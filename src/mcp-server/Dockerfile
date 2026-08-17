@@ -8,15 +8,17 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies (use npm install instead of ci for flexibility)
-RUN npm install --production
+# Install production dependencies from the tracked lockfile (CSO M4:
+# npm ci is lockfile-exact and fails on drift, restoring the lockfile as a
+# supply-chain control; npm install floated semver ranges).
+RUN npm ci --omit=dev
 
 # Copy TypeScript config and source
 COPY tsconfig.json ./
 COPY src ./src
 
-# Install dev dependencies for build
-RUN npm install && npm run build && npm prune --production
+# Install dev dependencies (from lock) to build, then prune to production.
+RUN npm ci && npm run build && npm prune --production
 
 # Run as non-root (CSO hardening, issue #874).
 # node:22-alpine ships a built-in `node` user at UID 1000.

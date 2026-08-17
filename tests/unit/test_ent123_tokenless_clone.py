@@ -133,6 +133,16 @@ def _load_crud(monkeypatch):
     git_service.check_remote_branch_exists = AsyncMock(return_value=True)
     git_service.reserve_and_generate_instance_id = AsyncMock(
         return_value=("iid-1", "main"))
+    # #2069: `_apply_github_env` now gates GIT_SYNC_AUTO on the real
+    # `_git_auto_sync_baked` predicate (the single owner). A bare MagicMock is
+    # TRUTHY, which would set GIT_SYNC_AUTO for every case; give the mock a
+    # faithful copy so these tests exercise the real gating. The REAL predicate's
+    # matrix is guard-tested in `test_2069_gitignore_at_creation::TestBakePredicate`.
+    git_service._git_auto_sync_baked = (
+        lambda config, github_repo, github_pat, fork_upstream: bool(github_repo)
+        and bool(github_pat)
+        and (not config.source_mode or bool(fork_upstream))
+    )
 
     github_service_mod = MagicMock()
     github_service_mod.GitHubError = _GitHubError
@@ -598,8 +608,16 @@ class TestWriteCredentialGuard:
             result = _run(gs.sync_to_github("a1"))
         assert result.success is False
         assert result.conflict_type == "no_write_credentials"
-        assert "fork-to-own" in result.message
-        assert "create a new agent" in result.message
+        # Anchored on the CONSTANT, not on its current wording: this test used
+        # to assert the literal "fork-to-own"/"create a new agent" phrasing and
+        # broke when ent#109 retired that workaround. What ent#123 actually
+        # requires is that the refusal carries the platform's named message and
+        # stays actionable — the exact copy is owned by
+        # test_ent109_no_write_credentials_message.py.
+        assert result.message == gs.NO_WRITE_CREDENTIALS_MESSAGE
+        low = result.message.lower()
+        assert "no write credentials" in low
+        assert "token" in low, "the refusal must still name a remedy"
 
     def test_sync_to_github_passes_credentialed_agent(self, git_service_env):
         gs, _db = git_service_env

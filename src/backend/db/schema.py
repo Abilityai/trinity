@@ -98,6 +98,7 @@ TABLES = {
             file_sharing_enabled INTEGER DEFAULT 0,
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
+            a2a_exposed INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
             tts_voice_telegram_enabled INTEGER DEFAULT 1,
@@ -274,6 +275,7 @@ TABLES = {
             source_channel TEXT,
             source_channel_chat_id TEXT,
             source_channel_thread TEXT,
+            source_channel_agent TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -503,6 +505,85 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Workspace / client portal (epic #78; moved from the entitled enterprise
+    # seam to OSS core by ent#356).
+    #
+    # The `enterprise_` prefix is HISTORICAL and deliberately kept: these tables
+    # already exist on every entitled install, created by the enterprise runner,
+    # and renaming them would force a data migration the move explicitly
+    # forbids. Every statement is IF NOT EXISTS, so adopting them onto the OSS
+    # track is a no-op there and a plain create on a fresh/community build.
+    #
+    # A portal client is a VERIFIED EMAIL, not a `users` row, and does not go
+    # through the public-link surface — so neither `chat_messages` (user_id
+    # scoped) nor `public_chat_messages` (link_id scoped) fits; hence a small
+    # dedicated pair keyed by (agent, client email).
+    # -------------------------------------------------------------------------
+    # ent#358: the last three columns make a Workspace thread RESUMABLE — the
+    # same trio `agent_sessions` carries. A thread now reattaches to its Claude
+    # session (`claude --print --resume <uuid>`) instead of replaying history as
+    # a prompt prefix, which is what let the Workspace absorb the Session
+    # surface without downgrading continuity.
+    "enterprise_portal_sessions": """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            last_message_at TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            cached_claude_session_id TEXT,
+            last_resume_at TEXT,
+            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0
+        )
+    """,
+
+    "enterprise_portal_messages": """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_messages (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            session_id TEXT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            cost REAL,
+            created_at TEXT NOT NULL
+        )
+    """,
+
+    # ent#359 — per-user chat state for the Workspace sidebar: which chats the
+    # user starred, and how far they have read.
+    #
+    # A separate table rather than columns on the chat row, for two reasons. A
+    # room (`shared_sessions`) is shared between several users, so a star stored
+    # on the room row would be one user's star imposed on everyone in it. And
+    # rooms live in the enterprise submodule, so a per-kind column would put half
+    # of one feature in each repo. Keyed by the caller's own email, so the row IS
+    # the per-user scope — there is nothing to filter on read.
+    "enterprise_portal_chat_state": """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_chat_state (
+            client_email TEXT NOT NULL,
+            chat_kind TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            starred_at TEXT,
+            last_read_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, chat_kind, chat_id)
+        )
+    """,
+
+    "enterprise_client_blocks": """
+        CREATE TABLE IF NOT EXISTS enterprise_client_blocks (
+            email TEXT PRIMARY KEY,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id TEXT,
+            blocked_by_email TEXT,
+            reason TEXT
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Local product-event capture — activation funnel, Tier-1 (ent#184)
     # Local-only, default-on, zero egress. Wizard step transitions are emitted;
     # first-value events are derived on read from audit_log/agent_activities.
@@ -514,6 +595,27 @@ TABLES = {
             event_type TEXT NOT NULL,
             event_context TEXT,
             created_at TEXT NOT NULL
+        )
+    """,
+
+    # Behavioral evaluations (ent#206) — the referee surface.
+    # A run's quality score, written ONLY by the platform/evaluator, never by the
+    # graded agent's key (the load-bearing rule of the eval epic). `completion`
+    # mirrors schedule_executions clean-exit; `quality` is the separate axis.
+    # -------------------------------------------------------------------------
+    "agent_evaluations": """
+        CREATE TABLE IF NOT EXISTS agent_evaluations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            execution_id TEXT,
+            archetype TEXT,
+            completion INTEGER,
+            quality REAL,
+            checks_json TEXT,
+            judge_json TEXT,
+            evaluator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
         )
     """,
 
@@ -753,7 +855,41 @@ TABLES = {
             skill_name TEXT NOT NULL,
             assigned_by TEXT NOT NULL,
             assigned_at TEXT NOT NULL,
+            source_id TEXT,
             UNIQUE(agent_name, skill_name)
+        )
+    """,
+
+    # ent#237: multi-source skills library. A source is one git repo the
+    # platform syncs skills from; `skill_sources` replaces the single
+    # `skills_library_url` setting.
+    #
+    # UNIQUE stays (agent_name, skill_name) — NOT (agent_name, skill_name,
+    # source_id). Names are the flat namespace (ent#237 AC#4: custom-wins
+    # precedence, bare names) because the agent-side identity is the directory
+    # `.claude/skills/<name>/` and the ent#139 runner + ent#178 A2A card both
+    # resolve by bare name. `source_id` RECORDS which source an assignment
+    # resolved from so a silent cross-source swap is detectable; it is
+    # deliberately NOT part of the key, which would permit two rows that
+    # cannot both exist on disk.
+    "skill_sources": """
+        CREATE TABLE IF NOT EXISTS skill_sources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            ref TEXT NOT NULL DEFAULT 'main',
+            ref_type TEXT NOT NULL DEFAULT 'branch',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_commit_sha TEXT,
+            last_error TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(url, ref)
         )
     """,
 
@@ -963,6 +1099,7 @@ TABLES = {
             webhook_url TEXT,
             telegram_secret_token TEXT,
             last_update_id INTEGER DEFAULT 0,
+            progress_indicator_enabled INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT
         )
@@ -1000,7 +1137,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT,
             verified_by_email TEXT,
-            verified_at TEXT
+            verified_at TEXT,
+            allow_proactive INTEGER DEFAULT 1
         )
     """,
 
@@ -1397,6 +1535,8 @@ INDEXES = [
 
     # Agent report indexes (#918)
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",
@@ -1436,6 +1576,13 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    # ent#237: resolution order for the custom-wins precedence merge.
+    "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
+    "ON skill_sources(priority, created_at) WHERE enabled = 1",
+    # At most one bundled default source. Partial-unique so custom sources
+    # (is_default = 0) are unconstrained; valid on both SQLite and PostgreSQL.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sources_one_default "
+    "ON skill_sources(is_default) WHERE is_default = 1",
 
     # Agent tags indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_tags_tag ON agent_tags(tag)",
@@ -1584,6 +1731,17 @@ INDEXES = [
     # (the reconcile reads pending ∪ firing).
     "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
     "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')",
+    # Workspace / client portal (ent#356). Names unchanged from the enterprise
+    # runner that created them, so an existing install re-runs these as no-ops.
+    "CREATE INDEX IF NOT EXISTS idx_portal_messages_convo "
+    "ON enterprise_portal_messages(agent_name, client_email, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_portal_sessions_convo "
+    "ON enterprise_portal_sessions(agent_name, client_email, last_message_at)",
+    # Per-session read (the chat view loads one thread at a time). Safe here —
+    # unlike on the enterprise track, where `session_id` was added by a later
+    # migration to a pre-existing table and this index had to wait for it.
+    "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
+    "ON enterprise_portal_messages(session_id, created_at)",
 ]
 
 

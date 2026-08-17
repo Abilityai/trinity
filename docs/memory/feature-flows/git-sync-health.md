@@ -99,6 +99,50 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
 
 ## Execution Flow
 
+### 0. Creation-time canonical `.gitignore` seed (#2069)
+
+The auto-sync loop (§1) is on **from birth** for the `GIT_SYNC_AUTO` set, but the
+fleet-wide `_GITIGNORE_PATTERNS` was applied only on Push/init — never at creation.
+So the first cycle staged `.trinity/` runtime state and the root-level `.env`/`.mcp.json`
+into a **user-owned** repo before any Push could migrate the list. #2069 lands the
+merged list *after* startup.sh's full git setup and *before* the first auto-sync cycle:
+
+```
+crud.py::_materialize_agent_files  (last step, gated: _git_auto_sync_baked(...))
+    │  and start_agent_internal (T1: gated on DB auto_sync_enabled)
+    ▼
+git_service.spawn_gitignore_merge_after_clone(name)   fire-and-forget, Semaphore-capped
+    ▼
+merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECONDS (1800)
+    ├── poll: DIRECT agent /health probe (agent_httpx_client, NOT the masking proxy)
+    │        server launches once at startup.sh:517 — AFTER clone→tar→checkout→remote-config,
+    │        so a 200 proves no further `git checkout` can revert the merge (Codex #1 race)
+    ├── once ready: [ -d /home/developer/.git ]  → absent ⇒ failed clone, skip (Push backstop)
+    ├── _git_toplevel(name)  → None ⇒ skip
+    └── _build_gitignore_merge_command(git_dir)   MERGE-ONLY (no rm-cached; PREVENT)
+```
+
+- **Reuses `_build_gitignore_merge_command`** (single source of truth; no fourth pattern
+  list — one backend `docker exec`, nothing in the agent-server / Invariant #5).
+- **Merge-only = PREVENT**: the generated `.env`/`.mcp.json` are untracked post-clone,
+  so a merge-installed `.gitignore` stops `git add -A` from ever staging them. A template
+  that *committed* a credential file (unusual subclass) stays tracked → Push migration
+  remediates → #1703 retires the layer.
+- **ENV-predicate gate** (`_git_auto_sync_baked`, the single owner shared with
+  `_apply_github_env`): covers exactly the auto-committing population, **ephemeral
+  non-source `github:`+PAT ghosts included** (the DB-flag block excludes them, but they
+  still bake `GIT_SYNC_AUTO` and are never Pushed). Source-mode excluded (the uncommitted
+  `.gitignore` would block a pull-only agent's next `git pull`).
+- **Idempotent (#953)**: `grep -qxF` gate → no `M .gitignore` drift for an already-compliant
+  template; a stale wholesale `.trinity/` line gets a legitimate supersede→append (#2070).
+- **Fleet remediation (T1)**: `start_agent_internal` fires the same spawn (gated on the DB
+  `auto_sync_enabled` flag — ghosts never recreate), so existing leakers converge on their
+  next base-image-drift recreate/restart. No behaviour change on Push (`sync_to_github`).
+- **Bounded & non-fatal**: monotonic deadline, module-level `asyncio.Semaphore` cap on
+  pollers, every exec/HTTP `asyncio.wait_for`-wrapped (frees the task, not the pinned
+  4-thread Docker pool thread). Known hole: a backend restart in the readiness window
+  loses the in-memory `create_task` — Push migration remediates; #1703 is the structural fix.
+
 ### 1. Auto-sync heartbeat (agent container)
 
 ```
@@ -129,6 +173,27 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
   `services/agent_service/crud.py` sets `GIT_SYNC_AUTO=true` only for
   non-source-mode GitHub-template agents (auto-pushing to `main` would
   clobber protected branches).
+- **On every container rebuild (ent#109)** the flag is re-derived by
+  `lifecycle.py::_apply_git_env_from_db` as **`auto_sync_enabled` OR the baked
+  env**, not from the column alone. The two creation writers disagree today:
+  the DB opt-in in `crud.py::_materialize_agent_files` carries
+  `and not config.ephemeral` inside a swallowing `try/except` while
+  `_apply_github_env` does not, and the column defaults to `0` — so
+  env-`true`/DB-`0` is reachable from one transient DB hiccup at creation and
+  permanently for ghosts, and DB-only derivation would **silently stop
+  auto-push** for that slice of the fleet (no error, just a stale
+  `agent_sync_state`). The helper **derives only — it never writes the column
+  back**: `PUT /{agent}/git/auto-sync` writes the row and nothing else while
+  the agent gates on container env, so "baked `true` / DB `0`" is *also*
+  exactly what an owner's explicit disable looks like. A backfill would
+  silently re-enable it, erase the only record of that intent, and — since
+  `PUT .../auto-sync` is `OwnedAgentByName` while `POST .../start` (which
+  triggers the recreate) is `AuthorizedAgentByName` — let a shared non-owner,
+  or an agent-scoped key resolving to its owner with the owner's role
+  (trinity-ops-agent#232), flip an owner-only flag. The disagreement is
+  logged instead. Making
+  `PUT /git/auto-sync` authoritative over the baked env is a tracked
+  follow-up.
 - Loop swallows every exception so a single bad tick can't kill the
   heartbeat.
 - **#1595:** the cycle runs in a worker thread (`asyncio.to_thread`) so a
@@ -267,7 +332,9 @@ the data-loss setup.
   - **green**: last sync < 24 h AND status success AND
     `behind_working === 0`.
 - `stores/agents.js::fetchSyncHealth()` calls `/api/agents/sync-health`
-  on mount; `views/Agents.vue` renders the dot next to each agent.
+  on mount; `components/AgentListPanel.vue` (the Dashboard List mode —
+  ent#260 retired the Agents page into it) renders the dot next to each
+  agent, with a 60s visibility-aware refresh while the mode is active.
 
 ## Files Touched
 
@@ -283,7 +350,9 @@ the data-loss setup.
 | `database.py` | Delegation to `SyncStateOperations` + the two new flags + duplicate query |
 | `services/sync_health_service.py` | Background poller + operator-queue emitter |
 | `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
-| `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents |
+| `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents; `_apply_github_env` gates on `git_service._git_auto_sync_baked` (#2069, single owner of the bake predicate); `_materialize_agent_files` fires `spawn_gitignore_merge_after_clone` on the same predicate (#2069 creation seed) |
+| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
+| `services/git_service.py` | `merge_gitignore_after_clone` (readiness-gated poll-then-merge, reusing `_build_gitignore_merge_command`), `spawn_gitignore_merge_after_clone` (fire-and-forget, Semaphore-capped), `_git_auto_sync_baked` (the `GIT_SYNC_AUTO`-bake predicate) — #2069 creation-time seed |
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
@@ -304,7 +373,7 @@ the data-loss setup.
 |------|---------|
 | `stores/agents.js` | `syncHealth` state + `fetchSyncHealth()` action |
 | `utils/syncHealth.js` | `classifySyncHealth`, `syncHealthColor`, `syncHealthLabel` |
-| `views/Agents.vue` | Renders the dot + imports helpers + fetches on mount |
+| `components/AgentListPanel.vue` | Renders the dot + imports helpers + fetches on mount + 60s visibility-aware refresh (ent#260 — replaces the retired `views/Agents.vue`) |
 
 ## Testing
 
@@ -331,7 +400,7 @@ Baseline: 75 passing tests added across the two PRs.
 |---------|-----|---------|
 | Auto-sync on/off per agent | `PUT /api/agents/{name}/git/auto-sync` body `{enabled: bool}` | `true` for non-source-mode GitHub-template agents |
 | Interval override | `GIT_SYNC_INTERVAL_SECONDS` env var in the agent container | 900 s (15 min) |
-| Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` only if backend set it at creation |
+| Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` if the backend set it at creation **or** `auto_sync_enabled = 1` — re-derived as the OR of both on every container rebuild (ent#109) |
 | Freeze schedules when sync failing | `PUT /api/agents/{name}/git/freeze-schedules-if-failing` | `false` (opt-in) |
 | Alert threshold | Hardcoded in `SyncHealthService.ALERT_THRESHOLD` | 3 consecutive failures |
 

@@ -54,28 +54,43 @@ A reusable combobox component that provides preset model options with free-text 
 | `placeholder` | String | `'Select or type a model...'` | Input placeholder |
 | `compact` | Boolean | `false` | Smaller input styling for inline use |
 
-### Preset Models
+### Preset Models — derived from the single-source catalog (#2086)
 
-Current-generation models use undated aliases (resolve to the latest snapshot); legacy models use full snapshot-dated IDs. **Synced 2026-07-08 (#1521)** against the [Anthropic models overview](https://platform.claude.com/docs/en/about-claude/models/overview):
+Since #2086 the picker no longer carries its own literal list. `ModelSelector.vue`
+imports `MODEL_CATALOG` from `src/frontend/src/constants/modelCatalog.js` — a
+GENERATED, checked-in mirror of the one source of truth,
+`src/backend/services/model_catalog.py` (run `python scripts/gen_model_catalog.py`
+to regenerate; a `tests/unit/test_2086_model_catalog_parity.py` guard byte-matches
++ structurally validates the mirror on every PR). `PRESET_MODELS` is now a
+projection:
 
 ```javascript
-const PRESET_MODELS = [
-  // Claude 5 family (latest generation, native 1M context)
-  { value: 'claude-fable-5', label: 'Claude Fable 5', note: 'Most capable — longest tasks (latest)' },
-  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5', note: 'Fast + smart, 1M context (latest)' },
-  // Current generation
-  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8', note: 'Most capable Opus' },
-  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7', note: 'Current' },
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Current' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest' },
-  // Legacy (still active)
-  { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', note: 'Legacy' },
-  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', note: 'Legacy' },
-]
+const PRESET_MODELS = MODEL_CATALOG.map((m) => ({ value: m.id, label: m.label, note: m.note }))
 ```
 
-**Context-window denominator (#1521).** The `% context used` gauge is model-specific, not a flat 200K. The runtime-reported `modelUsage.contextWindow` is the primary value; the fallback is `services/model_context.py::resolve_context_window` (`[1m]`→1M, Gemini→1M, Codex→272K, bare Claude→200K *safe floor*, unknown→200K + warning), vendored byte-identically into the agent server (Invariant #5). See the Agent Runtimes → Context-window catalog note in `architecture.md`.
+The catalog, in picker order:
+
+| id | label | note |
+|---|---|---|
+| `claude-opus-5` | Claude Opus 5 | Most capable Opus (latest) |
+| `claude-fable-5` | Claude Fable 5 | Most capable — longest tasks (latest) |
+| `claude-sonnet-5` | Claude Sonnet 5 | Fast + smart, 1M context (latest) |
+| `claude-opus-4-8` | Claude Opus 4.8 | Legacy (prior Opus) |
+| `claude-opus-4-7` | Claude Opus 4.7 | Legacy |
+| `claude-opus-4-6` | Claude Opus 4.6 | Legacy |
+| `claude-sonnet-4-6` | Claude Sonnet 4.6 | Fast + smart |
+| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | Fastest, cheapest |
+| `claude-opus-4-5-20251101` | Claude Opus 4.5 | Legacy |
+| `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 | Legacy |
+
+Each entry also carries two policy flags (`public_channel`,
+`admin_default_selectable`) plus a `recommended` marker; the backend
+`PUBLIC_CHANNEL_MODELS` allow-list and the `Settings.vue` admin default-model
+dropdown both derive from those flags (Haiku is public-channel-only, #1080; the
+legacy ids are picker-only). See requirements `public-access.md` §47.2 and
+[public-channel-model.md](public-channel-model.md).
+
+**Context-window denominator (#1521).** The `% context used` gauge is model-specific, not a flat 200K. The runtime-reported `modelUsage.contextWindow` is the primary value; the fallback is `services/model_context.py::resolve_context_window` (`[1m]`→1M, Gemini→1M, Codex `gpt-5.6`→1.05M / older Codex families→272K, bare Claude→200K *safe floor*, unknown→200K + warning), vendored byte-identically into the agent server (Invariant #5). See the Agent Runtimes → Context-window catalog note in `architecture.md`.
 
 > **Removed models retire safely (#1080).** `claude-opus-4-20250514` and `claude-sonnet-4-20250514` retire **2026-06-15** and are removed from the presets. Removing a model from the picker only removes the *suggestion* — the field is free-text, so a schedule/session pinned to a removed ID stays valid as free-text until Anthropic retires it on the API. After that the next execution fails with a clear error in `schedule_executions.error` (surfaced in the execution history), not silently. To recover, re-point the schedule's Model field (or the session/task model) to a current model. No default resolves to a removed model — the platform default (`claude-sonnet-4-6`), agent-base default (`claude-sonnet-4-6`), and the summarization model (`claude-haiku-4-5-20251001`) are all current.
 
@@ -478,17 +493,18 @@ ALTER TABLE schedule_executions ADD COLUMN model_used TEXT;
 
 | Model ID | Label | Notes |
 |-----------|-------|-------|
+| `claude-opus-5` | Claude Opus 5 | Current Opus tier (latest), 1M context — **added #2086** |
 | `claude-fable-5` | Claude Fable 5 | Claude 5 family — most capable, longest tasks (latest), 1M context |
 | `claude-sonnet-5` | Claude Sonnet 5 | Claude 5 family — fast + smart (latest), 1M context |
-| `claude-opus-4-8` | Claude Opus 4.8 | Most capable Opus, 1M context |
-| `claude-opus-4-7` | Claude Opus 4.7 | Current, 1M context |
-| `claude-opus-4-6` | Claude Opus 4.6 | Current |
-| `claude-sonnet-4-6` | Claude Sonnet 4.6 | Fast + smart (current) |
+| `claude-opus-4-8` | Claude Opus 4.8 | Legacy (prior Opus), 1M context |
+| `claude-opus-4-7` | Claude Opus 4.7 | Legacy, 1M context |
+| `claude-opus-4-6` | Claude Opus 4.6 | Legacy |
+| `claude-sonnet-4-6` | Claude Sonnet 4.6 | Fast + smart — the platform default (`PLATFORM_DEFAULT_MODEL_VALUE`, #831) |
 | `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | Fastest, cheapest (current) |
-| `claude-opus-4-5-20251101` | Claude Opus 4.5 | Legacy (still active) |
-| `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 | Legacy (still active) |
+| `claude-opus-4-5-20251101` | Claude Opus 4.5 | Legacy (picker-only) |
+| `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 | Legacy (picker-only) |
 
-Current-generation models (`claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`) use undated aliases that resolve to the latest snapshot. Legacy models use full snapshot-dated IDs (e.g., `claude-opus-4-5-20251101`) for deterministic version pinning. The two models that retired from the presets on 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are no longer offered — see the graceful-degradation note under Preset Models above.
+Current-generation `-5` models and `claude-sonnet-4-6` use undated aliases that resolve to the latest snapshot; the prior Opus generation (`4-8`/`4-7`/`4-6`) is relabelled Legacy since `claude-opus-5` landed (#2086). Legacy dated ids (e.g., `claude-opus-4-5-20251101`) pin a deterministic snapshot. The two models that retired from the presets on 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are no longer offered — see the graceful-degradation note under Preset Models above.
 
 Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (`sonnet[1m]`, etc.).
 
@@ -592,6 +608,7 @@ Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (
 
 | Date | Change |
 |------|--------|
+| 2026-08-16 | **#2086 — centralize the selectable model catalog**: one source of truth (`src/backend/services/model_catalog.py`, stdlib-only leaf) now defines id/label/note + the `public_channel`/`admin_default_selectable`/`recommended` policy flags. `scripts/gen_model_catalog.py` emits the checked-in `src/frontend/src/constants/modelCatalog.js`; `ModelSelector.vue`, the `Settings.vue` admin dropdown, and `settings_service.PUBLIC_CHANNEL_MODELS` all derive from it (no consumer keeps a literal list). Added `claude-opus-5` (public + admin) so it is selectable end-to-end (422→200 on the public-channel PUT); relabelled the prior Opus gen (4.8/4.7/4.6) as Legacy. `tests/unit/test_2086_model_catalog_parity.py` byte-matches + structurally validates the mirror on every PR; retired the brittle `test_1660` Vue-regex guard and repointed `test_ent243`/`test_model_selection`/`test_platform_default_model` at the catalog. |
 | 2026-06-06 | **#1080 — model list refresh**: Added **Claude Opus 4.8** (`claude-opus-4-8`) as the flagship/latest across `ModelSelector.vue` and the admin platform-default dropdown (`Settings.vue`). Removed the two models retiring 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) from the presets; re-tiered current vs. legacy. Bumped the `TasksPanel.vue` localStorage fallback off legacy `claude-opus-4-5-20251101` → current `claude-sonnet-4-6`. Refreshed MCP `model` param examples (`chat.ts`, `schedules.ts`, `loops.ts`) off the EOL example ID. Backend/agent-server defaults were already current (`claude-sonnet-4-6`, `claude-haiku-4-5-20251001`) — unchanged, no base-image rebuild. Documented graceful degradation: removed presets remain valid free-text until Anthropic's retirement date, then fail with a clear execution error rather than silently. |
 | 2026-03-02 | **MODEL-001 bug fixes**: (1) ModelSelector `PRESET_MODELS` updated to correct Anthropic API IDs with snapshot dates (`claude-opus-4-5-20251101`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`) plus legacy models. (2) Added `isTyping` flag so dropdown filtering only applies during free-text input, not when opening via chevron. (3) Fixed `DatabaseManager.create_task_execution()` proxy missing `model_used` parameter -- was crashing all task submissions with model selection. (4) Default model changed from `claude-opus-4-5` to `claude-opus-4-6` in TasksPanel.vue and SchedulesPanel.vue. |
 | 2026-03-02 | **MODEL-001**: Added model selection for Tasks and Schedules. New ModelSelector.vue component, database migration #22 (`model` on agent_schedules, `model_used` on schedule_executions), full-stack integration through backend, scheduler service, and agent server. |

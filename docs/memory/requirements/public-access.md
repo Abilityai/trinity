@@ -119,7 +119,8 @@
   - `ChannelAdapter.download_file()` — each channel implements own download auth
   - Images (`image/*`): base64 inline in prompt (Claude vision, 5MB/image, 10MB total)
   - Text files: copied to `/home/developer/uploads/{session_id}/`, `Read` tool added
-  - Unsupported formats (PDF, ZIP, video, audio) rejected with user-friendly message
+  - Unsupported formats (PDF, tar, gzip, rar, video, audio) rejected with user-friendly message
+  - ZIP allowed (2026-08, PR #2152): lands in the per-session uploads dir un-extracted; the platform does NOT unpack it, so zip-slip/decompression-bomb exposure is deferred to the agent container (isolated, per-file size cap still enforced)
   - Filename sanitization (path traversal, hidden files, special chars)
   - File upload rate limit: 5 files/min per user
   - Per-session upload dirs cleaned after execution
@@ -146,16 +147,18 @@
   - No new Python dependencies (httpx only)
   - Router generalization: `ChannelMessageRouter` now uses adapter methods instead of Slack-specific hardcodings
 - **Database Tables**:
-  - `telegram_bindings` — Maps bots to agents (bot_id UNIQUE, bot_username, webhook_secret, telegram_secret_token, encrypted bot token)
+  - `telegram_bindings` — Maps bots to agents (bot_id UNIQUE, bot_username, webhook_secret, telegram_secret_token, encrypted bot token, `progress_indicator_enabled` — ent#264, see §15.1h)
   - `telegram_chat_links` — Maps Telegram users to sessions (binding_id, telegram_user_id, message_count)
 - **API Endpoints**:
   - `POST /api/telegram/webhook/{webhook_secret}` — Receive Telegram updates (validated by X-Telegram-Bot-Api-Secret-Token header)
-  - `GET /api/agents/{name}/telegram` — Bot binding status
+  - `GET /api/agents/{name}/telegram` — Bot binding status (`AuthorizedAgentByName` since ent#264 — see Security below; response carries `progress_indicator_enabled`)
   - `PUT /api/agents/{name}/telegram` — Configure bot token (validates via getMe)
   - `DELETE /api/agents/{name}/telegram` — Remove bot binding + delete webhook
   - `POST /api/agents/{name}/telegram/test` — Test bot connectivity / send test message
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — Toggle the in-progress status indicator (ent#264, see §15.1h)
 - **Security**:
   - Bot tokens AES-256-GCM encrypted at rest (same `CredentialEncryptionService` as Slack)
+  - Binding-status GET hardened to `AuthorizedAgentByName` (ent#264): binding status — including `webhook_url`, which embeds the `webhook_secret` — is no longer readable by arbitrary authenticated users (uniform-404 accessor; owner/shared/admin still pass). The sibling `GET .../telegram/groups` (group chat ids/titles/welcome text — tenant data) carries the same accessor; the group-message POST was already owner-gated
   - Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set during setWebhook)
   - SSRF prevention: media downloads restricted to `api.telegram.org` domain
   - Restricted tools for Telegram users (WebSearch, WebFetch — same as Slack)
@@ -185,6 +188,7 @@
   - Mention text stripped from agent input for cleaner prompts
   - Commands support @botname suffix in groups (e.g., `/help@mybot`)
   - Uses modern Telegram `reply_parameters` API for threaded replies
+  - In-flight status indicator (ent#264, §15.1h) acks only @mention/reply-triggered turns and `all`-trigger-mode groups; observe-mode un-mentioned turns get typing only (a visible reaction would reveal a silently-observing bot and spam the group)
 - **Database Tables**:
   - `telegram_group_configs` — Per-group settings (binding_id, chat_id, trigger_mode, welcome_enabled, welcome_text, is_active)
 - **API Endpoints**:
@@ -202,6 +206,60 @@
   - Group membership not re-verified per message (documented limitation)
   - Bot loop prevention inherited from TGRAM-001 (`is_bot` check)
 - **Frontend**: TelegramChannelPanel extended with group list, trigger mode radio, welcome message config
+- **Flow**: `docs/memory/feature-flows/telegram-integration.md`
+
+### 15.1h Channel Completion Report-Back (CHANNEL-REPORT — ent#224 Slack, ent#265 Telegram)
+- **Status**: ✅ Slack (2026-07, ent#224) · ✅ Telegram (2026-07, ent#265)
+- **Priority**: P1
+- **Description**: A long-running or **delegated** task whose work started from a channel reports its terminal (success AND failure — a silent failure is the bug this closes) back to the originating chat/thread. A direct channel turn is answered inline by the adapter; the reporter covers the executions that *inherited* their channel context (A→B delegation, background /task work).
+- **Generic mechanism** (`services/channel_completion_report.py`):
+  - **Inherited-context-only / no-double-post rule**: report ONLY when the execution's `triggered_by` is NOT a channel trigger (`slack`/`telegram`/`whatsapp`) — an inline turn was already answered by the adapter. This single condition is the no-spam guarantee; never weaken it.
+  - **Context is persisted on the row at /task creation (ent#265 D0)**: `create_task_execution_and_activities` resolves `_inherited_channel_context(parent_execution_id)` and writes `source_channel`/`_chat_id`/`_thread`/`_agent` onto the child row itself (the former `run_async_task` → `execute_task(source_channel=…)` threading was dead code — `execute_task` writes channel columns only in its no-`execution_id` creation branch). A **provenance guard** gates inheritance, keyed on the **authenticated principal** (never the raw `X-Source-Agent` header — unvalidated client input for a human caller, since the SELF-EXEC-001 spoof guard only fires for agent-scoped keys): an agent-scoped caller must BE the parent's executing agent; a human caller must OWN the parent's agent (or be admin — writing into a channel chat is a proactive-send capability, and every other proactive surface is owner-gated); a connector key never inherits. Failure → no inheritance (never someone else's chat).
+  - **Binding-agent resolution (ent#265 D1)**: consent + bot token evaluate against `binding_agent = row.source_channel_agent or row.agent_name` for BOTH channels — the bot the user actually addressed delivers (on Telegram no other bot even *can* deliver the DM); transitive across A→B→C. NULL column (direct/legacy rows) = the executing agent, byte-identical legacy behavior. Attribution stays with the EXECUTING agent (Slack `username=`; Telegram head-line suffix when it differs — no per-message sender name).
+  - **Terminal chokepoints**: `apply_result` success + failure branches (the failure branch is the ent#265 D3 fix — it previously emitted the #1578 event but never the report) and `_write_terminal_and_gate` (timeout/budget/crash), all CAS-won-only, fire-and-forget, never-raise. CANCELLED envelopes report uniformly.
+  - **At-most-once**: `effect_guard("channel_completion_report", {channel, chat_id, thread}, execution_id, agent_name=row.agent_name)` (#1084) — identity is the resolved destination, never the generated body; the guard's `agent_name` is ALWAYS the executing agent (a binding-agent passthrough fail-opens resolution and silently disarms dedup). A failed send claims completed (at-most-once bias; never blind-retry an ambiguous send).
+  - **Sanitize-before-truncate**: `_summarize` credential-sanitises over a 2× window before capping at 2800 chars (the #1578 emit-chokepoint rule — every egress surface).
+  - **D10 structure**: per-channel resolver dispatch map; `SUPPORTED_CHANNELS` derives from it — a WhatsApp leg is additive.
+- **Per-channel consent units**:
+  - **Slack**: channel-binding `allow_proactive` (ent#223); no binding / no consent → suppress.
+  - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `reject_agent_principal`). Requires `is_active` too.
+  - **Telegram DM**: **consent-by-construction** — a chat link exists only because the user personally cold-started the bot (Telegram's own cold-DM prohibition is the transport guarantee); a block surfaces as a 403 the send handles as a logged no-op.
+  - Unknown Telegram destination (no group config, no chat link) → suppress with log — never fire a send destined to fail.
+  - **Two DM consent regimes (deliberate)**: reporting on *user-initiated work* is the deferred sibling of the inline reply and needs no flag; *agent-initiated outreach* (#321 proactive messaging) keeps its own `agent_sharing.allow_proactive` per-recipient consent. The #321 flag is NOT honored as DM report revocation — it cannot distinguish "explicitly revoked" from "never opted in" (default 0), so honoring it would kill the flagship delegated-DM case for every verified shared user. A future unified consent model inherits this rationale.
+- **Rendering (Telegram)**: pre-escape `&`/`<`/`>` → `_markdown_to_html` → re-cap at 4096 (entity expansion; "message too long" is a 400 the parse-fallback doesn't catch); thread = the triggering `message_id`, passed as `reply_parameters` when numeric, DMs anchored too, `allow_sending_without_reply` makes a deleted original safe.
+- **Database**: `schedule_executions.source_channel_agent TEXT` (nullable; `AgentRef` KEEP — rename cascades, #772 90-day sweep is retention); `telegram_group_configs.allow_proactive INTEGER DEFAULT 1`. Dual-track migration (SQLite `channel_report_back_columns` + Alembic `0031_channel_report_back`).
+- **Known limits (v1)**: lease-reaper/bulk-sweep/pull-sink and operator-terminate (Path B) terminals don't report; a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
+- **Deliberate scope cut**: the proactive group-send endpoint (`POST …/telegram/groups/{chat_id}/messages`) is NOT gated on `allow_proactive` here (ent#223 did gate Slack's) — with default 1 the eventual coherence gate is a no-op for un-toggled groups; follow-up issue filed at ship time.
+- **Flow**: `docs/memory/feature-flows/channel-completion-report.md`
+
+### 15.1i Telegram In-Progress Status Indicator (TGRAM-PROGRESS)
+- **Status**: ✅ Implemented (2026-07-30)
+- **Requirement ID**: TGRAM-PROGRESS
+- **Priority**: P2
+- **Issue**: trinity-enterprise#264
+- **Description**: While a Telegram-triggered execution runs (minutes to hours under TIMEOUT-001), the user gets live feedback instead of silence: an immediate 👀 reaction ack on the triggering message at dispatch, the existing one-shot typing garnish, and — once the run crosses a 30s threshold — an elapsed-time placeholder message ("⏳ Working on it — N min elapsed · updated HH:MM UTC") maintained via `editMessageText` on a 60s cadence and resolved (deleted; fallback edited to a neutral terminal line) at every terminal.
+- **Key Features**:
+  - Channel-agnostic start/progress/resolve seam: the router owns a per-turn driver task ticking a new default-no-op `ChannelAdapter.indicate_progress(message, elapsed_seconds)` hook; adapters declare capability via `progress_threshold_seconds` (`None` ⇒ driver never armed — Slack/WhatsApp/VoIP behave byte-identically; ent#228 later implements only the hook, not the loop)
+  - All per-turn indicator state rides `NormalizedMessage.metadata` (the adapter is a long-lived shared singleton handling concurrent turns — no unkeyed adapter state, no cleanup protocol; state dies with the turn)
+  - Honest status (dispatch/terminal-hook driven, never a lying timer): the driver is cancelled AND awaited-dead before `indicate_done` at all three router terminals (success / failed-or-cancelled / exception — timeout surfaces as `failed`), so a tick can never edit the placeholder after it is deleted; a `finally` backstop cancels a still-armed driver on unexpected raises outside the terminals
+  - Resolve-vs-first-send race closed by construction: the first placeholder send runs as a shielded future that records the Telegram `message_id` into metadata **inside the future itself**; the resolve path awaits the in-flight send (bounded) before `indicate_done`, so the delete always sees the id
+  - Group gating: reaction + placeholder only for @mention/reply-triggered turns and `all`-trigger-mode groups (the bot replies to everything there — excluding them would recreate the zero-feedback problem); observe-mode turns get typing only, so the indicator never reveals a silently-observing bot
+  - Self-dating placeholder text (`· updated HH:MM UTC`) — a restart-stranded placeholder dates itself instead of lying forever
+  - Static template text only: the placeholder/edit text is built solely from the elapsed-time template — no agent response or error content at this egress (no sanitizer needed; ent#224 class closed by construction)
+  - Degradation ladder: reaction fails (per-chat disabled / permissions / old chats → 400) → typing + placeholder still work; two consecutive failed progress HTTP attempts (placeholder sends, edits, timeouts alike) set a per-turn degraded flag that stops all further progress HTTP; the turn itself is NEVER failed by indicator code (every hook body fail-soft at its boundary)
+  - Rate-limit aware: one 429 retry honoring `retry_after` (capped 30s) on placeholder send/edit; "message is not modified" treated as success; 👀 reaction is single-attempt (a missed reaction is cosmetic); edit cadence 60s is well under the ≈1 msg/s per-chat budget
+  - Terminal reaction is CLEARED at every terminal — no success-👍 swap (✅ is not in Telegram's allowed bot reaction set; a split success/failure emoji semantics lies on edge cases; the reply itself is the completion signal)
+  - Per-binding toggle, default ON including existing bindings (migration column default): NULL/missing reads as **enabled** via the Python-side `v is None or v != 0` predicate (never SQL — `NULL != 0` is NULL); only an explicit `0` disables; toggle reads are per-turn, so a flip takes effect on the NEXT turn (documented behavior)
+- **Database Changes**:
+  - `telegram_bindings.progress_indicator_enabled INTEGER DEFAULT 1` — dual-track migration (SQLite `telegram_progress_indicator` in `db/migrations.py` + Alembic `0031_telegram_progress_indicator`), plus `db/schema.py` / `db/tables.py` DDL parity
+- **API Endpoints**:
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — owner-only (`OwnedAgentByName`) **+ `reject_agent_principal`** (human-only: an agent-scoped key resolves to the owner and could otherwise flip its own toggle — ent#223 lesson); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
+  - `GET /api/agents/{name}/telegram` — response gains `progress_indicator_enabled` (null when unconfigured); endpoint hardened to `AuthorizedAgentByName` (see §15.1c Security)
+- **Frontend**: `TelegramChannelPanel.vue` — "In-progress status indicator" switch in the configured-state block (optimistic flip, revert on error, dark-mode aware)
+- **Known residuals**:
+  - Backend restart mid-run strands the reaction/placeholder (same accepted class as Slack's stranded ⏳; the UTC stamp self-dates the stale placeholder) — no persistence engineering
+  - The resolve-path settle of an in-flight first placeholder send is **bounded at 10s** — a first send that exceeds it (e.g. a 429 `retry_after` ≥ 10s on that exact send) is abandoned and can still strand a placeholder (same accepted class; the UTC stamp self-dates it)
+  - The driver is bound to the inline channel execution path (`execute_task` awaited in-process; channel triggers are not in `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`). If #1081 pull-mode / #1083 async dispatch ever move channel triggers off the inline path, the in-process driver silently never resolves — the successor is the durable terminal-event seam (`source_channel*` columns + #1578 completion events, the ent#265 rails); the `indicate_progress` hook API survives that migration, only the router ticker moves
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 
 ### 15.1g Webhook Triggers for Agent Schedules (WEBHOOK-001)
@@ -249,7 +307,7 @@
   - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
   - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
   - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
-  - Media inbound: images/audio/PDFs via Twilio-hosted URLs with HTTP Basic auth; SSRF-gated to `*.twilio.com` domain suffix; `follow_redirects=False` with allowlisted single-redirect follow for signed-URL media
+  - Media inbound via Twilio-hosted URLs with HTTP Basic auth. Any type is **fetched**, but only **images** (plus text/CSV/JSON) reach the workspace — `upload_service.UNSUPPORTED_MIMES` rejects `application/pdf`, `audio/`, `video/` and archives channel-agnostically, so a PDF or voice note surfaces as `"— unsupported format"` (a deliberate policy gate, not a download failure). SSRF-gated two-tier — the credentialed source hop stays `*.twilio.com`, validated redirect targets also allow `*.twiliocdn.com` (Twilio's media CDN, #1932); `follow_redirects=False` with every hop re-validated against the allowlist before it is issued (bounded follow budget)
   - Message splitting at 1600-char Twilio WhatsApp limit (paragraph → sentence → word boundaries)
   - Sandbox auto-detection from well-known number `whatsapp:+14155238886`
   - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
@@ -278,7 +336,7 @@
 - **Security**:
   - AuthToken AES-256-GCM encrypted at rest; never logged in full
   - Webhook signature verification via `twilio>=9.10.5` `RequestValidator` (constant-time compare)
-  - SSRF allowlist on media downloads: `*.twilio.com` only, no redirects to other hosts
+  - SSRF allowlist on media downloads (#1932): the credentialed source hop is `*.twilio.com` only; a 30x is followed only to a re-validated `*.twilio.com`/`*.twiliocdn.com` target, always without auth. `s3-external-1.amazonaws.com` is deliberately excluded (path-style ⇒ allowlisting it admits arbitrary buckets)
   - Phone number masking in logs: `whatsapp:+141***5309`
   - Unknown webhook secrets return 200 empty TwiML (no binding-existence oracle)
   - Rate limiting via `ChannelMessageRouter` defaults (30 msg/min per sender)
@@ -579,6 +637,54 @@ Edited from the Sharing tab.
 - **FR-6 — Group chats**: applied to group channels too (group surfaces are
   public-facing).
 
+### 47.2 Selectable Model Catalog — Single Source of Truth (#2086)
+
+**Description**: The selectable Claude-model catalog was hand-maintained in three
+independent places (the #894 backend allow-list, the `ModelSelector.vue` picker,
+and the `Settings.vue` admin fleet-default dropdown) with no shared registry, so
+the copies drifted silently — worst asymmetrically, since the allow-list is a
+*validation* set (a shipping model missing there is rejected **422** on `PUT
+.../public-channel-model`, unselectable even via the API, while the frontend lists
+degrade quietly). #2086 centralizes it.
+
+- **FR-1 — Single source**: `src/backend/services/model_catalog.py` defines
+  `MODEL_CATALOG` (ordered `ModelEntry` list: `id`, `label`, `note`, and the
+  policy flags). It is a **stdlib-only leaf** (imports nothing from
+  `settings_service`/`database`) so codegen and the parity test load it DB-free.
+- **FR-2 — Two policy dimensions + a display marker**:
+  - `public_channel` — selectable as the #894 per-agent public-channel override
+    (`settings_service.PUBLIC_CHANNEL_MODELS` **re-exports** the derived set).
+  - `admin_default_selectable` — offered in the admin fleet-default dropdown.
+    Enforces the **#1080** posture: Haiku is public-channel-selectable but NOT
+    admin-default (an admin must not be able to default the whole fleet to the
+    cheap tier); the two legacy ids are picker-only (neither flag).
+  - `recommended` — drives the admin dropdown's "(recommended)" marker; exactly
+    one entry, **pinned to `PLATFORM_DEFAULT_MODEL_VALUE`** (#831, out of scope to
+    change) rather than the loaded value.
+- **FR-3 — Generated frontend mirror**: `scripts/gen_model_catalog.py` emits the
+  checked-in, do-not-edit `src/frontend/src/constants/modelCatalog.js` (Vite-bundled,
+  CSP-clean `'self'` asset). `ModelSelector.vue` derives its picker and `Settings.vue`
+  its admin dropdown from it. **No consumer keeps its own literal model list.**
+- **FR-4 — CI guard**: `tests/unit/test_2086_model_catalog_parity.py` (rides
+  `backend-unit-test.yml`, no `paths:` filter → every PR) **byte-matches** the
+  committed JS against `render_js()` AND **structurally validates** the parsed
+  records against the Python source (a wrong-but-fresh emitter fails too).
+- **FR-5 — Preserved behavior**: `db.get_public_channel_model` still degrades an
+  allow-list-absent stored value to the platform default (#1080); `ModelSelector.vue`
+  still accepts free-text ids (incl. the `[1m]` extended-context suffix).
+- **FR-6 — Adding a model is a single-file edit** (the human control the guard
+  can NOT provide): the guard catches consumer-vs-source drift, not
+  source-vs-reality staleness (Anthropic ships a model, nobody edits the catalog →
+  all lists stay green but the model is unselectable). **When Anthropic ships a
+  selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
+  `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
+  AC requires ("docs say where the file is").
+- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
+  its frontend twin `stores/observability.js::formatModelName` are display
+  prettifiers with no model list (a new id renders via their title-case fallback).
+  They are the same drift class but are **deliberately out of scope** for #2086 —
+  tracked as a follow-up, not silently folded into the centralized catalog.
+
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
 **Description**: Reworks outbound voice replies (ElevenLabs TTS) so that voice is
@@ -637,3 +743,57 @@ of the epic #24 voice-replies feature.
   (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
   only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
   flags + `effective_voice_id`; `GET/PUT /api/settings/elevenlabs`.
+
+### 48.2 Narrated Surfaces — the Workspace speaks, and agents know it (#2157)
+
+**Description**: The Workspace (Client Portal) reads an agent's reply aloud
+**client-side** — the browser posts the text to `POST .../client-portal/agents/{agent}/tts`
+and plays the MP3 when the client switches the speaker control on. The agent
+neither triggers it nor produces an artifact, so §48.1's `send_voice_reply` (an
+audio artifact, messaging channels only) correctly refuses there. Agents were
+told only that refusal, and generalized it into two false claims made to
+clients in their own voice: that the surface is *text-only*, and that a spoken
+reply requires Slack/Telegram/WhatsApp. Both are wrong; the client can be heard
+where they already are.
+
+- **FR-1 — Narrated-surface advertisement**: a portal turn's caller prompt carries
+  `platform_prompt_service.build_narrated_surface_prompt()` — the counterpart to
+  §48.1 FR-5, describing a **client-controlled surface affordance**, not an
+  agent-invocable tool. It states the surface narrates, that the switch belongs to
+  the client, and that the agent must point at the speaker control instead of
+  routing the client elsewhere.
+- **FR-2 — No over-correction**: the fragment must NOT imply the agent can deliver
+  audio in the portal (it cannot). Promising an audio message here replaces one
+  false claim with another; the fragment says so explicitly.
+- **FR-3 — Platform-set from the surface**: the fragment is composed by
+  `_build_portal_system_prompt` from the turn's own surface, never asserted by a
+  caller, and is unreachable from the channel path (channel turns unchanged).
+- **FR-4 — Truthful gating**: the fragment appears only when narration would
+  actually work for that agent — the same gate the speaker control renders on, so
+  it can never promise a control the client does not have.
+- **FR-5 — Portal-specific tool answer**: on a portal turn `send_voice_reply`
+  returns `reason: "portal_client_narrated"` (not `not_a_channel_turn`) plus a
+  plain-language `guidance` string, so an agent reasoning from the tool result
+  alone still answers correctly. The MCP tool surfaces `guidance` and instructs
+  the agent to act on it and never quote a `reason` code to a user. The portal
+  answer splits on the SAME gate the speaker control renders on (FR-6): with no
+  voice configured the reason is `portal_voice_not_configured` and the guidance
+  points at no control — telling a client to "switch the speaker on" when that
+  control does not exist would re-make this bug facing the other way.
+- **FR-6 — One voice gate for both surfaces**: narration availability =
+  platform TTS key **AND** agent-level `tts_voice_replies_enabled` **AND** an
+  effective voice (`tts_voice_id`, else the platform default) —
+  `tts_service.resolve_voice_id()` / `resolve_voice_from_config()`, shared by the
+  roster card's `voice_available`, the portal `/tts` endpoint, and the prompt
+  fragment. Per-channel flags stay with the channel path (the Workspace is not a
+  messaging channel). This is a **behaviour change in both directions**: an agent
+  riding the platform default voice now gets a speaker control (it had none), and
+  an agent whose operator turned voice off is no longer narrated (it was).
+- **FR-7 — Surface stamp**: portal executions carry
+  `schedule_executions.source_channel = "portal"` (`config.PORTAL_SOURCE_CHANNEL`),
+  written at both creation sites (the turn and the ent#286 pre-created streaming
+  row). `triggered_by="public"` is shared with public links and x402 chat and
+  cannot identify the surface. It is deliberately not a messaging channel: portal
+  rows carry no `source_channel_chat_id`, so channel consumers already ignore it.
+- **FR-8 — Sticky client choice**: the speaker toggle persists per client+agent in
+  `localStorage`, instead of resetting to off on every page load.

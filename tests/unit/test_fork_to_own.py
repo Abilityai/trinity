@@ -424,6 +424,24 @@ def _load_crud(docker_available=True):
 
     template_service = MagicMock()
     template_service.generate_credential_files = MagicMock(return_value={})
+    # ent#14 S2: the creation path reads `template.yaml` through the
+    # reason-preserving form and UNPACKS the pair — the `fork_to_own` gate
+    # decides on the reason, so it can no longer be dropped. An unstubbed
+    # MagicMock iterates empty and fails the unpack, which is the loud failure
+    # we want rather than a Mock silently standing in for a security decision.
+    template_service.fetch_template_metadata_result_for_create = MagicMock(
+        return_value=({}, None)
+    )
+    # ent#14 S2: the `fork_to_own` gate calls this classifier, which crud
+    # imports FROM this module — an unstubbed MagicMock returns a truthy Mock,
+    # so every github create would 503 TEMPLATE_METADATA_UNAVAILABLE. Mirrored
+    # faithfully (real: services/template_service.py::metadata_reason_is_unreadable
+    # — a clean 404 is absence, everything else is unreadable) rather than
+    # pinned to False, so a case that DOES script an unreadable reason still
+    # exercises the refusal.
+    template_service.metadata_reason_is_unreadable = MagicMock(
+        side_effect=lambda reason: bool(reason) and not reason.startswith("HTTP 404")
+    )
 
     git_service = MagicMock()
     git_service.DEFAULT_PERSISTENT_STATE = ["memory/"]
@@ -432,6 +450,15 @@ def _load_crud(docker_available=True):
         return_value=("iid-1", "main"))
     git_service.materialize_persistent_state = AsyncMock()
     git_service.materialize_data_paths = AsyncMock()
+    # #2069: `_apply_github_env` / `_materialize_agent_files` now gate on the real
+    # `_git_auto_sync_baked` predicate; a bare MagicMock is TRUTHY and would set
+    # GIT_SYNC_AUTO for every case. Faithful copy (real matrix guard-tested in
+    # test_2069_gitignore_at_creation::TestBakePredicate).
+    git_service._git_auto_sync_baked = (
+        lambda config, github_repo, github_pat, fork_upstream: bool(github_repo)
+        and bool(github_pat)
+        and (not config.source_mode or bool(fork_upstream))
+    )
 
     settings_service = MagicMock()
     settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant-key")

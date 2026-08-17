@@ -27,20 +27,12 @@ _platform_model_cache_ts: float = 0.0
 _PLATFORM_MODEL_CACHE_TTL = 60.0
 
 # #894: current-gen models an agent owner may select as a per-agent override for
-# public-facing channels. Mirrors the current presets in
-# `frontend/src/components/ModelSelector.vue` (kept in sync by hand — there is no
-# shared model registry across the Python/Vue boundary). A model removed from
-# this set after it was saved is treated as unset (→ platform default) by
-# `db.get_public_channel_model`, matching the #1080 graceful-degradation posture.
-PUBLIC_CHANNEL_MODELS = frozenset({
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-})
+# public-facing channels. Derived from the single source of truth,
+# `services/model_catalog.py` (#2086) — every selectable-model list now flows from
+# that one file (add a model there, re-run `scripts/gen_model_catalog.py`). A model
+# removed from this set after it was saved is treated as unset (→ platform default)
+# by `db.get_public_channel_model`, matching the #1080 graceful-degradation posture.
+from services.model_catalog import PUBLIC_CHANNEL_MODELS  # noqa: E402  (re-export)
 
 
 def is_valid_public_channel_model(model: str) -> bool:
@@ -85,7 +77,28 @@ RETENTION_OPS_KEYS = (
     # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
     # window (surfaced/logged/reset-protected), NOT a community-floor key.
     "agent_reminders_retention_days",
+    # #2216: database-backup artifacts under /data/backups. Membership here
+    # buys the write-path protections (validated /ops/config only, generic
+    # PUT 422-blocked, /ops/reset skips) — but its READ is special-cased:
+    # every surface renders it through
+    # services.db_backup_service.effective_backup_retention_days(), whose
+    # coercion is INVERTED (garbage → 14, never → 0/keep-forever), and
+    # GET /api/settings/retention excludes it from the generic windows map.
+    # NOT a community-floor key (fewer days = the destructive direction here).
+    "backup_retention_days",
 )
+
+# The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
+# `backup_retention_days` prunes FILE artifacts from the backup job's own tail;
+# its bounded-destruction guarantee is structural (the fixed BACKUP_MIN_KEEP
+# floor in db/backup_primitives.py — never zero recovery points), NOT the
+# count-threshold/ack-gated `_guard_allows` refusal in cleanup_service: an
+# ack-gated refusal fails in the INVERTED direction for backups (refused prune
+# → backups fill the disk, #1871 class), so that prune must run unconditionally
+# within its floor. `tests/unit/test_1771a_retention_edges.py` asserts every
+# key in RETENTION_OPS_KEYS minus THIS set has exactly one `_guard_allows`
+# call site — add a second file-artifact window HERE, or the guard fires.
+NON_ROW_RETENTION_OPS_KEYS = frozenset({"backup_retention_days"})
 
 
 # Default values for ops settings (as specified in requirements)
@@ -141,6 +154,14 @@ OPS_SETTINGS_DEFAULTS = {
     # failed). Rows older than this many days are deleted; pending/firing never
     # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
     "agent_reminders_retention_days": "90",
+    # Issue #2216: retention for database-backup artifacts. The #1638 "widest
+    # value" rule applies in spirit but the direction INVERTS: raising this
+    # default costs disk on every un-configured install (#1871 class), while
+    # lowering it deletes recovery points — NEVER lower it for existing
+    # installs without a migration note, and never raise it casually either.
+    # "0" is INVALID for this key (validated 1–3650): keep-forever is the
+    # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
+    "backup_retention_days": "14",
 }
 
 # Descriptions for each ops setting
@@ -162,7 +183,28 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
 }
+
+
+# --- Remote template registry keys (TMPL-002, trinity-enterprise#14) -------
+TEMPLATE_REGISTRY_URL_KEY = "template_registry_url"
+TEMPLATE_REGISTRY_ENABLED_KEY = "template_registry_enabled"
+TEMPLATE_REGISTRY_GENERATION_KEY = "template_registry_generation"
+TEMPLATE_REGISTRY_LKG_KEY = "template_registry_lkg"
+
+#: Every registry key the generic `PUT /api/settings/{key}` must refuse, so the
+#: dedicated validated route is the only write path. The URL alone would be
+#: enough to matter (the SSRF gate lives on that route); `generation` and `lkg`
+#: are here because they are the cache itself, and a writable cache is a
+#: poisonable one. Same 422-with-a-pointer shape as RETENTION_OPS_KEYS (ent#297)
+#: and SKILLS_AUTOMATION_KEYS (ent#236).
+TEMPLATE_REGISTRY_KEYS = frozenset({
+    TEMPLATE_REGISTRY_URL_KEY,
+    TEMPLATE_REGISTRY_ENABLED_KEY,
+    TEMPLATE_REGISTRY_GENERATION_KEY,
+    TEMPLATE_REGISTRY_LKG_KEY,
+})
 
 
 class SettingsService:
@@ -414,6 +456,64 @@ class SettingsService:
         return self._resolve_bool_flag("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED")
 
     # =========================================================================
+    # Workspace / portal session policy (ent#375)
+    # =========================================================================
+
+    def get_portal_session_policy(self) -> tuple:
+        """`(idle_seconds, absolute_seconds)` for the sliding Workspace session.
+
+        OSS owns the mechanism and these safe defaults; the entitled Settings
+        panel owns the *setter* that writes the overrides — the core-primitive +
+        enterprise-knob split `users.suspended_at` uses (#995). A community
+        install slides on the defaults, it just cannot retune them.
+
+        NO env leg, deliberately. `_resolve_bool_flag` has one because those
+        flags predate their Settings surface; these keys are new, and an env leg
+        would let a stale variable override a row an operator actually set — the
+        #1638 "two sources for one policy" trap.
+
+        Clamped on READ, not only on write. The entitled setter validates, but a
+        direct DB write or a future default regression must not be able to mint a
+        session that outlives its own cap. Read-side clamping is what makes
+        `idle <= absolute` hold regardless of who wrote the row (#506
+        clamp-on-use).
+
+        Fail-safe: any read failure returns the code defaults rather than
+        raising. This runs on the auth path — an exception here would 500 every
+        Workspace request instead of degrading to the shipped policy.
+        """
+        from config import (
+            PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT,
+            PORTAL_SESSION_IDLE_DAYS_DEFAULT,
+            PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
+            PORTAL_SESSION_MIN_IDLE_MINUTES,
+        )
+
+        def _read(key: str, default_days: float) -> float:
+            try:
+                raw = self.get_setting(key)
+            except Exception:
+                return float(default_days)
+            if raw is None:
+                return float(default_days)
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                return float(default_days)
+            return val if val > 0 else float(default_days)
+
+        idle_s = int(_read("portal_session_idle_days", PORTAL_SESSION_IDLE_DAYS_DEFAULT) * 86400)
+        abs_s = int(_read("portal_session_absolute_days", PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT) * 86400)
+
+        # Floors/ceilings first, then the ordering invariant. A cap shorter than
+        # the idle window would kill every session at the cap while the idle
+        # window claimed otherwise.
+        idle_s = max(idle_s, PORTAL_SESSION_MIN_IDLE_MINUTES * 60)
+        abs_s = min(abs_s, PORTAL_SESSION_MAX_ABSOLUTE_DAYS * 86400)
+        abs_s = max(abs_s, idle_s)
+        return idle_s, abs_s
+
+    # =========================================================================
     # GitHub Templates (TMPL-001)
     # =========================================================================
 
@@ -443,6 +543,145 @@ class SettingsService:
     def delete_github_templates(self) -> bool:
         """Delete GitHub templates configuration (revert to defaults)."""
         return db.delete_setting('github_templates')
+
+    # =========================================================================
+    # Remote Template Registry (TMPL-002, trinity-enterprise#14)
+    # =========================================================================
+    #
+    # Four keys, all four blocked on the generic `PUT /api/settings/{key}` via
+    # TEMPLATE_REGISTRY_KEYS: `url` because the SSRF gate would otherwise be one
+    # unvalidated PUT away from bypass, `enabled` because it is a security
+    # control, and `generation`/`lkg` because they ARE the cache — writing them
+    # directly is cache poisoning with extra steps.
+
+    def get_template_registry_url(self) -> str:
+        """Effective registry URL: admin override row, else the config default.
+
+        No cache. `--workers 2` (the #506 rationale) — one SQLite read per
+        catalog assembly is negligible next to the HTTP fetch it gates, and a
+        cached URL is exactly how one worker keeps fetching a repointed
+        registry's old address.
+        """
+        from config import TEMPLATE_REGISTRY_URL
+
+        stored = self.get_setting(TEMPLATE_REGISTRY_URL_KEY)
+        if stored and str(stored).strip():
+            return str(stored).strip()
+        return TEMPLATE_REGISTRY_URL
+
+    def is_template_registry_enabled(self) -> bool:
+        """Composed switch: the config hard kill switch AND the admin toggle.
+
+        Deliberately NOT `_resolve_bool_flag` — see the config.py comment. That
+        helper treats its env var as opt-in only, so `default=True` would make
+        `TEMPLATE_REGISTRY_ENABLED=false` inert (#1039 class). Here the hard
+        switch is evaluated FIRST and no stored row can override it.
+
+        Fail-open on a settings-read failure (the #506 `clamp_to_ceiling`
+        discipline): the toggle defaults to on, so a transient DB error must not
+        silently disable a working registry — and the fetch itself is fenced.
+        """
+        from config import TEMPLATE_REGISTRY_ENABLED
+
+        if not TEMPLATE_REGISTRY_ENABLED:
+            return False
+        try:
+            stored = self.get_setting(TEMPLATE_REGISTRY_ENABLED_KEY)
+        except Exception:
+            stored = None
+        if stored is None:
+            return True
+        return str(stored).strip().lower() in ("1", "true", "yes", "on")
+
+    def is_template_registry_hard_disabled(self) -> bool:
+        """True when config alone has switched the registry off, so the panel
+        can render the toggle as inert instead of pretending it works
+        (the `TelemetrySharingPanel` `hard_disabled` shape)."""
+        from config import TEMPLATE_REGISTRY_ENABLED
+
+        return not TEMPLATE_REGISTRY_ENABLED
+
+    def get_template_registry_generation(self) -> int:
+        """Monotonic counter bumped on every registry settings write.
+
+        This is the cross-worker cache invalidation primitive. A per-process
+        `invalidate_registry_cache()` clears only the calling worker, so under
+        `--workers 2` an admin who repoints the registry sees the change apply
+        on roughly half their page loads — a nondeterministic setting, which is
+        worse than a slow one. A cached entry stamped with a stale generation is
+        discarded on read.
+
+        Mandatory, not nice-to-have, once the registry TTL is an hour: the two
+        decisions are coupled and must not be split. Fail-open to 0 — an
+        unreadable counter must not disable the cache.
+        """
+        try:
+            raw = self.get_setting(TEMPLATE_REGISTRY_GENERATION_KEY)
+            return int(raw) if raw is not None else 0
+        except Exception:  # noqa: BLE001 — unreadable counter must not disable the cache
+            return 0
+
+    def bump_template_registry_generation(self) -> int:
+        """Invalidate every worker's registry cache. Called on every write."""
+        nxt = self.get_template_registry_generation() + 1
+        db.set_setting(TEMPLATE_REGISTRY_GENERATION_KEY, str(nxt))
+        return nxt
+
+    def set_template_registry_config(
+        self, *, url: Optional[str] = None, enabled: Optional[bool] = None
+    ) -> None:
+        """Partial update. An omitted field is left untouched (the
+        `/api/settings/skills-library` shape). Always bumps the generation."""
+        if url is not None:
+            db.set_setting(TEMPLATE_REGISTRY_URL_KEY, url)
+        if enabled is not None:
+            db.set_setting(
+                TEMPLATE_REGISTRY_ENABLED_KEY, "true" if enabled else "false"
+            )
+        self.bump_template_registry_generation()
+
+    def delete_template_registry_config(self) -> bool:
+        """Reset to the config defaults.
+
+        Also drops the durable last-known-good: it was captured under the
+        overridden URL, and serving it after a reset would attribute one
+        registry's catalog to another.
+        """
+        removed_url = db.delete_setting(TEMPLATE_REGISTRY_URL_KEY)
+        removed_enabled = db.delete_setting(TEMPLATE_REGISTRY_ENABLED_KEY)
+        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
+        self.bump_template_registry_generation()
+        return bool(removed_url or removed_enabled)
+
+    def get_template_registry_lkg(self) -> Optional[dict]:
+        """Durable last-known-good parse, or None.
+
+        Never raises: a corrupt row is indistinguishable from no row, which is
+        the correct degradation — the caller falls back to the bundled floor.
+        """
+        raw = None
+        try:
+            raw = self.get_setting(TEMPLATE_REGISTRY_LKG_KEY)
+            if raw is None:
+                return None
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            logger.warning(
+                "[template-registry] stored last-known-good is unreadable; ignoring it"
+            )
+            return None
+
+    def set_template_registry_lkg(self, payload: dict) -> None:
+        """Persist the sanitized PARSED registry (never the raw YAML).
+
+        Storing raw YAML would mean re-parsing an untrusted document out of our
+        own database on a path where the network guards no longer apply.
+        """
+        db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
+
+    def clear_template_registry_lkg(self) -> None:
+        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
 
     def get_platform_default_model(self) -> str:
         """
@@ -743,6 +982,60 @@ def get_skills_library_branch() -> str:
     return settings_service.get_setting('skills_library_branch', 'main')
 
 
+# ---------------------------------------------------------------------------
+# Library lifecycle automation (trinity-enterprise#236)
+# ---------------------------------------------------------------------------
+#
+# All three default to the pre-#236 behavior (no scheduled sync, no fleet
+# sweep), so a zero-config install is byte-identical to before. Resolved fresh
+# on every read — the loop re-reads each cycle, which is what lets an admin
+# change the interval or flip a flag without a backend restart, and matches the
+# #506 "no per-process cache under --workers 2" discipline.
+
+SKILLS_AUTO_SYNC_ENABLED_KEY = "skills_library_auto_sync_enabled"
+SKILLS_AUTO_SYNC_INTERVAL_KEY = "skills_library_auto_sync_interval_seconds"
+SKILLS_AUTO_REINJECT_ENABLED_KEY = "skills_library_auto_reinject_enabled"
+
+SKILLS_AUTO_SYNC_INTERVAL_DEFAULT = 3600
+# Floor is a real guard, not decoration: each cycle forks `git fetch` against
+# GitHub for the whole install, so a 10-second interval is a self-inflicted
+# rate-limit ban. Ceiling keeps "enabled" meaningful.
+SKILLS_AUTO_SYNC_INTERVAL_MIN = 300
+SKILLS_AUTO_SYNC_INTERVAL_MAX = 86400
+
+
+def is_skills_auto_sync_enabled() -> bool:
+    """Scheduled skills-library auto-sync flag (ent#236). Default OFF."""
+    return settings_service._resolve_bool_flag(
+        SKILLS_AUTO_SYNC_ENABLED_KEY, "SKILLS_LIBRARY_AUTO_SYNC_ENABLED", False
+    )
+
+
+def is_skills_auto_reinject_enabled() -> bool:
+    """Fleet-wide re-inject-after-sync flag (ent#236). Default OFF."""
+    return settings_service._resolve_bool_flag(
+        SKILLS_AUTO_REINJECT_ENABLED_KEY, "SKILLS_LIBRARY_AUTO_REINJECT_ENABLED", False
+    )
+
+
+def get_skills_auto_sync_interval() -> int:
+    """Auto-sync interval in seconds, clamped into [MIN, MAX] (ent#236).
+
+    Read-side clamping (the #506 `clamp_to_ceiling` shape) so a stray value
+    written straight to the DB — or by a future unvalidated path — cannot spin
+    the loop into a tight fetch flood or park it past a day. Fail-safe on a bad
+    row: fall back to the default rather than raising inside the loop.
+    """
+    raw = settings_service.get_setting(SKILLS_AUTO_SYNC_INTERVAL_KEY)
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError, AttributeError):
+        return SKILLS_AUTO_SYNC_INTERVAL_DEFAULT
+    return max(
+        SKILLS_AUTO_SYNC_INTERVAL_MIN, min(SKILLS_AUTO_SYNC_INTERVAL_MAX, value)
+    )
+
+
 # ============================================================================
 # Agent Default Resources (RES-001)
 # ============================================================================
@@ -927,6 +1220,17 @@ def get_agent_default_require_email() -> bool:
 def get_github_templates() -> Optional[List[dict]]:
     """Get admin-configured GitHub templates, or None for defaults."""
     return settings_service.get_github_templates()
+
+
+# Remote Template Registry (TMPL-002, trinity-enterprise#14)
+def get_template_registry_url() -> str:
+    """Effective registry URL — admin override row, else the config default."""
+    return settings_service.get_template_registry_url()
+
+
+def is_template_registry_enabled() -> bool:
+    """Config hard switch AND the admin toggle (default on when unset)."""
+    return settings_service.is_template_registry_enabled()
 
 
 def get_platform_default_model() -> str:

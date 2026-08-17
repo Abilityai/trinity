@@ -12,7 +12,47 @@ import os
 import re
 import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Any
+
+def _unquote_env_value(value: str) -> str:
+    """The `.env` decoder, borrowed rather than re-implemented (#2023).
+
+    This module builds the REDACTION set, so a decoder that disagrees with the
+    one executions use means a credential is delivered in one form and searched
+    for in another — i.e. silently not redacted from logs. It was a fourth copy
+    of `.strip('"').strip("'")`; before the encoding became reversible the two
+    agreed (both corrupted identically) and redaction happened to work.
+
+    Resolved by PATH rather than by import name because this file is loaded in
+    three shapes — as `agent_server.utils.credential_sanitizer` (package),
+    flat, and standalone by path in the tests — and only the path is the same
+    in all three. `services.execution_env` in particular resolves to the
+    BACKEND package in a test process, which is a different module entirely.
+    Falls back to the old positional strip only if the sibling cannot be
+    loaded at all, so log redaction degrades rather than disappearing.
+    """
+    global _unquote_impl
+    if _unquote_impl is None:
+        try:
+            import importlib.util as _ilu
+
+            _target = Path(__file__).resolve().parents[1] / "services" / "execution_env.py"
+            _spec = _ilu.spec_from_file_location("_agent_execution_env", _target)
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _unquote_impl = _mod.unquote_env_value
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Could not load the shared .env decoder (%s); falling back to "
+                "positional stripping — quote-bearing credentials may not be "
+                "redacted from logs", exc,
+            )
+            _unquote_impl = lambda v: v.strip().strip('"').strip("'")  # noqa: E731
+    return _unquote_impl(value)
+
+
+_unquote_impl = None
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +95,8 @@ SECRET_VALUE_PATTERNS = [
     r'sk-[a-zA-Z0-9]{20,}',           # OpenAI API keys
     r'sk-proj-[a-zA-Z0-9\-_]{20,}',   # OpenAI project keys
     r'sk-ant-[a-zA-Z0-9\-_]{20,}',    # Anthropic API keys
-    r'ghp_[a-zA-Z0-9]{36,}',          # GitHub PAT (fine-grained)
-    r'github_pat_[a-zA-Z0-9_]{22,}',  # GitHub PAT (classic)
+    r'ghp_[a-zA-Z0-9]{36,}',          # GitHub PAT (classic, ~40 chars)
+    r'github_pat_[a-zA-Z0-9_]{22,}',  # GitHub PAT (fine-grained, ~93 chars)
     r'gho_[a-zA-Z0-9]{36,}',          # GitHub OAuth token
     r'ghs_[a-zA-Z0-9]{36,}',          # GitHub App token
     r'ghr_[a-zA-Z0-9]{36,}',          # GitHub refresh token
@@ -156,7 +196,16 @@ def _load_credential_values() -> Set[str]:
                     if line and not line.startswith('#') and '=' in line:
                         var_name, _, var_value = line.partition('=')
                         var_name = var_name.strip()
-                        var_value = var_value.strip().strip('"').strip("'")
+                        # #2023: the SAME decoder the execution env uses. This
+                        # was a fourth copy of `.strip('"').strip("'")`, and it
+                        # is the one that builds the REDACTION set — so once the
+                        # writer/reader pair became reversible, a credential
+                        # containing a quote was held here in its escaped form
+                        # while executions received the unescaped one, and
+                        # `sanitize_text()` stopped redacting it from logs.
+                        # Before that fix the two agreed (both corrupted
+                        # identically), so redaction happened to work.
+                        var_value = _unquote_env_value(var_value.strip())
                         if var_value and len(var_value) >= 8:
                             for pattern in _sensitive_var_re:
                                 if pattern.match(var_name):
@@ -184,6 +233,42 @@ def refresh_credential_values():
     logger.info(f"Refreshed credential cache with {len(_credential_values)} values")
 
 
+# URL userinfo: `scheme://user:secret@host/...` → `scheme://***@host/...`
+#
+# Shape-INDEPENDENT, and that is the point. The value patterns above only catch
+# tokens whose prefix we already know; this catches any credential embedded in a
+# URL, including formats that do not exist yet. Trinity writes git remotes as
+# `https://oauth2:<PAT>@github.com/...` (and `x-access-token:` in the field), so
+# every git subprocess carries a live PAT in its argv.
+#
+# Anchored on `://` and stopping at the first `@` before any `/`, so a path or
+# query containing `@` is untouched.
+_URL_USERINFO_RE = re.compile(r"(://)[^/@\s]+@")
+
+
+def redact_url_userinfo(text: str) -> str:
+    """Strip credentials from URLs. Promoted from `routers/git.py` (#1595) so
+    every log exit can use it, not just the two git-stderr sinks it was written
+    for."""
+    if not text:
+        return text
+    return _URL_USERINFO_RE.sub(r"\1***@", text)
+
+
+def sanitize_cmdline(cmd: str) -> str:
+    """Sanitize a process command line before it reaches a log sink.
+
+    THE entry point for anything read out of `/proc/<pid>/cmdline` or otherwise
+    derived from argv. A reaped `git remote-https` carries the PAT in argv, and
+    logging it verbatim wrote a live credential into the container log, into
+    Vector's persisted archives, and into any snapshot of the log volume.
+
+    Log level is not a mitigation: agent logs are routed by container class with
+    no level filter, so INFO and WARNING persist identically.
+    """
+    return sanitize_text(redact_url_userinfo(cmd))
+
+
 def sanitize_text(text: str) -> str:
     """
     Sanitize sensitive values from text.
@@ -203,6 +288,11 @@ def sanitize_text(text: str) -> str:
         return text
 
     result = text
+
+    # 0. Redact URL userinfo FIRST. It is shape-independent, so it covers
+    #    credentials the value patterns below would miss entirely — including a
+    #    PAT format that does not exist yet.
+    result = redact_url_userinfo(result)
 
     # 1. Replace known credential values (exact match)
     for value in get_credential_values():

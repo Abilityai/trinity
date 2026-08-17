@@ -8,7 +8,25 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
-RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg && rm -rf /var/lib/apt/lists/*
+#
+# `tzdata-legacy` carries the IANA *backward-compatibility links* (#1823). Debian
+# 13 "trixie" split them out of `tzdata`, and this image is `FROM python:3.13-slim`
+# with no codename pin — so it silently migrated bookworm→trixie and lost
+# `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias) without anyone
+# changing a line. `zoneinfo.ZoneInfo("Europe/Kiev")` then raises
+# ZoneInfoNotFoundError inside APScheduler's `astimezone()`, which is how a
+# perfectly ordinary schedule create started 500ing. Do NOT drop this when
+# slimming the image — `tests/unit/test_1823_tz_capability_parity.py` fails if
+# an image that resolves timezones declares no tz-data source.
+# `postgresql-client-17` (#2216) carries pg_dump for the nightly PostgreSQL
+# backup arm (services/db_backup_service.py). MAJOR-PINNED deliberately, not
+# the floating `postgresql-client` meta-package: this image already migrated
+# bookworm→trixie silently once (#1823, the tzdata split above), and an
+# unpinned client's major could change under an unrelated rebuild — breaking
+# every PG install's backups at once. pg_dump handles servers ≤ its own major
+# (bundled dev PG is 16); a future server-major above 17 fails LOUDLY
+# (non-zero exit → operator alarm), never silently.
+RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg tzdata-legacy postgresql-client-17 && rm -rf /var/lib/apt/lists/*
 
 # Build-time provenance (#926). Each arg is forwarded by docker-compose
 # `backend.build.args` from shell vars set by `scripts/deploy/start.sh`.
@@ -29,6 +47,15 @@ ENV VERSION=${VERSION} \
     GIT_BRANCH=${GIT_BRANCH} \
     BUILD_DATE=${BUILD_DATE}
 
+# `idna` is pinned explicitly even though httpx already pulls it in:
+# services/setup_url_display.py canonicalises author-supplied `setup_url`
+# hosts with UTS-46 nontransitional IDNA (browser semantics — the stdlib
+# `str.encode("idna")` codec is IDNA2003 and disagrees on exactly the
+# deviation set that matters, e.g. `fass.de` vs `xn--fa-hia.de`). A
+# transitive pin is one dependency resolution away from vanishing, and the
+# #1033 class of bug is invisible to /verify-local because the source
+# imports fine on the host. (trinity-enterprise#127)
+#
 # cryptography is pinned explicitly: the 49.x line's bundled OpenSSL triggers a
 # SIGILL (illegal instruction) when loaded in the same process as grpcio's
 # BoringSSL (pulled in transitively by the OTLP gRPC exporter) on
@@ -47,6 +74,7 @@ RUN pip install --no-cache-dir \
     websockets==14.1 \
     redis==5.2.1 \
     httpx==0.28.1 \
+    idna==3.10 \
     pyyaml==6.0.2 \
     sqlalchemy==2.0.36 \
     alembic==1.18.4 \
@@ -56,13 +84,33 @@ RUN pip install --no-cache-dir \
     apscheduler==3.11.0 \
     croniter==5.0.1 \
     pytz==2024.2 \
+    # #1823 portability floor for the tz database. `zoneinfo` reads the SYSTEM
+    # database first and falls back to this wheel only for keys the system
+    # lacks (measured: a key present on TZPATH always wins), so with
+    # `tzdata-legacy` installed above this is inert in production — it exists so
+    # the capability survives another silent base-tag migration and holds on a
+    # non-Debian base. Pinned exactly per this file's convention;
+    # tests/requirements-test.txt deliberately keeps a floor instead (#1771 —
+    # an exact pin there would freeze a stale IANA database). The staleness
+    # hazard that motivates the floor there does not bite here precisely
+    # because the wheel is inert while `tzdata-legacy` supplies the system db;
+    # bump this pin with the rest of the file.
+    tzdata==2026.3 \
     psutil==6.1.1 \
     payments-py==1.2.1 \
     Pillow==11.1.0 \
+    # #1536 report export. Both are pure-Python wheels — no system libraries, so
+    # the image build is unchanged beyond these two lines (WeasyPrint was
+    # rejected for exactly that reason: cairo/pango would have made a PDF button
+    # a container-build concern). The export endpoint degrades to 503 when they
+    # are absent, so an instance that upgrades code without rebuilding the image
+    # (#1814) gets a clear message instead of a 500.
+    openpyxl==3.1.5 \
+    reportlab==4.2.5 \
     google-genai==1.63.0 \
     "slack_sdk[socket-mode]==3.41.0" \
-    aiohttp \
-    slackify-markdown \
+    aiohttp==3.14.3 \
+    slackify-markdown==0.2.4 \
     tenacity==9.0.0 \
     opentelemetry-api==1.29.0 \
     opentelemetry-sdk==1.29.0 \
@@ -89,6 +137,12 @@ COPY ../../src/backend/adapters /app/adapters/
 COPY ../../src/backend/utils /app/utils/
 COPY ../../src/backend/db /app/db/
 COPY ../../src/backend/canary /app/canary/
+# Workspace / client portal (ent#356). A new top-level backend package must be
+# listed here or the image builds fine and the app dies at import — `main.py`
+# does `from client_portal.router import ...` and the container has no such
+# module (#1033's class). `prod-image-smoke` is what catches it; source-only CI
+# cannot, because the source tree always has the directory.
+COPY ../../src/backend/client_portal /app/client_portal/
 
 # Alembic migration scripts (#1183). db/alembic_runner.py points Alembic's
 # script_location at /app/migrations at runtime, so the directory MUST ship in

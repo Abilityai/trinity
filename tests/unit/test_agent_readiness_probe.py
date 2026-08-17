@@ -49,11 +49,13 @@ def wait_for_agent_ready(monkeypatch):
         "services.docker_service": types.SimpleNamespace(
             docker_client=None, get_agent_container=lambda _n: None,
             get_next_available_port=lambda: 2222,  # added to lifecycle.py import (#1559 recreate path)
+            reserve_port_for_recreate=lambda _p: None,  # added to lifecycle.py import (#2215)
         ),
         "services.docker_utils": types.SimpleNamespace(
             container_stop=None, container_remove=None, container_start=None,
             container_reload=None, volume_get=None, volume_create=None,
             containers_run=None,
+            image_get=None,  # added to lifecycle.py import (#1809)
         ),
         "services.agent_service.helpers": types.SimpleNamespace(
             validate_base_image=None,
@@ -64,7 +66,10 @@ def wait_for_agent_ready(monkeypatch):
             check_full_capabilities_match=None,
             check_guardrails_env_matches=None,
             check_agent_auth_token_env_matches=None,  # added to lifecycle.py import (#1159)
+            check_agent_mcp_key_matches=None,  # added to lifecycle.py import (#1854)
+            check_base_image_matches=None,  # added to lifecycle.py import (#1809)
             is_claude_runtime=None,  # added to lifecycle.py import (#1187)
+            is_system_agent_name=None,  # added to lifecycle.py import (#1816)
         ),
         "services.settings_service": types.SimpleNamespace(
             get_anthropic_api_key=None, get_github_pat=None,

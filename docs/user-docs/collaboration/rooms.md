@@ -2,13 +2,13 @@
 
 A **room** is one shared, persistent conversation where several agents — and a human — can work a topic together across many turns. Each agent still runs in its own isolated session; the room is a shared *record*, not a shared *context*.
 
-> **Enterprise feature.** Shared sessions are available on the enterprise tier, when the enterprise edition is entitled on your instance. In a community build the room MCP tools return a `shared_sessions_not_enabled` result and the Sessions view is hidden.
+> **Enterprise feature.** Shared sessions are available on the enterprise tier, when the enterprise edition is entitled on your instance. In a community build the room MCP tools return a `shared_sessions_not_enabled` result, and the Workspace offers single-agent chats only — its agent picker is single-select and a room link reports that the conversation isn't available on this instance, rather than failing when you try to start one.
 
 ## Concepts
 
 - **Room** — A bounded, persistent transcript with a set of participant agents. It has a name, an optional topic, a status (`Active` / `Closed`), and running message and cost counters.
 - **Shared record, not shared context** — Each participating agent keeps its own private session. A room never merges anyone's context. When an agent is woken, it is handed only the slice of transcript it has not seen yet.
-- **Mechanical turn-taking** — An agent is woken **only** when it is `@mentioned` in a message. A message with no mention simply joins the transcript silently. Nothing has to decide who speaks next.
+- **Mechanical turn-taking** — An agent is woken **only** when it is `@mentioned` in a message. A message with no mention simply joins the transcript silently. Nothing has to decide who speaks next. Mentioning an agent that is not yet a participant **adds** it to the room — but only a person can recruit that way, never another agent.
 - **You always post as yourself** — The acting identity comes from your own key. An agent posts as its own agent and can never impersonate another participant.
 - **Membership is the grant** — You can only add agents you already have access to. Rooms you are not a member of are invisible: a non-member request returns a uniform `404`, so a room's existence is never leaked.
 - **Bounded and auto-closing** — Every room has budgets. It closes automatically when it hits `max_messages` (default 60), a `max_cost_usd` ceiling, or `ttl_hours` (default 24; `0` = never). It can also be closed by hand.
@@ -17,16 +17,20 @@ A **room** is one shared, persistent conversation where several agents — and a
 
 ## How It Works
 
-Open the **Sessions** view from the left nav. It has four parts:
+Rooms live in the **[Workspace](../sharing-and-access/workspace.md)** alongside your one-to-one chats. (The standalone Sessions page has been retired; `/sessions` links redirect into the Workspace.)
 
-1. **Rooms rail** (left) — Your rooms, each with status and message count. Click one to open it. **New Room** opens the create dialog.
-2. **Transcript pane** (center) — The shared message history, showing who posted each message and which participants were mentioned. A header shows the room name, status, and the `messages` / cost counters.
-3. **Participants rail** (right) — The agents in the room, their working state, and the room's budget progress (messages used, cost, and time until auto-close).
-4. **Composer** (bottom) — Post a message into the room as yourself. `@mention` a participant to wake it; leave mentions out to add a note without waking anyone.
+A room row in the Workspace sidebar shows its participants' avatars and can be starred like any other chat. Opening it gives you the shared transcript, a header naming the participants, and a warning as the room approaches its budget. **+ Add agent** brings in another agent you can access, and the composer names the current participants so you know who is listening.
 
-**Creating a room.** In the **New Room** dialog, set a name, pick participants (only agents you can access appear), and optionally add a topic, a message / cost / TTL budget, and a scribe. Once the room opens, mention any participant to bring it into the conversation.
+**Starting a room.** Two ways:
 
-**Human participation.** You can post into a room yourself from the composer — a human is a first-class participant alongside the agents.
+- **New chat** → pick **two or more** agents.
+- **`@mention` from an existing 1:1** — type `@` and another agent's name in a one-to-one chat, and the Workspace opens a room containing both agents and posts your message there. The original 1:1 is left untouched.
+
+An `@name` that isn't one of your agents stays plain text rather than erroring.
+
+Name, topic, budget, and scribe are set through the API or MCP tools rather than the Workspace UI.
+
+**Human participation.** You post into a room as yourself — a human is a first-class participant alongside the agents.
 
 ## For Agents
 
@@ -61,7 +65,8 @@ These enterprise endpoints back the tools above (present only when the feature i
 - **Per-message cost is not shown in the transcript** yet. Only the room-level cost total is displayed.
 - **Roles are recorded, not enforced.** Designating a moderator or scribe is advisory — no participant is prevented from posting based on its role.
 - **Turn chains run synchronously.** A mention triggers the mentioned agent's turn inline, so a long chain of hand-offs can run longer than a single HTTP request.
-- **The Sessions view is gated** behind the enterprise entitlement and does not appear in a community build.
+- **Multi-agent chat is gated** behind the enterprise entitlement. Where it is absent, the Workspace picker is single-select, `@mention` escalation is off, and a room link reports that the conversation isn't available on this instance.
+- **Rooms show no unread badge** in the Workspace sidebar. Starring works for rooms; unread counts currently cover one-to-one chats only.
 
 ## See Also
 

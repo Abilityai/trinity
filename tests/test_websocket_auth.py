@@ -23,7 +23,7 @@ import pytest
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect as ws_connect
 
-from utils.api_client import TrinityApiClient
+from testkit.api_client import TrinityApiClient
 
 UPGRADE_HEADERS = {
     "Upgrade": "websocket",

@@ -2500,6 +2500,43 @@ def _migrate_agent_loops_tables(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_evaluations_table(cursor, conn):
+    """Create the agent_evaluations table + indexes (ent#206).
+
+    The behavioral-eval referee surface: a run's completion (clean-exit mirror)
+    and its separate quality score, written ONLY by the platform/evaluator, never
+    by the graded agent's key. Also defined in db/schema.py for fresh installs;
+    this handles existing installs. Idempotent. Mirrored by Alembic
+    0033_agent_evaluations for PostgreSQL (#1183 dual-track).
+    """
+    cursor.execute("PRAGMA table_info(agent_evaluations)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_evaluations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            execution_id TEXT,
+            archetype TEXT,
+            completion INTEGER,
+            quality REAL,
+            checks_json TEXT,
+            judge_json TEXT,
+            evaluator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent "
+        "ON agent_evaluations(agent_name, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution "
+        "ON agent_evaluations(execution_id)"
+    )
+
+
 def _migrate_agent_reminders_table(cursor, conn):
     """Create the agent_reminders table + indexes (#1296).
 
@@ -2540,6 +2577,58 @@ def _migrate_agent_reminders_table(cursor, conn):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
         "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')"
+    )
+    conn.commit()
+
+
+def _migrate_skill_sources_table(cursor, conn):
+    """Create skill_sources + add agent_skills.source_id (ent#237).
+
+    Multi-source skills library: one row per git repo the platform syncs
+    skills from, replacing the single `skills_library_url` system setting.
+    Mirrored by Alembic 0034_skill_sources and the DDL in `db/schema.py` /
+    MetaData in `db/tables.py`. Kept consistent across all four.
+
+    The pre-existing `skills_library_url` row is NOT read here — adopting it
+    as a source is a filesystem operation too (the legacy clone at
+    /data/skills-library/ has to move into a per-source subdir), so it lives
+    in `skill_service` where both halves can succeed or fail together. A
+    migration that moved only the DB half would leave the clone orphaned.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS skill_sources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            ref TEXT NOT NULL DEFAULT 'main',
+            ref_type TEXT NOT NULL DEFAULT 'branch',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_commit_sha TEXT,
+            last_error TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(url, ref)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
+        "ON skill_sources(priority, created_at) WHERE enabled = 1"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sources_one_default "
+        "ON skill_sources(is_default) WHERE is_default = 1"
+    )
+    # Nullable with no default: NULL means "assigned before multi-source, or
+    # the source row was removed" and resolves by precedence like any other
+    # bare name. Backfilling it would be a guess.
+    _safe_add_column(
+        cursor, "agent_skills", "source_id",
+        "ALTER TABLE agent_skills ADD COLUMN source_id TEXT",
     )
     conn.commit()
 
@@ -2738,6 +2827,27 @@ def _migrate_agent_ownership_mcp_exposed(cursor, conn):
         "agent_ownership",
         "mcp_exposed",
         "ALTER TABLE agent_ownership ADD COLUMN mcp_exposed INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_a2a_exposed(cursor, conn):
+    """ent#157 — per-agent A2A inbound-server exposure toggle.
+
+    Adds ``a2a_exposed INTEGER DEFAULT 0`` to ``agent_ownership``. When set, the
+    public A2A surface (``GET /a2a/{name}/.well-known/agent-card.json`` + the
+    JSON-RPC task endpoint) serves/accepts the agent; default 0 (OFF, safe by
+    default). Edition-agnostic OSS primitive (the OSS routes read + enforce it);
+    the WRITE is entitlement-gated by the enterprise A2A module (like
+    ``mcp_exposed`` reads OSS but ``suspended_at`` is set only by enterprise).
+    Mirrored by the Alembic revision 0035_agent_ownership_a2a_exposed for
+    PostgreSQL (re-chained onto dev's head 0028_agent_reminders, #157).
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "a2a_exposed",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_exposed INTEGER DEFAULT 0",
     )
     conn.commit()
 
@@ -3151,6 +3261,191 @@ def _migrate_slack_channel_allow_proactive(cursor, conn):
         )
 
 
+def _migrate_telegram_progress_indicator(cursor, conn):
+    """ent#264 — per-binding toggle for the Telegram in-progress indicator.
+
+    Adds ``progress_indicator_enabled INTEGER DEFAULT 1`` to
+    ``telegram_bindings``. Default ON for EVERYONE (the AC), unlike ent#223's
+    deny-for-new posture: no backfill UPDATE is needed because SQLite's
+    ``ALTER TABLE ADD COLUMN ... DEFAULT 1`` physically populates existing
+    rows with 1 (no NULLs arise from the migration itself). The Python-side
+    ``v is None or v != 0`` read predicate is defense-in-depth for edge
+    writes, not the backfill mechanism.
+
+    Mirrored by Alembic 0032_telegram_progress_indicator.
+    """
+    _safe_add_column(
+        cursor,
+        "telegram_bindings",
+        "progress_indicator_enabled",
+        "ALTER TABLE telegram_bindings ADD COLUMN progress_indicator_enabled INTEGER DEFAULT 1",
+    )
+
+
+def _migrate_channel_report_back_columns(cursor, conn):
+    """ent#265 — channel completion report-back: Telegram leg + binding identity.
+
+    Two ADD COLUMNs in one entry (multi-table precedent: ``_migrate_access_control``):
+
+    * ``schedule_executions.source_channel_agent`` (nullable TEXT) — "the agent
+      whose channel binding owns this execution's inherited context". Written
+      ONLY at the /task row-creation point when channel context is inherited
+      from a parent execution (parent's own ``source_channel_agent``, else the
+      parent's agent name — transitive across A→B→C). NULL for direct rows;
+      the completion reporter falls back to the executing agent, which is
+      byte-identical legacy behavior.
+    * ``telegram_group_configs.allow_proactive INTEGER DEFAULT 1`` — per-group
+      consent for completion reports (the Telegram analog of ent#223's Slack
+      channel-binding flag). DEFAULT 1 fills existing rows on read AND covers
+      new inserts, so no backfill UPDATE is needed. Allow is the deliberate
+      default (unlike Slack's new-deny split): the reporter posts only into
+      chats that initiated the work — the group-scale analog of DM
+      consent-by-construction — and the toggle is an opt-out mute.
+
+    Mirrored by Alembic 0031_channel_report_back for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "source_channel_agent",
+        "ALTER TABLE schedule_executions ADD COLUMN source_channel_agent TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "allow_proactive",
+        "ALTER TABLE telegram_group_configs ADD COLUMN allow_proactive INTEGER DEFAULT 1",
+    )
+
+
+def _migrate_client_portal_tables_to_oss(cursor, conn):
+    """Adopt the Workspace / client-portal tables onto the OSS track (ent#356).
+
+    The module moved from the entitled enterprise seam into OSS core, so its
+    three tables move from `enterprise_schema_migrations` to `schema_migrations`.
+
+    ADOPTION, NOT CREATION. On every existing entitled install these tables
+    already exist — created by the enterprise runner — and carry live client
+    conversations. The acceptance criteria for the move are explicit that there
+    is no data migration and no re-auth for signed-in clients, so every
+    statement here is IF NOT EXISTS and this migration is a NO-OP on those
+    installs. It does real work only on a fresh or community build.
+
+    The `enterprise_` table-name prefix is therefore load-bearing history, not a
+    licensing claim: renaming would be exactly the data migration this forbids.
+
+    Mirrored by Alembic `0036_client_portal_oss` and the DDL in `db/schema.py`.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_portal_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            last_message_at TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_portal_messages (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            session_id TEXT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            cost REAL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_client_blocks (
+            email TEXT PRIMARY KEY,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id TEXT,
+            blocked_by_email TEXT,
+            reason TEXT
+        )
+    """)
+    # `session_id` predates this move on the enterprise track (its 0001
+    # migration added it to an already-shipped messages table). A fresh OSS
+    # build gets it from the CREATE above; an adopted install already has it.
+    # Add defensively so a half-migrated enterprise install cannot land here
+    # without the column the index below needs.
+    cursor.execute("PRAGMA table_info(enterprise_portal_messages)")
+    if "session_id" not in {row[1] for row in cursor.fetchall()}:
+        cursor.execute("ALTER TABLE enterprise_portal_messages ADD COLUMN session_id TEXT")
+
+    for index_sql in (
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_convo "
+        "ON enterprise_portal_messages(agent_name, client_email, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_portal_sessions_convo "
+        "ON enterprise_portal_sessions(agent_name, client_email, last_message_at)",
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
+        "ON enterprise_portal_messages(session_id, created_at)",
+    ):
+        cursor.execute(index_sql)
+    conn.commit()
+
+
+def _migrate_portal_session_resume(cursor, conn):
+    """Give a Workspace thread the resume state a Session row already had (ent#358).
+
+    The Workspace absorbs the Session surface, so it has to resume the way the
+    Session did — `claude --print --resume <uuid>` against a cached id, not a
+    replay of prior messages as prompt text. These are the three columns that
+    make that possible, and they are the same three `agent_sessions` carries.
+
+    Additive and defaulted: existing threads land with a NULL cache, so their
+    next turn is a cold turn that writes a JSONL and caches its id. No thread
+    loses history — history persistence is untouched.
+    """
+    cursor.execute("PRAGMA table_info(enterprise_portal_sessions)")
+    existing = {row[1] for row in cursor.fetchall()}
+    if not existing:
+        # Table absent (client_portal tables migration has not run yet on this
+        # DB) — its CREATE already carries these columns, so nothing to do.
+        return
+    for col_name, col_type in (
+        ("cached_claude_session_id", "TEXT"),
+        ("last_resume_at", "TEXT"),
+        ("consecutive_resume_failures", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if col_name not in existing:
+            cursor.execute(
+                f"ALTER TABLE enterprise_portal_sessions ADD COLUMN {col_name} {col_type}"
+            )
+    conn.commit()
+
+
+def _migrate_portal_chat_state(cursor, conn):
+    """Per-user star + read cursor for Workspace chats (ent#359).
+
+    A star belongs to the person who starred it, and a room is shared between
+    several people — so this cannot be a column on the chat row without one
+    user's star appearing in everyone else's sidebar. Keyed by the caller's own
+    email, which makes the row itself the per-user scope.
+
+    ``chat_kind`` distinguishes a portal thread from a room: the two id spaces
+    are independent, so the pair is the key, not the id alone.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_chat_state (
+            client_email TEXT NOT NULL,
+            chat_kind TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            starred_at TEXT,
+            last_read_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, chat_kind, chat_id)
+        )
+        """
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3253,4 +3548,12 @@ MIGRATIONS = [
     ("agent_reminders_table", _migrate_agent_reminders_table),
     ("slack_channel_allow_proactive", _migrate_slack_channel_allow_proactive),
     ("product_events_table", _migrate_product_events_table),
+    ("channel_report_back_columns", _migrate_channel_report_back_columns),
+    ("telegram_progress_indicator", _migrate_telegram_progress_indicator),
+    ("agent_evaluations_table", _migrate_agent_evaluations_table),
+    ("skill_sources_table", _migrate_skill_sources_table),
+    ("agent_ownership_a2a_exposed", _migrate_agent_ownership_a2a_exposed),
+    ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
+    ("portal_session_resume", _migrate_portal_session_resume),
+    ("portal_chat_state", _migrate_portal_chat_state),
 ]

@@ -9,8 +9,9 @@ Feature Spec: docs/requirements/MODEL_SELECTION_TASKS_SCHEDULES.md
 
 import pytest
 import uuid
-from utils.api_client import TrinityApiClient
-from utils.assertions import (
+from services.model_catalog import MODEL_CATALOG
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import (
     assert_status,
     assert_status_in,
     assert_json_response,
@@ -339,17 +340,12 @@ class TestScheduleModelUpdate:
 class TestModelPresets:
     """Tests for standard model preset values (MODEL-001)."""
 
-    # Current offered lineup (#1080, synced 2026-06-06). The two models retiring
-    # 2026-06-15 (claude-opus-4-20250514, claude-sonnet-4-20250514) are intentionally
-    # absent — they were removed from the picker. The model field is free-text, so this
-    # list asserts each current ID round-trips through schedule create/read.
-    PRESET_MODELS = [
-        "claude-opus-4-8",      # Flagship (latest)
-        "claude-opus-4-7",      # Current
-        "claude-opus-4-6",      # Current
-        "claude-sonnet-4-6",    # Fast + smart (platform default)
-        "claude-haiku-4-5",     # Fastest
-    ]
+    # Sourced from the single-source catalog (#2086) instead of a hand-synced copy
+    # — every selectable id (incl. claude-opus-5 and the legacy picker-only ids)
+    # now round-trips through schedule create/read. The model field is free-text,
+    # so the extra bare `claude-haiku-4-5` (the pre-#2086 case; the catalog carries
+    # the dated `claude-haiku-4-5-20251001`) is kept to preserve bare-alias coverage.
+    PRESET_MODELS = [m.id for m in MODEL_CATALOG] + ["claude-haiku-4-5"]
 
     @pytest.mark.parametrize("model", PRESET_MODELS)
     def test_create_schedule_with_preset_model(

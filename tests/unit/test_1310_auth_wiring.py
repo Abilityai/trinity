@@ -19,8 +19,11 @@ allow/filter branches (no raise), capability flags, and WebSocket ``close(4003)`
 dict handlers (they never ``raise HTTPException``).
 
 Escape hatches: a per-``(file, function)`` allowlist for the intentional
-consolidated-404 designs, and a line-level ``# noqa: inv8`` marker for the
-deferred ``slack.py`` sites — so NEW inline auth added to slack.py still trips.
+consolidated-404 designs, and a general line-level ``# noqa: inv8`` marker for a
+future, individually-reviewed exception. The ``slack.py`` sites that once used
+the marker were migrated onto the shared helpers (#1710), so no ``# noqa: inv8``
+marker remains in the tree — a re-introduced inline gate now trips unless it
+carries a freshly-added, reviewable marker.
 """
 
 from __future__ import annotations
@@ -35,18 +38,25 @@ _ROUTERS = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
 
 # Per-(filename, function) allowlist — intentional, documented designs that keep
 # their own inline check (enumeration-safe by construction; INV-8 §2.7 / #186):
-#   * reports.get_report            — 404-not-403 to avoid a report-id oracle
+#   * reports._report_or_404        — 404-not-403 to avoid a report-id oracle;
+#     the ONE gate shared by the detail / rows / export routes (#1838 review)
 #   * nevermined._require_*_access  — the payment-config uniform-404 helpers
 #   * chat.execute_parallel_task    — the resume-session owner check is a compound
 #     `role != "admin" AND NOT db.resume_session_belongs_to_user(...)` raising an
 #     intentional 404 (session-id enumeration safety, Invariant #8 session
 #     pattern). No shared helper fits: `assert_owns_or_admin` takes an owner_id
 #     and raises 403, which would leak session existence. Stays inline (#1083).
+#   * a2a._authorize_inbound        — the public A2A inbound gate (ent#157): a
+#     uniform-404 helper (non-exposed OR inaccessible → the SAME 404, so the
+#     public /a2a/{name} surface is not an enumeration oracle, Invariant #8).
+#     A shared `AuthorizedAgentByName` dependency can't express the exposure
+#     pre-check + the allow-list 403 that only fires AFTER access is proven.
 _ALLOWLIST: set[tuple[str, str]] = {
-    ("reports.py", "get_report"),
+    ("reports.py", "_report_or_404"),
     ("nevermined.py", "_require_read_access"),
     ("nevermined.py", "_require_write_access"),
     ("chat.py", "execute_parallel_task"),
+    ("a2a.py", "_authorize_inbound"),
 }
 
 _CAN_USER = {"can_user_access_agent", "can_user_share_agent"}
@@ -151,8 +161,8 @@ def find_violations(source: str, filename: str) -> list[tuple[str, int, str]]:
 # --------------------------------------------------------------------------- #
 def test_no_inline_auth_gates_in_routers():
     """No router carries an inline agent/admin gate that a shared helper should
-    own — except the allowlisted intentional-404 designs and `# noqa: inv8`
-    lines (the deferred slack.py sites)."""
+    own — except the allowlisted intentional-404 designs and any individually
+    reviewed `# noqa: inv8`-marked line (none remain in-tree after #1710)."""
     offenders: dict[str, list[tuple[str, int, str]]] = {}
     for path in sorted(_ROUTERS.glob("*.py")):
         v = find_violations(path.read_text(), path.name)
@@ -239,14 +249,14 @@ def test_allowlist_suppresses_intentional_404():
     """A `can_user_*`-guarded raise in an allowlisted (file, function) is not a
     violation — the intentional-404 designs keep their inline check."""
     src = (
-        "def get_report(report_id, current_user):\n"
+        "def _report_or_404(report_id, current_user):\n"
         "    report = db.get_report(report_id)\n"
         "    if not report or not db.can_user_access_agent(current_user.username, report['agent_name']):\n"
         "        raise HTTPException(status_code=404, detail='Report not found')\n"
     )
     assert find_violations(src, "reports.py") == []
     # same body in a non-allowlisted file/function IS flagged
-    assert find_violations(src.replace("get_report", "leak", 1), "reports.py")
+    assert find_violations(src.replace("_report_or_404", "leak", 1), "reports.py")
 
 
 def test_noqa_inv8_suppresses_line():

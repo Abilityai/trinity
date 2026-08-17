@@ -22,6 +22,9 @@ Structure:
   * A6 anti-exfil sibling   — Agent B's key sharing Agent A's files → 403
   * A7 schedules ordering   — low-priv on a nonexistent agent → 403 (not 404)
   * A8 loops composite gate — admin/initiator ADMITTED, stranger fallback → 403
+  * A9 slack.py (#1710)     — 3 read + 8 owner gates migrated onto the shared
+        helpers: stranger→403 exact-detail; shared reader ADMITTED on reads,
+        DENIED on owner gates; site #10 human-only reject + #11 send asymmetry
 
 Helper-level truth tables (connector/ephemeral fence, owns_or_admin/owns type
 parity) live in this file's Part B, added with the helpers in the same PR.
@@ -120,6 +123,7 @@ import routers.ops as ops  # noqa: E402
 import routers.public as public  # noqa: E402
 import routers.public_memory as public_memory  # noqa: E402
 import routers.settings as settings  # noqa: E402
+import routers.slack as slack  # noqa: E402
 import routers.subscriptions as subscriptions  # noqa: E402
 import routers.system_agent as system_agent  # noqa: E402
 import routers.voice as voice  # noqa: E402
@@ -696,3 +700,172 @@ def test_assert_owns_no_admin_bypass(seeded):
     _assert_403(exc, "You don't have access to this session")
     exc = _raised(lambda: dep.assert_owns(_user("o", uid=11), 7))
     _assert_403(exc, "You don't have access to this session")
+
+
+# =============================================================================
+# A9 — slack.py inline auth gates, migrated onto the shared imperative helpers
+#      (#1710, retiring the `# noqa: inv8` carve-out). 3 read gates
+#      (assert_agent_access) + 8 owner gates (assert_agent_owner); every detail=
+#      string preserved verbatim so the 403 body is byte-identical (AC #6). The
+#      handlers are access-first, so each gate raises BEFORE any downstream
+#      public-link / workspace / channel lookup — no stubs needed for a denial.
+#      Locks: stranger → 403 + exact detail at all 11; a shared (non-owner)
+#      reader is ADMITTED on the 3 read gates and DENIED on all 8 owner gates
+#      (a mis-classified helper is invisible to the AST wiring guard); owner /
+#      admin are never denied by the migrated gate; and site #10's ent#223
+#      human-only reject survives while site #11 stays agent-callable
+#      (the grant-vs-send asymmetry).
+# =============================================================================
+
+_SLACK_LINK = "lk-xyz"
+_SLACK_CHANNEL = "C-123"
+
+
+def _slack_read_sites():
+    """(id, invoker(user), detail) — the 3 assert_agent_access gates."""
+    return [
+        ("slack.get_slack_connection_status",
+         lambda u: slack.get_slack_connection_status(
+             name=_AGENT, link_id=_SLACK_LINK, current_user=u),
+         "Access denied"),
+        ("slack.get_agent_slack_channel",
+         lambda u: slack.get_agent_slack_channel(name=_AGENT, current_user=u),
+         "Access denied"),
+        ("slack.list_agent_slack_channels",
+         lambda u: slack.list_agent_slack_channels(name=_AGENT, current_user=u),
+         "Access denied"),
+    ]
+
+
+def _slack_owner_sites():
+    """(id, invoker(user), detail) — the 8 assert_agent_owner gates."""
+    from models import SlackChannelMessageRequest, SlackChannelProactiveRequest  # noqa: PLC0415
+
+    return [
+        ("slack.connect_slack",
+         lambda u: slack.connect_slack(name=_AGENT, link_id=_SLACK_LINK, current_user=u),
+         "Only owners can connect Slack"),
+        ("slack.disconnect_slack",
+         lambda u: slack.disconnect_slack(name=_AGENT, link_id=_SLACK_LINK, current_user=u),
+         "Only owners can disconnect Slack"),
+        ("slack.update_slack_connection",
+         lambda u: slack.update_slack_connection(
+             name=_AGENT, link_id=_SLACK_LINK, enabled=True, current_user=u),
+         "Only owners can modify Slack settings"),
+        ("slack.create_agent_slack_channel",
+         lambda u: slack.create_agent_slack_channel(name=_AGENT, current_user=u),
+         "Only owners can manage Slack channels"),
+        ("slack.delete_agent_slack_channel",
+         lambda u: slack.delete_agent_slack_channel(name=_AGENT, current_user=u),
+         "Only owners can manage Slack channels"),
+        ("slack.set_agent_as_slack_dm_default",
+         lambda u: slack.set_agent_as_slack_dm_default(name=_AGENT, current_user=u),
+         "Only owners can manage Slack channels"),
+        ("slack.set_slack_channel_proactive",
+         lambda u: slack.set_slack_channel_proactive(
+             name=_AGENT, channel_id=_SLACK_CHANNEL,
+             request=SlackChannelProactiveRequest(allow_proactive=True), current_user=u),
+         "Only owners can change channel settings"),
+        ("slack.send_agent_slack_channel_message",
+         lambda u: slack.send_agent_slack_channel_message(
+             name=_AGENT, channel_id=_SLACK_CHANNEL,
+             request=SlackChannelMessageRequest(message="hello"), current_user=u),
+         "Only owners can send channel messages"),
+    ]
+
+
+_HUMAN_ONLY = "This operation is human-only; agent-scoped keys cannot perform it"
+
+
+def _grant_share(email="stranger@example.com"):
+    """Give the stranger a share row → can_user_access True, can_user_share False."""
+    run("UPDATE users SET email = :e WHERE id = :id", e=email, id=_STRANGER_ID)
+    run(
+        "INSERT INTO agent_sharing (agent_name, shared_with_email, shared_by_id, created_at) "
+        "VALUES (:a, :e, :o, :n)",
+        a=_AGENT, e=email, o=_OWNER_ID, n="2026-01-01T00:00:00Z",
+    )
+
+
+def test_slack_read_sites_deny_stranger(seeded):
+    for site_id, invoke, detail in _slack_read_sites():
+        exc = _raised(invoke(_stranger()))
+        assert exc is not None and exc.status_code == 403, f"{site_id}: expected 403"
+        assert exc.detail == detail, f"{site_id}: {exc.detail!r} != {detail!r}"
+
+
+def test_slack_owner_sites_deny_stranger(seeded):
+    for site_id, invoke, detail in _slack_owner_sites():
+        exc = _raised(invoke(_stranger()))
+        assert exc is not None and exc.status_code == 403, f"{site_id}: expected 403"
+        assert exc.detail == detail, f"{site_id}: {exc.detail!r} != {detail!r}"
+
+
+def test_slack_sites_admit_owner(seeded):
+    """Owner clears every migrated gate (may fail later for a non-auth reason,
+    never with the gate detail)."""
+    for site_id, invoke, detail in _slack_read_sites() + _slack_owner_sites():
+        exc = _raised(invoke(_owner()))
+        if exc is not None:
+            assert exc.detail != detail, f"owner wrongly denied at {site_id}"
+
+
+def test_slack_owner_sites_admit_admin(seeded):
+    """Admin (non-owner) clears the owner gates via can_user_share_agent's admin
+    short-circuit — never the owner-gate detail."""
+    for site_id, invoke, detail in _slack_owner_sites():
+        exc = _raised(invoke(_admin()))
+        if exc is not None:
+            assert exc.detail != detail, f"admin wrongly denied at {site_id}"
+
+
+def test_slack_shared_reader_read_vs_owner_matrix(seeded):
+    """The core adversarial case: a shared (non-owner) reader is ADMITTED on the
+    3 read gates but DENIED at all 8 owner gates. A read gate wrongly wired to
+    assert_agent_owner (or an owner gate wired to assert_agent_access) is
+    invisible to the AST wiring guard — only this matrix catches it."""
+    _grant_share()
+    shared = _stranger()  # has access via the share row; is NOT the owner
+    for site_id, invoke, detail in _slack_read_sites():
+        exc = _raised(invoke(shared))
+        if exc is not None:
+            assert exc.detail != detail, f"shared reader wrongly denied at read gate {site_id}"
+    for site_id, invoke, detail in _slack_owner_sites():
+        exc = _raised(invoke(shared))
+        assert exc is not None and exc.status_code == 403, (
+            f"{site_id}: shared reader not denied at owner gate"
+        )
+        assert exc.detail == detail, f"{site_id}: {exc.detail!r} != {detail!r}"
+
+
+def test_slack_proactive_toggle_rejects_agent_principal(seeded):
+    """Site #10 keeps its ent#223 human-only guard through the migration: an
+    agent-scoped principal (resolving to the owner, carrying the owner role) is
+    refused with the reject_agent_principal detail — self-granting proactive
+    consent is a human decision. assert_agent_owner alone is agent-permissive,
+    so the standalone reject_agent_principal line is what enforces this."""
+    from models import SlackChannelProactiveRequest  # noqa: PLC0415
+
+    agent_key = _user(_OWNER, uid=_OWNER_ID, agent_name=_AGENT)  # the agent's own key
+    exc = _raised(slack.set_slack_channel_proactive(
+        name=_AGENT, channel_id=_SLACK_CHANNEL,
+        request=SlackChannelProactiveRequest(allow_proactive=True), current_user=agent_key))
+    _assert_403(exc, _HUMAN_ONLY)
+
+
+def test_slack_send_message_allows_agent_principal(seeded):
+    """Site #11 asymmetry (ent#223): SENDING under consent stays agent-callable.
+    An agent-scoped principal is NOT rejected by any human-only gate — it clears
+    the owner gate as its owner and fails later for a non-auth reason, never with
+    the human-only detail (adding a reject here would break AC #6)."""
+    from models import SlackChannelMessageRequest  # noqa: PLC0415
+
+    agent_key = _user(_OWNER, uid=_OWNER_ID, agent_name=_AGENT)
+    exc = _raised(slack.send_agent_slack_channel_message(
+        name=_AGENT, channel_id=_SLACK_CHANNEL,
+        request=SlackChannelMessageRequest(message="hi"), current_user=agent_key))
+    if exc is not None:
+        assert exc.detail != _HUMAN_ONLY, (
+            "site #11 wrongly rejected an agent principal (breaks the ent#223 "
+            "grant/send asymmetry)"
+        )

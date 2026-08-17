@@ -23,18 +23,72 @@ silent success.
 - **API**: `POST /api/agents/{agent_name}/skills/inject` (owner-only; `force=True` — unconditional repair)
 - **MCP**: `sync_agent_skills` (same endpoint; surfaces per-skill warnings even on success)
 - **Automatic**: `services/agent_service/lifecycle.py::inject_assigned_skills` during agent start (`force=False` — version-unchanged skills are skipped)
+- **Fleet** (ent#236): `skills_sync_service.run_fleet_reinject` after a library sync that moved the commit — running non-ghost agents, `force=False`, bounded concurrency
+
+## Removal (ent#236)
+
+Injection's inverse, added because an unassigned skill previously stayed on the
+agent forever — still in `~/.claude/skills/`, still listed in CLAUDE.md, still
+invocable.
+
+```
+DELETE /skills/{name}  ·  PUT /skills (dropped names)  ·  start-path reconcile
+        │
+        ▼
+skill_service.remove_skills   (SAME skill_inject:{name} lock as injection)
+        │  read .trinity-skill.json  → no meta ⇒ not_managed, nothing deleted
+        │  compute_removal(meta.manifest) = compute_prune(prev, [], name) + meta
+        │  DELETE /api/files per path (the prune transport, protected-path guard)
+        ▼
+_finalize_removed_dirs (ONE exec): rmdir the emptied dirs (incl. the skill root)
+        · strip the skill's `.gitignore` line  · CLAUDE.md section rebuilt
+```
+
+| Property | Mechanism |
+|---|---|
+| Only platform-written files die | delete set is the previous injection's own manifest — agent-authored files and runtime artifacts (`__pycache__`, models) are never in it |
+| Directories survive if not empty | `os.rmdir` refuses a non-empty dir, so a skill dir holding agent files stays |
+| Unmanaged dir untouched | no `.trinity-skill.json` ⇒ `not_managed` + `unmanaged_dir_kept` (the mirror of injection's overwrite-only `unmanaged_dir_overwritten` — overwrite is recoverable, deletion is not) |
+| Meta removed last | while it exists the package is still managed, so an interrupted removal resumes. Included even when the manifest is missing/garbage, or the dir would stay in every future reconcile's inventory with nothing to delete |
+| Truncation (>200 paths) | `removal_truncated` and the meta is **kept** — dropping it would strand the remaining files as unmanaged orphans |
+| Unassign never fails | DB row is authoritative and already committed; a stopped agent / busy lock / dead transport degrades to `removal_deferred:*` and the start-path reconcile finishes it |
+| Probe failure ≠ "nothing there" | the batch meta read returns `{}` on ANY exec failure, so an empty result is reported `deferred`, never `not_present` |
+| Gitignore line stripped | else `.gitignore` grows a dead line per skill ever injected, and a later agent-authored skill of the same name would be silently un-committed by auto-sync |
+
+**Reconciliation, not tombstones.** By the time a stopped agent starts, the
+assignment row is gone — there is nothing to replay. `reconcile_agent_skills`
+diffs the agent's platform-managed skill dirs against the current assignment set
+instead, so every removal route converges (single DELETE, bulk-PUT shrink, direct
+DB edit) with no new table and no migration. It runs after injection (same lock,
+so it cannot run inside it) and **also when zero skills are assigned** — that is
+precisely the "unassigned the last skill" case.
+
+**Blast-radius guard.** A reconcile proposing more than
+`SKILLS_RECONCILE_MAX_REMOVALS` (10) removals for one agent refuses wholesale,
+logs ERROR, and raises an operator alarm on the uncreatable sentinel
+`_skills-sync`. A wiped or reset `agent_skills` table is indistinguishable from a
+legitimate mass-unassign, and one of those two readings erases every package in
+the fleet on the next restart — keeping files is the recoverable direction
+(#1638/#1644). The alarm carries counts only, never skill names (G-04's lesson).
 
 ## Architecture
 
 ```
-/data/skills-library (git clone)
-        │  git ls-tree HEAD .claude/skills/        → per-skill TREE SHA (= version)
-        │  git archive HEAD -- .claude/skills/<n>  → atomic tar source
+/data/skills-library/<source_id> (per-source git clone, ent#237)
+        │  skills_rel_root(): catalog.yaml skills_root: → skills/ probe →
+        │    .claude/skills/ fallback (ent#332 — per source, every invalid
+        │    tier falls through; dual-layout keeps legacy + layout_conflict)
+        │  git ls-tree HEAD -- <root>/         → per-skill TREE SHA (= version,
+        │    layout-independent: a restructure with same content keeps versions)
+        │  git archive HEAD -- <root>/<n>      → atomic tar source
         ▼
 services/skill_packaging.py (pure)
-        │  filter_skill_archive: REGTYPE only (symlinks NEVER ship — build-side
-        │    exfiltration guard + agent-side KeyError guard), litter + protected
-        │    basenames dropped w/ warnings, caps enforced
+        │  filter_skill_archive(source_root=…): REGTYPE only (symlinks NEVER
+        │    ship — build-side exfiltration guard + agent-side KeyError guard),
+        │    litter + protected basenames dropped w/ warnings, caps enforced;
+        │    ent#332: arcnames REWRITTEN <root>/<n>/… → .claude/skills/<n>/…
+        │    (identity for legacy) — the ONE point source layout becomes the
+        │    agent destination, so everything below stays destination-canonical
         │  build_injection_tar: uncompressed; generated .trinity-skill.json
         │    {version, commit, manifest, injected_at} appended LAST (partial-
         │    extraction ordering guard)
@@ -65,7 +119,7 @@ agent /home/developer/.claude/skills/<name>/  (+ .trinity-skill.json provenance)
 | Agent runtime files survive | prune only touches previous-manifest paths — `__pycache__`, downloaded models, agent notes untouched |
 | Same-named agent-authored dir | no meta → overwrite-only + `unmanaged_dir_overwritten`, never pruned |
 | Repo bloat guard | injected names appended to agent's `.gitignore` + untracked, so the 15-min auto-sync (which deliberately commits `.claude/`) never commits platform packages (#1595/#1596 class); Playbooks keep committing |
-| Concurrency | Redis `skill_inject:{name}` SETNX+TTL fail-open lock (outside `agent:*` — `compat_fix` precedent); manual inject → 409, start path → skip |
+| Concurrency | Redis `skill_inject:{name}` SETNX+TTL fail-open lock via the shared `redis_breaker_util.SingleFlightLock` (#1920; injected `_redis_client`, `_acquire_inject_lock` still raises `SkillInjectionBusy` on contention) — outside `agent:*` (`compat_fix` precedent); manual inject → 409, start path → skip |
 | Caps | `SKILL_MAX_BYTES` (10 MiB) / `SKILLS_TOTAL_MAX_BYTES` (50 MiB), env-tunable; over-cap → named error, other skills continue |
 
 ## Result Contract (honest per skill)
@@ -178,5 +232,7 @@ unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
 | Date | Change |
 |------|--------|
+| 2026-08-04 | **trinity-enterprise#332 per-source skills root**: source layout resolvable per source (`catalog.yaml` `skills_root:` → evidence-gated `skills/` probe → `.claude/skills/` fallback; segment-wise validation, ent#314 hardened parse, lstat/containment guards, dual-layout keeps legacy + `layout_conflict`); `filter_skill_archive(source_root=…)` rewrites arcnames to the canonical agent-side destination so manifests/prune/removal stay destination-canonical with zero migration. Requirements §21.1.4. |
+| 2026-07-29 | **trinity-enterprise#236 lifecycle automation**: removal-on-unassign (`remove_skills` + `compute_removal`, manifest-driven, same inject lock), start-path reconciliation with a blast-radius refusal, and fleet-wide re-inject after a commit-changing library sync. See also [skills-library-sync.md](skills-library-sync.md) for the scheduled sync. |
 | 2026-07-19 | **trinity-enterprise#183 full-directory packages**: git-archive tar source, agent-server restore transport, tree-SHA versioning + `.trinity-skill.json`, manifest prune, frontmatter contract + declaration-only dep check, honest per-skill warnings, gitignore/untrack guard, repair path, injection lock. Replaces the single-file `write_file`-per-skill design. |
 | 2026-01-25 | CLAUDE.md "Platform Skills" section; initial documentation |

@@ -44,7 +44,98 @@ when python-dotenv is installed, so direct `pytest` invocations work too.
 | `run-smoke.sh` | Yes | Marker `smoke` — high-signal API checks | ~2 min |
 | `run-integration.sh` | Yes | Marker `integration` — E2E flows + `tests/security/` Redis ACL | ~1 min |
 | `run-core.sh` | Yes | `-m "not slow"` for non-unit + unit tier (`-m "not slow"`) in two pytest invocations | ~30 min |
-| `run-full.sh` | Yes | Everything (slow tests included) | ~45+ min |
+| `run-full.sh` | Yes | Everything, as orchestrated tiers — see below | ~45+ min |
+
+### `run-full.sh` — the honest full run (#2080)
+
+One command, one verdict. It runs each tier as its **own** pytest invocation
+and **exits non-zero on any tier failure, collection error, or skip-audit
+violation**. All tiers run even after one fails, so a single red tier cannot
+hide the state of the rest.
+
+```
+tests/run-full.sh                 # everything
+tests/run-full.sh --tier unit     # one tier (repeatable)
+tests/run-full.sh --no-pg         # skip the disposable-Postgres tier
+tests/run-full.sh -k pattern      # extra args pass through to pytest
+```
+
+Tiers: `unit`, `integration`, `git-sync`, `security`, `scheduler`,
+`agent-server`, `api` (root-level live-backend tests), `standalone`,
+`postgres`.
+
+What it does beyond running pytest:
+
+- **Self-heals the venv** — creates it if absent and `pip install -r
+  requirements-test.txt` every run, so a newly declared dependency cannot abort
+  a tier at collection. It refuses to run when the venv's Python differs from
+  the image pin (read from `docker/backend/Dockerfile`, single declaration per
+  #1891). `TRINITY_TEST_ALLOW_PY_MISMATCH=1` overrides it loudly, and the
+  override is repeated in the final summary so such a run cannot be quoted as
+  a clean result.
+- **Postgres/Alembic tier** — starts a disposable `postgres:16-alpine`, runs a
+  real `alembic upgrade head`, exports both `DATABASE_URL` (engine) and
+  `TEST_POSTGRES_URL` (the variable the PG-gated tests actually check), runs
+  them, and tears the container down. This is the dual-track migration
+  contract (Invariant #3) exercised locally, not only in the `pg-migrations`
+  CI job.
+- **Provisions a test agent** so agent-dependent tests run instead of skipping
+  (`tests/harness/ensure_test_agent.py`; exports `TEST_AGENT_NAME`).
+- **Runs the standalone-documented tests** as separate invocations
+  (`tests/harness/list_standalone_tests.py` derives the list from the tests'
+  own "Run standalone: pytest …" instruction, so it cannot go stale).
+- **Skip audit** — after every tier, `tests/harness/audit_skips.py` parses the
+  `-rs` output and **fails the run on any skip whose reason is not on a named
+  allowlist**. A skip is a test that did not run; it is indistinguishable from
+  a pass in every summary line pytest prints, which is how whole tiers came to
+  be silently uncovered. Adding an allowlist entry requires writing down why
+  the condition is acceptable.
+- **Nothing can hang it** — every tier carries `--timeout` and
+  `--timeout-method=thread` (`signal` re-enters the interpreter from a handler
+  and turned one hung read into a pytest INTERNALERROR).
+
+Logs land in `tests/reports/full-<timestamp>/`, one per tier, plus a per-tier
+PASS/FAIL summary table at the end.
+
+## Where does a new test go? (#1895)
+
+The **per-PR** CI unit job runs `cd tests && pytest unit/`
+(`backend-unit-test.yml`), and `tests/unit/pytest.ini` seals that island
+(`norecursedirs = ..`). So **`tests/unit/` is the ONLY directory a per-PR job
+collects.** A `test_*.py` in the `tests/` **root** is run by no per-PR job — only
+by the nightly `integration-nightly.yml` sweep and the local `run-*.sh` — so its
+coverage is invisible to the merge gate (this is how #1880 shipped: the one file
+exercising the canary alert composer, incl. the G-04 credential-leak check, gated
+nowhere).
+
+- **No live backend** (pure logic, or a tmp-SQLite DB — no `api_client` /
+  `created_agent` / `ws_ticket` / other live fixture, no raw `httpx`/`ws_connect`
+  to a running stack) → put it in **`tests/unit/`**.
+- **Mixed** (some self-contained cases + some that need a live backend) → **split
+  it**: the self-contained half → `tests/unit/`, the live half stays in `tests/`
+  root.
+- **Needs a live backend** → keep it in the `tests/` root. If it takes no live
+  *fixture* parameter (raw `httpx`/`ws_connect`), add a
+  `# allow-root-live-test: <reason>` comment so the placement guard exempts it.
+- **Async unit tests MUST carry an explicit `@pytest.mark.asyncio`** (on the
+  function, its class, or a module-level `pytestmark`). `tests/unit/pytest.ini`
+  sets no `asyncio_mode`, so pytest-asyncio runs in **strict** mode: an unmarked
+  `async def test_` does not run — it fails outright on the current toolchain, or
+  passes vacuously on older pytest-asyncio. Either way it is a silent coverage
+  hole.
+
+Both rules are enforced by `tests/lint_root_test_placement.py` (part 1: no
+self-contained test in `tests/` root; part 2: no unmarked async under
+`tests/unit/`), which runs in the unconditional `lint-sys-modules` CI job (push +
+PR, never path-filtered). `tests/lint_root_test_placement_baseline.txt` grandfathers
+today's live-in-root set and is ratcheted — never grow it; move the new test
+instead.
+
+**Known uncovered surface:** the sibling dirs (`tests/security/`,
+`tests/scheduler_tests/`, `tests/git_sync/`, `tests/agent_server/`, …) are also
+collected by no per-PR job; this guard is root-scoped and does not close that
+(tracked separately — #1958 makes the unit job a *required* check; giving the
+sibling suites a per-PR home is its own follow-up).
 
 ## Friction recovery
 

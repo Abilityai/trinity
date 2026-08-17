@@ -648,7 +648,6 @@ def get_anthropic_api_key() -> str:
 ```python
 env_vars = {
     'AGENT_NAME': config.name,
-    'AGENT_TYPE': config.type,
     'ANTHROPIC_API_KEY': get_anthropic_api_key(),  # Uses settings value OR env fallback
     # ...
 }

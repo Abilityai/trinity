@@ -102,6 +102,7 @@ agent_ownership = Table(
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
+    Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag
@@ -264,6 +265,9 @@ schedule_executions = Table(
     Column("source_channel", Text),           # ent#117: originating channel for voice-reply delivery
     Column("source_channel_chat_id", Text),   # ent#117: channel destination (chat/channel id)
     Column("source_channel_thread", Text),    # ent#117: channel thread id (nullable)
+    # ent#265: binding-agent for channel report-back — the agent whose channel
+    # binding owns this execution's INHERITED context (NULL = executing agent).
+    Column("source_channel_agent", Text),
 )
 
 agent_loops = Table(
@@ -442,6 +446,71 @@ agent_activities = Table(
     Column("created_at", Text),
 )
 
+# --- Workspace / client portal (ent#356) ------------------------------------
+# Moved out of the entitled enterprise module. They are in this MetaData — where
+# the enterprise copies deliberately were not — because `db/agent_cleanup.py`
+# resolves every AGENT_REFS entry through it, and both tables carry an
+# `agent_name` that must follow a rename and be cleaned on a purge. Registering
+# the refs without the Table handles is a KeyError at rename time, which is how
+# this was caught.
+#
+# The `enterprise_` prefix is retained history — see `client_portal/__init__.py`.
+enterprise_portal_sessions = Table(
+    "enterprise_portal_sessions",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("client_email", Text),
+    Column("title", Text),
+    Column("created_at", Text),
+    Column("last_message_at", Text),
+    Column("message_count", Integer),
+    # ent#358 — resume state, mirroring agent_sessions: the Workspace thread
+    # reattaches to its Claude session instead of replaying history as text.
+    Column("cached_claude_session_id", Text),
+    Column("last_resume_at", Text),
+    Column("consecutive_resume_failures", Integer),
+)
+
+enterprise_portal_messages = Table(
+    "enterprise_portal_messages",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("client_email", Text),
+    Column("session_id", Text),
+    Column("role", Text),
+    Column("content", Text),
+    Column("cost", Float),
+    Column("created_at", Text),
+)
+
+# ent#359 — per-user star + read cursor for a Workspace chat of either kind
+# (`thread` = enterprise_portal_sessions, `room` = the enterprise shared_sessions
+# room). Separate from the chat row because a room is shared between users and a
+# star is not; see db/schema.py for the full rationale.
+enterprise_portal_chat_state = Table(
+    "enterprise_portal_chat_state",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("chat_kind", Text, primary_key=True),
+    Column("chat_id", Text, primary_key=True),
+    Column("starred_at", Text),
+    Column("last_read_at", Text),
+    Column("updated_at", Text),
+)
+
+enterprise_client_blocks = Table(
+    "enterprise_client_blocks",
+    metadata,
+    Column("email", Text, primary_key=True),
+    Column("blocked_at", Text),
+    Column("blocked_by_id", Text),
+    Column("blocked_by_email", Text),
+    Column("reason", Text),
+)
+
+
 agent_reports = Table(
     "agent_reports",
     metadata,
@@ -467,6 +536,21 @@ product_events = Table(
     Column("installation_id", Text),
     Column("event_type", Text),
     Column("event_context", Text),
+    Column("created_at", Text),
+)
+
+agent_evaluations = Table(
+    "agent_evaluations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("execution_id", Text),
+    Column("archetype", Text),
+    Column("completion", Integer),
+    Column("quality", Float),
+    Column("checks_json", Text),
+    Column("judge_json", Text),
+    Column("evaluator", Text),
     Column("created_at", Text),
 )
 
@@ -665,6 +749,35 @@ agent_skills = Table(
     Column("skill_name", Text),
     Column("assigned_by", Text),
     Column("assigned_at", Text),
+    # ent#237: which source this assignment resolved from. Recorded, not keyed
+    # — see the agent_skills note in db/schema.py.
+    Column("source_id", Text),
+)
+
+# ent#237: one row per git repo the skills library syncs from.
+skill_sources = Table(
+    "skill_sources",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("name", Text),
+    Column("url", Text),
+    # `ref` is a branch OR tag name; `ref_type` says which. The bundled
+    # community source pins to a tag (ent#237 AC#5) so a merged upstream PR
+    # never reaches a fleet unattended; custom sources track a branch.
+    Column("ref", Text),
+    Column("ref_type", Text),
+    Column("is_default", Integer),
+    Column("enabled", Integer),
+    # Lower wins on a name collision. Custom sources default to 100, the
+    # bundled default source to 1000 — i.e. custom-wins (ent#237 AC#4).
+    Column("priority", Integer),
+    Column("last_sync_at", Text),
+    Column("last_sync_status", Text),
+    Column("last_commit_sha", Text),
+    Column("last_error", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
 )
 
 agent_tags = Table(
@@ -835,6 +948,7 @@ telegram_bindings = Table(
     Column("webhook_url", Text),
     Column("telegram_secret_token", Text),
     Column("last_update_id", Integer),
+    Column("progress_indicator_enabled", Integer),  # ent#264: default ON (1)
     Column("created_at", Text),
     Column("updated_at", Text),
 )
@@ -870,6 +984,8 @@ telegram_group_configs = Table(
     Column("updated_at", Text),
     Column("verified_by_email", Text),
     Column("verified_at", Text),
+    # ent#265: per-group consent for completion reports (default allow, opt-out mute)
+    Column("allow_proactive", Integer),
 )
 
 whatsapp_bindings = Table(

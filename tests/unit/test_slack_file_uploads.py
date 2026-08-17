@@ -1,7 +1,9 @@
 """
 Unit tests for Slack file upload handling (#222).
 
-Pure logic tests — no backend imports, no mocking, no pydantic.
+Mostly pure logic tests (no backend imports); the MIME gate is the exception —
+it imports the real UNSUPPORTED_MIMES from services.upload_service so the test
+can't drift from the deny-list it verifies.
 
 Module: src/backend/adapters/message_router.py, slack_adapter.py
 Issue: https://github.com/abilityai/trinity/issues/222
@@ -9,6 +11,82 @@ Issue: https://github.com/abilityai/trinity/issues/222
 
 import os
 import re
+import sys
+import types
+
+import pytest
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+
+def _install_stubs():
+    """Stub heavyweight deps so upload_service imports without DB/Docker.
+
+    Mirrors test_web_file_upload.py; setdefault keeps the two files compatible
+    in the same pytest session regardless of collection order.
+    """
+    if "services.upload_service" in sys.modules:
+        return
+
+    _aud = types.ModuleType("services.platform_audit_service")
+
+    class _AuditEventType:
+        EXECUTION = "execution"
+        AUTHENTICATION = "authentication"
+
+    _mock_svc = MagicMock()
+    _mock_svc.log = AsyncMock()
+    _aud.platform_audit_service = _mock_svc
+    _aud.AuditEventType = _AuditEventType
+    sys.modules.setdefault("services.platform_audit_service", _aud)
+
+    _du = types.ModuleType("services.docker_utils")
+    _du.container_put_archive = AsyncMock(return_value=True)
+    _du.container_exec_run = AsyncMock(return_value=(0, b""))
+    sys.modules.setdefault("services.docker_utils", _du)
+
+
+# These stubs are installed at IMPORT time — they have to be in place before the
+# `from services.upload_service import ...` below, which `monkeypatch` cannot
+# reach because no fixture has run yet. So the snapshot is taken here, before
+# the install, and unwound by the module-scoped fixture underneath: nothing this
+# file stubs leaks into other files in the same pytest session
+# (tests/lint_sys_modules.py, issue #762).
+_STUBBED_MODULE_NAMES = [
+    "services.platform_audit_service",
+    "services.docker_utils",
+]
+
+_MODULES_BEFORE_STUBS = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+
+_install_stubs()
+
+from services.upload_service import UNSUPPORTED_MIMES  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_sys_modules():
+    """Put sys.modules back the way this file found it, once its tests finish.
+
+    Module-scoped and paired with a module-level snapshot on purpose: the stubs
+    go in during import, so a function-scoped fixture would snapshot the
+    already-stubbed state and restore nothing. A name absent before the install
+    is removed again; one that was already present is restored to that exact
+    object, so running after `test_web_file_upload.py` is a no-op rather than a
+    clobber.
+    """
+    try:
+        yield
+    finally:
+        for name, module in _MODULES_BEFORE_STUBS.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 # ---------------------------------------------------------------------------
@@ -35,11 +113,9 @@ def format_file_size(size_bytes):
 
 
 def is_unsupported_mime(mimetype):
-    """Reproduces the UNSUPPORTED_MIMES check in _handle_file_uploads."""
-    UNSUPPORTED_MIMES = {"application/pdf", "application/zip", "application/x-tar",
-                         "application/gzip", "application/x-rar-compressed"}
+    """Applies the real UNSUPPORTED_MIMES set with upload_service's matching rule."""
     return any(mimetype.startswith(m) if m.endswith("/") else mimetype == m
-               for m in UNSUPPORTED_MIMES) or mimetype.startswith("video/") or mimetype.startswith("audio/")
+               for m in UNSUPPORTED_MIMES)
 
 
 def extract_files(event):
@@ -122,8 +198,10 @@ class TestFileTypeRouting:
     def test_pdf_unsupported(self):
         assert is_unsupported_mime("application/pdf")
 
+    def test_zip_supported(self):
+        assert not is_unsupported_mime("application/zip")
+
     def test_archives_unsupported(self):
-        assert is_unsupported_mime("application/zip")
         assert is_unsupported_mime("application/x-tar")
         assert is_unsupported_mime("application/gzip")
 

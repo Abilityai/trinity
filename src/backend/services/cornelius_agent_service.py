@@ -10,12 +10,26 @@ Unlike the system agent (`system_agent_service.py`) — a privileged, deletion-p
 orchestrator recreated on EVERY boot — Cornelius is a NORMAL owned/deletable agent
 seeded exactly ONCE on a genuinely-fresh install:
 
-  * Provisioned from the bundled LOCAL template `local:cornelius`
-    (`config/agent-templates/cornelius/`) via the ordinary create path — no GitHub
-    clone, no PAT, no network dependency at boot. (This is why the local bundle was
-    chosen over github-native: `create_agent_internal`'s dynamic-github branch hard-
-    requires a system PAT even for a public repo, and a boot-time clone would add a
-    network SPOF to startup.)
+  * Provisioned from the PUBLIC upstream template `github:Abilityai/cornelius` via
+    the ordinary create path, cloned anonymously (source-mode, no PAT) on the
+    trinity-enterprise#123 tokenless path. `AgentConfig.source_mode` defaults True,
+    which is what that path requires.
+
+    This was a bundled `local:cornelius` snapshot until #1656. The local bundle was
+    originally chosen because the dynamic-github branch hard-required a system PAT
+    even for a public repo — trinity-enterprise#123 removed exactly that constraint.
+    Vendoring was also the direct cause of two shipped first-run defects (#1646
+    phantom skills/capabilities, #1656 dead wikilinks in the seed vault): a snapshot
+    that silently drifts from the prose describing it. Seeding from source retires
+    that failure class, and makes the template's `semantic_search` capability real —
+    `resources/local-brain-search/` ships upstream but was never vendored, which is
+    why #1646 had to trim the claim.
+
+    A boot-time clone is NOT a startup SPOF: seeding is a fire-and-forget background
+    task that never blocks its caller, and a failed pass deliberately leaves the
+    seeded flag unset (see below) so the next boot retries. There is no offline
+    install to protect — building the agent base image alone requires apt/npm/Go
+    downloads, and an agent with no route to the Anthropic API is inert regardless.
   * First-run-only: a durable `cornelius_seeded` system-setting is the "already done"
     marker. A user who DELETES Cornelius is NOT re-provisioned (the flag stays set) —
     the opposite of the system agent's resurrect-every-boot behaviour.
@@ -39,13 +53,12 @@ from typing import Optional
 from database import db
 from models import AgentConfig, User
 from services.docker_service import docker_client
-from redis_breaker_util import get_breaker_redis
+from redis_breaker_util import get_breaker_redis, SingleFlightLock
 
 logger = logging.getLogger(__name__)
 
 CORNELIUS_AGENT_NAME = "cornelius"
-CORNELIUS_TEMPLATE = "local:cornelius"
-CORNELIUS_TYPE = "knowledge-base"
+CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
 CORNELIUS_OWNER = "admin"  # seeded under the admin account, like the system agent
 
 # Durable "already seeded" marker (system_settings KV — no migration).
@@ -124,8 +137,13 @@ class CorneliusAgentService:
                 "Admin user not present yet (pre-setup) — deferring Cornelius seed",
             )
 
-        # 4. Cross-worker lock (fail-open). Only the winner provisions this pass.
-        if not self._acquire_lock():
+        # 4. Cross-worker lock (fail-open). Only the winner provisions this
+        #    pass. The lock is LOCAL to the pass (never on this singleton) so
+        #    its ownership-checked release can never delete a *successor's*
+        #    live lock — the pre-#1920 constant-"1" + unconditional-delete bug
+        #    it shared verbatim with system_seed_service.
+        lock = self._acquire_lock()
+        if lock is None:
             return self._skip(result, "skipped_locked", "Another worker is provisioning Cornelius")
 
         try:
@@ -180,22 +198,23 @@ class CorneliusAgentService:
             logger.error("Failed to seed Cornelius agent: %s", e)
             return result
         finally:
-            self._release_lock()
+            self._release_lock(lock)
 
     async def _provision(self, admin_user: User) -> None:
-        """Create the Cornelius agent from the bundled local template.
+        """Create the Cornelius agent from the public upstream template.
 
         Uses the ordinary service-layer create path (not the system agent's bespoke
-        direct-Docker build): a local template needs no PAT/network, and this gives
-        Cornelius a normal, deletable agent lifecycle. `request=None` — the HTTP
-        request object is not dereferenced by the create path (verified).
+        direct-Docker build), which gives Cornelius a normal, deletable agent
+        lifecycle and routes the clone through the trinity-enterprise#123 tokenless
+        public-repo path — anonymous, source-mode, no PAT (#1656).
+        `request=None` — the HTTP request object is not dereferenced by the create
+        path (verified).
         """
         # Imported lazily to avoid a router/service import cycle at module load.
         from services.agent_service.crud import create_agent_internal
 
         config = AgentConfig(
             name=CORNELIUS_AGENT_NAME,
-            type=CORNELIUS_TYPE,
             template=CORNELIUS_TEMPLATE,
             # resources / tools / capabilities / runtime are read from the bundled
             # template.yaml inside create_agent_internal.
@@ -234,26 +253,27 @@ class CorneliusAgentService:
             db.set_setting(_BRAIN_ORB_FLAG, "true")
             logger.info("Brain Orb enabled by default (seeded %s=true)", _BRAIN_ORB_FLAG)
 
-    def _acquire_lock(self) -> bool:
-        """SETNX provisioning lock. Fail-open (no Redis → sole-worker behaviour)."""
-        r = get_breaker_redis()
-        if r is None:
-            return True
-        try:
-            return bool(r.set(_PROVISION_LOCK_KEY, "1", nx=True, ex=_PROVISION_LOCK_TTL))
-        except Exception as e:
-            logger.warning("Cornelius provision lock failed-open (%s)", e)
-            return True
+    def _acquire_lock(self):
+        """Take the provisioning lock via the shared ownership-checked
+        primitive (#1920). Returns a held ``SingleFlightLock`` when this pass
+        may provision, or ``None`` when another worker holds it. Fail-open (no
+        Redis → sole-worker behaviour).
 
-    def _release_lock(self) -> None:
-        """Best-effort release so a legitimate retry isn't blocked for the TTL."""
-        r = get_breaker_redis()
-        if r is None:
-            return
-        try:
-            r.delete(_PROVISION_LOCK_KEY)
-        except Exception:
-            pass  # TTL will expire it
+        The returned lock is LOCAL to the pass — never stored on this
+        singleton — so the release below is a compare-and-delete against a
+        unique per-acquire token and can never remove a *successor's* live
+        lock (the pre-#1920 constant-``"1"`` + unconditional ``delete`` bug,
+        shared verbatim with system_seed_service)."""
+        lock = SingleFlightLock(
+            _PROVISION_LOCK_KEY, _PROVISION_LOCK_TTL, client=get_breaker_redis()
+        )
+        return lock if lock.acquire() else None
+
+    def _release_lock(self, lock) -> None:
+        """Best-effort ownership-checked release so a legitimate retry isn't
+        blocked for the TTL. Compare-and-delete: only our own token deletes."""
+        if lock is not None:
+            lock.release_if_owned()
 
     @staticmethod
     def _skip(result: dict, action: str, message: str) -> dict:

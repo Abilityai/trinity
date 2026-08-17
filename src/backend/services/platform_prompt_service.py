@@ -13,6 +13,8 @@ from typing import List, Optional
 import httpx
 
 from database import db
+from models import REPORT_PAYLOAD_MAX_BYTES
+from services.prompt_tier import PromptTier, resolve_prompt_tier
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +46,38 @@ Use `list_agents` to discover your available collaborators.
 
 ### Sharing Files with Users
 
-When the user asks for a file (CSV, PDF, report, image, exported data, etc.) or when your answer is best delivered as a file instead of inline text:
+When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
 2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
 3. Include the returned `url` in your reply as-is.
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
+### Publishing Reports
+
+Any result that is rows-and-columns, or that a human will re-read later — a table you just produced (10 rows or 10,000), findings from a scheduled run, batch summaries, KPI snapshots, numbers someone compares against next period — belongs in a **report**, not only in chat. If you are about to paste a table into chat, or to hand-write a CSV and share it as a file, publish a report instead: the user gets the same data with Excel and PDF export built in. Chat is read once; a report is persisted on your Reports tab and the fleet Reports view. Reports are one-way: when you need a *decision*, use the operator queue below instead.
+
+```
+mcp__trinity__report(
+    report_type="recon.weekly_summary",    # namespaced, lower_snake
+    title="Week 30: 14 leads, 3 qualified",
+    payload={...},                         # max __REPORT_PAYLOAD_MAX__ serialized
+    display_hint="table",                  # optional, see below
+    period_start="...", period_end="...")  # optional ISO-8601
+```
+
+Match the payload to the `display_hint` or it renders as raw JSON:
+
+- `table` — `{"columns": ["Name","Status"], "rows": [["Acme","qualified"]]}` (a row may instead be an object keyed by column)
+- `kpi` — `{"tiles": [{"label": "Leads", "value": 14, "unit": "new"}]}`
+- `markdown` — `{"markdown": "## Findings\\n..."}`
+- `timeline` — `{"events": [{"ts": "2026-07-27T09:00:00Z", "label": "Deal closed", "detail": "..."}]}`
+- `json` — any shape, when none of the above fit
+
+Aggregate before publishing: the 20 rows that matter, not 5,000 raw ones. Oversized payloads are rejected and reports are rate-limited.
+
+Before filing a recurring report, read back what you already filed — `mcp__trinity__list_reports` (metadata; filter by `report_type`) then `mcp__trinity__get_report(report_id)` for a payload. That is how you continue a series instead of duplicating or contradicting last period's numbers.
 
 ### Operator Communication
 
@@ -159,6 +186,103 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
 - Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
 
+# The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
+# block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in
+# the same PR — so every agent would have been told a ceiling 20x below the real
+# one, and would pre-aggregate away exactly the payloads #1537 raised the cap to
+# accept. A literal here is a second source of truth for a number the platform
+# already owns; `test_1535_report_prompt_guidance.py` pins the substitution too.
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
+    "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
+)
+
+
+# ---------------------------------------------------------------------------
+# Model-conditional prompt tiers (ent#243)
+# ---------------------------------------------------------------------------
+#
+# The prompt stays ONE authored literal above. Sections are *derived* from it by
+# splitting on its top-level ``###`` headings, never re-typed into a parallel
+# list — maintaining two full prompt strings guarantees drift, and the drift that
+# matters is a security instruction added to one variant and not the other.
+#
+# The delimiter is ``\n\n###`` + space, which cannot match the ``####``
+# subsections inside Operator Communication (they carry a fourth ``#`` where this
+# pattern requires a space). ``split``/``join`` on the same delimiter round-trips
+# byte-exactly, which is what makes the VERBOSE render provably identical to the
+# pre-ent#243 constant.
+
+_SECTION_DELIMITER = "\n\n### "
+
+# Sections DROPPED at PromptTier.MINIMAL. Each is tool-usage guidance whose
+# real home is the corresponding MCP tool description — the "single source of
+# truth" rule. Dropping them is inert until _MINIMAL_PREFIXES is non-empty.
+_MINIMAL_DROP_SECTIONS = frozenset({
+    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
+    "Sharing Files with Users",         # → share_file description
+    "Publishing Reports",               # → report description (+ #1535 display_hint enum)
+})
+
+# Every top-level section, CI-pinned (tests/unit/test_ent243_prompt_tier.py).
+# A renamed heading must fail loudly: an unmapped section falls back to
+# always-render (see _iter_sections), which is safe but silent, and "silent" is
+# how a section intended to be dropped quietly stops being dropped — or worse,
+# how a rename makes a drop-list entry dead without anyone noticing.
+_KNOWN_SECTION_HEADINGS = frozenset({
+    "Agent Collaboration",
+    "Sharing Files with Users",
+    "Publishing Reports",
+    "Operator Communication",
+    "Package Persistence",
+    "Remembering Things About Users (Public & Channel Sessions)",
+})
+
+# Sections that render at EVERY tier, stated positively for the reader. These are
+# NOT tool-usage guidance and have no tool description to live in:
+#   * Operator Communication — the #1402 fire-and-park contract. Sentinel-locked
+#     by tests/unit/test_1402_prompt_contract.py and synced to
+#     config/trinity-meta-prompt/prompt.md; it documents a FILE protocol
+#     (~/.trinity/operator-queue.json), not an MCP tool.
+#   * Remembering Things About Users — carries the shared-memory-directory leak
+#     warning. A privacy guard, un-gateable by construction.
+#   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
+#     that no model can infer from tool signatures.
+# Derived, not hand-listed, so it cannot disagree with the drop set.
+_ALWAYS_SECTIONS = _KNOWN_SECTION_HEADINGS - _MINIMAL_DROP_SECTIONS
+
+
+def _iter_sections(text: str) -> list[tuple[str, str]]:
+    """Split the platform instructions into ``(heading, chunk)`` pairs.
+
+    The first chunk is the preamble (everything before the first ``###``); it
+    carries the empty heading ``""`` and always renders. Each subsequent chunk is
+    the raw split fragment — heading line included, WITHOUT the delimiter — so
+    that ``_SECTION_DELIMITER.join(chunk for _, chunk in ...)`` reconstructs the
+    input byte-for-byte.
+    """
+    chunks = text.split(_SECTION_DELIMITER)
+    sections: list[tuple[str, str]] = [("", chunks[0])]
+    for chunk in chunks[1:]:
+        sections.append((chunk.split("\n", 1)[0].strip(), chunk))
+    return sections
+
+
+def render_platform_instructions(tier: PromptTier = PromptTier.VERBOSE) -> str:
+    """Render PLATFORM_INSTRUCTIONS for a prompt tier (ent#243).
+
+    ``VERBOSE`` returns the constant unchanged — byte-identical, not merely
+    equivalent. An unknown/renamed heading renders (fail toward more instruction,
+    matching prompt_tier's own unknown→VERBOSE invariant).
+    """
+    if tier is not PromptTier.MINIMAL:
+        return PLATFORM_INSTRUCTIONS
+    kept = [
+        chunk
+        for heading, chunk in _iter_sections(PLATFORM_INSTRUCTIONS)
+        if heading not in _MINIMAL_DROP_SECTIONS
+    ]
+    return _SECTION_DELIMITER.join(kept)
+
 
 # ---------------------------------------------------------------------------
 # Runtime-aware MCP tool naming (#1187 F-MCP)
@@ -179,8 +303,10 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `write_user_memory` — exactly as your client auto-discovers "
-    "them. Do not add any vendor-specific tool-name prefix.\n\n---\n\n"
+    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory` — "
+    "exactly as your client "
+    "auto-discovers them. Do not add any vendor-specific tool-name prefix."
+    "\n\n---\n\n"
 )
 
 
@@ -340,7 +466,9 @@ async def summarize_user_memory_background(
         )
 
 
-def get_platform_system_prompt(runtime: str = "claude-code") -> str:
+def get_platform_system_prompt(
+    runtime: str = "claude-code", model: Optional[str] = None
+) -> str:
     """
     Build the full platform system prompt.
 
@@ -352,11 +480,17 @@ def get_platform_system_prompt(runtime: str = "claude-code") -> str:
             Codex gets MCP-tool references without the Claude-only
             ``mcp__trinity__`` prefix; Claude/Gemini/unknown keep the canonical
             naming (#1187 F-MCP).
+        model: the model this turn will run on, when the caller knows it. Selects
+            the prompt tier (ent#243) — a frontier coding model gets the MINIMAL
+            render, everything else (including ``None``) gets VERBOSE. Orthogonal
+            to ``runtime``: that decides tool *naming*, this decides how much
+            prose. Inert until ``prompt_tier._MINIMAL_PREFIXES`` is non-empty.
 
     Returns:
         Combined system prompt string
     """
-    parts = [_adapt_instructions_for_runtime(PLATFORM_INSTRUCTIONS, runtime)]
+    instructions = render_platform_instructions(resolve_prompt_tier(model))
+    parts = [_adapt_instructions_for_runtime(instructions, runtime)]
 
     # Append custom prompt from database setting (operator-configurable)
     custom_prompt = db.get_setting_value("trinity_prompt", default=None)
@@ -609,8 +743,19 @@ def compose_system_prompt(
 
     ``runtime`` is threaded to :func:`get_platform_system_prompt` so the MCP-tool
     naming matches the agent's harness (Codex vs. Claude/Gemini, #1187 F-MCP).
+
+    ``execution_context.model`` selects the prompt tier (ent#243). It was already
+    carried on the context for *rendering* (the Execution Context block); this
+    also reads it for *selection*. A caller that does not know the model — the
+    chat path, where the container picks one after composition — leaves it
+    ``None`` and gets VERBOSE, which is the pre-ent#243 prompt.
     """
-    parts: List[str] = [get_platform_system_prompt(runtime=runtime)]
+    parts: List[str] = [
+        get_platform_system_prompt(
+            runtime=runtime,
+            model=execution_context.model if execution_context is not None else None,
+        )
+    ]
 
     if include_execution_context and execution_context is not None:
         # Auto-fill collaborators and platform URL without mutating the caller's
@@ -699,6 +844,55 @@ def build_voice_capability_prompt(agent_name: str, channel: str) -> Optional[str
         "After sending a voice note, end your turn with `[NO_REPLY]` if you do NOT also "
         "want the same content sent as text. If voice can't be delivered the tool tells "
         "you and you should just reply with text."
+    )
+
+
+def build_narrated_surface_prompt(agent_name: str) -> Optional[str]:
+    """Tell an agent that THIS surface reads its text aloud when the client asks
+    it to (#2157) — the Workspace/Client-Portal counterpart to
+    ``build_voice_capability_prompt``.
+
+    The two describe deliberately different things, which is the whole point of
+    keeping them apart:
+
+    * ``build_voice_capability_prompt`` advertises a **tool the agent invokes**
+      to deliver an audio artifact into a messaging channel.
+    * this advertises a **client-controlled surface affordance** — the browser
+      speaks the agent's text after it arrives. The agent cannot trigger it,
+      cannot hear it, and produces no audio file.
+
+    So the fragment must say the surface narrates WITHOUT implying the agent can
+    send audio here (it cannot, and claiming so is the mirror-image bug). Without
+    it an agent asked for a spoken reply reasons only from ``send_voice_reply``'s
+    refusal and over-generalizes to "this surface is text-only — go to Slack",
+    which is false and pushes a client off the surface built for them (#2157).
+
+    Returns None (no advertisement) unless narration would actually work for this
+    agent — same gate the speaker toggle renders on, so the fragment can never
+    promise a control the client does not have. Never raises."""
+    try:
+        import services.tts_service as tts_service
+
+        if not tts_service.resolve_voice_id(agent_name):
+            return None
+    except Exception as e:  # noqa: BLE001 — never block a chat on this
+        logger.warning("narrated-surface prompt check failed for %s: %s", agent_name, e)
+        return None
+    return (
+        "## Hearing you on this surface (client-controlled narration)\n"
+        "You are talking to a client in the Trinity Workspace (web). This surface is "
+        "NOT text-only: the client can switch on the speaker control in this "
+        "conversation, and their browser then reads your text replies aloud as they "
+        "arrive.\n"
+        "- Narration is the CLIENT's switch, not yours. You cannot start, stop, or "
+        "hear it, and it leaves no audio file in the conversation — so never claim to "
+        "have sent, or offer to send, a voice message or recording here.\n"
+        "- `send_voice_reply` delivers voice notes on messaging channels only "
+        "(Telegram/Slack/WhatsApp) and will refuse here. That is a limit on YOU, not "
+        "on this surface.\n"
+        "- If a client asks to be spoken to, point them at the speaker control in this "
+        "conversation. Never tell them this surface is text-only, and never send them "
+        "to another channel to be heard."
     )
 
 

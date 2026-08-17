@@ -108,6 +108,7 @@ def _admin():
     u = MagicMock()
     u.role = "admin"
     u.connector_agent = None  # #1310: not a connector principal
+    u.agent_name = None  # ent#293: not an agent-scoped key
     return u
 
 
@@ -162,7 +163,13 @@ def test_read_surface_community_reports_wide_defaults_and_audit_exempt():
     assert w["log_retention_days"] == 5
     # OPS windows fall back to the wide code defaults when unset in the DB —
     # an un-seeded install keeps its data.
+    # #2216: backup_retention_days is deliberately EXCLUDED from the generic
+    # windows map (its coercion is inverted — garbage must read as 14, never
+    # as _ops_int's 0 = keep-forever); it renders only in the `backup` block.
     for key in RETENTION_OPS_KEYS:
+        if key == "backup_retention_days":
+            assert key not in w
+            continue
         assert w[key] == int(OPS_SETTINGS_DEFAULTS[key])
         assert w[key] > COMMUNITY_RETENTION_FLOOR_DAYS
     # audit exempt — stays at the 365 floor

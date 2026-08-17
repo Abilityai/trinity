@@ -18,13 +18,13 @@
   <a href="https://github.com/abilityai/trinity/stargazers"><img src="https://img.shields.io/github/stars/abilityai/trinity?style=flat" alt="Stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://pypi.org/project/trinity-cli/"><img src="https://img.shields.io/pypi/v/trinity-cli?label=CLI&color=blue" alt="CLI"></a>
-  <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.13-blue.svg" alt="Python">
   <img src="https://img.shields.io/badge/vue-3.x-green.svg" alt="Vue">
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
 > [!NOTE]
-> **📦 Just released — [v0.8.5](docs/releases/0.8.5.md)** (July 26, 2026): skills as a first-class platform capability, shared multi-agent rooms (sessions), agent display names, ephemeral "ghost" agents, voice replies v2, and a smoother first-run experience. [Read the full release notes →](docs/releases/0.8.5.md)
+> **📦 Just released — [v0.9.0](docs/releases/0.9.0.md)** (August 17, 2026): **Workspace** — the client-facing surface, now in every build — plus fresh-install provisioning (remote template registry, GitHub import wizard, manifest install UI, guided credentials), the multi-source skills library and Library page, bidirectional A2A, dashboard List view + grid data tiles, automatic database backups, and a large reliability & security sweep. [Read the full release notes →](docs/releases/0.9.0.md)
 
 <p align="center">
   <a href="https://youtu.be/XDLOq1crF9w">
@@ -77,7 +77,7 @@ Each agent runs in its own isolated Docker container with real-time observabilit
 
 <!--
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/assets/screenshots/grid-view-fleet.png"></video>
+  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/screenshots/dashboard-grid.png"></video>
 </div>
 -->
 
@@ -131,15 +131,7 @@ The runbook ([`docs/AGENT_INSTALL_GUIDE.md`](docs/AGENT_INSTALL_GUIDE.md)) is a
 deterministic verify → install → confirm → report-next-steps loop that any
 capable agent can execute and explain to you as it goes.
 
-**One-line install (run it yourself)**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
-```
-
-This clones the repository, configures the environment, builds the base image, and starts all services. For a fully non-interactive bring-up (no admin-password prompt — one is generated and printed), run `./scripts/deploy/start.sh --unattended`.
-
-**Manual installation**
+**Install it yourself**
 
 ```bash
 # 1. Clone the repository
@@ -148,8 +140,9 @@ cd trinity
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env - at minimum set:
-#   SECRET_KEY (generate with: openssl rand -hex 32)
+# Edit .env and set ADMIN_PASSWORD (12+ characters) — the only required edit.
+# start.sh generates SECRET_KEY, the encryption keys and the Redis
+# passwords for you on first run.
 
 # 3. Build the base agent image
 ./scripts/deploy/build-base-image.sh
@@ -158,16 +151,16 @@ cp .env.example .env
 ./scripts/deploy/start.sh
 ```
 
-> Prefer a guided setup? `./quickstart.sh` walks you through it interactively (or `./quickstart.sh --defaults` for non-interactive bring-up with auto-generated secrets).
+For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattended` (or set `TRINITY_UNATTENDED=1`) and skip the `.env` edit entirely — an admin password is generated and printed in the final summary.
 
 > **Note**: the repo's git submodules are private and optional — cloning (even with `--recurse-submodules`) needs no credentials; they're skipped automatically. See [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
 **First-time setup**
 
 1. Open http://localhost — you'll be redirected to the setup wizard
-2. Set your **admin password** (minimum 8 characters)
-3. Log in with username `admin` and your new password
-4. Go to **Settings** → **API Keys** to configure your Anthropic API key
+2. Enter your **admin email** — this becomes your sign-in identity — and an **admin password** (minimum 12 characters, with upper- and lowercase, a digit, and a special character)
+3. Log in with that email (or the username `admin`) and your password
+4. Go to **Settings** → **Integrations** → **API Keys** to configure your Anthropic API key
 
 **Access**
 
@@ -250,12 +243,12 @@ If you're an agent working with this repository, **[AGENTS.md](AGENTS.md)** is y
 
 <table>
   <tr>
-    <td width="50%"><a href="docs/assets/screenshots/grid-view-fleet.png"><img src="docs/assets/screenshots/grid-view-fleet.png" alt="Grid view — the fleet as a canvas of agent tiles"/></a><br/><sub><b>Grid view</b> — the whole fleet as tiles: live status, activity sparklines, cost & success per agent, inline Run/Auto toggles.</sub></td>
-    <td width="50%"><a href="docs/assets/screenshots/operations-executions.png"><img src="docs/assets/screenshots/operations-executions.png" alt="Operations — fleet-wide execution history"/></a><br/><sub><b>Operations</b> — every task run across the fleet, with success rate, cost, and per-agent/trigger filters.</sub></td>
+    <td width="50%"><a href="docs/screenshots/dashboard-grid.png"><img src="docs/screenshots/dashboard-grid.png" alt="Grid view — the fleet as a canvas of agent tiles"/></a><br/><sub><b>Grid view</b> — the whole fleet as tiles: live status, activity sparklines, cost & success per agent, inline Run/Auto toggles.</sub></td>
+    <td width="50%"><a href="docs/screenshots/operations-executions.png"><img src="docs/screenshots/operations-executions.png" alt="Operations — fleet-wide execution history"/></a><br/><sub><b>Operations</b> — every task run across the fleet, with success rate, cost, and per-agent/trigger filters.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><a href="docs/assets/screenshots/agent-overview-detail.png"><img src="docs/assets/screenshots/agent-overview-detail.png" alt="Agent Overview — trends, health, and activity"/></a><br/><sub><b>Agent overview</b> — per-agent activity trends, success rate, duration, and health at a glance.</sub></td>
-    <td width="50%"><a href="docs/assets/screenshots/brain-orb.png"><img src="docs/assets/screenshots/brain-orb.png" alt="Brain Orb — an agent's self-rendering knowledge graph"/></a><br/><sub><b>Brain Orb</b> — a knowledge-base agent renders its own mind as a live 3D graph of notes, edges & activity.</sub></td>
+    <td width="50%"><a href="docs/screenshots/agent-overview.png"><img src="docs/screenshots/agent-overview.png" alt="Agent Overview — trends, health, and activity"/></a><br/><sub><b>Agent overview</b> — per-agent activity trends, success rate, duration, and health at a glance.</sub></td>
+    <td width="50%"><a href="docs/screenshots/brain-orb.png"><img src="docs/screenshots/brain-orb.png" alt="Brain Orb — an agent's self-rendering knowledge graph"/></a><br/><sub><b>Brain Orb</b> — a knowledge-base agent renders its own mind as a live 3D graph of notes, edges & activity.</sub></td>
   </tr>
 </table>
 
@@ -282,7 +275,8 @@ The full feature set is below and in the [documentation](#documentation).
 ### Fleet Observability
 
 - **Grid View** — The whole fleet as a canvas of agent tiles: live status, activity sparklines, cost & success rate per agent, with inline run/autonomy toggles
-- **Graph View** — Visual topology of your agent fleet with live status, success rates, cost tracking, and resource usage per agent
+- **List View** — The fleet as a sortable, filterable roster with inline run/autonomy toggles; `/` type-to-filter works across all dashboard views
+- **Grid Data Tiles** — Fleet info tiles alongside agent tiles (executions by trigger, recent failures), an org overlay of departments and reporting lines
 - **Timeline View** — Gantt-style execution timeline with trigger-based color coding (manual, scheduled, MCP, agent-triggered, public, paid)
 - **Host Telemetry** — Real-time CPU, memory, and disk monitoring in the dashboard header
 - **Fleet Health Monitoring** — Multi-layer health checks (Docker, network, business) with alerting and WebSocket updates
@@ -294,9 +288,9 @@ The full feature set is below and in the [documentation](#documentation).
 - **Multi-Runtime Support** — Choose between Claude Code (Anthropic), OpenAI Codex, or Gemini CLI (Google) per agent
 - **Model Selection** — Choose which Claude model (Opus, Sonnet, Haiku) per task or schedule
 - **Agent Overview** — Per-agent Overview tab with activity trends, success rate, duration, and health over a 7/14/30-day window
-- **Compatibility Report** — Advisory validation of a running agent's workspace against ~100 best-practice checks, with one-click fixes for common issues
+- **Compatibility Report** — Advisory validation of a running agent's workspace against 88 best-practice checks in 12 categories, with one-click fixes for common issues
 - **Agent Dashboard** — Custom dashboards defined via `dashboard.yaml` with 11 widget types, historical tracking, and sparkline visualization
-- **Playbooks** — Browse and invoke agent skills (`.claude/skills/`) directly from the UI
+- **Skills & Playbooks** — Assign skills from a multi-source library (bundled community repo + your own repos) with scheduled auto-sync and fleet re-inject; browse and invoke agent skills (`.claude/skills/`) directly from the UI
 - **Dynamic Thinking Status** — Real-time status labels reflecting agent activity (Reading file, Searching code, etc.)
 - **Persistent Memory** — File-based and database-backed memory across sessions
 - **Full Capabilities Mode** — Optional elevated permissions for agents that need `apt-get`, `sudo`, etc.
@@ -315,16 +309,20 @@ The full feature set is below and in the [documentation](#documentation).
 - **System Manifest Deployment** — Deploy multi-agent systems from a single YAML configuration
 - **Scheduling** — Cron-based automation with dedicated scheduler service and Redis distributed locks
 - **Webhook Triggers** — Public trigger URLs for schedules, with optional HMAC-SHA256 signature authentication and rate limiting
-- **MCP Integration** — 90+ tools for external agent orchestration via Model Context Protocol
+- **MCP Integration** — 100+ tools for external agent orchestration via Model Context Protocol, including `ask_trinity` docs Q&A
+- **A2A Protocol** — Per-agent opt-in inbound Agent Card + JSON-RPC/SSE task endpoint, and outbound `call_a2a_agent` to operator-registered external agents
 - **Trinity Connect** — WebSocket event streaming for local Claude Code integration
 - **Channel Adapters** — Pluggable external messaging: Slack (Socket Mode + webhooks, per-channel agent binding), Telegram (DMs, groups, voice transcription, file uploads), and WhatsApp via Twilio (DMs, media, `/login` flow)
 - **Voice** — Spoken voice replies (text-to-speech) on Slack, Telegram, and WhatsApp, plus opt-in outbound phone calls over Twilio telephony
 - **Unified Access Control** — Verified-email allow-list governs access across web, Slack, and Telegram with per-agent `require_email` / `open_access` policies (#311)
 - **Proactive Messaging** — Agents initiate user conversations via `send_message` / `send_group_message` MCP tools (#321, #349)
+- **Workspace** — A client-facing surface at `/workspace` for the people your agents serve: verified-email sign-in, chats with one or more agents, agent pages, skill hints, streaming turns, file uploads — one click away for platform users
+- **Agent Reports** — Agents publish structured reports (KPI, table, markdown, timeline) rendered on the dashboard, exportable to Excel/PDF, searchable, and readable back over MCP
 
 ### Operations
 
-- **Template-Based Deployment** — Create agents from pre-configured templates or GitHub repos
+- **Library** — Agent templates (bundled + a remote, self-updating registry), installable system manifests, and the skills library on one page; GitHub-repo import wizard with fork / copy / clone-own intents; guided per-agent credential setup
+- **Template-Based Deployment** — Create agents from pre-configured templates or GitHub repos (public repos need no PAT)
 - **Credential Management** — Direct file injection with encrypted git storage (`.credentials.enc`)
 - **Per-Agent GitHub PAT** — Encrypted per-agent tokens override the global PAT for private template access (#347)
 - **Subscription Management** — Centralized Claude Max/Pro subscription tokens shared across agents
@@ -342,6 +340,7 @@ The full feature set is below and in the [documentation](#documentation).
 - **Paid Agent Access (x402)** — Per-agent monetization via Nevermined x402 payment protocol
 - **Mobile Admin PWA** — Standalone mobile admin at `/m`, installable as a home screen app
 - **First-Time Setup Wizard** — Guided setup for admin password and API key configuration
+- **Automatic Database Backups** — Nightly verified recovery points for SQLite and PostgreSQL, plus a pre-migration copy at boot
 
 ## Architecture
 
@@ -444,7 +443,7 @@ These agents demonstrate:
 # Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/cornelius")
 ```
 
-**Note**: You'll need to configure a `GITHUB_PAT` environment variable in `.env` to use GitHub templates.
+**Note**: Public GitHub templates clone without any token. A `GITHUB_PAT` (global in `.env`, per-user in Settings, or per-agent) is only needed for private repos and for pushing agent state back to GitHub.
 
 ## Multi-Agent Systems
 
@@ -546,7 +545,7 @@ Trinity includes an MCP server for external orchestration of agents:
 ### Ask Trinity from any MCP client — no instance required
 
 Evaluating Trinity, or want its docs assistant inside your editor? The standalone
-[`@abilityai/trinity-docs-mcp`](src/helper-mcp/) server answers questions about
+[`trinity-docs-mcp`](src/helper-mcp/) server answers questions about
 Trinity, grounded in this documentation — no Trinity instance, no API key:
 
 ```json
@@ -554,7 +553,7 @@ Trinity, grounded in this documentation — no Trinity instance, no API key:
   "mcpServers": {
     "trinity-docs": {
       "command": "npx",
-      "args": ["-y", "@abilityai/trinity-docs-mcp"]
+      "args": ["-y", "trinity-docs-mcp"]
     }
   }
 }
@@ -619,7 +618,9 @@ Trinity Compatible Agent Guide). See [src/helper-mcp/README.md](src/helper-mcp/R
 - **Git** (6 tools) — Status, sync, log, pull, sync-state, and recovery reset
 - **Operator Queue** (3 tools) — Read and respond to human-in-the-loop approval items
 - **Loops** (3 tools) — Run, monitor, and stop bounded sequential task loops
-- **Reports** (1 tool) — Publish structured agent reports to the dashboard
+- **Reports** (3 tools) — Publish structured agent reports to the dashboard, list and read them back
+- **A2A** (2 tools) — Call an external A2A agent by registered endpoint name and poll its task
+- **Docs** (2 tools) — `ask_trinity` grounded Q&A about Trinity itself, agent requirements guide
 - **Memory** (1 tool) — Write per-user memory for channel sessions
 - **Pipelines** (2 tools) — Introspect agent-defined long-running pipelines
 - **VoIP** (1 tool) — Place an opt-in outbound phone call
@@ -632,7 +633,7 @@ Trinity Connect enables real-time coordination between local Claude Code instanc
 # Install listener dependencies
 brew install websocat jq
 
-# Set your MCP API key (from Settings → API Keys)
+# Set your MCP API key (from Settings → MCP Keys)
 export TRINITY_API_KEY="trinity_mcp_xxx"
 
 # Listen for events from a specific agent

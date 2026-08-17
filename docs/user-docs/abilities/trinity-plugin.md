@@ -18,8 +18,8 @@ Connect, deploy, operate, and sync agents on the Trinity platform. Seven skills 
 |-------|-------------|
 | `/trinity:start-here` | **New here?** Guided, resumable journey: what Trinity is → get an instance → connect → first agent alive |
 | `/trinity:connect` | One-time: authenticate and configure the MCP connection |
-| `/trinity:onboard` | Per-agent: compatibility check, file creation, deploy |
-| `/trinity:sync` | Ongoing: sync changes between local and the running remote agent |
+| `/trinity:onboard` | Per-agent: compatibility check, file creation, deploy from the repo — or, run inside an already-deployed agent, onboard it in place |
+| `/trinity:sync` | Ongoing: git-based sync between your repo and the deployed agent, multi-remote, with schedule and plugin reconciliation |
 | `/trinity:loop` | Run a remote agent task in a sequential, bounded loop — fire once, disconnect, check back |
 | `/trinity:create-dashboard` | Generate an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current |
 | `/trinity:deploy-new-instance` | Deploy a Trinity instance on any server and scaffold an ops agent to manage it |
@@ -72,35 +72,70 @@ After connecting, Trinity MCP tools become available:
 - `mcp__trinity__deploy_local_agent`
 - `mcp__trinity__run_agent_loop` (and the rest of the tool surface)
 
-### Step 2: Onboard (Per Agent)
+### Step 2: Add your GitHub token (One-Time)
+
+Deployment is **repository-first**: Trinity clones the agent straight from its GitHub repo and tracks the branch. In the Trinity UI, go to **Settings → GitHub token** and add a fine-grained PAT with *Contents: Read* on the repos your agents live in. Public repos work without a token; private repos don't. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
+
+### Step 3: Onboard (Per Agent)
 
 ```bash
-/trinity:onboard
+/trinity:onboard            # asks what you want: deploy, adapt only, or onboard in place
+/trinity:onboard analyze    # report only — no changes
+/trinity:onboard in-place   # force the in-place path (see below)
 ```
 
-For each agent you want to deploy:
+Run it in the agent's directory. It analyzes the current state, then:
 
-1. **Compatibility check** — Verifies required files exist
-2. **File creation** — Generates missing Trinity files
-3. **Deploy** — Pushes the agent to the Trinity platform
+1. **Creates the Trinity files** it finds missing — `template.yaml` (with `plugins:`, `schedules:`, and credential declarations), `.env.example`, `.gitignore`, `.mcp.json.template`
+2. **Checks GitHub readiness** — the token tier and a pushed remote — before any deploy runs
+3. **Deploys** — from the repository by default (`create_agent` with `github:owner/repo@branch`); from a local archive as the fallback when the repo doesn't exist yet or the instance can't reach GitHub, with an offer to promote the agent onto the repo path afterwards
+4. **Injects** gitignored credentials (`.env`) after deploy, since they are never in the clone or the archive
+5. **Reconciles declared schedules** onto the instance, matching on schedule name
+6. **Verifies** with the platform's own compatibility report — the report, not the skill's checklist, is the definition of "compatible"
 
-Required files (created if missing):
+Two things it will tell you and you cannot skip: declared schedules arm only on a literal `enabled: true`, and a newly created agent's **autonomy toggle is off** — until you turn it on in the UI, the scheduler skips every cron trigger for that agent.
 
-- `template.yaml` — Agent metadata
-- `.env.example` — Environment variable documentation
-- `.mcp.json.template` — MCP server configuration
+There are three ways an agent gets onto Trinity:
 
-### Step 3: Sync (Ongoing)
+| Path | When | What happens |
+|------|------|--------------|
+| **From the GitHub repo** (default) | The agent is adapted and pushed | Trinity clones the repo, tracks the branch, materializes declared schedules and plugins at creation |
+| **From local files** (fallback) | No repo yet, air-gapped instance, or a throwaway | A snapshot of your directory is deployed; promote it onto the repo path with `initialize_github_sync` before it becomes long-lived |
+| **Deploy as-is, then onboard in place** | A repo you can't or shouldn't adapt locally — someone else's agent, a bare repo with no `template.yaml` | Create the agent from the bare repo first (Trinity tolerates a missing `template.yaml`), then run `/trinity:onboard` *inside* that agent — see [below](#onboarding-a-deployed-agent-in-place) |
+
+### Step 4: Sync (Ongoing)
 
 ```bash
-/trinity:sync
+/trinity:sync                       # status of every remote
+/trinity:sync push [@remote] [branch]
+/trinity:sync pull [@remote]
+/trinity:sync deploy [@remote] <branch>
+/trinity:sync remotes | add-remote <name> <agent> [branch] | set-default <name>
+/trinity:sync schedules [@remote]   # reconcile template.yaml schedules: against the live agent
+/trinity:sync plugins [@remote]     # reconcile template.yaml plugins: against what's installed
 ```
 
-After making local changes:
+Sync is git-based and multi-remote — a `.trinity-remote.yaml` registry lets one repo serve several instances (production, staging), each tracking its own branch. `push` advances the deployed agent to your new commit; `pull` brings the agent's own commits back; `deploy` switches a remote to another branch.
 
-- Detects modified files
-- Pushes updates to the remote agent
-- Optionally restarts the agent
+`schedules` and `plugins` treat `template.yaml` as the design truth and the operator as owner of the live extras: they **create or install what is declared but missing, and report what is live but undeclared — never delete, never uninstall**. Both also run automatically after `push`, `pull`, and `deploy`, and read-only in `status`. A plugin installed by reconciliation loads on the agent's *next* execution.
+
+## Onboarding a Deployed Agent In Place
+
+When `/trinity:onboard` detects it is running *inside* a deployed Trinity agent — the agent's own workspace, with the platform's MCP tools already injected — it offers **Onboard in place** as the recommended goal (or take it directly with `/trinity:onboard in-place`, which is also the one-line form an orchestrator dispatches after deploying a bare repo). Nothing is created; the agent already exists. Instead it:
+
+1. Writes the Trinity files — `template.yaml` (with `plugins:` declaring at least `trinity@abilityai`), `.env.example`, `.gitignore`, `.mcp.json.template` if the agent runs MCP servers of its own
+2. **Installs the declared plugins now**, with the same CLI calls the container's boot hook uses, so they are present from the next execution rather than the next restart
+3. **Commits and pushes the result back to the repo** — this step matters: a repo-deployed agent tracks its branch pull-only, so a file written in the container is lost on the next reset unless it reaches the repo. If the agent has no write credentials, the skill tries the platform's push path and, failing that, **stops and says so** — it prints the patch and states that the result is container-local, rather than pretending
+4. Reconciles declared schedules live
+5. Finishes with `get_agent_compatibility_report` — every HARD finding is yours to fix; SOFT and AI findings are advisory
+
+**Bootstrap for agents that predate declared plugins.** The in-place path needs the `trinity` plugin present in the container. Agents created since Trinity re-installs declared plugins at boot get it from their `template.yaml`; an older agent has nothing declared yet, so run this once from its terminal, then start a fresh session:
+
+```bash
+claude plugin marketplace add abilityai/abilities && claude plugin install trinity@abilityai --yes
+```
+
+Onboarding in place is idempotent — if the push was refused, grant the agent write credentials and re-run.
 
 ## Remote Loops: `/trinity:loop`
 
@@ -185,13 +220,17 @@ Agents must have:
 | File | Purpose |
 |------|---------|
 | `CLAUDE.md` | Agent identity and instructions |
-| `template.yaml` | Trinity metadata (name, description, type) |
+| `template.yaml` | Trinity metadata (name, description, resources, declared schedules and plugins) |
 | `.env.example` | Documents required environment variables |
 
 Optional but recommended:
 
 - `dashboard.yaml` — Custom metrics dashboard
 - `.mcp.json.template` — MCP server configuration
+- `template.yaml` `schedules:` — declared recurring work, materialized at creation
+- `template.yaml` `plugins:` — declared Claude Code plugins, re-installed on every boot (declare `trinity@abilityai` at minimum)
+
+The authoritative verdict is the platform's compatibility report (Agent Detail → Overview), which `/trinity:onboard` runs at the end of every path. See [Creating Agents](../agents/creating-agents.md).
 
 ## See Also
 

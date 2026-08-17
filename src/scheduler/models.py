@@ -97,6 +97,92 @@ class ScheduleExecution:
     validates_execution_id: Optional[str] = None  # FK to execution being validated
 
 
+# SQLite stores INTEGER as a signed 64-bit value and RAISES on anything wider
+# rather than truncating, so this is the real bound on `source_user_id` — a
+# parser that only type-checks lets a payload field fail the INSERT (#1970,
+# found by /edge-cases). PostgreSQL `integer`/`bigint` are narrower or equal, so
+# clamping here is safe on both backends.
+_SQLITE_INT_MIN = -(2 ** 63)
+_SQLITE_INT_MAX = 2 ** 63 - 1
+
+
+@dataclass
+class ExecutionOrigin:
+    """Who initiated an execution (AUDIT-001, #1970).
+
+    One value object instead of five parallel parameters threaded through
+    ``_trigger_handler → _execute_manual_trigger → _execute_schedule_with_lock
+    → create_execution`` — five positional siblings at four call depths is how
+    one of them silently stops being forwarded.
+
+    Attribution only; **nothing authorizes on these fields.** An all-``None``
+    origin is the correct, honest record for a cron tick, which has no caller.
+    """
+    user_id: Optional[int] = None
+    user_email: Optional[str] = None
+    agent_name: Optional[str] = None
+    mcp_key_id: Optional[str] = None
+    mcp_key_name: Optional[str] = None
+
+    def is_empty(self) -> bool:
+        # Compared against None, NOT truthiness. `user_id=0` is a populated
+        # origin, but `not any((0, ...))` reported it empty. Found by
+        # /edge-cases, Hypothesis-shrunk to `{"source_user_id": 0}`. Nothing in
+        # `src/` gated on this yet — which is exactly why it was worth fixing
+        # before the first caller inherited a helper that lies about a valid
+        # value.
+        return all(
+            value is None
+            for value in (self.user_id, self.user_email, self.agent_name,
+                          self.mcp_key_id, self.mcp_key_name)
+        )
+
+    @classmethod
+    def from_payload(cls, body: object) -> "ExecutionOrigin":
+        """Build from an untrusted JSON body (the scheduler's trigger endpoint).
+
+        Validates at the boundary: wrong types are dropped rather than coerced,
+        wrong RANGES likewise, and strings are length-capped — so a malformed or
+        oversized payload cannot write junk into an append-only-in-spirit audit
+        column, nor break the write. A caller that lies about its identity is
+        not a new exposure — ``triggered_by`` has been caller-supplied on this
+        same endpoint all along, and the scheduler is reachable only from the
+        platform network.
+        """
+        if not isinstance(body, dict):
+            return cls()
+
+        def _str(key: str) -> Optional[str]:
+            value = body.get(key)
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            return value[:255] or None
+
+        user_id = body.get("source_user_id")
+        if isinstance(user_id, bool) or not isinstance(user_id, int):
+            user_id = None
+        elif not (_SQLITE_INT_MIN <= user_id <= _SQLITE_INT_MAX):
+            # Found by /edge-cases. The type check alone was not enough: the
+            # column is INTEGER and SQLite raises `OverflowError: Python int too
+            # large to convert to SQLite INTEGER` rather than truncating, so an
+            # out-of-range value from this untrusted body escaped into the
+            # INSERT and took the whole dispatch with it — silently losing the
+            # run on the #1970 path (the exception lands in a blanket `except`
+            # AFTER the endpoint already answered "triggered"). Dropped to None
+            # like every other unusable input here: attribution is never worth
+            # a failed run.
+            user_id = None
+
+        return cls(
+            user_id=user_id,
+            user_email=_str("source_user_email"),
+            agent_name=_str("source_agent_name"),
+            mcp_key_id=_str("source_mcp_key_id"),
+            mcp_key_name=_str("source_mcp_key_name"),
+        )
+
+
 @dataclass
 class Reminder:
     """A durable one-shot agent self-reminder (#1296).
@@ -119,6 +205,13 @@ class Reminder:
     allowed_tools: Optional[List[str]] = None
     execution_id: Optional[str] = None
     error: Optional[str] = None
+    # Provenance captured when the reminder was set (#1296). Carried onto the
+    # execution row the reminder fires, so a reminder-triggered run is
+    # attributable instead of anonymous (AUDIT-001, #1970).
+    owner_id: Optional[int] = None
+    created_by_email: Optional[str] = None
+    source_agent_name: Optional[str] = None
+    source_mcp_key_id: Optional[str] = None
 
 
 @dataclass

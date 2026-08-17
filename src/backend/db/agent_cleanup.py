@@ -98,6 +98,10 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_sharing",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_schedules",              "agent_name",        Policy.CASCADE),
     AgentRef("schedule_executions",          "agent_name",        Policy.KEEP),
+    # ent#265: binding-agent for channel report-back. KEEP mirrors the row it
+    # rides on (same #772 90-day terminal-row sweep); cascade_rename touches ALL
+    # refs regardless of policy, so a renamed binding agent keeps delivering.
+    AgentRef("schedule_executions",          "source_channel_agent", Policy.KEEP),
 
     # --- Agent loops (#740 Phase 1) ----------------------------------------
     # Loop ownership lives on the TARGET agent. `agent_loops` carries a
@@ -125,6 +129,17 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("chat_sessions",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_session_messages",       "agent_name",        Policy.CASCADE),
     AgentRef("agent_sessions",               "agent_name",        Policy.CASCADE),
+
+    # --- Workspace / client portal (ent#356) --------------------------------
+    # These tables came from the entitled enterprise module, which was OUTSIDE
+    # this registry — so an agent rename left its portal history keyed to the
+    # old name (invisible to the client, whose thread simply emptied) and a
+    # purge orphaned the rows. Moving the module into OSS core brings them under
+    # the same delete/rename contract as every other agent-scoped table, and the
+    # parity test is what noticed: it failed the moment the DDL landed in
+    # db/schema.py. Children before parents, matching the chat pair above.
+    AgentRef("enterprise_portal_messages",   "agent_name",        Policy.CASCADE),
+    AgentRef("enterprise_portal_sessions",   "agent_name",        Policy.CASCADE),
 
     # --- Activity / notifications ------------------------------------------
     AgentRef("agent_activities",             "agent_name",        Policy.CASCADE),
@@ -167,6 +182,7 @@ AGENT_REFS: List[AgentRef] = [
     # delete and re-key on rename so a reused agent name can't inherit another
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
+    AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
 
     # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
     # connector KEY is an mcp_api_keys row (scope='connector') already covered
@@ -347,6 +363,17 @@ def cascade_delete(conn, agent_name: str) -> Dict[str, int]:
         )
         if result.rowcount and result.rowcount > 0:
             deleted[table] = deleted.get(table, 0) + result.rowcount
+
+    # Org-overlay reporting refs (trinity-enterprise#305): `reports-to-<name>`
+    # tag VALUES on OTHER agents' rows. The AGENT_REFS row cascade above only
+    # removes this agent's own tag rows; without this sweep a dangling ref
+    # would silently re-attach to an unrelated agent that reuses the name
+    # after the retention window frees it.
+    from .tags import delete_reports_to_refs
+
+    refs = delete_reports_to_refs(conn, agent_name)
+    if refs:
+        deleted["agent_tags:reports_to_refs"] = refs
 
     return deleted
 

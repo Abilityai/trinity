@@ -1,3 +1,15 @@
+# #1871: bound every container's json-file log. Docker's json-file driver has
+# NO max-size and NO max-file by default, so each container's log under
+# /var/lib/docker/containers/ grows forever — silently, until the Docker data
+# root hits 100% and dockerd wedges. Agent containers are created through the
+# Docker SDK, not compose, so they are capped separately by AGENT_LOG_CONFIG in
+# src/backend/services/agent_service/capabilities.py.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CONTAINER_LOG_MAX_SIZE:-10m}"
+    max-file: "${CONTAINER_LOG_MAX_FILE:-3}"
+
 services:
   backend:
     build:
@@ -15,6 +27,7 @@ services:
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
+    logging: *default-logging
     ports:
       - "8000:8000"
     environment:
@@ -51,15 +64,35 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+      # Opt-in, default OFF. The DB row (system_settings) is the primary leg, so a
+      # gap here cannot make the feature unreachable — but the env leg still has to
+      # be forwarded or an operator setting it in .env silently does nothing.
+      - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
       # container or the .env lever is inert (the #1056/#1039 packaging class).
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
       - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}  # non-empty default (#1076)
       - TTS_MAX_CHARS=${TTS_MAX_CHARS:-1500}                      # shared synth cost cap (chars)
+      # Workspace / client portal (ent#356), now OSS core. Rate limits are enforced
+      # at these defaults whether or not they are wired, so the gap is an inert
+      # tuning lever rather than a dead feature — but inert is still the
+      # #1056/#1039 packaging class, so wire them where the .env lever can reach.
+      - PORTAL_CHAT_BURST_LIMIT=${PORTAL_CHAT_BURST_LIMIT:-20}     # portal chat sends per email+agent per 60s
+      - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
+      - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
+      - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
+      - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Skills library lifecycle automation (ent#236). The reconcile cap is named in the
+      # refusal alarm's own remediation text, so it must be tunable from .env or the
+      # operator is told to raise a lever that never reaches the container.
+      - SKILLS_RECONCILE_MAX_REMOVALS=${SKILLS_RECONCILE_MAX_REMOVALS:-10}   # per-agent blast-radius cap
+      - SKILLS_FLEET_INJECT_CONCURRENCY=${SKILLS_FLEET_INJECT_CONCURRENCY:-5}  # parallel agents per sweep
       # Public webhook trigger hardening (#1023, #1424) — 60s windows fixed in code.
       # Must reach the container or the .env lever is inert (the #1056/#1039 packaging class).
       - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
@@ -89,21 +122,48 @@ services:
       - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
       - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
+      - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # First-run default system seed (trinity-enterprise#124): a path to an
       # operator manifest, or `disabled` to skip seeding. Empty = bundled
       # config/manifests/default-system.yaml.
       - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#237 — the community skills catalog seed. BARE pass-through, NOT
+      # `${VAR:-}`: an empty value is the DOCUMENTED disable for this setting
+      # ("Set the URL to \"\" to disable the seed entirely"), so `${VAR:-}` would
+      # send "" on every install and silently turn the catalog off for everyone.
+      # `${VAR:-github.com/...}` is wrong the other way — it swallows the
+      # operator's explicit disable. Rendered with `docker compose config`:
+      #   bare, unset          -> null (not set) -> config.py default applies
+      #   bare, set to a URL   -> the URL
+      #   bare, set to ""      -> "" -> seed disabled, as documented
+      - TRINITY_DEFAULT_SKILL_SOURCE
+      - TRINITY_DEFAULT_SKILL_SOURCE_REF
+      # ent#126: directory the bundled-manifest catalog
+      # (GET /api/systems/manifests) reads. Empty = the image's own
+      # config/manifests (already bind-mounted :ro below). Point it at another
+      # bind-mounted directory to offer your own curated fleet manifests; an
+      # unreadable path is an EMPTY catalog, not an error, so mount the
+      # directory too — setting this alone silently lists nothing.
+      - TRINITY_MANIFESTS_DIR=${TRINITY_MANIFESTS_DIR:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Agent container log cap (#1871) — read by capabilities.py to build the
+      # agent container's json-file log_config. The x-logging anchor above bounds
+      # the PLATFORM services; agents are SDK-created, so these must reach the
+      # backend process itself or the knobs are inert (#1039 class).
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_LOG_MAX_SIZE=${AGENT_LOG_MAX_SIZE:-10m}
+      - AGENT_LOG_MAX_FILE=${AGENT_LOG_MAX_FILE:-3}
       # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
       # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
       # it must reach the backend here or the .env lever is inert (#1039 class).
       # Default (1800s) lives agent-side; 0/negative disables. Recreate to apply.
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
+      - AGENT_IDLE_FINALIZE_S=${AGENT_IDLE_FINALIZE_S:-}
       # OpenTelemetry Configuration (Optional)
       - OTEL_ENABLED=${OTEL_ENABLED:-0}
       - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}
@@ -129,6 +189,15 @@ services:
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       - LOG_ARCHIVE_PATH=/data/archives  # Local path for archived logs
+      # Automatic database backups (#2216) — daily job in the backend
+      # (services/db_backup_service.py), default ON, artifacts under
+      # /data/backups. This service uses an explicit environment list (no
+      # env_file), so an unforwarded var is INERT (#1486/#1488 class) —
+      # mirror any change into docker-compose.prod.yml.
+      - DB_BACKUP_ENABLED=${DB_BACKUP_ENABLED:-true}
+      - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
+      - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
+      - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
       - TRINITY_DB_PATH=/data/trinity.db
       # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
       # (default). Set to a postgresql:// URL (with the postgres profile up) to
@@ -174,6 +243,15 @@ services:
       - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
       - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
       - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
+      # Remote template registry (ent#14): the GitHub half of the template
+      # catalog, fetched at runtime. TEMPLATE_REGISTRY_ENABLED=false is the HARD
+      # kill switch (no system_settings row can turn it back on) — without this
+      # line it is inert, which is the #1039 class the config.py comment argues
+      # against one paragraph above where it reads the var. URL keeps its FULL
+      # non-empty default — a bare :- would arrive set-but-empty and shadow the
+      # code default (#1076 class), pointing the registry at "".
+      - TEMPLATE_REGISTRY_ENABLED=${TEMPLATE_REGISTRY_ENABLED:-true}
+      - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter
@@ -195,6 +273,11 @@ services:
       # credential — leaking it lets anyone post to that one channel.
       # Unset = canary cycles run silently (still persists violations).
       - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Unset
+      # is the norm — services/instance_identity.py then derives one from
+      # FRONTEND_URL's host, so multiple instances sharing one webhook are
+      # already distinguishable. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
       # Backend agent-call budget (#904 RC-1). Caps how many concurrent
       # outbound agent HTTP calls the backend will hold at once, plus
       # the per-acquire queue wait before returning 503. Default
@@ -234,6 +317,12 @@ services:
       # (observability). The actual routing gate is the mcp-server's read of the
       # SAME env key; keep both in sync via this single .env var.
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — read by BOTH processes from this one key. The
+      # backend gates the /api/internal/mcp-auth/* surface on it (404 when off)
+      # and gates the keyless connector snippet; the mcp-server gates the keyless
+      # session tier. Must be wired in both services or the whole feature is
+      # un-flippable on deploy (#1056/#1039 packaging-gap class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
       # #1081 pull/work-stealing pilot allowlist — the SINGLE switch that opts an
       # agent into pull mode. Backend-only, process-env (needs a backend restart),
       # default empty = pull fully dark. Forwarded here (G1) because the backend
@@ -276,6 +365,8 @@ services:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
       logs-init:
         condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
+      archives-init:
+        condition: service_completed_successfully  # #2205: same, for the archives volume
     networks:
       - trinity-platform   # Redis, scheduler, vector, OTel
       - trinity-agent      # Frontend, mcp-server, agent containers
@@ -308,6 +399,7 @@ services:
       dockerfile: ../../docker/frontend/Dockerfile
     image: trinity-frontend:latest
     container_name: trinity-frontend
+    logging: *default-logging
     ports:
       - "${FRONTEND_PORT:-80}:80"
     volumes:
@@ -330,6 +422,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trinity-redis
+    logging: *default-logging
     # Loopback-only host port (test suites connect from the dev machine).
     # External LAN cannot reach Redis even with auth — defense in depth.
     ports:
@@ -420,6 +513,7 @@ services:
       context: ./src/mcp-server
       dockerfile: Dockerfile
     container_name: trinity-mcp-server
+    logging: *default-logging
     ports:
       - "8080:8080"
     environment:
@@ -442,6 +536,29 @@ services:
       # gate (the backend reads the same key only for feature-flags observability).
       # Must be wired here or the flag is un-flippable on deploy (#1056/#1039 class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — THIS is the session-tier gate: with it OFF a
+      # keyless MCP connection is refused outright and no login tools register.
+      # The backend reads the same key to gate /api/internal/mcp-auth/*. Both
+      # must be wired or the feature can never be switched on (#1056/#1039 class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # #848 ceiling for the mcp-server's four backend relay fetches on the
+      # inline-auth path (request/verify/playbooks/chat). Functional via its
+      # 15000ms default; wired so the lever is not inert.
+      - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #736 ceiling for the mcp-server's own outbound-A2A fetches
+      # (call_a2a_agent / get_a2a_task). It must stay BELOW the MCP client's
+      # gateway abort so WE give up first and can return a pollable receipt
+      # instead of an opaque `fetch failed` over a call that completed anyway.
+      # Functional via its 40000ms default; wired so the lever is not inert.
+      - MCP_A2A_TIMEOUT_MS=${MCP_A2A_TIMEOUT_MS:-40000}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client. Wired
+      # through compose because an env var the container never receives is not
+      # actually configurable — the same "un-flippable on deploy" trap called
+      # out for the flag above. Point it at an internal mirror, or at an
+      # unreachable value to effectively disable the tool (it degrades to a
+      # structured error, never a crash).
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend
@@ -465,6 +582,7 @@ services:
       context: .
       dockerfile: docker/scheduler/Dockerfile
     container_name: trinity-scheduler
+    logging: *default-logging
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
@@ -513,9 +631,38 @@ services:
   logs-init:
     image: alpine:3.20
     container_name: trinity-logs-init
+    logging: *default-logging
     command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
     volumes:
       - trinity-logs:/data/logs
+    restart: "no"
+    networks:
+      - trinity-platform
+
+  # #2205: the missed sibling of `logs-init`. `trinity-archives` is a NAMED volume,
+  # and Docker creates those root-owned — so the UID-1000 backend could not write
+  # `/data/archives` at all. `archive_storage.__init__` does
+  # `mkdir(parents=True, exist_ok=True)`, which silently no-ops on the existing
+  # root-owned directory, so nothing failed until the first WRITE: every archival
+  # run died with `[Errno 13] Permission denied`, archived originals were never
+  # unlinked, and `/data/logs` grew unbounded (measured on a real instance: 8.5 GB,
+  # a single 4.6 GB file, failing since 2026-06-23).
+  #
+  # Why it hid: the ERROR is written into the very log files that are not being
+  # pruned — symptom and diagnosis in the same unbounded file nobody tails. Same
+  # class as #1478 and #1871.
+  #
+  # This also REPAIRS existing installs rather than only fixing fresh ones: the
+  # one-shot runs on every `up`, and chowning the directory is idempotent.
+  # `chmod 775` (not 755) so a future root-writing sibling can share it, exactly as
+  # #1478 reasoned for the logs volume.
+  archives-init:
+    image: alpine:3.20
+    container_name: trinity-archives-init
+    logging: *default-logging
+    command: ["sh", "-c", "chown 1000:1000 /data/archives && chmod 775 /data/archives"]
+    volumes:
+      - trinity-archives:/data/archives
     restart: "no"
     networks:
       - trinity-platform
@@ -524,6 +671,7 @@ services:
   vector:
     image: timberio/vector:0.43.1-alpine
     container_name: trinity-vector
+    logging: *default-logging
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -564,6 +712,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.120.0
     container_name: trinity-otel-collector
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "4317:4317"   # gRPC receiver (OTLP)
@@ -592,6 +741,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: trinity-postgres
+    logging: *default-logging
     restart: unless-stopped
     profiles: ["postgres"]
     environment:

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import json
 import time
+import zoneinfo
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
@@ -23,7 +24,10 @@ import redis
 import httpx
 
 from .config import config
-from .models import Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule
+from .models import (
+    Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule,
+    ExecutionOrigin,
+)
 from .database import SchedulerDatabase
 from .locking import get_lock_manager, LockManager
 # Shared SUB-003 auth-class classifier (#1088). The scheduler uses it for
@@ -453,7 +457,26 @@ class SchedulerService:
             self._permanent_add_failures.discard(schedule.id)
             logger.info(f"Added schedule job: {job_id} ({schedule.name}) for agent {schedule.agent_name}")
             return True
-        except (pytz.exceptions.UnknownTimeZoneError, ValueError) as e:
+        except (
+            pytz.exceptions.UnknownTimeZoneError,
+            ValueError,
+            # #1823: a zone pytz knows but this runtime's IANA database lacks —
+            # a legacy alias such as `Europe/Kiev` when the image ships no
+            # backward-compatibility links. APScheduler's `astimezone()` raises
+            # it from inside CronTrigger, and it is a KeyError subclass, so it
+            # is NOT a ValueError and fell through to the broad `except
+            # Exception` below: the TRANSIENT arm. The row was therefore never
+            # snapshotted into _permanent_add_failures, so #1472's bounded-retry
+            # machinery was defeated — it retried every 60s forever, logged an
+            # ERROR on every sync tick, and froze `next_run_at` into exactly the
+            # "Next: Nd ago" symptom #1472 existed to eliminate (canary E-06
+            # fires on it each cycle).
+            #
+            # Named explicitly, NEVER a bare KeyError: this arm SUPPRESSES
+            # retries, so widening it would permanently park schedules whose
+            # registration failed for a genuinely transient reason.
+            zoneinfo.ZoneInfoNotFoundError,
+        ) as e:
             # #1472: permanent — a bad timezone or cron that clears the backend's
             # looser croniter check but fails _parse_cron/CronTrigger. Log ONCE and
             # record so the sync loop snapshots it (bounded) instead of retrying
@@ -711,12 +734,22 @@ class SchedulerService:
         else:
             logger.warning(f"Unknown job_id format for skipped job: {job_id}")
 
-    def _record_skipped_agent_schedule(self, schedule_id: str):
+    def _record_skipped_agent_schedule(
+        self,
+        schedule_id: str,
+        skip_reason: str = "Previous execution still running (max_instances reached)",
+        event_reason: str = "Previous execution still running",
+    ):
         """
         Record a skipped agent schedule execution in the database.
 
         Creates an execution record with status='skipped' so it appears in
         the execution history and provides an audit trail.
+
+        `skip_reason` / `event_reason` are parameterised (#1808) so the
+        sync-freeze gate can reuse this exact audit path; the defaults preserve
+        the original max_instances wording for the EVENT_JOB_MAX_INSTANCES
+        caller.
         """
         try:
             schedule = self.db.get_schedule(schedule_id)
@@ -730,7 +763,7 @@ class SchedulerService:
                 agent_name=schedule.agent_name,
                 message=schedule.message,
                 triggered_by="schedule",
-                skip_reason="Previous execution still running (max_instances reached)"
+                skip_reason=skip_reason
             )
 
             if execution:
@@ -743,7 +776,7 @@ class SchedulerService:
                     "schedule_id": schedule.id,
                     "execution_id": execution.id,
                     "schedule_name": schedule.name,
-                    "reason": "Previous execution still running"
+                    "reason": event_reason
                 }))
             else:
                 logger.error(f"Failed to create skipped execution record for schedule {schedule_id}")
@@ -751,12 +784,24 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"Error recording skipped execution for schedule {schedule_id}: {e}")
 
-    def _record_skipped_process_schedule(self, schedule_id: str):
+    def _record_skipped_process_schedule(
+        self,
+        schedule_id: str,
+        skip_reason: str = "Previous execution still running (max_instances reached)",
+        event_reason: str = "Previous execution still running",
+    ):
         """
         Record a skipped process schedule execution in the database.
 
         Creates an execution record with status='skipped' so it appears in
         the execution history and provides an audit trail.
+
+        `skip_reason` / `event_reason` are parameterised (#1994) so the
+        lock-denial branch of `_execute_process_schedule` can reuse this exact
+        audit path and still name the mechanism that actually suppressed the
+        run; the defaults preserve the original max_instances wording for the
+        EVENT_JOB_MAX_INSTANCES caller. Mirrors the agent-schedule sibling,
+        which gained the same parameters in #1808.
         """
         try:
             schedule = self.db.get_process_schedule(schedule_id)
@@ -770,7 +815,7 @@ class SchedulerService:
                 process_id=schedule.process_id,
                 process_name=schedule.process_name,
                 triggered_by="schedule",
-                skip_reason="Previous execution still running (max_instances reached)"
+                skip_reason=skip_reason
             )
 
             if execution:
@@ -784,7 +829,7 @@ class SchedulerService:
                     "schedule_id": schedule.id,
                     "trigger_id": schedule.trigger_id,
                     "execution_id": execution.id,
-                    "reason": "Previous execution still running"
+                    "reason": event_reason
                 }))
             else:
                 logger.error(f"Failed to create skipped execution record for process schedule {schedule_id}")
@@ -807,6 +852,30 @@ class SchedulerService:
         lock = self.lock_manager.try_acquire_schedule_lock(schedule_id)
         if not lock:
             logger.info(f"Schedule {schedule_id} already being executed by another instance")
+            # #1969: a suppressed tick must leave a record. Suppression is the
+            # correct behaviour — what was missing is the evidence it happened.
+            # With only the INFO line above, a tick denied by the lock is
+            # indistinguishable from a tick that never fired, in the execution
+            # history, the UI, and monitoring alike.
+            #
+            # There are two ways a run gets suppressed and only one was
+            # audited. APScheduler's `max_instances=1` refusal writes a
+            # `skipped` row via _on_job_max_instances; this branch returned
+            # bare. They do not overlap — a max_instances refusal means the job
+            # never started, so _execute_schedule is never entered and no lock
+            # is attempted; conversely reaching this line means APScheduler
+            # already let the job start. Exactly one of the two fires per tick.
+            #
+            # The gap mattered most for the common case: a MANUAL trigger
+            # bypasses APScheduler entirely (_trigger_handler dispatches via
+            # asyncio.create_task), so its instance counter stays at zero, the
+            # cron job starts normally, and the collision is caught one layer
+            # down — here.
+            self._record_skipped_agent_schedule(
+                schedule_id,
+                skip_reason="Previous execution still running (distributed lock held)",
+                event_reason="Previous execution still running",
+            )
             return
 
         try:
@@ -814,20 +883,76 @@ class SchedulerService:
         finally:
             lock.release()
 
-    async def _execute_schedule_with_lock(self, schedule_id: str, triggered_by: str = "schedule"):
+    def _abandon_precreated_execution(self, execution, reason: str) -> None:
+        """Fail an execution row created before this run could be aborted (#1968).
+
+        A manual trigger now creates its row synchronously so the caller gets a
+        real id back, which means the row can already exist when a gate below
+        decides not to run. Leaving it `running` forever is the worse outcome:
+        canary E-01 flags exactly that, and the UI would show a task that never
+        ends. Fail it with the reason instead. Best-effort — an abort path must
+        not raise.
+        """
+        if execution is None:
+            return
+        try:
+            # CAS on RUNNING: this row was created moments ago by the trigger
+            # and every abandon gate runs BEFORE dispatch, so nothing else can
+            # have written it — but "safe by argument" is what #1082 exists to
+            # retire, and the precondition is one clause.
+            abandoned = self.db.update_execution_status(
+                execution.id,
+                ExecutionStatus.FAILED,
+                error=reason,
+                expected_status=ExecutionStatus.RUNNING,
+            )
+            if abandoned:
+                logger.info(f"Abandoned pre-created execution {execution.id}: {reason}")
+            else:
+                logger.info(
+                    f"Pre-created execution {execution.id} already left RUNNING — "
+                    f"not abandoning ({reason})"
+                )
+        except Exception as exc:
+            logger.error(
+                f"Could not abandon pre-created execution {execution.id}: {exc}"
+            )
+
+    async def _execute_schedule_with_lock(
+        self,
+        schedule_id: str,
+        triggered_by: str = "schedule",
+        origin: Optional[ExecutionOrigin] = None,
+        execution=None,
+    ):
         """Execute schedule after acquiring lock.
 
         Args:
             schedule_id: ID of the schedule to execute
             triggered_by: Source of trigger - "schedule" (cron) or "manual"
+            origin: Who initiated the run (#1970). None for a cron tick — there
+                is no caller, and the execution row records that honestly as
+                NULLs rather than inventing an owner.
+            execution: A row already created by the caller (#1968). The manual
+                trigger endpoint creates it synchronously so it can return a
+                real `execution_id`; passing it here is what stops this method
+                creating a SECOND row for the same run. None on the cron path,
+                which still creates its own.
         """
         schedule = self.db.get_schedule(schedule_id)
         if not schedule:
             logger.error(f"Schedule {schedule_id} not found")
+            # Deleted between the trigger response and this task starting.
+            self._abandon_precreated_execution(
+                execution, "Schedule was deleted before the run started"
+            )
             return
 
         if not schedule.enabled and triggered_by == "schedule":
             logger.info(f"Schedule {schedule_id} is disabled, skipping")
+            self._abandon_precreated_execution(
+                execution, "Schedule was disabled before the run started"
+            )
             return
 
         # Check if agent has autonomy enabled (only for cron-triggered, not manual)
@@ -840,28 +965,84 @@ class SchedulerService:
             # the default-OFF fleet) and no last_run_at (nothing ran; setting it
             # would suppress the _get_missed_schedules catch-up).
             self._advance_next_run_only(schedule)
+            self._abandon_precreated_execution(
+                execution, "Agent autonomy was disabled before the run started"
+            )
+            return
+
+        # #1808: git-sync freeze gate. The owner opted in via
+        # `freeze_schedules_if_sync_failing` (#389) so the agent stops doing
+        # autonomous work while its repo is broken — until now the flag was
+        # stored, reported back as enabled, and never enforced, and
+        # docs/user-docs/faq/troubleshooting.md told users it worked.
+        #
+        # Cron only: a manual trigger is an operator explicitly asking, exactly
+        # like the autonomy gate above.
+        #
+        # Unlike the autonomy branch this DOES record a skipped execution row.
+        # Autonomy-off is a static config gate on a default-OFF fleet, so a row
+        # per tick would flood the table; a sync freeze needs BOTH an opt-in
+        # toggle AND 3+ consecutive real sync failures, so the row count is
+        # bounded and it is exactly the signal an operator needs to see. Uses
+        # the same audit path as the max_instances skip.
+        if triggered_by == "schedule" and self.db.should_freeze_schedules(schedule.agent_name):
+            logger.warning(
+                f"Schedule {schedule_id} skipped: agent {schedule.agent_name} git sync is "
+                f"failing and freeze_schedules_if_sync_failing is enabled"
+            )
+            self._record_skipped_agent_schedule(
+                schedule_id,
+                skip_reason=(
+                    "Git sync is failing and freeze_schedules_if_sync_failing is "
+                    "enabled for this agent"
+                ),
+                event_reason="Git sync failing (schedules frozen)",
+            )
+            # Same projection advance as the autonomy branch (#1472) so the
+            # schedule never renders a receding "Next: Nd ago" while frozen.
+            self._advance_next_run_only(schedule)
+            self._abandon_precreated_execution(
+                execution, "Git sync started failing before the run started"
+            )
             return
 
         # Agent-owned pre-check gate (#454): may skip the firing entirely or
         # override the message. Manual triggers always fire.
         should_fire, effective_message = await self._apply_pre_check_gate(schedule, triggered_by)
         if not should_fire:
+            # Unreachable for a pre-created row: the gate short-circuits to
+            # (True, schedule.message) for anything but triggered_by="schedule",
+            # and only manual/webhook triggers pre-create. Abandon anyway — a
+            # future gate change must not silently strand a running row.
+            self._abandon_precreated_execution(
+                execution, "Agent pre-check declined the run"
+            )
             return
 
         logger.info(f"Executing schedule: {schedule.name} for agent {schedule.agent_name} (triggered_by={triggered_by})")
 
-        # Create execution record
-        execution = self.db.create_execution(
-            schedule_id=schedule.id,
-            agent_name=schedule.agent_name,
-            message=effective_message,
-            triggered_by=triggered_by,
-            model_used=schedule.model
-        )
+        # #1968: the manual path already created the row, synchronously, so its
+        # id could be returned to the caller. Creating another here would give
+        # one trigger two executions — the caller's id would name a row that
+        # never runs while a second one did the work.
+        if execution is None:
+            origin = origin or ExecutionOrigin()
+            execution = self.db.create_execution(
+                schedule_id=schedule.id,
+                agent_name=schedule.agent_name,
+                message=effective_message,
+                triggered_by=triggered_by,
+                model_used=schedule.model,
+                source_user_id=origin.user_id,
+                source_user_email=origin.user_email,
+                source_agent_name=origin.agent_name,
+                source_mcp_key_id=origin.mcp_key_id,
+                source_mcp_key_name=origin.mcp_key_name
+            )
 
-        if not execution:
-            logger.error(f"Failed to create execution record for schedule {schedule_id}")
-            return
+            if not execution:
+                logger.error(f"Failed to create execution record for schedule {schedule_id}")
+                return
 
         # #1472: advance the run-time projection ONCE, at fire time, regardless of
         # the eventual outcome — the single "this window was consumed" write. It
@@ -1542,6 +1723,33 @@ class SchedulerService:
             )
             return
 
+        # #1970: a retry inherits the original run's attribution. The retry has
+        # no caller of its own, but it is not anonymous — it exists only because
+        # someone (or a cron tick) started the original, and a chain of retries
+        # that drops the initiator makes the very first attempt the only
+        # attributable one.
+        #
+        # Fail-open around the READ, not merely around a missing row: this is a
+        # brand-new DB call on the retry path, and letting it raise would trade
+        # "the retry is unattributed" for "the retry never runs". A row already
+        # purged by retention lands in the same place — no origin, still fires.
+        origin = ExecutionOrigin()
+        try:
+            original = self.db.get_execution(original_execution_id)
+            if original:
+                origin = ExecutionOrigin(
+                    user_id=original.source_user_id,
+                    user_email=original.source_user_email,
+                    agent_name=original.source_agent_name,
+                    mcp_key_id=original.source_mcp_key_id,
+                    mcp_key_name=original.source_mcp_key_name,
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Could not read the origin of {original_execution_id} for its "
+                f"retry — the retry proceeds unattributed: {exc}"
+            )
+
         # Create a new execution record for the retry
         retry_execution = self.db.create_execution(
             schedule_id=schedule_id,
@@ -1550,7 +1758,12 @@ class SchedulerService:
             triggered_by="retry",
             model_used=model,
             attempt_number=next_attempt_number,
-            retry_of_execution_id=original_execution_id
+            retry_of_execution_id=original_execution_id,
+            source_user_id=origin.user_id,
+            source_user_email=origin.user_email,
+            source_agent_name=origin.agent_name,
+            source_mcp_key_id=origin.mcp_key_id,
+            source_mcp_key_name=origin.mcp_key_name
         )
 
         if not retry_execution:
@@ -1695,6 +1908,20 @@ class SchedulerService:
         reminder = self.db.get_reminder_by_id(reminder_id)
         attempts = reminder.fire_attempts if reminder else 1
 
+        # #1970: a reminder fires with no live caller, but it is not anonymous —
+        # #1296 already persisted who set it. Carry that provenance onto the
+        # execution row so "who caused this run?" is answerable from the DB.
+        origin = (
+            ExecutionOrigin(
+                user_id=reminder.owner_id,
+                user_email=reminder.created_by_email,
+                agent_name=reminder.source_agent_name or agent_name,
+                mcp_key_id=reminder.source_mcp_key_id,
+            )
+            if reminder
+            else ExecutionOrigin(agent_name=agent_name)
+        )
+
         execution_id = None
         try:
             # 2. Create the execution row up-front (REAL id, __manual__ marker —
@@ -1707,6 +1934,11 @@ class SchedulerService:
                 message=message,
                 triggered_by="reminder",
                 model_used=model,
+                source_user_id=origin.user_id,
+                source_user_email=origin.user_email,
+                source_agent_name=origin.agent_name,
+                source_mcp_key_id=origin.mcp_key_id,
+                source_mcp_key_name=origin.mcp_key_name,
             )
             if not execution:
                 raise Exception("failed to create reminder execution row")
@@ -1782,6 +2014,22 @@ class SchedulerService:
                 f"Reminder reconcile skipped (table absent or read error): {e}"
             )
             return
+
+        # #1806: reminders on autonomy-disabled agents are filtered out of
+        # get_active_reminders, so they are never armed and produce no job and
+        # no skip line — the reconcile is the only place that can say they
+        # exist. Log a COUNT (not a row per reminder) once per pass, and only
+        # when non-zero, so a paused fleet doesn't spam the log. Best-effort:
+        # observability must never break the reconcile.
+        try:
+            held = self.db.count_held_reminders()
+            if held:
+                logger.info(
+                    f"{held} reminder(s) held: their agent's autonomy is disabled. "
+                    f"They will fire past-due when autonomy is re-enabled."
+                )
+        except Exception as e:
+            logger.debug(f"Held-reminder count unavailable: {e}")
 
         now = datetime.utcnow()
         # A firing row older than this (with no live job) is a crash-mid-fire
@@ -2079,6 +2327,25 @@ class SchedulerService:
         lock = self.lock_manager.try_acquire_schedule_lock(f"process_{schedule_id}")
         if not lock:
             logger.info(f"Process schedule {schedule_id} already being executed by another instance")
+            # #1994: the sibling of #1969, on the process-schedule path.
+            # Suppression is correct — two concurrent runs of one schedule is
+            # what the lock exists to prevent. What was missing is the evidence
+            # it happened: with only the INFO line above, a denied tick is
+            # indistinguishable from a tick that never fired, in the execution
+            # history, the UI, and monitoring alike.
+            #
+            # The two suppression paths do not overlap, which is what makes
+            # calling the same helper from both safe (no #91-style duplicate
+            # skipped+success pairing). APScheduler's `max_instances=1` refusal
+            # fires EVENT_JOB_MAX_INSTANCES -> _on_job_max_instances -> a skipped
+            # row, and the job never starts, so this function is never entered.
+            # Reaching this line means APScheduler already let the job start,
+            # so no max-instances event fires. Exactly one of the two per tick.
+            self._record_skipped_process_schedule(
+                schedule_id,
+                skip_reason="Previous execution still running (distributed lock held)",
+                event_reason="Previous execution still running",
+            )
             return
 
         try:

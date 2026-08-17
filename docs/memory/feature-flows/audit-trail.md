@@ -469,10 +469,14 @@ When enabled:
 
 Verify with `POST /api/audit-log/verify?start_id=1&end_id=100`:
 ```json
-{"valid": true, "checked": 100, "first_invalid_id": null}
+{"valid": true, "status": "verified", "checked": 100, "skipped_unhashed": 0,
+ "total_in_range": 100, "hash_chain_enabled": true, "first_invalid_id": null}
 ```
 
-Entries written before hash chain was enabled are skipped during verification.
+Entries written before hash chain was enabled are skipped during verification
+(surfaced as `skipped_unhashed`, `status: "verified_partial"`). An all-unhashed
+range returns `valid: null, status: "unverifiable"`; an empty range returns
+`valid: null, status: "empty_range"` — never a vacuous `valid: true` (#1984).
 
 ### Export
 

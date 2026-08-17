@@ -56,10 +56,16 @@ def wired(monkeypatch):
     monkeypatch.setitem(sys.modules, "services.slack_service",
                         types.SimpleNamespace(slack_service=fake_slack))
 
+    # ent#265: consent is keyed on the BINDING agent (row.source_channel_agent
+    # or the executing agent). The fixture rows carry no source_channel_agent,
+    # so the lookup key is the executing "analytics" — pinning that the legacy
+    # NULL path still resolves consent under the old identity.
     fake_db = types.SimpleNamespace(
         get_execution=lambda eid: _execution(),
-        get_slack_channels_for_agent=lambda a: [
-            {"slack_channel_id": "C123", "team_id": "T1", "allow_proactive": True}],
+        get_slack_channels_for_agent=lambda a: (
+            [{"slack_channel_id": "C123", "team_id": "T1", "allow_proactive": True}]
+            if a == "analytics" else []
+        ),
         get_slack_workspace_bot_token=lambda t: "xoxb-test",
     )
     monkeypatch.setitem(sys.modules, "database", types.SimpleNamespace(db=fake_db))
@@ -128,9 +134,12 @@ class TestScope:
         assert _report() is False
         assert sent == []
 
-    def test_non_slack_channel_is_out_of_scope_in_v1(self, wired):
+    def test_unsupported_channel_is_out_of_scope(self, wired):
+        """ent#265 conscious edit: telegram grew its own delivery leg, so the
+        remaining channel WITHOUT a resolver is whatsapp (see
+        test_265_telegram_completion_report.py for the telegram leg)."""
         sent, db = wired
-        db.get_execution = lambda eid: _execution(channel="telegram", triggered_by="agent")
+        db.get_execution = lambda eid: _execution(channel="whatsapp", triggered_by="agent")
         assert _report() is False
         assert sent == []
 

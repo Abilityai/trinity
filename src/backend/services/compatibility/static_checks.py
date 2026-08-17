@@ -16,13 +16,25 @@ Secret-bearing values are NEVER echoed: S-003 / S-009 / K-004 report the file an
 line and a pattern label, never the matched secret.
 """
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from services.template_service import _is_platform_injected
-from services.git_service import _GITIGNORE_PATTERNS
+from utils.safe_yaml import (
+    AliasPolicy,
+    HardenedYamlError,
+    load_hardened_yaml,
+)
+
+from services.credential_charset import (
+    CREDENTIAL_DETECTOR_NAME_RE,
+    CREDENTIAL_DETECTOR_REF_RE,
+)
+from services.template_service import _is_platform_injected, declared_credential_names
+
+logger = logging.getLogger(__name__)
 
 # A check result: (status, message, detail)
 Result = Tuple[str, str, Optional[Dict[str, Any]]]
@@ -76,8 +88,15 @@ def _parse_yaml(content: Optional[str]) -> Tuple[Optional[Any], Optional[str]]:
     if content is None:
         return None, "content unavailable"
     try:
-        return yaml.safe_load(content), None
-    except yaml.YAMLError as e:
+        # ent#314: the snapshot is agent-authored workspace content. REJECT,
+        # because every check here walks the parsed structure and no legitimate
+        # workspace file needs an alias.
+        return load_hardened_yaml(
+            content, kind="workspace_yaml", alias_policy=AliasPolicy.REJECT
+        ), None
+    except (yaml.YAMLError, HardenedYamlError) as e:
+        # HardenedYamlError is a ValueError: without it a refused document would
+        # escape this helper instead of becoming the (None, reason) it promises.
         return None, str(e).splitlines()[0] if str(e) else "invalid YAML"
 
 
@@ -92,7 +111,12 @@ def _template(snap: Dict[str, Any]) -> Tuple[Optional[dict], Optional[str]]:
     return (data if isinstance(data, dict) else {}), None
 
 
-_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The shared detector charset (services/credential_charset.py). This finder was
+# already the wide one; naming the constant is what stops a future "align the
+# regexes" pass from narrowing it to match `_env_example_vars` — the wrong
+# direction, because the substitution engines accept the wide form. Read that
+# module's NON-MEMBERS list before touching any sibling pattern.
+_VAR_RE = CREDENTIAL_DETECTOR_REF_RE
 
 
 def _mcp_vars(snap: Dict[str, Any]) -> List[str]:
@@ -124,8 +148,14 @@ def _env_example_vars(snap: Dict[str, Any]) -> List[str]:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # The shared detector charset, NOT uppercase-only. This reader is the
+        # `provided` side of K-001 (HARD) and the `has_vars` precondition of
+        # K-003 (SOFT): an uppercase-only view made a correctly documented
+        # `my_var=` invisible, so K-001 HARD-failed a template that documents
+        # every variable it references. `.strip()` above is load-bearing — the
+        # validator anchors with `\Z`. (ent#128)
         name = line.split("=", 1)[0].strip()
-        if re.match(r"^[A-Z][A-Z0-9_]*$", name):
+        if CREDENTIAL_DETECTOR_NAME_RE.match(name):
             out.append(name)
     return out
 
@@ -228,9 +258,26 @@ def c_f003(snap):  # .gitignore exists
         else _fail(".gitignore is missing — secrets may be committed on first sync")
 
 
-def c_f004(snap):  # .env.example exists
-    return _ok(".env.example present") if _exists(snap, ".env.example") \
-        else _fail(".env.example is missing — users can't tell what credentials to provide")
+def c_f004(snap):  # .env.example exists when credentials are declared
+    """SOFT, conditional (#2137).
+
+    Unconditionally demanding `.env.example` SOFT-failed every credential-free
+    agent for a file that would document nothing. K-001 already covers the case
+    that matters at HARD (a `${VAR}` in `.mcp.json.template` with no
+    `.env.example` entry); this now fires only when the agent declares
+    credentials somewhere and still ships no example file.
+    """
+    if _exists(snap, ".env.example"):
+        return _ok(".env.example present")
+    data, _err = _template(snap)
+    declares_creds = bool(
+        _mcp_vars(snap)
+        or (isinstance(data, dict) and data.get("credentials"))
+        or (isinstance(data, dict) and data.get("mcp_servers"))
+    )
+    if not declares_creds:
+        return _ok("no credentials declared — .env.example not required")
+    return _fail(".env.example is missing — users can't tell what credentials to provide")
 
 
 def c_f005(snap):  # .mcp.json.template exists if MCP servers declared
@@ -257,11 +304,6 @@ def c_f007(snap):  # .trinity/setup.sh when system packages referenced
                    "(installs won't persist across restarts)")
 
 
-def c_f008(snap):  # .claude/commands/ exists
-    return _ok(".claude/commands/ present") if _dir_list(snap, ".claude/commands") is not None \
-        else _fail(".claude/commands/ directory is missing")
-
-
 def c_f009(snap):  # at least one skill or command file
     return _ok("skills/commands present") if _skill_files(snap) \
         else _fail("no skill or command files found")
@@ -275,16 +317,6 @@ def c_f010(snap):  # dashboard.yaml
 def c_f011(snap):  # ARCHITECTURE.md
     return _ok("architecture doc present") if (_exists(snap, "ARCHITECTURE.md") or _exists(snap, "docs/architecture.md")) \
         else _fail("ARCHITECTURE.md (or docs/architecture.md) is missing")
-
-
-def c_f012(snap):  # requirements doc
-    return _ok("requirements doc present") if (_exists(snap, "docs/memory/requirements.md") or _exists(snap, "REQUIREMENTS.md")) \
-        else _fail("docs/memory/requirements.md (or REQUIREMENTS.md) is missing")
-
-
-def c_f013(snap):  # CHANGELOG.md
-    return _ok("CHANGELOG.md present") if _exists(snap, "CHANGELOG.md") \
-        else _fail("CHANGELOG.md is missing")
 
 
 # ===========================================================================
@@ -320,12 +352,20 @@ def c_s004(snap):  # .claude/projects/ ignored
         else _fail(".claude/projects/ is not excluded — Claude Code session history would be committed")
 
 
-def c_s005(snap):  # .trinity/ ignored
-    # ".trinity/*" satisfies the same intent: Brain-Orb templates use it with a
-    # "!.trinity/brain-orb/" re-include so committed hooks stay tracked while
-    # runtime state stays ignored (trinity-enterprise#76). Git can't re-include
-    # under a dir-form exclusion, so the star-form is the only committable shape.
-    return _ok(".trinity/ is gitignored") if _has_ignore(snap, ".trinity/", ".trinity", ".trinity/*") \
+def c_s005(snap):  # .trinity/ runtime state ignored
+    # ".trinity/*" is the CANONICAL shape since #2070: git cannot re-include a
+    # path under a dir-form exclusion (it never descends into the directory),
+    # so the star form is the only one under which the authored hooks
+    # — pre-check, post-check, setup.sh, brain-orb/, pipelines/ — can stay
+    # tracked while runtime state stays ignored.
+    #
+    # The dir-forms are still ACCEPTED rather than failed: they do exclude the
+    # runtime state this check is about, which is what it grades. A template on
+    # the dir-form that also commits a hook is the #2070 case, and the fleet
+    # merge repairs it on the next Push by replacing that exact line — grading
+    # it a failure here would report a problem the platform fixes itself.
+    return _ok(".trinity/ runtime state is gitignored") \
+        if _has_ignore(snap, ".trinity/*", ".trinity/", ".trinity") \
         else _fail(".trinity/ is not excluded — platform runtime state would be committed")
 
 
@@ -474,25 +514,7 @@ def c_t011(snap):
                           else _fail("template.yaml 'capabilities' array is missing"))
 
 
-def c_t012(snap):
-    def f(d):
-        declared = d.get("mcp_servers")
-        actual = set(_mcp_server_names(snap))
-        if not actual:
-            return _ok("no MCP servers in .mcp.json.template")
-        declared_names = set()
-        if isinstance(declared, list):
-            for s in declared:
-                if isinstance(s, dict) and s.get("name"):
-                    declared_names.add(s["name"])
-                elif isinstance(s, str):
-                    declared_names.add(s)
-        missing = sorted(actual - declared_names)
-        if missing:
-            return _fail("MCP servers in .mcp.json.template not described in template.yaml",
-                         {"missing": missing})
-        return _ok("mcp_servers match .mcp.json.template")
-    return _with_template(snap, f)
+_CREDENTIAL_SECTION_KEYS = frozenset({"mcp_servers", "env_file", "config_files"})
 
 
 def c_t015(snap):
@@ -503,13 +525,37 @@ def c_t015(snap):
         creds = d.get("credentials") or {}
         listed = set()
         if isinstance(creds, dict):
-            listed = set(creds.keys())
+            listed = set(creds.keys()) - _CREDENTIAL_SECTION_KEYS
         elif isinstance(creds, list):
             for c in creds:
                 if isinstance(c, dict) and c.get("name"):
                     listed.add(c["name"])
                 elif isinstance(c, str):
                     listed.add(c)
+        # The STRUCTURED form is the documented one, and it declares variables one
+        # level deeper than `creds.keys()` ever looked — so
+        # `credentials.mcp_servers.stripe.env_vars: [STRIPE_API_KEY]` satisfied
+        # nothing and this HARD gate failed a correctly-declared template.
+        #
+        # Fails CLOSED, and only this term is wrapped. A raise degrades to the
+        # narrower set above — which makes `missing` LARGER, i.e. errs toward
+        # failing — and never to `skipped`. That direction is the whole point: a
+        # HARD gate that cannot evaluate must not become indistinguishable from a
+        # HARD gate that passed, and `c_k002` delegates here, so one raise would
+        # otherwise take BOTH gates dark together on four lines of untrusted YAML.
+        # The `isinstance` filter is redundant against
+        # `declared_credential_names`' own contract, deliberately: the gate must
+        # not depend on that contract holding.
+        try:
+            listed |= {
+                name for name in declared_credential_names(creds) if isinstance(name, str)
+            }
+        except Exception as e:  # noqa: BLE001 — fail CLOSED, keep the narrow verdict
+            logger.warning(
+                "T-015: credential declaration unreadable (%s); comparing against "
+                "section names only",
+                e,
+            )
         missing = sorted(v for v in mcp_vars if v not in listed and not _is_platform_injected(v))
         if missing:
             return _fail("MCP ${VAR}s not listed in template.yaml credentials", {"missing": missing})
@@ -517,30 +563,43 @@ def c_t015(snap):
     return _with_template(snap, f)
 
 
-def c_t016(snap):
-    def f(d):
-        schedules = d.get("schedules") or []
-        cmds = set(_command_names(snap))
-        missing = []
-        for s in schedules if isinstance(schedules, list) else []:
-            msg = (s.get("message") if isinstance(s, dict) else "") or ""
-            name = _slash_command(msg)
-            if name and name not in cmds:
-                missing.append(name)
-        if missing:
-            return _fail("schedule messages reference missing commands", {"missing": sorted(set(missing))})
-        return _ok("schedule messages reference existing commands")
-    return _with_template(snap, f)
+def c_t018(snap):
+    """STATIC: the `schedules:` block is STRUCTURALLY well-formed (ent#89).
 
-
-def c_t017(snap):
+    Structure only — presence and type of `name`/`cron`/`message`, entry shape,
+    block shape, and the declared-schedule cap. It deliberately does NOT report
+    cron syntax: A-002 already ships as "cron expressions are valid", and two
+    contradicting cron authorities in the same report on the same field is
+    worse than either alone. (The *reader* validates cron strictly, but that is
+    a materialization gate — drop the entry — not a report verdict.)
+    """
     def f(d):
-        git = d.get("git") or {}
-        paths = git.get("commit_paths") or []
-        bad = [p for p in paths if p in (".env", ".mcp.json", ".mcp.json.template")]
-        if bad:
-            return _fail("git.commit_paths includes Trinity-injected files", {"paths": bad})
-        return _ok("commit_paths do not overwrite injected files")
+        try:
+            from services.template_schedules import schedule_shape_errors
+            errors = schedule_shape_errors(d.get("schedules"))
+        except Exception as e:  # noqa: BLE001
+            # Fail CLOSED, deliberately, and against the grain of every other
+            # check here. `run_static` converts a raise into `skipped`, and
+            # `_counts` (compatibility/__init__.py) counts only `status ==
+            # "fail"` — so a raising SOFT check drops soft_count 1->0 and, since
+            # `overall` is a bare `> 0` test, flips the whole report from
+            # `issues` to `compatible` exactly when this check's finding was the
+            # only failure. That is the entire population T-018 exists to serve.
+            # Worse, `build_report` persists `checks_json` and
+            # `_report_from_persisted` recomputes counts from it, so one
+            # transient raise is replayed as a clean bill of health on every
+            # stopped-agent read. A check whose whole purpose is
+            # malformed-input tolerance must not rely on that fail-open net.
+            #
+            # Type name ONLY: `detail` is persisted to
+            # agent_compatibility_results.checks_json and rendered in the UI,
+            # and `str(e)` can embed untrusted template content.
+            return _fail("schedules block could not be evaluated",
+                         {"error_type": type(e).__name__})
+        if errors:
+            return _fail("template.yaml `schedules:` entries are malformed",
+                         {"errors": errors[:25]})
+        return _ok("schedules block entries are well-formed")
     return _with_template(snap, f)
 
 
@@ -587,11 +646,6 @@ def c_k001(snap):
     return _ok("all MCP variables documented in .env.example")
 
 
-def c_k002(snap):
-    # Same documentation gap but against template.yaml credentials — reuse T-015's logic.
-    return c_t015(snap) if _mcp_vars(snap) else _ok("no MCP credential variables")
-
-
 def c_k003(snap):
     content = _content(snap, ".env.example")
     if not content:
@@ -635,51 +689,6 @@ def c_g001(snap):
         return _fail(".claude/ is excluded wholesale — commits/skills/agents won't reach Trinity",
                      {"lines": blanket})
     return _ok(".claude/ is not wholesale excluded")
-
-
-def c_g002(snap):
-    if not _exists(snap, ".gitignore"):
-        return _skip(".gitignore missing (see F-003)", "no_gitignore")
-    lines = set(_gitignore_lines(snap))
-    missing = [p for p in _GITIGNORE_PATTERNS if p not in lines]
-    if missing:
-        return _fail(f".gitignore is missing {len(missing)} canonical pattern(s)", {"missing": missing[:40]})
-    return _ok(".gitignore follows the canonical pattern list")
-
-
-def c_g003(snap):
-    def f(d):
-        git = d.get("git") or {}
-        paths = git.get("commit_paths") or []
-        bad = [p for p in paths if p in (".env", ".mcp.json") or str(p).startswith("content")]
-        if bad:
-            return _fail("git.commit_paths includes secrets or content/", {"paths": bad})
-        return _ok("commit_paths exclude secrets and content/")
-    return _with_template(snap, f)
-
-
-def c_g004(snap):
-    def f(d):
-        git = d.get("git") or {}
-        if "ignore_paths" not in git:
-            return _ok("no git.ignore_paths declared")
-        ignore = git.get("ignore_paths") or []
-        missing = [p for p in (".env", ".mcp.json") if p not in ignore]
-        if missing:
-            return _fail("git.ignore_paths should include .env and .mcp.json", {"missing": missing})
-        return _ok("git.ignore_paths include credential files")
-    return _with_template(snap, f)
-
-
-def c_g005(snap):
-    def f(d):
-        git = d.get("git") or {}
-        if "push_enabled" in git:
-            return _ok("git.push_enabled is explicit")
-        if not git:
-            return _ok("no git config declared")
-        return _fail("git.push_enabled is left to the platform default — declare it explicitly")
-    return _with_template(snap, f)
 
 
 # ===========================================================================
@@ -734,8 +743,19 @@ def c_p002(snap):
 
 
 def c_p004(snap):
+    """SOFT: each SKILL.md is under 500 lines.
+
+    #2137: this walked EVERY `.md` under `.claude/skills/` (that is what
+    `_skill_files` collects), so it flagged the very `reference.md` /
+    `examples.md` companions that P-009 tells authors to create — the catalog
+    contradicting itself. Scoped to `SKILL.md`, matching P-002's existing
+    scope, the two form a ladder: P-009 suggests splitting a SKILL.md past
+    ~200 lines, P-004 fails one past 500.
+    """
     big = []
     for rel, info in _skill_files(snap).items():
+        if not rel.endswith("SKILL.md") and "/commands/" not in rel:
+            continue  # companion reference/examples file — P-009's output, not a defect
         content = info.get("content")
         if content is None:
             if info.get("truncated"):
@@ -744,8 +764,8 @@ def c_p004(snap):
         if content.count("\n") + 1 > 500:
             big.append(rel)
     if big:
-        return _fail("skill files exceed 500 lines", {"files": big[:25]})
-    return _ok("all skill files are under 500 lines")
+        return _fail("SKILL.md files exceed 500 lines", {"files": big[:25]})
+    return _ok("all SKILL.md files are under 500 lines")
 
 
 _APPROVAL_PATTERNS = [
@@ -757,6 +777,25 @@ _APPROVAL_PATTERNS = [
 _APPROVAL_RE = re.compile("(?i)(" + "|".join(_APPROVAL_PATTERNS) + ")")
 
 
+def _automation_mode(content: str) -> Optional[str]:
+    """The skill's declared `automation:` mode, or None.
+
+    The marketplace convention (`autonomous | gated | manual`) is the author's
+    own statement about whether a human is expected in the loop. Parsed off the
+    YAML frontmatter via the same hardened loader every other frontmatter read
+    uses — never a bare regex over the body, which would let a mention of the
+    word in prose flip a HARD check off.
+    """
+    m = _FRONTMATTER_RE.match(content or "")
+    if not m:
+        return None
+    data, err = _parse_yaml(m.group(1))
+    if err or not isinstance(data, dict):
+        return None
+    mode = data.get("automation")
+    return str(mode).strip().lower() if isinstance(mode, str) else None
+
+
 def c_p006(snap):
     """STATIC (deviation from doc AI): scan autonomous/scheduled skills for
     approval gates that would hang a scheduled run. Targets the command files
@@ -764,7 +803,15 @@ def c_p006(snap):
     data, _err = _template(snap)
     scheduled_cmds = set()
     if isinstance(data, dict):
-        for s in (data.get("schedules") or []):
+        # ent#89: `isinstance(..., list)` was MISSING here, unlike all four
+        # sibling readers of this field (c_t016, c_a001, c_a002, c_x007). A
+        # template with `schedules: 5` raised `TypeError: 'int' object is not
+        # iterable`, `run_static` swallowed it into `skipped`, and `_counts`
+        # ignores `skipped` — so this HARD check silently vanished from
+        # hard_count. A live instance of the exact fail-open class T-018 above
+        # guards against.
+        schedules = data.get("schedules")
+        for s in (schedules if isinstance(schedules, list) else []):
             msg = (s.get("message") if isinstance(s, dict) else "") or ""
             name = _slash_command(msg)
             if name:
@@ -772,18 +819,32 @@ def c_p006(snap):
     if not scheduled_cmds:
         return _ok("no scheduled/autonomous skills declared")
     hits = []
+    gated = []
     skills = _skill_files(snap)
     for name in scheduled_cmds:
         for rel, info in skills.items():
             if rel.endswith(f"commands/{name}.md") or rel.endswith(f"skills/{name}/SKILL.md"):
                 content = info.get("content") or ""
+                # #2137: a skill that gates BY DESIGN is not a defect. The
+                # marketplace already carries an `automation:` frontmatter
+                # convention (`autonomous | gated | manual`); an explicit
+                # `gated`/`manual` is the author telling us the human pause is
+                # intentional, so reporting it HARD is reporting their design
+                # back at them. Only the DEFAULT (absent, or an explicit
+                # `autonomous`) is held to "must not hang".
+                if _automation_mode(content) in ("gated", "manual"):
+                    gated.append({"file": rel, "mode": _automation_mode(content)})
+                    continue
                 for i, line in enumerate(content.splitlines(), start=1):
                     if _APPROVAL_RE.search(line):
                         hits.append({"file": rel, "line": i})
                         break
     if hits:
         return _fail("autonomous/scheduled skill contains an approval gate (would hang the run)",
-                     {"matches": hits[:25]})
+                     {"matches": hits[:25], "opt_out": "declare `automation: gated` in the skill "
+                                                       "frontmatter if the pause is intentional"})
+    if gated:
+        return _ok("scheduled skills that gate do so by declaration", {"declared_gated": gated[:25]})
     return _ok("autonomous skills contain no approval gates")
 
 
@@ -791,33 +852,104 @@ def c_p006(snap):
 # A — Autonomy Design (static parts)
 # ===========================================================================
 
+# A slash command may appear ANYWHERE in a schedule message, not only at
+# position 0 (#2137). The marketplace's own generated schedules are the proof:
+# `add-pipeline` writes `message: "Run /pipeline-tick"`, `add-orchestrator`
+# writes `"Run /project-steward"`, `trinity:onboard` writes `"Run /weekly-report
+# and post the summary"`. The old `re.match(r"^\s*/...")` anchored at position 0
+# and saw none of them — so P-006 (HARD: approval gates would hang an autonomous
+# run) resolved zero command names and returned "no scheduled/autonomous skills
+# declared" on exactly the agents it exists to guard, and X-007/T-016 passed
+# vacuously.
+#
+# Two guards keep a filesystem path from being read as a command — X-007 turns a
+# resolved name into a SOFT "references a command that doesn't exist", so a false
+# positive here manufactures exactly the unactionable finding #2137 removes:
+#
+#   1. `(?<![^\s(\[])` requires the `/` to START a token (preceded by
+#      start-of-string, whitespace, `(` or `[`), so `reports/daily` and the
+#      `//` and `/status` in `https://x/status` are all skipped.
+#   2. The matched token must not be followed by `/` — a command is a single
+#      segment, a path is not. Checked in CODE rather than with a `(?!/)`
+#      lookahead, because the regex engine would simply backtrack the greedy
+#      name class and match `/et` out of `/etc/passwd`.
+#
+# So `"Check /var/log/app.log for errors"` yields no command at all, while
+# `"Run /weekly-report and post the summary"` yields `weekly-report`. The first
+# qualifying match wins: a message naming two commands is ambiguous, and the
+# single-valued callers (P-006's `scheduled_cmds`, X-007's `missing`) expect one.
+_SLASH_COMMAND_RE = re.compile(r"(?<![^\s(\[])/([A-Za-z0-9][A-Za-z0-9_\-]*)")
+
+
 def _slash_command(message: str) -> Optional[str]:
-    m = re.match(r"^\s*/([A-Za-z0-9][A-Za-z0-9_\-]*)", message or "")
-    return m.group(1) if m else None
+    text = message or ""
+    for m in _SLASH_COMMAND_RE.finditer(text):
+        if m.end() < len(text) and text[m.end()] == "/":
+            continue  # `/etc/passwd` — a path segment, not a command
+        return m.group(1)
+    return None
 
 
 def _command_names(snap) -> List[str]:
+    """Every name an agent's schedule message could invoke as `/name`.
+
+    #2137: this globbed ONLY `.claude/commands/`, so it was blind to the single
+    layout the `create-agent` wizards produce — `.claude/skills/<name>/SKILL.md`.
+    X-007 ("scheduled messages match existing skills/commands") therefore
+    reported a false failure for every skill-based agent that named a real
+    skill. Both layouts now resolve, so X-007 passes on a skill-based agent and
+    still fails on a genuinely missing target.
+    """
     out = []
     for rel in _skill_files(snap):
+        base = rel.rsplit("/", 1)[-1]
         if "/commands/" in rel or rel.startswith(".claude/commands/"):
-            base = rel.rsplit("/", 1)[-1]
             if base.endswith(".md"):
                 out.append(base[:-3])
-    listing = _dir_list(snap, ".claude/commands") or []
-    for fn in listing:
-        if fn.endswith(".md"):
-            out.append(fn[:-3])
+        elif base == "SKILL.md":
+            # `.claude/skills/<name>/SKILL.md` -> `<name>`; a nested
+            # `<name>/<sub>/SKILL.md` is invoked as `<sub>`, so take the parent
+            # directory in both cases.
+            parts = rel.split("/")
+            if len(parts) >= 2:
+                out.append(parts[-2])
+    for base_dir in (".claude/commands", ".claude/skills"):
+        for fn in _dir_list(snap, base_dir) or []:
+            if base_dir.endswith("commands"):
+                if fn.endswith(".md"):
+                    out.append(fn[:-3])
+            elif not fn.endswith(".md"):
+                # A skills/ listing entry is a directory name == the skill name.
+                out.append(fn)
     return sorted(set(out))
 
 
-_CRON_FIELD = re.compile(r"^[\d*/,\-]+$")
-
-
 def _valid_cron(expr: str) -> bool:
-    parts = (expr or "").split()
-    if len(parts) != 5:
+    r"""True if the dedicated scheduler would accept this cron expression.
+
+    ent#89: this was a per-field `^[\d*/,\-]+$` regex, which was wrong in BOTH
+    directions — it rejected `0 9 * * MON` (valid; the scheduler translates
+    named days) and accepted `99 99 * * *` (invalid; no range check). So A-002
+    reported "cron expressions are valid" for an expression creation silently
+    drops, and flagged one that works. Delegate to the same validator the
+    scheduler registers with (#1472): *validate a config with the SAME parser
+    the executor uses.*
+
+    Imported inside the function so `apscheduler`/`pytz` stay off this module's
+    load path — `static_checks` is imported by the templates router on every
+    catalog request.
+    """
+    from services.schedule_validation import (
+        ScheduleValidationError,
+        validate_cron_expression,
+    )
+    try:
+        validate_cron_expression(expr)
+    except ScheduleValidationError:
         return False
-    return all(_CRON_FIELD.match(p) for p in parts)
+    except Exception:  # noqa: BLE001 — an unexpected shape is still "not valid"
+        return False
+    return True
 
 
 def c_a001(snap):
@@ -826,11 +958,13 @@ def c_a001(snap):
         prose = []
         for s in schedules if isinstance(schedules, list) else []:
             msg = (s.get("message") if isinstance(s, dict) else "") or ""
-            if msg and not msg.strip().startswith("/"):
+            if msg and not _slash_command(msg):
                 prose.append((s.get("name") if isinstance(s, dict) else None) or msg[:40])
         if prose:
-            return _fail("scheduled messages use raw prose instead of slash commands", {"schedules": prose[:25]})
-        return _ok("scheduled messages reference slash commands")
+            return _fail("scheduled messages name no slash command — a named skill "
+                         "(e.g. \"Run /weekly-report\") dispatches more deterministically "
+                         "than prose", {"schedules": prose[:25]})
+        return _ok("scheduled messages reference a slash command")
     return _with_template(snap, f)
 
 
@@ -959,23 +1093,6 @@ def c_d005(snap):
     return _with_dashboard(snap, f)
 
 
-def c_d006(snap):
-    def f(d):
-        metrics = d.get("metrics")
-        if not metrics:
-            return _ok("no metrics declared")
-        names = []
-        if isinstance(metrics, dict):
-            names = list(metrics.keys())
-        elif isinstance(metrics, list):
-            names = [m.get("name") for m in metrics if isinstance(m, dict) and m.get("name")]
-        bad = [n for n in names if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", str(n))]
-        if bad:
-            return _fail("metric names are not valid keys", {"names": bad})
-        return _ok("metric names are valid")
-    return _with_template(snap, f)
-
-
 def c_d008(snap):
     def f(widgets):
         _d, _w, err = _dashboard(snap)
@@ -1056,56 +1173,195 @@ def c_x007(snap):
 # ===========================================================================
 # I — Composability (static parts)
 # ===========================================================================
-
-def c_i005(snap):
-    data, _err = _template(snap)
-    declares_contract = False
-    if isinstance(data, dict) and ("output_format" in data or "output_schema" in data):
-        declares_contract = True
-    if _dir_list(snap, "schemas") is not None:
-        declares_contract = True
-    claude = (_content(snap, "CLAUDE.md") or "")
-    if re.search(r"(?i)output (?:format|contract|schema)", claude):
-        declares_contract = True
-    if not declares_contract:
-        return _ok("no output contract declared")
-    return _ok(".trinity/post-check present") if _exists(snap, ".trinity/post-check") \
-        else _fail("an output contract is declared but no .trinity/post-check validates it")
+# (I-005 retired in #2137 — `.trinity/post-check` has no executor anywhere in
+# the platform; its only other mention was a git_service comment pointing back
+# at this check.)
 
 
-# ---------------------------------------------------------------------------
-# Registry — keyed by check id (consistency-tested against spec.STATIC_IDS).
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# DP — Runtime Data Paths (#1169, implemented #2137)
+# ===========================================================================
+
+# Paths that are materialized and managed by their OWN mechanism. A data_paths
+# entry overlapping one of these creates ambiguous ownership and double-handling.
+_DP_MANAGED_PREFIXES = (".trinity/", ".claude/", ".env", ".mcp.json")
+
+
+def _dp_norm(path: str) -> str:
+    """Normalize a data_paths entry for prefix comparison.
+
+    Strips a leading `./` — as a PREFIX. `str.lstrip("./")` strips a character
+    SET, which turns `.trinity/state.json` into `trinity/state.json` and makes
+    every `.`-prefixed managed path unmatchable.
+    """
+    p = str(path).strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _declared_data_paths(d: dict) -> Tuple[List[str], bool]:
+    """(entries, declared). `declared` distinguishes "absent" from "empty list"."""
+    raw = d.get("data_paths")
+    if raw is None:
+        return [], False
+    if not isinstance(raw, list):
+        return [], True  # declared but malformed — DP-001 reports the shape
+    return [str(x).strip() for x in raw if str(x).strip()], True
+
+
+def c_dp001(snap):
+    """HARD: every data_paths entry resolves under `data/`.
+
+    An entry that escapes the data root is never snapshotted by
+    export/import (#1169), so the author believes their data is covered and it
+    silently is not — the reason this is the one HARD check in the category.
+
+    Shell-safety is checked with `git_service._is_safe_data_path`, the SAME
+    predicate `materialize_data_paths` uses to decide what to drop — imported
+    rather than reimplemented, for the reason A-002 delegates its cron parsing:
+    a checker that reimplements its executor's rule eventually disagrees with it.
+    Containment is checked HERE because the materializer deliberately does not
+    (its regex admits `..` and `/`), so this is new coverage, not a mirror.
+    """
+    def f(d):
+        entries, declared = _declared_data_paths(d)
+        if not declared:
+            return _ok("no data_paths declared")
+        raw = d.get("data_paths")
+        if not isinstance(raw, list):
+            return _fail("template.yaml `data_paths:` must be a list",
+                         {"found_type": type(raw).__name__})
+        if not entries:
+            return _ok("data_paths declared but empty")
+        from services.git_service import _is_safe_data_path
+        bad = []
+        for e in entries:
+            norm = _dp_norm(e)
+            if e.startswith("/") or e.startswith("~"):
+                bad.append({"path": e, "reason": "absolute"})
+            elif ".." in norm.split("/"):
+                bad.append({"path": e, "reason": "escapes_data_root"})
+            elif not (norm == "data" or norm.startswith("data/")):
+                # The check has to mean what its name says. `POST
+                # /api/agents/{name}/data/export` archives `/home/developer/data`
+                # and nothing else, so a plain relative entry like `outputs/*.csv`
+                # is just as unsnapshotted as `../escape` — it simply fails
+                # quietly instead of loudly. Absolute/`..` are only two of the
+                # ways to be outside the root; being outside it is the defect.
+                bad.append({"path": e, "reason": "outside_data_root"})
+            elif not _is_safe_data_path(e):
+                # Dropped verbatim by materialize_data_paths (#1169 L1).
+                bad.append({"path": e, "reason": "shell_metacharacters"})
+        if bad:
+            return _fail("data_paths entries do not resolve under data/", {"entries": bad[:25]})
+        return _ok(f"{len(entries)} data_paths entr{'y' if len(entries) == 1 else 'ies'} resolve under data/")
+    return _with_template(snap, f)
+
+
+def c_dp002(snap):
+    """SOFT: the `data/` root is gitignored when data_paths is declared.
+
+    SOFT, not the doc's HARD (#2137): `materialize_data_paths` appends `data/`
+    to the agent's own `.gitignore` at creation, so a violation is a platform
+    anomaly rather than an author defect — and the consequence (runtime data
+    committed to git) is bloat/leak, not the runtime breakage HARD denotes.
+    """
+    def f(d):
+        entries, declared = _declared_data_paths(d)
+        if not declared or not entries:
+            return _ok("no data_paths declared")
+        if not _exists(snap, ".gitignore"):
+            return _skip(".gitignore missing (see F-003)", "no_gitignore")
+        lines = set(_gitignore_lines(snap))
+        if lines & {"data/", "data", "/data/", "/data"}:
+            return _ok("data/ root is gitignored")
+        return _fail("data_paths is declared but the data/ root is not gitignored — "
+                     "runtime data will be committed on sync")
+    return _with_template(snap, f)
+
+
+def c_dp003(snap):
+    """SOFT: data_paths do not overlap separately-managed surfaces."""
+    def f(d):
+        entries, declared = _declared_data_paths(d)
+        if not declared or not entries:
+            return _ok("no data_paths declared")
+        managed = set(d.get("persistent_state") or []) if isinstance(d.get("persistent_state"), list) else set()
+        bad = []
+        managed_norm = {_dp_norm(m) for m in managed}
+        for e in entries:
+            norm = _dp_norm(e)
+            if norm.startswith(_DP_MANAGED_PREFIXES):
+                bad.append({"path": e, "conflicts_with": "platform-managed path"})
+            elif norm in managed_norm:
+                bad.append({"path": e, "conflicts_with": "persistent_state"})
+        if bad:
+            return _fail("data_paths overlap separately-managed paths", {"entries": bad[:25]})
+        return _ok("data_paths do not overlap managed paths")
+    return _with_template(snap, f)
+
+
+def c_dp004(snap):
+    """INFO: declaring data_paths makes the agent instance-local.
+
+    INFO, not the doc's SOFT (#2137): this reports a PROPERTY of the agent, not
+    a defect — there is no edit that "fixes" it, and an unactionable SOFT is
+    exactly the finding class this issue removes.
+    """
+    def f(d):
+        entries, declared = _declared_data_paths(d)
+        if not declared or not entries:
+            return _ok("no data_paths declared — agent is replica-safe")
+        return _fail("data_paths make this agent instance-local: its runtime data must "
+                     "travel via export/import, not template clone",
+                     {"data_paths": entries[:25]})
+    return _with_template(snap, f)
+
+
 STATIC_CHECKS = {
     "F-001": c_f001, "F-002": c_f002, "F-003": c_f003, "F-004": c_f004,
-    "F-005": c_f005, "F-006": c_f006, "F-007": c_f007, "F-008": c_f008,
-    "F-009": c_f009, "F-010": c_f010, "F-011": c_f011, "F-012": c_f012,
-    "F-013": c_f013,
+    "F-005": c_f005, "F-006": c_f006, "F-007": c_f007,
+    "F-009": c_f009, "F-010": c_f010, "F-011": c_f011,
     "S-001": c_s001, "S-002": c_s002, "S-003": c_s003, "S-004": c_s004,
     "S-005": c_s005, "S-006": c_s006, "S-007": c_s007, "S-008": c_s008,
     "S-009": c_s009, "S-010": c_s010,
     "T-001": c_t001, "T-002": c_t002, "T-003": c_t003, "T-004": c_t004,
     "T-005": c_t005, "T-006": c_t006, "T-007": c_t007, "T-008": c_t008,
-    "T-010": c_t010, "T-011": c_t011, "T-012": c_t012, "T-015": c_t015,
-    "T-016": c_t016, "T-017": c_t017,
+    "T-010": c_t010, "T-011": c_t011, "T-015": c_t015, "T-018": c_t018,
     "C-001": c_c001, "C-007": c_c007,
-    "K-001": c_k001, "K-002": c_k002, "K-003": c_k003, "K-004": c_k004,
-    "G-001": c_g001, "G-002": c_g002, "G-003": c_g003, "G-004": c_g004,
-    "G-005": c_g005,
+    "K-001": c_k001, "K-003": c_k003, "K-004": c_k004,
+    "G-001": c_g001,
     "P-001": c_p001, "P-002": c_p002, "P-004": c_p004, "P-006": c_p006,
     "A-001": c_a001, "A-002": c_a002, "A-004": c_a004,
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
-    "D-005": c_d005, "D-006": c_d006, "D-008": c_d008,
+    "D-005": c_d005, "D-008": c_d008,
     "X-003": c_x003, "X-004": c_x004, "X-007": c_x007,
-    "I-005": c_i005,
+    "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,
+    "DP-004": c_dp004,
 }
 
 
 def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Result]:
     """Run the requested static checks against a snapshot. Returns {id: result}.
 
-    A check that raises is captured as a "skipped" result with the error reason
-    rather than failing the whole report.
+    A check that raises is captured rather than propagated — one bad check must
+    never break the whole report — but it is captured as a **FAIL**, not a skip.
+
+    It used to be a skip, and `_counts` counts only `status == "fail"`, so a raise
+    inside a HARD check DROPPED `hard_count` and could flip `overall_status` from
+    `issues` to `compatible` on an agent with a real problem. Four lines of
+    untrusted `template.yaml` were enough (`env_vars: [{K: v}]` → the gate's set
+    comprehension raises `TypeError: unhashable type: 'dict'`), and because
+    `c_k002` delegates to `c_t015` one raise took both HARD gates dark together —
+    a result indistinguishable from a clean pass. `template.yaml` is read from the
+    agent's own workspace, so that is a self-attestation bypass on the surface
+    whose job is to police it.
+
+    A check that could not evaluate is not a check that passed. Individual checks
+    that CAN degrade meaningfully do so themselves and fail closed (see `c_t015`);
+    reaching this handler means an unanticipated shape, which is exactly what
+    should be visible.
     """
     out: Dict[str, Result] = {}
     for cid in check_ids:
@@ -1116,5 +1372,19 @@ def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Resu
         try:
             out[cid] = fn(snapshot)
         except Exception as e:  # noqa: BLE001 — one bad check never breaks the report
-            out[cid] = _skip(f"check error: {e}", "check_error")
+            # This swallow previously left NO trace anywhere AND dropped out of
+            # `_counts` (which counted only `status == "fail"`), so a broken
+            # validator reported "healthy" with nothing in the logs saying
+            # otherwise. Both halves are now closed: ent#128 flipped the result
+            # from `_skip` to `_fail` so a crashed check is counted, and ent#89
+            # added the log so all ~100 checks' failures are observable.
+            #
+            # ERROR with `exc_info`, not WARNING: the status alone says a check
+            # crashed but not where, and this handler is only reached by an
+            # unanticipated shape — the traceback is the whole diagnostic value.
+            logger.error("Static compatibility check %s raised: %s", cid, e,
+                         exc_info=True)
+            out[cid] = _fail(
+                f"check could not be evaluated: {e}", {"check_error": str(e)}
+            )
     return out

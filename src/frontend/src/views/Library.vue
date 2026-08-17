@@ -1,0 +1,575 @@
+<template>
+  <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
+    <NavBar />
+
+    <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+      <div class="px-4 sm:px-0">
+        <div class="flex justify-between items-center mb-8">
+          <div>
+            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Library</h1>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Installable assets for your fleet — agent templates, systems, and skills
+            </p>
+          </div>
+        </div>
+
+        <!-- Tab strip (ent#384). OverflowTabs is the contract's mandated
+             primitive; `Operations.vue`'s hand-rolled strip is NOT the
+             precedent to copy — only its `?tab=` URL handling is. The three
+             sections became tabs together, deliberately reversing ent#263's
+             stacked-sections choice for the whole page rather than
+             special-casing Skills, so the page keeps exactly one model. -->
+        <div class="mb-6 border-b border-gray-200 dark:border-gray-750">
+          <OverflowTabs :tabs="visibleTabs" v-model="activeTab" />
+        </div>
+
+        <!-- Agent Templates section (ent#263: the Library's first asset kind).
+             Owns its own loading/error/empty states so a templates failure
+             never blanks the skills section below. -->
+        <section v-show="activeTab === 'templates'" id="agent-templates" class="mb-12">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Agent Templates</h2>
+          <button
+            @click="fetchTemplates"
+            class="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+            title="Refresh templates"
+          >
+            <svg class="w-5 h-5" :class="{ 'animate-spin': loading }" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Loading state -->
+        <div v-if="loading && templates.length === 0" class="flex justify-center py-12">
+          <div class="flex items-center gap-3 text-gray-500 dark:text-gray-400">
+            <svg class="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span>Loading templates...</span>
+          </div>
+        </div>
+
+        <!-- Error state -->
+        <div v-else-if="error" class="text-center py-12">
+          <div class="text-status-danger-500 dark:text-status-danger-400 mb-4">
+            <svg class="w-12 h-12 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <p class="text-gray-600 dark:text-gray-400">{{ error }}</p>
+          <button @click="fetchTemplates" class="mt-4 text-action-primary-600 dark:text-action-primary-400 hover:text-action-primary-800 dark:hover:text-action-primary-300">
+            Try again
+          </button>
+        </div>
+
+        <!-- Templates grid -->
+        <div v-else>
+          <!-- Starter (local) Templates Section — same curated set as the
+               Create Agent modal; real starters first (#1513). -->
+          <div v-if="localTemplates.length > 0" class="mb-8">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+              <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Starter Templates
+              <span class="ml-2 text-sm font-normal text-gray-500 dark:text-gray-400">({{ localTemplates.length }})</span>
+            </h3>
+            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              <div
+                v-for="template in localTemplates"
+                :key="template.id"
+                class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-6 hover:shadow-lg dark:hover:shadow-gray-900/50 transition-shadow flex flex-col"
+              >
+                <div class="flex items-start justify-between mb-3">
+                  <div class="flex items-center">
+                    <div class="flex-shrink-0 w-10 h-10 rounded-full bg-action-primary-100 dark:bg-action-primary-900/50 flex items-center justify-center">
+                      <svg class="w-5 h-5 text-action-primary-600 dark:text-action-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </div>
+                    <div class="ml-3">
+                      <h3 class="text-lg font-medium text-gray-900 dark:text-white">{{ getDisplayName(template) }}</h3>
+                      <p class="text-xs text-gray-500 dark:text-gray-400">Bundled template</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Content area that grows -->
+                <div class="flex-grow">
+                  <p class="text-gray-600 dark:text-gray-300 text-sm mb-4 line-clamp-3">
+                    {{ template.description || 'No description available' }}
+                  </p>
+
+                  <!-- Stats row: Skills, MCPs, Credentials -->
+                  <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400 mb-4">
+                    <span v-if="template.skills?.length" class="flex items-center">
+                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      </svg>
+                      {{ template.skills.length }} skills
+                    </span>
+                    <span v-if="template.mcp_servers?.length" class="flex items-center">
+                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                      </svg>
+                      {{ template.mcp_servers.length }} MCPs
+                    </span>
+                    <span v-if="template.required_credentials?.length" class="flex items-center">
+                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                      </svg>
+                      {{ template.required_credentials.length }} credentials
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  @click="useTemplate(template)"
+                  class="w-full bg-action-primary-600 hover:bg-action-primary-700 text-white font-bold py-2 px-4 rounded transition-colors mt-auto"
+                >
+                  Use Template
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- GitHub Templates Section
+
+               #1931: renders whenever the catalog has anything at all, not
+               only when there are GitHub entries. With DEFAULT_GITHUB_TEMPLATE_REPOS
+               emptied, a default install has zero of them, and the old
+               `v-if="githubTemplates.length > 0"` made the whole section
+               VANISH — honouring "empty states teach the next action" only by
+               accident (it had never been zero before).
+
+               The condition is just `!noTemplatesAtAll`: githubTemplates is a
+               filter over `templates`, so `githubTemplates.length > 0` already
+               implies `!noTemplatesAtAll`. The wholly-empty case belongs to
+               the page-level empty state below — the two are mutually
+               exclusive by construction and can never stack. -->
+          <div v-if="!noTemplatesAtAll" class="mb-8">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+              <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+              </svg>
+              GitHub Templates
+              <span v-if="githubTemplates.length > 0" class="ml-2 text-sm font-normal text-gray-500 dark:text-gray-400">({{ githubTemplates.length }})</span>
+            </h3>
+            <div v-if="githubTemplates.length > 0" class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              <div
+                v-for="template in githubTemplates"
+                :key="template.id"
+                class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-6 hover:shadow-lg dark:hover:shadow-gray-900/50 transition-shadow flex flex-col"
+              >
+                <div class="flex items-start justify-between mb-3">
+                  <div class="flex items-center">
+                    <div class="flex-shrink-0 w-10 h-10 rounded-full bg-gray-900 dark:bg-gray-700 flex items-center justify-center">
+                      <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                      </svg>
+                    </div>
+                    <div class="ml-3">
+                      <h3 class="text-lg font-medium text-gray-900 dark:text-white">{{ getDisplayName(template) }}</h3>
+                      <p class="text-xs text-gray-500 dark:text-gray-400">{{ template.github_repo }}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Content area that grows -->
+                <div class="flex-grow">
+                  <p class="text-gray-600 dark:text-gray-300 text-sm mb-4 line-clamp-3">
+                    {{ template.description || 'No description available' }}
+                  </p>
+
+                  <!-- Stats row: Skills, MCPs, Credentials -->
+                  <div class="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400 mb-4">
+                    <span v-if="template.skills?.length" class="flex items-center">
+                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      </svg>
+                      {{ template.skills.length }} skills
+                    </span>
+                    <span v-if="template.mcp_servers?.length" class="flex items-center">
+                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                      </svg>
+                      {{ template.mcp_servers.length }} MCPs
+                    </span>
+                    <span v-if="template.required_credentials?.length" class="flex items-center">
+                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                      </svg>
+                      {{ template.required_credentials.length }} credentials
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  @click="useTemplate(template)"
+                  class="w-full bg-action-primary-600 hover:bg-action-primary-700 text-white font-bold py-2 px-4 rounded transition-colors mt-auto"
+                >
+                  Use Template
+                </button>
+              </div>
+            </div>
+
+            <!-- #1931: zero GitHub templates. Marketplace first — the
+                 abilityai/abilities wizards are the recommended way to build an
+                 agent and they exist today; a fresh install's Settings panel
+                 does not. The owner/repo action is the secondary "I already
+                 have a repo" path, offered to BOTH roles so a non-admin is
+                 never left with only an action they cannot take. Only the
+                 curation hint branches on role, mirroring
+                 LibrarySkillsSection.vue on this same page. -->
+            <div v-else class="grid grid-cols-1 gap-6">
+              <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-6 border-2 border-dashed border-gray-300 dark:border-gray-600">
+                <div class="text-center py-4 max-w-2xl mx-auto">
+                  <div class="mx-auto w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center mb-4">
+                    <svg class="w-6 h-6 text-gray-400 dark:text-gray-500" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                    </svg>
+                  </div>
+                  <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No GitHub templates configured</h3>
+                  <p class="text-gray-600 dark:text-gray-300 text-sm mb-4">
+                    Trinity ships none by default. The recommended way to build an agent is the
+                    <a
+                      href="https://github.com/abilityai/abilities"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-action-primary-600 dark:text-action-primary-400 hover:underline font-medium"
+                    >abilityai/abilities</a>
+                    marketplace — install its <code class="text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700">create-agent</code>
+                    plugin in Claude Code and its wizards scaffold a Trinity-ready agent repository for you.
+                  </p>
+                  <p class="text-gray-500 dark:text-gray-400 text-sm mb-6">
+                    Already have a repository? Create an agent from it directly.
+                  </p>
+                  <button
+                    @click="useTemplate({ id: 'github-custom' })"
+                    class="w-full sm:w-auto sm:px-8 bg-action-primary-600 hover:bg-action-primary-700 text-white font-bold py-2 px-4 rounded transition-colors"
+                  >
+                    Create from a GitHub repository
+                  </button>
+                  <p v-if="isAdmin" class="mt-6 text-xs text-gray-500 dark:text-gray-400">
+                    To list repositories here for everyone, curate them under
+                    <router-link to="/settings?tab=agents" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Settings → GitHub Templates</router-link>.
+                  </p>
+                  <p v-else class="mt-6 text-xs text-gray-500 dark:text-gray-400">
+                    To list repositories here for everyone, ask an admin to add them under Settings → GitHub Templates.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Create Custom Agent Card -->
+          <div class="mb-8">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+              <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+              </svg>
+              Custom Agent
+            </h3>
+            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-6 border-2 border-dashed border-gray-300 dark:border-gray-600 hover:border-action-primary-300 dark:hover:border-action-primary-500 transition-colors">
+                <div class="text-center py-4">
+                  <div class="mx-auto w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center mb-4">
+                    <svg class="w-6 h-6 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                  </div>
+                  <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Blank Agent</h3>
+                  <p class="text-gray-600 dark:text-gray-300 text-sm mb-6">
+                    Start with an empty configuration and customize everything
+                  </p>
+                  <button
+                    @click="useTemplate(null)"
+                    class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded transition-colors"
+                  >
+                    Create Blank Agent
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Empty state -->
+          <div v-if="templates.length === 0 && !loading" class="text-center py-12">
+            <svg class="w-16 h-16 mx-auto text-gray-300 dark:text-gray-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <p class="text-gray-500 dark:text-gray-400 text-lg mb-2">No templates configured</p>
+            <!-- #1931: was "Configure GitHub templates in config.py …" — config.py
+                 is not an operator surface, and its default list is now empty by
+                 design. Name the two actions an operator can actually take. -->
+            <p class="text-gray-400 dark:text-gray-500 text-sm">Add a GitHub repository under Settings → GitHub Templates, or add a template directory to <code>config/agent-templates/</code>.</p>
+          </div>
+        </div>
+        </section>
+
+        <!-- Systems section (ent#126: the Library's third asset kind).
+             Sits next to Agent Templates because both install agents — a
+             template creates one, a manifest creates a whole fleet with its
+             permissions, schedules and shared folders already wired. Skills
+             stays last: it configures agents that already exist.
+
+             Hidden entirely below `creator` rather than shown-and-disabled:
+             deploying is gated by POST /api/systems/deploy's own
+             require_role("creator") (AC #6), and an operator who cannot use
+             it gains nothing from seeing a dead panel in a browse surface.
+             Owns its own state, isolated from the fetches around it. -->
+        <section
+          v-if="canInstallSystems && visited.has('systems')"
+          v-show="activeTab === 'systems'"
+          id="systems"
+          class="mb-12"
+        >
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Systems</h2>
+          </div>
+          <p class="mb-4 text-sm text-gray-500 dark:text-gray-400">
+            Install a multi-agent system from a manifest — pick a bundled one, upload a
+            file, or paste YAML. Preview shows exactly what it would create before anything runs.
+          </p>
+          <SystemInstallPanel />
+        </section>
+
+        <!-- Skills section (ent#263): fleet-level browse over the shared
+             skills library. Assignment stays on each agent's Skills tab
+             (ent#182: one skill model, no parallel mechanisms); this section
+             owns its own loading/error/empty states, isolated from the
+             templates fetch above. -->
+        <section v-if="visited.has('skills')" v-show="activeTab === 'skills'" id="skills" class="mb-8">
+          <LibrarySkillsSection />
+        </section>
+      </div>
+    </main>
+
+    <!-- Create Agent Modal -->
+    <CreateAgentModal
+      v-if="showCreateModal"
+      :initial-template="selectedTemplateId"
+      @close="showCreateModal = false"
+      @created="onAgentCreated"
+    />
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import NavBar from '../components/NavBar.vue'
+import CreateAgentModal from '../components/CreateAgentModal.vue'
+import LibrarySkillsSection from '../components/LibrarySkillsSection.vue'
+import SystemInstallPanel from '../components/systems/SystemInstallPanel.vue'
+import OverflowTabs from '../components/OverflowTabs.vue'
+import api from '../api'
+import { useRole } from '../composables/useRole'
+
+const router = useRouter()
+const route = useRoute()
+// #1931: same convention as LibrarySkillsSection.vue on this page — the
+// templates half must not ship the opposite empty-state convention to the
+// skills half. Store-backed (auth), so no page-level fetch is involved.
+const { hasMinRole, isAdmin } = useRole()
+
+// Mirrors POST /api/systems/deploy's require_role("creator") (AC #6). The
+// server is the enforcement point; this only decides whether to render.
+const canInstallSystems = computed(() => hasMinRole('creator'))
+
+// ---------------------------------------------------------------------------
+// Tabs (ent#384)
+// ---------------------------------------------------------------------------
+// The three sections became tabs together — a deliberate reversal of ent#263's
+// stacked-sections choice for the WHOLE page, so it keeps exactly one model
+// rather than a tabs-plus-stacked hybrid.
+
+const DEFAULT_TAB = 'templates'
+
+// Legacy in-page anchors from the stacked era. `/templates` → `/library`
+// preserves the hash, so old bookmarks and deep links land on the right tab.
+const HASH_TO_TAB = {
+  '#agent-templates': 'templates',
+  '#systems': 'systems',
+  '#skills': 'skills',
+}
+
+// Systems is omitted rather than shown-and-disabled, matching what ent#126
+// already did with the section: a browse surface gains nothing from a dead
+// panel, and POST /api/systems/deploy is the actual enforcement point.
+const visibleTabs = computed(() => [
+  { id: 'templates', label: 'Agent Templates' },
+  ...(canInstallSystems.value ? [{ id: 'systems', label: 'Systems' }] : []),
+  { id: 'skills', label: 'Skills' },
+])
+
+/** A tab id is only valid if it is currently VISIBLE to this role. */
+function resolveTab(requested) {
+  return visibleTabs.value.some((t) => t.id === requested) ? requested : DEFAULT_TAB
+}
+
+// What the caller ASKED for, captured once before anything rewrites the URL.
+// The late-role watch below must test this and not the live query: `onMounted`
+// normalizes `?tab=` within a microtask, long before `/api/users/me` returns,
+// so by the time the role arrives a creator's `?tab=systems` has already been
+// rewritten to `?tab=templates` — and a watcher reading `route.query.tab` would
+// see its own normalization and never restore the deep link it exists to save.
+const requestedTab = route.query.tab || HASH_TO_TAB[route.hash] || DEFAULT_TAB
+
+const activeTab = ref(resolveTab(requestedTab))
+
+// Lazy-mount-once: a panel mounts the first time its tab is opened and then
+// stays mounted. Plain `v-if` would re-run each child's onMounted fetch on
+// every switch (the #1109 teardown rationale doesn't apply — neither
+// SystemInstallPanel nor stores/skillsLibrary owns a poll), while plain
+// `v-show` would mount Skills and Systems for a Templates-only visitor. This
+// also preserves SystemInstallPanel's editor state across switches.
+const visited = ref(new Set([activeTab.value]))
+
+function selectTab(tab) {
+  activeTab.value = tab
+  if (!visited.value.has(tab)) {
+    visited.value = new Set([...visited.value, tab])
+  }
+}
+
+watch(activeTab, (tab) => {
+  selectTab(tab)
+  if (route.query.tab === tab && !route.hash) return
+  // Drop the legacy hash in the same replace: with the jump anchors gone it
+  // would survive pointing at nothing.
+  router.replace({ query: { ...route.query, tab }, hash: '' })
+})
+
+// The render follows the URL for ANY navigation that changes `?tab=` — an
+// external link, a deep link, a history entry. Reading the query once at setup
+// (the shape Operations.vue uses) leaves those cases changing the address bar
+// while the panel stays put.
+//
+// Note tab CLICKS use `router.replace` above, so they deliberately push no
+// history entry: five tab clicks must not cost five Backs to leave the page.
+// Back therefore leaves the Library rather than walking back through tabs,
+// which is the same trade Operations.vue makes.
+watch(
+  () => route.query.tab,
+  (q) => {
+    // `undefined` is NOT a no-op: clicking the NavBar's Library link while on
+    // another tab re-navigates to a bare `/library` on the SAME route record,
+    // so the component is reused and `onMounted` does not re-run. Early
+    // -returning there left the URL saying `/library` while the render stayed
+    // on Skills — and a reload then landed the user somewhere else.
+    const resolved = resolveTab(q ?? DEFAULT_TAB)
+    if (resolved !== activeTab.value) {
+      selectTab(resolved)
+    } else if (q === undefined) {
+      // Same tab, but the address no longer names it — re-stamp it. The
+      // `activeTab` watcher can't do this for us: `activeTab` didn't change.
+      router.replace({ query: { ...route.query, tab: resolved }, hash: '' })
+    }
+  }
+)
+
+// `stores/auth.js` reports `user` until GET /api/users/me lands, so a creator
+// hard-loading `?tab=systems` resolves to the default first. BOTH arms matter:
+// bounce off Systems if the role turns out to be lower, and restore onto it
+// once the role arrives — without the second arm the deep link is simply lost.
+watch(canInstallSystems, (allowed) => {
+  if (!allowed && activeTab.value === 'systems') {
+    selectTab(DEFAULT_TAB)
+  } else if (allowed && requestedTab === 'systems' && activeTab.value !== 'systems') {
+    selectTab('systems')
+  }
+})
+
+const templates = ref([])
+const loading = ref(false)
+const error = ref('')
+const showCreateModal = ref(false)
+const selectedTemplateId = ref('')
+
+// Computed properties to separate GitHub and local templates. Both sections
+// render from the single `/api/templates` fetch so the Library's templates
+// section shows the same curated set as CreateAgentModal — the backend already
+// excludes hidden test/canary/demo fixtures (#1513).
+const githubTemplates = computed(() => {
+  return templates.value.filter(t => t.source === 'github')
+})
+
+const localTemplates = computed(() => {
+  return templates.value.filter(t => t.source === 'local' || !t.source)
+})
+
+// #1931: with DEFAULT_GITHUB_TEMPLATE_REPOS empty, a default install has zero
+// GitHub templates. NOTE: `templates` is the raw /api/templates response — it
+// holds BOTH sources, so this is "the whole catalog is empty", not "no local
+// templates". Named `noTemplatesAtAll` for that reason: a reviewer misread an
+// earlier `catalogEmpty` as local-only and derived a stacking bug from it.
+// The page-level "No templates configured" block below owns this case
+// exclusively; the GitHub placeholder owns "catalog non-empty, GitHub empty".
+// They can never both render:
+//   local github | length | page-level | github section / inner
+//     3      0   |   3    |    no      |  yes / placeholder   <- default install
+//     3      6   |   9    |    no      |  yes / grid
+//     0      6   |   6    |    no      |  yes / grid
+//     0      0   |   0    |   YES      |   no / --
+const noTemplatesAtAll = computed(() => templates.value.length === 0)
+
+// Extract display name without "(GitHub)" suffix for cleaner display
+const getDisplayName = (template) => {
+  const name = template.display_name || template.id
+  return name.replace(' (GitHub)', '')
+}
+
+const fetchTemplates = async () => {
+  loading.value = true
+  error.value = ''
+  try {
+    // Invariant #7 — shared api client (auth interceptor, in-flight GET dedup,
+    // 401 → /login). This page previously called axios with a hand-built header.
+    const response = await api.get('/api/templates')
+    templates.value = response.data
+  } catch (err) {
+    console.error('Failed to fetch templates:', err)
+    error.value = err.response?.data?.detail || 'Failed to load templates'
+  } finally {
+    loading.value = false
+  }
+}
+
+const useTemplate = (template) => {
+  selectedTemplateId.value = template?.id || ''
+  showCreateModal.value = true
+}
+
+const onAgentCreated = (agent) => {
+  // Navigate to the newly created agent's detail page
+  if (agent?.name) {
+    router.push(`/agents/${agent.name}`)
+  } else {
+    // ent#260: Agents page retired — fall back to the Dashboard (bare `/`;
+    // see useAgentLifecycle.js for the no-?view rationale).
+    router.push('/')
+  }
+}
+
+onMounted(() => {
+  fetchTemplates()
+  // Normalize the URL to carry `?tab=` (and drop any legacy hash) so the
+  // address bar always names the tab actually on screen — including the case
+  // where the request arrived as a bare `/library` or a `#skills` anchor.
+  if (route.query.tab !== activeTab.value || route.hash) {
+    router.replace({ query: { ...route.query, tab: activeTab.value }, hash: '' })
+  }
+})
+</script>
+
+<style scoped>
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+</style>

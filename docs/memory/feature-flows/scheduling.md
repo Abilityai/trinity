@@ -173,6 +173,91 @@ emit('create-schedule', msg)     - Switch to 'schedules' tab       - Pre-fill fo
 - `src/frontend/src/components/SchedulesPanel.vue:487-490` - `initialMessage` prop definition
 - `src/frontend/src/components/SchedulesPanel.vue:790-802` - Watch handler for `initialMessage`
 
+### 1c. Template-Declared Schedules at Creation (trinity-enterprise#89)
+
+**Trigger:** an agent is created from a template whose `template.yaml` declares
+a `schedules:` block. No user action — this is the fourth schedule producer,
+alongside the router, MCP, and manifest deploy.
+
+```
+_resolve_template (crud.py)                       _materialize_agent_files (crud.py)
+---------------------------                       ---------------------------------
+github: branch                                    if declared and not config.ephemeral:
+  _read_source_template(                            try:
+      repo, creation-resolved PAT, @ref)               reconcile_declared_schedules(
+    → template_service                                     name, declared, owner)
+      .fetch_template_metadata_result_for_create()   except: WARNING   ← non-fatal
+      (cache-bypassed, loud on failure)                    ↓
+    → normalize_declared_schedules()             seen = {s.name for s in
+local: branch                                            db.list_agent_schedules(name)}
+  normalize_declared_schedules(                  per entry not in seen:
+      tr.template_data["schedules"])                db.create_schedule(name, owner,
+    ↓                                                   ScheduleCreate(enabled=…))
+tr.declared_schedules  (ONE normalized carrier)     falsy return → WARNING + failed++
+```
+
+**Why a dedicated carrier rather than `template_data`.** `template_data` holds
+two different shapes: raw template YAML on the `local:` path and `{}` on the
+`github:` path — that branch has never populated it, which is why #383's
+`persistent_state` and #1169's `data_paths` are effectively `local:`-only. Its
+truthiness also gates `_stage_config_files`' credential-file generation, so
+merging the shapes would change credential generation for every GitHub agent.
+`declared_schedules` is normalized, symmetric, and consumed by exactly one step.
+
+**Non-fatality is the invariant.** Every step in `_materialize_agent_files` is
+non-fatal by design, and this function runs inside creation's destructive
+rollback fence — an escaping raise would roll back a successful creation over a
+schedule. The `try/except` therefore wraps the **entire** call including the
+`list_agent_schedules` read, and each entry additionally has its own guard so
+one bad entry never costs the rest.
+
+**`db.create_schedule` returns `None`; it does not raise** — on an unknown
+user, on no agent access, and on the #1445 `is_agent_live` no-orphan gate. A
+`try/except` alone catches none of those, so the return value is checked and a
+falsy result is counted as *failed*. The summary INFO line reports
+created / skipped-existing / failed from **actual outcomes**, never from
+`len(declared)`.
+
+**`enabled` is passed explicitly.** `ScheduleCreate.enabled` defaults to
+`True`; omitting it would arm every undeclared schedule and invert AC #3. A
+declared `enabled: true` **is** honored — safety rests on
+`agent_ownership.autonomy_enabled`, which is `INTEGER DEFAULT 0` with no
+`register_agent_owner()` parameter, so a newly created agent can never fire.
+(Caveat: `set_autonomy_status` force-enables *every* schedule on the first
+autonomy toggle, so per-schedule intent is erased there either way — that, not
+the flag, is the real control.)
+
+**Idempotency runs in three places** (AC #4), all required:
+1. **Creation** — name-match read-then-skip. No recreate hook: recreate goes
+   through `lifecycle.py`, and an eager re-materialize would resurrect
+   schedules an operator deliberately deleted.
+2. **Within the block** — the reader dedupes by name (first wins) and the
+   materializer's seen-set catches it again.
+3. **Manifest deploy** — `system_service.create_schedules` runs *after*
+   `create_agent_internal`, making it the second producer for the same agent.
+   It gained the same name-match skip; without it, a manifest declaring
+   `daily-briefing` on a template that also declares it yields **two** rows
+   (there is no `UNIQUE(agent_name, name)` index, and adding one is a
+   dual-track schema change that would fail on installs already holding
+   duplicates).
+
+Ghost agents are skipped at the caller — schedules on an ephemeral agent are a
+400 by ent#69 fleet hygiene, and a new caller must exclude ghosts itself.
+
+The reader, its tolerance matrix, and the catalog surface are in
+[template-processing.md](template-processing.md#declared-schedules-trinity-enterprise89).
+
+**Files:**
+- `src/backend/services/template_schedules.py` — the tolerant reader
+- `src/backend/services/agent_service/crud.py` — `_read_source_template`
+  (ent#14 S2 renamed it from `_declared_schedules_for_github` and widened its
+  return to `(metadata, reason)`: the `fork_to_own` gate decides from this same
+  read, so schedules are no longer its only consumer),
+  `reconcile_declared_schedules`, `_materialize_agent_files`
+- `src/backend/services/system_service.py` — `create_schedules` name-match guard
+- `tests/unit/test_ent89_schedule_materialization.py`,
+  `tests/unit/test_ent89_manifest_no_duplicate.py`
+
 ### 2. Schedule Execution Flow (Automatic)
 
 **Trigger:** APScheduler cron trigger fires in **Dedicated Scheduler Service**
@@ -608,14 +693,41 @@ Broadcast via dedicated scheduler -> Redis pub/sub -> backend WebSocket relay fo
 - `0 */6 * * *` - Every 6 hours
 - `*/30 * * * *` - Every 30 minutes
 
+### Client-side cron validation (#925)
+
+The schedule form pre-validates the cron expression as the user types, and the list marks
+stored-invalid rows — the backend 400 is no longer the first feedback (design-system p17).
+
+- **Validator**: `src/frontend/src/utils/cronValidation.js` — a pure, zero-dependency mirror of
+  the backend's exact grammar (`services/schedule_validation.py::validate_cron_expression`:
+  5-field split + verbatim `_dow_to_apscheduler` port + APScheduler 3.11 field rules, including
+  the prefix-matched name expressions, the step-span rule, and the Python-truthiness
+  `last or MAX` fallback). Total + fail-open: an internal error returns `{valid: true}` so a
+  port bug can never brick the panel; the server 400 stays the authority.
+- **Form gating** (`SchedulesPanel.vue`): `shouldShowCronError` (pure, exported) — while
+  creating, the inline error appears only after first blur and only for non-empty input; while
+  editing, an invalid stored cron (incl. empty) shows unconditionally. The format-hint line is
+  the reserved error slot (no modal jump). Submit is disabled only when the cron is
+  **non-empty AND invalid** — empty keeps the native `required` bubble. Presets come from the
+  exported `CRON_PRESETS` and are fixture-proven valid.
+- **Row icon**: `computeCronValidityMap(schedules)` → warning triangle inside the cron chip for
+  invalid rows, tooltip/aria-label exactly `Invalid cron expression`.
+- **Drift alarm**: both suites assert the shared probe-generated fixture
+  `tests/fixtures/cron-grammar-cases.json` — `tests/unit/test_925_cron_grammar_fixture.py`
+  against the live backend validator (fires on an APScheduler grammar change),
+  `src/frontend/tests/unit/cronValidation.spec.js` against the client mirror. Quirk rows
+  (`MON/999`, `jan/0`, `lastx`, `0-6,1` vs `0-6`, falsy-zero `0-0/2`) are pinned verbatim and
+  must not be "fixed" — parity outranks tidiness.
+
 ---
 
 ## Dependencies
 
 **Python packages** (docker/backend/Dockerfile):
-- `apscheduler==3.10.4` - Async job scheduler
-- `croniter==2.0.1` - Cron expression parsing
-- `pytz==2024.1` - Timezone support
+- `apscheduler==3.11.0` - Async job scheduler. `docker/scheduler/requirements.txt` pins the SAME version (#1823): the backend validates by constructing the `CronTrigger` the scheduler will register, so a floor on one side lets validator and executor resolve different parsers
+- `croniter==5.0.1` - Cron expression parsing
+- `pytz==2024.2` - Timezone support. **Not the authoritative resolver** — pytz bundles its own complete tz database, while APScheduler's `astimezone()` re-resolves the zone through the stdlib `zoneinfo` (#1823)
+- `tzdata==2026.3` (+ the `tzdata-legacy` apt package) - The IANA database `zoneinfo` reads. `tzdata-legacy` carries the *backward-compatibility links* (`Europe/Kiev` → `Europe/Kyiv`), split out of `tzdata` in Debian trixie; without it every schedule stored under a legacy alias fails to register (#1823). Guarded by `tests/unit/test_1823_tz_capability_parity.py`
 - `httpx` - Async HTTP client (used by AgentClient)
 
 ---
@@ -1066,6 +1178,8 @@ POST /schedules  ------>  db/schedules.py:create_schedule()
 ---
 
 ## Status
+**Updated 2026-08-09** - **Legacy IANA timezone aliases (#1823)**: a valid `timezone` is one BOTH resolvers accept, not "a pytz zone". `validate_timezone` now probes `zoneinfo` (what APScheduler's `astimezone()` binds through) and `validate_cron_expression` delegates to it, so the create route (which calls only the latter) and the update route (only the former) share one contract; a cron-only `PUT` validates against the row's stored timezone rather than a hardcoded `"UTC"`. Aliases are supported, not normalized — the images now ship `tzdata-legacy` + the `tzdata` wheel. See the Dependencies section and `docs/memory/feature-flows/scheduler-service.md` for the `_add_job` permanent/transient half.
+
 **Updated 2026-03-09** - **MCP Tool Parity (#85)**: Added `timeout_seconds`, `allowed_tools`, and `model` parameters to MCP `create_agent_schedule` and `update_agent_schedule` tools. TypeScript interfaces updated in `src/mcp-server/src/types.ts`, Zod schemas updated in `src/mcp-server/src/tools/schedules.ts`.
 **Updated 2026-03-02** - **MODEL-001 Model Selection**: Per-schedule model override. New `model` column on `agent_schedules`, `model_used` column on `schedule_executions`. ModelSelector.vue component in create/edit form. Model forwarded through scheduler service to agent container. model_used recorded on every execution for audit. See [model-selection.md](model-selection.md).
 **Updated 2026-02-22** - **Dashboard Schedule Stats**: Added `get_all_agents_schedule_counts()` method to `db/schedules.py:719-743`. Returns schedule counts (total and enabled) per agent. Used by `GET /api/agents/execution-stats` endpoint to populate `schedules_total` and `schedules_enabled` fields. Dashboard AgentNode now displays "X/Y schedules" with "(paused)" indicator when autonomy disabled.

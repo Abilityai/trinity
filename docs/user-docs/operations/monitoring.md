@@ -111,11 +111,23 @@ The approval is:
 
 Agent-purge sweeps always require an acknowledgement because every one destroys data volumes.
 
+#### Changing a window
+
+Retention windows have exactly **one** write path: `PUT /api/settings/ops/config`, reached from **Settings → Retention**. It type- and range-validates every value all-or-nothing (one bad value rejects the whole request with a 422) and writes an audit entry naming which windows moved. The generic settings endpoint refuses these keys and points you here.
+
+Two things worth internalising, because the risk is counter-intuitive:
+
+- Garbage always failed **safe** — an unparseable value became `0`, which *disables* the sweep and retains forever.
+- **A small valid number is the dangerous input.** `1` is well-formed and in range, and no range check can distinguish it from an operator who genuinely wants a one-day window. Validation buys you a loud failure instead of a silent coercion; what actually stops an accidental mass deletion is the blast-radius guard above and the admin-plus-human gate on approving it.
+
+**Reset to defaults** (`POST /api/settings/ops/reset`) deliberately **skips** retention windows — resetting other operator settings must never silently change how much of your data is kept. The reset is itself audit-logged.
+
 Endpoints:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/settings/retention` | GET | Effective windows (per-window value + source), edition, community-floor days, the read-only guard threshold, and pending acknowledgements (admin) |
+| `/api/settings/ops/config` | PUT | The single validated, audited write path for retention windows (admin) |
 | `/api/settings/retention/acknowledge` | POST | Approve one over-threshold prune — body `{key, window_days}` (admin, human-only) |
 
 ## Real-Time Event Reliability

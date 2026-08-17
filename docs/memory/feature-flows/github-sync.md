@@ -286,11 +286,26 @@ The migration is **best effort** — failures are caught, logged at WARNING,
 and Push proceeds against whatever `.gitignore` already exists. Rationale:
 a transient docker exec glitch must not break an operator's Push.
 
+This is the **REMEDIATE** half (merge + untrack). As of #2069 the same
+canonical merge (merge-only, PREVENT — never the untrack sweep) also runs at
+**agent creation** for the `GIT_SYNC_AUTO` set, so a fresh `github:` agent no
+longer auto-commits `.trinity/`/`.env`/`.mcp.json` before its first Push — see
+[git-sync-health.md](git-sync-health.md) § *Creation-time canonical `.gitignore`
+seed*. Push migration remains the backstop and its behaviour is unchanged.
+
 This means existing agents pick up new exclusion patterns automatically on
 their next Push, with no re-init or container rebuild required. The same
 shared `_detect_git_dir` helper used by `initialize_git_in_container`
 guarantees the migration targets the same path as init (`/home/developer`,
-or `/home/developer/workspace` for legacy pre-2026-02 agents).
+or `/home/developer/workspace` for legacy pre-2026-02 agents). Since #2075
+that path comes from git itself (`rev-parse --show-toplevel`), not from a
+`workspace/`-content heuristic — the heuristic made this migration's
+`[ -d <dir>/.git ]` guard test the wrong directory on agents with a populated
+non-git `workspace/`, so the whole #462 migration silently no-op'd for them.
+**Operator note**: on such an agent the next Push finally appends the
+fleet-wide patterns and `git rm --cached`s files that now match a rule —
+working-tree files are untouched and history is **not** rewritten, so anything
+already pushed stays in history (credential rotation is separate work).
 
 ---
 
@@ -360,7 +375,7 @@ The post-create `db.set_git_auto_sync_enabled` opt-in in
 `crud.py::_materialize_agent_files` carries the same PAT requirement (new
 `github_pat_for_agent` param threaded from the orchestrator).
 
-### Rebuild-missing-container recovery — `lifecycle.py::_apply_persisted_auth_env` (#1559)
+### Container-rebuild env — `lifecycle.py::_apply_git_env_from_db` (#1559, ent#109)
 
 Gate flipped from `if pat and repo:` to `if repo:` — a tokenless agent rebuilt
 after container loss still gets `GITHUB_REPO` + `GIT_SYNC_ENABLED`
@@ -368,6 +383,27 @@ after container loss still gets `GITHUB_REPO` + `GIT_SYNC_ENABLED`
 health, the #843/#1439 class). The PAT is injected only when present;
 source-mode rows also re-derive `GIT_SOURCE_MODE`/`GIT_SOURCE_BRANCH` so a
 volume-loss rebuild re-clones the right branch.
+
+**ent#109 — one owner, two rebuild paths.** That block used to live *only* in
+`_apply_persisted_auth_env` (`recreate_missing_container`, the
+rebuild-from-nothing path). The other rebuild path,
+`recreate_container_with_updated_config`, seeds `env_vars` from the **old
+container** and re-derived only `GITHUB_PAT` — so it replayed whatever
+`GITHUB_REPO` / `GIT_SYNC_*` that container happened to be carrying. Its one
+production caller is `start_agent_internal`, fired by nine config-drift
+predicates **and by base-image drift at cold start**, so a base-image rebuild
+arms the replay for the whole fleet. `_apply_git_env_from_db` is now the sole
+writer for both, over the `_GIT_ENV_KEYS` set (`GITHUB_REPO`, `GITHUB_PAT`,
+`GIT_SYNC_ENABLED`, `GIT_SOURCE_MODE`, `GIT_SOURCE_BRANCH`, `GIT_SYNC_AUTO`,
+`TRINITY_GIT_BASE_URL`).
+
+| Property | Behaviour |
+|---|---|
+| **PAT gate** | A **required keyword parameter**, never a shared default. `recreate_missing_container` passes `pat_gate="effective"` (2-tier per-agent → global — there is no old container to inherit a token from). The config-drift recreate passes `pat_gate="per_agent_only"`, which preserves #211 verbatim: resolve only when the container **already carries** a token or a **per-agent** PAT row exists. Sharing one gate would bake the global platform PAT into every tokenless container; `configure_push_remote` then clears the push blackhole (below) and a private KB can reach the shared public upstream — the ent#162 class. A static guard in `tests/unit/test_ent109_git_env_seam.py` fails CI if either call site flips. |
+| **Correct, never introduce** | Config-drift path only. The block is repo-gated (ent#123) while the PAT is per-agent-gated (#211), and those two disagree for one real row shape: an agent bound post-creation via `POST /{agent}/git/initialize` on the **global** platform PAT. That path writes an `agent_git_config` row and pushes, but never recreates the container, never bakes any git env, never persists a per-agent PAT row, and never writes the token into the workspace `.env` — so its only credential is the one embedded in `.git/config`'s origin URL, and startup.sh's #1264 `.env` fallback does not cover it. Handing startup.sh `GIT_SYNC_ENABLED=true` with **no** `GITHUB_PAT` is exactly what it reads as "deliberately tokenless": the restart branch rewrites origin to the credential-less `CLONE_URL` (destroying that token) and `configure_push_remote` blackholes the push remote — silently, fleet-wide, on the same base-image drift this helper exists to fix. So `per_agent_only` writes the block only when the old container already carried `GITHUB_REPO` **or** a PAT resolves; it corrects a stale repo, a flipped `source_mode` or a deleted row (every case the fix is about — a tokenless ent#123 agent carries `GITHUB_REPO` from creation, so the flagship is unaffected). `effective` is exempt: with no old container, *not* introducing the block is the #843/#1439 silently-empty-agent bug. |
+| **Set-or-clear** | Every repo-derived var is cleared when it stops applying, because the config-drift path writes into a carried-forward dict. No `agent_git_config` row (reachable from the `routers/git.py` orphan cleanup and `_rollback_failed_creation`) ⇒ the whole set pops, including an orphaned `GITHUB_PAT` — the per-agent token is a column *on* that row, so no row means no per-agent credential and no repo to push to. A `source_mode` flip clears the mode/branch pair. While a repo **is** bound, `GITHUB_PAT` stays set-only. |
+| **`GIT_SYNC_AUTO`** | `DB auto_sync_enabled` **OR** the baked env — derive-only, **never written back**: a backfill cannot distinguish a creation-time discrepancy from an owner's explicit `PUT .../git/auto-sync {enabled:false}`, so it would erase that intent and cross an `OwnedAgentByName` → `AuthorizedAgentByName` privilege boundary through Start. The two creation writers genuinely disagree — `crud.py`'s DB opt-in carries `and not config.ephemeral` inside a swallowing `try/except` while `_apply_github_env` does not, and the column defaults to `0` — so DB-only derivation would silently stop auto-push for that slice of the fleet. See [git-sync-health.md](git-sync-health.md). |
+| **Not owned** | `GIT_WORKING_BRANCH` (only read by startup.sh's *clone* branch, which a recreate never reaches — the volume and its `.git` are carried forward; `GIT_SOURCE_MODE=true` outranks it there anyway) and `GIT_UPSTREAM_REPO` (no DB column — the `upstream` remote lives in `.git/config` on the pinned workspace volume and survives every recreate). |
 
 ### Container start — `docker/base-image/startup.sh`
 
@@ -411,9 +447,13 @@ a clearer message, never block a working push.
 - `sync_to_github` returns a named failure **before contacting the agent**:
   `conflict_type: "no_write_credentials"`, `conflict_class: "AUTH_FAILURE"`,
   message `NO_WRITE_CREDENTIALS_MESSAGE` ("This agent has no write
-  credentials — it tracks a public template read-only. To keep your changes,
-  create a new agent with fork-to-own and import your data…, or add a GitHub
-  token.").
+  credentials — it tracks a public template read-only. Use 'Bind to your own
+  repo' in this agent's Git tab to point it at a GitHub repository you own
+  (keeping everything it has learned), or add a GitHub token."). **ent#109**
+  retired the workaround this used to teach (create a new agent with
+  fork-to-own and import your data), which discarded the agent's identity,
+  its 180-day name reservation and its history — the retrofit now exists in
+  place; see [agent-repo-binding.md](agent-repo-binding.md).
 - `reset_to_main_preserve_state` refuses up front with
   `{"error": "no_write_credentials", "message": NO_WRITE_CREDENTIALS_MESSAGE}`
   (the recovery ends in a force-with-lease push); `routers/git.py` maps it
@@ -545,7 +585,7 @@ sequenceDiagram
 - Unit tests (mirror pattern):
   - `tests/unit/test_reset_preserve_state_allowlist.py` (snapshot/restore)
   - `tests/unit/test_reset_preserve_state_guardrails.py` (compose + backend proxy)
-- Pure-git regression: `tests/git-sync/s3_reset_preserve.sh`
+- Pure-git regression: `tests/git_sync/s3_reset_preserve.sh`
 - Integration (opt-in): `tests/test_reset_preserve_state_integration.py`
 
 ### Non-goals (owned by other PRs)
@@ -1065,8 +1105,8 @@ endpoint not available yet (blocked on issue #384)."
 
 | File | Scope |
 |------|-------|
-| `tests/git-sync/test_p2_parallel_history_detection.sh` | Drives the real FastAPI handler in-process and asserts `pull_branch`, `common_ancestor_sha`, `common_ancestor_age_days` are present and well-formed in the `/api/git/status` response. |
-| `tests/git-sync/test_s2_usegitsync.test.js` | Vitest scenarios for the `isParallelHistory` predicate (no ancestor, stale ancestor, recent ancestor, behind=0 short-circuit). |
+| `tests/git_sync/test_p2_parallel_history_detection.sh` | Drives the real FastAPI handler in-process and asserts `pull_branch`, `common_ancestor_sha`, `common_ancestor_age_days` are present and well-formed in the `/api/git/status` response. |
+| `tests/git_sync/test_s2_usegitsync.test.js` | Vitest scenarios for the `isParallelHistory` predicate (no ancestor, stale ancestor, recent ancestor, behind=0 short-circuit). |
 
 ### API Request Format
 
@@ -1119,7 +1159,7 @@ Operators staring at `merge_conflict` and a wall of raw git stderr could not tel
 | `WORKING_BRANCH_EXTERNAL_WRITE` | Ref moved under us (P5 clobber signature) |
 | `UNKNOWN` | Stderr did not match any known shape |
 
-**Classifier** — `classify_conflict(stderr, ahead, behind, common_ancestor_sha=None) -> ConflictClass` (`src/backend/services/git_service.py:77-130`). Pure function, no IO, regex-only. `common_ancestor_sha` is accepted for forward compatibility (#385 discriminator) but unused today. Decision order: auth → uncommitted → external-write → parallel-history → numeric fallback → `UNKNOWN`. Regex patterns are drawn from `tests/git-sync/fixtures/p2_parallel_history_stderr.txt` and `tests/git-sync/fixtures/p5_clobber_stderr.txt`.
+**Classifier** — `classify_conflict(stderr, ahead, behind, common_ancestor_sha=None) -> ConflictClass` (`src/backend/services/git_service.py:77-130`). Pure function, no IO, regex-only. `common_ancestor_sha` is accepted for forward compatibility (#385 discriminator) but unused today. Decision order: auth → uncommitted → external-write → parallel-history → numeric fallback → `UNKNOWN`. Regex patterns are drawn from `tests/git_sync/fixtures/p2_parallel_history_stderr.txt` and `tests/git_sync/fixtures/p5_clobber_stderr.txt`.
 
 **Agent-server mirror** — `docker/base-image/agent_server/utils/git_conflict.py` (NEW) holds a parallel implementation. The agent-server runs inside the container image and does not import from the backend, so the classifier is duplicated intentionally. The two copies must be kept in sync; the backend copy is canonical. `docker/base-image/agent_server/routers/git.py:41-68` adds a shared `_conflict_response()` helper that replaced 5 prior `raise HTTPException(status_code=409, detail=...)` sites; it returns a `JSONResponse` with `conflict_class` in the body and both `X-Conflict-Type` + `X-Conflict-Class` headers.
 
@@ -1129,7 +1169,7 @@ Operators staring at `merge_conflict` and a wall of raw git stderr could not tel
 
 **Composable plumbing** — `src/frontend/src/composables/useGitSync.js:87-93` (sync branch) and `:131-138` (pull branch) read `err.response?.headers?.['x-conflict-class']` and store it on the existing `gitConflict` ref. No branching logic change; the modal reads the new field directly.
 
-**Regression tests** — `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases covering each enum member, the fallback, and the two stderr fixtures) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshot scenarios for the per-class copy and the pre-S5 fallback).
+**Regression tests** — `tests/git_sync/test_s5_conflict_classifier.py` (11 pytest cases covering each enum member, the fallback, and the two stderr fixtures) and `tests/git_sync/test_s5_modal.spec.js` (5 Vitest snapshot scenarios for the per-class copy and the pre-S5 fallback).
 
 ### Component Files
 
@@ -1178,7 +1218,7 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
 
 When two Trinity instances bind to the same working branch, only one can push without clobbering the other. Layers 0 and 2 (reservation helper + partial UNIQUE index — see [github-repo-initialization.md](github-repo-initialization.md)) prevent the binding from being created in the first place. Layer 3 — the push-time guard documented here — is the last line of defense for instances that already have a stale binding from before those constraints existed.
 
-**2026-04-17 incident reference**: This Layer 3 change is the response to the alpaca-vybe-live silent clobber, where a peer instance's `git push --force` overwrote in-flight work without either side noticing. Tier-1 regression coverage lives at `tests/git-sync/test_p5_branch_ownership.sh`.
+**2026-04-17 incident reference**: This Layer 3 change is the response to the alpaca-vybe-live silent clobber, where a peer instance's `git push --force` overwrote in-flight work without either side noticing. Tier-1 regression coverage lives at `tests/git_sync/test_p5_branch_ownership.sh`.
 
 ### Persisted last-remote-sha (the lease)
 
@@ -1305,11 +1345,11 @@ Working - PAT-free public-template clone (trinity-enterprise#123, 2026-07-23)
 | Date | Changes |
 |------|---------|
 | 2026-07-23 | **PAT-free clone of public `github:` templates** (trinity-enterprise#123): a tokenless create is admitted in source mode (`crud.py::_gate_tokenless_request` normalizes `resolve_github_pat`'s `("", "none")` to None; working-branch mode → named 400) and validated via a credential-less `git ls-remote` probe (`git_service.probe_anonymous_repo_access`; unavailable → combined 400, transient → FAIL-CLOSED 502; source branch checked anonymously). `_parse_github_ref` gains the `_GITHUB_REPO_PATH_RE` owner/repo charset guard (400). Env baking (`_apply_github_env`) and the #1559 rebuild recovery (`lifecycle.py::_apply_persisted_auth_env`) gate on repo only — token vars/`GIT_SYNC_AUTO`/auto-sync opt-in still require a PAT. startup.sh (base-image rebuild): repo-only clone gate, conditional CLONE_URL, `GIT_TERMINAL_PROMPT=0`, `configure_push_remote()` push-URL blackhole for tokenless agents, workspace-`.env` PAT fallback for the #1264 live-injection window, unconditional restart-path origin rewrite. Push paths refuse honestly: `git_service._agent_has_write_credentials` (fail-open; baked env OR per-agent PAT, never global) → `sync_to_github` 409 `no_write_credentials`/`AUTH_FAILURE`; `reset_to_main_preserve_state` → 409 `X-Conflict-Type: no_write_credentials`. Tests: `tests/unit/test_ent123_tokenless_clone.py` (50). Requirements §11.11. |
-| 2026-04-19 | **S7 Layer 3 push-time guard** (#382, PR #396): `sync_to_github()` `force_push` strategy now uses `git push --force-with-lease=<branch>:<expected-sha>` instead of plain `--force` (`docker/base-image/agent_server/routers/git.py`). The expected-sha is the remote value last observed at fetch, persisted to `~/.trinity/last-remote-sha/<branch>` via `_persist_last_remote_sha()` after every successful fetch. Stale-lease rejection returns HTTP 409 with header `X-Conflict-Type: branch_ownership_collision` and appends a structured alert to `~/.trinity/operator-queue.json` (`_record_push_collision()`), which the backend's `OperatorQueueSyncService` surfaces in the Operating Room on its next 5s poll. Persistence/append failures are logged, never raised. Response to the 2026-04-17 alpaca-vybe-live silent clobber; Tier-1 regression at `tests/git-sync/test_p5_branch_ownership.sh`. Layers 0 and 2 (reservation helper + partial UNIQUE index) are documented in `github-repo-initialization.md`. |
-| 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` and `X-Conflict-Class` response header on 409s. Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper. `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
-| 2026-04-19 | **S2 — Parallel-history detection at modal open** (#385, PR #395): `get_git_status()` in `docker/base-image/agent_server/routers/git.py` now also returns `pull_branch`, `common_ancestor_sha`, and `common_ancestor_age_days`, computed via `git merge-base HEAD origin/<pull_branch>` and `git log -1 --format=%cI`. Existing `ahead`/`behind` are unchanged. Frontend `useGitSync.js` adds `pullBranch`, `isParallelHistory` predicate (threshold 30 days), and an `adoptUpstreamPreserveState()` resolver that POSTs to `/api/agents/{name}/git/reset-to-main-preserve-state` (S3 / #384, not yet live — surfaces a clear "blocked on #384" notification on 404 / missing store method). `GitConflictModal.vue` adds a sibling `<div v-if="show && isParallelHistory">` variant titled "Your agent cannot sync" with primary "Adopt latest upstream (preserve my state)" and secondary "Force push anyway"; the existing variant's outer `v-if` is narrowed to `show && !isParallelHistory` so the new branch takes priority. All copy uses `{{ pullBranchLabel }}` — no hardcoded "main". `AgentDetail.vue` forwards the two new reactives into the modal mount. Regression tests: `tests/git-sync/test_p2_parallel_history_detection.sh` and `tests/git-sync/test_s2_usegitsync.test.js`. |
+| 2026-04-19 | **S7 Layer 3 push-time guard** (#382, PR #396): `sync_to_github()` `force_push` strategy now uses `git push --force-with-lease=<branch>:<expected-sha>` instead of plain `--force` (`docker/base-image/agent_server/routers/git.py`). The expected-sha is the remote value last observed at fetch, persisted to `~/.trinity/last-remote-sha/<branch>` via `_persist_last_remote_sha()` after every successful fetch. Stale-lease rejection returns HTTP 409 with header `X-Conflict-Type: branch_ownership_collision` and appends a structured alert to `~/.trinity/operator-queue.json` (`_record_push_collision()`), which the backend's `OperatorQueueSyncService` surfaces in the Operating Room on its next 5s poll. Persistence/append failures are logged, never raised. Response to the 2026-04-17 alpaca-vybe-live silent clobber; Tier-1 regression at `tests/git_sync/test_p5_branch_ownership.sh`. Layers 0 and 2 (reservation helper + partial UNIQUE index) are documented in `github-repo-initialization.md`. |
+| 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` and `X-Conflict-Class` response header on 409s. Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper. `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git_sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git_sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
+| 2026-04-19 | **S2 — Parallel-history detection at modal open** (#385, PR #395): `get_git_status()` in `docker/base-image/agent_server/routers/git.py` now also returns `pull_branch`, `common_ancestor_sha`, and `common_ancestor_age_days`, computed via `git merge-base HEAD origin/<pull_branch>` and `git log -1 --format=%cI`. Existing `ahead`/`behind` are unchanged. Frontend `useGitSync.js` adds `pullBranch`, `isParallelHistory` predicate (threshold 30 days), and an `adoptUpstreamPreserveState()` resolver that POSTs to `/api/agents/{name}/git/reset-to-main-preserve-state` (S3 / #384, not yet live — surfaces a clear "blocked on #384" notification on 404 / missing store method). `GitConflictModal.vue` adds a sibling `<div v-if="show && isParallelHistory">` variant titled "Your agent cannot sync" with primary "Adopt latest upstream (preserve my state)" and secondary "Force push anyway"; the existing variant's outer `v-if` is narrowed to `show && !isParallelHistory` so the new branch takes priority. All copy uses `{{ pullBranchLabel }}` — no hardcoded "main". `AgentDetail.vue` forwards the two new reactives into the modal mount. Regression tests: `tests/git_sync/test_p2_parallel_history_detection.sh` and `tests/git_sync/test_s2_usegitsync.test.js`. |
 | 2026-04-19 | **Sync observability** (#389, #390): dual `ahead_main`/`ahead_working` + `behind_main`/`behind_working` in `GET /api/git/status` (fixes P6). New `auto_sync_enabled` and `freeze_schedules_if_sync_failing` columns on `agent_git_config`. Full sync-health feature documented in [git-sync-health.md](git-sync-health.md). |
-| 2026-04-18 | **Reset-preserve-state operation** (S3, #384): Added `POST /api/agents/{name}/git/reset-to-main-preserve-state` plus two agent-server primitives (`/api/agent-server/snapshot`, `/api/agent-server/restore` in `routers/snapshot.py`) and a compose routine in `agent_server/routers/git.py`. Recovery path: snapshot allowlist (S4) → `git reset --hard origin/main` → overlay snapshot → commit `Adopt main baseline, preserve state` → `git push --force-with-lease`. Guardrails: 409 `agent_busy` (backend checks activity service), `no_git_config`, `no_remote_main`. Backup always written to `.trinity/backup/<iso-ts>/` before destructive ops. Mirrored unit tests in `tests/unit/test_reset_preserve_state_*.py` plus pure-git regression `tests/git-sync/s3_reset_preserve.sh`. |
+| 2026-04-18 | **Reset-preserve-state operation** (S3, #384): Added `POST /api/agents/{name}/git/reset-to-main-preserve-state` plus two agent-server primitives (`/api/agent-server/snapshot`, `/api/agent-server/restore` in `routers/snapshot.py`) and a compose routine in `agent_server/routers/git.py`. Recovery path: snapshot allowlist (S4) → `git reset --hard origin/main` → overlay snapshot → commit `Adopt main baseline, preserve state` → `git push --force-with-lease`. Guardrails: 409 `agent_busy` (backend checks activity service), `no_git_config`, `no_remote_main`. Backup always written to `.trinity/backup/<iso-ts>/` before destructive ops. Mirrored unit tests in `tests/unit/test_reset_preserve_state_*.py` plus pure-git regression `tests/git_sync/s3_reset_preserve.sh`. |
 | 2026-04-16 | **Per-Agent GitHub PAT** (#347): Added per-agent PAT configuration. Agents can now use their own GitHub PAT instead of the global one. DB column `github_pat_encrypted` in `agent_git_config`, encrypted with AES-256-GCM. 3 new API endpoints (GET/PUT/DELETE), 2 MCP tools, GitPanel.vue settings UI. Helper `get_github_pat_for_agent()` provides fallback logic. |
 | 2026-03-26 | **Fix git pull for working branches** (#195): Added `_get_pull_branch()` helper that detects `trinity/*` branches and redirects pull/status to `origin/main`. Fixed `git fetch --dry-run` → `git fetch origin` in status endpoint. Fixed `initialize_git_in_container()` to preserve remote history via `git fetch + reset` instead of `git init + force push`. Tests in `tests/unit/test_git_pull_branch.py`. |
 | 2026-02-28 | **Git Branch Support** (GIT-002): Added complete data flow documentation with line numbers. URL syntax (`github:owner/repo@branch`) parses branch in crud.py:102-113. MCP types.ts:29 and agents.ts:201-207 expose `source_branch` parameter. template_service.py:22-41 passes branch to git clone. startup.sh:38-45 uses `-b` flag. Added testing checklist from requirements spec. |

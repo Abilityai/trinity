@@ -17,6 +17,35 @@
       </button>
     </div>
 
+    <!-- #1796: autonomy is the master gate for every schedule on this agent.
+         With it off the scheduler fires each job on time and discards it
+         without writing an execution row, so the tab would otherwise look
+         completely healthy while nothing ever runs. -->
+    <div
+      v-if="!autonomyEnabled && enabledScheduleCount > 0"
+      class="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-4"
+    >
+      <div class="flex items-start">
+        <svg class="w-5 h-5 mr-3 mt-0.5 flex-shrink-0 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
+        </svg>
+        <div class="flex-1">
+          <p class="text-sm font-medium text-amber-800 dark:text-amber-200">
+            Autonomy is off — {{ enabledScheduleCount === 1 ? 'this schedule will not fire' : `these ${enabledScheduleCount} schedules will not fire` }}
+          </p>
+          <p class="mt-1 text-sm text-amber-700 dark:text-amber-300">
+            Autonomy mode is the master switch for scheduled work on this agent. While it is off, each run is skipped silently and no execution is recorded.
+          </p>
+          <button
+            @click="$emit('enable-autonomy')"
+            class="mt-3 inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
+          >
+            Enable autonomy
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Create/Edit Form Modal -->
     <div v-if="showCreateForm || editingSchedule" class="fixed inset-0 z-50 overflow-y-auto">
       <div class="flex items-center justify-center min-h-screen px-4">
@@ -45,16 +74,29 @@
                 type="text"
                 required
                 placeholder="0 9 * * *"
+                @blur="cronTouched = true"
                 class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md font-mono focus:outline-none focus:ring-2 focus:ring-action-primary-500"
               />
-              <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Format: minute hour day month day_of_week (e.g., "0 9 * * *" for 9 AM daily)
+              <!-- #925: the format hint doubles as the reserved error slot — one
+                   footprint (min-h-8 ≈ the hint's own 2 wrapped lines), so the
+                   modal never jumps when validation kicks in (p4/p6). -->
+              <p
+                class="text-xs mt-1 min-h-8"
+                :class="showCronError ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-gray-500 dark:text-gray-400'"
+              >
+                <template v-if="showCronError"><span data-testid="cron-error">{{ cronVerdict.error }}</span></template>
+                <template v-else>Format: minute hour day month day_of_week (e.g., "0 9 * * *" for 9 AM daily)</template>
               </p>
               <div class="mt-1 flex flex-wrap gap-1">
-                <button type="button" @click="setCronPreset('0 9 * * *')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Daily 9 AM</button>
-                <button type="button" @click="setCronPreset('0 9 * * 1')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Weekly Mon</button>
-                <button type="button" @click="setCronPreset('0 */6 * * *')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Every 6h</button>
-                <button type="button" @click="setCronPreset('*/30 * * * *')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Every 30m</button>
+                <!-- #925: presets come from the exported CRON_PRESETS so "presets
+                     never warn" is tested against the shipped list. -->
+                <button
+                  v-for="p in CRON_PRESETS"
+                  :key="p.expression"
+                  type="button"
+                  @click="setCronPreset(p.expression)"
+                  class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300"
+                >{{ p.label }}</button>
               </div>
             </div>
 
@@ -219,9 +261,11 @@
               >
                 Cancel
               </button>
+              <!-- #925: disabled ONLY for non-empty-AND-invalid cron — an empty
+                   cron keeps the native `required` bubble path for the form. -->
               <button
                 type="submit"
-                :disabled="formLoading"
+                :disabled="formLoading || submitBlockedByCron"
                 class="px-4 py-2 text-sm font-medium text-white bg-action-primary-600 border border-transparent rounded-md hover:bg-action-primary-700 disabled:bg-gray-400"
               >
                 <span v-if="formLoading" class="flex items-center">
@@ -239,11 +283,43 @@
       </div>
     </div>
 
+    <!-- Action failure (#1926) — enable/disable used to fail to console only
+         (the row silently snapped back), and delete/trigger used a native
+         alert(). Both now surface here and persist until dismissed. -->
+    <InlineError
+      v-if="actionError"
+      class="mb-4"
+      :message="actionError"
+      :detail="actionErrorDetail"
+      @dismiss="clearActionError"
+    />
+
     <!-- Schedules List -->
-    <div v-if="loading" class="text-center py-8">
+    <!-- #1634: the spinner means "no data yet", never "fetch in flight"
+         (design-system p4/p5/p13/p14). Gating on the in-flight flag alone
+         unmounted the whole list on every refetch — the document collapsed to
+         spinner height and the browser clamped window.scrollY to 0, so toggling
+         a row threw the page back to the top. Matches ExecutionsPanel /
+         LoopsPanel / TasksPanel / ReportsPanel / RoomsRail / CompatibilityPanel. -->
+    <div v-if="loading && schedules.length === 0" class="text-center py-8">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
       <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading schedules...</p>
     </div>
+
+    <!-- Failed list fetch (#1926) — "No schedules configured" on a failed fetch
+         invites the user to create a duplicate schedule. Gated on "no data":
+         once rows are on screen, letting this panel replace them would unmount
+         the list mid-refetch — the #1634 scroll clamp by another door. The
+         data-on-screen refetch failure renders as a dense banner above the
+         list instead (below). -->
+    <LoadFailed
+      v-else-if="loadError && schedules.length === 0"
+      title="Couldn't load schedules"
+      message="The schedule list didn't load, so what you see may be incomplete. Try again."
+      :detail="loadError"
+      :retrying="loading"
+      @retry="loadSchedules"
+    />
 
     <div v-else-if="schedules.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg">
       <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -254,9 +330,23 @@
     </div>
 
     <div v-else class="space-y-4">
+      <!-- Refetch failed with data on screen (#1926 × #1634): same failure,
+           non-unmounting form — the stale rows stay put and keep their scroll
+           position; the banner names the staleness and carries the retry. -->
+      <LoadFailed
+        v-if="loadError"
+        dense
+        title="Couldn't refresh schedules"
+        message="Showing the last loaded list — it may be stale."
+        :detail="loadError"
+        :retrying="loading"
+        @retry="loadSchedules"
+      />
       <div
         v-for="schedule in schedules"
         :key="schedule.id"
+        data-testid="schedule-row"
+        :data-schedule-id="schedule.id"
         class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-sm transition-shadow"
       >
         <div class="flex justify-between items-start">
@@ -264,6 +354,7 @@
             <div class="flex items-center space-x-2">
               <h4 class="font-medium text-gray-900 dark:text-white">{{ schedule.name }}</h4>
               <span
+                data-testid="schedule-status"
                 :class="[
                   'px-2 py-0.5 text-xs font-medium rounded-full',
                   schedule.enabled ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
@@ -280,6 +371,21 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <code class="font-mono bg-gray-100 dark:bg-gray-700 px-1 rounded">{{ schedule.cron_expression }}</code>
+                <!-- #925: stored-invalid cron (won't register with the scheduler).
+                     Inside the chip span so flex-wrap can't detach the icon from
+                     its chip; `=== false` so a map miss can never false-warn. -->
+                <span
+                  v-if="cronValidity[schedule.id] === false"
+                  class="ml-1 text-status-warning-600 dark:text-status-warning-400"
+                  title="Invalid cron expression"
+                  aria-label="Invalid cron expression"
+                  role="img"
+                  data-testid="cron-invalid-warning"
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
+                  </svg>
+                </span>
               </span>
               <span class="flex items-center">
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -314,7 +420,17 @@
                 </svg>
                 {{ schedule.max_retries }}x retry
               </span>
-              <span v-if="schedule.next_run_at && isOverdue(schedule)" class="flex items-center text-amber-600 dark:text-amber-400" :title="`Scheduled for ${formatDateTime(schedule.next_run_at)} but hasn't fired yet`">
+              <!-- #1796: autonomy is the master gate. When it is off the
+                   scheduler still fires the job and immediately discards it,
+                   so a "Next: in 4 minutes" countdown here would promise a run
+                   that cannot happen. Say why instead. -->
+              <span v-if="!autonomyEnabled && schedule.enabled" class="flex items-center text-amber-600 dark:text-amber-400" title="Autonomy is off for this agent, so this schedule will not fire">
+                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Will not fire — autonomy off
+              </span>
+              <span v-else-if="schedule.next_run_at && isOverdue(schedule)" class="flex items-center text-amber-600 dark:text-amber-400" :title="`Scheduled for ${formatDateTime(schedule.next_run_at)} but hasn't fired yet`">
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
                 </svg>
@@ -390,12 +506,13 @@
             </button>
             <button
               @click="toggleSchedule(schedule)"
-              :disabled="toggleLoading === schedule.id"
+              data-testid="schedule-toggle"
+              :disabled="toggleLoading.has(schedule.id)"
               class="p-1.5 rounded transition-colors"
               :class="schedule.enabled ? 'text-status-success-600 hover:text-gray-400' : 'text-gray-400 hover:text-status-success-600'"
               :title="schedule.enabled ? 'Disable' : 'Enable'"
             >
-              <svg v-if="toggleLoading === schedule.id" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+              <svg v-if="toggleLoading.has(schedule.id)" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
               </svg>
@@ -403,8 +520,13 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
               </svg>
             </button>
+            <!-- #1634: also gate Edit while THIS row's toggle refetch is in
+                 flight — editSchedule() copies `enabled` into the form and
+                 saveSchedule() PUTs it back (recomputing next_run_at), so an
+                 Edit+Save inside the toggle window rewrites the fire time. -->
             <button
               @click="editSchedule(schedule)"
+              :disabled="deleteLoading === schedule.id || toggleLoading.has(schedule.id)"
               class="p-1.5 text-gray-400 hover:text-action-primary-600 rounded transition-colors"
               title="Edit"
             >
@@ -764,6 +886,17 @@ import { parseUTC } from '@/utils/timestamps'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { apiErrorMessage } from '../utils/apiError'
+// #925: client-side mirror of the backend cron grammar (see utils/cronValidation.js
+// header — parity pinned by tests/fixtures/cron-grammar-cases.json in both suites).
+import {
+  validateCronExpression,
+  shouldShowCronError,
+  computeCronValidityMap,
+  CRON_PRESETS,
+} from '../utils/cronValidation'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 
@@ -778,8 +911,16 @@ const props = defineProps({
   initialMessage: {
     type: String,
     default: ''
+  },
+  // #1796: master gate. Defaults to true so a parent that doesn't pass it
+  // never shows a false "will not fire" warning.
+  autonomyEnabled: {
+    type: Boolean,
+    default: true
   }
 })
+
+defineEmits(['enable-autonomy'])
 
 const authStore = useAuthStore()
 const executionsStore = useExecutionsStore()
@@ -793,12 +934,48 @@ const perfBySchedule = ref({}) // schedule_id -> rollup row
 // State
 const schedules = ref([])
 const loading = ref(true)
+
+// #1796: only enabled schedules are affected by the autonomy gate — a disabled
+// schedule wouldn't fire either way, so warning about it would be noise.
+const enabledScheduleCount = computed(
+  () => schedules.value.filter(s => s.enabled).length
+)
 const showCreateForm = ref(false)
 const editingSchedule = ref(null)
 const formLoading = ref(false)
 const formError = ref('')
+
+// #925: client-side cron validation. Display gating lives in the pure, exported
+// shouldShowCronError/computeCronValidityMap (node-tested); these computeds are
+// thin wiring only.
+const cronTouched = ref(false) // first blur of the cron input (create flow)
+const cronVerdict = computed(() => validateCronExpression(formData.value.cron_expression))
+const showCronError = computed(() =>
+  shouldShowCronError({
+    valid: cronVerdict.value.valid,
+    expr: formData.value.cron_expression,
+    touched: cronTouched.value,
+    editing: !!editingSchedule.value,
+  })
+)
+// Submit blocked ONLY when non-empty AND invalid — empty keeps the native
+// `required` bubble (disabling on empty would kill the browser's
+// constraint-validation path for every field in the form).
+const submitBlockedByCron = computed(() => {
+  const expr = String(formData.value.cron_expression ?? '')
+  return expr.trim() !== '' && !cronVerdict.value.valid
+})
+// Row warning icons: id → validity, recomputed only when the list is replaced.
+const cronValidity = computed(() => computeCronValidityMap(schedules.value))
 const triggerLoading = ref(null)
-const toggleLoading = ref(null)
+// #1634: a Set, not one id — two rows can be in flight at once, and a single ref
+// let the first completion re-enable the second row's control mid-request (AC #6).
+const toggleLoading = ref(new Set())
+// #1926: a failed list fetch is not an empty list; a failed verb is not a
+// silent no-op. Both get their own state instead of console.error/alert().
+const loadError = ref('')
+const actionError = ref('')
+const actionErrorDetail = ref('')
 const deleteLoading = ref(null)
 const expandedSchedule = ref(null)
 const executions = ref({})
@@ -1064,18 +1241,31 @@ function toggleAllTools() {
   }
 }
 
+// #1634: a superseded load must not paint over a newer one. Clearing the list in
+// the agent-name watcher cannot stop a LATE response: switching A→B while A's GET
+// is in flight lands A's rows under B's header (and clears the spinner early)
+// whenever A resolves last. Also covers two same-agent refreshes racing (AC #3).
+// Per-instance: `let` inside <script setup>.
+let loadSeq = 0
+
 // Load schedules
 async function loadSchedules() {
+  const seq = ++loadSeq
   loading.value = true
+  loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/schedules`, {
       headers: authStore.authHeader
     })
+    if (seq !== loadSeq) return
     schedules.value = response.data
+    loadError.value = ''
   } catch (error) {
+    if (seq !== loadSeq) return
     console.error('Failed to load schedules:', error)
+    loadError.value = apiErrorMessage(error, 'Request failed')
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
   loadPerf()
 }
@@ -1084,8 +1274,10 @@ async function loadSchedules() {
 // by schedule_id for inline row stats. Best-effort — failure leaves rows
 // without stats, never blocks the list.
 async function loadPerf() {
+  const seq = loadSeq          // #1634: the load that owns this refresh
   try {
     const summary = await executionsStore.fetchSchedulesSummary(props.agentName, PERF_WINDOW)
+    if (seq !== loadSeq) return
     const map = {}
     for (const row of summary?.schedules || []) map[row.schedule_id] = row
     perfBySchedule.value = map
@@ -1133,8 +1325,15 @@ async function saveSchedule() {
         { headers: authStore.authHeader }
       )
     }
-    closeForm()
+    // #1634: refresh BEFORE closing. With the list no longer unmounting during a
+    // refetch, closing first leaves the stale row interactive — a click on its
+    // Edit button opens the modal pre-filled from pre-save data, and saving that
+    // silently reverts the edit just made. Keeping the modal up — it already
+    // shows the sanctioned in-button spinner (`formLoading`) — removes the
+    // interactive-stale window entirely and gives the create path the progress
+    // signal it otherwise loses.
     await loadSchedules()
+    closeForm()
   } catch (error) {
     formError.value = error.response?.data?.detail || 'Failed to save schedule'
   } finally {
@@ -1147,6 +1346,8 @@ function closeForm() {
   showCreateForm.value = false
   editingSchedule.value = null
   formError.value = ''
+  cronTouched.value = false // #925: next create starts un-flashed
+
   formData.value = {
     name: '',
     cron_expression: '',
@@ -1190,14 +1391,16 @@ function deleteSchedule(schedule) {
   confirmDialog.variant = 'danger'
   confirmDialog.onConfirm = async () => {
     deleteLoading.value = schedule.id
+    clearActionError()
     try {
       await axios.delete(`/api/agents/${props.agentName}/schedules/${schedule.id}`, {
         headers: authStore.authHeader
       })
       await loadSchedules()
     } catch (error) {
-      console.error('Failed to delete schedule:', error)
-      alert(error.response?.data?.detail || 'Failed to delete schedule')
+      // alert() blocks the page and dies on OK, leaving no record of what
+      // failed; an inline error persists next to the row (#1926).
+      reportActionFailure(error, `delete the schedule "${schedule.name}"`)
     } finally {
       deleteLoading.value = null
     }
@@ -1205,25 +1408,41 @@ function deleteSchedule(schedule) {
   confirmDialog.visible = true
 }
 
+function clearActionError() {
+  actionError.value = ''
+  actionErrorDetail.value = ''
+}
+
+// #1926 — one place that turns a failed verb into a persistent, named error.
+function reportActionFailure(error, what) {
+  console.error(`Failed to ${what}:`, error)
+  actionError.value = `Couldn't ${what}. Nothing was changed — try again.`
+  actionErrorDetail.value = apiErrorMessage(error, 'Request failed')
+}
+
 // Toggle schedule enabled/disabled
 async function toggleSchedule(schedule) {
-  toggleLoading.value = schedule.id
+  toggleLoading.value.add(schedule.id)
+  clearActionError()
+  const wanted = schedule.enabled ? 'disable' : 'enable'
   try {
-    const endpoint = schedule.enabled ? 'disable' : 'enable'
-    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${endpoint}`, {}, {
+    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${wanted}`, {}, {
       headers: authStore.authHeader
     })
     await loadSchedules()
   } catch (error) {
-    console.error('Failed to toggle schedule:', error)
+    // The row reverts to its server state on reload, so without this the user
+    // sees the toggle snap back with no explanation (#1926).
+    reportActionFailure(error, `${wanted} the schedule "${schedule.name}"`)
   } finally {
-    toggleLoading.value = null
+    toggleLoading.value.delete(schedule.id)
   }
 }
 
 // Trigger schedule manually
 async function triggerSchedule(schedule) {
   triggerLoading.value = schedule.id
+  clearActionError()
   try {
     await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/trigger`, {}, {
       headers: authStore.authHeader
@@ -1233,8 +1452,20 @@ async function triggerSchedule(schedule) {
       await loadExecutions(schedule.id)
     }
   } catch (error) {
-    console.error('Failed to trigger schedule:', error)
-    alert(error.response?.data?.detail || 'Failed to trigger schedule')
+    // #1968: the backend now answers 409 when the schedule is already running,
+    // instead of reporting a success that started nothing. That is not the
+    // "nothing was changed — try again" case reportActionFailure describes: a
+    // run IS in flight, and retrying only hits the same lock. Say what is
+    // actually true, and reload so the user can see the run in question.
+    if (error?.response?.status === 409) {
+      actionError.value = `"${schedule.name}" is already running — no new run was started.`
+      actionErrorDetail.value = ''
+      if (expandedSchedule.value === schedule.id) {
+        await loadExecutions(schedule.id)
+      }
+    } else {
+      reportActionFailure(error, `run the schedule "${schedule.name}" now`)
+    }
   } finally {
     triggerLoading.value = null
   }
@@ -1402,6 +1633,17 @@ function summarizeToolInput(tool) {
 
 // Watch for agent name changes
 watch(() => props.agentName, () => {
+  // #1634: this state belongs to the PREVIOUS agent. With the spinner now gated
+  // on "no data yet", leaving it would (a) suppress the panel-wide spinner the
+  // new agent's first load needs and (b) render the old agent's rows under the
+  // new agent's header. ORDERING: loadSchedules() sets loading=true
+  // synchronously (no await precedes it) and this watcher is flush:'pre', so
+  // both writes land in one flush — no empty-state frame. Keep that line first.
+  schedules.value = []
+  perfBySchedule.value = {}
+  // #1926 state is per-agent too: a failed verb on agent A must not show as an
+  // error banner under agent B. (loadError clears inside loadSchedules().)
+  clearActionError()
   loadSchedules()
 })
 
@@ -1417,6 +1659,7 @@ watch(() => props.initialMessage, (newMessage) => {
     formData.value.enabled = true
     formData.value.timeout_seconds = 3600  // #665
     formData.value.allowed_tools = null
+    cronTouched.value = false // #925: this path opens the form without closeForm()
     showCreateForm.value = true
   }
 }, { immediate: true })

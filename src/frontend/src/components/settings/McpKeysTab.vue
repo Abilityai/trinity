@@ -62,7 +62,12 @@
       </div>
 
       <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700">
-        <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-700">
+        <!-- #1848: the dark hover surface is the chrome shade gray-750, not
+             gray-700 (which is border-strong). On gray-700 the row's tertiary
+             meta ink sits at 4.06:1 — below AA — whenever the cursor is on the
+             row, and the gray-700 prefix chip below becomes invisible (1.00:1).
+             On gray-750 they read 5.21:1 and 1.28:1. -->
+        <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-750">
           <div class="flex items-center justify-between">
             <div class="flex items-center flex-1">
               <div class="flex-shrink-0">
@@ -86,21 +91,47 @@
                   <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
                     System
                   </span>
+                  <!-- ent#163: this key can act as ANY end user with portal
+                       access, so it must never render like an ordinary user
+                       key on the page where an admin audits keys. -->
+                  <span v-else-if="key.scope === 'portal_delegate'"
+                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300"
+                        title="Can exchange an end-user email for a portal session — treat as a delegated-identity credential">
+                    Portal Delegate
+                  </span>
                 </div>
                 <p v-if="key.description" class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ key.description }}</p>
-                <div class="mt-1 flex items-center text-xs text-gray-400 dark:text-gray-500 space-x-4">
+                <!-- #1848: uniform inline flow. `space-x-4` is margin-left on every
+                     item after the first, which indents continuation lines the moment
+                     the row wraps — so a wrapping row needs `gap`, not `space-x`. Each
+                     label+value atom is nowrap so a timestamp can never orphan its
+                     AM/PM; the email instead gets min-w-0 + break-all, because an
+                     address has no spaces and so would otherwise be an unbreakable
+                     token that overflows the row. The Last-used slot always renders so
+                     every row has the same item set — that, not nowrap alone, is what
+                     stops rows breaking at different points. Ink is the tertiary ladder
+                     rung (gray-500/gray-400), which was inverted and failed AA in both
+                     themes at rest.
+
+                     The owner span is the one item that can now go multi-line (break-all
+                     is what made that reachable), so its icon is items-start + mt-0.5
+                     rather than items-center — it must sit on the FIRST line, not float
+                     to the vertical centre of two. text-xs is a 16px line box and the
+                     glyph is 12px, so mt-0.5 (2px) is exactly the offset items-center
+                     was already producing: single-line rows are pixel-identical. -->
+                <div class="mt-1 flex items-center flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                   <span>
                     <code class="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded font-mono">{{ key.key_prefix }}...</code>
                   </span>
-                  <span v-if="key.user_email" class="flex items-center">
-                    <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <span v-if="key.user_email" class="flex items-start min-w-0 break-all">
+                    <svg class="h-3 w-3 mr-1 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                     </svg>
                     {{ key.user_email }}
                   </span>
-                  <span>Created {{ formatDate(key.created_at) }}</span>
-                  <span v-if="key.last_used_at">Last used {{ formatDate(key.last_used_at) }}</span>
-                  <span class="flex items-center">
+                  <span class="whitespace-nowrap tabular-nums">Created {{ formatDate(key.created_at) }}</span>
+                  <span class="whitespace-nowrap tabular-nums">Last used {{ key.last_used_at ? formatDate(key.last_used_at) : 'never' }}</span>
+                  <span class="flex items-center whitespace-nowrap tabular-nums">
                     <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                     </svg>
@@ -157,6 +188,23 @@
                   class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
                   placeholder="Used for..."
                 ></textarea>
+              </div>
+
+              <!-- ent#163. Admin-only, and deliberately opt-in rather than a
+                   default: a delegate key acts as other people, so creating one
+                   should be a conscious choice, never a stray click. -->
+              <div v-if="isAdmin">
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="checkbox" v-model="newKey.portalDelegate" class="mt-0.5 rounded text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm text-gray-700 dark:text-gray-300">
+                    Portal delegate key
+                    <span class="block text-xs text-gray-500 dark:text-gray-400">
+                      Lets a trusted backend exchange one of your client emails for a
+                      portal session — it acts as that person. It can do nothing else:
+                      every other endpoint is refused. Revoke it to stop delegation.
+                    </span>
+                  </span>
+                </label>
               </div>
             </div>
           </div>
@@ -326,7 +374,8 @@ const copiedConfig = ref(false)
 
 const newKey = ref({
   name: '',
-  description: ''
+  description: '',
+  portalDelegate: false
 })
 
 const confirmDialog = reactive({
@@ -432,7 +481,10 @@ const createKey = async () => {
       },
       body: JSON.stringify({
         name: newKey.value.name,
-        description: newKey.value.description || null
+        description: newKey.value.description || null,
+        // Omitted (not `null`) for an ordinary key so the backend
+        // default stands and nothing changes for existing callers.
+        ...(newKey.value.portalDelegate ? { scope: 'portal_delegate' } : {})
       })
     })
 
@@ -441,7 +493,7 @@ const createKey = async () => {
       createdApiKey.value = data.api_key
       showCreateModal.value = false
       showKeyModal.value = true
-      newKey.value = { name: '', description: '' }
+      newKey.value = { name: '', description: '', portalDelegate: false }
       await fetchApiKeys()
     } else {
       const error = await response.json()

@@ -29,7 +29,41 @@ LOG_ARCHIVE_ENABLED = os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true"
 LOG_CLEANUP_HOUR = int(os.getenv("LOG_CLEANUP_HOUR", "3"))
 
 LOG_DIR = Path("/data/logs")
-TEMP_ARCHIVE_DIR = Path("/tmp/archives")
+# #2205 review finding: staging must not sit on the 100 MB `/tmp` tmpfs that both
+# compose files mount (`- /tmp:noexec,nosuid,size=100m`). Measured on a real
+# instance, platform JSON logs gzip about 42:1 — so the 2.0 GB file there stages to
+# ~47 MB and fits, but the 4.6 GB file this issue was FILED against stages to
+# ~110 MB and does not: `_compress_file` fails with ENOSPC, the error is swallowed
+# (`logger.error` + `continue`), and the largest file — the whole reason the disk
+# grew — is never archived. Fixing the directory ownership alone would not have
+# pruned it.
+#
+# Staging inside the destination directory removes the ceiling AND makes the final
+# `store_archive` a same-filesystem rename instead of a cross-device copy of the
+# whole archive. `_staging_dir()` resolves it from the storage backend so the two
+# cannot drift apart; the `/tmp` path stays as the fallback for a non-local backend.
+_TMP_STAGING_FALLBACK = Path("/tmp/archives")
+
+
+def _staging_dir() -> Path:
+    """Where to gzip before handing the file to the storage backend.
+
+    Beside the destination when the backend is local (same filesystem => rename),
+    else the legacy tmp path. Never raises: a staging directory that cannot be
+    created is reported by the caller, not at import.
+    """
+    try:
+        from services.archive_storage import get_archive_storage, LocalArchiveStorage
+
+        storage = get_archive_storage()
+        if isinstance(storage, LocalArchiveStorage):
+            return Path(storage.archive_path) / ".staging"
+    except Exception:  # noqa: BLE001 — fall back rather than fail at import
+        pass
+    return _TMP_STAGING_FALLBACK
+
+
+TEMP_ARCHIVE_DIR = _TMP_STAGING_FALLBACK
 
 
 class LogArchiveService:
@@ -111,6 +145,34 @@ class LogArchiveService:
             logger.warning(f"Log directory not found: {LOG_DIR}")
             return {"error": "Log directory not found"}
 
+        # Review finding: re-arm the writability alarm per RUN, not once per process.
+        # The constructor probes at import; under `restart: unless-stopped` a backend
+        # can run for weeks, so an operator who acknowledged the alarm without fixing
+        # ownership would never hear about it again while every nightly run failed.
+        # The alarm id is bucketed per day, so this re-alarms at most daily while the
+        # fault persists and goes quiet as soon as it is fixed (#2216's
+        # `_staleness_check` is the sibling precedent).
+        try:
+            from services.archive_storage import probe_archive_writability
+
+            probe_archive_writability()
+        except Exception:  # noqa: BLE001 — never let the probe break the run
+            logger.debug("[LogArchive] writability probe skipped", exc_info=True)
+
+        # Staging is resolved per run, not at import: the storage backend is built
+        # lazily, and staging beside the destination is what keeps a large archive off
+        # the 100 MB `/tmp` tmpfs (see `_staging_dir`).
+        self._staging = _staging_dir()
+        try:
+            self._staging.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error(
+                "[LogArchive] staging dir %s unusable (%s) — falling back to %s",
+                self._staging, exc, _TMP_STAGING_FALLBACK,
+            )
+            self._staging = _TMP_STAGING_FALLBACK
+            self._staging.mkdir(parents=True, exist_ok=True)
+
         files_processed = 0
         bytes_before = 0
         bytes_after = 0
@@ -125,7 +187,7 @@ class LogArchiveService:
 
                 if file_date and file_date < cutoff_date.date():
                     # Compress the file to temp directory
-                    archive_path = TEMP_ARCHIVE_DIR / f"{log_file.stem}.json.gz"
+                    archive_path = self._staging / f"{log_file.stem}.json.gz"
                     original_size = log_file.stat().st_size
 
                     logger.info(f"Archiving {log_file.name} ({original_size / 1024 / 1024:.1f} MB)")

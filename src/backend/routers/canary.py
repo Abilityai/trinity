@@ -23,6 +23,7 @@ from database import db
 from dependencies import require_admin
 from models import (
     CanaryStatsResponse,
+    CanaryStatusResponse,
     CanaryViolation,
     CanaryViolationListResponse,
     CycleTransition,
@@ -103,6 +104,26 @@ async def get_canary_stats(
     return CanaryStatsResponse(**stats)
 
 
+@router.get("/status", response_model=CanaryStatusResponse)
+async def get_canary_status(
+    _: User = Depends(require_admin),
+) -> CanaryStatusResponse:
+    """Run-state of the canary harness. Admin only.
+
+    Answers the question a disabled/stale canary otherwise hides: a harness
+    emitting zero violations because it is OFF is byte-identical to a clean
+    fleet (the H-01 class one level up — H-01 catches a blind collector while
+    a cycle runs; this catches "no cycle running at all"). All logic lives in
+    the service (Invariant #1); this handler is a thin pass-through.
+
+    Fail-open: a disabled install reads `disabled` and a Redis/parse failure
+    reads `unknown` — never `stale`, so a default-OFF install never alarms.
+    A distinct root literal, so no Invariant #4 collision with
+    `/violations/{violation_id}`.
+    """
+    return CanaryStatusResponse(**canary_service.get_run_status())
+
+
 @router.get("/violations/{violation_id}", response_model=CanaryViolation)
 async def get_canary_violation(
     violation_id: int,
@@ -134,9 +155,11 @@ async def run_canary_cycle(
       - confirming a violation cleared after a fix
       - integration tests that need deterministic cycle timing
 
-    The response surfaces exactly the transitions the service emitted —
+    The response surfaces exactly the transitions the service delivered —
     no recomputation here — so the endpoint and the Slack webhook cannot
-    disagree.
+    disagree. Anything detected but NOT delivered is reported beside them
+    in `undelivered_invariant_ids` (#1897), so a webhook outage reads as an
+    outage rather than as a green cycle.
     """
     body = body or RunCycleRequest()
     requested_ids = body.invariants or list(INVARIANTS.keys())
@@ -185,7 +208,9 @@ async def run_canary_cycle(
 
         # Build a transition entry only for invariants the SERVICE actually
         # decided fired a notification this cycle. Continuing-red invariants
-        # have rows in `persisted` but are absent from `transition_set`.
+        # have rows in `persisted` but are absent from `transition_set` — and
+        # since #1897 so does a transition whose webhook POST was rejected,
+        # which is why `undelivered_invariant_ids` rides alongside below.
         if invariant_id in transition_set and vlist:
             worst = max(vlist, key=lambda v: severity_rank(v.severity))
             transitions_out.append(CycleTransition(
@@ -206,4 +231,5 @@ async def run_canary_cycle(
         sources_unavailable=cycle.sources_unavailable,
         violations=persisted,
         transitions=transitions_out,
+        undelivered_invariant_ids=cycle.undelivered_invariant_ids,
     )

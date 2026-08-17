@@ -67,6 +67,8 @@ async def container_stop(container, timeout: int = 10) -> None:
 | `container_reload(container)` | Refresh container attrs | 100-500ms | 0s event loop block |
 | `container_stats(container, stream=False)` | Get container stats | 1-2s | 0s event loop block |
 | `container_get(container_id)` | Get container by ID/name | 50-200ms | 0s event loop block |
+| `image_get(name)` | Get image by tag/ID (#1809 drift check) | 50-200ms | 0s event loop block |
+| `network_get(name)` | Get network by name (#1816 adoption pre-flight) | 50-200ms | 0s event loop block |
 | `volume_get(name)` | Get volume by name | 100-300ms | 0s event loop block |
 | `volume_create(name, labels=None)` | Create volume | 200-500ms | 0s event loop block |
 | `volume_remove(volume)` | Remove volume | 100-300ms | 0s event loop block |
@@ -74,6 +76,26 @@ async def container_stop(container, timeout: int = 10) -> None:
 | `container_exec_run(container, cmd, user, workdir, environment)` | Execute command in container | 100ms-30s | 0s event loop block |
 | `api_exec_create(container_id, cmd, stdin, tty, ...)` | Create exec instance | 50-200ms | 0s event loop block |
 | `api_exec_start(exec_id, socket, tty)` | Start exec instance | 50-200ms | 0s event loop block |
+| `agent_container_states_async()` | Coarse state of EVERY agent container, one sparse list (#2196) | 50-200ms | 0s event loop block |
+| `agent_container_state_async(name)` | Coarse state of ONE agent (#2196) | 50-200ms | 0s event loop block |
+
+The two #2196 wrappers differ from every other entry above in one respect worth
+stating, because it constrains how they may be edited: their leaf is imported
+**inside the function body**, not at module scope. `client_portal` and its tests
+patch `sys.modules["services.docker_service"]`, and only the
+`from x import y` form resolves through `sys.modules` at call time — an
+`import x.y as m` alias binds the package attribute, which conftest's #762
+restore can leave pointing at a different object. Hoisting either import to the
+top of the module would silently disconnect that patch route, and a missed patch
+does not error: the real Docker read runs and the test fails on product
+behaviour.
+
+Their tri-state semantics are the leaf's (`docker_service.agent_container_states`
+/ `agent_container_state`): a value means Docker answered, `None` means it could
+not be asked. That distinction is the whole point — see
+[docker-socket-gid-detection.md](docker-socket-gid-detection.md) for the class of
+fault that makes "no container" and "cannot reach the daemon" indistinguishable
+everywhere else.
 
 ---
 
@@ -471,3 +493,4 @@ Container listing operations in `docker_service.py` are fast (<50ms) and do not 
 |------|---------|
 | 2026-02-24 | Initial implementation per DOCKER-001 requirements |
 | 2026-02-24 | Added exec wrappers (`container_exec_run`, `api_exec_create`, `api_exec_start`), expanded to SSH/Git/Terminal services (12 files total) |
+| 2026-08-15 | #2196: added `agent_container_states_async` / `agent_container_state_async` — the async form of the tri-state container-state reads the Workspace roster projects onto its cards |

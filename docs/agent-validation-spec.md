@@ -13,21 +13,18 @@
 | F-001 | HARD | STATIC | File Structure | `template.yaml` exists |
 | F-002 | HARD | STATIC | File Structure | `CLAUDE.md` exists |
 | F-003 | SOFT | STATIC | File Structure | `.gitignore` exists |
-| F-004 | SOFT | STATIC | File Structure | `.env.example` exists |
+| F-004 | SOFT | STATIC | File Structure | `.env.example` exists (only when the agent declares credentials — K-001 owns the HARD case) |
 | F-005 | SOFT | STATIC | File Structure | `.mcp.json.template` exists (if MCP servers declared) |
 | F-006 | INFO | STATIC | File Structure | `README.md` exists |
 | F-007 | INFO | STATIC | File Structure | `.trinity/setup.sh` exists (if system packages are needed) |
-| F-008 | INFO | STATIC | File Structure | `.claude/commands/` directory exists |
 | F-009 | INFO | STATIC | File Structure | At least one `.claude/skills/` or `.claude/commands/` file exists |
 | F-010 | SOFT | STATIC | File Structure | `dashboard.yaml` exists |
 | F-011 | INFO | STATIC | File Structure | `ARCHITECTURE.md` (or `docs/architecture.md`) exists |
-| F-012 | INFO | STATIC | File Structure | `docs/memory/requirements.md` (or `REQUIREMENTS.md`) exists |
-| F-013 | INFO | STATIC | File Structure | `CHANGELOG.md` exists |
 | S-001 | HARD | STATIC | Security | `.env` is excluded in `.gitignore` |
 | S-002 | HARD | STATIC | Security | `.mcp.json` is excluded in `.gitignore` |
 | S-003 | HARD | STATIC | Security | No hardcoded secrets in any committed file |
 | S-004 | HARD | STATIC | Security | `.claude/projects/` is excluded in `.gitignore` |
-| S-005 | HARD | STATIC | Security | `.trinity/` is excluded in `.gitignore` |
+| S-005 | HARD | STATIC | Security | `.trinity/` runtime state is excluded in `.gitignore` (canonical shape is `.trinity/*` plus `!` re-includes for the authored hooks — see #2070; the dir-forms are still accepted) |
 | S-006 | SOFT | STATIC | Security | `.claude/statsig/`, `.claude/todos/`, `.claude/debug/`, `.claude/sessions/`, `.claude/shell-snapshots/` excluded in `.gitignore` |
 | S-007 | SOFT | STATIC | Security | `content/` is excluded in `.gitignore` |
 | S-008 | SOFT | STATIC | Security | `*.pem`, `*.key`, `credentials.json` patterns in `.gitignore` |
@@ -39,52 +36,43 @@
 | T-004 | HARD | STATIC | template.yaml | `resources.cpu` present and valid Docker CPU string |
 | T-005 | HARD | STATIC | template.yaml | `resources.memory` present and valid Docker memory string |
 | T-006 | SOFT | STATIC | template.yaml | `display_name` field present |
-| T-007 | SOFT | STATIC | template.yaml | `version` field present (semantic version format) |
-| T-008 | SOFT | STATIC | template.yaml | `author` field present |
+| T-007 | INFO | STATIC | template.yaml | `version` field present (semantic version format) |
+| T-008 | INFO | STATIC | template.yaml | `author` field present |
 | T-009 | SOFT | AI | template.yaml | `description` is substantive (2+ sentences, explains purpose clearly) |
-| T-010 | SOFT | STATIC | template.yaml | `use_cases` array present with 3–7 examples |
-| T-011 | SOFT | STATIC | template.yaml | `capabilities` array present |
-| T-012 | SOFT | STATIC | template.yaml | `mcp_servers` descriptions match actual servers in `.mcp.json.template` |
+| T-010 | INFO | STATIC | template.yaml | `use_cases` array present with 3–7 examples |
+| T-011 | INFO | STATIC | template.yaml | `capabilities` array present |
 | T-013 | SOFT | AI | template.yaml | `use_cases` entries are realistic, specific, actionable prompts (not buzzword lists) |
 | T-014 | SOFT | AI | template.yaml | `tagline` (if present) is concise and explains unique value (not generic "AI assistant") |
-| T-015 | SOFT | STATIC | template.yaml | `credentials` schema lists all variables referenced in `.mcp.json.template` |
-| T-016 | INFO | STATIC | template.yaml | `schedules` entries (if any) reference existing `.claude/commands/` files |
-| T-017 | HARD | STATIC | template.yaml | No conflicting Trinity-injected files named in commit paths (`.env`, `.mcp.json`) |
+| T-015 | HARD | STATIC | template.yaml | `credentials` schema lists all variables referenced in `.mcp.json.template` |
+| T-018 | SOFT | STATIC | template.yaml | `schedules` block entries are well-formed (structure only — A-002 owns cron syntax) |
 | C-001 | HARD | STATIC | CLAUDE.md | Valid UTF-8 markdown, non-empty |
 | C-002 | HARD | AI | CLAUDE.md | Has an identity/purpose section (who the agent is and what it does) |
 | C-003 | SOFT | AI | CLAUDE.md | Contains domain-specific instructions (not just generic Claude guidance) |
 | C-004 | SOFT | AI | CLAUDE.md | Lists available tools and MCP integrations |
 | C-005 | SOFT | AI | CLAUDE.md | Contains at least one concrete workflow or step-by-step procedure |
-| C-006 | SOFT | AI | CLAUDE.md | Contains explicit constraints or guardrails section |
+| C-006 | SOFT | AI | CLAUDE.md | Contains explicit, **actionable** constraints or guardrails (absorbs retired C-009) |
 | C-007 | SOFT | STATIC | CLAUDE.md | Under 2000 lines (beyond this, Claude ignores trailing instructions) |
 | C-008 | SOFT | AI | CLAUDE.md | Does not repeat standard Claude knowledge (generic best practices, library docs) |
-| C-009 | SOFT | AI | CLAUDE.md | Constraints are explicit and actionable, not vague ("be safe", "be helpful") |
 | C-010 | INFO | AI | CLAUDE.md | Critical rules are emphasized (uses IMPORTANT:, **bold**, or similar) |
 | C-011 | INFO | AI | CLAUDE.md | No stale references to tools/services not available in this agent |
-| C-012 | SOFT | AI | CLAUDE.md | Identity section conveys a coherent persona aligned with the agent's purpose |
+| C-012 | INFO | AI | CLAUDE.md | Identity section conveys a coherent persona aligned with the agent's purpose |
 | K-001 | HARD | STATIC | Credentials | Every `${VAR}` in `.mcp.json.template` has a corresponding entry in `.env.example` |
-| K-002 | HARD | STATIC | Credentials | Every `${VAR}` in `.mcp.json.template` is listed in `template.yaml` credentials schema |
-| K-003 | SOFT | STATIC | Credentials | `.env.example` comments explain what each variable is for |
+| K-003 | INFO | STATIC | Credentials | `.env.example` comments explain what each variable is for |
 | K-004 | SOFT | STATIC | Credentials | `.env.example` uses placeholder values (not empty or real values) |
-| K-005 | SOFT | AI | Credentials | Credential variable names follow the `SERVICE_FIELD` convention (e.g., `TWITTER_API_KEY`) |
 | G-001 | HARD | STATIC | Git Config | `.claude/` is NOT excluded from `.gitignore` wholesale (must stay committed for Claude Code) |
-| G-002 | SOFT | STATIC | Git Config | `.gitignore` follows the canonical pattern list from `git_service.py` |
-| G-003 | SOFT | STATIC | Git Config | If `git.commit_paths` in `template.yaml`, paths do not include `.env`, `.mcp.json`, `content/` |
-| G-004 | SOFT | STATIC | Git Config | If `git.ignore_paths` in `template.yaml`, `.env` and `.mcp.json` are listed |
-| G-005 | INFO | STATIC | Git Config | `git.push_enabled` is explicitly set (not left to platform default) |
 | P-001 | SOFT | STATIC | Skills/Playbooks | Each skill file has valid YAML frontmatter |
 | P-002 | SOFT | STATIC | Skills/Playbooks | Each skill frontmatter has `name` and `description` fields |
 | P-003 | SOFT | AI | Skills/Playbooks | Skill `description` is specific enough to trigger correct auto-invocation (not vague) |
-| P-004 | SOFT | STATIC | Skills/Playbooks | Each skill file is under 500 lines |
+| P-004 | SOFT | STATIC | Skills/Playbooks | Each `SKILL.md` is under 500 lines (companion `reference.md`/`examples.md` are exempt — they are P-009's output) |
 | P-005 | SOFT | AI | Skills/Playbooks | Skills are domain-specific to this agent's purpose (not generic dev methodology) |
-| P-006 | HARD | AI | Skills/Playbooks | Autonomous/scheduled skills contain NO approval gates or human decision points |
+| P-006 | HARD | STATIC | Skills/Playbooks | Autonomous/scheduled skills contain NO approval gates, unless frontmatter declares `automation: gated` or `manual` |
 | P-007 | SOFT | AI | Skills/Playbooks | Autonomous skills include error handling and notification on failure |
 | P-008 | SOFT | AI | Skills/Playbooks | Playbooks that run on schedule are self-contained (no required user input) |
 | P-009 | INFO | AI | Skills/Playbooks | Complex skills use multi-file layout (SKILL.md + reference.md / examples.md) |
 | P-010 | SOFT | AI | Skills/Playbooks | Skills are idempotent or clearly document that they are not |
 | P-011 | SOFT | AI | Skills/Playbooks | `allowed-tools` is scoped appropriately (read-only skills don't request write tools) |
 | P-012 | INFO | AI | Skills/Playbooks | Skills include a completion checklist or explicit output format |
-| A-001 | SOFT | AI | Autonomy Design | Scheduled messages reference slash commands, not raw prose prompts |
+| A-001 | INFO | STATIC | Autonomy Design | Scheduled messages name a slash command *anywhere* in the message (prose is valid; this is a determinism suggestion) |
 | A-002 | SOFT | STATIC | Autonomy Design | Cron expressions in `template.yaml` schedules are valid cron syntax |
 | A-003 | SOFT | AI | Autonomy Design | Agent has a clear autonomy model: either interactive or autonomous, not ambiguous |
 | A-004 | INFO | STATIC | Autonomy Design | `.trinity/pre-check` (if present) is executable and has a valid shebang |
@@ -94,7 +82,6 @@
 | D-003 | HARD | STATIC | Dashboard/Metrics | Widget required fields are present (e.g., `content` not `text` for text widgets, `items` not `values` for list widgets, `url` not `href` for link widgets) |
 | D-004 | SOFT | STATIC | Dashboard/Metrics | Progress widget values are in 0–100 range |
 | D-005 | SOFT | STATIC | Dashboard/Metrics | Status widget colors are from allowed palette (green/red/yellow/gray/blue/orange/purple) |
-| D-006 | SOFT | STATIC | Dashboard/Metrics | `metrics:` in `template.yaml` (if present) — all metric names match keys in `metrics.json` pattern |
 | D-007 | SOFT | AI | Dashboard/Metrics | Metrics definitions reflect meaningful domain KPIs (not just generic "messages processed") |
 | D-008 | INFO | STATIC | Dashboard/Metrics | Dashboard `refresh_interval` is >= 5 seconds |
 | X-001 | SOFT | AI | Consistency | Agent name, `display_name`, and `description` tell a coherent story about the same agent |
@@ -103,18 +90,14 @@
 | X-004 | SOFT | AI | Consistency | MCP servers listed in `template.yaml` match servers in `.mcp.json.template` |
 | X-005 | SOFT | AI | Consistency | Credentials in `.env.example` are consistent with those documented in CLAUDE.md |
 | X-006 | INFO | AI | Consistency | The agent's stated use cases are achievable given its declared tools and MCP servers |
-| X-007 | SOFT | AI | Consistency | Scheduled task messages (cron prompts) align with skills that exist in this agent |
+| X-007 | SOFT | STATIC | Consistency | Scheduled messages resolve to an existing `.claude/skills/<name>/SKILL.md` **or** `.claude/commands/<name>.md` |
 | X-008 | INFO | AI | Consistency | Resource allocation (`cpu`/`memory`) is appropriate for the agent's stated workload |
 | I-001 | SOFT | AI | Composability | If the agent is callable by others (declares Trinity MCP or `permissions`), it documents its output format in `template.yaml` or `CLAUDE.md` |
 | I-002 | SOFT | AI | Composability | Scheduled/autonomous tasks write structured output to a file or shared folder, not only as a chat response |
-| I-003 | SOFT | AI | Composability | If the agent produces data for downstream consumers, an output schema or format is documented |
-| I-004 | SOFT | AI | Composability | Agent has a clear "interface" — what goes in, what comes out — not just a description of what it does |
-| I-005 | INFO | STATIC | Composability | `~/.trinity/post-check` exists if the agent declares output contracts (validates own output before delivery) |
 | DP-001 | HARD | STATIC | Runtime Data | Every `data_paths` entry in `template.yaml` resolves under `data/` (relative to `/home/developer`) — no `../`, no absolute paths, no escape from the data root |
-| DP-002 | HARD | STATIC | Runtime Data | If `data_paths` is declared, the `data/` root is excluded in `.gitignore` (Trinity appends it at creation; a template that ships `.gitignore` should pre-include it) |
+| DP-002 | SOFT | STATIC | Runtime Data | If `data_paths` is declared, the `data/` root is excluded in `.gitignore` (Trinity appends it at creation; a template that ships `.gitignore` should pre-include it) |
 | DP-003 | SOFT | STATIC | Runtime Data | `data_paths` entries do not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state` (those are managed separately) |
-| DP-004 | SOFT | STATIC | Runtime Data | If `data_paths` is declared, the agent is NOT replica-safe — its runtime data is instance-local and must travel via export/import, not template clone (feeds #927) |
-| DP-005 | INFO | STATIC | Runtime Data | `~/.trinity/pre-snapshot` (if present) is executable and has a valid shebang (PR2 SQLite-quiesce hook; A-004 analog) |
+| DP-004 | INFO | STATIC | Runtime Data | If `data_paths` is declared, the agent is NOT replica-safe — its runtime data is instance-local and must travel via export/import, not template clone (feeds #927) |
 
 ---
 
@@ -134,9 +117,9 @@ Check: File exists at agent root. Without it, Claude Code has no instructions an
 Severity: SOFT | Type: STATIC  
 Check: File exists at agent root. Missing `.gitignore` will cause secrets to be committed on first sync. Auto-fixable: Yes (generate canonical template).
 
-**F-004** — `.env.example` exists  
+**F-004** — `.env.example` exists when credentials are declared  
 Severity: SOFT | Type: STATIC  
-Check: File exists. Without it, users have no way to know what credentials to inject. Auto-fixable: No.
+Check: File exists — but only demanded when the agent actually declares credentials (a `${VAR}` in `.mcp.json.template`, or a `credentials:`/`mcp_servers:` block in `template.yaml`). A credential-free agent is PASSed: an `.env.example` there would document nothing, and unconditionally requiring it SOFT-failed every such agent for an unactionable reason (#2137). K-001 still owns the case that matters at HARD — a `${VAR}` with no matching `.env.example` entry. Auto-fixable: No.
 
 **F-005** — `.mcp.json.template` exists when MCP servers are declared  
 Severity: SOFT | Type: STATIC  
@@ -150,10 +133,6 @@ Human-facing documentation. Not required for Trinity runtime, but expected for a
 Severity: INFO | Type: AI+STATIC  
 Check: If CLAUDE.md references system packages (ffmpeg, imagemagick, etc.) or global npm packages, a setup.sh must exist to persist them across container restarts.
 
-**F-008** — `.claude/commands/` exists  
-Severity: INFO | Type: STATIC  
-At least one slash command is expected for any agent that has scheduled tasks.
-
 **F-009** — At least one skill or command file exists  
 Severity: INFO | Type: STATIC  
 An agent with no skills or commands is unlikely to be useful autonomously.
@@ -165,14 +144,6 @@ Without a dashboard, the Trinity Dashboard tab shows nothing. Not required, but 
 **F-011** — `ARCHITECTURE.md` (or `docs/architecture.md`) exists  
 Severity: INFO | Type: STATIC  
 Describes the agent's design, data flows, key components, and how it fits into a broader agentic system. Especially valuable for multi-agent or complex agents. CLAUDE.md can `@import` this file to keep the system prompt concise while giving Claude full architectural context.
-
-**F-012** — `docs/memory/requirements.md` (or `REQUIREMENTS.md`) exists  
-Severity: INFO | Type: STATIC  
-Captures the agent's goals, use cases, and acceptance criteria in a durable document. Helps future maintainers understand scope and prevents feature drift. Recommended location: `docs/memory/requirements.md` to mirror the Trinity development convention.
-
-**F-013** — `CHANGELOG.md` exists  
-Severity: INFO | Type: STATIC  
-Tracks changes between versions. Once an agent is published and iterated on, a changelog helps operators understand what changed and whether an upgrade is safe. Not required for initial versions but expected for any mature published template.
 
 ---
 
@@ -243,11 +214,11 @@ Severity: SOFT | Type: STATIC
 Without it, the UI falls back to `name` (lowercase, hyphens visible).
 
 **T-007** — `version` present (semver)  
-Severity: SOFT | Type: STATIC  
+Severity: INFO | Type: STATIC  
 Must match `/^\d+\.\d+(\.\d+)?$/`. Enables upgrade tracking.
 
 **T-008** — `author` present  
-Severity: SOFT | Type: STATIC  
+Severity: INFO | Type: STATIC  
 Required for template marketplace attribution.
 
 **T-009** — `description` is substantive  
@@ -255,36 +226,47 @@ Severity: SOFT | Type: AI
 The description must explain what the agent does and for whom in at least 2 sentences. Evaluate: does it answer "what does this agent do?" and "who would use it?"
 
 **T-010** — `use_cases` array with 3–7 entries  
-Severity: SOFT | Type: STATIC  
+Severity: INFO | Type: STATIC  
 Fewer than 3 gives users no guidance. More than 7 clutters the UI.
 
 **T-011** — `capabilities` array present  
-Severity: SOFT | Type: STATIC  
+Severity: INFO | Type: STATIC  
 These appear as feature chips in the template gallery.
-
-**T-012** — `mcp_servers` entries match `.mcp.json.template`  
-Severity: SOFT | Type: STATIC  
-Extract server names from `.mcp.json.template` `mcpServers` keys; verify all are listed in `template.yaml mcp_servers[].name`.
 
 **T-013** — `use_cases` entries are realistic and specific  
 Severity: SOFT | Type: AI  
-Each use case should be a plausible user prompt, not a feature description. Bad: "Advanced analytics capabilities". Good: "Analyze our Q3 pipeline and flag deals at risk of slipping."
+Each use case should be a plausible user prompt, not a feature description. Bad: "Advanced analytics capabilities". Good: "Analyze our Q3 pipeline and flag deals at risk of slipping." **PASSes when `use_cases` is absent** (#2137), mirroring T-014's "PASS if absent; FAIL only if present and generic" — T-010 already owns presence, at INFO.
 
 **T-014** — `tagline` conveys unique value  
 Severity: SOFT | Type: AI  
 If present, must not be generic ("AI-powered assistant", "Smart agent"). Should state what makes this agent distinctive in ≤60 chars.
 
 **T-015** — All MCP credential variables listed in `credentials` schema  
-Severity: SOFT | Type: STATIC  
-Extract all `${VAR}` from `.mcp.json.template`; verify each appears in `template.yaml credentials`.
-
-**T-016** — Schedule messages reference existing commands  
-Severity: SOFT | Type: STATIC  
-If `schedules[].message` starts with `/`, verify a corresponding file exists in `.claude/commands/`.
-
-**T-017** — Commit paths don't overwrite Trinity-injected files  
 Severity: HARD | Type: STATIC  
-`git.commit_paths` must not include `.env`, `.mcp.json`, `.mcp.json.template`. These are managed by Trinity.
+Extract all `${VAR}` from `.mcp.json.template`; verify each appears in `template.yaml credentials`. **Promoted SOFT → HARD in #2137** when its duplicate K-002 was retired: K-002 was declared HARD and its body was literally `return c_t015(snap)`, so the two shared logic but *not* severity. Retiring it as a plain duplicate would have silently downgraded the credential-declaration gate and undone the deliberate ent#128 choice that a hostile `credentials:` declaration must reach `hard_count`. An undeclared `${VAR}` is author-fixable and breaks the agent at runtime — HARD, on one check instead of two.
+
+**T-018** — `schedules` block entries are well-formed  
+Severity: SOFT | Type: STATIC  
+Trinity materializes a template's declared `schedules:` at agent creation
+(trinity-enterprise#89), so a malformed block silently costs the agent its recurring tasks.
+Validates **structure**: the block is a list; each entry is a mapping carrying non-empty string
+`name`, `cron` and `message`; `timezone`/`description` are strings when present; `name` and
+`description` are within their length bounds; names are unique within the block; and the block is
+within the 20-entry cap. Shares one reader — `services/template_schedules.py` — with the
+materializer and the catalog surface, so the report cannot drift from what creation actually does.
+
+**Cron syntax is deliberately NOT reported here — A-002 owns it.** Two checks disagreeing about
+the same field is worse than either alone. (The reader *does* validate cron strictly, but that is
+a materialization gate — drop the entry — not a report verdict.)
+
+SOFT, not HARD: a malformed block costs the agent its declared schedules, not its usability.
+
+**Fails closed.** Unlike every other check, T-018 catches its own exception and returns `fail`.
+`run_static` converts a raise into `skipped`, and the report counts only `fail` — so a raising
+SOFT check drops `soft_count` 1→0 and flips `overall_status` from `issues` to `compatible`
+precisely when this check's finding was the only failure, then persists that clean bill of health
+into every degraded report. A check whose whole purpose is malformed-input tolerance must not rely
+on the fail-open outer net.
 
 ---
 
@@ -310,9 +292,9 @@ The agent should tell Claude what MCP servers and capabilities are available so 
 Severity: SOFT | Type: AI  
 At least one numbered or bulleted step-by-step procedure. An agent with only high-level instructions will produce inconsistent results.
 
-**C-006** — Contains explicit constraints  
+**C-006** — Contains explicit, actionable constraints  
 Severity: SOFT | Type: AI  
-A constraints section limits scope creep and prevents the agent from doing things it shouldn't.
+A constraints section limits scope creep and prevents the agent from doing things it shouldn't — and those constraints must be actionable ("never email external addresses"), not vague ("be safe"). Absorbs retired C-009 (#2137): asking "are there constraints?" and "are the constraints actionable?" as two AI checks charged two LLM verdicts and produced two findings for one edit.
 
 **C-007** — Under 2000 lines  
 Severity: SOFT | Type: STATIC  
@@ -321,10 +303,6 @@ Claude's instruction-following degrades for content past ~2000 lines. Move refer
 **C-008** — No generic Claude guidance  
 Severity: SOFT | Type: AI  
 Prompt: "Does this CLAUDE.md contain instructions that Claude already knows without being told (e.g., 'write clean code', 'be helpful', 'use best practices')? If so, list them. These waste context and should be removed."
-
-**C-009** — Constraints are explicit and actionable  
-Severity: SOFT | Type: AI  
-Bad: "Be safe." Good: "Never send emails to external addresses. Only write files within /home/developer/outputs/. Do not access URLs outside *.company.com."
 
 **C-010** — Critical rules are emphasized  
 Severity: INFO | Type: AI  
@@ -335,28 +313,24 @@ Severity: INFO | Type: AI
 References to MCP tools or integrations not available in this agent's `.mcp.json.template` suggest the CLAUDE.md was cloned from another agent and not updated.
 
 **C-012** — Coherent persona  
-Severity: SOFT | Type: AI  
+Severity: INFO | Type: AI  
 The agent's identity should feel like a consistent character: name (if any), tone, and area of expertise should align rather than contradict.
 
 ---
 
 ### Category: Credentials
 
-**K-001/K-002** — All `${VAR}` placeholders documented  
+**K-001** — All `${VAR}` placeholders documented in `.env.example`  
 Severity: HARD | Type: STATIC  
-Extract all `${VAR_NAME}` references from `.mcp.json.template`. Verify each appears in `.env.example` AND in `template.yaml credentials`. Missing entries mean users can't know what credentials to provide. Auto-fixable: No.
+Extract all `${VAR_NAME}` references from `.mcp.json.template`; verify each appears in `.env.example`. Missing entries mean users can't know what credentials to provide. The `template.yaml credentials` half of this pair is **T-015** — it was duplicated as K-002 until #2137. Auto-fixable: No.
 
 **K-003** — `.env.example` entries have comments  
-Severity: SOFT | Type: STATIC  
+Severity: INFO | Type: STATIC  
 Each variable should have a `# comment` explaining what it is and where to get it.
 
 **K-004** — `.env.example` uses placeholder values  
 Severity: SOFT | Type: STATIC  
 Values must look like placeholders (`your-api-key-here`, `PLACEHOLDER`). Flag any value that matches the secret patterns from S-003.
-
-**K-005** — Credential naming convention  
-Severity: SOFT | Type: AI  
-Variable names should follow `SERVICE_FIELD` (e.g., `OPENAI_API_KEY`, `STRIPE_SECRET_KEY`). Ambiguous names like `API_KEY`, `SECRET`, `TOKEN` without a service prefix are flagged.
 
 ---
 
@@ -365,22 +339,6 @@ Variable names should follow `SERVICE_FIELD` (e.g., `OPENAI_API_KEY`, `STRIPE_SE
 **G-001** — `.claude/` not wholesale excluded  
 Severity: HARD | Type: STATIC  
 Check: `.gitignore` must NOT contain `.claude/` as a standalone pattern. The `.claude/commands/`, `.claude/skills/`, and `.claude/agents/` directories must be committed for Claude Code to work on Trinity. Auto-fixable: Yes (remove the overly broad exclusion, add specific subdirectory exclusions).
-
-**G-002** — `.gitignore` follows canonical pattern list  
-Severity: SOFT | Type: STATIC  
-Compare against the canonical `_GITIGNORE_PATTERNS` list in `git_service.py`. Missing entries may cause secrets to be committed.
-
-**G-003** — Commit paths don't include secrets or content  
-Severity: SOFT | Type: STATIC  
-If `git.commit_paths` is set in `template.yaml`, verify `.env`, `.mcp.json`, and `content/` are not included.
-
-**G-004** — Ignore paths include credential files  
-Severity: SOFT | Type: STATIC  
-If `git.ignore_paths` is set, `.env` and `.mcp.json` must be present.
-
-**G-005** — `git.push_enabled` explicitly declared  
-Severity: INFO | Type: STATIC  
-Leaving it to platform default makes the sync behavior implicit. Explicit declaration makes the agent's intent clear.
 
 ---
 
@@ -398,17 +356,19 @@ Both are required. `name` is the skill identifier; `description` is what Claude 
 Severity: SOFT | Type: AI  
 Prompt: "Will this skill description cause Claude to invoke this skill at the right times and not invoke it at wrong times? A good description says what the skill does AND gives trigger context. A bad description is too vague or too broad."
 
-**P-004** — Skill files under 500 lines  
+**P-004** — `SKILL.md` files under 500 lines  
 Severity: SOFT | Type: STATIC  
-Beyond 500 lines, Claude's attention degrades. Move reference material to companion files.
+Beyond 500 lines, Claude's attention degrades. Move reference material to companion files. **Scoped to `SKILL.md` and `.claude/commands/*.md` only** (#2137) — it previously walked every `.md` under `.claude/skills/`, so it flagged the very `reference.md`/`examples.md` companions P-009 tells authors to create. With the scope fixed the two form a ladder: P-009 suggests splitting past ~200 lines, P-004 fails past 500.
 
 **P-005** — Skills are domain-specific  
 Severity: SOFT | Type: AI  
 Skills should encode knowledge unique to this agent's domain. Skills that are generic development methodology (commit, review, test) likely belong in a separate plugin, not in this agent's skill library.
 
 **P-006** — Autonomous skills have no approval gates  
-Severity: HARD | Type: AI  
+Severity: HARD | Type: STATIC  
 Scan scheduled/autonomous skills for: `[APPROVAL GATE]`, "wait for", "ask user", "confirm with", "present options to", "get user input". An approval gate in an autonomous playbook causes the scheduled execution to hang indefinitely. Flag any match. Auto-fixable: No.
+
+Two #2137 corrections. (1) The check resolves its target skills through `_slash_command()`, which anchored at position 0 (`^\s*/`) — so the marketplace's own generated schedules (`"Run /pipeline-tick"`, `"Run /project-steward"`) matched nothing, the scheduled-command set came back empty, and this HARD check returned "no scheduled/autonomous skills declared" on exactly the agents it exists to guard. It has been inert since it shipped. The matcher now finds a slash command anywhere a token starts, with two guards so a filesystem path is never read as one: the `/` must begin a token, and the token must not be followed by another `/` (a command is one segment). `"Check /var/log/app.log for errors"` therefore yields no command — X-007 turns a resolved name into a SOFT finding, so a false positive there would manufacture the exact unactionable failure this pass removed. (2) A skill may **opt out** by declaring `automation: gated` or `automation: manual` in its YAML frontmatter (the convention already used across the `abilityai/abilities` marketplace). An intentional human pause is a design choice, not a defect; only the default (frontmatter absent, or `automation: autonomous`) is held to "must not hang".
 
 **P-007** — Autonomous skills have error handling  
 Severity: SOFT | Type: AI  
@@ -438,13 +398,18 @@ Skills with structured output (reports, JSON, tables) should specify the expecte
 
 ### Category: Autonomy Design
 
-**A-001** — Scheduled messages use slash commands  
-Severity: SOFT | Type: AI  
-`template.yaml schedules[].message` should start with `/` referencing a `.claude/commands/` file, not be a raw prose prompt. Raw prompts produce inconsistent autonomous behavior.
+**A-001** — Scheduled messages name a slash command  
+Severity: INFO | Type: STATIC  
+`template.yaml schedules[].message` naming a `/skill` dispatches more deterministically than a prose prompt. **INFO, not SOFT** (#2137): prose messages are entirely valid Trinity input — a schedule message is a chat prompt — and the `create-agent` wizards deliberately generate prose for all 13 of their scheduled tasks, so a SOFT here failed every wizard-scaffolded agent for a decision its author never made. The slash command may appear **anywhere** in the message, not only at position 0.
 
 **A-002** — Cron expressions are valid  
 Severity: SOFT | Type: STATIC  
-Validate against standard 5-field cron syntax. Flag invalid expressions.
+Validated with `services/schedule_validation.validate_cron_expression` — the **same** parser the
+dedicated scheduler registers the job with (#1472): exactly 5 fields, Unix→APScheduler day-name
+translation, real range checking, and the declared `timezone`. Flags anything `_add_job` would
+reject. Until trinity-enterprise#89 this was a per-field `^[\d*/,\-]+$` regex that was wrong in
+both directions — it rejected `0 9 * * MON` and accepted `99 99 * * *`. A-002 is the single cron
+authority in this catalog; T-018 reports the `schedules:` block's structure only.
 
 **A-003** — Agent has a clear autonomy model  
 Severity: SOFT | Type: AI  
@@ -488,10 +453,6 @@ Values for `progress` widgets must be 0–100. Values outside this range are cla
 Severity: SOFT | Type: STATIC  
 Only `green`, `red`, `yellow`, `gray`, `blue`, `orange`, `purple` are rendered correctly.
 
-**D-006** — Metric names consistent with metrics.json pattern  
-Severity: SOFT | Type: STATIC  
-If `template.yaml` declares metrics, the `name` fields should be valid JSON keys (no spaces, no special characters).
-
 **D-007** — Metrics reflect meaningful KPIs  
 Severity: SOFT | Type: AI  
 Prompt: "Are these metrics meaningful domain KPIs, or are they generic vanity metrics? A meaningful metric tells the operator something actionable about agent health or output quality."
@@ -529,8 +490,8 @@ Severity: INFO | Type: AI
 Prompt: "Given the MCP servers and tools declared in template.yaml, are the stated use_cases actually achievable? Flag any use case that requires a tool or integration not listed."
 
 **X-007** — Scheduled messages match existing skills  
-Severity: SOFT | Type: STATIC + AI  
-If `schedules[].message` is `/some-command`, verify `.claude/commands/some-command.md` exists. Additionally (AI): verify the command's purpose aligns with the schedule's declared intent.
+Severity: SOFT | Type: STATIC  
+If `schedules[].message` names `/some-command`, verify a target exists. **Both layouts resolve** (#2137): `.claude/commands/some-command.md` *or* `.claude/skills/some-command/SKILL.md`. The name resolver previously globbed only `.claude/commands/`, which is the one layout the `create-agent` wizards never produce — so a skill-based agent naming a real skill was reported as referencing a missing command.
 
 **X-008** — Resource allocation appropriate for workload  
 Severity: INFO | Type: AI  
@@ -550,43 +511,29 @@ If the agent's `template.yaml` or `CLAUDE.md` indicates it is intended to be cal
 Severity: SOFT | Type: AI  
 Autonomous tasks that feed downstream agents or systems should write structured output (JSON file, CSV, markdown report to a known path, shared folder write) rather than relying solely on the chat response text. Prompt: "Do this agent's scheduled tasks or autonomous skills produce output in a structured, file-based form that another agent or system could consume without parsing a conversation? Flag skills that only produce chat responses with no file or structured output."
 
-**I-003** — Output schema documented for data-producing agents  
-Severity: SOFT | Type: AI  
-If the agent's purpose includes producing reports, datasets, or structured content for downstream use, the output schema or format must be documented somewhere in the agent (CLAUDE.md, a `schemas/` directory, or `template.yaml`). Prompt: "If this agent produces structured data or reports intended for downstream consumption, is the output schema or format documented? Answer YES/NO and cite where."
-
-**I-004** — Agent has a clear interface declaration  
-Severity: SOFT | Type: AI  
-An agent designed for composition should explicitly state what it accepts as input and what it produces as output — not just its general purpose. Prompt: "Does this agent clearly document its 'interface': what input it expects (message format, required context, parameters) and what output callers will receive? This is separate from what the agent does — it's about the contract at the boundary. Answer YES/NO."
-
-**I-005** — `post-check` hook exists when output contracts are declared  
-Severity: INFO | Type: STATIC  
-If the agent documents an output format or schema (detected by presence of `schemas/` directory, `output_format:` key in `template.yaml`, or `output contract` / `output format` in CLAUDE.md), a `~/.trinity/post-check` hook should exist to validate outputs before delivery. Without it, the declared contract is aspirational rather than enforced.
-
 ---
 
 ### Category: Runtime Data Paths (#1169)
 
 `data_paths` in `template.yaml` declares the agent's runtime data (SQLite DBs, datasets) that live under `/home/developer/data` on the already-durable home volume — kept out of git, but exportable/importable for portability. These checks fire only when `data_paths` is declared (it is opt-in).
 
+> **Implemented in #2137.** DP-001..DP-004 were documented and indexed here from #1169 but never existed in `spec.py`. `TestSpecDocSync::test_ids_match_doc` matched a **single**-letter prefix (`^\|\s*([A-Z]-\d{3})\s*\|`), so the two-letter `DP-` ids never took part in the "the two can't drift" guarantee. The regex is now `[A-Z]{1,2}-\d{3}`. `DP-005` (`.trinity/pre-snapshot` shebang) was **retired instead of implemented** — PR2 of #1169 never shipped, so no executor reads that hook.
+
 **DP-001** — `data_paths` entries resolve under `data/`  
 Severity: HARD | Type: STATIC  
-Each entry, after normalization, must stay under the `data/` root (relative to `/home/developer`). Reject absolute paths, `../` traversal, or any entry that escapes the data root. The export/import primitive only captures and restores `data/**`, so an out-of-root declaration is silently never snapshotted.
+Each entry, after normalization, must stay under the `data/` root (relative to `/home/developer`) — reported as `absolute`, `escapes_data_root`, `outside_data_root`, or `shell_metacharacters`. Absolute paths and `../` are only two of the ways to be outside the root: `POST /api/agents/{name}/data/export` archives `/home/developer/data` and nothing else, so a plain relative entry like `outputs/*.csv` is just as unsnapshotted — it merely fails quietly instead of loudly. The export/import primitive only captures and restores `data/**`, so an out-of-root declaration is silently never snapshotted — which is why this is the category's only HARD. Shell-safety reuses `git_service._is_safe_data_path`, the **same** predicate `materialize_data_paths` uses to decide what to drop (the A-002 discipline: validate with the parser the executor uses). Containment is checked *here* because the materializer's own regex deliberately does not — it admits `..` and `/` — so this is new coverage rather than a mirror.
 
 **DP-002** — `data/` root is gitignored  
-Severity: HARD | Type: STATIC  
-Trinity appends `data/` (and each declared entry) to the agent's `.gitignore` at creation, but a template shipping its own `.gitignore` should pre-include `data/`. Without it, runtime data risks being committed on the first auto-sync.
+Severity: SOFT | Type: STATIC  
+Trinity appends `data/` (and each declared entry) to the agent's `.gitignore` at creation, but a template shipping its own `.gitignore` should pre-include `data/`. Without it, runtime data risks being committed on the first auto-sync. **SOFT, not the HARD originally documented** (#2137): because `materialize_data_paths` appends the rule itself, a violation is a platform anomaly rather than an author defect, and the consequence (data committed to git) is bloat/leak — not the runtime breakage HARD denotes.
 
 **DP-003** — `data_paths` don't overlap managed paths  
 Severity: SOFT | Type: STATIC  
 Entries must not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state`. Those surfaces are materialized and managed separately; overlapping declarations create ambiguous ownership and double-handling.
 
 **DP-004** — `data_paths` ⇒ not replica-safe  
-Severity: SOFT | Type: STATIC  
-A `data_paths` declaration means the agent carries instance-local runtime state. Such an agent cannot be replicated by cloning its template alone — its data must travel via `data/export` → `data/import`. Flag for replica-safety tooling (#927).
-
-**DP-005** — `.trinity/pre-snapshot` is executable with a shebang  
 Severity: INFO | Type: STATIC  
-If present (the PR2 SQLite-quiesce hook that stages a consistent `.backup` copy before snapshot), verify a `#!` shebang on line 1 — `docker exec` fails to run it otherwise. Analogous to A-004 for `pre-check`.
+A `data_paths` declaration means the agent carries instance-local runtime state. Such an agent cannot be replicated by cloning its template alone — its data must travel via `data/export` → `data/import`. Flag for replica-safety tooling (#927). **INFO, not the SOFT originally documented** (#2137): this reports a *property* of the agent, not a defect. There is no edit that "fixes" it, and an unactionable SOFT is precisely the finding class #2137 removed.
 
 ---
 
@@ -617,7 +564,6 @@ The following checks can be resolved automatically via `POST /api/agents/{name}/
 | S-007 | Append `content/` to `.gitignore` |
 | S-008 | Append `*.pem`, `*.key`, `credentials.json` to `.gitignore` |
 | G-001 | Remove `.claude/` blanket exclusion; add specific subdirectory exclusions |
-| G-002 | Append missing canonical patterns to `.gitignore` |
 
 All other checks require manual intervention.
 
@@ -627,8 +573,28 @@ All other checks require manual intervention.
 
 - Checks in this spec map to the validation service package at `src/backend/services/compatibility/` (`spec.py` is the single source of truth; `collector.py`, `static_checks.py`, `ai_checks.py`, `fixes.py`) — issue #668.
 - AI-evaluated checks call the Claude API (`claude-haiku-4-5`) with the relevant file contents, batched by category; results include a confidence score and explanation.
-- The full check list is versioned here; bump this file when adding/removing checks. A unit test (`tests/unit/test_compatibility_checks.py::TestSpecDocSync`) asserts the check-id set here matches `spec.py` exactly, so the two can't drift.
-- Check IDs are stable — do not renumber existing checks; append new ones.
+- The full check list is versioned here; bump this file when adding/removing checks. A unit test (`tests/unit/test_compatibility_checks.py::TestSpecDocSync`) asserts the check-id set **and the Severity column** here match `spec.py` exactly, so the two can't drift. The id regex is `[A-Z]{1,2}-\d{3}` — it was `[A-Z]-\d{3}` until #2137, which is how `DP-001`..`DP-005` stayed documented-but-unimplemented for so long. Any future two-letter category is covered.
+- Check IDs are stable — do not renumber existing checks; append new ones. **Retired ids are never reissued** (see below), so a persisted `agent_compatibility_results.checks_json` row written before a retirement stays interpretable.
+
+### Retired checks (#2137)
+
+Removed from the catalog; their ids are permanently retired.
+
+| Retired | Reason | Successor |
+|---------|--------|-----------|
+| `T-017`, `G-003`, `G-004`, `G-005` | The `template.yaml git:` block has **no backend reader** anywhere in the platform, and no bundled template declares it. It is documented in `TRINITY_COMPATIBLE_AGENT_GUIDE.md` as legacy Working Branch Mode config. | — |
+| `D-006` | `template.yaml metrics:` has no backend reader — `dashboard.yaml` is the read surface. | D-001..D-005, D-008 |
+| `I-005` | `.trinity/post-check` has no executor. Its only other mention was a `git_service` comment pointing back at this check. | — |
+| `F-008` | Required `.claude/commands/`; the `create-agent` wizards emit `.claude/skills/<name>/SKILL.md` and never `.claude/commands/`, so this was a guaranteed INFO failure. | F-009 |
+| `F-012`, `F-013` | `docs/memory/requirements.md` / `CHANGELOG.md` are Trinity-repo conventions, not agent conventions. | — |
+| `T-012` | Same MCP-server comparison, one direction only. | X-004 |
+| `T-016` | Byte-identical logic to X-007 under a second id. | X-007 |
+| `K-002` | Literally `return c_t015(snap)`. | T-015 |
+| `K-005` | AI restatement of a STATIC check. | S-010 |
+| `I-003`, `I-004` | Two more ways of asking "is the output contract documented?". | I-001 |
+| `C-009` | "Are constraints actionable?" split from "do constraints exist?". | C-006 |
+| `G-002` | Compared against the 58-entry fleet-wide `_GITIGNORE_PATTERNS` that **Trinity injects at git-init**; most of it (`.bashrc`, `.profile`, `.cache/`, `.ssh/`, `.claude/plugins/`, …) is not authorable content, and every author-controllable line is already owned by S-001..S-008. | S-001..S-008, G-001 |
+| `DP-005` | `.trinity/pre-snapshot` has no executor — PR2 of #1169 never shipped. | — |
 
 ### Implementation deviations (#668)
 
@@ -649,6 +615,13 @@ test-locked ways:
 - **Runtime-aware.** Claude-specific checks (`CLAUDE.md` content, `.claude/`
   skills/commands) are **omitted** for non-Claude runtimes (Codex/Gemini, #1187)
   so those agents aren't flagged with false HARDs.
+- **T-018 fails closed** (trinity-enterprise#89) — the only check that catches
+  its own exception and returns `fail`. `run_static`'s swallow turns a raise
+  into `skipped`, which the report's counts ignore, so a broken validator
+  reports "healthy" and that verdict persists into every degraded report. A
+  check whose entire purpose is malformed-input tolerance cannot rest on that
+  net. The swallow itself is now logged (`logger.error`), which is the
+  instrument for deciding later whether to flip it to `fail` for all checks.
 - **Persistence (departs from the issue's "no DB table" note).** The latest
   report per agent is persisted in `agent_compatibility_results` (one row,
   upserted) so AI verdicts show on every Overview load without re-spending

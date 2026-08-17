@@ -22,6 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from aiohttp import web
 
 from .config import config
+from .models import ExecutionOrigin
 from .service import SchedulerService
 
 
@@ -63,6 +64,10 @@ class SchedulerApp:
         self.health_app: Optional[web.Application] = None
         self.health_runner: Optional[web.AppRunner] = None
         self._shutdown_event = asyncio.Event()
+        # #1968: strong refs to the fire-and-forget trigger tasks. The loop keeps
+        # only a weak one, and these tasks now own a held lock and a live
+        # execution row — see `_trigger_handler` for why that matters.
+        self._inflight_triggers: set = set()
 
     async def start(self):
         """Start the scheduler application."""
@@ -154,7 +159,11 @@ class SchedulerApp:
         Manual/webhook trigger endpoint.
 
         POST /api/schedules/{schedule_id}/trigger
-        Optional JSON body: {"triggered_by": "manual" | "webhook"}
+        Optional JSON body: {
+            "triggered_by": "manual" | "webhook",
+            "source_user_id", "source_user_email", "source_agent_name",
+            "source_mcp_key_id", "source_mcp_key_name"   # #1970, all optional
+        }
 
         Triggers a schedule execution with the same flow as cron triggers,
         including activity tracking and WebSocket broadcasts.
@@ -181,41 +190,153 @@ class SchedulerApp:
             )
 
         # Optional triggered_by from JSON body (webhook callers pass "webhook")
+        # plus the #1970 caller attribution the backend forwards. Both are read
+        # from the same body in one parse; a malformed body degrades to
+        # "manual" + no attribution rather than failing the trigger — the run
+        # itself must not depend on its audit metadata being well-formed.
         triggered_by = "manual"
+        origin = ExecutionOrigin()
         try:
             if request.content_type == "application/json" and request.content_length:
                 body = await request.json()
                 raw = body.get("triggered_by", "manual")
                 if raw in ("manual", "webhook"):
                     triggered_by = raw
+                origin = ExecutionOrigin.from_payload(body)
         except Exception:
             pass  # malformed body — default to "manual"
 
         logger.info(
             f"Trigger received for schedule {schedule_id} ({schedule.name}) "
-            f"triggered_by={triggered_by}"
+            f"triggered_by={triggered_by} "
+            # Log the id, never the email: this line lands in Vector-captured
+            # platform logs and an email is PII that the DB column already holds.
+            f"source_user_id={origin.user_id} source_agent={origin.agent_name}"
         )
 
-        # Execute in background (fire-and-forget)
-        asyncio.create_task(
-            self._execute_manual_trigger(schedule_id, triggered_by=triggered_by)
-        )
+        # #1968: acquire the lock and create the execution row HERE, before
+        # responding. Both facts the caller needs — whether the trigger took
+        # effect, and which execution it produced — only exist after these two
+        # steps, and the old handler answered before either had happened.
+        #
+        # It reported `"status": "triggered"` with no id even when the lock was
+        # denied and nothing ran, so a suppressed trigger and a real one were
+        # byte-identical to the caller. The MCP tool then interpolated the
+        # missing key and told every agent `Execution started with ID
+        # 'undefined'`.
+        lock = self.scheduler_service.lock_manager.try_acquire_schedule_lock(schedule_id)
+        if not lock:
+            logger.warning(
+                f"Trigger for {schedule_id} (triggered_by={triggered_by}): "
+                "schedule already executing"
+            )
+            return web.json_response({
+                "status": "already_running",
+                "schedule_id": schedule_id,
+                "schedule_name": schedule.name,
+                "agent_name": schedule.agent_name,
+                "message": "Schedule is already executing",
+            }, status=409)
 
-        # Return immediately; execution creates its own record asynchronously
+        # From here the lock is HELD. Every path below must either hand it to
+        # the background task or release it — a leak would wedge the schedule
+        # until the Redis TTL expires.
+        try:
+            execution = self.scheduler_service.db.create_execution(
+                schedule_id=schedule.id,
+                agent_name=schedule.agent_name,
+                message=schedule.message,
+                triggered_by=triggered_by,
+                model_used=schedule.model,
+                source_user_id=origin.user_id,
+                source_user_email=origin.user_email,
+                source_agent_name=origin.agent_name,
+                source_mcp_key_id=origin.mcp_key_id,
+                source_mcp_key_name=origin.mcp_key_name,
+            )
+        except Exception as exc:
+            lock.release()
+            logger.error(f"Trigger for {schedule_id}: could not create execution: {exc}")
+            return web.json_response(
+                {"error": "Failed to create execution record"}, status=500
+            )
+
+        if not execution:
+            lock.release()
+            logger.error(f"Trigger for {schedule_id}: could not create execution record")
+            return web.json_response(
+                {"error": "Failed to create execution record"}, status=500
+            )
+
+        # Execute in background, handing over the lock we already hold and the
+        # row we already created.
+        #
+        # The strong reference is load-bearing, not defensive tidiness. The
+        # event loop holds only a WEAK reference to a task, so a bare
+        # `create_task(...)` whose result nobody keeps can be garbage-collected
+        # mid-flight (the asyncio docs say so outright). That was survivable
+        # before this change — a dropped task meant the run silently didn't
+        # happen. It is not survivable now: the row and the lock are created
+        # BEFORE the task, so a collected task strands a `running` execution
+        # whose id the caller already holds and pins the schedule's lock until
+        # its TTL. Same `_inflight` shape the #1083 result-callback path uses
+        # (`agent_server/services/result_callback.py`).
+        task = asyncio.create_task(
+            self._execute_manual_trigger(
+                schedule_id,
+                triggered_by=triggered_by,
+                origin=origin,
+                lock=lock,
+                execution=execution,
+            )
+        )
+        self._inflight_triggers.add(task)
+        task.add_done_callback(self._inflight_triggers.discard)
+
         return web.json_response({
             "status": "triggered",
             "schedule_id": schedule_id,
+            "execution_id": execution.id,
             "schedule_name": schedule.name,
             "agent_name": schedule.agent_name,
             "triggered_by": triggered_by,
             "message": "Execution started in background"
         })
 
-    async def _execute_manual_trigger(self, schedule_id: str, triggered_by: str = "manual"):
-        """Execute a manually or webhook-triggered schedule."""
-        try:
-            # Acquire lock (prevents concurrent execution)
-            lock = self.scheduler_service.lock_manager.try_acquire_schedule_lock(schedule_id)
+    async def _execute_manual_trigger(
+        self,
+        schedule_id: str,
+        triggered_by: str = "manual",
+        origin: Optional[ExecutionOrigin] = None,
+        lock=None,
+        execution=None,
+    ):
+        """Execute a manually or webhook-triggered schedule.
+
+        #1968: `lock` and `execution` are acquired/created by `_trigger_handler`
+        BEFORE it responds, so the response can carry a real `execution_id` and
+        a denied lock can be reported as 409 instead of a false "triggered".
+        Both are passed in rather than taken here; this coroutine's job is to
+        run the schedule and, whatever happens, release the lock.
+
+        They stay optional so the method keeps working if called without them
+        (it then acquires its own lock, as before, and lets the service create
+        the row) — a caller that forgets is degraded, not broken.
+
+        Whichever way the lock arrived, this coroutine owns it from here and
+        releases it exactly once. Structured as acquire-then-single-`finally`
+        rather than a release in both the `finally` and an error branch: the
+        second release is the dangerous one, since a lock re-acquired by the
+        next run in between would be freed out from under it.
+        """
+        if lock is None:
+            try:
+                lock = self.scheduler_service.lock_manager.try_acquire_schedule_lock(
+                    schedule_id
+                )
+            except Exception as exc:
+                logger.error(f"Trigger for {schedule_id}: lock acquisition failed: {exc}")
+                return
             if not lock:
                 logger.warning(
                     f"Trigger for {schedule_id} (triggered_by={triggered_by}): "
@@ -223,18 +344,19 @@ class SchedulerApp:
                 )
                 return
 
-            try:
-                await self.scheduler_service._execute_schedule_with_lock(
-                    schedule_id,
-                    triggered_by=triggered_by
-                )
-            finally:
-                lock.release()
-
+        try:
+            await self.scheduler_service._execute_schedule_with_lock(
+                schedule_id,
+                triggered_by=triggered_by,
+                origin=origin,
+                execution=execution
+            )
         except Exception as e:
             logger.error(
                 f"Trigger execution failed for {schedule_id} (triggered_by={triggered_by}): {e}"
             )
+        finally:
+            lock.release()
 
     async def _run_until_shutdown(self):
         """Run the scheduler until shutdown signal."""

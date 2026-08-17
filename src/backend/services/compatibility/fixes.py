@@ -22,7 +22,11 @@ import re
 from typing import List, Optional, Tuple
 
 from services.docker_service import execute_command_in_container, get_agent_container
-from services.git_service import _detect_git_dir, _GITIGNORE_PATTERNS
+from services.git_service import (
+    _detect_git_dir,
+    _GITIGNORE_PATTERNS,
+    _TRINITY_AUTHORED_PATHS,
+)
 from . import spec
 
 logger = logging.getLogger(__name__)
@@ -34,12 +38,20 @@ except Exception:  # pragma: no cover - redis/config always present in prod
     _redis_lib = None
     _REDIS_URL = ""
 
+# The shared ownership-checked single-flight lock (#1920). Leaf module, so
+# this adds no heavy dependency; redis is already a hard backend dependency.
+from redis_breaker_util import SingleFlightLock  # noqa: E402
+
 # Specific patterns appended by each per-check append fix.
 _ADD_PATTERNS = {
     "S-001": [".env", ".env.*"],
     "S-002": [".mcp.json"],
     "S-004": [".claude/projects/"],
-    "S-005": [".trinity/"],
+    # #2070: the contents-only form plus the authored re-includes. Adding the
+    # wholesale `.trinity/` line back would re-break the thing this fix is for:
+    # git does not descend into a dir-form exclusion, so the negations under it
+    # would never apply and the next Push would untrack the template's hooks.
+    "S-005": [".trinity/*", *(f"!{p}" for p in _TRINITY_AUTHORED_PATHS)],
     "S-006": [".claude/statsig/", ".claude/todos/", ".claude/debug/",
               ".claude/sessions/", ".claude/shell-snapshots/"],
     "S-007": ["content/"],
@@ -98,8 +110,6 @@ def _compute_new_gitignore(check_id: str, current: str) -> str:
         # Ensure a .gitignore exists with the canonical pattern list.
         base = current if current.strip() else ""
         return _append_missing(base, list(_GITIGNORE_PATTERNS))
-    if check_id == "G-002":
-        return _append_missing(current, list(_GITIGNORE_PATTERNS))
     if check_id == "G-001":
         removed = _remove_blanket_claude(current)
         return _append_missing(removed, _G001_REPLACEMENTS)
@@ -109,27 +119,36 @@ def _compute_new_gitignore(check_id: str, current: str) -> str:
 
 
 def _lock(agent_name: str):
+    """Ownership-checked SETNX lock (#1920) serialising the per-agent gitignore
+    read-modify-write. Returns a held ``SingleFlightLock`` on acquire, ``None``
+    when Redis is unavailable (fail-open — the fix still runs), or raises
+    ``FixBusy`` when another fix holds it. The shared primitive mints a unique
+    per-acquire token, so release can never delete a *successor's* lock after
+    an expiry (the pre-#1920 constant-``"1"`` + unconditional ``delete``)."""
     if _redis_lib is None or not _REDIS_URL:
         return None
     try:
-        client = _redis_lib.from_url(_REDIS_URL, decode_responses=True)
-        if client.set(f"compat_fix:{agent_name}", "1", nx=True, ex=30):
-            return client
-        raise FixBusy("another fix is in progress for this agent")
-    except FixBusy:
-        raise
+        lock = SingleFlightLock(
+            f"compat_fix:{agent_name}",
+            30,
+            client=_redis_lib.from_url(_REDIS_URL, decode_responses=True),
+        )
     except Exception as e:  # noqa: BLE001 — redis down → proceed best-effort
         logger.warning("[compatibility] fix lock unavailable for %s: %s", agent_name, e)
         return None
+    # acquire() handles SETNX errors internally (fail-open → proceed); a real
+    # busy holder returns False, which surfaces as FixBusy.
+    if lock.acquire():
+        return lock
+    raise FixBusy("another fix is in progress for this agent")
 
 
-def _unlock(client, agent_name: str):
-    if client is None:
-        return
-    try:
-        client.delete(f"compat_fix:{agent_name}")
-    except Exception:  # noqa: BLE001
-        pass
+def _unlock(lock, agent_name: str):
+    """Ownership-checked compare-and-delete: only our own token releases. No-op
+    for the ``None`` fail-open sentinel. ``agent_name`` is kept for the
+    call-site signature; the lock already carries its own key."""
+    if isinstance(lock, SingleFlightLock):
+        lock.release_if_owned()
 
 
 async def _read_gitignore(agent_name: str, git_dir: str) -> str:
@@ -167,7 +186,7 @@ async def apply_fix(agent_name: str, check_id: str) -> Tuple[bool, str]:
     if container is None or getattr(container, "status", None) != "running":
         return False, "Agent must be running to apply a fix"
 
-    client = _lock(agent_name)
+    lock = _lock(agent_name)
     try:
         git_dir = await _detect_git_dir(f"agent-{agent_name}")
         current = await _read_gitignore(agent_name, git_dir)
@@ -182,4 +201,4 @@ async def apply_fix(agent_name: str, check_id: str) -> Tuple[bool, str]:
             return False, "Write verification failed"
         return True, "Fixed .gitignore (uncommitted until the agent's next git sync)"
     finally:
-        _unlock(client, agent_name)
+        _unlock(lock, agent_name)

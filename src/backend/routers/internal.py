@@ -113,7 +113,7 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     # with a valid scoped key, so rollback takes effect on backend restart rather
     # than only after a container recreate. The trusted-backend (internal-secret)
     # path is unchanged.
-    from services.agent_service.pull_mode import is_pull_pilot_agent
+    from services.pull_pilot import is_pull_pilot_agent
     if not is_pull_pilot_agent(agent_name):
         return False
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
@@ -561,12 +561,25 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
                     TaskExecutionStatus.FAILED,
                     TaskExecutionStatus.CANCELLED,
                 ):
-                    db.update_execution_status(
+                    won = db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
                         error="Execution cancelled (backend shutdown)",
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED on cancel")
+                    # #1804: the second backend-shutdown terminal writer (the
+                    # first is task_execution_service's own CancelledError
+                    # handler). Both wrote the execution terminal and left the
+                    # paired activity open — and because the row is now `failed`,
+                    # startup recovery never revisits it, so nothing but the
+                    # 120-minute duration-fabricating backstop ever closed it.
+                    # No activity_id in scope here; the helper looks it up.
+                    if won:
+                        await activity_service.close_execution_activity(
+                            request.execution_id,
+                            TaskExecutionStatus.FAILED,
+                            error="Execution cancelled (backend shutdown)",
+                        )
             except Exception as db_err:
                 logger.error(f"Failed to update execution status on cancel: {db_err}")
         raise
@@ -704,6 +717,7 @@ async def log_audit_entry(request: InternalAuditRequest):
             mcp_key_name=request.mcp_key_name,
             mcp_scope=request.mcp_scope,
             actor_agent_name=request.actor_agent_name,
+            actor_email=request.actor_email,
             target_type=request.target_type,
             target_id=request.target_id,
             request_id=request.request_id,

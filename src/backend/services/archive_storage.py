@@ -15,6 +15,68 @@ from utils.helpers import utc_now_iso
 logger = logging.getLogger(__name__)
 
 
+# #2205 alarm plumbing, mirroring db_backup_service (#2216): platform-created
+# directly through `db.create_operator_queue_item`, so it bypasses the #1632
+# agent-ingestion caps by construction. The sentinel host is uncreatable as an
+# agent name (`sanitize_agent_name` strips a leading `_`) and is excluded from
+# canary L-03's orphan scan; the id prefix is registered in
+# `operator_queue_service._RESERVED_ID_PREFIXES` so an agent cannot pre-create —
+# and, via `on_conflict_do_nothing`, silence — this alarm.
+ALARM_AGENT_NAME = "_log-archive"
+ALARM_ID_PREFIX = "log-archive-"
+
+
+def probe_archive_writability() -> bool:
+    """Re-check writability at the start of an archival run (review finding).
+
+    The constructor's probe fires once per PROCESS. Under `restart:
+    unless-stopped` a backend can run for weeks, so an operator who acknowledged
+    the alarm without actually fixing ownership would never hear about it again
+    while every nightly run kept failing — the #2216 sibling added
+    `_staleness_check` for exactly this. Because the alarm id is bucketed per day,
+    calling this per run re-alarms at most daily while the fault persists, and goes
+    quiet the moment it is fixed.
+    """
+    storage = get_archive_storage()
+    if not isinstance(storage, LocalArchiveStorage):
+        return True
+    return storage._preflight_writable() is not False
+
+
+def _alarm_unwritable_archive_dir(path: str, detail: str) -> None:
+    """One operator-queue alarm for an unwritable archive directory.
+
+    Deliberately fired from the storage constructor rather than from the failing
+    write: by the time a write fails the run is already lost, and the operator
+    needs to know the CAUSE (ownership) rather than the Nth symptom. Fail-soft —
+    an alarm that cannot be filed must not escalate into a boot failure.
+    """
+    try:
+        from database import db
+        from utils.helpers import utc_now_iso
+
+        db.create_operator_queue_item(ALARM_AGENT_NAME, {
+            # Stable id: one alarm per path per day, so a restart loop cannot
+            # flood the queue while an operator is already looking at it.
+            "id": f"{ALARM_ID_PREFIX}{path.strip('/').replace('/', '-')}-"
+                  f"{utc_now_iso()[:10]}",
+            "type": "alert",
+            "priority": "high",
+            "title": "Log archival cannot write its archive directory",
+            "question": (
+                f"{path} is not writable by the backend (UID 1000), so log archival "
+                "fails on every run and /data/logs grows without bound. On the dev "
+                "compose stack this is the `archives-init` one-shot (#2205); "
+                "otherwise chown the directory to 1000:1000. Detail: " + detail
+            ),
+            "context": {"path": path, "detail": detail},
+            "created_at": utc_now_iso(),
+        })
+        logger.warning("[ArchiveStorage] operator alarm emitted for %s", path)
+    except Exception:  # noqa: BLE001 — never let alarm plumbing break startup
+        logger.exception("[ArchiveStorage] failed to emit the unwritable-dir alarm")
+
+
 class ArchiveStorage(ABC):
     """Abstract base class for archive storage backends."""
 
@@ -81,8 +143,63 @@ class LocalArchiveStorage(ArchiveStorage):
             archive_path: Directory path for storing archives
         """
         self.archive_path = Path(archive_path)
-        self.archive_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Local archive storage initialized: {self.archive_path}")
+        # Construction stays CHEAP and DB-free (CI finding). An earlier version
+        # probed and alarmed right here, which meant: a touch+unlink on every
+        # construction, and — on a host with no writable `/data`, i.e. exactly a CI
+        # runner — the alarm path importing `database` at IMPORT time, since
+        # `log_archive_service` is a module-level singleton. That produced three
+        # cascading tracebacks per test process and put database initialisation on
+        # the import path of anything that touches this module.
+        #
+        # So the constructor only records what it found; the operator alarm is
+        # raised by `probe_archive_writability()` at the start of an archival RUN,
+        # which is also where re-arming belongs.
+        self.init_error: Optional[str] = None
+        try:
+            self.archive_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Local archive storage initialized: {self.archive_path}")
+        except OSError as exc:
+            self.init_error = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "[ArchiveStorage] cannot create %s: %s — log archival will fail "
+                "and /data/logs will grow unbounded",
+                self.archive_path, self.init_error,
+            )
+
+    def _preflight_writable(self):
+        """Probe the archive directory and alarm if unwritable.
+
+        Skipped when `LOG_ARCHIVE_ENABLED=false` (review finding): storage is
+        constructed unconditionally while the flag is only read in
+        `LogArchiveService.start()`, so an install that deliberately disables
+        archival would get a `priority: high` alarm every boot asserting that
+        "archival fails on every run and /data/logs grows without bound" — about a
+        job that never runs. A false alarm that demands action is worse than none.
+
+        Never raises: a broken archive directory must not take the backend down —
+        archival is a maintenance job, not a request path. It must simply stop being
+        silent.
+        """
+        if os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() != "true":
+            return True
+        if self.init_error:
+            # The directory could not even be created; nothing to probe.
+            _alarm_unwritable_archive_dir(str(self.archive_path), self.init_error)
+            return False
+        probe = self.archive_path / f".perm-probe-{os.getpid()}"
+        try:
+            probe.touch()
+            probe.unlink()
+            return True
+        except OSError as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "[ArchiveStorage] %s is NOT writable by this process (uid=%s) — log "
+            "archival will fail and /data/logs will grow unbounded: %s",
+            self.archive_path, getattr(os, "getuid", lambda: "?")(), detail,
+        )
+        _alarm_unwritable_archive_dir(str(self.archive_path), detail)
+        return False
 
     async def store_archive(
         self,

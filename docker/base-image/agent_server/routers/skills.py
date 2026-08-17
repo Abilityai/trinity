@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from ..safe_yaml import AliasPolicy, load_hardened_yaml
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -62,8 +64,14 @@ def parse_yaml_frontmatter(content: str) -> Dict[str, Any]:
         return {}
 
     try:
-        import yaml
-        frontmatter = yaml.safe_load(match.group(1))
+        # #1965: REJECT, matching `skill_packaging`'s policy for the same
+        # frontmatter on the backend side. Skill files are agent-authored and
+        # every consumer walks the parsed mapping.
+        frontmatter = load_hardened_yaml(
+            match.group(1),
+            kind="frontmatter",
+            alias_policy=AliasPolicy.REJECT,
+        )
         if not isinstance(frontmatter, dict):
             logger.warning(f"Frontmatter is not a dict: {type(frontmatter)}")
             return {}
@@ -78,6 +86,20 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
     Scan a skills directory for subdirectories containing SKILL.md files.
 
     Returns list of SkillInfo objects sorted by name.
+
+    SCOPE, stated because a caller cannot tell an empty result from an unscanned
+    one (#2213): this walks ONE level and requires `SKILL.md` in each immediate
+    subdirectory. Two things the agent can run are therefore invisible here —
+    skills nested deeper, and skills provided by an installed PLUGIN (which live
+    under the plugin's own cache, not under `.claude/skills/`).
+
+    Enumerating plugin skills is deliberately OUT OF SCOPE for #2213 and needs its
+    own change: it means reading the plugin cache layout, and it ships in the agent
+    base image, so an instance only gets it after a base-image rebuild — old images
+    would silently keep the old surface, which is the release-note trap ent#123
+    already paid for once. The Workspace consequence is bounded and now honest: the
+    `/` popup offers what this endpoint reports and says how many further playbooks
+    exist without listing them, rather than implying the list is complete.
     """
     skills = []
 

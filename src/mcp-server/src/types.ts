@@ -2,7 +2,6 @@
 
 export interface Agent {
   name: string;
-  type: string;
   status: string;
   port: number;  // SSH port only - UI no longer exposed externally
   created: string;
@@ -12,11 +11,17 @@ export interface Agent {
   };
   container_id?: string;
   mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
+  // trinity-enterprise#15: present on the create response for a copy-import
+  import_snapshot?: {
+    source_repo: string;
+    source_branch: string;
+    head_sha: string;
+    file_count: number;
+  };
 }
 
 export interface AgentConfig {
   name: string;
-  type?: string;
   base_image?: string;
   resources?: {
     cpu: string;
@@ -28,6 +33,9 @@ export interface AgentConfig {
   port?: number;  // SSH port - ui_port removed for security
   template?: string;
   source_branch?: string;  // Branch to track (default: main). Can also use github:owner/repo@branch syntax.
+  // trinity-enterprise#15: GitHub-repo import intent. MCP exposes only
+  // "copy" | "clone" — "fork" is web-UI-only (its PAT arg would be audit-logged).
+  import_intent?: string;
   // trinity-enterprise#69: ephemeral "ghost" agent budget — at least one of
   // max_executions/ttl_seconds; entitlement-gated at the backend.
   ephemeral?: {
@@ -70,13 +78,49 @@ export interface TokenResponse {
  * Extends Record<string, unknown> to satisfy FastMCP's session type requirements
  */
 export interface McpAuthContext extends Record<string, unknown> {
-  userId: string;        // Username of the key owner
+  userId: string;        // Username of the key owner ("anonymous" pre-login, #848)
   userEmail?: string;    // Email of the key owner
   keyId?: string;        // MCP API key ID (AUDIT-001: for execution origin tracking)
   keyName: string;       // Name of the MCP API key
   agentName?: string;    // Agent name if scope is 'agent', 'system', or 'connector'
-  scope: "user" | "agent" | "system" | "connector"; // user=human, agent=regular agent, system=bypasses all permissions, connector=end-user consumption key bound to one agent (ent#46)
+  // user=human, agent=regular agent, system=bypasses all permissions,
+  // connector=end-user consumption key bound to one agent (ent#46),
+  // anonymous=keyless pre-login session that may only call the inline-auth
+  // tools until verify_login upgrades it (#848),
+  // portal_delegate=trusted issuer that exchanges an end-user email for a portal
+  // session and nothing else (ent#163).
+  //
+  // #1854: `portal_delegate` was missing here, so a fifth live value arrived as
+  // a runtime string outside the declared union — the backend column is
+  // free-text with no CHECK constraint, and every scope check in this codebase
+  // is an equality test, so an unlisted value silently falls through to the
+  // "user-scoped keys see all accessible agents" branch. Keep this union
+  // exhaustive against `mcp_api_keys.scope`; anything not listed must be
+  // treated as least-privileged, never as `user`.
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
+
+  // --- #848 inline email auth (anonymous scope only) ---------------------
+  // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth
+  // object by reference, so an in-place upgrade is observed by all subsequent
+  // calls on the session without any library support. The session's advertised
+  // advertised tool list is deliberately NOT keyed on login state — behaviour
+  // flips, visibility does not. (FastMCP does re-filter live sessions; a
+  // login-keyed gate would just flip at reconciler timing. See server.ts.)
+  /** Set once the OTP is verified. Absent ⇒ still pre-login. */
+  verifiedEmail?: string;
+  /** Email awaiting a code, set by request_login. Not proof of anything. */
+  pendingEmail?: string;
+  /** Opaque per-session id, for correlating rate limits and audit rows. */
+  sessionId?: string;
+  /**
+   * Agent names this verified email may reach, as resolved by the backend at
+   * verify time. Used only to pick a default and to give a helpful error when
+   * several are available — it is NOT the authorization boundary. The backend
+   * re-gates every call on `email_has_agent_access`, so a stale or tampered
+   * list here cannot widen access.
+   */
+  agents?: string[];
 }
 
 export interface AgentAccessInfo {
@@ -106,7 +150,6 @@ export interface AgentTemplateInfo {
   description?: string;
   version?: string;
   author?: string;
-  type?: string;
   resources?: {
     cpu?: string;
     memory?: string;
@@ -258,7 +301,12 @@ export interface ScheduleToggleResult {
 export interface ScheduleTriggerResult {
   status: "triggered";
   schedule_id: string;
-  execution_id: string;
+  // #1968: optional, and that is the honest declaration. This was typed as a
+  // required `string` while the backend never sent the field at all — which is
+  // precisely why the compiler stayed happy while every trigger interpolated
+  // `undefined` into its success message. A current backend fills it in; an
+  // older one still omits it, so callers must check rather than trust the type.
+  execution_id?: string;
   message?: string;
 }
 
@@ -371,4 +419,21 @@ export interface AgentFileTreeResponse {
   tree: AgentFileNode[];
   total_files: number;
   show_hidden: boolean;
+}
+
+/**
+ * Agent report metadata — the list-response shape (#918/#1538). Deliberately
+ * carries NO `payload`: list is metadata, detail fetches the body, mirroring the
+ * REST split so a broad listing can't dump every report's contents.
+ */
+export interface ReportSummary {
+  id: string;
+  agent_name: string;
+  report_type: string;
+  title: string;
+  display_hint?: string | null;
+  schema_version?: number;
+  period_start?: string | null;
+  period_end?: string | null;
+  created_at: string;
 }

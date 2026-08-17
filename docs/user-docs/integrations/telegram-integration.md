@@ -83,6 +83,26 @@ User sends message -> Telegram API -> Trinity webhook -> Agent -> Response -> Te
 
 The agent receives the message text plus context for any media (photos, documents, voice notes). Responses are sent back as replies in the same chat.
 
+### Knowing the Agent Is Working
+
+A Telegram-triggered task can run for minutes or hours. Three layers of feedback cover the wait, all of them optional and all fail-soft:
+
+1. **Immediate acknowledgement** — a 👀 reaction lands on your message the moment the agent picks it up. It is cleared when the turn ends.
+2. **Typing indicator** — the standard Telegram "typing…" state.
+3. **Elapsed-time note** — if the turn passes 30 seconds, the bot posts a quiet "⏳ Working on it — N min elapsed" message (sent without a notification) and edits it in place about every minute. It is deleted when the turn finishes; if deletion isn't possible it is edited to a neutral "✔ Done." or "⚠️ Finished with an error."
+
+This is **on by default** per bot binding, and can be turned off in the Telegram dialog on the agent's Sharing tab. In groups it fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would give away that it is listening.
+
+If Telegram refuses any of it (reactions disabled for the chat, missing permissions), the rest still works and the turn is unaffected.
+
+### Completion Report-Back
+
+When a task started from Telegram finishes **later** — because the agent delegated it, or kicked off background work — the result is posted back into the originating chat, threaded to your original message and sent by the same bot you were talking to. Failures report honestly (⚠️) rather than silently vanishing.
+
+This fires only for work that *inherited* its Telegram context. An ordinary chat turn already answers inline, so it is never double-posted.
+
+Group chats have a per-group consent flag (on by default) controlling whether the bot may post proactively there; turn it off and completion reports are suppressed for that group. Direct messages are consented by construction — you started the conversation.
+
 ### Voice Messages
 
 Voice notes sent to the bot are automatically transcribed with Google Gemini 2.0 Flash and delivered to the agent as text prefixed with the 🎙️ emoji. Transcription is transparent — users just send voice notes normally.
@@ -176,6 +196,7 @@ Click the remove button next to a group to deactivate it. The bot will stop resp
 | `/api/agents/{name}/telegram/groups` | GET | List group configs |
 | `/api/agents/{name}/telegram/groups/{id}` | PUT | Update trigger mode / welcome |
 | `/api/agents/{name}/telegram/groups/{id}` | DELETE | Deactivate group config |
+| `/api/agents/{name}/telegram/progress-indicator` | PUT | Turn the in-progress indicator on or off for this binding (human-only) |
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
 

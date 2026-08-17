@@ -29,6 +29,7 @@ Modules under test:
     docker/base-image/agent_server/services/stream_parser.py::process_stream_line
     docker/base-image/agent_server/services/headless_executor.py::_finalize_headless_result
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,6 +43,7 @@ _AGENT_SERVER_DIR = _PROJECT_ROOT / "docker" / "base-image" / "agent_server"
 # tests/unit/conftest.py:_preload_real_agent_server() registers
 # docker/base-image/agent_server as a namespace package in sys.modules.
 from agent_server.models import ExecutionMetadata  # noqa: E402
+from agent_server.services import jsonl_recovery as _jsonl_module  # noqa: E402
 from agent_server.services.headless_executor import (  # noqa: E402
     HeadlessRunContext,
     _finalize_headless_result,
@@ -49,6 +51,33 @@ from agent_server.services.headless_executor import (  # noqa: E402
 
 _STALE_UUID = "2f1c9a44-0d3e-4c7a-9b21-1f0e5d8c7a63"
 _CLAUDE_MSG = f"No conversation found with session ID: {_STALE_UUID}"
+
+_TASK_START = "2026-07-17T00:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _empty_jsonl_projects_dir(tmp_path, monkeypatch):
+    """Make "no JSONL on disk" an ASSERTED precondition, not an accident.
+
+    #1870 added a recovery step inside the `execution_error` branch that
+    consults the on-disk transcript. These tests only stay meaningful while
+    `_STALE_UUID` resolves to nothing — which today is true merely because
+    `/home/developer/.claude/...` does not exist on a test host. No CI job
+    runs tests/unit inside a container, so the premise holds, but it was
+    implicit. Pin it.
+    """
+    target = tmp_path / "projects" / "-home-developer"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(_jsonl_module, "_JSONL_PROJECTS_DIR", str(target))
+    return target
+
+
+def _write_jsonl(jsonl_dir: Path, session_id: str, records: list) -> Path:
+    import json
+
+    p = jsonl_dir / f"{session_id}.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return p
 
 
 def _make_ctx(
@@ -66,7 +95,7 @@ def _make_ctx(
     ctx = HeadlessRunContext(
         cmd=["claude", "--print", "--resume", _STALE_UUID],
         task_session_id="task-1673",
-        task_start_iso="2026-07-17T00:00:00Z",
+        task_start_iso=_TASK_START,
         effective_timeout=900,
         images=None,
         prompt="dummy",
@@ -174,9 +203,15 @@ def test_502_detail_carries_the_resume_marker_backend_matches_on():
     """The detail must contain Claude's verbatim text.
 
     `routers/sessions.py::_is_resume_not_found` substring-matches "no
-    conversation found" on `result.error`. If the message is dropped, the
-    fallback never fires and the session stays wedged — so this assertion
-    is the contract between the two layers, not a cosmetic check.
+    conversation found" on `result.error`, which the backend derives from
+    ``detail["message"]`` via ``_extract_agent_error``. If the message is
+    dropped, the fallback never fires and the session stays wedged — so this
+    assertion is the contract between the two layers, not a cosmetic check.
+
+    #1853 changed the ``execution_error`` 502 body from a plain string to a
+    STRUCTURED body (message + metadata + execution_log). The resume marker now
+    lives in ``detail["message"]``, carried verbatim so the self-heal is
+    preserved (#1938).
     """
     ctx = _make_ctx(
         response_parts=[],
@@ -188,16 +223,20 @@ def test_502_detail_carries_the_resume_marker_backend_matches_on():
         _finalize_headless_result(ctx)
 
     detail = exc_info.value.detail
-    assert isinstance(detail, str), "execution_error detail is a plain string"
-    assert "no conversation found" in detail.lower()
+    assert isinstance(
+        detail, dict
+    ), "execution_error detail is a structured body (#1853)"
+    assert "no conversation found" in detail["message"].lower()
 
 
-def test_execution_error_not_a_reader_race_dict_body():
+def test_execution_error_body_does_not_trip_reader_race():
     """Must not collide with the #678 auto-retry.
 
-    `task_execution_service._is_reader_race_signature` only matches a dict
-    body with recovery_attempted — a string detail can never trigger the
-    502 auto-retry path.
+    #1853 changed the ``execution_error`` 502 body from a string to a structured
+    dict, so "not a dict" is no longer the discriminator. The real contract is
+    that ``task_execution_service._is_reader_race_signature`` gates on
+    ``recovery_attempted`` (absent from the #1853 body), so the structured body
+    must still NOT trigger the 502 auto-retry path.
     """
     ctx = _make_ctx(
         response_parts=[],
@@ -208,7 +247,12 @@ def test_execution_error_not_a_reader_race_dict_body():
     with pytest.raises(HTTPException) as exc_info:
         _finalize_headless_result(ctx)
 
-    assert not isinstance(exc_info.value.detail, dict)
+    # conftest.py makes `services.*` importable (it imports services.agent_client).
+    from services.task_execution_service import _is_reader_race_signature
+
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)  # #1853: now a structured body
+    assert _is_reader_race_signature(detail) is False
 
 
 def test_execution_error_fires_even_when_assistant_text_exists():
@@ -242,6 +286,125 @@ def test_execution_error_message_is_sanitized():
         _finalize_headless_result(ctx)
 
     assert "dummy-not-a-real-key-999" not in str(exc_info.value.detail)
+
+
+# ---------------------------------------------------------------------------
+# #1870 added a recovery step in this branch. These pin that it can only ever
+# fire on positive on-disk evidence — never on accumulated stdout text.
+# ---------------------------------------------------------------------------
+
+
+def _assistant(text, *, stop, ts, msg_id="msg_x"):
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "id": msg_id,
+            "stop_reason": stop,
+            "content": [{"type": "text", "text": text}],
+        },
+        "timestamp": ts,
+    }
+
+
+def _user(text, ts):
+    return {
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "timestamp": ts,
+    }
+
+
+def test_jsonl_present_but_no_end_turn_still_502(_empty_jsonl_projects_dir):
+    """A transcript that shows the turn was interrupted is not evidence of
+    completion. #1870 recovery must decline and the 502 must stand."""
+    _write_jsonl(
+        _empty_jsonl_projects_dir,
+        _STALE_UUID,
+        [
+            _user("do the thing", "2026-07-17T00:00:10Z"),
+            _assistant("working on it", stop="tool_use", ts="2026-07-17T00:00:20Z"),
+        ],
+    )
+    ctx = _make_ctx(
+        response_parts=[],
+        error_type="execution_error",
+        error_message=_CLAUDE_MSG,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _finalize_headless_result(ctx)
+
+    assert exc_info.value.status_code == 502
+
+
+def test_stale_end_turn_plus_partial_stdout_still_502(_empty_jsonl_projects_dir):
+    """THE shape that would re-open #1673.
+
+    A PRIOR turn's `end_turn` sits in the JSONL (a `--resume` session) AND
+    partial stdout text sits in `response_parts`. Recovering here would be a
+    silent wrong answer — the previous turn's reply reported as this turn's
+    success — and would prove the gate had drifted onto accumulated stdout.
+
+    Exercises the staleness guard and the never-recover-from-stdout invariant
+    in one test.
+    """
+    _write_jsonl(
+        _empty_jsonl_projects_dir,
+        _STALE_UUID,
+        [
+            _user("an EARLIER question", "2026-07-16T09:00:00Z"),
+            _assistant("PRIOR TURN ANSWER", stop="end_turn", ts="2026-07-16T09:00:05Z"),
+        ],
+    )
+    ctx = _make_ctx(
+        response_parts=["partial output"],
+        error_type="execution_error",
+        error_message=_CLAUDE_MSG,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _finalize_headless_result(ctx)
+
+    assert exc_info.value.status_code == 502
+    assert "PRIOR TURN ANSWER" not in str(exc_info.value.detail)
+
+
+@pytest.mark.parametrize(
+    "error_type,expected_status",
+    [
+        ("rate_limit", 429),
+        ("max_turns", 422),
+        ("authentication_failed", 503),
+    ],
+)
+def test_recovery_is_not_attempted_for_other_error_types(
+    _empty_jsonl_projects_dir, error_type, expected_status
+):
+    """#1870 recovery is scoped to `execution_error` ONLY.
+
+    Those branches short-circuit above it, so even a perfectly recoverable
+    transcript must not turn a rate-limit / max-turns / auth failure into a
+    200. Nothing pinned that before.
+    """
+    _write_jsonl(
+        _empty_jsonl_projects_dir,
+        _STALE_UUID,
+        [
+            _user("do the thing", "2026-07-17T00:00:10Z"),
+            _assistant("a complete answer", stop="end_turn", ts="2026-07-17T00:00:20Z"),
+        ],
+    )
+    ctx = _make_ctx(
+        response_parts=[],
+        error_type=error_type,
+        error_message="some failure",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _finalize_headless_result(ctx)
+
+    assert exc_info.value.status_code == expected_status
 
 
 # ---------------------------------------------------------------------------

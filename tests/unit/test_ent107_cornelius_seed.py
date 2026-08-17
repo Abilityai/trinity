@@ -14,7 +14,9 @@ Covers the orchestration invariants surfaced by the autoplan review:
     409 that means "creation was blocked" — only the former may burn the flag
   * the `--workers 2` Redis SETNX provisioning lock (held → skip; Redis down →
     fail-open)
-  * `_provision` builds a `local:cornelius` create with request=None
+  * `_provision` builds a `github:Abilityai/cornelius` create with request=None,
+    source_mode left at its default True (#1656 — the tokenless public-clone path
+    of trinity-enterprise#123 rejects a non-source-mode request)
   * a real-DB smoke of `db.count_non_system_agents()` — defends the facade-
     delegation pitfall (learnings 2026-07-04) that a wholesale-mocked test misses
 
@@ -215,6 +217,28 @@ def test_generic_provision_failure_does_not_burn_flag(env):
     assert result["status"] == "error"
 
 
+def _store_backed_redis():
+    """A MagicMock Redis honouring SETNX + GET + DELETE against a real dict
+    so the #1920 compare-and-delete release (SingleFlightLock.release_if_owned)
+    can match the internally-minted token. A bare MagicMock returns a fresh
+    MagicMock on GET (never == the token), which would wrongly read as 'not our
+    lock' and skip the DELETE."""
+    redis = MagicMock()
+    store = {}
+
+    def _set(key, val, nx=None, ex=None):
+        if nx and key in store:
+            return None  # SETNX loses on an already-held key
+        store[key] = val
+        return True
+
+    redis.set.side_effect = _set
+    redis.get.side_effect = lambda key: store.get(key)
+    redis.delete.side_effect = lambda key: store.pop(key, None)
+    redis.store = store
+    return redis
+
+
 def test_provision_lock_held_skips(env):
     """Another worker holds the SETNX lock (set(nx=True) → falsy) → skip, no
     provision, flag untouched."""
@@ -228,16 +252,48 @@ def test_provision_lock_held_skips(env):
 
 
 def test_provision_lock_acquired_and_released(env):
-    """Lock winner (set(nx=True) → truthy) provisions and releases the lock."""
-    redis = MagicMock()
-    redis.set.return_value = True      # we won the lock
+    """#1920: lock winner provisions and releases via an ownership-checked
+    compare-and-delete against the minted token, not a tokenless delete."""
+    redis = _store_backed_redis()
     env.monkeypatch.setattr(cas, "get_breaker_redis", lambda: redis)
     result = _run()
     env.provision.assert_awaited_once()
     redis.set.assert_called_once()
     _, kwargs = redis.set.call_args
     assert kwargs.get("nx") is True and kwargs.get("ex")  # SETNX with a TTL
-    redis.delete.assert_called_once()                     # released
+    # The SETNX stored a real uuid token; the release GET matched it -> DELETE.
+    redis.delete.assert_called_once_with(cas._PROVISION_LOCK_KEY)
+    assert redis.store.get(cas._PROVISION_LOCK_KEY) is None  # lock free again
+    assert result["action"] == "created"
+
+
+def test_provision_release_never_deletes_a_successor_lock(env):
+    """THE #1920 property for cornelius (a verbatim twin of system_seed's bug):
+    worker A's TTL lapses, worker B acquires a FRESH lock, A finishes and
+    releases -- A's compare-and-delete must leave B's live lock intact. The
+    pre-#1920 tokenless delete removed it."""
+    redis = _store_backed_redis()
+    env.monkeypatch.setattr(cas, "get_breaker_redis", lambda: redis)
+
+    # A acquires (via the real _acquire_lock, minting A's token).
+    lock_a = svc._acquire_lock()
+    assert lock_a is not None
+
+    # A's lease TTL-expires and worker B SETNX-acquires a fresh token.
+    redis.store[cas._PROVISION_LOCK_KEY] = "worker-B-token"
+
+    # A finishes and releases -- must NOT touch B's live lock.
+    svc._release_lock(lock_a)
+    redis.delete.assert_not_called()
+    assert redis.store[cas._PROVISION_LOCK_KEY] == "worker-B-token"
+
+
+def test_provision_lock_fails_open_when_redis_down(env):
+    """Redis unreachable (client None) -> the lock fails open (sole worker) and
+    the provision still runs; release is a safe no-op."""
+    env.monkeypatch.setattr(cas, "get_breaker_redis", lambda: None)
+    result = _run()
+    env.provision.assert_awaited_once()
     assert result["action"] == "created"
 
 
@@ -259,8 +315,12 @@ def test_provision_builds_local_template_config(monkeypatch):
     admin = cas.User(id=1, username="admin", email="a@example.com", role="admin")
     asyncio.run(svc._provision(admin))
 
-    assert captured["config"].template == "local:cornelius"
+    assert captured["config"].template == "github:Abilityai/cornelius"
     assert captured["config"].name == "cornelius"
+    # #1656: the tokenless public-repo clone (trinity-enterprise#123) is source-mode
+    # only — `_gate_tokenless_request` 400s a non-source-mode request. The seeder
+    # relies on the AgentConfig default rather than setting it, so pin the default.
+    assert captured["config"].source_mode is True
     assert captured["request"] is None
     assert captured["user"].username == "admin"
 

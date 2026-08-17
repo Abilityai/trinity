@@ -41,8 +41,8 @@ claude plugin install create-agent@abilityai
 | Plugin | Skills | Purpose | Key Skills |
 |--------|--------|---------|------------|
 | [create-agent](create-agent-plugin.md) | 14 | Agent creation wizards | `/create-agent:prospector`, `/create-agent:custom` |
-| [agent-dev](agent-dev-plugin.md) | 20 | Extend existing agents | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-orchestrator`, `/agent-dev:work-loop` |
-| [trinity](trinity-plugin.md) | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:loop` |
+| [agent-dev](agent-dev-plugin.md) | 25 | Extend existing agents, and work fleet-wide | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-orchestrator`, `/agent-dev:add-canon`, `/agent-dev:agent-fleet-analysis` |
+| [trinity](trinity-plugin.md) | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:sync`, `/trinity:loop` |
 | [dev-methodology](dev-methodology-plugin.md) | 24 | Development workflow | `/dev-methodology:implement`, `/dev-methodology:validate-pr` |
 | [utilities](utilities-plugin.md) | 7 | Ops and productivity | `/utilities:safe-deploy`, `/utilities:docker-ops` |
 
@@ -51,19 +51,19 @@ claude plugin install create-agent@abilityai
 Abilities supports a four-step workflow:
 
 ```
-1. Scaffold              2. Develop                    3. Deploy              4. Iterate
-/create-agent:*          /agent-dev:create-playbook    /trinity:onboard       /trinity:sync
-                         /agent-dev:add-memory         trinity deploy .       git push
-                         /agent-dev:add-backlog                               /create-agent:adjust
+1. Scaffold              2. Develop                    3. Deploy                    4. Iterate
+/create-agent:*          /agent-dev:create-playbook    git push → /trinity:onboard  git push → /trinity:sync
+                         /agent-dev:add-memory         (or onboard in place)        /create-agent:review
+                         /agent-dev:add-backlog                                     /create-agent:adjust
 ```
 
 **Scaffold** — Use a wizard like `/create-agent:prospector` or `/create-agent:custom` to get a fully configured agent.
 
 **Develop** — Use `/agent-dev:create-playbook` to add capabilities, `/agent-dev:add-memory` for persistence.
 
-**Deploy** — Run `/trinity:connect` once to authenticate, then `/trinity:onboard` per agent.
+**Deploy** — Run `/trinity:connect` once to authenticate, push the agent's repo, then `/trinity:onboard` per agent — Trinity clones the repo and tracks the branch. An agent that is already deployed from a bare repo can be onboarded *in place* by running `/trinity:onboard` inside it.
 
-**Iterate** — Push changes with `git push` or `/trinity:sync`. Use `/create-agent:adjust` to audit.
+**Iterate** — Push changes and run `/trinity:sync`, which also reconciles declared schedules and plugins onto the instance. Use `/create-agent:review` and `/create-agent:adjust` to audit and improve.
 
 ## What Wizard-Created Agents Include
 
@@ -73,7 +73,7 @@ Every agent created with the wizards includes:
 - **Initial skills** — 2-4 playbooks based on agent purpose
 - **Onboarding system** — `onboarding.json` + `/onboarding` skill
 - **Dashboard** — `dashboard.yaml` + `/update-dashboard` skill
-- **Trinity files** — `template.yaml`, `.env.example`, `.mcp.json.template`
+- **Trinity files** — `template.yaml` (declaring credentials, `schedules:`, and `plugins:`), `.env.example`, `.mcp.json.template`
 - **Git repo** — Initialized and committed
 
 ## See Also

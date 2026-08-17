@@ -1,20 +1,27 @@
 import { test, expect } from '@playwright/test'
+import { ALL_LAYOUT_KEYS, LAYOUT_KEY, WIDGET_PREFS_KEY } from '../src/utils/gridStorageKeys.js'
+import { isWidgetKey } from '../src/utils/gridWidgets.js'
 
 /**
  * Dashboard Grid view e2e (trinity-enterprise#47).
  *
- * The Grid is a dashboard mode alongside Timeline (the legacy Graph / Vue Flow
- * canvas was decommissioned in #1689): a magnetic tile canvas on an unbounded
- * pan/zoom lattice. These specs cover the mode toggle + persistence, tile
- * rendering, drag-to-cell with swap, tidy/reset, and that the Timeline mode is
- * untouched.
+ * The Grid is a dashboard mode alongside Timeline and List (List consolidated
+ * the retired Agents page in trinity-enterprise#260; the legacy Graph / Vue
+ * Flow canvas was decommissioned in #1689): a magnetic tile canvas on an
+ * unbounded pan/zoom lattice. These specs cover the mode toggle + persistence,
+ * tile rendering, drag-to-cell with swap, tidy/reset, and that the Timeline
+ * mode is untouched. Toggle clicks use exact-name selectors, so the third
+ * mode button doesn't affect them; List-mode behaviour lives in
+ * dashboard-list-view.spec.js.
  *
  * Runs against a live stack — every install has at least `trinity-system`,
  * so no fixtures are needed. Layout state is reset per test via
  * localStorage.
  */
 
-const LAYOUT_KEY = 'trinity-grid-layout-v1'
+// LAYOUT_KEY / ALL_LAYOUT_KEYS / WIDGET_PREFS_KEY are imported from the store's
+// own module (#2199) — a hand-copied literal here silently desynced on the
+// #2042 v1->v2 bump and both read-back assertions below resolved `null`.
 const MODE_KEY = 'trinity-dashboard-view'
 
 async function gotoGrid(page) {
@@ -26,11 +33,17 @@ async function gotoGrid(page) {
 test.describe('dashboard grid view (trinity-enterprise#47)', () => {
   test.beforeEach(async ({ page }) => {
     // Fresh layout + default mode for deterministic assertions.
+    // ALL generations, not just the current one: `_loadSavedRaw` migrates a v1
+    // blob into v2 when v2 is absent, so clearing only LAYOUT_KEY lets a stale
+    // layout be migrated straight back in and the board is not clean (#2199).
+    // The argument is SPREAD into one flat array and the callback iterates it —
+    // nesting it would call removeItem() with an Array and silently clear
+    // nothing, which looks identical to a working cleanup.
     await page.addInitScript(
-      ([layoutKey]) => {
-        localStorage.removeItem(layoutKey)
+      (keys) => {
+        keys.forEach((k) => localStorage.removeItem(k))
       },
-      [LAYOUT_KEY]
+      [...ALL_LAYOUT_KEYS, WIDGET_PREFS_KEY]
     )
   })
 
@@ -50,6 +63,54 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await expect(page.getByRole('button', { name: 'Reset', exact: true })).toBeVisible()
     await expect(page.locator('.gv-legend')).toContainText('Scheduled')
     await expect(page.locator('.gv-zoomlvl')).toContainText('%')
+  })
+
+  test('scanline loading settles: chart content visible, no lingering clip-path (ent#245)', async ({ page }) => {
+    await gotoGrid(page)
+    const sysTile = page.locator('.gv-tile[data-agent="trinity-system"]')
+    await expect(sysTile).toBeVisible({ timeout: 15000 })
+
+    // The primitive actually renders (guards against the trivially-green
+    // case where the wrapper is absent and every count below is vacuous).
+    await expect(sysTile.locator('.scan-content')).toHaveCount(2)
+
+    // Once analytics land, both chart zones must be fully revealed: the
+    // loading track gone and NO wrapper stuck mid-wipe. A retained non-none
+    // clip-path is the signature of the entire stuck-`revealing` bug class
+    // (lost animationend, scoped-keyframe rename) — assert it never survives.
+    await expect(sysTile.locator('.scan-track')).toHaveCount(0, { timeout: 20000 })
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            [...document.querySelectorAll('.scan-content')].filter(
+              (el) => getComputedStyle(el).clipPath !== 'none'
+            ).length
+          ),
+        { timeout: 10000 }
+      )
+      .toBe(0)
+    // Headline flipped off the em-dash placeholder state (value or 0, not a
+    // stuck loading dash on the Activity zone whose data always exists).
+    await expect(sysTile.locator('.t-charts')).toBeVisible()
+  })
+
+  test('reduced motion: charts render instantly with no beam (ent#245)', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await gotoGrid(page)
+    const sysTile = page.locator('.gv-tile[data-agent="trinity-system"]')
+    await expect(sysTile).toBeVisible({ timeout: 15000 })
+    await expect(sysTile.locator('.scan-content')).toHaveCount(2)
+    await expect(sysTile.locator('.scan-track')).toHaveCount(0, { timeout: 20000 })
+    // The reveal phase is skipped entirely under reduced motion — nothing
+    // may ever hold a clip-path.
+    expect(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.scan-content')].filter(
+          (el) => getComputedStyle(el).clipPath !== 'none'
+        ).length
+      )
+    ).toBe(0)
   })
 
   test('mode choice persists across reload', async ({ page }) => {
@@ -100,12 +161,25 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await page.getByRole('button', { name: 'Reset', exact: true }).click()
     const reset = await page.evaluate((k) => localStorage.getItem(k), LAYOUT_KEY)
     expect(reset).toBeTruthy()
-    // Reset yields the deterministic default: every position is a small
-    // non-negative reading-order cell.
-    const positions = Object.values(JSON.parse(reset))
-    for (const p of positions) {
+    // Reset yields the deterministic default. Layout v2 holds TWO occupant
+    // kinds (#2042 / ent#325), so the shape differs by kind and asserting
+    // `r >= 0` across the whole map is a stale v1-era assumption — v1 held
+    // agent keys only. Agents land in non-negative reading-order cells;
+    // info tiles are seeded into the band ABOVE the fleet (negative rows,
+    // `seedWidgetCells` band [-3, -1] — "spill upward, never into the
+    // agents"). `isWidgetKey` is imported rather than matching a hand-copied
+    // 'widget:' literal, for the same reason the layout key is (#2199).
+    const entries = Object.entries(JSON.parse(reset))
+    expect(entries.length).toBeGreaterThan(0)
+    for (const [key, p] of entries) {
+      expect(Number.isInteger(p.c)).toBe(true)
+      expect(Number.isInteger(p.r)).toBe(true)
       expect(p.c).toBeGreaterThanOrEqual(0)
-      expect(p.r).toBeGreaterThanOrEqual(0)
+      if (isWidgetKey(key)) {
+        expect(p.r).toBeLessThan(0)
+      } else {
+        expect(p.r).toBeGreaterThanOrEqual(0)
+      }
     }
   })
 

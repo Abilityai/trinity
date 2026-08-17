@@ -17,7 +17,12 @@ __pycache__/
 .Python
 env/
 venv/
+# No trailing slash: the slash forms match DIRECTORIES only, so a *symlink*
+# named .venv slipped past them and was committed (#2082 shipped one pointing
+# at a developer's home directory). These also match a symlink or a file.
+.venv
 .venv/
+.venv*
 .venv*/
 ENV/
 build/
@@ -35,6 +40,16 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# The setuptools block above ends with a BARE `parts/`, which git applies at
+# every depth — so it also swallows `src/frontend/src/components/tiles/parts/`,
+# where the grid's presentational tile sub-components live (ent#100). The
+# directory is re-included first: git cannot re-include a file whose PARENT
+# directory is excluded, so `!.../parts/*.vue` alone would silently do nothing.
+# Symptom if this is ever removed: a component that builds locally, is missing
+# from the commit, and fails the frontend build in CI.
+!src/frontend/src/components/tiles/parts/
+!src/frontend/src/components/tiles/parts/**
 
 # uv lockfile (repo uses pyproject.toml for pytest only; empty lockfile is noise)
 uv.lock
@@ -73,6 +88,7 @@ temp/
 # Local deployment configuration (contains sensitive data)
 CLAUDE.local.md
 .trinity-sync.yaml
+.trinity-remote.yaml
 
 # API logs
 api.log
@@ -86,6 +102,7 @@ deployment/
 
 # Testing
 .pytest_cache/
+.hypothesis/
 .coverage
 htmlcov/
 *.cover
@@ -122,10 +139,11 @@ repositories/
 *.png
 # Allow PWA icons
 !src/frontend/public/icons/*.png
-# Allow documentation screenshots
+# Allow documentation screenshots — docs/screenshots/ is the ONE canonical store
+# (docs/screenshots/MANIFEST.yaml); docs/assets/screenshots/whats-new/ holds frozen
+# per-release snapshots. Do not add a third negation here — see docs/screenshots/README.md.
 !docs/screenshots/*.png
-!docs/user-docs/images/**/*.png
-!docs/assets/screenshots/**/*.png
+!docs/assets/screenshots/whats-new/**/*.png
 
 # Frontend build output
 src/frontend/dist/

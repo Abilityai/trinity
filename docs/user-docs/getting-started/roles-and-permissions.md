@@ -31,6 +31,15 @@ Admins can change a user's role at any time via Settings.
 | Run tasks and schedules | operator or above (with access) |
 | Chat with shared agents | Any authenticated user |
 | Use public links | Anyone (no auth required) |
+| Install a system from a manifest | creator or above |
+| Manage skill sources | Admin, **human only** |
+| Approve an oversized retention deletion | Admin, **human only** |
+
+### Role is not the same as "human"
+
+An MCP API key resolves to the user who created it and **carries that user's role**. Because an agent's own key is created under its owner, an agent operating on a default admin-owned installation would otherwise satisfy any check that asks only "is this caller an admin?".
+
+Endpoints whose blast radius is operator-scale therefore require a human caller *in addition to* the role — an API key of any scope is rejected there, no matter whose it is. See [Authentication](../api-reference/authentication.md) for the list.
 
 ## Managing User Roles
 

@@ -52,6 +52,45 @@ try:
 except ImportError:  # pragma: no cover - exercised by unit tests
     from orphan_allowlist import resolve_allowlist, _read_cmdline  # type: ignore[no-redef]
 
+# ent#292: sanitize a cmdline before it reaches a log sink.
+#
+# The redaction RULE lives in exactly one place — `credential_sanitizer` — and
+# is imported lazily here rather than at module scope. Two reasons, and the
+# first is not stylistic:
+#
+# 1. A second copy of a security regex is how this bug happened. #1595 fixed
+#    the same credential in git stderr with a local regex; the argv sink kept
+#    its own behaviour and was missed. Duplicating the pattern here would set
+#    up the identical drift for whoever improves it next.
+#
+# 2. It must be a LAZY import. This module is loaded three ways —
+#    package-relative in production, flat by `subprocess_pgroup`'s test, and
+#    during a full-suite collection where `src/backend` is also on sys.path
+#    carrying a DIFFERENT `credential_sanitizer` without `sanitize_cmdline`. An
+#    import-time dependency therefore aborted collection outright.
+#
+# When the helper genuinely cannot be reached, the cmdline is DROPPED rather
+# than logged raw. Diagnostics degrade; the credential never leaks. That is the
+# right trade for a log line whose whole purpose is answering "which process
+# keeps dying?" — a placeholder still says a process was reaped.
+_CMD_UNAVAILABLE = "<redacted: sanitizer unavailable>"
+
+
+def _safe_cmdline(cmd: str) -> str:
+    """Redact credentials from a process cmdline, or drop it entirely."""
+    try:
+        from .credential_sanitizer import sanitize_cmdline
+    except Exception:  # pragma: no cover - flat/standalone load
+        try:
+            from credential_sanitizer import sanitize_cmdline  # type: ignore[no-redef]
+        except Exception:
+            return _CMD_UNAVAILABLE
+    try:
+        return sanitize_cmdline(cmd or "")
+    except Exception:  # pragma: no cover - redaction must never break a sweep
+        return _CMD_UNAVAILABLE
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,7 +201,13 @@ def kill_cgroup_orphans(
     for i, pid in enumerate(orphan_pids):
         if i >= _LOG_DETAIL_CAP:
             break
-        cmd = (_read_cmdline(pid) or "?")[:_CMDLINE_LOG_CAP]
+        # ent#292: argv carries a live credential. Trinity writes git remotes
+        # as `https://oauth2:<PAT>@github.com/...`, so every reaped git helper
+        # logged a working PAT verbatim — into the container log, then into
+        # Vector's persisted archives and any snapshot of that volume.
+        # Sanitize BEFORE the length cap: truncating first can slice a token
+        # mid-value and leave a partial secret that no pattern then matches.
+        cmd = _safe_cmdline(_read_cmdline(pid) or "?")[:_CMDLINE_LOG_CAP]
         try:
             pgid_str = str(os.getpgid(pid))
         except OSError:

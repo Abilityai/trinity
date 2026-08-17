@@ -11,8 +11,8 @@ communicated in-band via the stream.
 
 import pytest
 import httpx
-from utils.api_client import TrinityApiClient, ApiConfig
-from utils.assertions import (
+from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit.assertions import (
     assert_status,
     assert_status_in,
 )

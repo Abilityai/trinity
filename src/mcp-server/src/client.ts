@@ -25,6 +25,7 @@ import type {
   OperatorQueueListResponse,
   CompatibilityReport,
   AgentFileTreeResponse,
+  ReportSummary,
 } from "./types.js";
 
 /**
@@ -102,6 +103,9 @@ export function pickRecentMcpExecution(
   matches.sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
   return matches[0];
 }
+
+/** Bound for #848 inline-auth control-plane calls (not chat). */
+const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
 
 export class TrinityClient {
   private baseUrl: string;
@@ -184,7 +188,8 @@ export class TrinityClient {
     path: string,
     body?: unknown,
     isRetry: boolean = false,
-    requestId?: string
+    requestId?: string,
+    extraHeaders?: Record<string, string>
   ): Promise<Response> {
     if (!this.token) {
       throw new Error("Not authenticated. Call authenticate() first or setToken().");
@@ -196,6 +201,17 @@ export class TrinityClient {
 
     if (body) {
       headers["Content-Type"] = "application/json";
+    }
+
+    // #1970: per-call attribution headers (X-Source-Agent / X-MCP-Key-*).
+    // Authorization is skipped explicitly: this parameter exists to add
+    // metadata, and letting it replace the bearer token would turn an audit
+    // convenience into an auth-substitution surface.
+    if (extraHeaders) {
+      for (const [key, value] of Object.entries(extraHeaders)) {
+        if (key.toLowerCase() === "authorization") continue;
+        headers[key] = value;
+      }
     }
 
     // #905: forward a caller-supplied correlation id. The backend's
@@ -224,7 +240,7 @@ export class TrinityClient {
       const success = await this.reauthenticate();
       if (success) {
         console.log("Re-authentication successful, retrying request...");
-        return this._fetch(method, path, body, true, requestId);
+        return this._fetch(method, path, body, true, requestId, extraHeaders);
       }
     }
 
@@ -284,9 +300,10 @@ export class TrinityClient {
     path: string,
     body?: unknown,
     isRetry: boolean = false,
-    requestId?: string
+    requestId?: string,
+    extraHeaders?: Record<string, string>
   ): Promise<T> {
-    const response = await this._fetch(method, path, body, isRetry, requestId);
+    const response = await this._fetch(method, path, body, isRetry, requestId, extraHeaders);
 
     // Handle 204 No Content (e.g., successful DELETE)
     if (response.status === 204) {
@@ -436,9 +453,17 @@ export class TrinityClient {
 
   /**
    * Create a new agent
+   *
+   * RELIABILITY-006 (#525): forward idempotency key so a transport-level retry
+   * of the same create replays the original response instead of colliding on
+   * the agent name.
    */
-  async createAgent(config: AgentConfig): Promise<Agent> {
-    return this.request<Agent>("POST", "/api/agents", config);
+  async createAgent(config: AgentConfig, idempotencyKey?: string): Promise<Agent> {
+    const headers: Record<string, string> = {};
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
+    return this.request<Agent>("POST", "/api/agents", config, false, undefined, headers);
   }
 
   /**
@@ -1191,14 +1216,39 @@ export class TrinityClient {
 
   /**
    * Manually trigger a schedule execution
+   *
+   * @param sourceAgent - Triggering agent, for agent-scoped keys
+   * @param mcpKeyInfo - MCP key identity (AUDIT-001 / #1970 execution origin)
    */
   async triggerAgentSchedule(
     agentName: string,
-    scheduleId: string
+    scheduleId: string,
+    sourceAgent?: string,
+    mcpKeyInfo?: { keyId?: string; keyName?: string }
   ): Promise<ScheduleTriggerResult> {
+    // #1970: send the same origin headers `chat()` does. The backend forwards
+    // them to the scheduler, which persists them on the execution row. Without
+    // this an MCP-triggered run attributes to the key OWNER but not to which
+    // key or which agent pulled the trigger — the part that identifies the
+    // actor when one human owns many keys and many agents.
+    const headers: Record<string, string> = {};
+    if (sourceAgent) {
+      headers["X-Source-Agent"] = sourceAgent;
+    }
+    if (mcpKeyInfo?.keyId) {
+      headers["X-MCP-Key-ID"] = mcpKeyInfo.keyId;
+    }
+    if (mcpKeyInfo?.keyName) {
+      headers["X-MCP-Key-Name"] = mcpKeyInfo.keyName;
+    }
+
     return this.request<ScheduleTriggerResult>(
       "POST",
-      `/api/agents/${encodeURIComponent(agentName)}/schedules/${encodeURIComponent(scheduleId)}/trigger`
+      `/api/agents/${encodeURIComponent(agentName)}/schedules/${encodeURIComponent(scheduleId)}/trigger`,
+      undefined,
+      false,
+      undefined,
+      headers
     );
   }
 
@@ -1394,6 +1444,60 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * List reports across accessible agents — METADATA only, no payload (#1538).
+   * The backend scopes to the caller's accessible agents; an agent-scoped key is
+   * narrowed further to {self} ∪ permitted by the tool layer.
+   */
+  async listReports(params: {
+    report_type?: string;
+    hours?: number;
+    search?: string;
+    agent?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ReportSummary[]> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request("GET", `/api/reports${suffix}`);
+  }
+
+  /**
+   * List one agent's reports (metadata only) (#1538).
+   */
+  async listAgentReports(
+    agentName: string,
+    params: {
+      report_type?: string;
+      hours?: number;
+      search?: string;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<ReportSummary[]> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/reports${suffix}`
+    );
+  }
+
+  /**
+   * Fetch one report INCLUDING its payload (#1538). The backend answers 404 —
+   * not 403 — when the caller cannot access the owning agent, so an id cannot be
+   * probed for existence.
+   */
+  async getReport(reportId: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/api/reports/${encodeURIComponent(reportId)}`);
+  }
+
   // ============================================================================
   // Operator Queue (OPS-001, #1101) — read surface
   // ============================================================================
@@ -1533,6 +1637,10 @@ export class TrinityClient {
     delivered: boolean;
     channel?: string;
     reason?: string;
+    /** #2157: plain-language explanation of a refusal, for surfaces where the
+     *  machine `reason` alone leads an agent to a wrong conclusion (the portal
+     *  narrates the agent's text, so "no voice note here" ≠ "no voice here"). */
+    guidance?: string;
   }> {
     return this.request(
       "POST",
@@ -1696,6 +1804,157 @@ export class TrinityClient {
       throw new Error(`Health check failed: ${response.statusText}`);
     }
     return (await response.json()) as { status: string; timestamp: string };
+  }
+
+  // ============================================================================
+  // Inline email auth (#848)
+  // ============================================================================
+  //
+  // Timeout for the three control-plane calls (request/verify/playbooks). Chat
+  // uses the longer MCP_CHAT_TIMEOUT_MS ceiling, matching the key-based path.
+  //
+  // These bypass `_fetch` on purpose: an anonymous session has no bearer token,
+  // and `_fetch` throws without one. They authenticate the *caller* (this MCP
+  // server) with the internal secret instead. The secret proves who is asking;
+  // it never proves authorization — the backend gates every inline-auth call on
+  // the verified email's own access (`email_has_agent_access`).
+
+  /**
+   * Bounded fetch for the inline-auth surface (#848).
+   *
+   * These four calls originally used bare `fetch` with no timeout, so a slow or
+   * hung agent pinned a socket and the anonymous tool call forever — and,
+   * because no tool sets `timeoutMs`, FastMCP's own tool timeout never fires
+   * either. The key-based chat path already bounds itself
+   * (MCP_CHAT_TIMEOUT_MS, see `chat`); leaving the inline path unbounded made
+   * the two caller tiers behave differently for the same underlying agent.
+   */
+  private async internalFetch(
+    path: string,
+    body: unknown,
+    timeoutMs: number
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: this.internalHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(`Trinity did not respond within ${timeoutMs}ms.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private internalHeaders(): Record<string, string> {
+    const secret = process.env.INTERNAL_API_SECRET || "";
+    if (!secret) {
+      throw new Error(
+        "INTERNAL_API_SECRET is not set — inline email auth (#848) cannot reach the backend."
+      );
+    }
+    return { "Content-Type": "application/json", "X-Internal-Secret": secret };
+  }
+
+  /**
+   * Ask the backend to email a login code. Fire-and-forget by contract: the
+   * backend always answers 202 with a constant body regardless of whether the
+   * address is known, so this resolves identically in both cases and callers
+   * must not branch on the result (#186 enumeration safety).
+   */
+  async requestInlineLoginCode(email: string, sessionId?: string): Promise<void> {
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/request",
+      { email, session_id: sessionId },
+      INLINE_AUTH_TIMEOUT_MS
+    );
+    if (!response.ok) {
+      throw new Error(`Inline login request failed: ${response.status}`);
+    }
+  }
+
+  /**
+   * Verify a login code and resolve what the address may reach. Returns the
+   * verified identity plus the agents shared with it; never a credential.
+   */
+  async verifyInlineLoginCode(
+    email: string,
+    code: string,
+    sessionId?: string
+  ): Promise<{
+    verified: boolean;
+    username?: string;
+    agents?: Array<{ name: string; description?: string }>;
+  }> {
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/verify",
+      { email, code, session_id: sessionId },
+      INLINE_AUTH_TIMEOUT_MS
+    );
+    if (response.status === 401) {
+      return { verified: false };
+    }
+    if (!response.ok) {
+      throw new Error(`Inline login verification failed: ${response.status}`);
+    }
+    return (await response.json()) as {
+      verified: boolean;
+      username?: string;
+      agents?: Array<{ name: string; description?: string }>;
+    };
+  }
+
+  /**
+   * Exposed playbooks for `agent`, acting as a verified email.
+   *
+   * The backend re-gates this on `email_has_agent_access(agent, email)` — the
+   * internal secret says who is asking, never what they may reach.
+   */
+  async getInlineConnectorPlaybooks(
+    email: string,
+    agent: string
+  ): Promise<Array<{ name: string; description?: string }>> {
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/playbooks",
+      { email, agent },
+      INLINE_AUTH_TIMEOUT_MS
+    );
+    if (response.status === 403) {
+      throw new Error(`You do not have access to "${agent}".`);
+    }
+    if (!response.ok) {
+      throw new Error(`Could not list playbooks for "${agent}": ${response.status}`);
+    }
+    return (await response.json()) as Array<{ name: string; description?: string }>;
+  }
+
+  /** Chat with `agent` acting as a verified email. Same backend gate as above. */
+  async inlineConnectorChat(
+    email: string,
+    agent: string,
+    message: string
+  ): Promise<unknown> {
+    // Chat gets the same ceiling as the key-based path so the two caller tiers
+    // time out identically for the same agent.
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/chat",
+      { email, agent, message },
+      Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000)
+    );
+    if (response.status === 403) {
+      throw new Error(`You do not have access to "${agent}".`);
+    }
+    if (!response.ok) {
+      throw new Error(`Chat with "${agent}" failed: ${response.status}`);
+    }
+    return await response.json();
   }
 
   // ============================================================================
@@ -2333,5 +2592,152 @@ export class TrinityClient {
       false,
       requestId,
     );
+  }
+
+  // ==========================================================================
+  // A2A control plane (trinity-enterprise#160)
+  // The management endpoints (config/exposure/allow-list/endpoints) proxy the
+  // ENTITLEMENT-GATED enterprise router (`/api/enterprise/a2a/*`) — a 403 in an
+  // unentitled build, a 404 in an OSS-only build. The served card is the OSS
+  // #737 endpoint.
+  // ==========================================================================
+
+  /** Full A2A control state for one agent (exposure, card URL, allow-list, endpoints). */
+  async getA2AConfig(name: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/config`,
+    );
+  }
+
+  /** Toggle whether the agent is exposed over A2A. */
+  async setA2AExposure(name: string, enabled: boolean): Promise<unknown> {
+    return this.request<unknown>(
+      "PUT",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/exposure`,
+      { enabled },
+    );
+  }
+
+  /** The served A2A Agent Card JSON (OSS #737 endpoint). */
+  async getA2ACard(name: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/a2a/agent-card`,
+    );
+  }
+
+  /** Add and/or remove inbound identities on the agent's A2A allow-list. */
+  async updateA2AInboundAllowlist(
+    name: string,
+    body: { add?: string[]; remove?: string[] },
+  ): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/inbound-allowlist`,
+      body,
+    );
+  }
+
+  /** Register (or update by name) an outbound external A2A endpoint. */
+  async registerA2AEndpoint(
+    name: string,
+    body: { name: string; url: string; credentials?: string },
+  ): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+      body,
+    );
+  }
+
+  /** List the agent's registered outbound endpoints (credentials never returned). */
+  async listA2AEndpoints(name: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+    );
+  }
+
+  /** Remove one outbound endpoint by id. */
+  async removeA2AEndpoint(name: string, endpointId: string): Promise<unknown> {
+    return this.request<unknown>(
+      "DELETE",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints/${encodeURIComponent(endpointId)}`,
+    );
+  }
+  // a2a_exposed is surfaced natively on GET /api/agents (ent#157), so list_agents
+  // / get_agent carry it without a separate fetch — no client merge needed.
+
+  // ==========================================================================
+  // A2A runtime — OUTBOUND calls (abilityai/trinity#736)
+  //
+  // Distinct from the ent#160 control plane above in two ways that matter:
+  //  - these hit OSS routes on /api/agents, NOT the entitlement-gated
+  //    /api/enterprise/a2a/*. The epic's ruling is "Outbound = OSS", so a
+  //    404 here means the kill switch is off or the build predates the
+  //    feature — never "not licensed".
+  //  - they carry their own AbortController. `request()` uses a bare `fetch`
+  //    with no signal, and nginx is `proxy_read_timeout 86400`, so without one
+  //    the MCP client's own 30-60s gateway timeout fires first: the agent sees
+  //    `fetch failed` while the credentialed outbound call completes anyway.
+  //    The side effect happened and, because `task_id` only comes back on
+  //    success, the agent would hold no handle to poll. Aborting on OUR side
+  //    first lets us return a structured receipt instead (the #914 shape).
+  // ==========================================================================
+
+  /** Bound below the MCP client's gateway abort so WE give up first (see above). */
+  private a2aTimeoutMs(): number {
+    // `||` not `??`: a set-but-empty env var must coalesce to the default.
+    // `Number('')` is 0, which would abort every call instantly (the #1076 class).
+    return Number(process.env.MCP_A2A_TIMEOUT_MS || 40000);
+  }
+
+  private async a2aFetch(path: string, body: unknown): Promise<unknown> {
+    if (!this.token) {
+      throw new Error("Not authenticated. Call authenticate() first or setToken().");
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.a2aTimeoutMs());
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new ApiError(response.status, await response.text(), response.headers);
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /** Task an external A2A agent through a PRE-REGISTERED endpoint (#736). */
+  async callA2AAgent(
+    name: string,
+    body: {
+      endpoint: string;
+      message: string;
+      dedup_label: string;
+      context_id?: string;
+      task_id?: string;
+      execution_id?: string;
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/call`, body);
+  }
+
+  /** Poll a remote A2A task by id on the same registered endpoint (#736). */
+  async getA2ATask(
+    name: string,
+    body: { endpoint: string; task_id: string },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
   }
 }

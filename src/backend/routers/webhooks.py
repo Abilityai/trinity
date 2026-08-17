@@ -289,7 +289,21 @@ async def trigger_webhook(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Scheduler service unavailable — try again later",
             )
-        if response.status_code not in (200, 202):
+        # 409 = the schedule is already executing (#1968 added this status).
+        # That is a HEALTHY, expected state for a public webhook, not an error:
+        # before #1968 this delivery got a 202, and routing it through the
+        # generic arm below would log at ERROR, answer an unauthenticated
+        # caller "try again later" (advice that only hits the same lock), and
+        # — via the `except HTTPException` arm — release the #525 dedup claim
+        # for something that never failed. The delivery is coalesced into the
+        # run already in flight and reported honestly as such.
+        already_running = response.status_code == 409
+        if already_running:
+            logger.info(
+                f"Webhook trigger: schedule {schedule.id} already executing — "
+                "delivery coalesced into the in-flight run"
+            )
+        if not already_running and response.status_code not in (200, 202):
             logger.error(
                 f"Webhook trigger: scheduler error {response.status_code} for schedule {schedule.id}"
             )
@@ -333,6 +347,7 @@ async def trigger_webhook(
             "triggered_by": "webhook",
             "caller_ip": caller_ip,
             "has_context": bool(body and body.context),
+            "already_running": already_running,
         },
     )
 
@@ -341,11 +356,16 @@ async def trigger_webhook(
     )
 
     trigger_payload = {
-        "status": "triggered",
+        "status": "already_running" if already_running else "triggered",
         "schedule_id": schedule.id,
         "schedule_name": schedule.name,
         "agent_name": schedule.agent_name,
-        "message": "Execution started — poll GET /api/agents/{name}/executions for status",
+        "message": (
+            "Schedule is already executing — this delivery was coalesced into "
+            "the run in flight; poll GET /api/agents/{name}/executions for status"
+            if already_running else
+            "Execution started — poll GET /api/agents/{name}/executions for status"
+        ),
     }
     # Store the ack so an explicit-key duplicate within the TTL replays it
     # instead of firing again (#525). No execution_id — the webhook is

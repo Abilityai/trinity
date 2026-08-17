@@ -26,7 +26,16 @@ Configuration:
 """
 
 # Skip test files that require backend context (can't be run from test suite)
-collect_ignore = ["test_archive_security.py"]
+collect_ignore: list[str] = []  # test_archive_security relocated to tests/unit/ (#1895)
+
+# WHERE TESTS LIVE (#1895): the per-PR CI unit job collects ONLY tests/unit/, so a
+# self-contained test belongs there, not here. The live-in-root set (files that
+# genuinely need a running backend) is enforced by tests/lint_root_test_placement.py
+# + its ratcheted baseline — do NOT hand-maintain a list here. The two intentional
+# basename twins that STAY in root, test_1083_callback_endpoint.py (a
+# pytest.mark.smoke live layer) and test_websocket_auth.py (a real wss:// handshake),
+# are deliberate: their mocked/direct logic twins live under tests/unit/ and the two
+# layers legitimately coexist across the two collected islands (do not dedupe).
 
 # ---------------------------------------------------------------------------
 # Issue #589: backend config now raises at import-time if REDIS_URL lacks
@@ -36,9 +45,19 @@ collect_ignore = ["test_archive_security.py"]
 # their own conftest from .env.
 # ---------------------------------------------------------------------------
 import os as _os_589
-_os_589.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
-_os_589.environ.setdefault("REDIS_PASSWORD", "test")
-_os_589.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+# #1775: whether the CALLER supplied a Redis target, captured BEFORE the
+# sentinels below are installed. This is the only place that can know: once the
+# setdefault runs, `"REDIS_URL" in os.environ` is unconditionally true, so a
+# child conftest cannot tell "the harness told us where Redis is" from "this
+# file defaulted it to a dummy". tests/integration/conftest.py reads this to
+# decide whether an unreachable Redis is a FAILURE (harness declared a target)
+# or a legitimate SKIP (we had to derive the target ourselves).
+CALLER_SUPPLIED_REDIS_URL = "REDIS_URL" in _os_589.environ
+ROOT_REDIS_URL_SENTINEL = "redis://test:test@redis:6379"
+ROOT_REDIS_PASSWORD_SENTINEL = "test"
+_os_589.environ.setdefault("REDIS_URL", ROOT_REDIS_URL_SENTINEL)
+_os_589.environ.setdefault("REDIS_PASSWORD", ROOT_REDIS_PASSWORD_SENTINEL)
+_os_589.environ.setdefault("REDIS_BACKEND_PASSWORD", ROOT_REDIS_PASSWORD_SENTINEL)
 
 # ---------------------------------------------------------------------------
 # Issue #754 (C-003): Load SECRET_KEY and INTERNAL_API_SECRET from the
@@ -99,10 +118,16 @@ if _dot_env_754.exists():
 # test file runs its top-level code. setdefault in that unit test then
 # becomes a benign no-op.
 #
-# Constraint: this conftest also does `from utils.api_client import ...`
-# which needs tests/utils/api_client.py (NOT src/backend/utils/). We must
-# NOT replace the `utils` package entry — only install `utils.helpers` as
-# a submodule while leaving `utils` itself pointing to tests/utils/.
+# NOTE (#2080): this constraint is HISTORY. The test helpers used to live in
+# `tests/utils`, which sits first on the pythonpath and therefore shadowed
+# `src/backend/utils` — so `utils` meant the test package, `utils.helpers` had
+# to be force-installed as a submodule of it, and every module added to the
+# backend package (most recently `safe_yaml.py`) became unimportable, taking
+# ~1,000 tests with it. The helpers are now `tests/testkit`, so `utils`
+# unambiguously means `src/backend/utils` and no shadow-repair is needed.
+# The preload below is kept for a DIFFERENT reason: several root-level tests
+# stub `utils.helpers` into sys.modules at import time, and this pins the real
+# module as the baseline the per-test restore returns to.
 #
 # Also pre-register `routers` as a proper namespace package pointing to
 # src/backend/routers/. test_inter_agent_timeout_unit.py has:
@@ -125,12 +150,13 @@ _BACKEND_STR = str(_BACKEND)
 
 
 def _preload_backend_helpers_submodule():
-    """Pre-register src/backend/utils/helpers.py as `utils.helpers`.
+    """Pin src/backend/utils/helpers.py as the canonical `utils.helpers`.
 
-    Does NOT change `sys.modules["utils"]` — conftest.py needs that to
-    point to tests/utils/ (for api_client, cleanup, etc.). We only
-    install the helpers submodule so that `from utils.helpers import X`
-    inside models.py resolves to the backend version.
+    Since #2080 this is a POLLUTION defence, not a shadow repair: the test
+    helpers moved to `tests/testkit`, so `utils` already resolves to the
+    backend package. What this still buys is a known-good baseline for the
+    #762 per-test restore, because several root-level tests replace
+    `utils.helpers` with a stub at module-import time.
     """
     existing = sys.modules.get("utils.helpers")
     if existing is not None:
@@ -184,15 +210,14 @@ def _preload_backend_models():
 def _preload_backend_routers_namespace():
     """Pre-register src/backend/routers/ as the `routers` namespace package.
 
-    test_inter_agent_timeout_unit.py runs at collection time and does:
-        if "routers" not in sys.modules:
-            sys.modules["routers"] = types.ModuleType("routers")  # plain module!
-    A plain module has no __path__, so `import routers.public` later in
-    test_ip_rate_limit_fix.py fails with "routers is not a package".
-
-    Pre-registering a proper namespace package here causes the
-    `if "routers" not in sys.modules:` guard to fire and prevents the
-    plain-module stub from being installed.
+    Historically test_inter_agent_timeout_unit.py installed a PLAIN `routers`
+    module stub at collection (`sys.modules["routers"] = types.ModuleType(...)`,
+    no __path__), which broke a later `import routers.public`
+    ("routers is not a package"). Since #1895 relocated that file to tests/unit/
+    (and migrated this preload into tests/unit/conftest.py), the root is left with
+    NO plain-stub installer, and `src/backend/routers/__init__.py` resolves as a
+    real package on sys.path anyway — so this preload is now harmless insurance
+    for the root island, not a hard dependency. Kept as a belt.
     """
     routers_dir = _BACKEND / "routers"
     if not routers_dir.exists():
@@ -274,6 +299,14 @@ _SYS_MODULES_INVARIANT_KEYS = (
     "services.settings_service",
     "services.task_execution_service",
     "services.validation_service",
+    # #736: the outbound A2A target resolver is FAIL-CLOSED, and a stubbed
+    # `sys.modules` entry silently inverts that INSIDE the suite that proves it
+    # closed — a `MagicMock` module's `resolve_endpoint()` returns a truthy mock
+    # whose `.url` is also a mock, i.e. a resolved endpoint out of thin air. The
+    # module's own `isinstance(ResolvedEndpoint)` check is the real defence;
+    # this baseline pin is the belt, so a cross-file stub cannot leave a later
+    # test asserting fail-closed against a mock that fails open.
+    "services.a2a_outbound",
     # Dependencies / adapters: stubbed by various adapter unit tests.
     "dependencies",
     "adapters",
@@ -327,8 +360,8 @@ def _restore_sys_modules_baseline_762():
     yield
     _restore_invariant_sys_modules()
 
-from utils.api_client import TrinityApiClient, ApiConfig
-from utils.cleanup import (
+from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit.cleanup import (
     ResourceTracker,
     cleanup_test_agent,
     register_created_agent,
@@ -753,3 +786,57 @@ def cleanup_after_test(api_client: TrinityApiClient, resource_tracker: ResourceT
     yield
     if not request.config.getoption("--skip-cleanup"):
         resource_tracker.cleanup(api_client)
+
+
+# --- #2140: module stubs that cannot outlive the load they exist for ---------
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def stubbed_modules(mapping):
+    """Install `mapping` into `sys.modules` for a block, then restore and verify.
+
+    Three unit files hand-load `services/agent_service/lifecycle.py`, which needs
+    the REAL `services.agent_service*` names present while it executes — line 27
+    is an absolute `from services.agent_service.helpers import validate_base_image`,
+    so the relative slots those files register are not enough. All three used to
+    install them PERMANENTLY.
+
+    That is not a tidiness point. `services/compatibility/spec.py`:
+
+        def applies_to_runtime(check, runtime):
+            if not check.claude_only:
+                return True
+            from services.agent_service.helpers import is_claude_runtime
+
+    resolves that import LAZILY, so it picks up whatever is in `sys.modules` at
+    call time. Every test running afterwards silently lost `claude_only`
+    filtering and `test_codex_runtime_omits_claude_only_checks` failed —
+    presenting as a real #1187 multi-runtime regression rather than as pollution
+    from another file. `pytest-randomly` made it a latent flake, not a constant.
+
+    Shared rather than inlined BECAUSE it was inlined: the first fix repaired
+    one copy and left two others producing the identical symptom.
+
+    The exit assertion uses IDENTITY, not `isinstance(..., Mock)`: the package
+    stub is a real `types.ModuleType` from `module_from_spec`, so a type check
+    waves through a re-leak of `services.agent_service` itself — the leak
+    `test_1310_auth_consolidation.py` documents as aborting its own collection.
+    A leak therefore fails at IMPORT, in the file that caused it, naming it.
+    """
+    snapshot = {name: sys.modules.get(name) for name in mapping}
+    sys.modules.update(mapping)
+    try:
+        yield
+    finally:
+        for name, original in snapshot.items():
+            if original is not None:
+                sys.modules[name] = original
+            else:
+                sys.modules.pop(name, None)
+        leaked = [name for name, stub in mapping.items() if sys.modules.get(name) is stub]
+        assert not leaked, (
+            f"module stubs outlived the load that needed them: {leaked}. "
+            "They are resolved lazily by services/compatibility/spec.py, so this "
+            "breaks claude_only filtering in whatever test runs next — see #2140."
+        )

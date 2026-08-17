@@ -7,12 +7,17 @@ version: "1.0.0"
 author: Trinity Platform
 priority: 10  # Lower = higher in list (after system templates)
 
-type: business-assistant
 
 # Use the OpenAI Codex runtime instead of Claude Code
 runtime:
   type: codex
-  model: gpt-5.1-codex
+  # Pinned, NOT omitted (#2207). Omitting it lets the CLI pick its own default,
+  # but Trinity prices a turn from the model string IT was given — an unpinned
+  # turn arrives at calculate_codex_cost() as model=None, because Codex's
+  # thread.started event carries only a thread id and never the resolved model.
+  # So "inherit the CLI default" silently means "cost is estimated from a
+  # fallback rate". Pin it and the recorded cost is attributable.
+  model: gpt-5.6-sol
 
 resources:
   cpu: "2"
@@ -27,9 +32,27 @@ mcp_servers: []
 
 # Codex authenticates with an OpenAI API key read from the agent's .env
 # (CRED-002). Declaring it here makes the Quick Inject UI prompt for it.
+#
+# `credentials:` is names-only and always will be — see
+# docs/schemas/trinity-agent-credentials.schema.json.
 credentials:
   env_file:
     - OPENAI_API_KEY
+
+# ent#128 — per-variable setup guidance. DECORATES the names above; it cannot
+# declare a variable that `credentials:` does not. Optional: without it the
+# variable still works, it just normalizes with `required: "unknown"` because a
+# bare name carries no authorial intent.
+credential_setup:
+  - name: OPENAI_API_KEY
+    title: OpenAI API key
+    description: >-
+      Authenticates the Codex CLI runtime. Without it the agent starts but every
+      turn fails at the model call.
+    required: true
+    secret: true
+    format: secret
+    setup_url: https://platform.openai.com/api-keys
 
 slash_commands:
   - name: /test

@@ -6,13 +6,13 @@ Trinity is an autonomous agent orchestration and infrastructure platform — sov
 
 ## Concepts
 
-**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.11, Node.js 20, Go 1.21) and a pluggable agent runtime: Claude Code, OpenAI Codex, or Gemini CLI (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
+**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 20, Go 1.23) and a pluggable agent runtime: Claude Code, OpenAI Codex, or Gemini CLI (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
 
 **Agent Container** -- An isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
 **Template** -- A GitHub repository or local directory that defines an agent's initial configuration, including CLAUDE.md, template.yaml, .mcp.json.template, and credential declarations.
 
-**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 74 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
+**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes over 110 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
 
 **System Agent** -- An auto-deployed platform orchestrator (`trinity-system`) that manages fleet operations such as health checks, scaling, and coordination.
 
@@ -30,7 +30,7 @@ Trinity runs as a set of Docker containers on your local machine or server. Afte
 2. **Create an agent** -- From the dashboard, click "Create Agent" and select a template (GitHub repo URL or local path). Trinity pulls the template, builds a container, and deploys the agent.
 3. **Configure credentials** -- Add API keys and secrets through the agent's credential panel. Credentials are encrypted in Redis and injected into the container at runtime with hot-reload support.
 4. **Chat with the agent** -- Open the agent detail page and use the built-in chat interface. The agent processes your request using its configured tools, MCP connections, and reasoning context.
-5. **Schedule autonomous work** -- Set up cron-based schedules so the agent executes tasks on its own. Enable Autonomy Mode to activate all schedules.
+5. **Schedule autonomous work** -- Set up cron-based schedules so the agent executes tasks on its own. Enable Autonomy Mode to let the agent's enabled schedules run.
 6. **Monitor the fleet** -- Use the dashboard to view agent health, execution history, and the network graph showing inter-agent communication.
 
 ## For Agents
@@ -42,8 +42,8 @@ All platform operations are available through the REST API and the MCP server.
 | Component | Technology | Port | Purpose |
 |-----------|-----------|------|---------|
 | Frontend | Vue.js 3 + Tailwind CSS | 80 | Web dashboard and chat UI |
-| Backend | FastAPI (Python) | 8000 | REST API, 300+ endpoints across 45+ routers |
-| MCP Server | FastMCP, Streamable HTTP | 8080 | 74 tools for agent-to-agent and agent-to-platform communication |
+| Backend | FastAPI (Python) | 8000 | REST API, 300+ endpoints across 70+ routers |
+| MCP Server | FastMCP, Streamable HTTP | 8080 | 110+ tools for agent-to-agent and agent-to-platform communication |
 | Vector | Log aggregation | 8686 | Structured logging from all containers |
 | Redis | Secrets and cache | 6379 | Encrypted credential storage |
 | Docker Engine | Container orchestration | -- | Agent lifecycle management |
@@ -87,7 +87,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 - Public chat links for external users
 - Channel adapters: Slack, Telegram, WhatsApp (via Twilio)
 - Outbound file sharing — agents publish files to signed download URLs
-- A2A v1.0 Agent Card discovery for external orchestrators
+- A2A `0.3.0` in both directions — Agent Card discovery and opt-in inbound tasking, plus outbound calls to external A2A agents
 - Voice chat via Gemini Live API
 - x402 payment protocol for agent monetization
 

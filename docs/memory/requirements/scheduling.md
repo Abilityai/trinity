@@ -13,10 +13,21 @@
 - **Flow**: `docs/memory/feature-flows/scheduling.md`
 
 ### 10.2 Autonomy Mode
-- **Status**: ✅ Implemented (2026-01-01)
-- **Description**: Master toggle for agent autonomous operation
-- **Key Features**: Dashboard toggle, enables/disables all schedules
+- **Status**: ✅ Implemented (2026-01-01); gate semantics corrected 2026-08-03 (#1945)
+- **Description**: Master gate for agent autonomous operation
+- **Key Features**: Dashboard toggle; gates every cron fire for the agent
 - **Flow**: `docs/memory/feature-flows/autonomy-mode.md`
+
+#### 10.2.1 Autonomy is a Gate, Not a Bulk Edit (#1945)
+- **Status**: ✅ Implemented (2026-08-03)
+- **GitHub Issue**: #1945
+- **Description**: `set_autonomy_status_logic` used to loop `db.set_schedule_enabled(id, enabled)` over every schedule on the agent, unfiltered and in both directions — so the agent-level gate and the per-schedule `enabled` flag shared one write path and only one survived. The first toggle destroyed per-schedule intent: an owner-disabled (or template-authored `enabled: false`) schedule was silently re-armed on the next autonomy-on, and autonomy-off was a set-all rather than a pause. Since a template can materialize up to 20 declared schedules at creation, one unrelated toggle could arm all of them at once (LLM cost amplification).
+- **Requirement**: the autonomy toggle MUST write only `agent_ownership.autonomy_enabled`. Per-schedule `enabled` is owner intent — nothing may rewrite it except an explicit per-schedule change (Schedules tab / `POST .../schedules/{id}/enable|disable` / `update_schedule`) or an explicit admin fleet op (`/api/ops/schedules/pause|resume`, `emergency_stop`).
+- **Enforcement**: the scheduler's cron-only gate (`src/scheduler/service.py::_execute_schedule_with_lock` → `get_autonomy_enabled`) is authoritative and unchanged — it now carries the whole load, so an enabled schedule on a paused agent is a normal state: skipped, no execution row, `next_run_at` projection advanced (#1472), shown in the UI as "Will not fire — autonomy off" (#1796). A manual trigger still bypasses autonomy by design.
+- **No schema change**: the fix is the removal of a write — no new column, no migration, nothing to keep in dual track.
+- **Upgrade behavior**: existing rows are never rewritten. An agent already flattened to all-disabled by a pre-#1945 toggle stays that way (the erased intent is unrecoverable); the toggle response says so explicitly instead of silently re-arming.
+- **API**: `PUT /api/agents/{name}/autonomy` drops `schedules_updated` (a count of a write that no longer happens) in favor of `total_schedules`, `enabled_schedules`, and a server-authored `message`.
+- **Tests**: `tests/unit/test_1945_autonomy_preserves_schedule_intent.py` (AC5 off→on cycle, no-write proof via unchanged `updated_at`/`next_run_at`, response contract, scheduler-gate source pin); `tests/unit/test_1557_autonomy_breaker_decoupled.py` updated — its "still suppresses proactive work" guard now pins the gate write and forbids the fan-out.
 
 ### 10.3 Execution Queue
 - **Status**: ✅ Implemented
@@ -125,6 +136,229 @@
     `BackendAgentCallBudgetExhausted` exception)
   - `src/backend/config.py` — env-var read of the two new knobs
   - `docker-compose.yml` — env-var pass-through for backend service
+
+### 10.4.3 Completed-Turn Recovery on `error_during_execution` (#1870)
+- **Status**: ✅ Implemented (2026-08-02)
+- **GitHub Issue**: #1870
+- **Description**: Claude Code can report a `result` line with `is_error: true` /
+  `subtype: error_during_execution` for a turn that actually **finished**. The
+  reproduction is a fan-out turn: the model reaches `stop_reason: end_turn`, a
+  background subagent's `<task-notification>` lands *after* it, the follow-on turn
+  is interrupted, and the CLI's terminal-state check sees a non-terminal last
+  message — so it reports the whole turn as failed
+  (`[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null`).
+  `_finalize_headless_result` treated that as terminal and raised HTTP 502,
+  discarding a complete assistant answer that was sitting on disk. Observed 4× in
+  ~30 runs of one schedule. The existing #678 recovery could not be reused: its
+  boundary walk anchors on the newest string-content user record, and the trailing
+  `<task-notification>` **is** one — so the boundary lands *past* the completed
+  answer and the forward scan returns nothing. The notification is inside any
+  plausible time window, so adding a `since` parameter would not have helped
+  either; the boundary rule itself was the defect.
+- **Key Features**:
+  - New additive recovery surface
+    `jsonl_recovery._recover_completed_turn_from_jsonl(session_id, since_iso)`,
+    consulted from inside the existing `execution_error` branch via
+    `headless_executor._try_recover_completed_turn(ctx)`. On a hit the recovered
+    text becomes the response and the turn returns **200 / SUCCESS**; on a miss the
+    502 is unchanged. `_recover_response_from_jsonl` (#678) is **not modified**.
+  - **Three independent gates, all required** — *main-thread only* × *turn-scoped* ×
+    *finished*. "Finished" is on-disk `message.stop_reason == "end_turn"`, and the
+    **last** qualifying assistant record must *itself* carry it (an interrupted
+    mid-tool thread cannot be rescued by an earlier marker). `max_tokens` and
+    `stop_sequence` are rejected. Sub-thread records (`isSidechain` / `isMeta`) are
+    excluded from marker selection, the boundary walk **and** text collection — a
+    subagent's `end_turn` plus its string-content prompt otherwise satisfy both the
+    marker and boundary tests, so a crashed main thread would return 200 carrying a
+    subagent's internal thought.
+  - **The recovered answer is the marker message's `message.id` group, fail-closed
+    when that group holds no text** — never a text window ending at the marker. A
+    thinking-enabled final message is written as *two* records sharing one
+    `message.id` (`thinking` then `text`), and **both** carry `end_turn`; measured
+    over 1,075 real transcripts, **40.6% of markers are thinking-only**.
+    `_read_jsonl_records` drops the final partial line on an interrupted write —
+    and this bug *is* the interrupted-tail case — so a window rule would silently
+    store the turn's narration *without* the answer as a 200 SUCCESS, with no error
+    and no retry. Grouping by `message.id` is also exactly `result_text` semantics,
+    so a recovered response is the same artifact a clean success stores. A marker
+    carrying no `message.id` (unobserved — 0 of 6,663 corpus markers) falls back to a
+    `(boundary, marker]` window walk, but **only after the marker record is confirmed
+    to carry text itself**: without an id the thinking/text split cannot be grouped,
+    so an unguarded window would return the turn's earlier *narration* — answer
+    absent — as a 200 SUCCESS, re-opening the same regression on the one path that
+    would ever run if the field disappeared.
+  - **Staleness guard**: the marker's timestamp must parse and fall within
+    `[task_start_iso, now + 300s]`. Without the lower bound, an aborted turn on a
+    `--resume` session would recover the *previous* turn's answer as this turn's
+    success. The upper bound exists because `task_start_iso` is a naive-UTC value
+    stamped `Z`, so a container clock ahead of UTC would fail **open**. An
+    unparseable `since_iso` declines.
+  - **Distinguishing signals — a recovered turn is SUCCESS but never
+    indistinguishable from a clean one.** (1) `ExecutionMetadata.recovered_terminal`
+    (agent-side, additive, defaulted) is the machine-readable marker, deliberately
+    **separate** from `recovered_from_jsonl`, which #678 already sets whenever mere
+    *telemetry* is back-filled from disk — overloading it would make "a reported
+    failure became a success" unmeasurable. Both are set on recovery. (2) A
+    `_RECOVERY_NOTICE` line is prepended to the response so an operator reading the
+    deliverable cannot mistake it; it names the partial-checkpoint risk explicitly,
+    because a recovered answer can legitimately be a mid-turn checkpoint rather than
+    the final deliverable. The notice is part of the stored response and therefore
+    flows into loop templating (`{{previous_response}}`) and fan-out joins — that is
+    deliberate and pinned by test.
+  - **Where each signal actually lands (verified, not assumed).**
+    `task_execution_service.apply_result`'s success branch cherry-picks exactly six
+    metadata keys (`cache_read_tokens`/`cache_creation_tokens`/`input_tokens`,
+    `context_window`, `cost_usd`, `session_id`, `compact_events`) and drops the
+    rest; `schedule_executions` has no metadata column, and the #1083 async callback
+    converges on the same applier. So `recovered_terminal` — like `error_type` and
+    `recovered_from_jsonl` before it — is **agent-side and on-the-wire only, not
+    persisted to a DB column today**. The signals that genuinely survive onto the
+    execution row are the **recovery notice** (it rides inside the stored `response`
+    text) and the **agent log line** (captured by Vector). That makes the notice the
+    only persisted operator-facing signal, not a secondary nicety — worth knowing
+    before anyone proposes reducing it to a footnote. Teaching the backend to read
+    `recovered_terminal` is a follow-up; `apply_result`'s success branch is the
+    single chokepoint. The field is additive and defaulted, so an old backend with a
+    new image is safe and a newer backend can start reading it with no coordination.
+  - **Observability in both directions**: a hit logs
+    `event=completed_turn_recovered_from_jsonl`; **every** decline logs
+    `event=completed_turn_recovery_declined reason=<no_since_iso|file_missing|
+    no_session_id|invalid_session_id|no_records|no_marker|marker_no_timestamp|
+    future_marker|malformed_message|stale_marker|sub_thread_only|not_finished|
+    no_boundary|no_text|exception>`. A fail-closed gate that silently stops firing is
+    otherwise indistinguishable from "the bug never happened", so the reasons are
+    deliberately split by **the action they imply**, not by where the code returned:
+    `marker_no_timestamp` / `malformed_message` mean the on-disk format moved (fix
+    the parser), `future_marker` means the container clock is wrong (fix the clock),
+    while `stale_marker`, `sub_thread_only` and `not_finished` are the guard working
+    as designed — `not_finished` (the turn was genuinely interrupted) being the
+    expected steady-state decline, and it carries the observed `stop_reason` as a
+    `stop_reason=<token>` field, echoed only when it matches `^[a-z_]{1,32}$` because
+    the value comes from an untrusted file. Logs carry session id, that token and
+    character counts only — never the text.
+  - Recovery is scoped to `error_type == "execution_error"` only; `rate_limit` /
+    `max_turns` / `authentication_failed` short-circuit above it and are unaffected.
+    A recovery exception degrades to today's 502, never a 500.
+- **⚠️ Coverage bound — permanent, with no fallback**: this reads a JSONL that only
+  exists when session persistence is on. `headless_executor` auto-enables it for
+  `timeout_seconds > 600` only, and `task_execution_service.execute_task` never
+  passes `persist_session=True` — so **every schedule or webhook whose agent has
+  `execution_timeout_seconds <= 600` writes no JSONL and #1870 remains unfixed for
+  it, silently.** There is no in-memory alternative: stream-json carries no
+  completion signal (`message.stop_reason` measured `None` in 179/179 real
+  assistant records, versus 99.96% populated on disk). **The only operator lever is
+  raising the agent's execution timeout above 600s** (`PUT /api/agents/{name}/timeout`,
+  §10.7). When diagnosing "the fix isn't firing", check for
+  `event=jsonl_persistence_auto_enabled` in the agent's logs *first* — its absence is
+  the answer, not a gate problem.
+- **Rollout**: the change is inside `trinity-agent-base`. A running fleet keeps
+  discarding completed turns until `./scripts/deploy/build-base-image.sh` runs **and
+  each agent is cold-recreated** (a plain restart does not always adopt, #1809).
+- **Files**:
+  - `docker/base-image/agent_server/services/jsonl_recovery.py` — `_recover_completed_turn_from_jsonl`, `_is_main_thread`, `_is_before`
+  - `docker/base-image/agent_server/services/headless_executor.py` — `_try_recover_completed_turn`, `_RECOVERY_NOTICE`, the `execution_error` branch
+  - `docker/base-image/agent_server/models.py` — `ExecutionMetadata.recovered_terminal`
+
+### 10.4.4 Telemetry + Transcript on a Failing `error_during_execution` / 504 Row (#1853)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #1853
+- **Description**: An execution that ends `error_during_execution` (Claude Code
+  reports `is_error` with a non-terminal last message — commonly a fan-out whose
+  `<task-notification>` lands after `stop_reason=end_turn` and interrupts the
+  follow-on turn) was written to `schedule_executions` with **status + error
+  string only**: no `claude_session_id`, no `cost`, no `execution_log`. Measured
+  on an ops instance: 26 `success` rows all carried log + session_id + cost; 6
+  `failed` rows carried none — the whole failure class was **undiagnosable after
+  the fact**. This is the observability substrate for the Aug-14 "system agent
+  identifies errors and proposes solutions" initiative (reliability lane; TOWARD
+  the #1401 recovery-trace target). Two siblings shipped adjacent and did **not**
+  touch this: #1944 (#1870) recovers only the *misclassified-completed* subclass
+  to SUCCESS; #1938 (#1849) fixed only the error *string*.
+- **Root cause (two structural gaps)**:
+  1. **Agent**: the `execution_error` 502 raise carried a bare `detail="Execution
+     error: <msg>"` — unlike the sibling 504 timeout path (`_timeout_504_detail`,
+     #1201) which carries `{message, termination_reason, metadata}`.
+     `ctx.metadata` (session_id, cost_usd, duration_ms, tokens, context_window)
+     and `ctx.raw_messages` (the full stream-json transcript) were in scope at the
+     raise but discarded.
+  2. **Backend**: `apply_result`'s FAILED branch never passed `execution_log` /
+     `claude_session_id` (the SUCCESS branch passes both, sanitized).
+     `cost` / `context` already salvaged from the body — null only because the
+     body was bare.
+- **Chosen approach — B (inline the sanitized transcript)**: the FAILED branch
+  **mirrors the SUCCESS branch** — it stores `execution_log =
+  sanitize_execution_log(json.dumps(raw_messages))`, a derived `tool_calls`
+  summary (#1741 — a summary, never a second transcript copy), `claude_session_id`
+  (UUID-validated agent-side), and the already-salvaged cost/context. The
+  transcript lives in the DB row, retrievable via the **same API as SUCCESS**,
+  surviving agent stop **and** delete, inheriting the 30-day
+  `execution_log_retention_days` window (#772). Chosen over a JSONL-survival-only
+  approach because SUCCESS already inlines the full sanitized transcript (avg 573
+  KB) on **every** run — failures are far rarer, so inlining on failure is
+  *strictly cheaper* than the hot path already pays — and it needs **no** reaper
+  keep-window, no new query, no reap race, and no retrieval endpoint. It also
+  captures **short-timeout runs** (`timeout ≤ 600s`, no JSONL persisted): the
+  transcript comes from in-memory `ctx.raw_messages`, not the on-disk JSONL, so it
+  is not gated on #678 persistence.
+- **Key Features**:
+  - **Agent — `_execution_error_502_detail(ctx, message)`** (beside
+    `_timeout_504_detail`): returns `{message, metadata, execution_log}` where
+    `metadata = sanitize_dict(ctx.metadata.model_dump())` with `session_id`
+    resolved as `metadata.session_id or ctx.claude_session_uuid` **and
+    UUID-shape-validated** via `_valid_session_id`, and `execution_log =
+    ctx.raw_messages`. The error `message` text is **byte-identical** to before
+    (preserves #1938's error-string fix and the backend's resume-not-found
+    self-heal, which reads `detail["message"]`).
+  - **Agent — `_valid_session_id(x)`**: persists the fallback session id only when
+    it matches the strict JSONL-filename UUID shape (mirrors the reaper's
+    `_UUID_RE`), else `None`. The fallback source `ctx.claude_session_uuid` can be
+    an untrusted `resume_session_id` (a log-forging vector — `sanitize_dict` does
+    not strip newlines), so the validation is a security gate, not cosmetics.
+  - **Agent — `_timeout_504_detail` gains the same** validated `session_id`
+    fallback + `execution_log = ctx.raw_messages`, so the 504 timeout path now
+    persists session_id + transcript **for real** (previously session_id was null
+    whenever the reader wedged, and it carried no transcript). Both 502 and 504
+    route through the same backend FAILED branch, so one backend change covers
+    both.
+  - **Backend — `_extract_agent_error` returns `(error_msg, metadata,
+    execution_log)`**; the `except httpx.HTTPError` handler threads the extracted
+    transcript + validated `session_id` onto the **existing**
+    `TerminalEnvelope.execution_log` / `.session_id` fields (previously unset on
+    failure).
+  - **Backend — FAILED branch of `apply_result` mirrors the SUCCESS branch**:
+    reuses the identical `sanitize_execution_log` + `extract_tool_calls`
+    (defense-in-depth redaction happens at the backend applier, exactly as
+    SUCCESS), and passes `execution_log` / `tool_calls` / `claude_session_id` into
+    the **existing** `db.update_execution_status` call. No schema change
+    (`execution_log` / `claude_session_id` / `cost` / `tool_calls` already exist
+    and `update_execution_status` already accepts all of them). `duration_ms` is
+    already computed inside `update_execution_status`.
+- **Invariants respected**: **single terminal applier (#1483)** — only the payload
+  of the *existing* FAILED branch is widened; **no** new CAS-writing path and
+  `_write_terminal_and_gate` is untouched. **CAS-won close/emit contracts
+  (#1578/#1804)** — every side-effect stays gated on the existing `won` bool; the
+  new columns are added to the SET clause *above* the `if won and activity_id:`
+  gate and **no predicate is widened**.
+- **⚠️ Named residuals (the Aug-14 initiative must NOT assume every FAILED row
+  carries telemetry)**: `_write_terminal_and_gate` terminals (backend-detected
+  timeout / budget / crash) still land bare — they carry no agent metadata, and
+  are out of the single-applier scope. The standalone-scheduler RETRY-001 FAILED
+  writes (`src/scheduler/`) are also outside this applier. Both are follow-ups.
+- **Graceful degrade / mixed-fleet**: `_extract_agent_error` already handles a
+  bare-string `detail` (old image) — new-backend + old-image sends a bare string
+  → `execution_log` / `session_id` stay null (= today's behaviour). Safe both
+  directions.
+- **Rollout**: the agent half is inside `trinity-agent-base`. A running fleet
+  keeps writing bare FAILED rows until `./scripts/deploy/build-base-image.sh` runs
+  **and each agent is cold-recreated** (a plain restart does not always adopt,
+  #1809). The backend half is live on backend deploy.
+- **Files**:
+  - `docker/base-image/agent_server/services/headless_executor.py` —
+    `_execution_error_502_detail`, `_valid_session_id`, the `execution_error`
+    branch, `_timeout_504_detail`, and the corrected auto-persist comment (real
+    behaviour is a 6h sweep / 1h age-guard = 1–7h effective, not "24h")
+  - `src/backend/services/task_execution_service.py` — `_extract_agent_error`
+    (3-tuple), the `except httpx.HTTPError` handler, `apply_result` FAILED branch
 
 ### 10.5 Model Selection for Tasks & Schedules (MODEL-001)
 - **Status**: ✅ Implemented (2026-03-02)
@@ -366,6 +600,293 @@
 - **Autonomy hold**: `get_active_reminders` filters `autonomy_enabled=1` AND `deleted_at IS NULL` — disabling an agent's autonomy holds its pending reminders (they resume, past-due-fire, when re-enabled); a soft-deleted/renamed agent's reminders follow via the `AGENT_REFS` cascade (CASCADE policy → wiped on purge, re-keyed on rename).
 - **Retention**: `agent_reminders_retention_days` (default 90, `0` = off) — the cleanup sweep DELETEs terminal (`fired`/`cancelled`/`failed`) rows past the window (`pending`/`firing` never deleted), chunked, gated through the #1644 blast-radius guard; registered in `RETENTION_OPS_KEYS`, surfaced read-only at `GET /api/settings/retention`. #1638 floor discipline: the default is the wide/safe value.
 - **Flow**: `docs/memory/feature-flows/agent-self-reminders.md`
+
+### 10.15 CAS-Won Terminal Owns the Activity Close (#1804)
+- **Status**: ✅ Implemented (2026-07-28, Issue #1804)
+- **GitHub Issue**: #1804 (sub of Epic #1259); prior single-producer patches #45, #767, #1332
+- **Description**: Closing an execution's paired `agent_activities` dispatch row is part of the
+  **terminal-write contract**, not a property of whoever happens to hold the `activity_id` local.
+  Before this, only the dispatching coroutine closed the activity, and only when it won the CAS —
+  so every recovery writer (watchdog, startup recovery, both bulk sweeps, both backend-shutdown
+  `CancelledError` handlers, the lease reaper, the pull sink) wrote the execution terminal and
+  walked away. The row stayed `activity_state='started'` (Timeline rendered the agent as still
+  working) until the generic 120-minute backstop closed it with a fabricated
+  `duration_ms = now − started_at` — a 15-minute run permanently recorded as a ~120-minute failure.
+- **The contract**: *every writer that wins a terminal CAS on `schedule_executions` closes the
+  paired dispatch activity.* The 120-minute `mark_stale_activities_failed` sweep is a **backstop
+  for the unclaimed**, not the primary closer (and #429 deletes it — a per-site patch would leave
+  no owner).
+- **One owner**: `activity_service.close_execution_activity(execution_id, terminal_status, …)`
+  (+ the sync `spawn_close_execution_activity` wrapper for the synchronous pull sink), mirroring
+  `event_dispatch_service.spawn_task_terminal_event` (#1578). It maps the terminal via the shared
+  `models.activity_state_for_terminal` (#1332 — never a second mapping), delegates to
+  `activity_service.complete_activity` so the `agent_activity` WebSocket broadcast survives, and is
+  **fail-open**: it can never affect an already-committed terminal write.
+- **The close is itself a CAS** (`db.complete_activity` → `ActivityCloseOutcome`
+  `UPDATED | ALREADY_CLOSED | NOT_FOUND`). Making a second closer *safe* is what makes "the CAS
+  winner owns it" true — you cannot guarantee only one writer tries. The activity predicate
+  **mirrors** the execution predicate (`db/schedules/executions.py`) rather than inventing a
+  stricter one:
+  - incoming COMPLETED (from SUCCESS) → `activity_state IN ('started','failed')` — an authoritative close
+    MAY upgrade a provisional FAILED (the #1083 late-SUCCESS-after-lease-expiry path);
+  - incoming CANCELLED / FAILED → `activity_state = 'started'` — nothing overwrites an
+    authoritative close, so a double close never clobbers `completed_at`/`duration_ms`/`error`.
+  The **lookup** is widened to agree with the write: an authoritative terminal searches
+  `started|failed`, a provisional terminal searches `started` only. A lookup narrower than the CAS
+  makes the whole fix inert.
+- **Split by cardinality**: single-row recovery paths use the per-row helper (WS broadcast
+  preserved); the two bulk sweeps use `db.close_open_activities_for_executions` — one transaction,
+  no per-row WebSocket, driven by the `collect_failed` rows #1714 already collects (no new query).
+  A WS herd during post-outage recovery is exactly what #1085 exists to prevent.
+- **Observability**: `CleanupReport.activities_closed_on_recovery`. Post-merge signal —
+  `stale_activities` trends to ~0 while `activities_closed_on_recovery` picks up the volume;
+  a non-zero `stale_activities` means a producer is still unowned.
+- **Guard**: `tests/unit/test_1804_terminal_activity_parity.py` is anchored on **terminal writes**
+  (`update_execution_status` / `mark_execution_failed_by_watchdog` / `fail_stale_slot_execution`),
+  not on completion-event emission — the emit set is a strict subset (both shutdown handlers write
+  a terminal and emit nothing), which is how those two writers hid from review.
+- **Flow**: `docs/memory/feature-flows/activity-stream.md`,
+  `docs/memory/feature-flows/task-execution-service.md`
+
+### 10.16 Template-Declared Schedules at Creation (trinity-enterprise#89)
+- **Status**: ✅ Implemented (2026-08-02, trinity-enterprise#89, sub of Epic #122)
+- **GitHub Issue**: trinity-enterprise#89 (code lands as a public `abilityai/trinity` PR)
+- **Description**: An agent template's `template.yaml` may declare a `schedules:` block. The
+  abilities plugin ecosystem (`create-agent` wizards, `agent-dev:add-pipeline`, `trinity:onboard`)
+  treats that block as the **design source of truth** for an agent's recurring tasks, but Trinity
+  never read it — only `/trinity:sync` reconciled it onto a live instance. An agent created from the
+  same template through the UI, the API, or MCP got **none** of its declared schedules. Creation now
+  materializes them through the existing `db.create_schedule` path, for **both** `github:` and
+  `local:` templates.
+
+#### The declared block
+```yaml
+schedules:
+  - name: daily-briefing          # required, non-empty string, ≤ 200 chars, unique in the block
+    cron: "0 9 * * *"             # required, non-empty string, strict 5-field Unix cron
+    message: /daily-briefing       # required, non-empty string, ≤ 10 000 chars (truncated beyond)
+    enabled: true                  # optional bool; anything else → False + a named error
+    timezone: Europe/London        # optional string, IANA zone (see below); default "UTC"
+    description: ...               # optional string, ≤ 1000 chars (`purpose:` is an accepted alias)
+    id: sched-1                    # IGNORED — Trinity mints its own schedule id
+```
+- Required-key shape mirrors `system_service.validate_manifest` (`name`/`cron`/`message`).
+- **Unknown keys are ignored** (AC #1) — a plugin may carry extra design metadata.
+- `timeout_seconds`, `model`, and `allowed_tools` are deliberately **not surfaced**.
+  `ScheduleCreate.timeout_seconds` defaults to `None` = "inherit the agent's
+  `execution_timeout_seconds`" (#913), so every materialized schedule sits inside the §35 agent-cap
+  ceiling **by construction** and can never trip `schedule_timeout_exceeds_agent_cap`.
+
+#### Reader — `services/template_schedules.py` (new leaf)
+- Public surface: `schedule_shape_errors(block) -> List[str]` and
+  `normalize_declared_schedules(block) -> List[dict]`, both over one private `_parse()` so the
+  error list and the accepted list can never disagree. Mirrors the sibling
+  `credential_shape_errors` / `credential_mcp_server_names` convention (trinity-enterprise#128).
+- **Total function contract — `template.yaml` is untrusted input and the reader never raises.**
+  `yaml.safe_load(...) or {}` can yield a scalar, a list, or a mapping at any level:
+
+  | Input | Behaviour |
+  |---|---|
+  | absent / `None` | `[]`, no error (a commented-out block is not a problem) |
+  | `schedules: "yes"` / `5` / `true` / `{a: b}` | `[]` + named error |
+  | `[null]`, non-mapping entry | entry dropped + named error |
+  | missing / non-string / empty `name`, `cron`, `message` | entry dropped + named error |
+  | non-string `timezone` | entry dropped + named error |
+  | invalid cron (`@daily`, 6-field, `99 99 * * *`) or unknown timezone | entry dropped + named error |
+  | timezone pytz knows but the runtime's IANA database cannot resolve (#1823) | entry dropped + named error naming the missing tz data — **never** a 500 |
+  | `name` > 200 / `description` > 1000 | entry dropped + named error |
+  | `message` > 10 000 | truncated + named error |
+  | duplicate `name` within the block | second and later dropped + named error |
+  | non-bool `enabled` | entry kept with `enabled=False` + named error (fail-safe) |
+  | more than `MAX_DECLARED_SCHEDULES` (20) entries | truncated to 20 + named error |
+- **Error-string discipline**: an error carries the **entry index, the key, and a YAML type name**
+  — never the `name` or `message` *value*. Those strings are author-controlled, unbounded, and
+  prompt-injection-shaped, and the error list is persisted into the compatibility report
+  (`agent_compatibility_results.checks_json`), rendered in the UI, and echoed into the catalog
+  response. The **cron** string is the one echoed value — bounded and printable-filtered by a local
+  4-line helper (the leaf cannot import `template_service._sanitize_for_warning` without closing an
+  import cycle; the two are comment-linked).
+- **Strict cron at the reader** (`services/schedule_validation.validate_cron_expression`, the same
+  validator the dedicated scheduler registers with, #1472). This is a **materialization** gate, not
+  a report verdict: `_calculate_next_run_at` *swallows* a bad cron and returns `None`
+  (`db/schedules/crud.py`), and `set_schedule_enabled` never re-validates — so an unvalidated entry
+  would create a **zombie schedule**: a row that exists, shows no next run, and never fires.
+- **A valid `timezone` is one BOTH resolvers accept (#1823)** — not "a pytz zone", which is what this
+  doc said and what #1472 implemented. The scheduler's chain is
+  `pytz.timezone(name)` → `CronTrigger(timezone=…)` → APScheduler `astimezone()` →
+  `zoneinfo.ZoneInfo(name)`. pytz bundles its own complete database and accepts every IANA
+  *backward-compatibility alias* (`Europe/Kiev`) everywhere; `zoneinfo` reads the system database
+  plus the optional `tzdata` wheel, so it is the strictly narrower — and actually binding —
+  constraint. `validate_timezone` probes both, and `validate_cron_expression` **delegates** to it, so
+  the create route (which calls only the latter) and the update route (which calls the former)
+  cannot enforce different contracts. Aliases are **supported, not normalized**: the shipped images
+  install `tzdata-legacy` + the `tzdata` wheel, guarded by
+  `tests/unit/test_1823_tz_capability_parity.py`. An unresolvable zone is a named 400 at the API and
+  a **permanent** (bounded, non-retrying) `_add_job` failure in the scheduler — never a 500, and
+  never the 60s retry storm that froze `next_run_at`.
+- `MAX_DECLARED_SCHEDULES = 20` lives in the reader, so the catalog surface and the materializer
+  inherit the same cap. (Verified: the platform has no other per-agent schedule cap.)
+
+#### Catalog surface (AC #1)
+- Both builders surface `schedules` (the **normalized** list, not the raw block) and
+  `schedule_errors`: `template_service._build_template` (GitHub) and `_build_local_template`
+  (local). Parity is explicit — the pre-existing asymmetry (`persistent_state` is surfaced only by
+  the GitHub builder) means it cannot be assumed.
+- `_template_schedules()` logs exactly one WARNING per malformed template naming the id; the
+  template still lists. A broken `schedules:` block costs that template its schedule metadata, not
+  its place in the catalog (the trinity-enterprise#128 / #1835 contract).
+- **Both GitHub catalog list paths are now fenced** per-template (`get_all_templates`), matching the
+  local path's fence. They were bare list comprehensions, so any raise inside `_build_template`
+  would 500 the whole GitHub half of `GET /api/templates`.
+
+#### Materialization at creation (AC #2)
+- `_TemplateResolution.declared_schedules` is the **normalized carrier populated by both resolver
+  branches**. It is deliberately *not* `template_data`: that field is raw template YAML on the
+  `local:` path and `{}` on the `github:` path, and `_stage_config_files` gates credential-file
+  generation on `if template_data:` — merging the two shapes would change credential generation for
+  every GitHub agent.
+- The `github:` branch fetches the raw `template.yaml` via
+  `template_service.fetch_template_metadata_for_create(repo, pat=…, ref=…)` — the
+  **creation-resolved PAT** (per-agent → per-user → global, ent#162) and the **parsed `@branch`
+  ref**, bypassing the 10-minute catalog cache. The catalog's own metadata fetch uses the *global*
+  platform PAT with no `?ref=`, so a user creating from their own private repo with their own
+  per-user token would silently get zero schedules, and `github:owner/repo@feature` would
+  materialize `main`'s. The fetch is **non-fatal and never silently empty**: any failure logs a
+  WARNING naming the repo, the status, and the likely cause.
+- `crud.reconcile_declared_schedules(agent_name, declared, owner_username)` runs inside
+  `_materialize_agent_files`, beside the `persistent_state` (#383) and `data_paths` (#1169) steps.
+  **Every step in that function is non-fatal by design — creation must never fail because a
+  schedule didn't materialize.** The helper is shaped as a *reconcile* primitive (takes
+  `agent_name`, not `AgentConfig`) so a future operator-triggered "re-apply template" can reuse it.
+- Ghost agents are skipped at the caller (`config.ephemeral`) — schedules on an ephemeral agent are
+  a 400 by ent#69 fleet hygiene, and a new caller must exclude ghosts itself.
+- `db.create_schedule` **returns `None`** (it does not raise) on three paths — unknown user, no
+  agent access, and the #1445 `is_agent_live` no-orphan gate. The materializer checks the return
+  value and counts a falsy result as *failed*, mirroring `system_service`. The summary INFO line
+  reports created / skipped-existing / skipped-invalid / failed derived from **actual outcomes**,
+  never from the input length.
+- Ordering is already correct: `_register_agent` runs before `_materialize_agent_files`, so
+  `is_agent_live()` is satisfied.
+
+#### `enabled:` semantics (AC #3)
+- A declared `enabled: true` **is honored**; an unspecified `enabled` defaults to **`False`**.
+  Passed explicitly to `ScheduleCreate`, whose own default is `True`.
+- Safety rests on the platform master gate, not on the flag: `agent_ownership.autonomy_enabled` is
+  `INTEGER DEFAULT 0` and `register_agent_owner()` has no parameter for it, so a newly created agent
+  can never have autonomy on; a cron fire against an autonomy-off agent is skipped with no execution
+  row. Honoring also gives the UI a real "Next run" — `db.create_schedule` computes `next_run_at`
+  only when `enabled` is true.
+- **Documented caveat (pre-existing, and the actual control):** `set_autonomy_status` force-enables
+  **every** schedule on the agent when an owner turns autonomy on, with no filter — so per-schedule
+  `enabled` intent is erased at the first toggle whether the row was written `0` or `1`. Forcing
+  `False` at creation would therefore prevent nothing. Making `set_autonomy_status` stop clobbering
+  per-schedule intent is the real guard and is tracked as **#1945** (P2, `type-bug`).
+
+#### Idempotency (AC #4) — three places, all required
+1. **At creation** — name-match read-then-skip against `db.list_agent_schedules(agent_name)` before
+   each insert. No recreate hook is added: container recreate goes through `lifecycle.py`, and an
+   eager re-materialize would **resurrect schedules an operator deliberately deleted**.
+2. **Within the declared block** — `normalize_declared_schedules` dedupes by name (first wins,
+   named error), and the materializer adds each created name to the seen-set as it goes.
+3. **Manifest deploy** — `system_service.create_schedules` runs *after* `create_agent_internal`, so
+   post-#89 it is the second schedule producer for the same agent. It gains the same name-match
+   skip; otherwise a manifest declaring `daily-briefing` on a template that also declares it yields
+   two rows.
+- There is **no** `UNIQUE(agent_name, name)` index on `agent_schedules` and none is added: it is a
+  schema change (Invariant #3, dual-track) and would fail on installs already holding
+  duplicate-named schedules. Known blind spot: `list_agent_schedules` excludes soft-deleted rows, so
+  a soft-deleted schedule of the same name does not suppress a re-create.
+
+#### Compatibility validation (AC #5)
+- **T-018** (`soft`, `static`, category `T`, not `claude_only`): *"schedules block entries are
+  well-formed"* — **structural** validity only (presence/type of `name`/`cron`/`message`, entry
+  shape, block shape, cap), via `template_schedules.schedule_shape_errors`. It deliberately does
+  **not** report cron syntax: **A-002** already ships as *"cron expressions are valid"*, and two
+  contradicting cron authorities in the same report on the same field is worse than either alone.
+- **A-002 is corrected in the same change.** Its private `_valid_cron` was a per-field
+  `^[\d*/,\-]+$` regex — it **rejected** `0 9 * * MON` (valid) and **accepted** `99 99 * * *`
+  (invalid). It now delegates to `validate_cron_expression`, so the report agrees with both the
+  scheduler and the materializer. *Validate a config with the same parser the executor uses.*
+- **T-018 fails closed.** `run_static` converts a raising check into `skipped`, and `_counts` counts
+  only `status == "fail"`, so a raising *soft* check drops `soft_count` 1→0 and flips
+  `overall_status` from `issues` to `compatible` — a validator that breaks reports "healthy", and
+  `_report_from_persisted` replays that clean bill of health from `checks_json` on every
+  stopped-agent read. T-018 therefore catches its own `Exception` and returns `_fail`, carrying
+  `type(e).__name__` **only** (never `str(e)`, which would embed untrusted template content into a
+  persisted, UI-rendered blob).
+- Two in-radius corrections ship with it: **`c_p006`** (a **HARD** check) iterated
+  `data.get("schedules") or []` with no `isinstance(..., list)` guard, unlike all four of its
+  siblings — `schedules: 5` raised `TypeError` and made a HARD check silently vanish from
+  `hard_count`; and **`run_static` now logs** the swallow (it previously recorded `check_error` with
+  no log line anywhere, for all ~100 checks).
+
+#### Blast radius and non-goals
+- **Zero on the default install.** Of the bundled templates only `demo-analyst` and
+  `demo-researcher` declare `schedules:` and both are `hidden: true`; `local:scout/sage/scribe` (the
+  ent#124 default manifest fleet) declare none. Zero declared schedules ⇒ zero behaviour change.
+  No migration, no feature flag, no new endpoint, no new Pydantic model.
+- **Invariant removed, named deliberately:** `config/manifests/default-system.yaml` records as an
+  ent#124 decision *"No `schedules:` — a zero-credential fresh install must not accumulate failing
+  cron executions."* #89 transfers that control from the manifest author to the template author with
+  no opt-out (a manifest can only add schedules, never suppress a template's).
+- **Amplification to note, not gate:** a schedule `message` carries the same trust level as that
+  template's `CLAUDE.md` and skills — no new trust boundary. But an agent-scoped MCP key holding
+  `create_agent` can now spawn an agent from an arbitrary `github:` template *and* mint recurring
+  autonomous tasks on it. Bounded by `autonomy_enabled=0`, `MAX_DECLARED_SCHEDULES`, the ghost skip,
+  and ent#69's ephemeral-caller refusal.
+- **Out of scope**: no `deploy_system` fallback to a template's declared block when the manifest
+  omits one; no recreate/repull hook; no `timeout_seconds`/`model`/`allowed_tools` surface.
+- **Flow**: `docs/memory/feature-flows/template-processing.md`,
+  `docs/memory/feature-flows/scheduling.md`,
+  `docs/memory/feature-flows/agent-compatibility-validation.md`
+
+### 10.17 Client-Side Cron Validation (#925)
+- **Status**: ✅ Implemented (2026-08-13)
+- **GitHub Issue**: #925
+- **Description**: The schedule form validated cron expressions only at save time — the backend's
+  400 was the first feedback — and a stored-invalid row (legacy croniter-era data, or rows created
+  before a validator tightening) sat in the list indistinguishable from a healthy one. The frontend
+  now pre-validates as the user types (design-system p17) and marks invalid stored rows.
+- **Requirement — mirror contract, not a second grammar**: the client validator
+  (`src/frontend/src/utils/cronValidation.js`, pure leaf, **zero npm deps**) is a hand-rolled
+  mirror of the backend's exact acceptance grammar —
+  `services/schedule_validation.py::validate_cron_expression` = strict 5-field split +
+  `_dow_to_apscheduler` translation (ported verbatim, branch order included) + APScheduler 3.11
+  field rules (`AllExpression`/`RangeExpression`/name-range prefix expressions, step-span rule,
+  Python-truthiness `last or MAX` fallback — deliberately `||` not `??` in JS). Cron libs
+  (`cron-parser`, `cronstrue`) were rejected: they implement a foreign grammar with ≥8 proven
+  verdict disagreements (`@daily`, 6-field, dow `0-6`, `last`, `7/2`, `L`/`#`, step-span,
+  `5/2`). This is the learnings.md #1472 lesson ("validate with the parser that registers")
+  applied one level up: the client validates with a pinned mirror of that parser.
+- **Drift alarm — shared fixture asserted by both suites**: the grammar contract is
+  `tests/fixtures/cron-grammar-cases.json` (~110 rows, **generated from a probe against the live
+  backend validator, never hand-typed**). `tests/unit/test_925_cron_grammar_fixture.py` re-proves
+  every row against `validate_cron_expression` in the backend CI env (an APScheduler bump that
+  changes the grammar fails there loudly); `src/frontend/tests/unit/cronValidation.spec.js`
+  asserts the client mirror agrees row-for-row. Quirk rows (prefix-matched names `MON/999` /
+  `jan/0` / `lastx`, comma-translation asymmetry `0-6,1` vs `0-6`, falsy-zero `0-0/2`) are
+  pinned and must NOT be "fixed" — parity outranks tidiness.
+- **Fail-open posture**: the validator is total (`String(expr ?? '')`) and a top-level catch
+  returns `{valid: true}` + `console.error` — an internal port bug must not brick the panel or
+  block saves. The backend 400 remains the enforcement authority; client validation is UX only.
+- **Form gating**: inline error in a reserved-footprint slot (the format-hint line doubles as the
+  error slot — no modal jump, p4/p6); submit disabled **only when non-empty AND invalid** — an
+  empty cron keeps the native `required` bubble path; while **editing**, an invalid (incl.
+  empty/whitespace) stored cron shows its error unconditionally so the disabled Update button is
+  never unexplained; while creating, errors appear only after first blur (no mid-typing flash).
+- **List surface**: each stored row with an invalid `cron_expression` renders a warning triangle
+  inside its cron chip, tooltip + aria-label exactly `Invalid cron expression` (shape + hue,
+  p24). Presets are sourced from the exported `CRON_PRESETS` so "presets never warn" is tested
+  against the shipped list.
+- **Documented divergence (client-stricter only)**: the client accepts ASCII digits only where
+  Python's `int()`/`\d` also accept Unicode digits / `+` signs / underscores — rejecting e.g.
+  `٥ * * * *` that the server accepts. Direction is client-stricter on absurd input; the
+  damaging direction (client-invalid/server-valid false warnings on real input) is guarded by
+  the quirk rows. The fixture marks such rows `divergence: "client-stricter"`.
+- **Out of scope**: no backend runtime change (400 contract byte-preserved); no server-side
+  migration/repair of stored invalid rows; no client timezone validation (the form select is a
+  fixed known-good list; cron field validity is timezone-independent).
+- **Flow**: `docs/memory/feature-flows/scheduling.md` (§ Client-side cron validation)
 
 ---
 

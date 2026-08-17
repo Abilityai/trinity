@@ -1,6 +1,13 @@
 #!/bin/bash
 # Restore Trinity SQLite database to GCP
 #
+# #2216 corrections over the original:
+# - stops backend AND scheduler (BOTH write the DB; stopping only the backend
+#   left a live writer holding the file during the copy)
+# - removes stale -wal/-shm/-journal sidecars beside the target before copying
+#   the artifact in (a stale hot journal or WAL beside a restored .db is a
+#   corruption hazard; harmless if absent)
+#
 # Usage: ./scripts/deploy/restore-database.sh <backup_file>
 # Requires deploy.config to be set up
 
@@ -8,7 +15,7 @@ set -e
 
 if [ -z "$1" ]; then
     echo "Usage: ./scripts/deploy/restore-database.sh <backup_file>"
-    echo "Example: ./scripts/deploy/restore-database.sh ./backups/trinity_db_backup_20251127_120000.db"
+    echo "Example: ./scripts/deploy/restore-database.sh ./backups/trinity-backup-20260816.db"
     exit 1
 fi
 
@@ -24,6 +31,7 @@ if [ ! -f "${CONFIG_FILE}" ]; then
     exit 1
 fi
 
+# shellcheck disable=SC1090  # operator-local deploy.config, path not constant
 source "${CONFIG_FILE}"
 
 if [ ! -f "${BACKUP_FILE}" ]; then
@@ -54,25 +62,25 @@ gcloud compute scp \
     "${BACKUP_FILE}" "${GCP_INSTANCE}:/tmp/trinity_restore.db"
 
 echo ""
-echo "Step 2: Stopping backend..."
+echo "Step 2: Stopping backend and scheduler (both write the DB)..."
 gcloud compute ssh "${GCP_INSTANCE}" \
     --zone="${GCP_ZONE}" \
     --project="${GCP_PROJECT}" \
-    --command="cd ${REMOTE_DIR} && sudo docker compose -f docker-compose.prod.yml stop backend"
+    --command="cd ${REMOTE_DIR} && sudo docker compose -f docker-compose.prod.yml stop backend scheduler"
 
 echo ""
-echo "Step 3: Restoring database..."
+echo "Step 3: Restoring database (removing stale journal sidecars first)..."
 gcloud compute ssh "${GCP_INSTANCE}" \
     --zone="${GCP_ZONE}" \
     --project="${GCP_PROJECT}" \
-    --command="cp /tmp/trinity_restore.db ~/trinity-data/trinity.db && rm /tmp/trinity_restore.db"
+    --command="rm -f ~/trinity-data/trinity.db-wal ~/trinity-data/trinity.db-shm ~/trinity-data/trinity.db-journal && cp /tmp/trinity_restore.db ~/trinity-data/trinity.db && rm /tmp/trinity_restore.db"
 
 echo ""
-echo "Step 4: Starting backend..."
+echo "Step 4: Starting backend and scheduler..."
 gcloud compute ssh "${GCP_INSTANCE}" \
     --zone="${GCP_ZONE}" \
     --project="${GCP_PROJECT}" \
-    --command="cd ${REMOTE_DIR} && sudo docker compose -f docker-compose.prod.yml start backend"
+    --command="cd ${REMOTE_DIR} && sudo docker compose -f docker-compose.prod.yml start backend scheduler"
 
 echo ""
 echo "Step 5: Waiting for backend..."

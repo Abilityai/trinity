@@ -6,13 +6,22 @@ Allows users to initialize GitHub synchronization for any existing agent by conf
 ## User Story
 As a **Trinity platform user**, I want to **enable GitHub synchronization for an existing agent** so that **I can version-control the agent's workspace and collaborate via GitHub without recreating the agent**.
 
+> **Sibling flow — [agent-repo-binding.md](agent-repo-binding.md) (ent#109).** This
+> doc covers an agent with **no** `agent_git_config` row: it creates the repo,
+> `git init`s the workspace, and writes the row, resolving the PAT through the
+> platform ladder (so the repo can land under the *admin's* account). Once an
+> agent HAS a row, "bind to your own repo" is the flow that moves it — a CAS
+> rebind under a destination-scoped lock, taking the user's own PAT, keeping the
+> existing history and container. The two do not overlap: binding refuses a
+> row-less agent with 400 `BIND_NO_GIT_CONFIG` and points here.
+
 ---
 
 ## Revision History
 
 | Date | Changes |
 |------|---------|
-| 2026-04-19 | S7 Layers 0/2 (#382): consolidated three independent `generate_instance_id()` call sites behind new `reserve_and_generate_instance_id()` helper in `services/git_service.py:115-206`. Reservation now atomically (a) generates a UUID, (b) probes the remote with `git ls-remote --heads --exit-code` (Layer 1), and (c) inserts the `agent_git_config` row under a new partial UNIQUE index `UNIQUE(github_repo, working_branch) WHERE source_mode = 0` (Layer 2). Retries up to `MAX_INSTANCE_ID_RETRIES` (5) on either remote or DB collision before raising `RuntimeError`. The reservation is performed BEFORE container creation in `agent_service/crud.py` and BEFORE `initialize_git_in_container` in `routers/git.py`, and is rolled back via `db.delete_git_config(...)` if any later step fails so a retry can claim a fresh branch. The duplicate post-container `db.create_git_config` call previously made by `crud.py` was removed. Schema added in `db/schema.py:757-758`; existing databases get the index via migration `agent_git_config_branch_ownership` (`db/migrations.py:1454-1511`), which refuses to install when `_find_duplicate_working_branches` finds existing collisions and prints every offending row so the operator can rebind one of the duplicates first. Failure mode: agent creation that previously could silently bind to an in-use working branch now fails fast with `RuntimeError` after 5 reservation attempts. Regression coverage: `tests/git-sync/test_s7_reserve_instance_id.py`. (Layer 3 push-time `--force-with-lease` guard documented in `github-sync.md`.) |
+| 2026-04-19 | S7 Layers 0/2 (#382): consolidated three independent `generate_instance_id()` call sites behind new `reserve_and_generate_instance_id()` helper in `services/git_service.py:115-206`. Reservation now atomically (a) generates a UUID, (b) probes the remote with `git ls-remote --heads --exit-code` (Layer 1), and (c) inserts the `agent_git_config` row under a new partial UNIQUE index `UNIQUE(github_repo, working_branch) WHERE source_mode = 0` (Layer 2). Retries up to `MAX_INSTANCE_ID_RETRIES` (5) on either remote or DB collision before raising `RuntimeError`. The reservation is performed BEFORE container creation in `agent_service/crud.py` and BEFORE `initialize_git_in_container` in `routers/git.py`, and is rolled back via `db.delete_git_config(...)` if any later step fails so a retry can claim a fresh branch. The duplicate post-container `db.create_git_config` call previously made by `crud.py` was removed. Schema added in `db/schema.py:757-758`; existing databases get the index via migration `agent_git_config_branch_ownership` (`db/migrations.py:1454-1511`), which refuses to install when `_find_duplicate_working_branches` finds existing collisions and prints every offending row so the operator can rebind one of the duplicates first. Failure mode: agent creation that previously could silently bind to an in-use working branch now fails fast with `RuntimeError` after 5 reservation attempts. Regression coverage: `tests/git_sync/test_s7_reserve_instance_id.py`. (Layer 3 push-time `--force-with-lease` guard documented in `github-sync.md`.) |
 | 2026-04-10 | Fix (#256): `initialize_git_in_container` now pushes after commit in the `remote_has_main` code path. Previously the workspace was committed locally inside the container but never reached GitHub when the target repo already had a `main` branch, making the UI report success while no files synced. |
 | 2026-02-11 | Added LEGACY notes for workspace path checks - new agents (2026-02+) use `/home/developer` directly, workspace checks exist for backward compatibility with pre-2026-02 agents |
 | 2026-01-23 | Verified line numbers against current implementation, updated MCP tool lines (530-604), verified git_service.py structure |
@@ -131,8 +140,8 @@ sequenceDiagram
 
     Note over Backend,Container: Phase 4b: Git Initialization (via git_service)
     Backend->>GitService: initialize_git_in_container(working_branch=reserved, create_working_branch=False)
-    GitService->>Container: Check for existing git directory
-    alt Has existing /home/developer/workspace with content (LEGACY)
+    GitService->>Container: git rev-parse --show-toplevel (walks up, #2075)
+    alt Repo genuinely rooted at /home/developer/workspace (LEGACY)
         Note over GitService: LEGACY: Agents created before 2026-02
         GitService->>GitService: Use /home/developer/workspace
     else Standard (new agents)
@@ -442,22 +451,17 @@ async def initialize_git_in_container(
     """
     container_name = f"agent-{agent_name}"
 
-    # Step 1: Directory detection with LEGACY workspace support
-    # LEGACY: Agents created before 2026-02 may have /home/developer/workspace
-    # New agents use /home/developer directly (no workspace subdirectory)
-    check_workspace = execute_command_in_container(
-        container_name=container_name,
-        command='bash -c "[ -d /home/developer/workspace ] && find /home/developer/workspace -mindepth 1 -maxdepth 1 | head -1 | wc -l"',
-        timeout=5
-    )
-
-    workspace_has_content = (
-        check_workspace.get("exit_code") == 0 and
-        "1" in check_workspace.get("output", "")
-    )
-    # LEGACY support: use workspace if it exists with content (pre-2026-02 agents)
-    # Otherwise use home directory directly (new standard)
-    git_dir = "/home/developer/workspace" if workspace_has_content else "/home/developer"
+    # Step 1: Directory detection — git's answer wins (#2075)
+    # _git_toplevel runs `git rev-parse --show-toplevel` from workspace/ when
+    # that directory exists and from /home/developer otherwise. --show-toplevel
+    # walks UP, so a genuinely workspace-rooted legacy repo (pre-2026-02) still
+    # resolves to workspace/ while a standard agent that merely keeps data
+    # under workspace/ resolves to /home/developer. Answers outside
+    # /home/developer are rejected.
+    # Only when there is NO repository at all does the pre-#2075 content
+    # heuristic decide (_detect_git_dir_fallback) — this init path needs a
+    # placement for a repo that does not exist yet, so it stays byte-compatible.
+    git_dir = await _detect_git_dir(container_name)
 
     # Step 2: Append any missing _GITIGNORE_PATTERNS entries to .gitignore
     # (issues #458 and #462). Runs for BOTH /home/developer and the legacy
@@ -1201,10 +1205,14 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 - The same merge runs on every subsequent Push via `_migrate_workspace_gitignore` (#462), so existing agents pick up new patterns automatically
 
 **LEGACY Case** (agents created before 2026-02):
-- If `/home/developer/workspace/` exists with content, that directory is used
+- If the agent's repository is genuinely rooted at `/home/developer/workspace/`
+  (git's own `rev-parse --show-toplevel` says so), that directory is used
 - Backend logs: `Using workspace directory: /home/developer/workspace`
 - `.gitignore` merge also runs here (#458 — previously skipped)
 - Detection logic shared with `_detect_git_dir`, used by both init and the post-init Push migration (#462)
+- A populated non-git `workspace/` **data** directory no longer forces this
+  branch (#2075) — that content heuristic misrouted standard agents, and now
+  runs only when no repository exists yet (fresh-agent placement)
 
 **Verify**:
 - Check GitHub repo contains agent files but not system files
@@ -1469,7 +1477,7 @@ transaction is rolled back; the caller is expected to retry agent
 creation, which will pick a fresh UUID.
 
 **Regression coverage**
-`tests/git-sync/test_s7_reserve_instance_id.py` covers:
+`tests/git_sync/test_s7_reserve_instance_id.py` covers:
 - (i) `reserve_and_generate_instance_id` retries on `ls-remote` hits
 - (ii) raises after `MAX_INSTANCE_ID_RETRIES`
 - (iii) the partial UNIQUE index rejects duplicate working-branch
@@ -1509,15 +1517,27 @@ your-repo/
 
 The system uses smart detection to find the correct directory (in `git_service.initialize_git_in_container()`):
 
-1. **Standard path (new agents, 2026-02+)**: Use `/home/developer` directly
-   - Agent home directory is `/home/developer`
-   - All files live there directly (no workspace subdirectory)
+1. **Ask git (#2075)**: `git rev-parse --show-toplevel`, probing from
+   `/home/developer/workspace` when that directory exists and `/home/developer`
+   otherwise. `--show-toplevel` walks **up**, so the nearest enclosing repo
+   wins: a genuinely workspace-rooted LEGACY repo (pre-2026-02) still resolves
+   to `workspace/`, a standard agent resolves to `/home/developer` even when it
+   keeps a populated non-git `workspace/` data directory. An answer outside
+   `/home/developer` is rejected.
 
-2. **LEGACY support (agents created before 2026-02)**: Check for workspace
-   - If `/home/developer/workspace` exists AND has content -> Use workspace
-   - Otherwise -> Use `/home/developer`
+2. **No repository yet → legacy content heuristic** (`_detect_git_dir_fallback`,
+   verbatim pre-#2075): `/home/developer/workspace` exists AND has content ->
+   use workspace, otherwise `/home/developer`. Only `initialize_git_in_container`
+   reaches this branch — it needs a placement for a repo that does not exist yet,
+   so fresh-agent placement is unchanged.
 
 3. **If using home directory**: Create `.gitignore` to exclude system files
+
+**Known limitation**: an agent that was already re-initialised *while
+misdetected* now has a real `workspace/.git` — a genuine nested repo,
+indistinguishable from a legitimate legacy agent by any probe. Git's answer for
+it is `workspace/`, and this logic keeps it there; repairing those takes an
+operator decision per agent.
 
 4. **Verify**: Run `git rev-parse --git-dir` before creating DB record
 

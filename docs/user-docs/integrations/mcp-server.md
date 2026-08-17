@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes ~107 tools across 27 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. This is the community build; a few tools are enterprise-gated and return `"disabled"` where not entitled.
+Trinity's MCP server exposes 116 tools across 28 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. A few are enterprise-gated and return `"disabled"` where not entitled. Two further sets are conditional: three consumption-only tools for connector keys, and two sign-in tools that appear only when inline email auth is enabled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -15,12 +15,26 @@ Trinity's MCP server exposes ~107 tools across 27 modules for agent orchestratio
 
 ### Authentication
 
-![MCP API Keys page showing auto-generated agent keys with usage stats and connection snippet](../images/mcp-api-keys.png)
+![MCP API Keys page showing auto-generated agent keys with usage stats and connection snippet](../../screenshots/mcp-api-keys.png)
 
-1. Go to the **API Keys** page (`/api-keys`).
+1. Go to **Settings → MCP Keys**.
 2. Click **Create Key**. Optionally scope the key to a specific agent.
 3. Copy the generated key (prefixed `trinity_mcp_*`).
 4. Use the key as a Bearer token in the `Authorization` header.
+
+#### Signing in with an email code instead of a key
+
+If your admin has enabled inline authentication, you can connect with **no API key at all** and sign in from inside your MCP client:
+
+1. Connect with a keyless connector configuration.
+2. Call `request_login(email)` — a 6-digit code is emailed to you.
+3. Call `verify_login(code)`.
+
+You can then use the exposed playbooks of every agent shared with that email. This mirrors the `/login` flow that Telegram and WhatsApp already use.
+
+Two things to know: the login binds a **session**, not a key — nothing is written to disk and you are never handed a `trinity_mcp_*` token. And MCP sessions are per-connection, so restarting your client means logging in again.
+
+Inline authentication is **off by default** (`MCP_INLINE_AUTH_ENABLED`). Operators enabling it should set `INTERNAL_API_SECRET` explicitly rather than relying on its fallback.
 
 ### Connecting from Claude Code
 
@@ -83,6 +97,37 @@ An owner can publish an agent as its own first-class MCP tool. On the agent's **
 | `/api/agents/{name}/mcp-exposed` | GET | Exposure flag + the resolved `tool_name` |
 | `/api/agents/{name}/mcp-exposed` | PUT | Toggle exposure (`{"enabled": true}`, owner-only) |
 
+### Each Agent's Own MCP Key
+
+Every agent carries its own agent-scoped key, injected into its container so it can call Trinity's MCP server. That key is what makes the agent-to-agent permission matrix apply — a container carrying a *user*-scoped key would operate with the owner's identity and bypass the matrix entirely.
+
+The agent's **Settings** tab surfaces this key so you can see and repair it. You never see the secret itself — only metadata and a health state:
+
+| State | Meaning |
+|-------|---------|
+| `active` | Healthy and in recent use |
+| `never_used` | The key exists but the agent has never authenticated with it |
+| `stale` | The key hasn't been used since well before the agent's last execution — the agent is probably authenticating as something else |
+| `missing` | No active agent-scoped key exists for this agent |
+| `env_absent` | The container has no Trinity MCP key configured |
+| `env_mismatch` | The container's key doesn't match any active key for this agent |
+| `exempt` | The system agent, which uses a system-scoped key by design |
+
+Two actions:
+
+- **Verify** runs a one-shot probe inside the container and reports what its configuration actually contains — including whether it is carrying a foreign user key, another agent's key, or a duplicate entry. A stopped agent degrades to "unavailable" rather than erroring.
+- **Regenerate** rotates the key: a new one is minted, delivered to the container, and the superseded keys are deleted. A running agent is rebuilt to pick it up; a stopped agent is updated in the database and stays stopped. **No plaintext is ever returned.**
+
+Trinity also self-heals: if an agent starts with a missing or mismatched key, the start path re-mints and re-injects one automatically.
+
+These routes are owner-only and reachable only from an interactive (browser) session — API keys of any scope are rejected, because rotating a credential should not be doable with the credential itself.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agents/{name}/mcp-key` | GET | Key metadata and health state (never the secret) |
+| `/api/agents/{name}/mcp-key/verify` | POST | Probe the container's actual configuration |
+| `/api/agents/{name}/mcp-key/regenerate` | POST | Rotate and deliver a new key |
+
 ### Key Tools Worth Knowing
 
 | Tool | Why it exists |
@@ -98,6 +143,8 @@ An owner can publish an agent as its own first-class MCP tool. On the agent's **
 | `write_user_memory` | Per-user memory blob in an isolated store. Trinity resolves the user's email from `execution_id` server-side, so an agent cannot accidentally cross-write another user's memory. |
 | `send_message` | Proactive message to a specific user by verified email. Rate-limited and audit-logged. |
 | `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. |
+| `ask_trinity` | Grounded Q&A about Trinity itself, answered from the documentation. Pass the `session_id` it returns to ask follow-ups; the tool tells you when a session reset dropped your context. Also available standalone as the `trinity-docs-mcp` npx package, with no Trinity instance or API key required. |
+| `report` | Publish a structured report (table, KPI set, markdown, timeline). Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
 
 ## For Agents
 
@@ -125,4 +172,4 @@ An owner can publish an agent as its own first-class MCP tool. On the agent's **
 
 - [Nevermined Payments](nevermined-payments.md)
 - [Slack Integration](slack-integration.md)
-- [A2A Agent Card](a2a-protocol.md) — A2A v1.0 discovery for external orchestrators
+- [A2A Protocol](a2a-protocol.md) — A2A `0.3.0` discovery and inbound tasking for external orchestrators

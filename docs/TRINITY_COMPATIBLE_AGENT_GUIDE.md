@@ -12,22 +12,23 @@
 2. [Required Files](#required-files)
 3. [Directory Structure](#directory-structure)
 4. [template.yaml Schema](#templateyaml-schema)
-5. [CLAUDE.md Requirements](#claudemd-requirements)
-6. [Runtime Options](#runtime-options)
-7. [Credential Management](#credential-management)
-8. [Inter-Agent Collaboration](#inter-agent-collaboration)
-9. [Shared Folders](#shared-folders)
-10. [Platform Skills](#platform-skills)
-11. [Custom Metrics](#custom-metrics)
-12. [Agent Dashboard](#agent-dashboard)
-13. [Operator Communication Is Asynchronous](#operator-communication-is-asynchronous-fire-and-park--1402)
-14. [Memory Management](#memory-management)
-15. [Content Folder Convention](#content-folder-convention)
-16. [Package Persistence](#package-persistence)
-17. [Compatibility Checklist](#compatibility-checklist)
-18. [Migration Guide](#migration-guide)
-19. [Best Practices](#best-practices)
-20. [Autonomous Agent Design](#autonomous-agent-design)
+5. [Declaring Credentials](#declaring-credentials)
+6. [CLAUDE.md Requirements](#claudemd-requirements)
+7. [Runtime Options](#runtime-options)
+8. [Credential Management](#credential-management)
+9. [Inter-Agent Collaboration](#inter-agent-collaboration)
+10. [Shared Folders](#shared-folders)
+11. [Platform Skills](#platform-skills)
+12. [Custom Metrics](#custom-metrics)
+13. [Agent Dashboard](#agent-dashboard)
+14. [Operator Communication Is Asynchronous](#operator-communication-is-asynchronous-fire-and-park--1402)
+15. [Memory Management](#memory-management)
+16. [Content Folder Convention](#content-folder-convention)
+17. [Package Persistence](#package-persistence)
+18. [Compatibility Checklist](#compatibility-checklist)
+19. [Migration Guide](#migration-guide)
+20. [Best Practices](#best-practices)
+21. [Autonomous Agent Design](#autonomous-agent-design)
 
 ---
 
@@ -89,7 +90,7 @@ See [CLAUDE.md Requirements](#claudemd-requirements) for guidelines.
 
 ### 3. `.mcp.json.template` (Required if using MCP servers)
 
-MCP server configuration with credential placeholders. Trinity replaces `${VAR}` with actual values from the credential store.
+MCP server configuration with credential placeholders. At container startup Trinity renders this file into `.mcp.json`, replacing `${VAR}` with values from the credential store (#2007).
 
 ```json
 {
@@ -107,9 +108,37 @@ MCP server configuration with credential placeholders. Trinity replaces `${VAR}`
 ```
 
 **Important:**
-- Use `${VAR_NAME}` syntax for credential placeholders
+- Use `${VAR_NAME}` syntax for credential placeholders — **inside `env` blocks only**
+- `${VAR:-default}` is also supported (the default is used when the credential is unset)
 - Never commit actual secrets
 - Server names must match `credentials.mcp_servers` keys in `template.yaml`
+
+**Where substitution happens, and what happens when it can't**
+
+Trinity substitutes **only inside `env`**. A `${VAR}` in `args` or `command` is
+**not** expanded, because the MCP config validator rejects both: a bare `$` in
+`args` reads as a shell metacharacter, and `command` must be a literal entry
+from the runtime allowlist (`npx`, `uvx`, `python`, `python3`, `node`, `bun`,
+`deno`, `docker`). Letting a credential value become the executed command is the
+config-injection class Trinity closed deliberately — so if you need a path,
+pass it through `env` and read it in your server, or use `uvx <package>` rather
+than an absolute interpreter path.
+
+Rendering is **merge-only and refuse-on-doubt**:
+
+- A server already present in `.mcp.json` is left untouched — including the
+  `trinity` entry Trinity injects, and anything you edited by hand. Re-running
+  is a no-op, so a restart never reverts your changes.
+- A server whose placeholders cannot be resolved (no such credential, or the
+  value is empty) is **withheld**, not configured with a blank value. The
+  reason is logged to the agent's container output, one line per withheld
+  server.
+- A server the validator rejects is withheld the same way, with the validator's
+  own reason — so `"command": "uv"` tells you `uv` is not in the allowlist
+  rather than failing later at exec time.
+
+The rest of the servers install normally: one bad entry never costs you the
+good ones.
 
 ### 4. `.env.example` (Recommended)
 
@@ -156,7 +185,15 @@ credentials.json
 .local/
 .npm/
 .ssh/
-.trinity/
+.trinity/*
+!.trinity/pre-check
+!.trinity/post-check
+!.trinity/pre-snapshot
+!.trinity/setup.sh
+!.trinity/persistent-processes.allow
+!.trinity/brain-orb/
+!.trinity/pipelines/
+!.trinity/plugins.yaml
 .tmp/
 .trinity-clone-tmp/
 
@@ -191,7 +228,16 @@ __pycache__/
 .claude/sessions/
 .claude/shell-snapshots/
 .claude/plugins/
-# Keep: .claude/commands/, .claude/skills/, .claude/agents/, settings.local.json
+# settings.json is baked by the Trinity base image with container-only hook
+# paths (/opt/trinity/hooks/*.py). Committing it bricks any clone made outside
+# the container: the missing hook script exits 2, which Claude Code reads as
+# "block this tool call", so every Bash/Edit/Write fails there. (#2036)
+.claude/settings.json
+.claude/remote-settings.json
+.claude/policy-limits.json
+.claude/backups/
+.claude/.last-cleanup
+# Keep: .claude/commands/, .claude/skills/, .claude/agents/
 
 # Temporary files
 *.log
@@ -292,6 +338,56 @@ Keep `data_paths` entries **under `data/`** — entries that escape the data roo
 
 ---
 
+## Declaring Plugins (`plugins`) — #1704
+
+If your agent relies on Claude Code **marketplace plugins** (skills / subagents /
+hooks bundled by a marketplace), declare them in `template.yaml`. Trinity writes a
+committed, secret-free `~/.trinity/plugins.yaml` manifest at creation and
+**re-installs anything missing on every container start** — so the selection is
+portable and survives a git-based reconstitution onto a fresh volume or a new
+host, not just a plain recreate (which the durable workspace volume already keeps).
+
+```yaml
+plugins:
+  marketplaces:
+    - name: abilityai
+      source: abilityai/abilities        # owner/repo shorthand, OR an https:// URL
+  installed:
+    - trinity@abilityai                    # plugin@marketplace (every entry's
+                                           # marketplace must be declared above)
+  # Alternatively, mirroring Claude Code's own settings.json shape:
+  # enabledPlugins:
+  #   trinity@abilityai: true              # value:false entries are dropped
+```
+
+Rules and why:
+
+- **Opt-in.** An absent/empty `plugins:` block is a full no-op — no file, no side
+  effect. Undeclared agents are unaffected.
+- **Committed, so it's portable.** `~/.trinity/plugins.yaml` is committed to your
+  agent's repo (unlike `data_paths`/`persistent_state`, which are volume-local).
+  Your installed *plugin cache* (`~/.claude/plugins/`) and `~/.claude.json` stay
+  gitignored — the manifest is a plugin-only, secret-free declaration, not the
+  cache.
+- **The `source` must be safe.** Use `owner/repo` shorthand or an `https://` URL.
+  A URL **must not embed credentials** (`https://user:token@…` is rejected) —
+  Trinity resolves a private marketplace's git credential from the agent's
+  `GITHUB_PAT` env at install time, never from the manifest. No `../` traversal,
+  no leading `-`.
+- **Re-install is idempotent.** On start Trinity reads the current state and
+  installs only what's missing — a volume-persisting restart runs zero installs.
+  A public marketplace works with network only; a private one needs the agent's
+  `GITHUB_PAT`.
+- **Trust model.** `plugin@marketplace` pins identity, not a commit — a re-install
+  re-fetches the marketplace's *current* content. (A commit-pinned mode is a
+  planned follow-up.)
+
+> **Runtime installs.** Plugins you install *after* creation via `/plugin install`
+> (not declared in the template) are **not** captured into the manifest yet — put
+> anything you want to survive a reconstitution in `template.yaml plugins:`.
+
+---
+
 ## template.yaml Schema
 
 Complete schema with all available fields:
@@ -378,6 +474,15 @@ platforms:
   - local
 
 # === GIT CONFIGURATION ===
+#
+# NOTE (#2137): the `git:` block below is INERT — no Trinity backend code reads
+# `push_enabled`, `commit_paths`, or `ignore_paths`, and none of the bundled
+# templates declare it. Sync behaviour is decided by source-mode vs working-branch
+# at agent creation, `agent_git_config.auto_sync_enabled`, and the agent's own
+# `.gitignore`. It is documented here for historical shape only; the compatibility
+# checks that used to validate it (T-017, G-003, G-004, G-005) were retired for
+# gating on a field nothing consumes. Do not write it expecting an effect.
+#
 # Two sync modes are available:
 #
 # SOURCE MODE (default): Pull-only from GitHub
@@ -424,7 +529,184 @@ metrics:
       - value: "active"           # Value written to metrics.json
         color: "green"            # green|red|yellow|gray|blue|orange
         label: "Active"           # Display label in UI
+
+# === RUNTIME DATA (Optional) — #1169 ===
+# Declared runtime-data globs under data/ (durable, gitignored, exportable).
+# See the "Runtime Data (data_paths)" section.
+data_paths:
+  - data/**
+
+# === PLUGINS (Optional) — #1704 ===
+# Claude Code marketplace plugins to install + re-install on boot. Committed +
+# secret-free. See the "Declaring Plugins (plugins)" section.
+plugins:
+  marketplaces:
+    - name: abilityai
+      source: abilityai/abilities   # owner/repo or an https:// URL (no userinfo)
+  installed:
+    - trinity@abilityai             # plugin@marketplace
 ```
+
+---
+
+## Declaring Credentials
+
+Machine-readable contract: [`docs/schemas/trinity-agent-credentials.schema.json`](schemas/trinity-agent-credentials.schema.json).
+
+Two keys, one contract:
+
+- **`credentials:`** — *which* variables the agent needs, **by name only**.
+- **`credential_setup:`** — *optional*, describes each one so an operator can fill
+  it in.
+
+```yaml
+credentials:                          # names only, always
+  mcp_servers:
+    stripe:
+      env_vars: [STRIPE_API_KEY]
+  env_file: [VAULT_BASE_PATH]
+
+credential_setup:                     # optional; DECORATES the names above
+  - name: STRIPE_API_KEY
+    title: "Stripe secret key"
+    description: "Reads charges and customers for the weekly revenue report."
+    required: true
+    secret: true
+    format: secret
+    setup_url: https://dashboard.stripe.com/apikeys
+
+  - name: VAULT_BASE_PATH
+    title: "Obsidian vault path"
+    description: "Where the agent reads and files notes."
+    required: false
+    secret: false
+    format: dirpath
+    default: "./Brain"
+```
+
+### The rule that makes two keys safe
+
+**`credential_setup:` can only decorate; it cannot declare.** Every entry's `name`
+must already appear in `credentials.mcp_servers.<server>.env_vars` or
+`credentials.env_file`. An entry naming anything else is reported as a named error
+and dropped — its valid siblings still apply.
+
+That is deliberate. Two places describing the same variable is normally how
+documentation rots; here only one of them can *introduce* a variable, so they
+cannot drift apart. If you get the error below, the fix is always the same:
+
+```
+credential_setup[2].name: 'FOO' is not declared in `credentials:`.
+Add it to `credentials.env_file` or `credentials.mcp_servers.<server>.env_vars` —
+`credential_setup:` adds setup guidance for variables `credentials:` declares,
+it does not declare them.
+```
+
+### Why `credentials:` stays names-only
+
+You may not put objects under `credentials.env_file`. A Trinity instance older
+than this feature reads that list and then looks each name up as a dictionary
+key — hand it a list of mappings and it crashes *while writing the agent's `.env`*.
+Enrichment therefore lives in a sibling key that an older instance simply never
+reads, which is why you can enrich a template today without waiting for every
+instance to upgrade.
+
+### Field reference
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | ✅ | The variable. Must be declared in `credentials:`. |
+| `title` | | Short label, e.g. "Stripe secret key". Defaults to `name`. |
+| `description` | | One or two sentences: what it is for, what it unlocks. This is what an operator reads while deciding whether to hand over a key. |
+| `required` | | `true`/`false`. **Omitting it on an enriched entry means `true`.** |
+| `secret` | | Mask in the UI. **Defaults to `true`** — fail-safe. Set `false` for a path, base URL or account id. |
+| `format` | | Input hint: `secret`, `filepath`, `dirpath`, `url`, `email`, `number`, `boolean`, `text`. A hint, never validation. |
+| `setup_url` | | Where to obtain it. **https only, and no `user@host` form.** |
+| `default` | | A safe, non-secret pre-fill. Never a real credential — `template.yaml` is committed. |
+
+Any key you invent is a named error with a "did you mean" suggestion, so an
+`is_required:` typo can't silently flip a field's meaning. Use an `x-` prefix
+(`x-my-vendor-thing:`) for something Trinity should ignore.
+
+**`required` is near-irreversible in practice.** Once templates are distributed,
+tightening a variable from `false` to `true` is a breaking change for anything
+downstream that gates on it. Mark conservatively.
+
+### The zero-credential contract
+
+**A Trinity-installable agent must run with nothing configured.** An agent that
+needs a key before it can start is not installable — it is a project.
+
+State it explicitly:
+
+```yaml
+credentials: {}
+```
+
+An absent block and an empty one mean the same thing to Trinity, and neither is an
+error. `{}` is better anyway, because *absent* is ambiguous to a human reading your
+template — it could equally mean you forgot. `{}` says "considered, and there are
+none", and the catalog shows a 0-credential badge an operator can trust.
+`scout`, `sage` and `scribe` in `config/agent-templates/` are the reference
+examples.
+
+### Degrade, don't demand
+
+If a credential is genuinely optional, the agent must **still work without it**,
+with that one capability switched off and an explanation of what is missing. Mark
+it `required: false` and check for it at runtime rather than asserting at startup.
+
+An agent that starts, tells you what it can do today, and names what it would need
+to do more is installable. An agent that exits non-zero on a missing key is not.
+
+### Don't ask for what Trinity already injects
+
+Trinity sets these on the container itself at creation — an operator has nothing to
+paste, and asking makes your setup checklist look longer than it is:
+
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `GITHUB_PAT`,
+`GITHUB_REPO`, and anything prefixed `TRINITY_`, `GIT_`, `OTEL_` or `CLAUDE_CODE_`.
+
+They are excluded from the catalog's credential count for exactly this reason. You
+may still *reference* them in `.mcp.json.template` — just don't declare them as
+something an operator supplies.
+
+### Composition with fork-to-own (ent#109)
+
+A template declaring `fork_to_own: required` is copied into a **user-owned** repo at
+creation, and the user's own PAT does the create and push. So a fork-to-own template
+must not declare `GITHUB_PAT` as an operator-supplied credential — the platform
+already resolves it per-agent. Declare only the credentials your agent's *own* work
+needs.
+
+### The author cost, stated plainly
+
+Declaring `STRIPE_API_KEY` in `credentials:` is a **separate edit** from
+referencing `${STRIPE_API_KEY}` in `.mcp.json.template`, and the compatibility
+check T-015 fails if the two disagree.
+
+That is a real cost and we're not pretending otherwise: three of Trinity's own six
+default GitHub templates declare **zero** credentials while their
+`.mcp.json.template` references between two and six, and their `.env.example`
+documents seven to twelve. Those templates are T-015-red today and stay red until
+someone does the edit.
+
+We keep it that way on purpose. If `.mcp.json.template` counted as a declaration,
+it would become a *second* authority on what your agent needs — which is exactly the
+drift this design exists to prevent. The practical order is: seed `credentials:`
+from your `.mcp.json.template` first, then enrich.
+
+### Two brace forms Trinity cannot see
+
+Neither is detected by Trinity's `${VAR}` readers, so neither is safe to rely on:
+
+- **`${my-key}`** — a hyphen is in no variable-name charset, so the reference is
+  dropped silently.
+- **`${VAR:-default}`** — the `:-` default form is **mis-substituted**: the whole
+  `VAR:-default` string is looked up as a key, misses, and your argument becomes an
+  empty string.
+
+Use a plain `${VAR}` and put the default in `credential_setup[].default`.
 
 ---
 
@@ -1559,9 +1841,20 @@ An agent is Trinity-compatible if:
 - [ ] `.mcp.json` and `.env` are gitignored
 - [ ] Sensitive files excluded from git sync paths
 
+### Credentials (see "Declaring Credentials")
+- [ ] Every `${VAR}` in `.mcp.json.template` is declared in `credentials:` (T-015 checks this)
+- [ ] Every declared variable is documented in `.env.example` (K-001 checks this)
+- [ ] `credentials: {}` is stated explicitly if the agent needs nothing
+- [ ] No platform-injected variable (`GEMINI_API_KEY`, `GITHUB_PAT`, `TRINITY_*`, …) is
+      declared as something an operator supplies
+- [ ] (Optional) `credential_setup:` describes each variable, and every `name` in it is
+      declared in `credentials:`
+- [ ] No `${my-key}` or `${VAR:-default}` — neither form is visible to Trinity's readers
+
 ### Behavior
 - [ ] Agent CLAUDE.md focuses on domain-specific instructions
 - [ ] Can run both locally and on Trinity platform
+- [ ] Starts and reports what it can do with NO credentials configured
 
 ---
 

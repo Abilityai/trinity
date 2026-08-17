@@ -105,6 +105,7 @@ class TelegramChannelOperations:
         telegram_bindings.c.webhook_url,
         telegram_bindings.c.telegram_secret_token,
         telegram_bindings.c.last_update_id,
+        telegram_bindings.c.progress_indicator_enabled,  # ent#264
         telegram_bindings.c.created_at,
         telegram_bindings.c.updated_at,
     )
@@ -151,6 +152,30 @@ class TelegramChannelOperations:
         if not binding:
             return None
         return self._decrypt_token(binding["bot_token_encrypted"])
+
+    def decrypt_bot_token(self, encrypted: str) -> Optional[str]:
+        """Decrypt a bot token from a binding row already in hand (ent#264 —
+        lets callers that hold the binding avoid a second read via
+        ``get_decrypted_bot_token``). Fail-soft: None on any decrypt error."""
+        if not encrypted:
+            return None
+        return self._decrypt_token(encrypted)
+
+    def set_progress_indicator_enabled(self, agent_name: str, enabled: bool) -> bool:
+        """ent#264 — toggle the in-progress indicator for this binding.
+
+        Returns False when no binding exists for the agent."""
+        stmt = (
+            update(telegram_bindings)
+            .where(telegram_bindings.c.agent_name == agent_name)
+            .values(
+                progress_indicator_enabled=1 if enabled else 0,
+                updated_at=utc_now_iso(),
+            )
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+        return result.rowcount > 0
 
     def get_all_bindings(self) -> List[dict]:
         """Get all Telegram bindings (for webhook reconciliation on startup)."""
@@ -459,6 +484,7 @@ class TelegramChannelOperations:
         telegram_group_configs.c.updated_at,
         telegram_group_configs.c.verified_by_email,
         telegram_group_configs.c.verified_at,
+        telegram_group_configs.c.allow_proactive,  # ent#265: completion-report consent
     )
 
     def get_or_create_group_config(
@@ -513,6 +539,10 @@ class TelegramChannelOperations:
                     is_active=1,
                     created_at=now,
                     updated_at=now,
+                    # ent#265: completion reports default ALLOW for new groups too
+                    # (uniform with the migration's DEFAULT 1 — no dead-default
+                    # split; the toggle is an opt-out mute).
+                    allow_proactive=1,
                 )
             )
 
@@ -560,6 +590,7 @@ class TelegramChannelOperations:
         trigger_mode: Optional[str] = None,
         welcome_enabled: Optional[bool] = None,
         welcome_text: Optional[str] = None,
+        allow_proactive: Optional[bool] = None,
     ) -> Optional[dict]:
         """Update group config settings."""
         now = utc_now_iso()
@@ -571,6 +602,9 @@ class TelegramChannelOperations:
             values["welcome_enabled"] = 1 if welcome_enabled else 0
         if welcome_text is not None:
             values["welcome_text"] = welcome_text
+        if allow_proactive is not None:
+            # ent#265: per-group completion-report consent (opt-out mute)
+            values["allow_proactive"] = 1 if allow_proactive else 0
 
         select_stmt = select(*self._GROUP_CONFIG_COLUMNS).where(
             telegram_group_configs.c.id == group_config_id
@@ -694,6 +728,11 @@ class TelegramChannelOperations:
             "updated_at": row["updated_at"],
             "verified_by_email": row["verified_by_email"],
             "verified_at": row["verified_at"],
+            # ent#265: default-allow — NULL (a row that somehow escaped both the
+            # DEFAULT and the writers) reads as allowed, matching the posture.
+            "allow_proactive": (
+                True if row["allow_proactive"] is None else bool(row["allow_proactive"])
+            ),
         }
 
     def _row_to_binding(self, row) -> dict:
@@ -707,6 +746,9 @@ class TelegramChannelOperations:
             "webhook_url": row["webhook_url"],
             "telegram_secret_token": row["telegram_secret_token"],
             "last_update_id": row["last_update_id"],
+            # ent#264: raw value (may be NULL on edge writes) — readers apply
+            # the Python-side default-ON predicate `v is None or v != 0`.
+            "progress_indicator_enabled": row["progress_indicator_enabled"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

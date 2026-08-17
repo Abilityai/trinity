@@ -78,6 +78,45 @@ SECRET_KEY = _secret_key
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days (was 30 minutes)
 
+# --- Workspace / portal session policy (ent#375) ---------------------------
+#
+# The Workspace session SLIDES: it renews while in use, dies on inactivity, and
+# is still bounded by an absolute cap no amount of use can extend. Replaces the
+# flat 12-hour absolute lifetime, which made anyone using the surface on two
+# consecutive days redo the email OTP.
+#
+# Defaults are the shipped policy for every install; the entitled Settings panel
+# writes overrides into `system_settings`, read (and clamped) by
+# `settings_service.get_portal_session_policy`.
+#
+# NOT env-configurable, deliberately: an env leg would give one policy two
+# sources, and the stale one wins silently (#1638).
+PORTAL_SESSION_IDLE_DAYS_DEFAULT = 7      # no requests for this long -> sign in again
+PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT = 30  # hard ceiling from first sign-in
+
+# #2157: the `schedule_executions.source_channel` stamp identifying a Workspace
+# turn. `triggered_by="public"` is shared with public links and x402 chat, so it
+# cannot answer "did this turn arrive from the Workspace?" — and that answer
+# decides what `send_voice_reply` tells an agent that tries to speak there. It is
+# NOT a messaging channel: portal rows carry no `source_channel_chat_id`, so every
+# channel consumer (the completion-report resolver map, `voice_reply_service`'s
+# supported set) already ignores it. It lives here so the writer (client_portal)
+# and the reader (routers/agents) share one spelling without importing each other.
+PORTAL_SOURCE_CHANNEL = "portal"
+
+# Bounds enforced on READ, so a bad row cannot widen the window (#506).
+PORTAL_SESSION_MIN_IDLE_MINUTES = 15
+PORTAL_SESSION_MAX_ABSOLUTE_DAYS = 90
+
+# Re-mint only once a session is this far into its idle window. Rotation revokes
+# the previous `jti`, so rotating on EVERY request would make a browser with two
+# in-flight requests race: the second arrives bearing a token the first just
+# revoked. A staleness threshold keeps rotations rare and the race window small;
+# `PORTAL_SESSION_ROTATION_GRACE_SECONDS` then keeps the superseded token alive
+# just long enough for requests already in flight.
+PORTAL_SESSION_ROTATE_AFTER_FRACTION = 0.5
+PORTAL_SESSION_ROTATION_GRACE_SECONDS = 60
+
 # Redis URL — must include credentials (Issue #589).
 # docker-compose builds the URL with the `backend` ACL user + REDIS_BACKEND_PASSWORD;
 # we only validate it here. Splicing fallback removed: a single source of truth
@@ -163,6 +202,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", 
 # agent_ownership.circuit_breaker_enabled (also default OFF). Both must be on
 # for the breaker to engage — a true opt-in canary (D7/D11).
 DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower() == "true"
+
+# MCP inline email auth (#848). Same env key the mcp-server reads, so a
+# single-.env deploy cannot drift between the two halves. Default OFF: with it
+# off the whole /api/internal/mcp-auth surface 404s, so the backend does not
+# depend on the MCP server's own gate for its default-OFF posture. Gating BOTH
+# halves matters because this surface bypasses the email whitelist and creates
+# accounts — it must not be live on an install that never opted in.
+MCP_INLINE_AUTH_ENABLED = os.getenv("MCP_INLINE_AUTH_ENABLED", "false").lower() == "true"
 
 # Fire-and-Forget Dispatch — global master switch (#1083).
 # When ON, eligible autonomous turns are dispatched to the agent with a 202
@@ -302,6 +349,18 @@ GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-
 # also requires a per-agent voip_bindings row to function. `voip_available`
 # in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
+# Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+# RUNTIME-RESOLVED like the Brain Orb flags, deliberately: no import-time
+# constant here, so a stale module value can never shadow an admin toggle, and —
+# more importantly — a compose file that forgets to forward the variable cannot
+# make the feature unreachable. Resolution lives in
+# `services/a2a_outbound_service.is_outbound_enabled()`: system_settings row →
+# A2A_OUTBOUND_ENABLED env opt-in → default OFF. Default OFF because this is the
+# platform's first backend-executed, credentialed, agent-triggerable outbound
+# fetcher, and every comparable surface (DISPATCH_ASYNC, CANARY_ENABLED,
+# VOIP_ENABLED, MCP_INLINE_AUTH_ENABLED, BRAIN_ORB_*) ships default-OFF.
+# Both routes 404 when off; `a2a_outbound_available` reports it in
+# GET /api/settings/feature-flags.
 # Brain Orb flags (trinity-enterprise#58/#60/#61) are RUNTIME-RESOLVED as of #85
 # — no import-time constants here, so a stale module value can never shadow an
 # admin toggle. Resolution lives in services/settings_service.py
@@ -326,14 +385,60 @@ VOIP_CALL_RATE_WINDOW = int(os.getenv("VOIP_CALL_RATE_WINDOW", "60"))  # seconds
 # Default GitHub Template Repositories
 # Just repo identifiers — metadata is fetched from each repo's template.yaml at runtime.
 # Admins can override this list via Settings → GitHub Templates (stored in system_settings).
-DEFAULT_GITHUB_TEMPLATE_REPOS = [
-    "abilityai/agent-ruby",
-    "abilityai/agent-cornelius",
-    "abilityai/agent-corbin",
-    "abilityai/ruby-orchestrator",
-    "abilityai/ruby-content",
-    "abilityai/ruby-engagement",
-]
+#
+# Intentionally EMPTY (#1931). The bundled list had gone stale — a pre-2026 repo
+# set no install had ever overridden — so every operator browsed the same dead
+# catalog. Curating GitHub templates is an explicit operator act, not a bundled
+# default. An empty default costs nothing: any repo is still creatable at any
+# time via `template: github:owner/repo` (`template_service.get_github_template`
+# resolves an unconfigured id through its dynamic branch), so this removes a
+# *browse* surface, never a *create* capability. It also means `GET /api/templates`
+# makes zero outbound GitHub calls on a cold metadata cache.
+#
+# Do NOT refill this list. Keep the constant: TMPL-001's None-vs-[] fallback,
+# routers/settings.py, and the Settings "defaults" badge all reference it. It is
+# now the FLOOR under the remote template registry rather than the only source —
+# trinity-enterprise#14 repointed this seam, so the resolution order is
+# `admin DB override -> remote registry -> this list`. Refilling it would give
+# every install a second, un-curatable catalog that no registry edit can remove.
+DEFAULT_GITHUB_TEMPLATE_REPOS: list[str] = []
+
+
+# --- Remote template registry (TMPL-002, trinity-enterprise#14) -------------
+# The GitHub half of the catalog is sourced at RUNTIME from a `registry.yaml`
+# fetched over HTTPS, so curating which starter agents an install offers is a
+# vendor file edit rather than a Trinity release. Purely additive: it fills the
+# branch the empty list above leaves, is never consulted when an admin has
+# curated their own list, and every failure mode degrades back to that floor.
+#
+# `TEMPLATE_REGISTRY_ENABLED=false` is the HARD kill switch — the air-gap /
+# policy answer. No `system_settings` row can turn it back on; the admin toggle
+# (`template_registry_enabled`, default true when absent) is composed with this
+# at the consumer, exactly as OPERATOR_INTAKE / TELEMETRY_SHARING compose theirs.
+#
+# Deliberately NOT resolved through `settings_service._resolve_bool_flag`: that
+# helper's env leg is OPT-IN ONLY ("true"/"1"/"yes" -> True, anything else falls
+# through to `default`), so with `default=True` it would silently swallow
+# `TEMPLATE_REGISTRY_ENABLED=false` and ship an inert kill switch (#1039 class).
+#
+# Deliberately NOT coupled to DO_NOT_TRACK, unlike the two flags above. Those
+# honour it because they SEND data about the operator. A registry fetch sends
+# nothing — it is a package-index read, and npm and Homebrew do not disable
+# their default registries under DNT. It is still outbound egress on a default
+# install, which is a real behavioural change and carries a release note.
+TEMPLATE_REGISTRY_ENABLED = (
+    os.getenv("TEMPLATE_REGISTRY_ENABLED", "true").strip().lower() == "true"
+)
+# Vendor-operated default. `raw.githubusercontent.com` deliberately: no new
+# infra, a public audit trail, and curation is literally a git commit. The
+# document served here must exist before the release ships — an empty
+# `version: 1` / `templates: []` is a valid registry and gives day-one
+# behaviour of "fetch succeeds, zero entries, catalog unchanged, no warnings"
+# (the ent#137 ship prerequisite).
+TEMPLATE_REGISTRY_URL = os.getenv(
+    "TEMPLATE_REGISTRY_URL",
+    "https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml",
+)
 
 
 # ============================================================================
@@ -366,9 +471,146 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # clear_agent_runtime_state -> remove_agent_volumes (#1581), destroying the
 # agent's workspace/public/shared volumes and any declared `data_paths` runtime
 # data (#1169). The floor does not apply to it in ANY edition.
+# ent#237: the bundled community skills source, written into a FRESH install so
+# the library is never empty out of the box (AC#3). Seeded as a row rather than
+# resolved as a code default at read time, for the same reason as the retention
+# floor above: an existing install must not silently acquire a source it never
+# configured, and an admin who deletes or disables this one must have that stick
+# across restarts. A code-default fallback would resurrect it on every boot.
+#
+# `ref_type: tag` is AC#5 — the community catalog takes PRs from strangers and
+# skills carry executables the ent#139 runner runs, so instances follow a tag we
+# bump deliberately, never the branch head. The repo itself is ent#296; until it
+# cuts its first tag this seed points at a 404 and `sync_library` reports a
+# failed source (fail-soft by design — it never raises).
+#
+# The tag name must match what ent#296 actually publishes: that issue's plan
+# (vybe, 2026-08-04) cuts **v0.1.0** once the seed content lands, so a `v1.0.0`
+# default would leave every fresh install seeded with a source that can never
+# sync — and the failure is quiet (a failed row in Settings), not loud. Bump
+# this in lockstep with the catalog's releases; the env var is the escape hatch
+# for an instance that wants to pin an older or newer catalog.
+#
+# TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
+# wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
+DEFAULT_SKILL_SOURCE_URL = os.getenv(
+    "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
+)
+DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.1.0")
+DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
+
 COMMUNITY_FRESH_INSTALL_SEED = {
     "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "execution_row_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "health_check_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "schedule_soft_delete_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
 }
+
+
+# ============================================================================
+# Ops-settings value validation (ent#297)
+# ============================================================================
+# `PUT /api/settings/ops/config` took `Dict[str, str]` and wrote it straight to
+# `db.set_setting` with NO type or range check, so every ops setting — including
+# the eight retention windows that drive irreversible deletion — accepted any
+# string at all.
+#
+# Read the failure modes precisely, because they are asymmetric and the
+# intuitive one is the harmless one:
+#
+#   * GARBAGE FAILS SAFE. Every reader coerces via `max(int(raw), 0)` inside a
+#     try/except returning 0, and 0 means "sweep disabled". So "abc" widens
+#     retention to forever. Wrong, but not destructive.
+#   * A SMALL VALID INTEGER IS THE CATASTROPHIC INPUT. `{"execution_row_
+#     retention_days": "1"}` is well-typed, in range for any naive check, and
+#     deletes the fleet's execution history on the next 5-minute cleanup cycle.
+#
+# So validation is NOT what stops the ent#297 attack, and it must not be sold as
+# such: a legitimate admin may genuinely want a 1-day window, and no range check
+# can tell that apart from an attack. The controls that stop it are the admin
+# gate rejecting agent principals (the root fix) and the #1644 blast-radius
+# guard refusing an over-threshold sweep. What validation buys is narrower and
+# still worth having — a malformed write fails LOUDLY at the boundary instead of
+# silently coercing to a value nobody chose, which is the #1525
+# validate-at-the-boundary rule and the same reasoning as the #506 ceiling's
+# dedicated range-checked route.
+# 10 years. Chosen to MATCH the enterprise `retention` module's own
+# `_MAX_DAYS` (`RetentionConfigUpdate` validates every window `ge=0, le=3650`),
+# not picked independently — these are two write paths to the same values, and
+# a wider OSS bound would let an admin store a window the managed panel then
+# refuses to edit, i.e. a value its own GET surfaces and its own PUT rejects.
+# The enterprise constant can't be imported here (private submodule, and OSS
+# must build without it), so the alignment is by value + this note.
+_DAYS_MAX = 3650
+_PERCENT = (0, 100)
+_MINUTES = (0, 525600)              # 1 year
+
+# key -> (kind, min, max); `None` bound = unbounded on that side.
+OPS_SETTINGS_VALIDATION = {
+    "ops_context_warning_threshold": ("int", *_PERCENT),
+    "ops_context_critical_threshold": ("int", *_PERCENT),
+    "ops_idle_timeout_minutes": ("int", *_MINUTES),
+    "ops_cost_limit_daily_usd": ("float", 0, 1_000_000),
+    "ops_max_execution_minutes": ("int", *_MINUTES),
+    "ops_alert_suppression_minutes": ("int", *_MINUTES),
+    "ops_log_retention_days": ("int", 0, _DAYS_MAX),
+    "ops_health_check_interval": ("int", 1, 86400),
+    "ssh_access_enabled": ("bool", None, None),
+    # The row-retention windows (RETENTION_OPS_KEYS, minus #2216's backup key
+    # below). `0` is a documented, meaningful value on every one of THESE —
+    # "disable this sweep" — so the lower bound is 0 and NOT the community floor. Clamping to the floor here would be
+    # wrong twice over: it would silently rewrite an operator's explicit choice,
+    # and the floor is a fresh-install SEED plus an enterprise entitlement
+    # clamp, deliberately NOT an OSS hard limit (#1039/#1638).
+    "execution_log_retention_days": ("int", 0, _DAYS_MAX),
+    "execution_row_retention_days": ("int", 0, _DAYS_MAX),
+    "health_check_retention_days": ("int", 0, _DAYS_MAX),
+    "agent_soft_delete_retention_days": ("int", 0, _DAYS_MAX),
+    "schedule_soft_delete_retention_days": ("int", 0, _DAYS_MAX),
+    "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
+    "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
+    "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
+    # #2216: the backup window's fail-safe direction is INVERTED vs the rows
+    # above — for backups "never prune" fills the disk (#1871 class), so `0`
+    # ("disable the sweep" everywhere else = keep-forever here) is REJECTED.
+    # Disabling backups is the separate, explicit DB_BACKUP_ENABLED=false.
+    # The lower bound 1 plus the fixed BACKUP_MIN_KEEP=3 floor in
+    # db/backup_primitives.py carry the "small valid integer" (#1644) safety.
+    "backup_retention_days": ("int", 1, _DAYS_MAX),
+}
+
+
+def validate_ops_setting(key: str, value: str) -> str:
+    """Validate one ops setting; return it normalized, or raise ValueError.
+
+    Unknown keys pass through untouched — `PUT /ops/config` already filters to
+    `OPS_SETTINGS_DEFAULTS` and reports the rest as `ignored`, and turning that
+    into a hard reject is a separate contract change.
+    """
+    spec = OPS_SETTINGS_VALIDATION.get(key)
+    if spec is None:
+        return value
+
+    kind, low, high = spec
+    raw = (value or "").strip()
+
+    if kind == "bool":
+        if raw.lower() not in ("true", "false"):
+            raise ValueError(f"{key} must be 'true' or 'false' (got {value!r})")
+        return raw.lower()
+
+    try:
+        parsed = int(raw) if kind == "int" else float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{key} must be {'an integer' if kind == 'int' else 'a number'} "
+            f"(got {value!r}). An unparseable value used to coerce to 0, which "
+            f"for a retention window silently means 'sweep disabled'."
+        )
+
+    if low is not None and parsed < low:
+        raise ValueError(f"{key} must be >= {low} (got {parsed})")
+    if high is not None and parsed > high:
+        raise ValueError(f"{key} must be <= {high} (got {parsed})")
+
+    return str(parsed)

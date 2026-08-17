@@ -107,7 +107,7 @@ Classic is faster to operate. Fine-grained is safer. Pick the tradeoff that matc
 
 A classic PAT with `repo` scope grants access to **every repository your GitHub user can see** — personal repos, plus any org repos your account has access to. Best when you're comfortable with that reach and want zero-maintenance setup.
 
-![GitHub new classic personal access token page with the `repo` scope checked](../images/pat/classic-token-scopes.png)
+![GitHub new classic personal access token page with the `repo` scope checked](../../screenshots/external-github-pat-scopes.png)
 
 
 **Step 1: Create the token**
@@ -229,7 +229,9 @@ Most edits to an existing PAT happen **in-place in GitHub** — the token string
 - Scopes are editable in-place (check/uncheck boxes and save).
 - The token string itself only changes if you click **Regenerate**.
 
-After any change that produces a **new token string**, update it in Trinity via **Settings → GitHub Personal Access Token → Test → Save**. Trinity auto-propagates the new token to all running agents that use the platform PAT within seconds.
+After any change that produces a **new token string**, update it in Trinity via **Settings → GitHub Personal Access Token → Test → Save**. Trinity propagates the new token to every running agent that uses the platform PAT within seconds — the container environment, the workspace `.env`, and the git credential configuration are all updated, so a rotation takes effect for the agent's next push without a manual restart.
+
+Agents that carry their **own** per-agent token are deliberately untouched by a global rotation — update those on the agent's Git tab.
 
 ## For Agents
 

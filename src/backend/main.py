@@ -82,14 +82,17 @@ from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router, pull_router as internal_pull_router
-from routers.tags import router as tags_router
+from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
 from routers.product_events import router as product_events_router
+from routers.evaluations import router as evaluations_router  # ent#206 behavioral-eval referee surface
 from routers.reminders import router as reminders_router
 from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
 from routers.connector import router as connector_router  # per-agent MCP connector (ent#46, OSS-core #118)
+from routers.mcp_auth import router as mcp_auth_router  # MCP inline email auth (#848)
+from routers.agent_mcp_key import router as agent_mcp_key_router  # per-agent Trinity MCP key (#1854)
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
@@ -106,6 +109,7 @@ from routers.event_subscriptions import router as event_subscriptions_router, se
 from routers.users import router as users_router
 from routers.debug import router as debug_router  # #306 soak instrumentation
 from routers.a2a import router as a2a_router  # #737 A2A Agent Cards
+from routers.a2a import a2a_server_router  # ent#157 A2A inbound server (well-known + JSON-RPC)
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
@@ -116,6 +120,11 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
+# Workspace / client portal — OSS core since ent#356 (was an entitled
+# enterprise module). Its own package rather than routers/: it moved
+# wholesale from the submodule, and keeping the vertical slice intact
+# keeps the move reviewable as a move.
+from client_portal.router import router as client_portal_router
 
 # Import activity service
 from services.activity_service import activity_service
@@ -135,6 +144,7 @@ from services.log_archive_service import log_archive_service
 # Import audit retention service (#552)
 from services.audit_retention_service import audit_retention_service
 from services.db_vacuum_service import db_vacuum_service
+from services.db_backup_service import db_backup_service  # #2216
 
 # Import operator queue sync service
 from services.operator_queue_service import operator_queue_service, set_websocket_manager as set_opqueue_sync_ws_manager
@@ -251,6 +261,7 @@ set_agents_filtered_ws_manager(filtered_manager)
 set_agent_rename_ws_manager(manager)
 set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
+set_tags_ws_manager(manager)  # agent_tags_changed (org overlay, ent#305)
 set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
 set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration + self_task broadcasts
 set_public_links_ws_manager(manager)
@@ -457,6 +468,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error starting DB vacuum service: {e}")
 
+    # Initialize DB backup service (#2216) — daily 03:30 UTC, both backends
+    try:
+        db_backup_service.start()
+        logger.info("DB backup service started")
+    except Exception as e:
+        logger.error(f"Error starting DB backup service: {e}")
+
     # PERF-269: Stagger background services to reduce SQLite write contention
     # Start operator queue sync service (OPS-001) — polls every 5s
     try:
@@ -510,6 +528,20 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
+
+    # trinity-enterprise#236: skills-library auto-sync + fleet re-inject.
+    # The loop always runs; it self-gates on the (default-OFF) setting each
+    # cycle and only the Redis leader performs a cycle, so starting it in every
+    # worker is safe. Staggered +11s to stay clear of the other boot loops.
+    async def _start_skills_sync_delayed():
+        await asyncio.sleep(11)
+        try:
+            from services.skills_sync_service import skills_sync_service
+            skills_sync_service.start()
+            logger.info("Skills library sync service started (staggered +11s)")
+        except Exception as e:
+            logger.error(f"Error starting skills library sync service: {e}")
+    asyncio.create_task(_start_skills_sync_delayed())
 
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
@@ -745,6 +777,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping DB vacuum service: {e}")
 
+    # Shutdown DB backup service (#2216)
+    try:
+        db_backup_service.stop()
+        logger.info("DB backup service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping DB backup service: {e}")
+
     # Shutdown cleanup service
     try:
         cleanup_service.stop()
@@ -805,9 +844,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping sync health service: {e}")
 
+    # Shutdown skills library sync service (trinity-enterprise#236)
+    try:
+        from services.skills_sync_service import skills_sync_service
+        skills_sync_service.stop()
+        logger.info("Skills library sync service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping skills library sync service: {e}")
+
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
-        canary_service.stop()
+        await canary_service.stop()
         logger.info("Canary service stopped")
     except Exception as e:
         logger.error(f"Error stopping canary service: {e}")
@@ -858,6 +905,18 @@ app = FastAPI(
 # Initialize OpenTelemetry distributed tracing (RELIABILITY-002)
 # Must be called after app creation but before middleware/routers
 _otel_enabled = setup_opentelemetry(app)
+
+
+# 422 bodies must not echo the value that failed validation (ent#109 /cso):
+# Pydantic v2 puts the rejected value in `input` and FastAPI's default handler
+# returns `exc.errors()` verbatim, so a failed `SecretStr` validation returns the
+# SECRET. Load-bearing for the ent#109 PAT charset guard — see the handler's own
+# docstring in `error_handlers.py`, which is where it lives so it is testable
+# without standing the whole app up.
+from fastapi.exceptions import RequestValidationError as _RequestValidationError
+from error_handlers import validation_error_without_input as _validation_error_without_input
+
+app.add_exception_handler(_RequestValidationError, _validation_error_without_input)
 
 # Add CORS middleware
 app.add_middleware(
@@ -968,8 +1027,11 @@ app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(reports_router)  # Agent Reports (#918)
 app.include_router(product_events_router)  # Local product-event capture (ent#184)
+app.include_router(evaluations_router)  # Behavioral evaluations (ent#206)
 app.include_router(reminders_router)  # Agent Self-Reminders (#1296)
 app.include_router(connector_router)  # Per-agent MCP connector (ent#46, OSS-core #118)
+app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal-secret gated
+app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
@@ -992,11 +1054,13 @@ app.include_router(event_subscriptions_router)  # Agent Event Subscriptions (EVT
 app.include_router(users_router)  # User Management (ROLE-001)
 app.include_router(debug_router)  # #306 soak dashboard
 app.include_router(a2a_router)  # A2A Agent Cards (#737)
+app.include_router(a2a_server_router)  # A2A inbound server: /a2a/{name}/.well-known + JSON-RPC (ent#157)
 app.include_router(admin_recovery_router)  # Soft-delete admin recovery (#834 Phase 1c)
 app.include_router(loops_agent_router)  # Sequential agent loops (#740)
 app.include_router(loops_loop_router)  # Sequential agent loops (#740)
 app.include_router(webhooks_router)  # Webhook Triggers (WEBHOOK-001, #291)
 app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
+app.include_router(client_portal_router)  # Workspace / client portal (ent#356, epic #78)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule
@@ -1279,24 +1343,56 @@ def _build_version_payload(
     import os
     from pathlib import Path
 
-    # Version resolution order (#993):
-    #   1. VERSION env var — build-stamped from git (e.g. "0.9.0+g4c640b6e"),
-    #      wired through docker-compose backend.build.args + start.sh.
-    #   2. VERSION file — curated semver, mounted in dev / copied in image.
-    #   3. "unknown" — neither present.
-    # Env-first means dev (bind-mount) and prod (build-arg) agree for the
-    # same commit instead of diverging on the file-mount being absent.
-    version = os.getenv("VERSION") or None
-    if not version:
-        version_paths = [
-            Path("/app/VERSION"),  # In container (mounted)
-            Path(__file__).parent.parent.parent / "VERSION",  # Development
-        ]
-        for version_file in version_paths:
+    # Version resolution (#993, corrected by #1810 + #1814).
+    #
+    #   env VERSION  — build-stamped from git ("0.9.0+g4c640b6e"), wired through
+    #                  docker-compose backend.build.args + start.sh. Describes
+    #                  the IMAGE.
+    #   VERSION file — curated semver. Bind-mounted live in dev
+    #                  (docker-compose.yml `./VERSION:/app/VERSION:ro`), COPY'd
+    #                  into the image in prod. In dev it describes the CODE.
+    #
+    # #1810: `ARG VERSION=unknown` + an unconditional `ENV` means the env var is
+    # always set — to the literal string "unknown" when no build arg was passed.
+    # That sentinel is truthy, so the old `or None` never fired and the file tier
+    # was unreachable for exactly the operator it was written for. Treat the
+    # sentinel as absence.
+    #
+    # #1814: `start.sh` never rebuilds platform images, so after an in-place
+    # upgrade the baked env still names the PREVIOUS build while the
+    # bind-mounted source runs the new code. The two then disagree, and the
+    # file — being live in dev — is the one describing what is actually
+    # executing. Prefer it, and keep the baked value as `image_version` so the
+    # drift is visible rather than silently smoothed over. In prod both are
+    # baked from the same build, so they agree and this branch never fires.
+    _SENTINEL = "unknown"
+
+    env_version = (os.getenv("VERSION") or "").strip()
+    if env_version == _SENTINEL:
+        env_version = ""
+
+    file_version = ""
+    version_paths = [
+        Path("/app/VERSION"),  # In container (mounted in dev, COPY'd in prod)
+        Path(__file__).parent.parent.parent / "VERSION",  # Development
+    ]
+    for version_file in version_paths:
+        try:
             if version_file.exists():
-                version = version_file.read_text().strip()
+                file_version = version_file.read_text().strip()
                 break
-    version = version or "unknown"
+        except OSError:
+            # An unreadable VERSION file must never 500 this endpoint — it is
+            # the endpoint operators reach for when something is already wrong.
+            continue
+
+    # Compare on the semver base: the env value carries a `+g<sha>` suffix the
+    # curated file does not.
+    image_version = env_version or None
+    if env_version and file_version and file_version != env_version.split("+")[0]:
+        version = file_version
+    else:
+        version = env_version or file_version or _SENTINEL
 
     git_commit = os.getenv("GIT_COMMIT", "unknown")
     git_commit_short = git_commit[:8] if git_commit != "unknown" else "unknown"
@@ -1317,6 +1413,12 @@ def _build_version_payload(
             "base_image": f"trinity-agent-base:{version}"
         },
         "runtimes": ["claude-code", "gemini-cli", "codex"],
+        # #1814: the version baked into the running image. Equal to `version`
+        # on a normally-built stack; DIFFERENT means the image is stale
+        # relative to the code being executed (an in-place upgrade without
+        # `docker compose build`), and the git_* fields below describe that
+        # older image, not `version`. None when the image carries no stamp.
+        "image_version": image_version,
         "build_date": os.getenv("BUILD_DATE", "unknown"),
         "git_commit": git_commit,
         "git_commit_short": git_commit_short,

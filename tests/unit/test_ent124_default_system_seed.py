@@ -49,6 +49,13 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_MANIFEST = REPO_ROOT / "config" / "manifests" / "default-system.yaml"
 
+# #1931: the two on-disk checks below are properties of ANY bundled manifest,
+# not just the auto-seeded one — a demo manifest referencing a template that
+# ships no CLAUDE.md deploys an agent with no instructions just as silently.
+# Enumerate by glob so the next bundled manifest is guarded on arrival.
+ALL_MANIFESTS = sorted((REPO_ROOT / "config" / "manifests").glob("*.yaml"))
+ALL_MANIFEST_IDS = [p.name for p in ALL_MANIFESTS]
+
 TEST_MANIFEST = """
 name: testsys
 agents:
@@ -150,7 +157,8 @@ def test_bundled_manifest_parses_and_validates():
     assert manifest.permissions.preset == "full-mesh"
 
 
-def test_bundled_manifest_local_templates_exist_in_tree():
+@pytest.mark.parametrize("manifest_path", ALL_MANIFESTS, ids=ALL_MANIFEST_IDS)
+def test_bundled_manifest_local_templates_exist_in_tree(manifest_path):
     """learnings 2026-07-23: an absent local: template used to create a BLANK
     agent — deploy reported success and the seed flag latched. #1759 closed
     that (create now 404s `UNKNOWN_LOCAL_TEMPLATE`), so this check is now
@@ -158,34 +166,44 @@ def test_bundled_manifest_local_templates_exist_in_tree():
     fails at collection time with a precise message naming the offending
     manifest entry, whereas the runtime gate would surface as a first-run seed
     landing in the operator queue. It also still covers the CLAUDE.md half
-    (ent#239), which the create gate does not check at all."""
-    manifest = system_service.parse_manifest(REAL_MANIFEST.read_text(encoding="utf-8"))
+    (ent#239), which the create gate does not check at all.
+
+    #1931: widened from `default-system.yaml` to every bundled manifest. Every
+    manifest the repo ships is `local:`-only today, which is the property that
+    keeps a deploy PAT-free — asserting it here is what keeps it true."""
+    manifest = system_service.parse_manifest(manifest_path.read_text(encoding="utf-8"))
     for short, cfg in manifest.agents.items():
-        assert cfg.template.startswith("local:"), f"{short}: PAT-free seed requires local: templates"
+        assert cfg.template.startswith("local:"), (
+            f"{manifest_path.name}/{short}: PAT-free deploy requires local: templates"
+        )
         template_dir = REPO_ROOT / "config" / "agent-templates" / cfg.template.split(":", 1)[1]
         assert (template_dir / "template.yaml").is_file(), (
-            f"{short}: bundled manifest references '{cfg.template}' but "
+            f"{manifest_path.name}/{short}: manifest references '{cfg.template}' but "
             f"{template_dir}/template.yaml does not exist — this would seed a blank agent"
         )
         # ent#239: template.yaml alone still deploys "successfully" but seeds an
         # agent with no instructions — CLAUDE.md is the zero-cred usefulness bar.
         assert (template_dir / "CLAUDE.md").is_file(), (
-            f"{short}: '{cfg.template}' ships no CLAUDE.md — the agent would "
-            f"deploy but have no instructions (fails the zero-cred useful bar)"
+            f"{manifest_path.name}/{short}: '{cfg.template}' ships no CLAUDE.md — the "
+            f"agent would deploy but have no instructions (fails the zero-cred useful bar)"
         )
 
 
-def test_bundled_manifest_templates_ship_declared_commands():
+@pytest.mark.parametrize("manifest_path", ALL_MANIFESTS, ids=ALL_MANIFEST_IDS)
+def test_bundled_manifest_templates_ship_declared_commands(manifest_path):
     """ent#239 live finding: Claude Code intercepts any leading-`/` message
     before the model sees it, so a command that is only *documented* (in
     template.yaml / CLAUDE.md prose) fails as typed — `/research` returned
     "Unknown command: /research" and `/status` hit the built-in. Every command
     a seeded template declares must ship a real `.claude/commands/<name>.md`
     (the pattern trinity-system / demo-* templates already follow); a shipped
-    file also shadows same-named built-ins (verified live for /status)."""
+    file also shadows same-named built-ins (verified live for /status).
+
+    #1931: widened to every bundled manifest — a demo fleet's commands fail as
+    typed exactly the same way the seeded fleet's would."""
     import yaml
 
-    manifest = system_service.parse_manifest(REAL_MANIFEST.read_text(encoding="utf-8"))
+    manifest = system_service.parse_manifest(manifest_path.read_text(encoding="utf-8"))
     for short, cfg in manifest.agents.items():
         template_dir = REPO_ROOT / "config" / "agent-templates" / cfg.template.split(":", 1)[1]
         declared = [
@@ -195,9 +213,10 @@ def test_bundled_manifest_templates_ship_declared_commands():
         for cmd in declared:
             cmd_file = template_dir / ".claude" / "commands" / f"{cmd}.md"
             assert cmd_file.is_file(), (
-                f"{short}: template.yaml declares command '{cmd}' but ships no "
-                f"{cmd_file.relative_to(REPO_ROOT)} — as typed, /{cmd} is "
-                f"intercepted by the CLI and fails ('Unknown command')"
+                f"{manifest_path.name}/{short}: template.yaml declares command "
+                f"'{cmd}' but ships no {cmd_file.relative_to(REPO_ROOT)} — as "
+                f"typed, /{cmd} is intercepted by the CLI and fails "
+                f"('Unknown command')"
             )
 
 
@@ -407,16 +426,94 @@ def test_lock_held_by_other_worker_skips(env):
     assert env.settings.get("default_system_seeded") is None
 
 
-def test_lock_winner_deploys_and_releases(env):
+def _store_backed_redis():
+    """A MagicMock Redis that honours SETNX + GET + DELETE against a real dict —
+    so the #1920 compare-and-delete release (`SingleFlightLock.release_if_owned`)
+    can match the internally-minted token. A bare MagicMock returns a fresh
+    MagicMock on GET (never == the token), which would wrongly read as 'not our
+    lock'; and a fixed `set.return_value` can't model SETNX losing on a held key."""
     redis = MagicMock()
-    redis.set.return_value = True
+    store = {}
+
+    def _set(key, val, nx=None, ex=None):
+        if nx and key in store:
+            return None  # SETNX loses on an already-held key
+        store[key] = val
+        return True
+
+    redis.set.side_effect = _set
+    redis.get.side_effect = lambda key: store.get(key)
+    redis.delete.side_effect = lambda key: store.pop(key, None)
+    redis.store = store
+    return redis
+
+
+def test_lock_winner_deploys_and_releases(env):
+    """#1920: release is an ownership-checked compare-and-delete against the
+    minted token — it deletes our own live lock (not a tokenless delete)."""
+    redis = _store_backed_redis()
     env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: redis)
 
     result = _run()
 
     env.deploy.assert_awaited_once()
-    redis.delete.assert_called_once()
+    # The SETNX stored a real uuid token; the release GET matched it -> DELETE.
+    redis.delete.assert_called_once_with(sss._PROVISION_LOCK_KEY)
     assert result["action"] == "created"
+    assert redis.store.get(sss._PROVISION_LOCK_KEY) is None  # lock is free again
+
+
+def test_release_never_deletes_a_successor_lock(env):
+    """THE #1920 property: worker A's TTL lapses, worker B acquires a FRESH
+    lock, A finishes and releases — A's compare-and-delete must leave B's live
+    lock intact (the pre-#1920 tokenless `delete` removed it)."""
+    redis = _store_backed_redis()
+    env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: redis)
+
+    # A acquires (via the real _acquire_lock, minting A's token).
+    lock_a = svc._acquire_lock()
+    assert lock_a is not None
+
+    # A's lease TTL-expires and worker B SETNX-acquires a fresh token.
+    redis.store[sss._PROVISION_LOCK_KEY] = "worker-B-token"
+
+    # A finishes and releases — must NOT touch B's live lock.
+    svc._release_lock(lock_a)
+    redis.delete.assert_not_called()
+    assert redis.store[sss._PROVISION_LOCK_KEY] == "worker-B-token"
+
+
+def test_lock_fails_open_when_redis_down_and_still_seeds(env):
+    """Redis unreachable (client None) → the lock fails open (sole worker) and
+    the seed still runs; release is a safe no-op."""
+    env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)
+
+    result = _run()
+
+    env.deploy.assert_awaited_once()
+    assert result["action"] == "created"
+
+
+def test_two_overlapping_in_process_passes_do_not_leak(env):
+    """The lock is LOCAL to each pass (never on the singleton), so pass B's
+    acquire can't make pass A's `finally` no-op and leak A's real lock for the
+    TTL. Both passes run against ONE store-backed Redis: the winner deploys +
+    releases, the loser skips, and the key ends up free."""
+    redis = _store_backed_redis()
+    env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: redis)
+
+    # Pass A acquires first (real token minted, key now set).
+    lock_a = svc._acquire_lock()
+    assert lock_a is not None
+    # Pass B, concurrently, finds the key held → skips (no lock object).
+    lock_b = svc._acquire_lock()
+    assert lock_b is None
+
+    # A finishes and releases its OWN lock — the key is freed exactly once.
+    svc._release_lock(lock_a)
+    svc._release_lock(lock_b)  # no-op: B never held anything
+    redis.delete.assert_called_once_with(sss._PROVISION_LOCK_KEY)
+    assert redis.store.get(sss._PROVISION_LOCK_KEY) is None
 
 
 # --- the orchestrator (persisted first-run verdict) ------------------------------
@@ -509,3 +606,158 @@ def test_orchestrator_never_raises_when_cornelius_explodes(orch):
     # Fleet seeder still ran despite the Cornelius failure.
     assert ("fleet", True, "true") in orch.calls
     assert result == {"action": "created"}
+
+
+# --- #2215: pass-level seed lock -------------------------------------------------
+#
+# The two inner seeder locks serialise each seeder only against ITSELF — worker
+# A's slow Cornelius clone ran concurrently with worker B's default-system
+# deploy (A holds cornelius:provision; B loses it, falls through, wins
+# system_seed:provision). ensure_first_run_seeded now takes ONE pass-level lock
+# (`first_run_seed:provision`, #1919 token hygiene) — the loser skips the WHOLE
+# pass and writes no flags.
+
+@pytest.fixture
+def pass_redis(orch):
+    """A real fakeredis behind the pass lock (honors nx/ex/get/delete), so the
+    SETNX + compare-and-delete semantics are exercised, not stubbed."""
+    import fakeredis
+
+    r = fakeredis.FakeStrictRedis(decode_responses=True)
+    orch.env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: r)
+    return r
+
+
+def test_pass_lock_loser_skips_whole_pass_without_flags(orch, pass_redis):
+    """The observed race is precisely a HALF-skipped pass — so the loser must
+    run NEITHER seeder, persist no verdict, burn no flag, and leave the
+    sibling's lease untouched."""
+    pass_redis.set("first_run_seed:provision", "foreign-token", ex=900)
+
+    result = asyncio.run(ensure_first_run_seeded())
+
+    assert orch.calls == []                       # neither seeder ran
+    assert result["action"] == "skipped_locked"
+    assert orch.env.settings.get("first_run_fresh") is None
+    assert orch.env.settings.get("default_system_seeded") is None
+    # #1919: the loser must never delete a lease it does not hold.
+    assert pass_redis.get("first_run_seed:provision") == "foreign-token"
+
+
+def test_pass_lock_winner_runs_both_seeders_and_releases(orch, pass_redis):
+    asyncio.run(ensure_first_run_seeded())
+
+    assert [c[0] for c in orch.calls] == ["cornelius", "fleet"]
+    # Released via compare-and-delete in the finally.
+    assert pass_redis.get("first_run_seed:provision") is None
+
+
+def test_pass_lock_release_leaves_a_foreign_token_alone(orch, pass_redis):
+    """#1919: after a TTL lapse a sibling may hold a LIVE lease under our key —
+    a blind DELETE would release it. Compare-and-delete must no-op.
+
+    Driven through a lock that genuinely WON and then lost the key, because
+    `SingleFlightLock.release_if_owned` gates on the stable acquire-time
+    `held`: a never-acquired lock no-ops before it ever compares, so it would
+    pass this assertion even against a blind delete and prove nothing (#1920).
+    """
+    lock = sss._acquire_pass_lock()
+    assert lock is not None and lock.held
+
+    # Our TTL lapsed and a sibling re-took the key under a live lease.
+    pass_redis.set("first_run_seed:provision", "foreign-token", ex=900)
+
+    lock.release_if_owned()
+
+    assert pass_redis.get("first_run_seed:provision") == "foreign-token"
+
+
+def test_pass_lock_redis_error_fails_open(orch):
+    """Seeding never blocks boot (G4/#1638): a raising Redis client means
+    proceed as sole worker."""
+    broken = MagicMock()
+    broken.set.side_effect = RuntimeError("redis exploded")
+    orch.env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: broken)
+
+    asyncio.run(ensure_first_run_seeded())
+
+    assert [c[0] for c in orch.calls] == ["cornelius", "fleet"]
+
+
+# --- #2215 AC#3: operator alert on a failed Cornelius seed -----------------------
+
+def _cornelius_returning(orch, action, message="Failed to seed Cornelius: boom"):
+    async def fake(fresh=None):
+        return {"agent_name": "cornelius", "action": action,
+                "status": "error", "message": message}
+
+    orch.env.monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", fake)
+
+
+@pytest.mark.parametrize("action", ["create_failed", "create_blocked"])
+def test_cornelius_failure_raises_operator_alert(orch, action):
+    """A failed Cornelius creation was log-only (the partial/failed alerts
+    cover only the manifest deploy) — the orchestrator now captures the result
+    and raises a deterministic reserved-prefix alert. The seed flag stays
+    unset, so next boot retries (#1790 asymmetry untouched)."""
+    _cornelius_returning(orch, action)
+
+    asyncio.run(ensure_first_run_seeded())
+
+    orch.env.opq.assert_called_once()
+    agent_name, item = orch.env.opq.call_args.args
+    assert agent_name == "trinity-system"
+    assert item["id"] == "system-seed-cornelius-failed"
+    assert "backend logs" in item["question"]
+    assert item["context"]["message"] == "Failed to seed Cornelius: boom"
+
+
+@pytest.mark.parametrize(
+    "action", ["created", "none", "skipped_not_fresh", "deferred", "skipped_locked"]
+)
+def test_cornelius_success_and_skips_raise_no_alert(orch, action):
+    _cornelius_returning(orch, action)
+
+    asyncio.run(ensure_first_run_seeded())
+
+    orch.env.opq.assert_not_called()
+
+
+def test_cornelius_belt_except_also_alerts(orch):
+    """The seeder is contract-documented never-raises; if it raises anyway the
+    belt-except must not silently bypass the action check."""
+
+    async def boom(fresh=None):
+        raise RuntimeError("cornelius exploded")
+
+    orch.env.monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", boom)
+
+    result = asyncio.run(ensure_first_run_seeded())
+
+    orch.env.opq.assert_called_once()
+    assert orch.env.opq.call_args.args[1]["id"] == "system-seed-cornelius-failed"
+    # And the fleet seeder still ran (never-raises contract preserved).
+    assert ("fleet", True, "true") in orch.calls
+    assert result == {"action": "created"}
+
+
+def test_cornelius_alert_message_is_credential_sanitized(orch):
+    """The `create_failed` message is `str(exc)` from a `github:` create that
+    resolves the platform PAT when one is configured, and git/GitHub errors can
+    embed PAT-bearing remote URLs — the deploy report already redacts at its
+    exit point (`system_service._failure_reason`); the operator-queue alert is
+    the same durable, UI-rendered class and must too."""
+    _cornelius_returning(
+        orch, "create_failed",
+        message="Failed to seed Cornelius: fatal: unable to access "
+                "'https://x-access-token:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+                "@github.com/acme/private.git/': 403",
+    )
+
+    asyncio.run(ensure_first_run_seeded())
+
+    item = orch.env.opq.call_args.args[1]
+    msg = item["context"]["message"]
+    assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab" not in msg
+    assert "github.com/acme/private.git" in msg  # the URL itself survives
+    assert item["id"] == "system-seed-cornelius-failed"

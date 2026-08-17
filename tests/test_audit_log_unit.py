@@ -97,6 +97,21 @@ def audit_db(monkeypatch):
         END
         """
     )
+    # #2242/#2015: the hash-chain toggle is a durable `system_settings` row now,
+    # not an instance attribute. Without this table the fixture's `db` was a
+    # MagicMock that swallowed the write, the (deliberately fail-CLOSED) reader
+    # answered "off", and nothing was ever hashed — so two tests named after the
+    # hash chain were asserting that a disabled chain produces no hashes.
+    # Same DDL as db/schema.py's `system_settings`.
+    cursor.execute(
+        """
+        CREATE TABLE system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -365,6 +380,26 @@ def audit_service(audit_db, monkeypatch, audit_ops):
     fake_db.create_audit_entry = audit_ops.create_audit_entry
     fake_db.get_audit_entries = audit_ops.get_audit_entries
     fake_db.get_audit_entries_range = audit_ops.get_audit_entries_range
+    # #2242: the three seams #2015 added, wired to the SAME temp DB rather than
+    # left as MagicMocks.
+    #
+    # `create_audit_entry_chained` is the real one because the chain head is read
+    # inside the insert transaction — a stub would have to reimplement exactly the
+    # part that makes the chain a chain.
+    #
+    # Settings go through a real `SettingsOperations` (engine-based, so it binds to
+    # the temp file via the DATABASE_URL the audit_db fixture sets) so
+    # `enable_hash_chain()` genuinely persists and `hash_chain_enabled` genuinely
+    # reads it back. Deliberately NOT `fake_db.get_setting_value.return_value =
+    # "true"`: that would force the flag on and bypass the fail-closed reader the
+    # #2015 design turns on, which is the one behaviour most worth not faking.
+    monkeypatch.delitem(sys.modules, "db.settings", raising=False)
+    from db.settings import SettingsOperations
+
+    settings_ops = SettingsOperations()
+    fake_db.create_audit_entry_chained = audit_ops.create_audit_entry_chained
+    fake_db.get_setting_value = settings_ops.get_setting_value
+    fake_db.set_setting = settings_ops.set_setting
     fake_db_module.db = fake_db
     monkeypatch.setitem(sys.modules, "database", fake_db_module)
 
@@ -996,10 +1031,11 @@ def test_verify_chain_valid(audit_service, audit_ops):
 
 
 def test_verify_chain_empty_range(audit_service, audit_ops):
-    """verify_chain on empty range returns valid=True, checked=0."""
+    """verify_chain on an empty range is unverifiable (#1984), not vacuously valid."""
     service, _, _ = audit_service
     result = asyncio.run(service.verify_chain(999999, 999999))
-    assert result["valid"] is True
+    assert result["valid"] is None
+    assert result["status"] == "empty_range"
     assert result["checked"] == 0
 
 

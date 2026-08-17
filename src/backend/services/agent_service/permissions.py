@@ -51,7 +51,6 @@ async def get_agent_permissions_logic(
         agent_info = {
             "name": agent["name"],
             "status": agent["status"],
-            "type": agent.get("type", ""),
             "permitted": agent["name"] in permitted_list
         }
 

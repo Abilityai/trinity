@@ -11,9 +11,70 @@ Recipe-based multi-agent deployment via YAML manifest files. Deploy entire agent
 ## How It Works
 
 1. Create a system manifest YAML file defining agents and their relationships.
-2. Deploy via the `deploy_system` MCP tool or the REST API.
+2. Deploy it from the web UI (see below), the `deploy_system` MCP tool, or the REST API.
 3. All agents are created, configured, and started according to the manifest.
 4. Agents appear on the Dashboard with appropriate tags for grouping.
+
+## Installing a system from the UI
+
+Go to **Library → Systems** (`/library?tab=systems`). You need the **creator** role or
+above, because installing a system creates agents — below that role the tab is
+not shown at all.
+
+Pick one of three sources:
+
+- **Pick a system** -- cards for the manifests bundled with your Trinity instance
+  (`config/manifests/`). Each card shows how many agents it creates, whether it adds
+  schedules, whether it replaces the global system prompt, and whether it looks
+  already installed.
+- **Upload a file** -- choose a `.yaml`/`.yml` file. It is read in your browser; the
+  file itself is never uploaded.
+- **Paste YAML** -- paste or hand-edit a manifest directly.
+
+Then:
+
+1. Click **Preview**. This validates the manifest without creating anything and shows
+   you the agent names that would be created, which agents would be able to call which,
+   and any schedules that would start. Fix anything listed under **Blockers** and preview
+   again.
+2. Click **Deploy**. Deploy stays disabled until you have previewed the *current* text —
+   if you edit the manifest afterwards, preview again.
+
+### Things the preview will make you confirm
+
+Some manifests do more than create agents, so Deploy is gated on an explicit checkbox
+when either applies:
+
+- **It replaces the global system prompt.** A top-level `prompt:` key overwrites the
+  platform-wide instructions for **every agent on your instance**, not just the ones in
+  the manifest.
+- **It starts recurring schedules.** A schedule is enabled unless you write
+  `enabled: false`, so those agents begin running on a timer as soon as they deploy —
+  consuming API budget without anyone asking them to.
+
+### Reading the result
+
+- **"All agents created"** -- everything worked.
+- **"Some agents were created"** -- the rest are listed with the reason. Note that
+  re-running the same manifest does **not** retry the missing ones; it creates a second,
+  suffixed copy of the ones that already succeeded. Fix the cause and create the missing
+  agents individually.
+- **"No agents were created"** -- nothing was deployed, so there is nothing to clean up.
+- **Things needing attention** -- the header only describes whether *agents* were
+  created. Shared folders, permissions, schedules, tags and starting the agents are all
+  best-effort, so read this section: a system can report "agents created" while none of
+  its schedules were set up.
+- **"Outcome unknown"** -- the request timed out or the server errored mid-deploy. The
+  deployment may still be running. **Check your agent list before retrying**, because
+  deploying twice creates duplicate agents.
+
+Two known limits of the preview, both deliberate:
+
+- Templates referenced as `github:` are only checked when you actually deploy, so a
+  clean preview cannot promise a remote-template manifest will work.
+- Agent names are provisional. If a name is taken, Trinity appends `_2`, `_3`, and so on,
+  and it re-checks at deploy time — so a name can shift if something else is created in
+  between.
 
 A manifest describes:
 
@@ -47,7 +108,7 @@ agents:
         cron: "0 9 * * *"
         message: "Create today's content plan"
   writer:
-    template: local:business-assistant
+    template: local:scribe
     folders: { expose: true, consume: true }
     tags: [worker]
 permissions:

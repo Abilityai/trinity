@@ -165,6 +165,80 @@ async def container_get(container_id: str) -> Any:
     )
 
 
+async def agent_container_states_async() -> Optional[Dict[str, str]]:
+    """Async form of ``docker_service.agent_container_states`` (#2196).
+
+    The tri-state semantics are the leaf's: a mapping (possibly empty) means
+    Docker answered; ``None`` means it could not be asked.
+
+    Exists because the Workspace roster is served from an ``async def`` route,
+    and this module's contract is mandatory there — a synchronous Docker read on
+    the event loop stalls every other request in the worker, including live
+    ``/chat/stream`` SSE for unrelated clients. Running it on the shared 4-worker
+    executor also bounds what concurrent sign-ins can do to the daemon.
+
+    The import is function-local **on purpose**: ``client_portal`` and the tests
+    around it patch ``sys.modules["services.docker_service"]``, and only the
+    ``from x import y`` form resolves through ``sys.modules`` at call time (an
+    ``import x.y as m`` alias binds the package attribute, which a stubbed suite
+    makes a different object).
+    """
+    from services.docker_service import agent_container_states
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, agent_container_states)
+
+
+async def agent_container_state_async(name: str) -> Optional[str]:
+    """Async form of ``docker_service.agent_container_state`` (#2196).
+
+    Single-agent, so one agent's page (or one chat turn) never pays a
+    fleet-scale read — see #2160. Same function-local-import rule as above.
+    """
+    from services.docker_service import agent_container_state
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, agent_container_state, name)
+
+
+# =============================================================================
+# Image Operations
+# =============================================================================
+
+async def image_get(name: str) -> Any:
+    """Get an image without blocking the event loop.
+
+    Args:
+        name: Image reference — tag (e.g. ``trinity-agent-base:latest``) or ID
+
+    Returns:
+        Image object
+
+    Raises:
+        docker.errors.ImageNotFound: If the image doesn't exist
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, docker_client.images.get, name)
+
+
+# =============================================================================
+# Network Operations
+# =============================================================================
+
+async def network_get(name: str) -> Any:
+    """Get a network without blocking the event loop.
+
+    Args:
+        name: Network name (e.g. ``trinity-agent-network``)
+
+    Returns:
+        Network object
+
+    Raises:
+        docker.errors.NotFound: If the network doesn't exist
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, docker_client.networks.get, name)
+
+
 # =============================================================================
 # Volume Operations
 # =============================================================================

@@ -31,7 +31,12 @@ deliberately does **not** re-render any header element; where it references one
   │      GET /api/agents/{name}/schedules               ┐ footprint chips
   │      GET /api/agents/{name}/skills                  ┘
   │      GET /api/executions?agent=name&limit=5         (recent-activity mini-list)
-  │      GET /api/agents/{name}/info ])                 (About lead)
+  │      agentsStore.getAgentInfo(name) ])              (About lead — #2198: via
+  │                                                       the store's in-flight
+  │                                                       join, not a raw axios
+  │                                                       GET; AgentDetail's
+  │                                                       checkBrainOrbCapability
+  │                                                       reads the same URL)
   ├── window selector 7/14/30d → watch(window) → loadAnalytics()  (per-window cache)
   ├── "New task" / "Full details →" → emit navigate-tab(tab)  → AgentDetail.activeTab
   └── recent row click → emit open-task(execId) → activeTab='tasks' + ?execution=

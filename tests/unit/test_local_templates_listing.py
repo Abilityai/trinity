@@ -11,6 +11,7 @@ temporary directory shaped like `config/agent-templates/`.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -159,6 +160,289 @@ def test_get_local_template_rejects_wrong_prefix(tmp_path, monkeypatch):
     ts = _load_template_service(monkeypatch, tmp_path)
     assert ts.get_local_template("github:org/x") is None
     assert ts.get_local_template("x") is None  # unprefixed
+
+
+# -----------------------------------------------------------------------------
+# #1900 — path-traversal containment on the READ path
+#
+# `GET /api/templates/{template_id:path}` hands `local:<name>` straight to
+# `get_local_template`, which joined `<name>` onto the templates root with no
+# validation. `{template_id:path}` captures `/`, so `local:../x`,
+# `local:/abs/x` and a root-escaping symlink each read `<escaped>/template.yaml`
+# and echoed its contents to any authenticated caller.
+#
+# ⚠️ READ THIS BEFORE ADDING A TEST HERE. On UNPATCHED code `get_local_template`
+# returns `None` for any id whose target directory simply has no `template.yaml`
+# — so "assert None" is green before *and* after the fix unless the test PLANTS
+# a real `template.yaml` at the exact escaped location. Every test below is
+# therefore labelled:
+#   REPRO   — plants a target; returns a dict on unpatched code (verified red).
+#   HYGIENE — cannot be made red; encodes the intended contract only.
+# A rejection test with nothing planted proves the fixture is empty, not that
+# the guard exists.
+# -----------------------------------------------------------------------------
+
+def _seed_root(tmp_path):
+    """`(base, root)` — the templates root is a CHILD of base, so `..` escapes
+    into a directory the test controls."""
+    root = tmp_path / "templates"
+    root.mkdir()
+    return tmp_path, root
+
+
+def test_1900_rejects_parent_traversal(tmp_path, monkeypatch):
+    """REPRO — `local:../<x>` and `local:..` must not escape the root.
+
+    Both targets are planted, so unpatched code returns a dict for each.
+    """
+    base, root = _seed_root(tmp_path)
+    _seed_template(base, "outside", body="name: outside\ndisplay_name: SECRET")
+    # The parent of the root is itself a template dir, so `local:..` is a real
+    # repro rather than a vacuous None.
+    (base / "template.yaml").write_text("name: parent\ndisplay_name: PARENT SECRET")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template("local:../outside") is None
+    assert ts.get_local_template("local:..") is None
+
+
+def test_1900_rejects_multi_level_traversal(tmp_path, monkeypatch):
+    """REPRO — two levels up is planted and must still be refused."""
+    root = tmp_path / "lvl1" / "lvl2" / "templates"
+    root.mkdir(parents=True)
+    _seed_template(tmp_path / "lvl1", "deep", body="name: deep\ndisplay_name: DEEP SECRET")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template("local:../../deep") is None
+
+
+def test_1900_rejects_absolute_path_id(tmp_path, monkeypatch):
+    """REPRO — the shape the issue never tested.
+
+    `Path("/root") / "/abs/x"` is `/abs/x`: an absolute right-hand side wins the
+    join outright, so no `..` is needed. It also needs no percent-encoding to
+    survive a conforming HTTP client (RFC 3986 dot-segment removal only drops a
+    segment that is exactly `..`).
+    """
+    base, root = _seed_root(tmp_path)
+    target = _seed_template(base, "abs-target", body="name: abs\ndisplay_name: ABS SECRET")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template(f"local:{target}") is None
+
+
+def test_1900_rejects_sibling_escape(tmp_path, monkeypatch):
+    """REPRO — `<root>-evil` is the escape a string prefix check MISSES.
+
+    `str("/x/templates-evil").startswith("/x/templates")` is True, so a
+    `startswith` containment check passes this. Only `is_relative_to` on the
+    resolved paths refuses it.
+    """
+    base, root = _seed_root(tmp_path)
+    _seed_template(base, "templates-evil", body="name: evil\ndisplay_name: SIBLING SECRET")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template("local:../templates-evil") is None
+
+
+def test_1900_rejects_symlink_escape(tmp_path, monkeypatch):
+    """REPRO — a symlink INSIDE the root pointing OUT of it.
+
+    The name allowlist cannot see this (`linked` is a perfectly legal name);
+    only resolving both sides catches it.
+    """
+    base, root = _seed_root(tmp_path)
+    outside = _seed_template(base, "elsewhere", body="name: e\ndisplay_name: LINK SECRET")
+    try:
+        os.symlink(outside, root / "linked", target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+        pytest.skip("symlinks unavailable on this platform")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template("local:linked") is None
+
+
+def test_1900_accepts_symlink_that_stays_inside_the_root(tmp_path, monkeypatch):
+    """Anti-over-blocking — only ESCAPING symlinks are refused, not all of them.
+
+    Note the emitted id is the link TARGET's (`local:sage`), because the helper
+    returns the resolved path and `_build_local_template` derives the id from
+    `Path.name`. That is deliberate: "use the value you checked" is the barrier
+    shape CodeQL recognises, and the shipped catalog contains no symlinks.
+    """
+    base, root = _seed_root(tmp_path)
+    _seed_template(root, "sage", body="name: sage\ndisplay_name: Sage")
+    try:
+        os.symlink(root / "sage", root / "inner", target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+        pytest.skip("symlinks unavailable on this platform")
+    ts = _load_template_service(monkeypatch, root)
+
+    got = ts.get_local_template("local:inner")
+    assert got is not None
+    assert got["id"] == "local:sage"
+
+
+def test_1900_rejects_malformed_names_with_a_planted_target(tmp_path, monkeypatch):
+    """REPRO — every one of these is a genuine, plantable POSIX directory name.
+
+    Each target is created with a real `template.yaml`, so unpatched code
+    returns a dict for each and the test is differential.
+    """
+    base, root = _seed_root(tmp_path)
+    hostile = ["a/b", "-lead", "_lead", ".hidden", "a..b", "sp ace", "a\\b"]
+    for name in hostile:
+        _seed_template(root, name, body=f"name: x\ndisplay_name: LEAK {name!r}")
+    ts = _load_template_service(monkeypatch, root)
+
+    for name in hostile:
+        assert ts.get_local_template(f"local:{name}") is None, name
+
+
+def test_1900_trailing_dot_name_is_contained_and_allowed(tmp_path, monkeypatch):
+    """Anti-over-blocking — `sage.` is a DIFFERENT directory that is still inside
+    the root, so `is_relative_to` correctly admits it (POSIX keeps the trailing
+    dot; the backend is Linux-only by construction). Not a bypass."""
+    base, root = _seed_root(tmp_path)
+    _seed_template(root, "sage.", body="name: sage\ndisplay_name: Trailing Dot")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template("local:sage.") is not None
+
+
+def test_1900_trailing_newline_name_is_stopped_by_the_existence_check(
+    tmp_path, monkeypatch
+):
+    """The one deliberately-permissive edge of the mirrored regex, pinned.
+
+    Python's `$` matches before a trailing newline, so `"sage\\n"` passes the
+    allowlist — exactly as it does in `crud._safe_local_template_path`, whose
+    pattern this one is byte-identical to (pinned by
+    `test_1759_template_root_parity.py`). Per the 2026-07-28 learning the
+    question is *what else* stops the case the mirrored predicate allows: here
+    it is the caller's own existence check, because `<root>/"sage\\n"` names a
+    DIFFERENT, non-existent directory — not a traversal. Both sinks and crud
+    carry that check, so nothing is inherited on faith.
+
+    Deliberately NOT planted: planting it would create the directory and make
+    the id legitimately resolvable, testing the opposite of the contract.
+    """
+    base, root = _seed_root(tmp_path)
+    _seed_template(root, "sage", body="name: sage\ndisplay_name: Sage")
+    ts = _load_template_service(monkeypatch, root)
+
+    assert ts.get_local_template("local:sage\n") is None
+    assert ts.get_local_template("local:sage") is not None
+
+
+def test_1900_rejects_unplantable_malformed_names(tmp_path, monkeypatch):
+    """HYGIENE — green on unpatched code by construction.
+
+    These encode the intended contract; they do NOT reproduce the bug (no
+    directory can be planted at any of them). Listed so the contract is
+    explicit, labelled so nobody counts them as coverage.
+    """
+    base, root = _seed_root(tmp_path)
+    _seed_template(base, "outside", body="name: outside")
+    ts = _load_template_service(monkeypatch, root)
+
+    for name in [
+        "", ".", "..", "...", "a\x00b", "%2e%2e", "..%2f", "....//",
+        "．．/outside",          # fullwidth lookalike
+        "‮outside",        # RTL override
+        "   ",
+    ]:
+        assert ts.get_local_template(f"local:{name}") is None, repr(name)
+
+
+def test_1900_legit_ids_still_resolve(tmp_path, monkeypatch):
+    """Anti-over-blocking — the whole legitimate name space keeps working."""
+    base, root = _seed_root(tmp_path)
+    for name in ["x", "dd-compliance", "a.b", "a_b", "9lives", "trinity-system"]:
+        _seed_template(root, name, body=f"name: {name}\ndisplay_name: {name}")
+    ts = _load_template_service(monkeypatch, root)
+
+    for name in ["x", "dd-compliance", "a.b", "a_b", "9lives", "trinity-system"]:
+        got = ts.get_local_template(f"local:{name}")
+        assert got is not None, name
+        assert got["id"] == f"local:{name}"
+
+
+def test_1900_hidden_template_still_resolves_by_id(tmp_path, monkeypatch):
+    """The #1513 contract is preserved — the barrier reads the NAME, never the
+    `hidden` flag, so hidden fixtures stay resolvable by id."""
+    base, root = _seed_root(tmp_path)
+    _seed_template(root, "canary", body="name: canary\ndisplay_name: C\nhidden: true")
+    ts = _load_template_service(monkeypatch, root)
+
+    got = ts.get_local_template("local:canary")
+    assert got is not None
+    assert got["hidden"] is True
+    # ...and it is still excluded from the user-facing listing.
+    assert ts.get_local_templates() == []
+
+
+def test_1900_every_listed_id_resolves(tmp_path, monkeypatch):
+    """Round-trip — anything the listing surface emits must resolve on detail.
+
+    Hermetic guard against the barrier over-blocking a name the catalog scan
+    happily lists.
+    """
+    base, root = _seed_root(tmp_path)
+    for name in ["alpha", "beta-two", "gamma.three", "delta_four"]:
+        _seed_template(root, name, body=f"name: {name}\ndisplay_name: {name}")
+    ts = _load_template_service(monkeypatch, root)
+
+    listed = ts.get_local_templates()
+    assert len(listed) == 4
+    for entry in listed:
+        assert ts.get_local_template(entry["id"]) is not None, entry["id"]
+
+
+def test_1900_real_catalog_names_match_the_id_allowlist(monkeypatch):
+    """Convention guard on the SHIPPED catalog.
+
+    A future template directory named `my template` would list fine and then
+    404 on detail. Cheap to catch here rather than in review.
+    """
+    real_dir = _BACKEND.parent.parent / "config" / "agent-templates"
+    if not real_dir.is_dir():
+        pytest.skip("shipped catalog not present in this checkout")
+    ts = _load_template_service(monkeypatch, real_dir)
+
+    offenders = [
+        child.name
+        for child in sorted(real_dir.iterdir())
+        if child.is_dir() and ts.contained_template_dir(child.name, real_dir) is None
+    ]
+    assert offenders == []
+
+
+def test_1900_containment_survives_a_symlinked_root(tmp_path, monkeypatch):
+    """LANDMINE GUARD — resolve BOTH sides, not just the candidate.
+
+    Its job is to fail the *fix*, not the bug: it is green before the change and
+    red on a half-resolved implementation that resolves only the candidate. When
+    the live root sits under a symlinked prefix (a container bind, an operator's
+    symlinked deploy dir), resolving one side and not the other rejects EVERY
+    legitimate template. All 130 pre-existing tests pass against that broken
+    variant — this is the only test that catches it, so do not weaken it.
+    """
+    real_base = tmp_path / "real"
+    root = real_base / "templates"
+    root.mkdir(parents=True)
+    _seed_template(root, "sage", body="name: sage\ndisplay_name: Sage")
+    try:
+        os.symlink(real_base, tmp_path / "link", target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+        pytest.skip("symlinks unavailable on this platform")
+
+    # Deliberately UNRESOLVED — this is what `_local_templates_dir()` returns.
+    ts = _load_template_service(monkeypatch, tmp_path / "link" / "templates")
+
+    got = ts.get_local_template("local:sage")
+    assert got is not None
+    assert got["id"] == "local:sage"
 
 
 # -----------------------------------------------------------------------------
@@ -312,29 +596,57 @@ def test_real_catalog_hides_all_known_fixtures(monkeypatch):
     leaked = forbidden & ids
     assert not leaked, f"internal fixtures leaked into the catalog: {sorted(leaked)}"
 
-    convention_leaks = {n for n in ids if n.startswith(("test-", "demo-"))}
-    assert not convention_leaks, f"test-/demo- named dirs in catalog: {sorted(convention_leaks)}"
+    # #1931: `dd-` joins the prefix convention. The 11-agent VC due-diligence
+    # fleet is a demo we still run, not a starter — it ships `hidden: true` and
+    # is reached deliberately via config/manifests/vc-due-diligence.yaml. This
+    # is the cheapest possible regression guard: un-hiding any dd-* turns CI
+    # red. It runs over VISIBLE ids only, so the hidden fleet is unaffected.
+    convention_leaks = {n for n in ids if n.startswith(("test-", "demo-", "dd-"))}
+    assert not convention_leaks, (
+        f"test-/demo-/dd- named dirs in catalog: {sorted(convention_leaks)}"
+    )
 
 
-def test_real_catalog_surfaces_starters_ahead_of_suite(monkeypatch):
-    """scout/sage/scribe are present and rank ahead of the dd-* suite after the
-    router sort — the priority-surfacing fix, verified end-to-end (#1513).
-    Also guards that scribe's template.yaml parses (a broken YAML would silently
-    drop it from the catalog)."""
+def test_real_catalog_surfaces_the_three_starters(monkeypatch):
+    """scout/sage/scribe are present, each still declares `priority: 20`, and
+    they sort ahead of anything else visible (#1513, reworked by #1931).
+
+    Renamed from `..._ahead_of_suite`: since #1931 the dd-* suite is
+    `hidden: true`, so the old `if dd_positions:` clause could only ever go
+    **vacuous, not red** — a green run would have proved nothing. What is
+    load-bearing now:
+
+    - all three present (this also proves each `template.yaml` parses — a
+      broken YAML silently drops a template from the catalog, the #1513
+      `scribe` bug);
+    - each still declares `priority: 20` — the *mechanism* the ordering
+      depends on, and a genuinely non-vacuous assertion today;
+    - the ordering clause, generalised off `dd-` to "anything else visible".
+      **It is inert today** (the visible catalog is exactly these three), kept
+      because it is what a fourth starter would rely on. Do not read a green
+      run here as proof that ordering is guarded.
+    """
     ts, real_dir = _load_ts_real_catalog(monkeypatch)
     if not real_dir.exists():
         pytest.skip("config/agent-templates not present in this checkout")
+
+    starters = ("scout", "sage", "scribe")
 
     templates = ts.get_local_templates()
     templates.sort(key=lambda t: (t.get("priority", 100), t.get("display_name", "")))
     order = [t["id"].split(":", 1)[1] for t in templates]
 
-    for starter in ("scout", "sage", "scribe"):
+    by_name = {t["id"].split(":", 1)[1]: t for t in templates}
+    for starter in starters:
         assert starter in order, f"starter {starter} missing from catalog"
+        assert by_name[starter].get("priority") == 20, (
+            f"starter {starter} no longer declares priority: 20 — the router "
+            f"sort would drop it behind every default-100 template"
+        )
 
-    dd_positions = [i for i, n in enumerate(order) if n.startswith("dd-")]
-    if dd_positions:
-        last_starter = max(order.index(s) for s in ("scout", "sage", "scribe"))
-        assert last_starter < min(dd_positions), (
-            "real starters must sort ahead of the dd-* suite"
+    others = [i for i, n in enumerate(order) if n not in starters]
+    if others:  # inert while the visible catalog is exactly the three starters
+        last_starter = max(order.index(s) for s in starters)
+        assert last_starter < min(others), (
+            "real starters must sort ahead of every other visible template"
         )

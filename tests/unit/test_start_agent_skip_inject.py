@@ -90,6 +90,11 @@ def _load_lifecycle():
         check_full_capabilities_match=Mock(return_value=True),
         check_guardrails_env_matches=Mock(return_value=True),
         validate_base_image=Mock(),
+        # #1816: MUST be stubbed explicitly. A bare Mock auto-creates missing
+        # attributes and returns a truthy Mock, so an unstubbed
+        # `is_system_agent_name` reads as "every agent is the system agent" and
+        # the AC2 gate silently suppresses every recreate in this harness.
+        is_system_agent_name=Mock(return_value=False),
     )
     read_only_mod = Mock(inject_read_only_hooks=AsyncMock(
         return_value={"success": True}
@@ -102,20 +107,20 @@ def _load_lifecycle():
     sys.modules[f"{pkg_name}.read_only"] = read_only_mod
     sys.modules[f"{pkg_name}.file_sharing"] = file_sharing_mod
 
-    # Names that downstream tests import from `services.agent_service`. Adding
-    # them here prevents this stub package — which can persist for the rest of
-    # the pytest session — from contaminating later tests with ImportError.
-    pkg.get_accessible_agents = Mock(return_value=[])
-    pkg.get_agent_owner_id = Mock(return_value=1)
-    pkg.list_agents_data = Mock(return_value=[])
+    # #2140: the real names, needed ONLY while lifecycle.py executes (its line 27
+    # is an absolute `from services.agent_service.helpers import ...`). These
+    # used to be installed permanently, and `services/compatibility/spec.py`
+    # resolves `is_claude_runtime` from that module lazily — so every later test
+    # lost `claude_only` filtering and blamed #1187 for it.
+    from conftest import stubbed_modules
 
-    # Also register under the import path used by lifecycle.py
-    sys.modules['services.agent_service'] = pkg
-    sys.modules['services.agent_service.helpers'] = helpers_mod
-    sys.modules['services.agent_service.read_only'] = read_only_mod
-    sys.modules['services.agent_service.file_sharing'] = file_sharing_mod
-
-    with patch.dict('sys.modules', _SYS_MOCKS):
+    agent_service_aliases = {
+        'services.agent_service': pkg,
+        'services.agent_service.helpers': helpers_mod,
+        'services.agent_service.read_only': read_only_mod,
+        'services.agent_service.file_sharing': file_sharing_mod,
+    }
+    with stubbed_modules({**_SYS_MOCKS, **agent_service_aliases}):
         spec = importlib.util.spec_from_file_location(
             f"{pkg_name}.lifecycle",
             os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
@@ -159,6 +164,9 @@ def _reset():
     _mod.check_resource_limits_match = Mock(return_value=True)
     _mod.check_full_capabilities_match = Mock(return_value=True)
     _mod.check_guardrails_env_matches = Mock(return_value=True)
+    # #1809: image matches by default — MUST be stubbed explicitly (async), or
+    # the real predicate would run against Mock containers on cold-start tests.
+    _mod.check_base_image_matches = AsyncMock(return_value=True)
     # By default, public folder mount matches the file_sharing_enabled flag
     _mod.check_public_folder_mount_matches = Mock(return_value=True)
     # By default, no read-only mode
@@ -293,10 +301,12 @@ class TestRecoverRecreate1559:
         assert kwargs["base_volumes"] == {
             "agent-proj-workspace": {"bind": "/home/developer", "mode": "rw"}
         }
-        # type + runtime recovered from the volume's template.yaml.
-        assert kwargs["labels"]["trinity.agent-type"] == "researcher"
+        # runtime recovered from the volume's template.yaml; the template's
+        # `type:` is parsed but IGNORED (#2104) — no label, no env var.
         assert kwargs["labels"]["trinity.agent-runtime"] == "codex"
+        assert "trinity.agent-type" not in kwargs["labels"]
         assert kwargs["env_vars"]["AGENT_RUNTIME"] == "codex"
+        assert "AGENT_TYPE" not in kwargs["env_vars"]
         assert kwargs["env_vars"]["AGENT_NAME"] == "proj"
 
     def test_recreate_missing_container_mounts_a_renamed_agents_real_volume(self):

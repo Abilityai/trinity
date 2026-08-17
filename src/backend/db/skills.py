@@ -11,13 +11,13 @@ table handle in ``db/tables.py``; the engine is resolved via ``db/engine.py``.
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from sqlalchemy import select, insert, delete
+from sqlalchemy import select, insert, delete, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
-from .tables import agent_skills
+from .tables import agent_skills, agent_ownership
 from db_models import AgentSkill
 from utils.helpers import utc_now_iso
 
@@ -33,7 +33,9 @@ class SkillsOperations:
             agent_name=row["agent_name"],
             skill_name=row["skill_name"],
             assigned_by=row["assigned_by"],
-            assigned_at=datetime.fromisoformat(row["assigned_at"])
+            assigned_at=datetime.fromisoformat(row["assigned_at"]),
+            # ent#237: None on rows written before multi-source.
+            source_id=row["source_id"],
         )
 
     # =========================================================================
@@ -57,6 +59,7 @@ class SkillsOperations:
                 agent_skills.c.skill_name,
                 agent_skills.c.assigned_by,
                 agent_skills.c.assigned_at,
+                agent_skills.c.source_id,
             )
             .where(agent_skills.c.agent_name == agent_name)
             .order_by(agent_skills.c.skill_name)
@@ -86,7 +89,8 @@ class SkillsOperations:
         self,
         agent_name: str,
         skill_name: str,
-        assigned_by: str
+        assigned_by: str,
+        source_id: Optional[str] = None,
     ) -> Optional[AgentSkill]:
         """
         Assign a skill to an agent.
@@ -95,6 +99,11 @@ class SkillsOperations:
             agent_name: Name of the agent
             skill_name: Name of the skill
             assigned_by: Username of who is assigning
+            source_id: ent#237 — which skill source the name resolved to at
+                assignment time. Recorded, not keyed: the UNIQUE stays
+                (agent_name, skill_name) because the agent-side identity is the
+                bare directory `.claude/skills/<name>/` and two sources' copies
+                cannot coexist there.
 
         Returns:
             AgentSkill object if created, None if already exists
@@ -106,6 +115,7 @@ class SkillsOperations:
             skill_name=skill_name,
             assigned_by=assigned_by,
             assigned_at=now,
+            source_id=source_id,
         )
         try:
             with get_engine().begin() as conn:
@@ -117,7 +127,8 @@ class SkillsOperations:
                 agent_name=agent_name,
                 skill_name=skill_name,
                 assigned_by=assigned_by,
-                assigned_at=datetime.fromisoformat(now)
+                assigned_at=datetime.fromisoformat(now),
+                source_id=source_id,
             )
         except IntegrityError:
             # Skill already assigned
@@ -146,7 +157,8 @@ class SkillsOperations:
         self,
         agent_name: str,
         skill_names: List[str],
-        assigned_by: str
+        assigned_by: str,
+        source_ids: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Set skills for an agent (full replacement).
@@ -157,11 +169,16 @@ class SkillsOperations:
             agent_name: Name of the agent
             skill_names: List of skill names to assign
             assigned_by: Username of who is assigning
+            source_ids: ent#237 — optional {skill_name: source_id} map recording
+                which source each name resolved to. Missing entries store NULL
+                rather than guessing, so an unrecorded origin is visibly unknown
+                instead of falsely attributed.
 
         Returns:
             Number of skills assigned
         """
         now = utc_now_iso()
+        source_ids = source_ids or {}
 
         with get_engine().begin() as conn:
             # Remove all existing skills for this agent
@@ -179,6 +196,7 @@ class SkillsOperations:
                                 skill_name=skill_name,
                                 assigned_by=assigned_by,
                                 assigned_at=now,
+                                source_id=source_ids.get(skill_name),
                             )
                         )
                 except IntegrityError:
@@ -236,3 +254,69 @@ class SkillsOperations:
         )
         with get_engine().connect() as conn:
             return [row["agent_name"] for row in conn.execute(stmt).mappings()]
+
+    def get_all_skill_assignments(self) -> List[Dict[str, Optional[str]]]:
+        """Every (skill, agent) assignment in one statement (ent#384).
+
+        Backs `GET /api/skills/assignments`, the fleet-wide "which agents hold
+        this skill" read behind the Library's Skills tab. Deliberately ONE
+        query rather than N calls to `get_agents_with_skill` — the Skills tab
+        renders one block per library skill, and the per-block shape is the
+        N+1 the ent#260 List view deleted rather than migrated.
+
+        Three filters, each load-bearing rather than hygiene:
+
+        * **INNER JOIN `agent_ownership`** — an `agent_skills` row whose
+          ownership row is gone is a cascade orphan (canary L-03's territory),
+          not a holder. Dropping it here is fail-closed.
+        * **`deleted_at IS NULL`** — #834 preserves a soft-deleted agent's
+          child rows for up to 180 days. The caller's access filter hides them
+          from non-admins incidentally (the container is removed at delete),
+          but admins read this unfiltered, so without the predicate a deleted
+          agent renders as a current holder. Same class as ent#335, where a
+          collector copied the schedule's own `deleted_at` filter but not the
+          owning agent's and flagged 6,220 preserved rows.
+        * **ephemeral excluded** — a ghost is hard-discarded at budget, so its
+          chip would link to a page that 404s within minutes, and a fan-out
+          burst would inflate every count. Heartbeat and fleet health exclude
+          ghosts for the same reason. `is_ephemeral` is nullable on rows
+          written before trinity-enterprise#69, so NULL must read as "not a
+          ghost" — a bare `== 0` silently drops every pre-#69 agent.
+
+        Returns rows as plain dicts (`skill_name`, `agent_name`,
+        `display_label`) — no model, because the router's `response_model`
+        owns the wire shape and the access filter runs between the two.
+        `display_label` rides along so the caller needs no second query and no
+        cross-store join for the ent#181 human-facing name (NULL ⇒ render the
+        slug).
+        """
+        stmt = (
+            select(
+                agent_skills.c.skill_name,
+                agent_skills.c.agent_name,
+                agent_ownership.c.display_label,
+            )
+            .select_from(
+                agent_skills.join(
+                    agent_ownership,
+                    agent_skills.c.agent_name == agent_ownership.c.agent_name,
+                )
+            )
+            .where(agent_ownership.c.deleted_at.is_(None))
+            .where(
+                or_(
+                    agent_ownership.c.is_ephemeral.is_(None),
+                    agent_ownership.c.is_ephemeral == 0,
+                )
+            )
+            .order_by(agent_skills.c.skill_name, agent_skills.c.agent_name)
+        )
+        with get_engine().connect() as conn:
+            return [
+                {
+                    "skill_name": row["skill_name"],
+                    "agent_name": row["agent_name"],
+                    "display_label": row["display_label"],
+                }
+                for row in conn.execute(stmt).mappings()
+            ]

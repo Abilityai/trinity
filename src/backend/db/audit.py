@@ -23,6 +23,13 @@ from .engine import get_engine
 from .tables import audit_log
 
 
+# Serialises hash-chain appends on PostgreSQL (#2015). Transaction-scoped, so
+# COMMIT/ROLLBACK releases it and no unlock path can be missed. Hex spelling of
+# "audithsh"; well within signed-bigint range. Distinct from the migration
+# runner's key — these two must never wait on each other.
+_CHAIN_APPEND_LOCK_KEY = 0x6175646974687368
+
+
 class PlatformAuditOperations:
     """Database operations for the platform audit log."""
 
@@ -41,7 +48,100 @@ class PlatformAuditOperations:
         in. Hash chain fields (`previous_hash`, `entry_hash`) are optional;
         Phase 4 enables them.
         """
-        stmt = insert(audit_log).values(
+        stmt = self._insert_stmt(entry)
+        with get_engine().begin() as conn:
+            conn.execute(stmt)
+
+    def create_audit_entry_chained(
+        self, entry: Dict[str, Any], compute_hash
+    ) -> None:
+        """Insert a HASH-CHAINED entry, reading the chain head in the same
+        transaction as the write (#2015).
+
+        The head used to live in a service attribute (`_last_hash`), which made
+        the chain a property of one process: with more than one worker each
+        kept its own head, wrote `previous_hash` values pointing into a
+        different worker's sequence, and `verify_chain`'s link check reported
+        the untampered result as **tampered** — the loud false positive its own
+        docstring warns against.
+
+        Reading it here instead makes the DB the single chain head — but a
+        shared transaction is NOT by itself enough, and the first version of
+        this docstring claimed it was:
+
+        * **SQLite** — pysqlite defers the real ``BEGIN`` until it sees DML, so
+          the SELECT ran in autocommit and the transaction only opened at the
+          INSERT. (SQLAlchemy logs ``BEGIN (implicit)`` before the SELECT, but
+          that is its own bookkeeping marker, not a statement sent to SQLite.)
+        * **PostgreSQL** — READ COMMITTED, and a bare ``SELECT … ORDER BY id
+          DESC LIMIT 1`` takes no lock and cannot lock rows that do not exist
+          yet. Two sessions read the same head and both insert.
+
+        Measured on the pre-fix code with six threads: 32% broken links, 39
+        forked heads, **zero errors** — it forks silently, writing rows that
+        look fine, which is worse than the deterministic multi-worker fault it
+        replaced. `docker-compose.prod.yml` runs ``--workers 2`` plus the
+        scheduler container on the same database, so this is the live shape.
+
+        So the append is serialised explicitly, per backend:
+
+        * PostgreSQL: ``pg_advisory_xact_lock`` — cross-connection and
+          cross-host, released automatically at COMMIT/ROLLBACK (the same
+          primitive `db/alembic_runner.py` uses, in its transaction-scoped form
+          so no explicit unlock is needed).
+        * SQLite: ``BEGIN IMMEDIATE``, which takes the RESERVED write lock
+          *before* the head is read, so a second appender blocks at BEGIN and
+          then reads the first one's committed hash.
+
+        Within one worker there was never a race — this is a synchronous call
+        with no ``await`` inside it — so the exposure being closed is strictly
+        cross-process.
+
+        `compute_hash` is injected rather than imported: the hashing policy
+        belongs to the service (it decides WHICH fields are covered), while the
+        atomicity belongs here. Importing the service from a db module would
+        also invert the layering.
+        """
+        with get_engine().begin() as conn:
+            self._lock_chain_for_append(conn)
+            head = conn.execute(
+                select(audit_log.c.entry_hash)
+                .where(audit_log.c.entry_hash.isnot(None))
+                .order_by(audit_log.c.id.desc())
+                .limit(1)
+            ).scalar()
+            entry["previous_hash"] = head
+            entry["entry_hash"] = compute_hash(entry)
+            conn.execute(self._insert_stmt(entry))
+
+    @staticmethod
+    def _lock_chain_for_append(conn) -> None:
+        """Take the append lock BEFORE the chain head is read (#2015).
+
+        Fails **closed**: an unusable lock raises rather than falling through to
+        an unserialised append. That is the opposite of the fail-open default
+        used elsewhere in this codebase (settings reads, breakers), and
+        deliberately so — the value of a hash chain is that a link is either
+        correct or absent. Silently appending an unlocked row produces a
+        forked chain that `verify_chain` later reports as tampering, which is
+        the false positive this whole change exists to remove. A failed audit
+        write is loud and recoverable; a forked chain is neither.
+        """
+        dialect = conn.engine.dialect.name
+        if dialect == "postgresql":
+            conn.exec_driver_sql(
+                "SELECT pg_advisory_xact_lock(%s)", (_CHAIN_APPEND_LOCK_KEY,)
+            )
+        elif dialect == "sqlite":
+            # pysqlite has not sent BEGIN yet (it defers until DML), so this
+            # opens the transaction with the RESERVED lock already held.
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+    @staticmethod
+    def _insert_stmt(entry: Dict[str, Any]):
+        """The INSERT, shared by the plain and chained writers so the two can
+        never drift on which columns they persist."""
+        return insert(audit_log).values(
             event_id=entry["event_id"],
             event_type=entry["event_type"],
             event_action=entry["event_action"],
@@ -62,8 +162,6 @@ class PlatformAuditOperations:
             previous_hash=entry.get("previous_hash"),
             entry_hash=entry.get("entry_hash"),
         )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
 
     # ---------------------------------------------------------------------
     # Read

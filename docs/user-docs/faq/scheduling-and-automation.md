@@ -88,7 +88,16 @@ Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up
 
 ## What are skills and playbooks, and how do I run one?
 
-A skill is a reusable capability packaged in the platform's skills library (a GitHub repository synced to Trinity). Each skill is a folder built around a `SKILL.md` instruction file, optionally bundled with supporting scripts, templates, and resources. When a skill is assigned to an agent, it becomes a playbook: the agent's **Playbooks** tab lists assigned skills with a **Run** button that sends the skill as a task, and in the **Chat** tab you can type `/` to autocomplete a playbook command with ghost text showing the syntax and argument hints. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+A skill is a reusable capability packaged in the platform's skills library — one or more GitHub repositories synced to Trinity. Each skill is a folder built around a `SKILL.md` instruction file, optionally bundled with supporting scripts, templates, and resources. When a skill is assigned to an agent, it becomes a playbook: the agent's **Playbooks** tab lists assigned skills with a **Run** button that sends the skill as a task, and in the **Chat** tab you can type `/` to autocomplete a playbook command with ghost text showing the syntax and argument hints. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+
+## How do I find out which agents already have a given skill?
+
+The **Library** page's Skills tab (`/library?tab=skills`) shows, for every skill, an *Assigned to N agents* line with chips linking straight to each agent's Skills tab. It's bounded — the first four agents, then **+N more**. Admins see the whole fleet; everyone else sees their own and shared agents, and the wording says which. Below the listing sits **Assigned but no longer in the library**: assignments whose skill was removed upstream. That list matters because revocation works by publishing a new version without the offending skill, and the package stays on each agent until it's unassigned there. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Can I assign a skill from the Library page?
+
+No — the Library is a browse-and-audit surface. Assignment stays a per-agent action on that agent's **Skills** tab, so there is exactly one place where the change is made. What the Library adds is the fleet-wide read: who holds each skill, and which assignments have outlived their skill. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## Can a skill be a whole folder of files instead of a single markdown file?
 
@@ -96,8 +105,44 @@ Yes. A skill is a full-directory package, not just one markdown file: alongside 
 
 ## How do I assign skills to an agent, and do I need to restart it?
 
-Open the agent's detail page, go to the skills/playbooks section, and assign skills from the library. Assigned skills are injected into the agent's `.claude/commands/` directory on its next start, where they become slash commands. To push skill changes into a running agent without a restart, use the `sync_agent_skills` MCP tool, which re-injects the assigned skills in place. Admins manage the library itself (sync from GitHub, create, edit, delete) from Settings. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+Open the agent's detail page and go to the **Skills** tab. Pick skills from the library, save, and click **Sync now** to copy them into a running agent — or just leave it, and they arrive on the agent's next start. Each skill lands as a whole directory under `~/.claude/skills/<name>/`, so its scripts and resources come too, and the per-skill result tells you honestly whether it landed clean or is missing a declared dependency. Admins manage the *sources* the library syncs from in **Settings → Agents**; skills themselves are edited in their GitHub repository, not in Trinity. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## How can I see whether a schedule is actually performing well?
 
 Three places, no setup required. The Schedules tab shows inline stats per schedule (7-day success rate, average duration, last-run status dot); the agent's Overview tab has a "Schedules performance" section rolling up every schedule over a 7/14/30-day window; and clicking **Show execution history** on a schedule opens a detailed Analytics card with run counts, success rate, duration percentiles (p50/p95/p99), total cost, top tools called, and a daily timeline, switchable between 24h, 7d, and 30d windows. The same data is available via the API and works even when the agent is stopped. See [Scheduling](../automation/scheduling.md).
+
+## Can the skills library sync from more than one repository?
+
+Yes. Trinity syncs from any number of GitHub repositories: a bundled public community catalog that ships pre-configured, plus custom repositories your admin adds in **Settings → Agents**. When two sources ship the same skill name, the lower-priority number wins — custom sources default to 100 and the community source to 1000, so your own repository always wins a clash. Nothing is overwritten silently: the winning skill is marked with which sources it shadows, in the library listing and as a warning at injection time. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Where do skills have to live inside a source repository?
+
+One of three layouts, tried in order: a root `catalog.yaml` with a `skills_root:` key naming the directory; a `skills/` directory containing at least one `<name>/SKILL.md`; or the legacy `.claude/skills/`. Existing repositories keep working with no configuration, and an invalid declaration falls through to the next layout rather than blanking the source. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Will a skills-library update reach my running agents automatically?
+
+Only if you turn it on — both automation settings default to off. Under **Settings → Agents → Skills Library → Automation**, enable **Auto-sync** to pull sources on an interval (default hourly), and **Fleet re-inject** to push changed packages to running agents. Re-inject fires only when a commit actually moved, so a no-op pull never sweeps the fleet, and stopped agents pick changes up on their next start. The panel shows the last sync status and the last fleet report, and raises an operator alert if any agent failed. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## What happens when I unassign a skill — do the files stay on the agent?
+
+No. Unassigning removes the injected package, using the manifest recorded at injection time, so only files the platform wrote are deleted; anything the agent authored survives, and directories left empty are cleaned up. If the agent is stopped, busy, or unreachable, the unassignment still succeeds and the removal is reported as deferred — the agent reconciles on its next start. A reconcile that would strip an unusually large number of skills from one agent refuses outright and raises an operator alert instead. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Why is the community skills source pinned to a tag instead of tracking a branch?
+
+Because skills carry executable scripts, and with fleet re-inject on, a source tracking a branch head would put every merged upstream commit onto every agent with no human in the loop — and the community catalog accepts public contributions. The community source is therefore pinned to a tag we bump; custom sources, whose write access you control, track a branch. If a pinned tag is later moved to a different commit, Trinity **refuses** it rather than adopting it. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## My template declares schedules — will Trinity create them?
+
+Yes. A `schedules:` block in `template.yaml` is materialized as real schedules when the agent is created, through the UI, the API, and MCP alike. Each entry needs a `name`, a strict 5-field `cron`, and a `message`; up to 20 per template. A malformed entry is dropped with a named error rather than failing the creation, and every materialized schedule inherits the agent's execution timeout so it can never exceed the agent's own cap. See [Creating Agents](../agents/creating-agents.md).
+
+## What should a schedule's message contain?
+
+Ideally a single line that invokes one of the agent's skills by name — `/daily-briefing` — and nothing else: no inline instructions, arguments, or business logic. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, and the execution history shows *which* playbook ran. A prose message is a second, unversioned copy of the procedure that drifts from the skill it describes. The abilities wizards generate schedules in this shape and `/create-agent:review` flags prose messages as findings. See [Scheduling](../automation/scheduling.md#schedules-from-a-template).
+
+## My scheduled skill hangs every run and burns its whole timeout — why?
+
+The skill almost certainly asks a question at one of its decision points. On an unattended cron there is nobody to answer, so every run blocks on the prompt until the execution times out with nothing committed. The fix belongs in the skill, not in the schedule message: give it a headless run mode — the abilities convention is a `--autonomous` argument, so the schedule message becomes `/<skill> --autonomous` — in which the skill never prompts, takes the safe default at each gate, never takes a destructive path a gate was protecting, and records any non-trivial decision as a `needs-attention` line instead of guessing. The orchestrator bundle's gated skills already ship this mode. See [Abilities Marketplace](../automation/abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+
+## Can I use a legacy timezone name like `US/Eastern` in a schedule?
+
+Yes — legacy IANA aliases such as `US/Eastern`, `Asia/Calcutta`, and `Europe/Kiev` resolve correctly. A timezone the platform genuinely cannot resolve is rejected when you create the schedule, with a message naming the problem, rather than being accepted and then silently never firing. See [Scheduling](../automation/scheduling.md).

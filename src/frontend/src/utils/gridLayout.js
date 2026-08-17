@@ -10,10 +10,14 @@
 // Interaction constants from the approved design of record (issue #47 mockup).
 // GAP_X exceeds the 26px avatar overhang, so a protruding avatar always
 // floats in clear space between columns.
+// Org-overlay revision: gaps are sized so a department-zone frame's chrome
+// (22px left / 10px right / 34px header top / 10px bottom, see gridOrg.js)
+// fits INSIDE the regular gap — two different zones can occupy adjacent
+// rows/columns with no spacer cells and no frame collision.
 export const CELL_W = 384
 export const CELL_H = 216
-export const GAP_X = 34
-export const GAP_Y = 18
+export const GAP_X = 40
+export const GAP_Y = 50
 export const COORD_LIMIT = 60 // sanity bound, ~unbounded in practice
 export const Z_MIN = 0.25
 export const Z_MAX = 1.6
@@ -98,19 +102,31 @@ export function defaultLayout(agentNames, systemNames = new Set()) {
 /**
  * Self-healing pass (#47 AC): reconcile a saved layout against the live
  * agent list.
- *   - new agents take the first free cell near the origin
+ *   - new agents take the first free cell near the origin — or, when the
+ *     caller provides `originFor(name)`, near that agent-specific origin
+ *     (the org overlay uses this to place a newcomer beside its department's
+ *     zone hull instead of at the board origin)
  *   - deleted agents leave their gap (their entries are dropped)
  *   - an invalid or colliding saved position resolves to the nearest free cell
  * Returns `{ layout, changed }` — `changed` signals the caller to re-persist.
  */
-export function normalizeLayout(saved, agentNames) {
+export function normalizeLayout(saved, agentNames, originFor = null, widgetKeys = []) {
   const layout = {}
   let changed = false
-  const names = [...agentNames]
+  // Agents FIRST, then widgets (ent#325). Order matters: on a collision the
+  // first pass keeps whoever it reaches first, and an agent's saved position
+  // is the one a user is more likely to have arranged deliberately — an info
+  // tile evicted to a neighbouring cell is a smaller surprise than a fleet
+  // constellation shifting under them.
+  const names = [...agentNames, ...widgetKeys]
   const source = saved && typeof saved === 'object' ? saved : {}
+  const live = new Set(names)
 
-  // Drop entries for agents that no longer exist (gap remains free).
-  if (Object.keys(source).some((n) => !agentNames.includes(n))) changed = true
+  // Drop entries for occupants that no longer exist (gap remains free).
+  // `live` covers widgets too — checking against `agentNames` alone would
+  // report `changed` on every pass for any board carrying a widget, which
+  // re-persists localStorage once per reconcile forever.
+  if (Object.keys(source).some((n) => !live.has(n))) changed = true
 
   // First pass: keep valid, non-colliding saved positions.
   const pending = []
@@ -124,9 +140,17 @@ export function normalizeLayout(saved, agentNames) {
     }
   }
 
-  // Second pass: place newcomers / evicted entries near the origin.
+  // Second pass: place newcomers / evicted entries near their origin.
+  // `originFor` is agent-only by contract (a widget has no department, so the
+  // org overlay has no zone to seed it beside) — widgets fall through to the
+  // board origin here, and their DEFAULT placement is owned by
+  // `gridWidgets.seedWidgetCells`, which knows about the band above the fleet.
   for (const name of pending) {
-    layout[name] = nearestFreeCell(layout, 0, 0)
+    const origin =
+      (originFor && !name.startsWith('widget:') && originFor(name, layout)) ||
+      { c: 0, r: 0 }
+    const o = isValidPos(origin) ? origin : { c: 0, r: 0 }
+    layout[name] = nearestFreeCell(layout, o.c, o.r)
     changed = true
   }
   return { layout, changed }

@@ -50,13 +50,25 @@ It's a single per-agent switch under "Who can chat with this agent?" on the Shar
 
 Sharing grants a Trinity account holder interact access through the logged-in UI. A public link is a shareable URL that lets anyone chat with the agent without logging in — optionally with email verification, rate limits, and a custom welcome message. Public-link conversations persist across page refreshes, and logged-in Trinity users get a history dropdown to resume past sessions. Create links under **Sharing** → **Distribution** → **Public links** on the agent detail page. See [Public Links](../sharing-and-access/public-links.md).
 
-## What's the difference between a public link, sharing, and the customer portal?
+## What is the Workspace?
 
-Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Sharing** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **customer portal** is an enterprise-tier, signed-in web app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations with per-agent history, and uploads files — a branded client workspace, not an anonymous URL and not the operator UI. The portal is gated to the paid tier and is not available in community builds. See [Customer Portal](../sharing-and-access/customer-portal.md).
+The Workspace at `/workspace` is the signed-in chat app for the people you share agents with — and for you. It is where conversations keep their memory between turns, where each agent has a page summarizing what it's been doing and what it's waiting on you for, and where several agents can work one thread together. Platform users reach it in one click from the nav; external clients sign in with a 6-digit email code and see only the agents shared with their address. See [Workspace](../sharing-and-access/workspace.md).
+
+## How do I bring a second agent into a conversation?
+
+Type `@` and the other agent's name in an existing one-to-one chat. The Workspace opens a **room** containing both agents and posts your message there, leaving the original chat untouched. Inside a room, mentioning an agent that isn't yet a participant adds it — only a person can recruit that way, never another agent. An `@name` that isn't one of your agents stays plain text. Multi-agent chat is an enterprise capability: where it's absent the picker is single-select and mentions stay ordinary text. See [Workspace](../sharing-and-access/workspace.md).
+
+## What can a client see on an agent's page?
+
+Its description and health, how many tasks it ran in the last 7, 14, or 30 days with completion and first-try rates, anything it's waiting on them for, reports it published, files exchanged, what it can be asked to do, and its recent activity. It reports rather than configures: no schedules, skills, logs, costs, or model details, and an open question is answered by replying in chat. Because it reads from stored data, a stopped agent still renders — degraded, not blank. See [Workspace](../sharing-and-access/workspace.md).
+
+## What's the difference between a public link, sharing, and the Workspace?
+
+Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Sharing** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **Workspace** is a signed-in app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations that keep their memory between turns, browses each agent's page, and uploads files — a client workspace, not an anonymous URL and not the operator UI. It ships in every build; only multi-agent rooms within it are enterprise-gated. See [Workspace](../sharing-and-access/workspace.md).
 
 ## How do I keep a growing fleet of agents organized?
 
-Use tags and saved views. Tag agents from the agent detail page (or via API/MCP); tags show as colored badges on agent tiles, group agents into tag clouds on the Dashboard, and drive filters on the Agents page that persist as you navigate. For filter combinations you use often, create a **System View** — a saved filter of tags plus other criteria that persists across sessions. See [Tags and Organization](../sharing-and-access/tags-and-organization.md).
+Use tags and saved views. Tag agents from the agent detail page (or via API/MCP); tags show as colored badges on agent tiles, group agents into tag clouds on the Dashboard, and drive the shared Dashboard filters that apply across the Timeline, Grid, and List views. For filter combinations you use often, create a **System View** — a saved filter of tags plus other criteria that persists across sessions. See [Tags and Organization](../sharing-and-access/tags-and-organization.md).
 
 ## Can I manage Trinity from my phone?
 

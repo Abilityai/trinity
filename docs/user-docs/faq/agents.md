@@ -4,7 +4,7 @@
 
 ## What are the different ways to create an agent?
 
-Three ways, all equivalent: in the UI, click **Create Agent** on the Dashboard or Agents page, pick a template source, enter a name (lowercase, hyphens allowed), and click **Create**; via the API, `POST /api/agents` with `{"name": "my-agent", "template": "github:Org/repo"}`; or via the MCP tool `create_agent`. In every case Trinity clones the template, builds an isolated Docker container from the base image, copies the template files into `/home/developer/`, and starts the agent automatically. See [Creating Agents](../agents/creating-agents.md).
+Three ways, all equivalent: in the UI, click **Create Agent** in the Dashboard header (or **Use Template** on the Library page), pick a template source, enter a name (lowercase, hyphens allowed), and click **Create**; via the API, `POST /api/agents` with `{"name": "my-agent", "template": "github:Org/repo"}`; or via the MCP tool `create_agent`. In every case Trinity clones the template, builds an isolated Docker container from the base image, copies the template files into `/home/developer/`, and starts the agent automatically. See [Creating Agents](../agents/creating-agents.md).
 
 ## Can I create an agent from a private GitHub repository or a specific branch?
 
@@ -16,11 +16,15 @@ Yes. A `github:owner/repo` template that points at a **public** repository clone
 
 ## Do I need to write my own template to create an agent?
 
-No. The Templates page ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. See [Creating Agents](../agents/creating-agents.md).
+No. The **Library** page (formerly Templates -- the old `/templates` path redirects to `/library`) ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. See [Creating Agents](../agents/creating-agents.md).
 
 ## What goes in template.yaml?
 
-`template.yaml` is the agent's metadata file: `display_name`, `description`, `resources`, `credentials`, and `runtime` (which CLI harness the agent uses, plus an optional model override). It can also declare `data_paths` (globs under `data/` holding runtime data, auto-added to the agent's `.gitignore`) and `fork_to_own: required` (copy the template into your own GitHub repo at creation). The rest of a template is `CLAUDE.md` (agent instructions), `.mcp.json.template` (MCP config with `${VAR}` placeholders), and `.env.example` (required credentials). Note that GitHub template metadata is cached for 10 minutes, so `template.yaml` edits may not appear immediately. See [Creating Agents](../agents/creating-agents.md).
+`template.yaml` is the agent's metadata file: `display_name`, `description`, `resources`, `credentials`, and `runtime` (which CLI harness the agent uses, plus an optional model override). It can also declare `data_paths` (globs under `data/` holding runtime data, auto-added to the agent's `.gitignore`), `schedules:` (recurring work created with the agent), `plugins:` (the Claude Code marketplace plugins the agent depends on, re-installed on every boot), and `fork_to_own: required` (copy the template into your own GitHub repo at creation). The rest of a template is `CLAUDE.md` (agent instructions), `.mcp.json.template` (MCP config with `${VAR}` placeholders), and `.env.example` (required credentials). Note that GitHub template metadata is cached for 10 minutes, so `template.yaml` edits may not appear immediately. See [Creating Agents](../agents/creating-agents.md).
+
+## How do I make sure my agent's Claude Code plugins survive a rebuild or a move?
+
+Declare them in a `plugins:` block in `template.yaml` — a `marketplaces:` list (name plus `owner/repo` or an https source) and an `installed:` list of `plugin@marketplace` entries. Trinity materializes the block at creation as a committed, secret-free `~/.trinity/plugins.yaml`, and on every container boot the agent re-installs anything declared but missing, headlessly. Plugins installed by hand inside the agent are *not* captured back — they live in gitignored Claude Code state and vanish when the workspace is reconstituted from git onto a fresh volume or another host — so add them to the template too. Adding the block to an existing agent takes effect on its next restart; the abilities `/trinity:sync plugins` skill installs the difference right away. See [Creating Agents](../agents/creating-agents.md#declared-plugins).
 
 ## Why did creating my agent fail with an error about the base image?
 
@@ -28,11 +32,11 @@ Every template's `base_image` is validated against an allowlist, and blocked ima
 
 ## What's the difference between the Claude Code, Codex, and Gemini runtimes?
 
-The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses `OPENAI_API_KEY` and skips Claude-subscription auto-assignment; Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — Trinity mirrors the template's `CLAUDE.md` into it at startup), session resume (the Session tab is hidden for Codex agents, though Chat keeps full continuity), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
+The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses `OPENAI_API_KEY` and skips Claude-subscription auto-assignment; Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — Trinity mirrors the template's `CLAUDE.md` into it at startup), session resume (a Codex agent cannot resume, so its Workspace turns replay the visible history as text rather than carrying working memory forward), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I start and stop an agent?
 
-Toggle the Running/Stopped switch on the Dashboard, the Agents page, or the Agent Detail page — a spinner shows while the state changes. Via the API, use `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`; via MCP, `start_agent(name)` and `stop_agent(name)`. See [Managing Agents](../agents/managing-agents.md).
+Toggle the Running/Stopped switch on the Dashboard (Grid tiles and List rows both carry it) or the Agent Detail page — a spinner shows while the state changes. Via the API, use `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`; via MCP, `start_agent(name)` and `stop_agent(name)`. See [Managing Agents](../agents/managing-agents.md).
 
 ## What survives an agent restart, and what survives a recreate?
 
@@ -74,7 +78,7 @@ Read-only mode prevents the agent from modifying source files (`*.py`, `*.js`, a
 
 ## What does the autonomy toggle actually control?
 
-Autonomy is the master switch for an agent's scheduled operations: turning it off pauses all of that agent's schedules at once, and turning it back on resumes them. You can flip it from the Dashboard, the Agents page, or the Agent Detail view, or via `PUT /api/agents/{name}/autonomy`. It only affects schedules — it is not a general on/off switch for the agent itself. See [Agent Configuration](../agents/agent-configuration.md) and [Scheduling](../automation/scheduling.md).
+Autonomy is the master switch for an agent's scheduled operations: turning it off pauses all of that agent's schedules at once, and turning it back on resumes them. You can flip it from the Dashboard (Grid or List), or the Agent Detail view, or via `PUT /api/agents/{name}/autonomy`. It only affects schedules — it is not a general on/off switch for the agent itself. See [Agent Configuration](../agents/agent-configuration.md) and [Scheduling](../automation/scheduling.md).
 
 ## How do I move an agent to another Trinity instance?
 
@@ -94,4 +98,20 @@ The **Logs** tab on the Agent Detail page shows the container's stdout/stderr wi
 
 ## What is the compatibility report on the Overview tab, and can Trinity fix what it finds?
 
-Once an agent is running, Trinity checks its workspace against roughly 100 best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The ten gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md).
+Once an agent is running, Trinity checks its workspace against 88 best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The nine gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md).
+
+## I already have a GitHub repo — how do I turn it into an agent?
+
+Create an agent from it and pick an **import intent**. **Clone** (the default) keeps the agent wired to that remote and pushes back to it. **Fork** forks it into your own GitHub account first, with `upstream` pointing at the original. **Copy** takes a one-time snapshot of the files, strips the git history, and gives the agent a standalone workspace with no remote, no token, and no sync. Copy is the right choice when you want to start *from* someone's repository without staying attached to it. After creation the dialog runs the compatibility check inline and shows the result before you leave. See [Creating Agents](../agents/creating-agents.md).
+
+## My agent was created from a public template and can't push anywhere. Can I fix that without recreating it?
+
+Yes — use **Bind to your own repo** on the agent's **Git** tab. Trinity creates the destination repository under your account (private by default), pushes the agent's *current* workspace history into it, repoints `origin`, saves your token as the agent's own, and rebuilds the container so the change survives a restart. The agent keeps its name, identity, name reservation, data volumes, and history — nothing is re-provisioned. The agent must be running, and the action is owner-only and human-only (there is deliberately no MCP tool, since it needs your personal token). See [GitHub Sync](../integrations/github-sync.md).
+
+## Where do I see which credentials an agent still needs?
+
+The **Credentials** tab shows a per-variable checklist: what the agent needs (read from its live workspace, so a forked or hand-edited agent reports its actual requirements), which are already set (probed from the agent's own `.env` — names only, values are never read), and where to get the missing ones via the template author's setup link. Fill values in directly on the checklist. It renders even when the agent is stopped, and a failed status probe is reported as a failure rather than shown as "nothing configured". See [Credential Management](../credentials/credential-management.md).
+
+## Where does the list of GitHub templates come from?
+
+Three tiers, in order: an admin-curated list in Settings, if one exists — in which case nothing else is consulted; otherwise a curated remote registry fetched over HTTPS, so the starter catalogue can refresh without upgrading Trinity; otherwise the bundled defaults, which are empty. Registry results are cached for about an hour with a durable last-known-good copy, and every failure degrades quietly to the next tier, so agent creation never depends on a registry being reachable. See [Creating Agents](../agents/creating-agents.md).

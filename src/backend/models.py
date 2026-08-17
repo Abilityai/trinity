@@ -5,12 +5,12 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
-from typing import Dict, List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
+from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 
-from utils.helpers import to_utc_iso
+from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 
 
@@ -20,6 +20,39 @@ from db_models import WebFileUpload  # noqa: F401 — re-exported for router imp
 _FORK_DESTINATION_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$"
 )
+
+
+# A GitHub PAT is sent as an `Authorization: Bearer <pat>` header
+# (`services/github_service.py`) and embedded in a git remote URL. h11 rejects an
+# illegal header value by ECHOING it, so a token carrying `\r` or `\n` — what a
+# paste from a terminal or clipboard routinely picks up — surfaces the RAW token
+# in the exception message, which then reaches an error response and the platform
+# log (Vector-captured, operator-readable). Validating the charset HERE closes
+# that at the boundary, once, for every consumer — rather than scrubbing each
+# error handler downstream and hoping none is missed.
+#
+# `\x21-\x7E` is printable ASCII minus space: a superset of every GitHub PAT
+# format (classic `ghp_*` and fine-grained `github_pat_*` are `[A-Za-z0-9_]`) and
+# exactly the set that is safe in both a header value and a URL userinfo field.
+# Deliberately permissive about WHICH printable characters, so a future token
+# format is not rejected; strict about whitespace and control characters, which
+# is where the leak lives.
+_PAT_SAFE_RE = re.compile(r"^[\x21-\x7E]+$")
+
+
+def _validate_pat_secret(v: SecretStr) -> SecretStr:
+    """Strip surrounding whitespace and reject a header-unsafe GitHub token."""
+    raw = v.get_secret_value().strip()
+    if not raw:
+        raise ValueError("github_pat must not be empty")
+    if not _PAT_SAFE_RE.match(raw):
+        # Never echo the value — that is the leak this guard exists to prevent.
+        raise ValueError(
+            "github_pat contains characters that are not valid in a GitHub "
+            "token (whitespace, line breaks or control characters). Copy the "
+            "token again without surrounding whitespace."
+        )
+    return SecretStr(raw)
 
 
 class ForkToOwnRequest(BaseModel):
@@ -55,9 +88,77 @@ class ForkToOwnRequest(BaseModel):
     @field_validator("github_pat")
     @classmethod
     def _validate_pat(cls, v: SecretStr) -> SecretStr:
-        if not v.get_secret_value().strip():
-            raise ValueError("github_pat must not be empty")
+        return _validate_pat_secret(v)
+
+
+class BindAgentRepoRequest(BaseModel):
+    """Post-creation repo binding parameters (trinity-enterprise#109).
+
+    Points a LIVE agent at a GitHub repo the user owns, creating it if needed,
+    from the agent's *current workspace* — not from its template. Same three
+    fields as :class:`ForkToOwnRequest` and the same destination validator, but
+    a distinct model because the two are distinct API contracts (a create-time
+    sub-object vs a standalone request body) and #654/Invariant #14 wants the
+    contract visible here rather than aliased.
+
+    ``github_pat`` is the USER's token: it creates/validates the destination,
+    authenticates the in-container push, and is then persisted as the agent's
+    per-agent PAT (#347). SecretStr keeps it out of reprs/logs; unwrap exactly
+    once at the service boundary.
+    """
+
+    destination_repo: str = Field(
+        ...,
+        description="Destination repo as owner/name in the user's account or org",
+    )
+    github_pat: SecretStr = Field(
+        ...,
+        description=(
+            "User's GitHub PAT — creates/authorizes the repo and becomes the "
+            "agent's git identity"
+        ),
+    )
+    private: bool = Field(
+        True, description="Destination repo visibility (private by default)"
+    )
+
+    @field_validator("destination_repo")
+    @classmethod
+    def _validate_destination(cls, v: str) -> str:
+        v = v.strip()
+        if ".." in v or not _FORK_DESTINATION_RE.match(v):
+            raise ValueError(
+                "destination_repo must be 'owner/name' (GitHub owner and repo "
+                "name characters only)"
+            )
         return v
+
+    @field_validator("github_pat")
+    @classmethod
+    def _validate_pat(cls, v: SecretStr) -> SecretStr:
+        return _validate_pat_secret(v)
+
+
+class BindAgentRepoResponse(BaseModel):
+    """Result of a successful post-creation repo binding (trinity-enterprise#109).
+
+    Carries no token and no repo URL containing one. ``previous_repo`` is
+    echoed so the UI can state what the agent moved *from* without a second
+    round-trip, and ``recreated`` tells the operator whether the container env
+    was actually re-baked — the step that makes the rebind survive a restart.
+    """
+
+    success: bool = True
+    agent_name: str
+    github_repo: str
+    previous_repo: str
+    default_branch: str
+    private: bool
+    created_repo: bool
+    reused_existing: bool
+    recreated: bool
+    repo_url: str
+    message: str
 
 
 class EphemeralConfig(BaseModel):
@@ -92,7 +193,9 @@ class AgentConfig(BaseModel):
     # only; None → the agent renders under its slug (exactly today's behavior).
     # Same normalization + named validation as the post-creation PUT /label.
     display_label: Optional[str] = None
-    type: Optional[str] = "business-assistant"
+    # #2104: the free-text agent `type` taxonomy is retired — tags are the
+    # classification mechanism. A `type=` kwarg from an older caller is
+    # silently ignored (Pydantic default extra="ignore"), never an error.
     base_image: str = "trinity-agent-base:latest"
     resources: Optional[dict] = {"cpu": "2", "memory": "4g"}
     tools: Optional[List[str]] = ["filesystem", "web_search"]
@@ -114,6 +217,11 @@ class AgentConfig(BaseModel):
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template
     # into a user-owned repo first; the agent is created from that copy.
     fork_to_own: Optional[ForkToOwnRequest] = None
+    # trinity-enterprise#15: explicit GitHub import intent. None → legacy
+    # behavior (clone semantics; fork when a fork_to_own block is present).
+    # "copy" is a backend-materialized snapshot: no git sync, no git-config
+    # row, no GitHub env in the container.
+    import_intent: Optional[Literal["fork", "copy", "clone"]] = None
     # Ephemeral "ghost" agent (trinity-enterprise#69): budgeted, volume-less,
     # hard-discarded at budget. Entitlement-gated at the creation path.
     ephemeral: Optional[EphemeralConfig] = None
@@ -161,8 +269,18 @@ class AgentLabelUpdate(BaseModel):
     `label=None` (or blank) clears it, and the agent renders under its slug
     again. Presentation only: the slug never moves, which is the entire point —
     a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
+
+    #1821: `label` is REQUIRED-but-nullable, and unknown fields are rejected.
+    Clearing is a legitimate operation expressed as an explicit null, but with
+    an ignored-extras model and a `None` default it was also what you got from
+    any body the server did not recognise — so `{"display_label": "..."}` (an
+    easy mistake: `display_label` is the DB column and `display_name` the
+    response field) returned 200 and silently wiped the label. Both an unknown
+    field and an empty `{}` now 422 instead of destroying data.
     """
-    label: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+    label: Optional[str]
 
     @field_validator("label")
     @classmethod
@@ -171,9 +289,8 @@ class AgentLabelUpdate(BaseModel):
 
 
 class AgentStatus(BaseModel):
-    """Status of an agent container."""
+    """Status of an agent container. (#2104: no `type` — the taxonomy is retired.)"""
     name: str
-    type: str
     status: str
     port: int  # SSH port only - UI no longer exposed externally
     created: datetime
@@ -184,6 +301,9 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
+    # head_sha, file_count}; set only on the create response of a snapshot import.
+    import_snapshot: Optional[Dict[str, Any]] = None
 
     class Config:
         json_encoders = {
@@ -207,6 +327,26 @@ class User(BaseModel):
     # key itself is minted by an entitled module (core-primitive + enterprise-
     # knob, same shape as users.suspended_at #995).
     connector_agent: Optional[str] = None
+    # ent#163: True for a `portal_delegate` MCP key — a trusted issuer that may
+    # exchange an asserted end-user email for a portal session, and NOTHING else
+    # (fenced centrally in `dependencies.get_current_user`). Like every MCP key
+    # it resolves to the key OWNER, so a consumer must branch on this flag
+    # rather than on the resolved user: the whole point of the request is that
+    # it concerns somebody other than the owner.
+    portal_delegate: bool = False
+    # #1854: the raw `mcp_api_keys.scope` this principal authenticated with, or
+    # None on the JWT (interactive human) branch. `scope` is a free-text column
+    # with NO CHECK constraint and already carries five live values
+    # (user/agent/system/connector/portal_delegate), so the two flags above are a
+    # DENYlist over an open space: `scope='system'` sets neither `agent_name`
+    # (only for scope='agent') nor `connector_agent` (only for
+    # scope='connector'), walks through both guards, and resolves to the key
+    # OWNER carrying the owner's role. This field is what lets a guard be an
+    # ALLOWlist ("is this a human?") instead — fail-closed against a sixth scope
+    # a future PR invents. Also the missing audit dimension: without it a
+    # credential-rotation row cannot distinguish "the owner from a browser" from
+    # "the owner's leaked MCP key".
+    mcp_scope: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -341,7 +481,26 @@ class Activity(BaseModel):
 
 # Max serialized-JSON byte length of a report payload. Enforced at the router
 # (oversize → HTTP 413) to bound SQLite growth and list-response weight.
-REPORT_PAYLOAD_MAX_BYTES = 256 * 1024  # 256 KiB
+# #1537: raised from 256 KiB. Measured on a live fleet before choosing: the
+# reports in existence were 201 bytes on average, 683 at the largest — four
+# orders of magnitude under the old cap. So the cap was never the thing agents
+# hit; it was the thing that would reject the FIRST real tabular report (a lead
+# list, a scan result) the moment one appeared. 5 MiB is a deliberate middle:
+# comfortably past "thousands of rows" of ordinary tabular JSON, and still small
+# enough that one row is a sane thing to hold in memory while rendering.
+#
+# The blob stays in one TEXT column. Off-row storage was considered and NOT
+# built: with no payload anywhere near the old cap, a migration + a rows table
+# would be a schema commitment made against a hypothetical. The paginated row
+# reader below is what keeps a large payload off the wire; if real payloads ever
+# approach this ceiling, THAT measurement is what should justify moving them
+# off-row.
+REPORT_PAYLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
+
+# Rows returned per page by the tabular row reader (#1537). Bounds the response
+# even when a payload carries tens of thousands of rows.
+REPORT_ROWS_PAGE_DEFAULT = 100
+REPORT_ROWS_PAGE_MAX = 1000
 
 # Renderer hints the frontend understands; an unknown/absent hint falls back to
 # the report_type prefix map, then the JSON viewer.
@@ -487,6 +646,30 @@ class TaskExecutionStatus(str, Enum):
     PENDING_RETRY = "pending_retry"  # Awaiting retry dispatch (#271)
 
 
+class ActivityCloseOutcome(Enum):
+    """Tri-state result of closing an activity (#1804).
+
+    One boolean cannot answer both questions the callers ask. ``routers/
+    internal.py`` needs "did this row exist" (it 404s); ``activity_service``
+    needs "did anything change" (it broadcasts). Once the close is a lattice
+    CAS (``db/activities.py::_close_predicate``), an idempotent no-op close is a
+    *designed* outcome, so the two answers diverge routinely — hence three
+    states, not two.
+
+    Lives in ``models`` (not ``db/activities``) deliberately: it is a contract
+    type shared by the db layer and the service layer, like ``ActivityState``
+    beside it, and callers compare it by **identity**. ``models`` is the leaf
+    everything imports from and nothing re-imports, so the enum object stays
+    the same one across a test harness that evicts ``db.*`` from ``sys.modules``
+    — otherwise two distinct enum classes exist and every ``is`` check silently
+    goes False.
+    """
+
+    UPDATED = "updated"                # the CAS won — broadcast
+    ALREADY_CLOSED = "already_closed"  # row exists, predicate refused — no clobber
+    NOT_FOUND = "not_found"            # no such activity — 404 here, and only here
+
+
 def activity_state_for_terminal(status) -> "ActivityState":
     """Map a terminal execution status to the activity state that closes its
     dispatch activity (#1332).
@@ -566,6 +749,12 @@ class QueueStatus(BaseModel):
 # System Manifest Models (Recipe-based Multi-Agent Deployment)
 # ============================================================================
 
+# ent#126: cap on a manifest accepted over the wire OR read from the bundled
+# catalog. Generous — the largest bundled manifest is ~2 KB — so it bounds abuse
+# without constraining a real fleet definition.
+MANIFEST_MAX_BYTES = 256 * 1024
+
+
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
     template: str  # e.g., "github:Org/repo" or "local:scout" (#1759: must resolve, or create 400s)
@@ -599,10 +788,20 @@ class SystemManifest(BaseModel):
     # ORG-001 Phase 4: Tags and System View support
     default_tags: Optional[List[str]] = None  # Applied to all agents in manifest
     system_view: Optional[SystemViewConfig] = None  # Auto-create System View on deploy
+    # ent#126: top-level keys the parser does not recognise, recorded so
+    # `validate_manifest` can WARN about them. Silently dropping them is how
+    # `trinity_prompt:` (a typo for `prompt:`) sat in a shipped manifest doing
+    # nothing. Warned, never rejected — rejecting would 400 manifests that
+    # deploy today.
+    unknown_keys: List[str] = []
 
 
 class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
+    # #1884: the raw YAML is parsed by `system_service.parse_manifest`, which
+    # applies the size / expansion-cost / duplicate-key guards mirroring the MCP
+    # pipeline reader (#919). Not validated here — a Pydantic field cannot see
+    # YAML structure.
     manifest: str  # Raw YAML string
     dry_run: bool = False
     # trinity-enterprise#125: abort on the first agent-create failure (legacy
@@ -619,10 +818,58 @@ class SystemDeployFailure(BaseModel):
     status_code: Optional[int] = None  # Original HTTP status when the failure was an HTTPException
 
 
+class SystemSchedulePreview(BaseModel):
+    """One schedule a manifest would create, as shown in the dry-run preview (ent#126).
+
+    Mirrors what `create_schedules` would build, including its `.get()` defaults
+    — `enabled` in particular defaults to True, which is why a manifest that
+    merely lists a schedule starts autonomous executions on deploy.
+    """
+    agent: str  # Final (resolved) agent name
+    short_name: str
+    name: str
+    cron: str
+    message: str
+    enabled: bool
+    timezone: str
+    description: Optional[str] = None
+
+
+class BundledManifestSummary(BaseModel):
+    """One manifest shipped in `config/manifests/`, as listed in the catalog (ent#126)."""
+    id: str  # Filename stem — the {manifest_id} path parameter
+    filename: str
+    # None when the file could not be parsed; the card still renders, with `reason`.
+    name: Optional[str] = None
+    description: Optional[str] = None
+    agent_count: int = 0
+    templates: List[str] = []
+    schedule_count: int = 0
+    # True when the manifest carries a top-level `prompt:`, which OVERWRITES the
+    # platform-wide trinity_prompt for every agent. The UI gates deploy on an
+    # explicit acknowledgement for this.
+    sets_prompt: bool = False
+    permissions_preset: Optional[str] = None
+    # parse + validate + the same side-effect-free template/resource preflight the
+    # dry-run uses. Named `valid` only because all three ran; a parse-only check
+    # would be `parseable`.
+    valid: bool = False
+    reason: Optional[str] = None  # Why it is not valid (short, human-readable)
+    # At least one agent this manifest would create already exists, so deploying
+    # produces `_N`-suffixed duplicates.
+    already_deployed: bool = False
+
+
+class BundledManifestDetail(BundledManifestSummary):
+    """A bundled manifest plus its raw YAML, for loading into the editor (ent#126)."""
+    manifest: str  # Raw YAML text
+
+
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
     # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
-    # | "valid" (dry_run) — trinity-enterprise#125
+    # | "valid" (dry_run, will deploy) | "invalid" (dry_run, blockers in `failed`,
+    # #1841) — trinity-enterprise#125
     status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
@@ -634,6 +881,23 @@ class SystemDeployResponse(BaseModel):
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
     failed: List[SystemDeployFailure] = []  # trinity-enterprise#125: per-agent create failures
+    # ent#126 dry-run preview fields (None on a real deploy). Computed by the
+    # SAME pure resolvers the writers consume, so the preview cannot drift from
+    # what deploy actually does.
+    #
+    # `permission_edges` is {source: targets} rather than the resolver's ordered
+    # pair list: write ORDER does not matter for display, and the sources are
+    # unique by construction (each branch writes any given agent at most once —
+    # explicit's clear phase and set phase are disjoint), so collapsing to a dict
+    # is lossless for the set of writes.
+    permission_edges: Optional[Dict[str, List[str]]] = None
+    schedules_preview: Optional[List[SystemSchedulePreview]] = None
+    # `system_view_created` is None both when a view was never requested AND when
+    # creating it failed (create_system_view swallows the exception), so a caller
+    # cannot tell "no view wanted" from "view lost". This disambiguates it: the
+    # frontend needs it to choose its post-deploy navigation, and a requested view
+    # that failed also appends a warning.
+    system_view_requested: bool = False
 
 
 # ============================================================================
@@ -713,6 +977,101 @@ class InternalDecryptInjectRequest(BaseModel):
     """Request for internal decrypt-and-inject (startup.sh)."""
     agent_name: str
 
+# ============================================================================
+# Guided Credential Setup (trinity-enterprise#127)
+# ============================================================================
+
+class CredentialRequirement(BaseModel):
+    """One credential variable an agent needs, with its live status.
+
+    RENDERING CONTRACT — binding, and enforced by component tests rather than by
+    this model, because it is about the DOM the fields land in:
+
+    * `title`, `description`, `source`, `default` and `errors[]` are
+      author-controlled text that reaches an operator. Interpolate them as TEXT
+      only. Do NOT route them through `utils/markdown.js`: for these fields
+      markdown is a WIDENING, since it hands the template author an arbitrary
+      `[label](url)` surface immediately beside a credential input, which defeats
+      the point of having one validated `setup_url`. `v-html` stays banned
+      (H-005).
+    * The anchor text for `setup_url` MUST be `setup_url_display_host`, never
+      `title`. `<a href="https://evil.tld">OpenAI API keys</a>` recreates the
+      userinfo attack in pure HTML with no validator in the way — and
+      `_setup_url_error` rejects `user@host` precisely to stop label/destination
+      divergence.
+    * `setup_url_display_host is None` means the host could not be verified:
+      render the URL as INERT TEXT, not a link.
+    * `secret is True` (the default) MUST mask the input.
+    * `format` is an OPEN vocabulary — never map an unrecognised value onto a DOM
+      attribute (`type`, `pattern`) without a client-side allowlist.
+    """
+
+    name: str
+    title: str
+    description: Optional[str] = None
+    # Tri-state: True | False | "unknown". `"unknown"` means the template author
+    # never opted in (a bare `- FOO`), and rendering it as required cries wolf on
+    # every legacy template. It never counts toward `summary.blocking`.
+    required: Union[bool, str] = "unknown"
+    # Fail-safe default: mask until an author says otherwise.
+    secret: bool = True
+    format: Optional[str] = None
+    # A PLACEHOLDER, never a prefilled value, and suppressed entirely by the UI
+    # unless `secret is False`. Nothing enforces the schema's "NEVER put a real
+    # credential here", so an author — or a prompt-injected agent rewriting its
+    # own template.yaml — could set `default: "sk-attacker-controlled"`; prefilling
+    # it turns author YAML into a one-click credential write, and `secret: true`
+    # would MASK the field, making it less likely the operator reads what they
+    # submit. `default` exists for `"./Brain"`-style paths, i.e. the
+    # `secret: false` case.
+    default: Optional[str] = None
+    source: Optional[str] = None
+    # True for a name observed in `.mcp.json.template` / `.env.example` but never
+    # declared (`state: "declaration_incomplete"`). Advisory rows are never
+    # required and never blocking.
+    advisory: bool = False
+    status: str  # "set" | "missing" | "unknown"
+    setup_url: Optional[str] = None
+    setup_url_display_host: Optional[str] = None
+    setup_url_registrable: Optional[str] = None
+    setup_url_verified: bool = False
+
+
+class CredentialRequirementsSummary(BaseModel):
+    """Server-computed counts, so a badge and its headline cannot drift."""
+
+    total: int = 0
+    set: int = 0
+    missing: int = 0
+    unknown: int = 0
+    # `required is True AND status == "missing"`. Excludes `required == "unknown"`
+    # and every advisory row by construction.
+    blocking: int = 0
+    # Platform-injected variables are dropped from `requirements` (they are never
+    # the operator's to set) but counted here, so the exclusion stays visible.
+    platform_injected_excluded: int = 0
+    advisory: int = 0
+
+
+class CredentialRequirementsResponse(BaseModel):
+    """Per-agent credential checklist (trinity-enterprise#127)."""
+
+    agent_name: str
+    # `degraded` DOMINATES `no_credentials_required` unconditionally — a degraded
+    # lookup and a genuinely credential-free agent produce an identical empty
+    # requirement set, and "Ready" is the one state nobody investigates.
+    state: str  # ok | no_credentials_required | declaration_incomplete | degraded
+    requirements_source: str  # live_workspace | catalog | none
+    status_source: str  # live | unavailable
+    degraded_reason: Optional[str] = None
+    requirements: List[CredentialRequirement] = []
+    summary: CredentialRequirementsSummary = CredentialRequirementsSummary()
+    # The normalizer's sanitized messages: non-printables stripped and
+    # length-capped, but NOT HTML-escaped. Text-interpolate only.
+    errors: List[str] = []
+
+
+
 
 # ============================================================================
 # GitHub PAT Propagation Models (#211)
@@ -724,6 +1083,12 @@ class AgentPropagationStatus(BaseModel):
     # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed"
     status: str
     error: Optional[str] = None
+    # #1967: whether the LIVE git remote was re-templated. The `.env` write only
+    # takes effect on the next restart, so this is the field that says whether
+    # fetch/push work *now*. Optional with a None default: it is genuinely
+    # unknown on the pre-skip and failure paths, and "unknown" must stay
+    # distinguishable from "attempted and did not happen".
+    remote_updated: Optional[bool] = None
 
 
 class GithubPatPropagationResult(BaseModel):
@@ -732,6 +1097,11 @@ class GithubPatPropagationResult(BaseModel):
     updated: List[str]
     skipped: List[AgentPropagationStatus]
     failed: List[AgentPropagationStatus]
+    # #1967: how many of `updated` also got their live remote re-templated.
+    # `updated` alone overstates the fix — an agent whose `.env` was rewritten
+    # but whose remote was not is still authenticating with the revoked token
+    # until it restarts, which is the silent failure this issue reports.
+    remotes_updated: int = 0
 
 
 # =============================================================================
@@ -832,6 +1202,19 @@ class AgentDefaultResourcesUpdate(BaseModel):
 class AgentDefaultAccessPolicyUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/access-policy (#1129)."""
     require_email: Optional[bool] = None
+
+
+class SkillsLibraryAutomationUpdate(BaseModel):
+    """Body for PUT /api/settings/skills-library (trinity-enterprise#236).
+
+    Partial update — every field optional, an omitted field is left untouched,
+    so toggling one flag can never silently reset the interval. The interval's
+    range (300–86400) is enforced in the router so an out-of-range value returns
+    a descriptive 400 rather than a generic 422.
+    """
+    auto_sync_enabled: Optional[bool] = None
+    auto_sync_interval_seconds: Optional[int] = None
+    auto_reinject_enabled: Optional[bool] = None
 
 
 class MaxParallelTasksCeilingUpdate(BaseModel):
@@ -969,6 +1352,83 @@ class FleetExecutionStats(BaseModel):
     deleted_agent_cost: float = 0.0
 
 
+class ExecutionTimelineSplit(BaseModel):
+    """One trigger's share of a time bucket (ent#96).
+
+    `failed` rides alongside `total` deliberately: a stack drawn from totals
+    alone hides failures inside the columns, which is exactly what the tile
+    reading this must not do.
+    """
+    total: int
+    failed: int
+
+
+class ExecutionTimelineBucket(BaseModel):
+    """One bucket of `GET /api/executions/timeline` (ent#326)."""
+    bucket: str
+    total: int
+    success: int
+    failed: int
+    cost: float
+    # Context-window occupancy summed over the bucket — NOT "tokens consumed".
+    # `schedule_executions` has no token columns (`output_tokens` lives only on
+    # `chat_messages`, which covers chat turns rather than fleet executions), so
+    # the field is named for the quantity it actually holds. A tile labelling
+    # this as tokens would be exactly the mislabel ent#326 warns against.
+    context_used: int
+    # ent#96: present only for `split=trigger`, and then on EVERY bucket —
+    # a gap-filled empty hour carries `{}`, so a chart never has to tell
+    # "no runs" apart from "field missing".
+    by_trigger: Optional[Dict[str, ExecutionTimelineSplit]] = None
+
+
+class ExecutionTimeline(BaseModel):
+    """Bucketed fleet execution rollups for the grid's data tiles (ent#326).
+
+    The time-series sibling of `FleetExecutionStats`: same table, same access
+    model, buckets instead of scalars. `hour`/`day` series are gap-filled so a
+    chart renders a real zero rather than skipping the interval (#1107).
+    """
+    group_by: str
+    hours: int
+    gap_filled: bool
+    buckets: List[ExecutionTimelineBucket]
+    # ent#96: echoed back so a caller can tell a split response from a plain
+    # one without inspecting the buckets.
+    split: Optional[str] = None
+    # The stack/legend order for `by_trigger`, served by the backend so the
+    # tile, its legend and the #1107 Overview chart cannot order the same
+    # buckets differently. Includes every catalog bucket, not only the ones
+    # present in this window, so the colours a reader learns stay put as
+    # traffic comes and goes.
+    trigger_order: Optional[List[str]] = None
+
+
+class EvaluationCreate(BaseModel):
+    """Body for a manual/admin evaluation write (ent#206). The graded agent is
+    the path `{name}`; the caller is fenced human-admin-only at the router, so
+    a graded agent can never write its own grade."""
+    execution_id: Optional[str] = None
+    archetype: Optional[str] = Field(default=None, max_length=40)
+    completion: Optional[bool] = None
+    quality: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    checks: Optional[dict] = None
+    judge: Optional[dict] = None
+
+
+class EvaluationResponse(BaseModel):
+    id: str
+    agent_name: str
+    execution_id: Optional[str] = None
+    archetype: Optional[str] = None
+    completion: Optional[bool] = None
+    quality: Optional[float] = None
+    checks: Optional[Any] = None
+    judge: Optional[Any] = None
+    evaluator: str
+    created_at: str
+
+
 class CircuitBreakerConfigUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
 
@@ -1029,6 +1489,12 @@ class ConnectorStatus(BaseModel):
     key_prefix: Optional[str] = None
     mcp_url: Optional[str] = None
     snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    # #848 inline email auth. When the platform flag is on, an owner can share
+    # the agent WITHOUT minting a key: the collaborator connects keyless and
+    # signs in by email. `inline_auth_available` mirrors the flag;
+    # `keyless_snippets` is the no-key config (empty when the flag is off).
+    inline_auth_available: bool = False
+    keyless_snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -1040,6 +1506,130 @@ class ConnectorKeySecret(BaseModel):
     key_prefix: str
     mcp_url: Optional[str] = None
     snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# MCP inline email auth (#848) — /api/internal/mcp-auth/*
+#
+# The MCP server calls these with X-Internal-Secret on behalf of a keyless
+# session. The internal secret authenticates the CALLER, never the action: every
+# body carries the asserted ``email`` and the backend re-gates each call on that
+# email's own access. Nothing here ever returns a credential.
+# ---------------------------------------------------------------------------
+
+class McpInlineLoginRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/request."""
+    email: str = Field(..., min_length=3, max_length=254)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class McpInlineLoginVerify(BaseModel):
+    """Body for POST /api/internal/mcp-auth/verify."""
+    email: str = Field(..., min_length=3, max_length=254)
+    code: str = Field(..., min_length=1, max_length=32)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class McpInlineAgent(BaseModel):
+    """One agent a verified email may reach through the connector surface."""
+    name: str
+    description: Optional[str] = None
+
+
+class McpInlineVerifyResponse(BaseModel):
+    """Response for a SUCCESSFUL verify. Carries no credential of any kind —
+    the MCP session binding is the credential and it lives only in the MCP
+    server's memory (§7.6: session, not a minted key)."""
+    verified: bool = True
+    username: Optional[str] = None
+    agents: List[McpInlineAgent] = Field(default_factory=list)
+
+
+class McpInlinePlaybooksRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/playbooks."""
+    email: str = Field(..., min_length=3, max_length=254)
+    agent: str = Field(..., min_length=1, max_length=100)
+
+
+class McpInlineChatRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/chat."""
+    email: str = Field(..., min_length=3, max_length=254)
+    agent: str = Field(..., min_length=1, max_length=100)
+    message: str = Field(..., min_length=1, max_length=100000)
+    idempotency_key: Optional[str] = Field(default=None, max_length=255)
+
+
+class McpInlineChatResponse(BaseModel):
+    """Response for POST /api/internal/mcp-auth/chat."""
+    agent: str
+    response: str
+    execution_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Agent MCP key — detection, self-heal & rotation (#1854)
+# ---------------------------------------------------------------------------
+
+class AgentMcpKeyStatus(BaseModel):
+    """Response for GET /api/agents/{name}/mcp-key (owner view).
+
+    Metadata only — the agent-key plaintext is unrecoverable by design (only its
+    SHA-256 hash is stored) and has never been exposed over HTTP.
+    """
+    agent_name: str
+    exists: bool = False
+    key_id: Optional[str] = None
+    key_prefix: Optional[str] = None
+    scope: Optional[str] = None
+    created_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    usage_count: int = 0
+    # missing | env_absent | env_mismatch | never_used | stale | active | exempt
+    health: str = "missing"
+    health_detail: Optional[str] = None
+    rotatable: bool = True
+
+
+class AgentMcpKeyVerifyEntry(BaseModel):
+    """One `.mcp.json` server entry as the CONTAINER reports it.
+
+    Carries no secret: the bearer token is hashed inside the container and only
+    the resolved key's public metadata (scope / prefix / bound agent) appears
+    here.
+    """
+    server_name: str
+    # ok | foreign_user_key | foreign_agent_key | unknown_key
+    verdict: str
+    key_scope: Optional[str] = None
+    key_prefix: Optional[str] = None
+    key_agent_name: Optional[str] = None
+
+
+class AgentMcpKeyVerifyResult(BaseModel):
+    """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
+    agent_name: str
+    # ok | foreign_user_key | foreign_agent_key | unknown_key | not_configured
+    # | shadow_entry | unavailable
+    verdict: str
+    message: Optional[str] = None
+    entries: List[AgentMcpKeyVerifyEntry] = Field(default_factory=list)
+
+
+class AgentMcpKeyRegenerateResult(BaseModel):
+    """Response for POST /api/agents/{name}/mcp-key/regenerate.
+
+    Deliberately carries **no plaintext**. Nobody outside the container has any
+    use for an agent key — it is minted, baked into ``Config.Env``, and read by
+    the agent — so returning it would add a credential-exfiltration primitive on
+    an owner-reachable route and buy nothing.
+    """
+    agent_name: str
+    key_id: str
+    key_prefix: str
+    delivery: str            # recreated | db_only
+    superseded_deleted: int = 0
+    children_repointed: int = 0
+    message: Optional[str] = None
 
 
 class VoiceRepliesUpdate(BaseModel):
@@ -1602,8 +2192,21 @@ class AuditCalendarResponse(BaseModel):
 class AuditVerifyResponse(BaseModel):
     """Hash chain verification result."""
 
-    valid: bool
-    checked: int
+    # TRI-STATE (#1984). True = verified intact, False = mismatch/tampering,
+    # None = UNVERIFIABLE (nothing in the range carried a hash). It was a plain
+    # `bool`, so "no integrity data exists" was indistinguishable from
+    # "verified" — and that is the default state of every install which never
+    # enabled hashing.
+    valid: Optional[bool] = None
+    # verified | verified_partial | tampered | unverifiable | empty_range
+    status: str = "unverifiable"
+    checked: int = 0
+    # Entries skipped for carrying no hash. Non-zero alongside
+    # `verified_partial` marks the permanent unhashed prefix of a chain that
+    # was enabled midway.
+    skipped_unhashed: int = 0
+    total_in_range: int = 0
+    hash_chain_enabled: bool = False
     first_invalid_id: Optional[int] = None
 
 
@@ -1664,11 +2267,18 @@ class CycleViolation(BaseModel):
 
 
 class CycleTransition(BaseModel):
-    """A green→red transition detected this cycle.
+    """A green→red transition this cycle **delivered an alert for**.
 
-    `CanaryService` posts exactly one Slack webhook message per entry,
+    `CanaryService` delivered exactly one Slack webhook message per entry,
     mapping severity to the message styling. Surfaced here so the run-cycle
-    response mirrors what the service actually emitted.
+    response mirrors what the service actually sent.
+
+    Since #1897 an entry means *notified*, not merely *detected*: a
+    transition whose webhook POST was rejected appears in
+    `RunCycleResponse.undelivered_invariant_ids` instead and is retried on
+    a later cycle while the invariant stays red. Conversely an entry here
+    may be a retry that finally landed, whose flip was detected on an
+    earlier cycle.
     """
 
     invariant_id: str
@@ -1697,6 +2307,81 @@ class RunCycleResponse(BaseModel):
     sources_unavailable: List[str]
     violations: List[CycleViolation]
     transitions: List[CycleTransition]
+    undelivered_invariant_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Invariants this cycle tried to alert on and could not deliver — "
+            "a rejected webhook, a raised emit, or a retry held off by the "
+            "per-interval floor (#1897). Disjoint from `transitions`, which "
+            "since #1897 lists only what was actually sent; without this "
+            "field a webhook outage would render as zero transitions, which "
+            "is indistinguishable from a green cycle. Each entry is retried "
+            "on a later cycle while its invariant stays red."
+        ),
+    )
+
+
+class CanaryStatusResponse(BaseModel):
+    """Run-state of the canary harness (#2217) — `GET /api/canary/status`.
+
+    Answers the "is the harness actually running" question that a disabled
+    canary (zero violations, byte-identical to a clean fleet) otherwise hides.
+    Plain fields only — no canary-lib symbols — so this lives in models.py
+    rather than following the `RunCycleRequest` in-router exception (Inv #14).
+    """
+
+    enabled: bool = Field(
+        ...,
+        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        "default-OFF is the normal state for most installs.",
+    )
+    status: str = Field(
+        ...,
+        description=(
+            "Derived liveness: 'disabled' (never an alarm, Redis never read), "
+            "'unknown' (enabled but no readable cursor — fail-open, never an "
+            "alarm), 'stale' (enabled, cursor older than stale_after_seconds — "
+            "the incident case), or 'healthy'."
+        ),
+    )
+    last_cycle_at: Optional[str] = Field(
+        None,
+        description=(
+            "ISO-Z from the shared canary:last_cycle_at cursor — the "
+            "collection-START instant of the last cycle the leader completed "
+            "(lags real completion by up to one cycle's duration). null = no "
+            "cycle recorded yet / cursor unreadable / disabled."
+        ),
+    )
+    seconds_since_last_cycle: Optional[int] = Field(
+        None,
+        description="Age of last_cycle_at, clamped max(0, int(age)) so clock "
+        "skew never yields a negative int; null when unknown/disabled.",
+    )
+    interval_seconds: int = Field(
+        ..., description="Scheduled cycle interval (CANARY_INTERVAL_SECONDS, 300 default)."
+    )
+    stale_after_seconds: int = Field(
+        ...,
+        description=(
+            "The staleness bound: _max_failover_seconds + _MAX_CYCLE_LEASE_SECONDS "
+            "(≈1680s at defaults) — provably above both the leader-failover window "
+            "and a maxed-out-but-healthy cycle. Explicit + testable."
+        ),
+    )
+    alert_sink_configured: bool = Field(
+        ...,
+        description=(
+            "Whether CANARY_SLACK_WEBHOOK_URL is set. A cycling canary with no "
+            "sink persists violations but pushes nothing — surfaced separately "
+            "from `status` (liveness and can-it-alert are orthogonal facts)."
+        ),
+    )
+    redis_available: Optional[bool] = Field(
+        None,
+        description="Whether the cursor read succeeded (distinguishes Redis "
+        "down from just-booted); null when not consulted (disabled).",
+    )
 
 
 # =============================================================================
@@ -1925,6 +2610,11 @@ class InternalAuditRequest(BaseModel):
     mcp_key_name: Optional[str] = None
     mcp_scope: Optional[str] = None
     actor_agent_name: Optional[str] = None
+    # #848: a keyless inline-auth caller has no key and no agent — the verified
+    # email is its only identity. Without this field Pydantic would silently
+    # DROP it (extra='ignore' by default), leaving an unattributable audit row
+    # and no error to notice.
+    actor_email: Optional[str] = None
     # Target
     target_type: Optional[str] = None
     target_id: Optional[str] = None
@@ -2130,10 +2820,21 @@ class ReminderCreate(BaseModel):
     def _check_fire_at_iso(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
+        # Delegate to the SAME parser reminder_service._resolve_fire_at uses, so
+        # "the validator accepted it" implies "the parser can parse it" BY
+        # CONSTRUCTION (#1831). A local re-implementation diverged: this used
+        # v.replace("Z", "+00:00") (EVERY Z) against the parser's trailing-Z-only
+        # strip, so a mid-string Z passed here and then raised ValueError out of
+        # the unguarded service call — HTTP 500. Do not reintroduce a local
+        # normalization to match _validate_iso8601 above: that value is never
+        # re-parsed, so it has no parser to agree with. This one does.
         try:
-            datetime.fromisoformat(v.replace("Z", "+00:00"))
+            parse_iso_timestamp(v)
         except (ValueError, AttributeError):
             raise ValueError("fire_at must be an ISO-8601 timestamp")
+        # Return v UNCHANGED — never canonicalized. The create-idempotency key
+        # hashes raw_fire_spec() == f"fire_at={self.fire_at}" (Invariant #18), so
+        # rewriting it here forks the key and double-creates on a client retry.
         return v
 
     @model_validator(mode="after")
@@ -2165,6 +2866,11 @@ class ReminderSummary(BaseModel):
     created_at: str
     fired_at: Optional[str] = None
     cancelled_at: Optional[str] = None
+    # #1806: derived at read time (NOT a column) — true when this reminder is
+    # still live but its agent has autonomy off, so the scheduler will not arm
+    # it. Without this a held reminder is indistinguishable from a healthy one:
+    # `pending` with a fire_at that quietly slides into the past.
+    autonomy_hold: bool = False
 
     class Config:
         from_attributes = True
@@ -2561,6 +3267,19 @@ class GitHubTemplatesUpdate(BaseModel):
     templates: List[GitHubTemplateEntry]
 
 
+class TemplateRegistryUpdate(BaseModel):
+    """PUT body for the remote template registry (TMPL-002, ent#14).
+
+    Partial update: an omitted field is left untouched (the
+    `/api/settings/skills-library` shape), so an admin can flip the toggle
+    without re-typing the URL. `url` is validated by
+    `utils.url_validation.validate_template_registry_url` at the route — SSRF
+    gating needs DNS resolution, which does not belong in a Pydantic model.
+    """
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
 class McpUrlUpdate(BaseModel):
     """Request body for updating the MCP server URL."""
     url: str
@@ -2661,6 +3380,8 @@ class TelegramBindingResponse(BaseModel):
     configured: bool = False
     group_count: int = 0
     warning: Optional[str] = None
+    # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
+    progress_indicator_enabled: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):
@@ -2681,17 +3402,27 @@ class TelegramGroupConfigResponse(BaseModel):
     welcome_enabled: bool = False
     welcome_text: Optional[str] = None
     is_active: bool = True
+    # ent#265: per-group consent for completion reports (default allow; the
+    # model IS the field allowlist for the GET's `Response(**row)` build).
+    allow_proactive: bool = True
 
 
 class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
+    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    allow_proactive: Optional[bool] = None
 
 
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class TelegramProgressIndicatorRequest(BaseModel):
+    """ent#264 — toggle the in-progress status indicator on a Telegram binding."""
+    enabled: bool
 
 
 class SlackChannelProactiveRequest(BaseModel):
@@ -2829,3 +3560,281 @@ class WhatsAppConfigureRequest(BaseModel):
 class WhatsAppTestRequest(BaseModel):
     to_number: Optional[str] = None
     message: str = "Hello from Trinity! Your WhatsApp integration is configured correctly."
+
+
+# ============================================================================
+# Skill Sources (ent#237 — multi-source skills library)
+# ============================================================================
+
+class SkillSourceCreate(BaseModel):
+    """Register a skills repo as a source.
+
+    `is_default` is absent by design: the bundled community source is seeded at
+    fresh install and there can be only one, so an API caller never sets the
+    flag. Its trust posture (tag-pinned, ours to bump) is not a property a
+    caller should be able to claim for an arbitrary repo.
+    """
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str = Field(..., min_length=1, max_length=500)
+    ref: str = Field("main", min_length=1, max_length=200)
+    # 'branch' tracks a moving head; 'tag' pins and REFUSES a moved tag. An
+    # operator syncing a repo whose write access they do not fully control
+    # should pin (ent#237 AC#5).
+    ref_type: Literal["branch", "tag"] = "branch"
+    enabled: bool = True
+
+    @field_validator("name", "ref")
+    @classmethod
+    def _no_control_chars(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        if any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError("must not contain control characters")
+        return v
+
+
+class SkillSourceUpdate(BaseModel):
+    """Patch a source. Every field optional; omitted fields are untouched.
+
+    `is_default` is not patchable — promoting a custom source would change its
+    trust posture without changing where it points (enforced in the db layer
+    too, so an added field here cannot silently start working).
+    """
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    url: Optional[str] = Field(None, min_length=1, max_length=500)
+    ref: Optional[str] = Field(None, min_length=1, max_length=200)
+    ref_type: Optional[Literal["branch", "tag"]] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = Field(None, ge=1, le=10000)
+
+
+class SkillsLibrarySourceStatus(BaseModel):
+    """One source's entry in the PUBLIC library-status projection (ent#334).
+
+    Every field the service emits per source EXCEPT `url`. Repo URLs are
+    admin-sensitive by ent#237's own classification — that is why
+    `GET /skills/sources` is `require_admin` + `reject_agent_principal` — but
+    `GET /skills/library/status` is open to any authenticated user (and to
+    agent-scoped keys, deliberately: the per-agent Skills tab and the MCP tool
+    both read it). Emitting the URL there handed the admin-gated value to
+    exactly the callers the gate excludes.
+    """
+    id: str
+    name: str
+    ref: Optional[str] = None
+    ref_type: Optional[str] = None
+    is_default: bool = False
+    enabled: bool = True
+    priority: Optional[int] = None
+    cloned: bool = False
+    # ent#332: resolved layout root; null until the source has been cloned.
+    skills_root: Optional[str] = None
+    layout_conflict: bool = False
+    last_sync: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    commit_sha: Optional[str] = None
+    skill_count: int = 0
+    # `last_error` is deliberately NOT here (ent#334, found by /cso).
+    #
+    # It carries git's own failure text, which routinely echoes the remote
+    # URL — and the URL the clone path uses is `_authenticated_url`'s, with a
+    # PAT spliced in. `skill_source_clone.redact()` scrubs it on the way in,
+    # but that scrubber under-matches a double-`@` authority (ent#347), which
+    # is exactly the shape `_authenticated_url` produces when the stored URL
+    # ALREADY carries userinfo — and that combination reliably fails auth, so
+    # the failing branch is the guaranteed one.
+    #
+    # Dropping the field here costs nothing: its only consumer is
+    # `SkillSourcesPanel.vue`, which reads the admin-gated
+    # `GET /api/skills/sources` (raw dict, field intact). So the operator who
+    # needs the error still sees it, and a caller who should not see repo
+    # URLs cannot reach one through an error string. Do not add it back to
+    # this projection to "help" a non-admin surface debug a sync.
+
+
+class SkillsLibraryStatus(BaseModel):
+    """PUBLIC projection of `skill_service.get_library_status()` (ent#334).
+
+    **This model exists to be an allow-list, and that is the whole point** —
+    do not replace it with the raw dict, and do not add fields to it
+    reflexively. FastAPI serialises through an explicitly-constructed model, so
+    anything the service starts returning that is not named here is invisible
+    over REST until someone deliberately adds it. Fail-closed: the next
+    sensitive field the service grows leaks nothing by default. Same idiom, and
+    same reason, as `response_model=List[SkillInfo]` on `GET /skills/library`.
+
+    Omitted on purpose: the flat `url` and the per-source `url`. Those are the
+    admin-sensitive value — ent#237 classes source repo URLs that way, which is
+    why `GET /skills/sources` is `require_admin` + `reject_agent_principal` —
+    and this route is open to every authenticated caller including agent-scoped
+    keys.
+
+    `branch` and `commit_sha` are deliberately KEPT. They are a ref name and a
+    commit hash, not credentials and not a repo identity, and the Library
+    header renders both. Dropping them was considered and cut: it would have
+    been a second, unrelated behaviour change riding a security fix. If a
+    reason to drop them appears later it belongs in its own issue.
+
+    `configured` and `cloned` are load-bearing, not decoration: the frontend
+    stores derive their empty-state discriminator from them
+    (`stores/skillsLibrary.js` → `emptyReason === 'not_cloned'`,
+    `stores/skills.js` gates on `configured`). Dropping either turns a
+    configured-but-unsynced library into a wrong "no library" empty state.
+    """
+    configured: bool = False
+    cloned: bool = False
+    sources: List[SkillsLibrarySourceStatus] = Field(default_factory=list)
+    source_count: int = 0
+    enabled_source_count: int = 0
+    skill_count: int = 0
+    multi_file_count: int = 0
+    shadowed_count: int = 0
+    last_sync: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    # Legacy flat fields (first source in resolution order). Not URLs.
+    branch: Optional[str] = None
+    commit_sha: Optional[str] = None
+
+
+class SkillAssignmentAgent(BaseModel):
+    """One agent holding a skill, as it leaves `GET /api/skills/assignments`.
+
+    An allow-list for the same reason as `SkillsLibraryStatus` above (ent#334):
+    the db layer selects from `agent_ownership`, whose columns include
+    subscription ids, resource limits and encrypted-credential pointers. Naming
+    the two fields that may leave makes the next column added to that table
+    fail-closed instead of shipping by default.
+
+    `display_label` is the ent#181 human-facing name; NULL means the UI renders
+    the slug. It discloses nothing new — `GET /api/agents` already serves it for
+    exactly the set this endpoint is scoped to.
+    """
+    name: str
+    display_label: Optional[str] = None
+
+
+class SkillAssignmentsResponse(BaseModel):
+    """Fleet-wide skill→agents map for the Library's Skills tab (ent#384).
+
+    `scope` is not decoration. An empty `assignments` map is ambiguous on its
+    own — it means either "nobody holds anything" or "you can see no agents" —
+    and a UI that guesses tells a `role=user` with no agents that a skill held
+    by forty agents has no holders. `all` (admin, unfiltered) vs `accessible`
+    (owned ∪ shared) lets the client word the zero honestly: "no agents yet"
+    only under `all`, "none of your agents" under `accessible` — which is true
+    whether the caller has zero agents or zero assignments among them, so no
+    count of the accessible set is needed and none is sent.
+    """
+    assignments: Dict[str, List[SkillAssignmentAgent]] = Field(default_factory=dict)
+    scope: str = "accessible"
+
+
+# ============================================================================
+# Outbound A2A calls (#736)
+# ============================================================================
+
+class A2ACallRequest(BaseModel):
+    """Body for `POST /api/agents/{name}/a2a/call` (#736).
+
+    Note what is NOT here: a URL. The target is an `endpoint` **reference** — an
+    id or the operator-facing name of a pre-registered endpoint — resolved
+    server-side. The issue's filed AC asked for `agent_card_url`, and it is
+    rejected: an agent's parameters are LLM-generated and prompt-injectable, so
+    a URL parameter would turn any document the agent reads into a lever on a
+    credentialed server-side request from inside the platform network. See
+    requirements mcp.md §32.5 FR-1.
+
+    There is likewise no `stream` field. A parameter that is accepted and
+    silently does not stream is a lie in a schema agents read (§32.5 FR-6).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(
+        ..., min_length=1, max_length=200,
+        description="Id or name of a pre-registered outbound A2A endpoint.",
+    )
+    message: str = Field(..., min_length=1, max_length=100_000)
+    dedup_label: str = Field(
+        ..., min_length=1, max_length=200,
+        description=(
+            "A distinct label per call within this turn. REQUIRED: the effect "
+            "guard keys on the endpoint + conversation ids, never the message "
+            "body, so without a distinct label a second question to the same "
+            "endpoint in one execution would replay the FIRST answer."
+        ),
+    )
+    context_id: Optional[str] = Field(default=None, max_length=200)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    execution_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class A2ATaskRequest(BaseModel):
+    """Body for `POST /api/agents/{name}/a2a/task` — poll a remote task (#736)."""
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(..., min_length=1, max_length=200)
+    task_id: str = Field(..., min_length=1, max_length=200)
+
+
+class A2ACallResponse(BaseModel):
+    """Allowlisted outbound-call result (#736).
+
+    An allowlist, not a filtered dump: the remote controls its response, so the
+    fields that reach the calling agent are enumerated here and nothing else
+    crosses — never the raw body, never request headers, never the resolved URL.
+    """
+    success: bool = True
+    state: str
+    text: Optional[str] = None
+    task_id: Optional[str] = None
+    context_id: Optional[str] = None
+    truncated: bool = False
+    protocol_version: str = "0.3"
+    endpoint: str
+    replayed: bool = False
+
+
+class A2AOutboundEndpointUpsert(BaseModel):
+    """Body for the admin OSS endpoint registry (#736 §32.5 FR-2).
+
+    `credentials` is WRITE-ONLY: it is accepted here and never returned by any
+    read. Omitting it on an update leaves an existing secret in place (so an
+    operator can repoint or rename without re-typing something they may not
+    have); `clear_credentials` removes it.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=200)
+    url: str = Field(..., min_length=1, max_length=2048)
+    credentials: Optional[SecretStr] = Field(default=None)
+    clear_credentials: bool = False
+
+    @field_validator("credentials")
+    @classmethod
+    def _validate_credential(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        """Reject a header-unsafe credential — the same guard, for the same
+        reason, as `_validate_pat_secret` (ent#109).
+
+        This value becomes an `Authorization: Bearer …` header on the outbound
+        POST, and h11 rejects an illegal header value by **echoing it**. A
+        credential carrying a stray line break — the routine paste artifact —
+        would therefore reappear inside the transport error the calling agent
+        reads and the backend logs. `error_handlers.validation_error_without_input`
+        strips Pydantic's `input` from every 422, so refusing here does not move
+        the leak into the rejection.
+        """
+        if v is None:
+            return None
+        raw = v.get_secret_value().strip()
+        if not raw:
+            return None
+        if not _PAT_SAFE_RE.match(raw):
+            # Never echo the value — that is the leak this guard prevents.
+            raise ValueError(
+                "credentials contains characters that are not valid in an HTTP "
+                "header (whitespace, line breaks or control characters). Paste "
+                "the token again without surrounding whitespace."
+            )
+        return SecretStr(raw)

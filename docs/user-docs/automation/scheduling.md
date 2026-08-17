@@ -10,13 +10,23 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 
 - **Schedule** -- A cron expression paired with a message or task sent to an agent at the specified times.
 - **Execution** -- Each time a schedule fires, it creates an execution record with status, duration, response, cost, and model used.
-- **Autonomy Mode** -- Master toggle that enables or disables all schedules for an agent. Schedules will not fire if autonomy is off.
+- **Autonomy Mode** -- Master gate for an agent's schedules: nothing fires while autonomy is off. It is a gate, not a bulk edit -- it never changes each schedule's own on/off switch, so turning autonomy off and back on restores exactly the schedules you had enabled.
 - **Scheduler Service** -- Standalone service with Redis distributed locks. Uses async fire-and-forget dispatch with DB polling for status.
 - **Misfire Handling** -- If the scheduler restarts, missed jobs within a 1-hour grace window are caught up and fired immediately (`misfire_grace_time=3600`, `coalesce=True`, `max_instances=1`).
 
+### Timezones
+
+Schedules take any IANA zone name — including legacy aliases like `US/Eastern`, `Asia/Calcutta`, and `Europe/Kiev`. A timezone the platform cannot actually resolve is rejected when you create the schedule, with a message naming the problem, rather than being accepted and then silently never firing.
+
+### Schedules from a template
+
+A template can ship the recurring work its agent is designed to do in a `schedules:` block, and Trinity creates those schedules when the agent is created — through the UI, the API, and MCP alike. They appear here like any other schedule and are yours to edit, disable, or delete. See [Creating Agents](../agents/creating-agents.md).
+
+**Keep the message to a bare playbook call.** The recommended shape for any schedule message — declared or hand-created — is a single line that invokes one of the agent's skills by name, e.g. `/daily-briefing`, with no inline instructions. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, never to the schedule. A skill that normally asks questions at its decision points needs a headless mode (the abilities convention is a `--autonomous` argument) before it goes on a cron; otherwise every run blocks on a prompt nobody sees and burns its whole timeout. See [Abilities Marketplace](abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+
 ## How It Works
 
-![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../images/agent-schedules-tab.png)
+![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../../screenshots/agent-schedules.png)
 
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
@@ -25,7 +35,7 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run Now** to trigger a schedule immediately.
-8. Use the autonomy toggle to control all schedules at once.
+8. Use the autonomy toggle to pause or resume all of the agent's scheduled work at once. Individual schedules keep their own enabled/disabled state across the toggle -- while autonomy is off, an enabled schedule shows a "Will not fire -- autonomy off" warning instead of being switched off.
 
 ### Execution Flow
 
@@ -56,12 +66,14 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 | `/api/agents/{name}/schedules` | GET | List schedules |
 | `/api/agents/{name}/schedules` | POST | Create schedule |
 | `/api/agents/{name}/schedules/{id}` | GET/PUT/DELETE | CRUD operations |
-| `/api/agents/{name}/schedules/{id}/enable` | POST | Enable schedule |
-| `/api/agents/{name}/schedules/{id}/disable` | POST | Disable schedule |
-| `/api/agents/{name}/schedules/{id}/trigger` | POST | Manual trigger |
+| `/api/agents/{name}/schedules/{id}/enable` | POST | Enable schedule (owner/admin) |
+| `/api/agents/{name}/schedules/{id}/disable` | POST | Disable schedule (owner/admin) |
+| `/api/agents/{name}/schedules/{id}/trigger` | POST | Manual trigger (owner/admin) |
 | `/api/agents/{name}/schedules/{id}/executions` | GET | Execution history |
 | `/api/agents/{name}/schedules/{id}/analytics` | GET | Per-schedule analytics (see below) |
 | `/api/agents/{name}/schedules/analytics-summary` | GET | Per-schedule performance rollup for the whole agent (`?window=7d\|14d\|30d`) |
+
+Enabling, disabling, and manually triggering a schedule are **owner or admin** actions — someone the agent is merely shared with can read its schedules and their history but cannot start or stop them. The same applies to the `toggle_agent_schedule` and `trigger_agent_schedule` MCP tools.
 
 ## Per-Schedule Analytics
 
@@ -191,6 +203,8 @@ Raise the agent cap first, then raise the schedule timeout.
 - Missed jobs are only caught up within the 1-hour grace window.
 - Retries count against the agent's parallel capacity slots.
 - Pre-check hooks run with the same permissions as the agent's normal tool calls (`developer` user inside the container).
+- A template may declare at most 20 schedules. Beyond that the list is truncated, with the reason reported.
+- If the agent has **freeze schedules if sync failing** enabled and its git sync has failed three times in a row, the scheduler skips firing until sync recovers.
 
 ## See Also
 

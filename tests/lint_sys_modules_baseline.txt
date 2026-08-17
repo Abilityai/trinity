@@ -3,21 +3,13 @@
 # Regenerate with: python tests/lint_sys_modules.py --regenerate-baseline
 # Goal: reduce these counts over time; never grow them.
 
-3 tests/git-sync/test_s5_conflict_classifier.py
-9 tests/git-sync/test_s7_reserve_instance_id.py
-5 tests/test_canary_invariants.py
+3 tests/git_sync/test_s5_conflict_classifier.py
+9 tests/git_sync/test_s7_reserve_instance_id.py
 7 tests/test_cb_probe_execution_close.py
-1 tests/test_event_bus.py
+1 tests/unit/test_event_bus.py
 6 tests/test_github_pat_propagation_unit.py
-9 tests/test_inter_agent_timeout_unit.py
-6 tests/test_platform_default_model.py
-4 tests/test_platform_prompt_unit.py
-1 tests/test_proactive_audit_unit.py
-2 tests/test_self_execute.py
-4 tests/test_telegram_login_gate.py
-4 tests/test_validation.py
-3 tests/test_watchdog_unit.py
-2 tests/test_whatsapp_adapter.py
+4 tests/unit/test_telegram_login_gate.py
+2 tests/unit/test_whatsapp_adapter.py
 2 tests/unit/test_agent_server_auto_sync.py
 1 tests/unit/test_agent_shared_files_migration.py
 3 tests/unit/test_audit_retention_prune.py

@@ -20,6 +20,11 @@ from .utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
 
 logger = logging.getLogger(__name__)
 
+# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
+# firing. Mirrors the threshold in the backend's
+# routers/internal.py::internal_agent_sync_health — keep the two in step.
+SYNC_FAILURE_FREEZE_THRESHOLD = 3
+
 
 def _scheduler_pg_url() -> Optional[str]:
     """Return the PostgreSQL ``DATABASE_URL`` if configured, else None (#300).
@@ -373,7 +378,12 @@ class SchedulerDatabase:
         triggered_by: str = "schedule",
         model_used: str = None,
         attempt_number: int = 1,
-        retry_of_execution_id: str = None
+        retry_of_execution_id: str = None,
+        source_user_id: Optional[int] = None,
+        source_user_email: Optional[str] = None,
+        source_agent_name: Optional[str] = None,
+        source_mcp_key_id: Optional[str] = None,
+        source_mcp_key_name: Optional[str] = None
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record.
 
@@ -385,6 +395,17 @@ class SchedulerDatabase:
             model_used: Model override
             attempt_number: Which attempt this is (1 = first try, RETRY-001)
             retry_of_execution_id: Original execution ID for retries (RETRY-001)
+            source_user_id: User who initiated this run (AUDIT-001, #1970)
+            source_user_email: Email of that user (denormalized for durability —
+                the row must stay readable after the account is renamed/removed)
+            source_agent_name: Agent that initiated this run, if agent-initiated
+            source_mcp_key_id: MCP key id the initiator authenticated with
+            source_mcp_key_name: Human-readable name of that key
+
+        The five ``source_*`` columns are **attribution, never authorization** —
+        nothing gates on them. NULL is the correct value for a cron tick: no
+        caller exists, and inventing one would be worse than an honest blank
+        (#1970).
         """
         execution_id = self._generate_id()
         now = utc_now_iso()
@@ -394,8 +415,10 @@ class SchedulerDatabase:
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
-                    model_used, attempt_number, retry_of_execution_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    model_used, attempt_number, retry_of_execution_id,
+                    source_user_id, source_user_email, source_agent_name,
+                    source_mcp_key_id, source_mcp_key_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -406,7 +429,12 @@ class SchedulerDatabase:
                 triggered_by,
                 model_used,
                 attempt_number,
-                retry_of_execution_id
+                retry_of_execution_id,
+                source_user_id,
+                source_user_email,
+                source_agent_name,
+                source_mcp_key_id,
+                source_mcp_key_name
             ))
             conn.commit()
 
@@ -418,9 +446,63 @@ class SchedulerDatabase:
                 started_at=parse_scheduler_ts(now),
                 message=message,
                 triggered_by=triggered_by,
+                source_user_id=source_user_id,
+                source_user_email=source_user_email,
+                source_agent_name=source_agent_name,
+                source_mcp_key_id=source_mcp_key_id,
+                source_mcp_key_name=source_mcp_key_name,
                 attempt_number=attempt_number,
                 retry_of_execution_id=retry_of_execution_id
             )
+
+    def should_freeze_schedules(self, agent_name: str) -> bool:
+        """Is this agent's cron firing frozen by a failing git sync? (#389/#1808)
+
+        True only when the owner opted in (`freeze_schedules_if_sync_failing`)
+        AND sync is actually failing. Mirrors the predicate the backend already
+        exposes at `/api/internal/agents/{name}/sync-health-status`; read
+        directly here because the scheduler talks to the same database for
+        every other gate (autonomy, enabled, reminders) and an extra HTTP hop
+        would add a failure mode to the fire path for no benefit.
+
+        FAIL-OPEN: any error (missing table on an older DB, read failure)
+        returns False and the schedule fires. A freeze-on-error would silently
+        stop the whole fleet the moment this query broke — the opposite of the
+        bug this closes.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT gc.freeze_schedules_if_sync_failing,
+                           ss.last_sync_status,
+                           ss.consecutive_failures
+                    FROM agent_git_config gc
+                    LEFT JOIN agent_sync_state ss ON ss.agent_name = gc.agent_name
+                    WHERE gc.agent_name = ?
+                    """,
+                    (agent_name,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                # Named access only: the PG path (#300) yields RealDictCursor
+                # mapping rows with no positional indexing — row[0] would
+                # KeyError and silently fail-open on every PostgreSQL deploy.
+                freeze_enabled = bool(row["freeze_schedules_if_sync_failing"])
+                if not freeze_enabled:
+                    return False
+                failing = (
+                    row["last_sync_status"] == "failed"
+                    and (row["consecutive_failures"] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
+                )
+                return bool(failing)
+        except Exception as e:
+            logger.warning(
+                f"Sync-freeze check failed for {agent_name} ({e}); firing anyway"
+            )
+            return False
 
     def create_skipped_execution(
         self,
@@ -495,12 +577,22 @@ class SchedulerDatabase:
         cost: float = None,
         tool_calls: str = None,
         execution_log: str = None,
-        claude_session_id: str = None  # Claude Code session ID for --resume (EXEC-023)
+        claude_session_id: str = None,  # Claude Code session ID for --resume (EXEC-023)
+        expected_status: str = None,
     ) -> bool:
         """Update execution status when completed.
 
         Args:
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
+            expected_status: optional CAS precondition — the UPDATE only lands
+                if the row is still in this status. Returns False (no write)
+                otherwise. This writer is otherwise an unconditional
+                ``UPDATE ... WHERE id = ?``; architecture.md names the
+                standalone scheduler's non-CAS writers as the open #1082
+                follow-up, and #1968's abandon path is a NEW one. Rather than
+                argue it is safe today (it is — the abandon gates all run
+                before dispatch, so no competing writer exists), the caller
+                passes the precondition and it is safe by construction.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -513,7 +605,10 @@ class SchedulerDatabase:
 
             started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            # Clock skew between the writer of started_at and this process can
+            # make the subtraction negative; clamp so a poisoned duration never
+            # reaches the analytics chart (#1832).
+            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
 
             cursor.execute("""
                 UPDATE schedule_executions
@@ -521,7 +616,7 @@ class SchedulerDatabase:
                     context_used = ?, context_max = ?, cost = ?, tool_calls = ?, execution_log = ?,
                     claude_session_id = ?
                 WHERE id = ?
-            """, (
+            """ + (" AND status = ?" if expected_status else ""), (
                 status,
                 to_utc_iso(completed_at),
                 duration_ms,
@@ -533,8 +628,8 @@ class SchedulerDatabase:
                 tool_calls,
                 execution_log,
                 claude_session_id,
-                execution_id
-            ))
+                execution_id,
+            ) + ((expected_status,) if expected_status else ()))
             conn.commit()
             return cursor.rowcount > 0
 
@@ -668,6 +763,14 @@ class SchedulerDatabase:
         except (TypeError, ValueError):
             allowed_tools = None
         firing_at = row["firing_at"]
+        # #1970: guard the provenance columns the way _row_to_execution guards
+        # its optional ones — this mapper also serves `SELECT *` against a DB
+        # that may predate a column, and a bare row["col"] raises there.
+        row_keys = row.keys()
+
+        def _opt(col):
+            return row[col] if col in row_keys else None
+
         return Reminder(
             id=row["id"],
             agent_name=row["agent_name"],
@@ -681,6 +784,10 @@ class SchedulerDatabase:
             allowed_tools=allowed_tools,
             execution_id=row["execution_id"],
             error=row["error"],
+            owner_id=_opt("owner_id"),
+            created_by_email=_opt("created_by_email"),
+            source_agent_name=_opt("source_agent_name"),
+            source_mcp_key_id=_opt("source_mcp_key_id"),
         )
 
     def get_active_reminders(self) -> List[Reminder]:
@@ -707,6 +814,27 @@ class SchedulerDatabase:
                 ORDER BY r.fire_at ASC
             """)
             return [self._row_to_reminder(row) for row in cursor.fetchall()]
+
+    def count_held_reminders(self) -> int:
+        """Live reminders excluded from arming solely because autonomy is off (#1806).
+
+        The complement of ``get_active_reminders``'s autonomy predicate, with the
+        same live-status and not-deleted conditions. Exists purely for
+        observability: a held reminder is never armed, so there is no job and
+        therefore no skip for the scheduler to log. Without this count an
+        operator debugging "my reminder never fired" has nothing to go on.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM agent_reminders r
+                JOIN agent_ownership ao ON ao.agent_name = r.agent_name
+                WHERE r.status IN ('pending', 'firing')
+                  AND ao.deleted_at IS NULL
+                  AND ao.autonomy_enabled = 0
+            """)
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
 
     def get_reminder_by_id(self, reminder_id: str) -> Optional[Reminder]:
         """Fetch a single reminder by id (to re-read fire_attempts after a CAS)."""
@@ -1142,7 +1270,10 @@ class SchedulerDatabase:
 
             started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            # Clock skew between the writer of started_at and this process can
+            # make the subtraction negative; clamp so a poisoned duration never
+            # reaches the analytics chart (#1832).
+            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
 
             cursor.execute("""
                 UPDATE process_schedule_executions

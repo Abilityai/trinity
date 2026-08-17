@@ -12,18 +12,57 @@
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
-        <!-- Notification Toast -->
+        <!-- Notification Toast.
+             #1953: anchored bottom-right, NOT `top-20 right-4`. `top-20` is exactly
+             where AgentHeader's row-1 right cluster starts (NavBar h-16 + main py-2 +
+             inner py-2 = 80px), so the toast covered the Running toggle and Delete.
+             `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
+             which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
           :class="[
-            'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+            'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
-          {{ notification.message }}
+          <span>{{ notification.message }}</span>
+          <button
+            v-if="notification.type === 'error'"
+            type="button"
+            class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+            aria-label="Dismiss notification"
+            @click="dismissNotification"
+          >✕</button>
         </div>
 
-        <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
-          {{ error }}
+        <!-- #1914: agent 404'd. Deliberately does NOT say whether the agent
+             exists — the backend's 404 is uniform for missing vs. inaccessible
+             (Invariant #8 / #186) and this copy must not undo that. -->
+        <div v-if="notFound && !loading" data-testid="agent-not-found" class="max-w-lg mx-auto text-center py-16">
+          <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <h2 class="mt-4 text-lg font-semibold text-gray-900 dark:text-gray-100">Agent not found</h2>
+          <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+            <span class="font-mono text-gray-800 dark:text-gray-200">{{ route.params.name }}</span>
+            doesn't exist, or you don't have access to it.
+          </p>
+          <router-link
+            to="/"
+            class="mt-6 inline-block px-4 py-2 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm font-medium transition-colors"
+          >
+            Back to Dashboard
+          </router-link>
+        </div>
+
+        <div v-if="error && !agent" data-testid="agent-load-error" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4 flex items-center justify-between gap-4">
+          <span>{{ error }}</span>
+          <button
+            @click="loadAgent"
+            data-testid="agent-load-retry"
+            class="shrink-0 px-3 py-1 rounded border border-status-danger-400 dark:border-status-danger-700 text-sm font-medium hover:bg-status-danger-200 dark:hover:bg-status-danger-900 transition-colors"
+          >
+            Retry
+          </button>
         </div>
 
         <div v-if="agent" :class="['ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
@@ -101,46 +140,29 @@
               <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
             </div>
 
-            <!-- Chat Tab Content (#1112: unified Chat tab with a Session-mode toggle).
-                 v-show keeps the active surface mounted so state/polling survives tab switches. -->
+            <!-- Chat Tab Content.
+                 ent#358: the Session-mode toggle is gone — continuous
+                 conversation lives in the Workspace now, which resumes the same
+                 way this surface used to (see the "Continue in Workspace" link
+                 below). What stays here is the stateless per-turn chat, which
+                 the Workspace does NOT replace.
+                 v-show keeps the surface mounted so state/polling survives tab switches. -->
             <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden flex flex-col">
-              <!-- Session-mode toggle — hidden when the Session surface is unavailable
-                   (feature flag off, or Codex runtime without --resume machinery). -->
-              <div
-                v-if="sessionAvailable"
-                class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40"
-              >
-                <span
-                  class="text-xs text-gray-500 dark:text-gray-400"
-                  title="Session mode resumes the same Claude session each turn (--resume), preserving memory, tool-result state, and reasoning across turns. Off = stateless, ephemeral per-turn chat."
-                >Session mode</span>
-                <button
-                  type="button"
-                  role="switch"
-                  :aria-checked="effectiveChatMode === 'session'"
-                  @click="toggleChatMode"
-                  :class="[
-                    effectiveChatMode === 'session' ? 'bg-action-primary-600' : 'bg-gray-300 dark:bg-gray-600',
-                    'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800'
-                  ]"
+              <div class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40">
+                <span class="text-xs text-gray-500 dark:text-gray-400">
+                  Stateless chat — each message starts fresh.
+                </span>
+                <router-link
+                  :to="{ path: '/workspace', query: { agent: agent.name } }"
+                  class="text-xs font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+                  title="The Workspace keeps one continuous conversation — memory, tool results and reasoning carry across turns."
                 >
-                  <span
-                    :class="[
-                      effectiveChatMode === 'session' ? 'translate-x-4' : 'translate-x-0',
-                      'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
-                    ]"
-                  />
-                </button>
+                  Continue in Workspace →
+                </router-link>
               </div>
 
               <div class="flex-1 overflow-hidden">
-                <SessionPanel
-                  v-if="effectiveChatMode === 'session'"
-                  :agent-name="agent.name"
-                  :agent-status="agent.status"
-                />
                 <ChatPanel
-                  v-else
                   :agent-name="agent.name"
                   :agent-status="agent.status"
                   :resume-session-id="resumeSessionId"
@@ -171,6 +193,11 @@
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
             </div>
 
+            <!-- A2A Tab Content (trinity-enterprise#158) -->
+            <div v-if="activeTab === 'a2a' && agent.can_share" class="p-6">
+              <A2aPanel :agent-name="agent.name" :notify="showNotification" />
+            </div>
+
             <!-- Sharing Tab Content -->
             <!-- Access Tab Content (#17 — Trinity operators) -->
             <div v-if="activeTab === 'access' && agent.can_share">
@@ -192,7 +219,12 @@
 
             <!-- Schedules Tab Content -->
             <div v-if="activeTab === 'schedules'" class="p-6">
-              <SchedulesPanel :agent-name="agent.name" :initial-message="schedulePrefillMessage" />
+              <SchedulesPanel
+                :agent-name="agent.name"
+                :initial-message="schedulePrefillMessage"
+                :autonomy-enabled="!!agent.autonomy_enabled"
+                @enable-autonomy="toggleAutonomy"
+              />
             </div>
 
             <!-- Reports Tab Content (#918) -->
@@ -225,8 +257,12 @@
             </div>
 
             <!-- Skills Tab Content -->
-            <div v-if="activeTab === 'skills'">
-              <SkillsPanel :agent-name="agent.name" :agent-status="agent.status" />
+            <div v-if="activeTab === 'skills'" class="p-6">
+              <SkillsPanel
+                :agent-name="agent.name"
+                :can-manage="!!agent.can_share"
+                :agent-running="agent.status === 'running'"
+              />
             </div>
 
             <!-- Shared Folders Tab Content -->
@@ -236,8 +272,10 @@
 
             <!-- Settings Tab Content (#1108) — sectioned home for per-agent
                  config; Guardrails (GUARD-001 UI, #967) is section #1 -->
-            <div v-if="activeTab === 'settings' && agent.can_share">
+            <div v-if="activeTab === 'settings' && agent.can_share" class="p-6 space-y-6">
               <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
+              <!-- ent#277: renders only when the entitlement is present. -->
+              <CrossModelValidationPanel :agent-name="agent.name" />
             </div>
 
           </div>
@@ -318,6 +356,7 @@ import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
 import SettingsPanel from '../components/settings/SettingsPanel.vue'
+import CrossModelValidationPanel from '../components/CrossModelValidationPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
@@ -334,8 +373,8 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsPanel from '../components/SkillsPanel.vue'
 import PlaybooksPanel from '../components/PlaybooksPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
-import SessionPanel from '../components/SessionPanel.vue'  // SESSION_TAB_2026-04 Phase 3
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
 // Import composables
@@ -358,40 +397,102 @@ const sessionsStore = useSessionsStore()  // SESSION_TAB_2026-04 Phase 3
 const agent = ref(null)
 const loading = ref(true)
 const error = ref('')
+const notFound = ref(false)  // #1914: the agent 404'd (missing OR inaccessible — uniform by design)
 const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
-const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'reports', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
+// #2153: resolved against every id the page can render (see ALL_TAB_IDS, which
+// the tab builder derives), not a hand-maintained subset. The old list omitted
+// a2a, loops, playbooks, access and nevermined, so those links died silently.
 // Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
-// #1112: the Session tab collapsed into Chat, so ?tab=session resolves to chat
-// (the session-mode toggle, not the tab id, selects the surface).
-const TAB_ALIASES = { guardrails: 'settings', session: 'chat' }
+// ent#358: `session` is no longer an alias — it REDIRECTS (see below). The
+// surface it named lives in the Workspace now, so resolving it to a local tab
+// would silently land the user on stateless chat while their link asked for a
+// continuous conversation.
+const TAB_ALIASES = { guardrails: 'settings' }
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
-  return DEEP_LINK_TABS.includes(resolved) ? resolved : null
+  return ALL_TAB_IDS.includes(resolved) ? resolved : null
 }
-// Apply the ?tab=/?resumeSessionId= deep-link landing. Called from BOTH onMounted
-// AND onActivated: AgentDetail is KeepAlive-cached (App.vue), so the common path —
-// open agent (caches it), click into an execution, "Continue as Chat" back — hits
-// onActivated, NOT onMounted. Handling the resume ONLY in onMounted silently dropped
-// it: routeForcedMode stayed null, effectiveChatMode fell back to the default 'session'
-// mode, SessionPanel rendered instead of ChatPanel, and the resume id was discarded
-// with no error and no banner (EXEC-023 #1672). One shared fn so the two hooks can't
-// drift again.
+
+// What the deep link selected, so visibility can be reconciled once the agent
+// loads. Null once reconciled or once the user has moved.
+let deepLinkedTab = null
+
+// #2198 — first-activation sentinel.
+//
+// Vue fires onMounted AND onActivated on the FIRST mount of a KeepAlive'd
+// component (App.vue wraps <router-view> in `<KeepAlive :include=[…,
+// 'AgentDetail']>`), so every data call in both hooks ran twice — measured as
+// two /api/agents/{name} requests with an identical timestamp.
+//
+// It is CONSUMABLE, not one-way. A `let initialLoadDone = true` that nothing
+// resets would skip the data half on EVERY later activation, so a KeepAlive
+// revisit would never refresh the agent — which is the entire reason
+// onActivated exists (#1672) and a strictly worse bug than the one being
+// fixed. It is also invisible to a request-count test, which is why
+// `agentDetailMountDedupe.spec.js` asserts the clear specifically.
+//
+// Armed synchronously in onMounted before its first await; read AND cleared
+// synchronously as the FIRST statement of onActivated — above
+// `redirectRetiredSessionLink()`. Consuming it after that early return would
+// leave it armed on a still-cached component, and the next genuine revisit
+// would skip its data half.
+let skipNextActivation = false
+// Apply the ?tab= deep-link landing. Called from BOTH onMounted AND onActivated:
+// AgentDetail is KeepAlive-cached (App.vue), so the common path — open agent
+// (caches it), click into an execution, "Continue as Chat" back — hits
+// onActivated, NOT onMounted. Handling it in onMounted alone silently dropped
+// the landing with no error and no banner (EXEC-023 #1672). One shared fn so the
+// two hooks can't drift again.
+//
 function applyDeepLinkRouting() {
-  if (route.query.tab) {
-    const resolvedTab = resolveDeepLinkTab(route.query.tab)
-    if (resolvedTab) activeTab.value = resolvedTab
-    // #1112: a legacy ?tab=session deep-link expresses session-mode intent.
-    if (route.query.tab === 'session') chatMode.value = 'session'
+  if (!route.query.tab) return
+  const resolvedTab = resolveDeepLinkTab(route.query.tab)
+  if (!resolvedTab) return
+  // `brain` is the one id that NAVIGATES when selected (a watcher pushes
+  // /agents/:name/brain). Applying it before the agent loads would bounce a
+  // caller off the page and back when the capability turns out to be absent, so
+  // it waits for the reconcile below, where the answer is known.
+  if (resolvedTab === 'brain') { deepLinkedTab = resolvedTab; return }
+  activeTab.value = resolvedTab
+  deepLinkedTab = resolvedTab
+}
+
+// Once the agent has loaded, drop a deep link to a tab this viewer cannot see.
+//
+// The guard is the whole point: #2130 was a late write to `activeTab` yanking
+// users off a tab they had clicked. So this only acts while `activeTab` is still
+// exactly what the deep link set — the moment the user moves, the intent is
+// theirs and this stops having an opinion. It also runs once and clears.
+function reconcileDeepLinkVisibility() {
+  const requested = deepLinkedTab
+  if (!requested) return
+  deepLinkedTab = null
+  const visible = visibleTabs.value.some((t) => t.id === requested)
+  if (visible) {
+    // The deferred `brain` case: apply it now that capability is known.
+    if (requested === 'brain' && activeTab.value !== 'brain') activeTab.value = 'brain'
+    return
   }
-  // #1112/#1672: an execution resume (ExecutionDetail "Continue as Chat") carries a
-  // claude_session_id only the legacy ChatPanel resumes — force legacy for this
-  // landing WITHOUT persisting to the user's saved preference. Clear the transient
-  // override on any non-resume landing so a prior resume doesn't stick legacy mode
-  // for the rest of the SPA session (the KeepAlive instance outlives the navigation).
-  routeForcedMode.value = resumeSessionId.value ? 'legacy' : null
+  // Not visible to this viewer — fall back, but never over a later choice.
+  if (activeTab.value === requested) activeTab.value = 'overview'
+}
+
+// ent#358: a `?tab=session` link (or any older session deep link) asked for the
+// continuous-conversation surface. That surface is the Workspace now, so send
+// them there — query-preserving, minus the tab key that no longer names
+// anything here. `replace`, not `push`: the retired URL should not sit in the
+// back stack waiting to bounce them again.
+//
+// Called FIRST in both lifecycle hooks and returns true when it navigates, so
+// the caller can skip setting up a view that is about to unmount.
+function redirectRetiredSessionLink() {
+  if (route.query.tab !== 'session') return false
+  const { tab, ...rest } = route.query
+  router.replace({ path: '/workspace', query: { ...rest, agent: route.params.name } })
+  return true
 }
 // Tabs that flex-fill the viewport (page enters h-screen fullscreen layout).
 // #1112: Chat (both session and legacy modes render ChatMessages, which depends
@@ -433,32 +534,15 @@ const tokenStats = ref(null)
 const resumeSessionId = computed(() => route.query.resumeSessionId || null)
 const resumeExecutionId = computed(() => route.query.executionId || null)
 
-// #1112: Chat-tab session-mode toggle. The unified Chat tab renders SessionPanel
-// (--resume continuity) or the legacy ChatPanel (stateless). The user's choice
-// persists per-user via localStorage (one preference across agents), default ON.
-const CHAT_MODE_KEY = 'trinity.chatMode'
-const chatMode = ref(localStorage.getItem(CHAT_MODE_KEY) === 'legacy' ? 'legacy' : 'session')
-// Transient routing override (NOT persisted): execution-resume must land on the
-// legacy ChatPanel, which owns resumeSessionId — without changing the saved pref.
-const routeForcedMode = ref(null)
-// Session surface is available only when the platform flag is on AND the runtime
-// has --resume machinery (Codex does not, #1187).
-const sessionAvailable = computed(
-  () => sessionsStore.sessionTabEnabled && agent.value?.runtime !== 'codex'
-)
-const effectiveChatMode = computed(() => {
-  if (!sessionAvailable.value) return 'legacy'      // feature-flag / codex fallback
-  if (routeForcedMode.value) return routeForcedMode.value
-  return chatMode.value
-})
-function toggleChatMode() {
-  routeForcedMode.value = null                       // user intent overrides routing
-  chatMode.value = effectiveChatMode.value === 'session' ? 'legacy' : 'session'
-  try { localStorage.setItem(CHAT_MODE_KEY, chatMode.value) } catch (e) { /* ignore */ }
-}
+// ent#358: the Chat tab no longer forks between a session surface and a
+// stateless one. Continuous conversation moved to the Workspace, which runs the
+// same --resume engine; what remains here is the stateless per-turn chat that
+// ExecutionDetail's "Continue as Chat" resumes into (EXEC-023 #1672), so the
+// mode toggle, its localStorage preference and the transient routing override
+// all went with the surface they selected.
 
 // Initialize composables
-const { notification, showNotification } = useNotification()
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // Agent lifecycle composable
 const {
@@ -546,10 +630,12 @@ async function toggleAutonomy() {
     // Update local state
     agent.value.autonomy_enabled = newState
 
+    // #1945: the server authors this line — the toggle no longer "activates"
+    // schedules, it gates them, and the message names the case (no schedules /
+    // all disabled / N of M will run) that the raw count used to hide.
     showNotification(
-      newState
-        ? `Autonomy enabled. ${result.schedules_updated} schedule(s) activated.`
-        : `Autonomy disabled. ${result.schedules_updated} schedule(s) paused.`,
+      result.message ||
+        `Autonomy ${newState ? 'enabled' : 'disabled'}.`,
       'success'
     )
   } catch (error) {
@@ -767,8 +853,20 @@ const {
 
 // Computed tabs based on agent permissions and system agent status
 // Tab order optimized for workflow: primary actions first, configuration/reference last
-const visibleTabs = computed(() => {
-  const isSystem = agent.value?.is_system
+// #2153: a PURE builder, so "which tabs exist" has exactly one definition.
+//
+// `?tab=` used to resolve against a hand-maintained `DEEP_LINK_TABS` list that
+// omitted a2a, loops, playbooks, access and nevermined — real tabs whose deep
+// links silently landed on Overview. Two sources of truth for the same fact,
+// and only one of them was updated when a tab was added.
+//
+// Taking the flags as arguments lets the deep-link resolver ask the same
+// function for the SUPERSET (every flag permissive) without a second list, so a
+// tab added below is deep-linkable the moment it appears.
+function buildTabs({
+  isSystem = false, hasDashboardFlag = false, brainOrbVisible = false,
+  canShare = false, a2aVisible = false, gitSync = false,
+} = {}) {
 
   // Primary tabs - most frequently used. Overview leads (#1107).
   const tabs = [
@@ -777,19 +875,18 @@ const visibleTabs = computed(() => {
     { id: 'chat', label: 'Chat' }
   ]
 
-  // #1112: the Session tab collapsed into the single Chat tab above. The
-  // Session surface is now reached via the Chat tab's "Session mode" toggle
-  // (default ON), gated on the same feature-flag + non-Codex-runtime condition
-  // (see `sessionAvailable`). No separate tab entry.
+  // #1112 collapsed the Session tab into the Chat tab above; ent#358 retired
+  // the surface entirely — continuous conversation is the Workspace's job now.
+  // The Chat tab keeps stateless per-turn chat and links across.
 
   // Dashboard tab - only show if agent has a dashboard.yaml file (insert after Tasks)
-  if (hasDashboard.value) {
+  if (hasDashboardFlag) {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
   }
 
   // Brain Orb tab (#58) — platform flag AND per-agent capability. Selecting it
   // navigates to the dedicated /agents/:name/brain route (handled by a watcher).
-  if (sessionsStore.brainOrbAvailable && hasBrainOrb.value) {
+  if (brainOrbVisible) {
     tabs.push({ id: 'brain', label: 'Brain' })
   }
 
@@ -803,14 +900,20 @@ const visibleTabs = computed(() => {
   )
 
   // Access control tabs - hide for system agent (system agent has full access)
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'access', label: 'Access' })  // #17 operators (Trinity users)
     tabs.push({ id: 'sharing', label: 'Sharing' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
   }
 
+  // A2A tab (trinity-enterprise#158) — owner-only, non-system, and only when the
+  // enterprise A2A module is entitled (never a blank tab in OSS/unentitled).
+  if (a2aVisible && canShare && !isSystem) {
+    tabs.push({ id: 'a2a', label: 'A2A' })
+  }
+
   // Git and Files tabs together
-  if (hasGitSync.value) {
+  if (gitSync) {
     tabs.push({ id: 'git', label: 'Git' })
   }
   // DEPRECATED: Terminal tab hidden for all users (candidate for removal)
@@ -818,12 +921,21 @@ const visibleTabs = computed(() => {
   tabs.push({ id: 'files', label: 'Files' })
 
   // Folders - hide for system agent
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'folders', label: 'Folders' })
   }
 
+  // Skills (#235) — unhidden. Was kept out of `visibleTabs` per requirements
+  // §22.2 ("component preserved for potential admin-only access") while
+  // assignment stayed REST/MCP-only, so the #182/#183 machinery had no product
+  // surface at all. Owner/admin and non-system, matching the other management
+  // tabs; OverflowTabs absorbs the extra entry.
+  if (canShare && !isSystem) {
+    tabs.push({ id: 'skills', label: 'Skills' })
+  }
+
   // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'settings', label: 'Settings' })
   }
 
@@ -831,16 +943,59 @@ const visibleTabs = computed(() => {
   tabs.push({ id: 'info', label: 'Info' })
 
   return tabs
-})
+}
+
+const visibleTabs = computed(() => buildTabs({
+  isSystem: agent.value?.is_system,
+  hasDashboardFlag: hasDashboard.value,
+  brainOrbVisible: sessionsStore.brainOrbAvailable && hasBrainOrb.value,
+  canShare: agent.value?.can_share,
+  a2aVisible: sessionsStore.a2aAvailable,
+  gitSync: hasGitSync.value,
+}))
+
+// Every id the page can ever render, derived from the builder above rather than
+// restated. This is what a `?tab=` value is resolved against BEFORE the agent
+// loads (#2130 requires the landing to apply before the first await, so nothing
+// permission-dependent is known yet); visibility is reconciled once it does.
+const ALL_TAB_IDS = buildTabs({
+  isSystem: false, hasDashboardFlag: true, brainOrbVisible: true,
+  canShare: true, a2aVisible: true, gitSync: true,
+}).map((t) => t.id)
 
 // Load agent
+//
+// #1914: a failure here has to reach the template, or the page renders blank —
+// `v-if="agent"` and the error banner are both false when `agent` is null and
+// `error` is ''. Two distinct failure states:
+//   404      -> not-found panel. The backend returns a UNIFORM 404 for both a
+//               non-existent agent and one this caller cannot access (an
+//               enumeration oracle otherwise — Invariant #8 / #186), so the
+//               copy must not claim which of the two it is.
+//   anything -> generic "couldn't load" banner with a retry (network blip,
+//   else      500, expired token). Retrying a 404 is pointless, so only this
+//               branch offers it.
 async function loadAgent() {
-  loading.value = true
+  // #2198 / design-system-contract:41-43. The skeleton must animate for a FIRST
+  // load and stay invisible for a background refresh of the same entity
+  // ("Loading means 'no data yet', never 'fetch in flight'"). Gating on
+  // IDENTITY, not mere presence, is what encodes that: a plain `!agent.value`
+  // would keep `loading` false across an A -> B agent switch, because the
+  // `route.params.name` watcher resets hasDashboard/agentTags/authStatus/
+  // tokenStats but deliberately never clears `agent.value` — so the user would
+  // stare at agent A's data while B loads, where today they correctly see the
+  // loading state.
+  if (!agent.value || agent.value.name !== route.params.name) loading.value = true
   error.value = ''
+  notFound.value = false
   try {
     agent.value = await agentsStore.fetchAgent(route.params.name)
   } catch (err) {
-    error.value = 'Failed to load agent details'
+    if (err.response?.status === 404) {
+      notFound.value = true
+    } else {
+      error.value = 'Failed to load agent details'
+    }
   } finally {
     loading.value = false
   }
@@ -982,15 +1137,54 @@ async function removeTag(tag) {
   }
 }
 
+// #2198 — the in-flight dashboard probe, and the key it was started under.
+//
+// The store-level dedupe in `stores/agents.js` CANNOT collapse this on its own,
+// and that is the subtle part: a promise-join only merges requests that are
+// concurrent, while the four triggers of checkDashboardExists() fire hundreds
+// of milliseconds apart (measured: ladders starting at +0, +326 and +396 ms).
+// Each staggered ladder then issues its own three /api/agent-dashboard/{name}
+// calls — 9 requests over ~9 s for one page load. The join has to happen at the
+// level of the PROBE, not the request.
+//
+// The key carries the running-ness the ladder branches on, not just the name.
+// The ladder early-returns whenever status !== 'running', so a probe started at
+// mount while the agent was still `starting` settles on hasDashboard=false; if
+// the status watcher — which exists precisely for "just became running" — then
+// joined that same settled promise, a slow-booting agent would lose its
+// Dashboard tab permanently, with no retry path (its status will not change
+// again).
+let dashboardProbe = null
+let dashboardProbeKey = null
+
 // Check if agent has a dashboard.yaml file.
 // Uses lightweight DB-backed /exists endpoint first (no agent call needed).
 // On failure, retries with backoff since agents need time to boot.
-async function checkDashboardExists() {
+//
+// NOTE: distinct from `agentsStore.checkDashboardExists()`, which is the single
+// /exists call this wraps with the boot retry ladder (#2198 E13).
+function checkDashboardExists() {
   if (!agent.value?.name) {
     hasDashboard.value = false
-    return
+    return Promise.resolve()
   }
 
+  const key = `${agent.value.name}:${agent.value.status === 'running'}`
+  if (dashboardProbe && dashboardProbeKey === key) return dashboardProbe
+
+  dashboardProbeKey = key
+  dashboardProbe = runDashboardProbe().finally(() => {
+    // Only clear our own probe — a newer one may already have been registered
+    // by the route or status watcher.
+    if (dashboardProbeKey === key) {
+      dashboardProbe = null
+      dashboardProbeKey = null
+    }
+  })
+  return dashboardProbe
+}
+
+async function runDashboardProbe() {
   // Fast path: check DB cache (no agent container call)
   try {
     const exists = await agentsStore.checkDashboardExists(agent.value.name)
@@ -1013,12 +1207,33 @@ async function checkDashboardExists() {
         hasDashboard.value = true
         return
       }
+      // #2198: the retries exist for an agent that has not finished booting.
+      // `settled` means the agent ran its handler and answered — so "no
+      // dashboard" is the real answer and asking twice more changes nothing.
+      // Without this the page spent 3 requests over 9 SECONDS on every load of
+      // an agent that will never have a dashboard, and #2130 recorded that same
+      // ladder as what delayed deep-link landing by ~10s.
+      //
+      // Absent (an older backend, or a genuinely inconclusive reply) keeps the
+      // old behaviour, so this degrades safely rather than turning a transient
+      // failure into a permanently missing tab.
+      if (response?.settled === true) break
     } catch {
       // Continue to next retry
     }
   }
-  // All retries exhausted — no dashboard found
+  // Settled negative, or all retries exhausted — no dashboard found
   hasDashboard.value = false
+}
+
+// #2198: drop any in-flight probe so a new agent (or a newly-running one) never
+// inherits the previous answer. Both watchers below call this BEFORE their own
+// checkDashboardExists(), because the key alone cannot protect the A -> B case:
+// a probe for agent A is still keyed `A:true` and would simply linger, and the
+// `finally` above would then be racing a probe the page no longer wants.
+function resetDashboardProbe() {
+  dashboardProbe = null
+  dashboardProbeKey = null
 }
 
 // #58 — detect the per-agent Brain Orb capability from template.yaml's
@@ -1108,6 +1323,9 @@ watch(() => route.params.name, async (newName, oldName) => {
     stopAllPolling()
     // Reset dashboard state for new agent
     hasDashboard.value = false
+    // #2198: and drop A's in-flight probe, so B does not join it and inherit
+    // A's answer.
+    resetDashboardProbe()
     // Reset tags for new agent
     agentTags.value = []
     // Reset auth status for new agent
@@ -1159,7 +1377,18 @@ watch(() => agent.value?.status, async (newStatus) => {
     if (hasGitSync.value) {
       startGitStatusPolling()
     }
-    // Check for dashboard when agent starts running
+    // #2198: this is the "just became running" path, and it must NOT join a
+    // probe that ran while the agent was still booting — the ladder early-
+    // returns on `status !== 'running'`, so such a probe settles without ever
+    // having asked, and joining it would strand a slow-starting agent without
+    // its Dashboard tab forever (its status will not change again).
+    //
+    // The probe KEY carries running-ness for exactly this reason, so that case
+    // is already a different key and gets its own ladder. Deliberately no
+    // reset here: on the common path — a mount where the agent is already
+    // running — this watcher and onMounted fire microseconds apart with the
+    // SAME key, and resetting would defeat the dedupe this commit exists for
+    // (measured: it is the difference between one ladder and two).
     await checkDashboardExists()
   } else {
     stopStatsPolling()
@@ -1198,6 +1427,27 @@ function stopAllPolling() {
 
 // Initialize on mount
 onMounted(async () => {
+  // ent#358: a retired session deep-link navigates away — don't spend a mount's
+  // worth of requests on a view that is unmounting.
+  if (redirectRetiredSessionLink()) return
+
+  // #2198: arm the first-activation sentinel. AFTER the early return above (a
+  // mount that navigates away does no loading, so the activation that follows
+  // must not be told to skip) and BEFORE the first await, because onActivated
+  // runs in the same flush and reads it synchronously.
+  skipNextActivation = true
+
+  // #2130: apply the ?tab=/resume landing BEFORE any await. It reads only
+  // route.query and writes local refs — nothing in it needs loaded agent data,
+  // and the whole tab area sits behind `v-if="agent"`, so writing activeTab
+  // early just makes the FIRST render land on the requested tab. Running it
+  // after the awaits below meant the deep-link waited on the slowest unrelated
+  // mount call: on a RUNNING agent that batch also holds the
+  // checkDashboardExists/checkBrainOrbCapability container round-trips (~10s
+  // measured), so the page showed Overview for that window and then stole a tab
+  // the user had clicked in the meantime.
+  applyDeepLinkRouting()
+
   // Load agent first (other calls may depend on agent data)
   await loadAgent()
 
@@ -1216,17 +1466,53 @@ onMounted(async () => {
     loadTokenStats(),
     ...(agent.value?.status === 'running' ? [checkDashboardExists(), checkBrainOrbCapability()] : [])
   ])
+  // #2153: only now is it known which tabs this viewer can see. Drops a deep
+  // link to one they cannot — and does nothing if they have already clicked.
+  reconcileDeepLinkVisibility()
   startEmotionCycling()
   startAllPolling()
-
-  // Handle tab / resume deep-link (from Timeline or ExecutionDetail navigation)
-  applyDeepLinkRouting()
 })
 
 // onActivated fires when component is shown (after being cached by KeepAlive)
 onActivated(async () => {
+  // #2198: consume the sentinel as the VERY FIRST statement — above the
+  // redirect guard below. If it were read after that early return, the
+  // retired-link path would leave the flag armed on a still-cached component
+  // and the next genuine revisit would silently skip its refresh.
+  const isInitialActivation = skipNextActivation
+  skipNextActivation = false
+
+  // ent#358: same guard as onMounted — AgentDetail is KeepAlive-cached, so a
+  // session deep-link opened on an already-visited agent lands here instead.
+  if (redirectRetiredSessionLink()) return
+
+  // EXEC-023 (#1672): re-apply the full tab + resume landing here, not just the
+  // tab — onMounted does NOT fire for a KeepAlive-cached instance, so this is
+  // the path the common "Continue as Chat" navigation actually takes.
+  // #2130: and apply it BEFORE the awaits below, for the same reason as
+  // onMounted — this hook re-awaits loadAgent() plus, on a running agent, the
+  // two container round-trips.
+  applyDeepLinkRouting()
+
   // Restart polling when returning to this view
   startAllPolling()
+
+  // #2198: on the INITIAL activation onMounted is running the same work in the
+  // same flush, so everything below would be a duplicate. Stop here — but note
+  // what has already run above: redirectRetiredSessionLink, applyDeepLinkRouting
+  // and startAllPolling are idempotent, data-free and still unconditional in
+  // BOTH hooks, which is the #1672 / #2130 / #2153 / ent#358 contract.
+  //
+  // reconcileDeepLinkVisibility() and startEmotionCycling() are deliberately
+  // BELOW this line and NOT in that set. Both are *consuming*:
+  // reconcileDeepLinkVisibility reads `deepLinkedTab`, acts, and clears it — so
+  // running it here, before onMounted's awaits have loaded the agent, would
+  // evaluate `visibleTabs` against `agent.value === null`, decide that
+  // ?tab=sharing / ?tab=brain are "not visible", fall back to Overview, and
+  // clear the flag so onMounted's own later call becomes a no-op. That
+  // regresses #2130 and #2153 and no request-count assertion would see it.
+  if (isInitialActivation) return
+
   // Refresh agent data
   await loadAgent()
   // Reload emotions and restart cycling (AVATAR-002)
@@ -1237,11 +1523,9 @@ onActivated(async () => {
     await checkDashboardExists()
     await checkBrainOrbCapability()
   }
-
-  // EXEC-023 (#1672): re-apply the full tab + resume landing here, not just the
-  // tab. onMounted does NOT fire for a KeepAlive-cached instance, so this is the
-  // path the common "Continue as Chat" navigation actually takes.
-  applyDeepLinkRouting()
+  // #2153: same reconcile as onMounted — this hook is the KeepAlive path, and
+  // handling it in one hook only is the #1672 bug class.
+  reconcileDeepLinkVisibility()
 
   // DEPRECATED: Terminal tab hidden (candidate for removal)
   // if (activeTab.value === 'terminal') {

@@ -8,8 +8,8 @@ defined BEFORE dynamic routes like /{name}/schedules to avoid FastAPI matching
 "scheduler" as an agent name.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from typing import List
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from typing import List, Optional
 from datetime import datetime
 import json
 import os
@@ -30,6 +30,7 @@ from dependencies import (
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
+    OwnedAgent,
     CurrentUser,
     assert_admin,
     assert_agent_access,
@@ -309,10 +310,34 @@ async def update_schedule(
 
     # #1472: validate cron + timezone with the scheduler's parser (see
     # create_schedule). Cron-field validity is timezone-independent, so a cron
-    # update is checked under UTC; a timezone update is checked on its own.
+    # update is checked under the effective zone purely to keep the combined
+    # check faithful; a timezone update is checked on its own.
+    #
+    # #1823: the zone passed here used to be the literal "UTC". Cron parsing
+    # genuinely does not depend on it — that reasoning was and is correct — but
+    # the hardcoded literal meant a CRON-ONLY `PUT` (updates.timezone is None)
+    # never looked at the zone the row actually stores. A row holding a zone the
+    # scheduler cannot register was therefore mutated and returned 200 OK, while
+    # still never firing: the API and the scheduler disagreeing, which is the
+    # exact contract #1472 exists to hold. Passing the EFFECTIVE zone changes no
+    # cron verdict and makes the combined check honest.
     if updates.cron_expression is not None:
+        # `is not None`, NOT `or`: an empty-string `timezone` is a SET value that
+        # means "use the scheduler default", not "field absent". `_add_job` reads
+        # `pytz.timezone(s.timezone) if s.timezone else pytz.UTC`, and
+        # `db.update_schedule` writes `""` through verbatim, so a PUT carrying
+        # `{"cron_expression": …, "timezone": ""}` leaves the row on UTC. An `or`
+        # chain treats that as unset and falls back to the STORED zone — so the
+        # validator would judge a zone the write is removing. On a runtime
+        # lacking the tz links that rejected the one request that REPAIRS such a
+        # row (clearing a stale `Europe/Kiev` back to the default), inverting
+        # this check's whole justification. Resolve the effective post-write zone
+        # first, then apply the scheduler's own empty->UTC rule.
+        effective_timezone = (
+            updates.timezone if updates.timezone is not None else schedule.timezone
+        ) or "UTC"
         try:
-            validate_cron_expression(updates.cron_expression, "UTC")
+            validate_cron_expression(updates.cron_expression, effective_timezone)
         except ScheduleValidationError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -378,7 +403,11 @@ async def delete_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/enable")
 async def enable_schedule(
-    name: AuthorizedAgent,
+    # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
+    # variant must match the PATH PARAM: these routes declare `{name}`, and
+    # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
+    # and rejected every request with 422 before the handler ran (#2094).
+    name: OwnedAgent,
     schedule_id: str
 ):
     """Enable a schedule."""
@@ -397,7 +426,11 @@ async def enable_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/disable")
 async def disable_schedule(
-    name: AuthorizedAgent,
+    # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
+    # variant must match the PATH PARAM: these routes declare `{name}`, and
+    # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
+    # and rejected every request with 422 before the handler ran (#2094).
+    name: OwnedAgent,
     schedule_id: str
 ):
     """Disable a schedule."""
@@ -416,9 +449,16 @@ async def disable_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/trigger")
 async def trigger_schedule(
-    name: AuthorizedAgent,
+    # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
+    # variant must match the PATH PARAM: these routes declare `{name}`, and
+    # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
+    # and rejected every request with 422 before the handler ran (#2094).
+    name: OwnedAgent,
     schedule_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    x_source_agent: Optional[str] = Header(None),
+    x_mcp_key_id: Optional[str] = Header(None),
+    x_mcp_key_name: Optional[str] = Header(None),
 ):
     """
     Manually trigger a schedule execution.
@@ -436,12 +476,37 @@ async def trigger_schedule(
             detail="Schedule not found"
         )
 
+    # #1970: the authenticated caller is in scope HERE and nowhere downstream —
+    # the scheduler hop carried only the schedule id, so every manually
+    # triggered run landed with all five source_* columns NULL and "who ran
+    # this?" was answerable only from logs, until they rolled.
+    #
+    # `current_user` is authenticated, so user_id/email are trustworthy. The
+    # three X-* headers are the same MCP-server-set attribution headers
+    # `routers/chat.py` already consumes; they are raw client headers, so they
+    # are attribution only — nothing authorizes on them (`AuthorizedAgent`
+    # above is what actually gates this endpoint).
+    #
+    # Precedence for the agent name is deliberately the REVERSE of chat.py's:
+    # `current_user.agent_name` comes from the VALIDATED agent-scoped key, so
+    # where it exists it wins and a caller cannot pin its run on a sibling
+    # agent by setting the header. The header fills only the case where it is
+    # the sole signal — a user-scoped key, whose `agent_name` is None.
+    source_payload = {
+        "source_user_id": current_user.id,
+        "source_user_email": current_user.email,
+        "source_agent_name": current_user.agent_name or x_source_agent,
+        "source_mcp_key_id": x_mcp_key_id,
+        "source_mcp_key_name": x_mcp_key_name,
+    }
+
     # Call dedicated scheduler service for manual trigger
     # The scheduler handles locking, activity tracking, and execution
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{SCHEDULER_URL}/api/schedules/{schedule_id}/trigger",
+                json=source_payload,
                 timeout=10.0
             )
 
@@ -454,6 +519,16 @@ async def trigger_schedule(
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Scheduler service unavailable"
+                )
+            elif response.status_code == 409:
+                # #1968: the scheduler declined because this schedule is
+                # already running. Relayed as a 409 rather than flattened into
+                # the 500 below, because it is not a failure — it is the answer
+                # to the caller's question, and the old handler's silent
+                # `"status": "triggered"` for this case is the bug.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Schedule is already executing"
                 )
             elif response.status_code != 200:
                 logger.error(f"Scheduler trigger failed: {response.status_code} - {response.text}")
@@ -477,12 +552,20 @@ async def trigger_schedule(
                     "schedule_id": schedule_id,
                     "schedule_name": result.get("schedule_name"),
                     "triggered_by": "manual",
+                    # #1968: the audit row can now name the execution it
+                    # started, so a trigger and its run are joinable after the
+                    # fact rather than only correlatable by timestamp.
+                    "execution_id": result.get("execution_id"),
                 },
             )
 
             return {
                 "status": "triggered",
                 "schedule_id": schedule_id,
+                # #1968: the field the MCP tool has always read and never
+                # found. It was absent here because the scheduler responded
+                # before the row existed; it now creates the row first.
+                "execution_id": result.get("execution_id"),
                 "schedule_name": result.get("schedule_name"),
                 "agent_name": result.get("agent_name"),
                 "message": result.get("message", "Execution started")

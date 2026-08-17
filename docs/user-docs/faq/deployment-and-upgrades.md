@@ -101,3 +101,15 @@ Vector's default Docker log source misbehaves on Docker Desktop and other VM-bas
 ## Why do I have to log in again after restarting the backend?
 
 JWT tokens are invalidated whenever the backend restarts, so every web UI session must log in again — this is expected after any upgrade or restart, not a bug. MCP clients such as Claude Code also need to reconnect: run `/mcp` in your session or restart the client. See [Monitoring](../guides/deploying/monitoring.md).
+
+## After rebuilding the base image, how do agents pick it up?
+
+At each agent's next **cold start** — the next time it goes from stopped to running. Trinity compares the running container's image against the current base image and recreates the container when they differ. A running agent is never replaced out from under you: drift is detected but not acted on until the agent is next started cold. The quickest way to roll it out is a fleet restart, which sends each agent through the normal lifecycle so drifted ones are recreated and up-to-date ones keep their containers. The system agent follows the same rule and is deliberately never swapped mid-operation — a stale image raises an operator alert instead. See [Upgrading](../guides/deploying/upgrading.md).
+
+## How do I confirm the running deployment is actually the build I just shipped?
+
+`curl -s http://localhost:8000/api/version`. The `git_commit_short`, `git_branch`, `git_commit_subject`, and `build_date` fields report the code that is *actually running*, not merely what was baked in at build time — so a container running mounted source, or one that drifted from its image, is reported honestly. The response also carries `edition` and `enterprise_features`, so you can confirm the entitlements you expect are registered. `"unknown"` values mean the image was built without the deploy script's build args. The same data is in the UI via the version chip in the navigation bar. See [Upgrading](../guides/deploying/upgrading.md).
+
+## Can a container log fill my disk?
+
+Not by default. Docker's JSON log driver has no size limit out of the box, and an unbounded log will eventually fill the Docker data root and wedge the whole fleet at once — so Trinity caps every container it controls, platform services and agents alike, at 10 MB per file and 3 files. Tune with `CONTAINER_LOG_MAX_SIZE`/`CONTAINER_LOG_MAX_FILE` (platform) and `AGENT_LOG_MAX_SIZE`/`AGENT_LOG_MAX_FILE` (agents). Both malformed *and* absurd-but-well-formed values fall back to the bounded default with a warning; there is no way to configure an unbounded log. Platform services adopt a change on the next `docker compose up`, agents on recreate. Only `docker logs` history shortens — Vector's aggregate at `/data/logs` is the primary record. See [Monitoring](../guides/deploying/monitoring.md).

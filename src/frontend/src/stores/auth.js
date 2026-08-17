@@ -5,6 +5,14 @@ export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: null,
     user: null,
+    // #2198 — true only after a SUCCESSFUL GET /api/users/me in this browsing
+    // session. Deliberately NOT persisted, and deliberately distinct from
+    // `user?.role` being present: `initializeAuth()` restores `user` (role
+    // included) synchronously from localStorage, which is user-editable, so a
+    // role gate reading it alone would fail OPEN on a forged value. Role-gated
+    // UI must require this flag, so the nav reflects a server answer rather
+    // than a stored one.
+    profileVerified: false,
     isAuthenticated: false,
     isLoading: true,
     authError: null,
@@ -175,6 +183,11 @@ export const useAuthStore = defineStore('auth', {
       try {
         const response = await axios.get('/api/users/me')
         this.user = { ...this.user, ...response.data }
+        // #2198: only a real server response verifies the profile. Set AFTER
+        // the assignment so a consumer waking on this flag always sees the
+        // merged user, and never in the catch — a failed fetch must leave
+        // role-gated UI closed.
+        this.profileVerified = true
         localStorage.setItem('auth0_user', JSON.stringify(this.user))
       } catch (e) {
         console.warn('Failed to fetch /api/users/me:', e?.message || e)
@@ -385,23 +398,43 @@ export const useAuthStore = defineStore('auth', {
 
     // Logout
     async logout() {
-      // #187: revoke the token server-side first so an exfiltrated copy stops
-      // working immediately. Best-effort — never block local logout if the
-      // call fails (the Authorization header is still set at this point).
-      try {
-        await axios.post('/api/auth/logout')
-      } catch (e) {
-        // ignore — proceed to clear local state regardless
-      }
-
+      // #2258: the LOCAL record of the session is cleared BEFORE the network
+      // revoke, in the same synchronous tick the caller entered. Two readers
+      // depend on that ordering:
+      //   * the global 401 interceptors (main.js / api.js) decide whether to
+      //     bounce to /login from `localStorage['token']`. If the revoke below
+      //     answers 401 — an already-expired token — an interceptor that still
+      //     saw the token would call THIS method again and push /login, which
+      //     for a client on the Workspace is the operator login (the #138
+      //     bounce by a new route);
+      //   * `router/index.js` redirects /login → / while `isAuthenticated`, so
+      //     a caller that pushes /login right after calling this (NavBar has
+      //     done so, un-awaited, since #187) used to lose the race to the
+      //     dashboard.
+      // The revoke itself still carries the token: it rides the axios DEFAULT
+      // header, which is deleted only after the call.
       this.token = null
       this.user = null
       this.isAuthenticated = false
+      // #2198: the verification belonged to the session that just ended. A
+      // stale `true` here would let the next principal's role-gated UI render
+      // from whatever `user` happens to be restored before its own
+      // /api/users/me lands.
+      this.profileVerified = false
       this.authError = null
       this.mfaChallenge = null
-
       localStorage.removeItem('token')
       localStorage.removeItem('auth0_user')
+
+      // #187: revoke the token server-side so an exfiltrated copy stops
+      // working immediately. Best-effort — never block local logout if the
+      // call fails.
+      try {
+        await axios.post('/api/auth/logout')
+      } catch (e) {
+        // ignore — local state is already cleared
+      }
+
       delete axios.defaults.headers.common['Authorization']
 
       // Clear the token cookie

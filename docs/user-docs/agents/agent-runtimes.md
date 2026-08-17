@@ -15,7 +15,7 @@ A template selects the runtime in `template.yaml`:
 ```yaml
 runtime:
   type: codex          # claude-code (default) | gemini-cli | codex
-  model: gpt-5.1-codex # optional model override
+  model: gpt-5.6-sol   # optional model override
 ```
 
 The runtime is fixed when the agent is created. To change it, recreate the agent from a template that declares a different runtime — there is no post-creation switch.
@@ -29,7 +29,7 @@ On the Agent Detail page, a runtime badge shows which runtime the agent is using
 | Auth model | Claude subscription / OAuth, or platform API key | Gemini API key | `OPENAI_API_KEY` (Codex skips Claude-subscription auto-assign) |
 | System-prompt file | `CLAUDE.md` | `CLAUDE.md` | `AGENTS.md` |
 | Chat continuity | Yes | Yes | Yes |
-| Session tab resume | Yes | Yes | No (Session tab hidden) |
+| Working memory across turns | Yes | Yes | No (history replayed as text) |
 | MCP support | Yes | Yes | Yes |
 | Cost reporting | Actual | Actual | Estimated |
 
@@ -42,7 +42,7 @@ Set the runtime in the template's `template.yaml`:
 | Field | Values | Default | Notes |
 |-------|--------|---------|-------|
 | `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
-| `runtime.model` | runtime-specific model id (e.g. `gpt-5.1-codex`) | runtime default | Optional override |
+| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. Trinity mirrors the template's `CLAUDE.md` into `AGENTS.md` at startup, so a single instruction file works across runtimes.
 
@@ -52,7 +52,7 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 
 ## Limitations
 
-- **Codex Session-tab resume is not supported.** The Session tab is hidden for Codex agents; use the Chat tab, which keeps conversation continuity.
+- **Codex cannot resume a session.** In the Workspace, a Codex agent's turns replay the visible history as text instead of carrying its working memory forward — the conversation stays coherent, but tool results and mid-task state do not survive between turns.
 - **No runtime switch after creation.** Recreate the agent from a different template to change runtimes — a post-creation runtime-switch endpoint is planned.
 - **Codex cost is estimated**, not metered exactly.
 - **Codex vision/image input and SSE streaming are out of scope** for the current release (planned).
@@ -60,7 +60,7 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 ## See Also
 
 - [Creating Agents](creating-agents.md) -- Selecting a runtime via the template
-- [Session Tab](agent-session.md) -- Resume-based chat (Claude/Gemini only)
+- [Continuous Conversations](agent-session.md) -- What resuming preserves (Claude/Gemini only)
 - [Chat](agent-chat.md) -- Standard chat, available on all runtimes
 - [Subscription Credentials](../credentials/subscription-credentials.md) -- Claude-subscription auto-assignment (skipped for Codex)
 - [MCP Server](../integrations/mcp-server.md) -- Tools available to all runtimes

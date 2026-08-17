@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
@@ -534,7 +534,51 @@ export function createScheduleTools(
           }, null, 2);
         }
 
-        const result = await apiClient.triggerAgentSchedule(agent_name, schedule_id);
+        // #1970: carry the caller identity through so the resulting execution
+        // row is attributable to this key/agent, not just to the key owner.
+        let result;
+        try {
+          result = await apiClient.triggerAgentSchedule(
+            agent_name,
+            schedule_id,
+            authContext?.agentName,
+            authContext
+              ? { keyId: authContext.keyId, keyName: authContext.keyName }
+              : undefined
+          );
+        } catch (error) {
+          // #1968: "already running" is an ANSWER, not a failure. Surfacing the
+          // raw ApiError would hand the calling agent a stack-shaped string it
+          // has to parse; a structured status lets it decide to wait and poll
+          // instead of retrying into the same lock.
+          if (error instanceof ApiError && error.status === 409) {
+            console.log(`[trigger_agent_schedule] Schedule '${schedule_id}' is already executing`);
+            return JSON.stringify({
+              status: "already_running",
+              schedule_id,
+              agent_name,
+              message:
+                "This schedule is already executing, so no new run was started. " +
+                "Poll list_recent_executions for the run in flight.",
+            }, null, 2);
+          }
+          throw error;
+        }
+
+        // #1968: `execution_id` used to be absent from the response, so this
+        // string always read "...with ID 'undefined'". Guard the wording rather
+        // than assume — an old scheduler behind a new MCP server still omits it,
+        // and a confident lie about the id is what this issue is about.
+        if (!result.execution_id) {
+          return JSON.stringify({
+            status: "triggered",
+            schedule_id,
+            execution_id: null,
+            message:
+              "Schedule triggered, but the backend returned no execution id. " +
+              "Find the run via list_recent_executions.",
+          }, null, 2);
+        }
 
         console.log(`[trigger_agent_schedule] Triggered schedule '${schedule_id}' for agent '${agent_name}', execution_id: ${result.execution_id}`);
 

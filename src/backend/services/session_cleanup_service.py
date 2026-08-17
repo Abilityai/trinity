@@ -15,11 +15,13 @@ Two paths feed the cleanup:
    to the user.
 
 2. **Periodic sweep** (every 6h, default) that diffs the on-disk JSONL set
-   against the keep set (every ``cached_claude_session_id`` currently
-   stored on an active ``agent_sessions`` row for that agent). JSONLs older
-   than the age guard whose UUID is not in the keep set are deleted.
-   Catches dropped synchronous reaps, externally-modified state, and any
-   churn from fallback turns that orphaned a JSONL behind a fresh UUID.
+   against the keep set: every ``cached_claude_session_id`` currently stored
+   for that agent, on an active ``agent_sessions`` row **or** on an
+   ``enterprise_portal_sessions`` (Workspace) thread — both surfaces resume,
+   so both are live (ent#358). JSONLs older than the age guard whose UUID is
+   in neither are deleted. Catches dropped synchronous reaps,
+   externally-modified state, and any churn from fallback turns that orphaned
+   a JSONL behind a fresh UUID.
 
 The age guard (default 1h) prevents a race where a brand-new cold turn
 writes a JSONL **before** the backend has updated
@@ -30,8 +32,8 @@ otherwise delete it and break the next resume.
 reaps headless task JSONLs by the same mechanism. Long-running headless
 tasks (timeout > 600s) auto-enable JSONL persistence so the stdout-race
 recovery code can fire (see ``headless_executor._setup_headless_command``).
-Their UUIDs are never inserted into ``agent_sessions``, so they fall out
-of the keep set automatically — after the 1h age guard, the next 6h
+Their UUIDs are never inserted into either sessions table, so they fall
+out of the keep set automatically — after the 1h age guard, the next 6h
 sweep cycle reaps them. No separate retention loop needed.
 
 This service uses ``execute_command_in_container`` (the same primitive
@@ -208,6 +210,25 @@ class SessionCleanupService:
         except Exception as e:
             logger.warning(
                 "[SessionCleanup] agent=%s could not load keep set: %s", agent_name, e
+            )
+            per["errors"] += 1
+            return per
+
+        # ent#358: Workspace threads resume too, so their cached UUIDs are just
+        # as live as `agent_sessions`'. Omitting them would delete a JSONL an
+        # hour after it was written and silently reset every Workspace
+        # conversation — no error, no log, just an agent that forgot.
+        #
+        # A failure here ABORTS the sweep rather than reaping against a partial
+        # keep set: skipping a cycle costs disk, reaping blind costs memory.
+        try:
+            from client_portal import db as portal_db
+            keep_set.update(portal_db.list_active_claude_session_ids(agent_name))
+        except Exception as e:
+            logger.warning(
+                "[SessionCleanup] agent=%s could not load Workspace keep set — "
+                "skipping sweep rather than reaping against a partial set: %s",
+                agent_name, e,
             )
             per["errors"] += 1
             return per

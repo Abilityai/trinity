@@ -21,6 +21,12 @@ from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
+from utils.credential_sanitizer import scrub_secret_and_urls
+from utils.safe_yaml import (  # ent#314
+    AliasPolicy as _AliasPolicy,
+    HardenedYamlError as _HardenedYamlError,
+    load_hardened_yaml as _load_hardened_yaml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +54,7 @@ class ConflictClass(str, Enum):
 
 
 # Regexes matched against the stderr. Patterns are drawn from real stderr
-# samples captured in /tmp/trinity-repro/ (see tests/git-sync/fixtures/).
+# samples captured in /tmp/trinity-repro/ (see tests/git_sync/fixtures/).
 _AUTH_PATTERNS = (
     re.compile(r"authentication failed", re.IGNORECASE),
     re.compile(r"could not read username", re.IGNORECASE),
@@ -222,6 +228,260 @@ async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) 
 
 
 # ============================================================================
+# Post-creation repo binding (trinity-enterprise#109)
+# ============================================================================
+
+# A full-history push of an agent's accumulated workspace, over the container's
+# network. Matched to fork_to_own.PUSH_TIMEOUT_S so the two halves of the same
+# feature cannot disagree about how long a push may legitimately take.
+REBIND_PUSH_TIMEOUT_S = 120
+
+
+def _credentialless_remote_url(github_repo: str) -> str:
+    """A remote URL with no userinfo, honouring ``TRINITY_GIT_BASE_URL``.
+
+    Mirrors ``startup.sh``'s ``UPSTREAM_URL`` construction
+    (``${GIT_SCHEME}://${GIT_HOST_PATH}/${repo}.git``) so the ``upstream``
+    remote this module writes and the one startup.sh self-heals are the same
+    string. Distinct from ``_git_remote_url``, which always embeds
+    ``oauth2:<pat>@`` — passing an empty PAT there yields ``oauth2:@host``,
+    which is NOT credential-less and defeats anonymous fetch.
+    """
+    base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
+    return f"{base}/{github_repo}.git"
+
+
+@dataclass
+class RebindResult:
+    """Outcome of the in-container half of a repo rebind (ent#109)."""
+
+    success: bool
+    stage: str  # detect | branch | push | rewire — where it stopped
+    branch: Optional[str] = None
+    error: Optional[str] = None
+
+
+def _scrub_git_output(text: str, user_pat: str) -> str:
+    """Redact BOTH the request's PAT and any URL userinfo from git output.
+
+    Two passes, because they cover different secrets. ``scrub_secret`` removes
+    the token the caller just handed us; ``redact_url_userinfo`` removes
+    whatever userinfo is embedded in a remote URL git happens to echo — which
+    on a rebind can be a *stale baked* token that is not ``user_pat`` at all
+    (learnings 2026-07-14). Dropping either one leaks a real credential into
+    an HTTP error body or the audit trail.
+    """
+    return scrub_secret_and_urls(text, user_pat)
+
+
+async def rebind_origin_and_push(
+    agent_name: str,
+    destination_repo: str,
+    user_pat: str,
+    previous_repo: Optional[str],
+    branch: str,
+) -> RebindResult:
+    """Push the agent's current history to ``destination_repo`` and repoint ``origin``.
+
+    The in-container half of "bind this agent to a repo you own"
+    (trinity-enterprise#109 §4.4 step 5). Unlike ent#93's create-time fork,
+    the content source is the agent's **workspace volume** — the accumulated
+    knowledge base — not a clone of the template, which is the whole reason
+    the two paths cannot share a copy step.
+
+``branch`` is the ref the caller already resolved via
+    ``inspect_container_git`` during classification, and is the SAME value it
+    wrote into the CAS's ``source_branch`` — re-reading it here would open a
+    window where the row and the pushed ref disagree.
+
+    Order is chosen so a failure is never half-applied:
+
+    1. push to the destination via an **explicit URL**, not via ``origin`` —
+       so a push failure leaves ``origin`` still pointing at the old repo and
+       the agent exactly as it was;
+    2. only then repoint ``origin``, clear the ent#123 push blackhole, and add
+       the old repo as a credential-less ``upstream`` (skipped when
+       ``previous_repo`` is None — a resumption, where the row already names
+       the destination and writing it would erase the real upstream);
+    3. read ``origin`` back and confirm it resolves to the destination. AC #5
+       forbids a *silent* origin mismatch, and a set-url that exits 0 without
+       taking effect is precisely the silent case.
+
+    **Committed history only.** This deliberately does NOT ``git add``/commit
+    the working tree. Nothing is lost — the files live on the workspace volume
+    and the next Push (which now works) commits them — and staging blind would
+    walk straight into the ``git add .`` credential hazard that has to be
+    solved before `local:` agents are supported.
+
+    Idempotent: re-running after a partial failure re-pushes the same refs and
+    re-applies the same set-urls.
+
+    Never raises; the caller maps ``stage`` to a structured 502.
+    """
+    container_name = f"agent-{agent_name}"
+    dest_url = _git_remote_url(user_pat, destination_repo)
+
+    try:
+        git_dir = await _detect_git_dir(container_name)
+    except Exception as e:  # noqa: BLE001 — container may be down mid-op
+        return RebindResult(False, "detect", error=f"Could not reach the agent container: {e}")
+
+    async def _run(cmd: str, timeout: int = 120) -> tuple:
+        result = await execute_command_in_container(
+            container_name=container_name,
+            command=f"bash -c {shlex.quote(f'cd {shlex.quote(git_dir)} && {cmd}')}",
+            timeout=timeout,
+        )
+        return (
+            result.get("exit_code", 1),
+            _scrub_git_output(result.get("output", ""), user_pat),
+        )
+
+    # 1. Push committed history to the destination by explicit URL.
+    rc, out = await _run(
+        f"git push {shlex.quote(dest_url)} "
+        f"{shlex.quote(f'refs/heads/{branch}:refs/heads/{branch}')}",
+        timeout=REBIND_PUSH_TIMEOUT_S,
+    )
+    if rc != 0:
+        last = out.strip().splitlines()[-1][:300] if out.strip() else "push failed"
+        return RebindResult(
+            False, "push", branch=branch,
+            error=(
+                f"Could not push the agent's history to '{destination_repo}': "
+                f"{last}"
+            ),
+        )
+
+    # 2. Repoint origin, clear the ent#123 blackhole, record the old repo as
+    #    upstream. Each is idempotent; `--unset-all` exits 5 when the key is
+    #    absent (the normal case for an agent that always had a token), so it
+    #    is explicitly tolerated rather than treated as a failure.
+    #
+    #    `previous_repo=None` means the caller is RESUMING a partially-applied
+    #    bind, where the row already names the destination — writing `upstream`
+    #    from it would point upstream at the destination itself and erase the
+    #    record of the real upstream. Skip it: a first attempt that reached this
+    #    point already set it, and `.git/config` is on the workspace volume every
+    #    recreate reuses (#1664), so it survives.
+    rewire = (
+        f"{_remote_seturl_subcommand(dest_url)} && "
+        f"(git config --unset-all remote.origin.pushurl 2>/dev/null || true)"
+    )
+    if previous_repo:
+        upstream_url = _credentialless_remote_url(previous_repo)
+        rewire += (
+            f" && (git remote set-url upstream {shlex.quote(upstream_url)} 2>/dev/null || "
+            f"git remote add upstream {shlex.quote(upstream_url)} 2>/dev/null || true)"
+        )
+    rc, out = await _run(rewire, timeout=60)
+    if rc != 0:
+        last = out.strip().splitlines()[-1][:300] if out.strip() else "rewire failed"
+        return RebindResult(
+            False, "rewire", branch=branch,
+            error=(
+                f"The history reached '{destination_repo}', but repointing the "
+                f"agent's origin failed: {last}"
+            ),
+        )
+
+    # 3. Read back — a set-url that "succeeded" without taking effect is the
+    #    silent origin mismatch AC #5 exists to prevent.
+    observed = (await inspect_container_git(agent_name)).origin_repo
+    if not observed or observed.lower() != destination_repo.lower():
+        return RebindResult(
+            False, "rewire", branch=branch,
+            error=(
+                f"The history reached '{destination_repo}', but the agent's "
+                f"origin reads as '{observed or 'unset'}' afterwards, not the "
+                f"destination. Nothing further was changed."
+            ),
+        )
+
+    logger.info(
+        "repo-bind: %s pushed branch %s to %s and repointed origin (upstream=%s)",
+        agent_name, branch, destination_repo, previous_repo or "unchanged",
+    )
+    return RebindResult(True, "done", branch=branch)
+
+
+def _parse_repo_from_remote_url(raw: str) -> Optional[str]:
+    """``owner/repo`` from a git remote URL, with any userinfo discarded.
+
+    The userinfo strip is not cosmetic: a bound agent's origin is
+    ``https://oauth2:<pat>@github.com/owner/repo.git``, and this value reaches
+    error messages, the audit row, and the API response.
+    """
+    without_scheme = raw.split("://", 1)[-1]
+    without_userinfo = without_scheme.split("@", 1)[-1]
+    path = without_userinfo.partition("/")[2]
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    parts = [seg for seg in path.strip("/").split("/") if seg]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:])
+
+
+@dataclass
+class ContainerGitState:
+    """What the LIVE container's git actually says (ent#109 classification).
+
+    Both fields are ``None`` when unreadable — container down, no git dir, no
+    ``origin``, detached HEAD. The caller must treat ``None`` as *unknown* and
+    refuse, never as agreement: guessing here is how an agent silently ends up
+    bound to a repo it is not actually pointing at (AC #5).
+    """
+
+    origin_repo: Optional[str] = None
+    branch: Optional[str] = None
+
+
+async def inspect_container_git(agent_name: str) -> ContainerGitState:
+    """Read the live container's ``origin`` repo and current branch.
+
+    Used by the rebind pre-flight (ent#109 FR-1) to refuse
+    ``BIND_STATE_UNCLASSIFIED`` when the container disagrees with the DB row,
+    and to learn the branch the push and the CAS's ``source_branch`` must both
+    use — they have to be the same value, so it is read once here rather than
+    twice with a window in between.
+
+    Never raises; an unreachable container yields an empty state.
+    """
+    container_name = f"agent-{agent_name}"
+    try:
+        git_dir = await _detect_git_dir(container_name)
+    except Exception as e:  # noqa: BLE001 — unknown, never "matches"
+        logger.warning("inspect_container_git: git dir probe failed for %s: %s", agent_name, e)
+        return ContainerGitState()
+
+    async def _read(cmd: str) -> Optional[str]:
+        try:
+            result = await execute_command_in_container(
+                container_name=container_name,
+                command=f"bash -c {shlex.quote(f'cd {shlex.quote(git_dir)} && {cmd}')}",
+                timeout=30,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("inspect_container_git: %r failed for %s: %s", cmd, agent_name, e)
+            return None
+        if result.get("exit_code", 1) != 0:
+            return None
+        lines = [ln.strip() for ln in (result.get("output") or "").splitlines() if ln.strip()]
+        return lines[-1] if lines else None
+
+    origin_raw = await _read("git remote get-url origin")
+    # Empty on a detached HEAD — deliberately left as None so the caller
+    # refuses rather than inventing a ref to push.
+    branch = await _read("git branch --show-current")
+
+    return ContainerGitState(
+        origin_repo=_parse_repo_from_remote_url(origin_raw) if origin_raw else None,
+        branch=branch or None,
+    )
+
+
+# ============================================================================
 # S4 — Persistent State Allowlist (abilityai/trinity#383)
 # ============================================================================
 #
@@ -253,6 +513,16 @@ _DATA_PATHS_PATH = "/home/developer/.trinity/data-paths.yaml"
 # runtime data never lands in a commit.
 _DATA_ROOT_GITIGNORE = "data/"
 
+# #1704: declared Claude Code plugin selection (marketplaces + installed
+# plugins). Unlike persistent-state.yaml / data-paths.yaml this file is
+# COMMITTED — it is in `_TRINITY_AUTHORED_PATHS`, so it rides the #2070
+# contents-only re-include and survives a git-based reconstitution onto a
+# fresh volume or a new host (the real #1704 gap; a plain recreate is already
+# volume-safe). The boot hook (`agent_server.plugins_reinstall`) reads it and
+# re-installs anything declared-but-missing. Opt-in — empty declaration writes
+# no file.
+_PLUGINS_PATH = "/home/developer/.trinity/plugins.yaml"
+
 
 # ---------------------------------------------------------------------------
 # Shared `.trinity/<file>.yaml` list primitives (#1169)
@@ -262,6 +532,34 @@ _DATA_ROOT_GITIGNORE = "data/"
 # heredoc delimiter is a parameter so each caller keeps its own marker (the
 # S4 tests pin `PSTATE_EOF`).
 # ---------------------------------------------------------------------------
+
+
+async def _write_trinity_yaml_file(
+    agent_name: str,
+    *,
+    path: str,
+    body: str,
+    heredoc: str,
+    timeout: int = 10,
+) -> None:
+    """Write a pre-serialized YAML `body` to `path` inside the agent container.
+
+    THE single container-write mechanism for every `.trinity/*.yaml` the backend
+    materializes (#953: never hand-roll a raw container write). The single-quoted
+    heredoc preserves the body verbatim and is injection-safe (no shell expansion
+    inside `<<'HEREDOC'`); callers keep the body's values free of the outer
+    `bash -c "..."` metacharacters (`$`, backtick, `"`, `\\`) — which the reused
+    `_SAFE_DATA_PATH_RE` / `template_plugins` charset validators guarantee.
+    """
+    cmd = (
+        f"mkdir -p /home/developer/.trinity && "
+        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
+    )
+    await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=f'bash -c "{cmd}"',
+        timeout=timeout,
+    )
 
 
 async def materialize_trinity_yaml_list(
@@ -279,15 +577,10 @@ async def materialize_trinity_yaml_list(
     injection-safe (no shell expansion inside the body).
     """
     import yaml as _yaml
+
     body = _yaml.safe_dump({key: list(patterns)}, sort_keys=False)
-    cmd = (
-        f"mkdir -p /home/developer/.trinity && "
-        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
-    )
-    await execute_command_in_container(
-        container_name=f"agent-{agent_name}",
-        command=f'bash -c "{cmd}"',
-        timeout=timeout,
+    await _write_trinity_yaml_file(
+        agent_name, path=path, body=body, heredoc=heredoc, timeout=timeout
     )
 
 
@@ -317,8 +610,11 @@ async def _read_trinity_yaml_list(
     if not raw:
         return list(default)
     try:
-        data = _yaml.safe_load(raw) or {}
-    except _yaml.YAMLError:
+        # ent#314: agent-written file read out of the container.
+        data = _load_hardened_yaml(
+            raw, kind="agent_yaml", alias_policy=_AliasPolicy.REJECT
+        ) or {}
+    except (_yaml.YAMLError, _HardenedYamlError):
         return list(default)
     patterns = data.get(key)
     if not isinstance(patterns, list) or not patterns:
@@ -428,6 +724,48 @@ async def _data_paths_for(agent_name: str) -> list[str]:
         path=_DATA_PATHS_PATH,
         key="data_paths",
         default=DEFAULT_DATA_PATHS,
+    )
+
+
+async def materialize_plugins(agent_name: str, plugins: dict) -> None:
+    """Materialize an agent's declared Claude Code plugins (#1704).
+
+    Writes `.trinity/plugins.yaml` as nested
+    `{plugins: {marketplaces: [{name, source}], installed: ["plugin@mkt"]}}` via
+    the shared injection-safe heredoc writer. The file is COMMITTED (it is in
+    `_TRINITY_AUTHORED_PATHS`), so the declaration survives a git-based
+    reconstitution onto a fresh volume or a new host, where the gitignored
+    `~/.claude.json` + `~/.claude/plugins/` cache are dropped.
+
+    `plugins` is the ALREADY-normalized dict from
+    `template_plugins.normalize_declared_plugins` — every value is
+    charset-validated, so the nested body is safe inside the outer `bash -c`
+    double quotes (see `_write_trinity_yaml_file`).
+
+    Opt-in: a falsy declaration (`{}` / None / no marketplaces + no installed)
+    is a complete no-op — no file is written.
+
+    Determinism (a correctness property): `sort_keys=True` + the normalizer's
+    sorted, de-duplicated lists mean a stable plugin set produces a byte-
+    identical file, so the 15-min auto-sync loop never re-commits a churning
+    manifest — unlike the flat `materialize_trinity_yaml_list` (`sort_keys=False`).
+    """
+    import yaml as _yaml
+
+    if not isinstance(plugins, dict):
+        return
+    marketplaces = plugins.get("marketplaces") or []
+    installed = plugins.get("installed") or []
+    if not marketplaces and not installed:
+        return
+
+    body = _yaml.safe_dump(
+        {"plugins": {"marketplaces": marketplaces, "installed": installed}},
+        sort_keys=True,
+        default_flow_style=False,
+    )
+    await _write_trinity_yaml_file(
+        agent_name, path=_PLUGINS_PATH, body=body, heredoc="PLUGINS_EOF"
     )
 
 
@@ -757,10 +1095,16 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ent#109 retired the workaround this used to teach ("create a new agent with
+# fork-to-own and import your data"), which discarded the agent's identity,
+# name reservation and history. The retrofit now exists in place, so point at
+# it. Kept in sync with the MCP 409 hint in `src/mcp-server/src/tools/git.ts`
+# (Invariant #13) by `tests/unit/test_ent109_no_write_credentials_message.py`.
 NO_WRITE_CREDENTIALS_MESSAGE = (
     "This agent has no write credentials — it tracks a public template "
-    "read-only. To keep your changes, create a new agent with fork-to-own "
-    "and import your data (agent Files → Export), or add a GitHub token."
+    "read-only. Use 'Bind to your own repo' in this agent's Git tab to point "
+    "it at a GitHub repository you own (keeping everything it has learned), "
+    "or add a GitHub token."
 )
 
 
@@ -996,6 +1340,49 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # grouped by category. The list covers the runtime/instance noise the #462
 # bug report named (1,599 files leaked on a single Push) plus the credential
 # files `inject_credentials` writes (the #458 trio).
+# Authored content under `.trinity/` — files a TEMPLATE commits and the
+# platform reads back (#2070). Everything else in that directory is runtime
+# state the platform writes.
+#
+# The rule used to be "ignore `.trinity/` wholesale", with a hardcoded pathspec
+# exemption list in the `git rm --cached` sweep. That is backwards: the default
+# was "untrack it", so every authored file needed remembering, and three
+# separate incidents were three forgotten strings — brain-orb hooks
+# (trinity-enterprise#76), `setup.sh` (swept live before the second exemption),
+# and `pre-check` (#2070, the SCHED-COND-001 hook the platform's own docs tell
+# template authors to commit).
+#
+# Inverted: `.trinity/*` ignores the directory's contents, and each authored
+# path is re-included. A NEW runtime file is ignored by default (no action
+# needed), and authored content is tracked by construction rather than by an
+# exemption someone has to remember. The star form is required — git does not
+# descend into a directory excluded by the `.trinity/` dir-form, so negations
+# under it never apply (which is also why compat check S-005 accepts it).
+_TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
+    ".trinity/pre-check",       # SCHED-COND-001 conditional-schedule hook (#454)
+    # Template-authored output-contract validator. No platform executor runs it
+    # today (compat check I-005 was retired in #2137 as gating on a fiction), but
+    # the path stays: #2070 derives the `!` re-includes from this tuple, and 14
+    # bundled templates already ship `!.trinity/post-check`, so removing it would
+    # untrack an authored hook on the next push — the exact #2070 regression.
+    ".trinity/post-check",
+    ".trinity/pre-snapshot",    # data-snapshot quiesce hook (#1169)
+    ".trinity/setup.sh",        # startup setup convention (trinity-enterprise#76)
+    ".trinity/persistent-processes.allow",  # orphan-sweep allowlist patterns (#1501)
+    ".trinity/brain-orb/",      # brain-orb convention hooks (#58/#60)
+    ".trinity/pipelines/",      # agent-defined pipeline DEFINITIONS (#919);
+                                # instance STATE lives in pipeline-state/
+    # #1704: declared Claude Code plugin selection (marketplaces + installed).
+    # COMMITTED — unlike persistent-state.yaml / data-paths.yaml (volume-local,
+    # re-materialized at creation), this must survive a git-based reconstitution
+    # onto a fresh volume or a new host, the gap #1704 closes. This entry alone
+    # yields both the `!` re-include and the `git rm --cached` exemption, so the
+    # manifest is committable while `.claude.json` and `.claude/plugins/` (#1705)
+    # stay gitignored.
+    ".trinity/plugins.yaml",
+)
+
+
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Shell init / history (instance-specific)
     ".bash_logout",
@@ -1015,7 +1402,9 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".local/",
     ".npm/",
     ".ssh/",
-    ".trinity/",
+    # #2070: contents-only, so the authored paths below can be re-included.
+    ".trinity/*",
+    *(f"!{path}" for path in _TRINITY_AUTHORED_PATHS),
     ".tmp/",  # #1098 disk-backed scratch (TMPDIR); #1187 relocated CODEX_HOME
     ".trinity-clone-tmp/",  # #1439 transient full-history clone staging dir (removed post-merge; ignored so a crash-orphaned copy — incl. its PAT-bearing .git/config — is never committed)
     # Large generated content
@@ -1055,6 +1444,29 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # the 15-min sync loop commits it (and every plugin update commits another
     # copy) — repo bloat, same class as #1596. Re-installable, so never in git.
     ".claude/plugins/",
+    # #2036: container-only Claude Code config. The base image bakes
+    # `~/.claude/settings.json` (docker/base-image/hooks/claude-settings.json)
+    # registering the platform guardrail hooks by ABSOLUTE container path
+    # (`/opt/trinity/hooks/*.py`). HOME == the repo root, so `git add -A` swept
+    # it into the agent's GitHub repo — and any clone made outside the container
+    # is then hard-bricked: a PreToolUse hook whose script is missing exits 2,
+    # which is precisely Claude Code's "block this tool call" signal, so every
+    # Bash/Edit/Write fails on a machine that has no `/opt/trinity`. Worse blast
+    # radius than #462/#1596/#1702 — the leak breaks foreign clones rather than
+    # merely bloating them. The rest are runtime state observed leaking in the
+    # same commit (`backups/` alone was ~3,000 lines).
+    #
+    # Trade-off, stated: `.claude/settings.json` doubles as Claude Code's
+    # PROJECT-level settings file, so a template can no longer commit one. That
+    # is the right default — the baked file always exists and would collide —
+    # and an agent that genuinely needs it keeps the #1596 escape hatch: negate
+    # in its own `.gitignore` (`!.claude/settings.json`). `settings.local.json`
+    # is already covered by the `*.local.json` rule below.
+    ".claude/settings.json",
+    ".claude/remote-settings.json",
+    ".claude/policy-limits.json",
+    ".claude/backups/",
+    ".claude/.last-cleanup",
     # Temporary files
     "*.log",
     "*.tmp",
@@ -1081,13 +1493,54 @@ def _build_gitignore_append_command(git_dir: str, patterns) -> str:
     return f"bash -c {shlex.quote(script)}"
 
 
+# Exact lines the fleet-wide merge REMOVES before appending (#2070).
+#
+# Append-only is not enough here. Git does not descend into a directory
+# excluded by the dir-form ``.trinity/``, so the ``!.trinity/pre-check``
+# negations that follow it are inert. Every agent synced before #2070 carries
+# that line — precisely the fleet this fixes — so leaving it in place would
+# keep sweeping authored hooks forever.
+#
+# Removal is by EXACT LINE and confined to the two spellings this platform
+# itself wrote (the same discipline as the G-001 auto-fix, which removes a
+# blanket ``.claude/`` line by exact-line match). A user rule that merely
+# mentions the directory — ``.trinity/scratch/``, ``!.trinity/mine`` — does not
+# match and is left alone.
+_GITIGNORE_SUPERSEDED_LINES: Tuple[str, ...] = (
+    ".trinity/",
+    ".trinity",
+)
+
+
 def _build_gitignore_merge_command(git_dir: str) -> str:
-    """Build a bash command that appends any missing ``_GITIGNORE_PATTERNS``
-    entries to ``{git_dir}/.gitignore`` without clobbering user-supplied
-    rules. Idempotent — each pattern is gated by an exact-line ``grep -qxF``
-    check, so a second run is a no-op.
+    """Build a bash command that reconciles ``{git_dir}/.gitignore`` with
+    ``_GITIGNORE_PATTERNS``: drop superseded exact lines, then append whatever
+    is missing — without clobbering user-supplied rules. Idempotent: the
+    removal is a no-op once the line is gone, and each append is gated by an
+    exact-line ``grep -qxF`` check.
     """
-    return _build_gitignore_append_command(git_dir, _GITIGNORE_PATTERNS)
+    parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
+    for stale in _GITIGNORE_SUPERSEDED_LINES:
+        # `grep -vxF` into a temp file, not `sed -i`: `-x -F` is a whole-line
+        # literal match, so no pattern metacharacter in a user's rule can be
+        # caught by accident. Guarded on the line existing, so the common path
+        # leaves the file (and its mtime) untouched.
+        q = shlex.quote(stale)
+        # `|| true` on the filter: `grep -v` exits 1 when it selects NO lines,
+        # which is the legitimate case of a `.gitignore` that contained only
+        # the superseded line. Without it the whole `&&` chain aborts and the
+        # merge never runs — and the guard above has already proved the file is
+        # readable, so the only status being swallowed is "empty result".
+        parts.append(
+            f"(! grep -qxF -- {q} .gitignore || "
+            f"{{ grep -vxF -- {q} .gitignore > .gitignore.tmp || true; "
+            f"mv .gitignore.tmp .gitignore; }})"
+        )
+    for pattern in _GITIGNORE_PATTERNS:
+        q = shlex.quote(pattern)
+        parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
+    script = " && ".join(parts)
+    return f"bash -c {shlex.quote(script)}"
 
 
 def _build_rm_cached_ignored_command(git_dir: str) -> str:
@@ -1100,15 +1553,24 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     with spaces or unicode survive the round-trip. Working-tree files are
     left alone; only the index is touched.
 
-    ``.trinity/brain-orb/`` and ``.trinity/setup.sh`` are exempt: Brain-Orb /
-    setup-convention templates COMMIT those files (trinity-enterprise#76), while
-    the fleet-wide ``.trinity/`` ignore appended above makes them look
-    ignored-but-tracked — without the pathspec exclusions the first push would
-    untrack them and push the deletion, so a later re-clone/recreate boots
-    hookless and never runs its startup setup (verified live: the e2e Push
-    swept setup.sh before the second exemption was added).
+    Authored ``.trinity/`` content is exempt, and the exemption list is DERIVED
+    from ``_TRINITY_AUTHORED_PATHS`` rather than written out here (#2070). It
+    used to be two hardcoded strings, and each of the three incidents in this
+    area was one more forgotten string: brain-orb hooks
+    (trinity-enterprise#76), ``setup.sh`` (swept live before the second
+    exemption was added), ``pre-check`` (#2070 — the SCHED-COND-001 hook the
+    platform's own docs tell template authors to commit). Deriving it makes
+    adding an authored path one edit instead of two, and the two cannot drift.
+
+    Belt-and-braces: since #2070 the ignore rules themselves no longer match
+    these paths, so ``git ls-files -ci`` should not list them at all. The
+    pathspec stays for the agent whose ``.gitignore`` still carries the
+    superseded wholesale ``.trinity/`` line — otherwise its hooks would be
+    swept by the very push that repairs the file.
     """
-    exempt = '":!.trinity/brain-orb" ":!.trinity/setup.sh"'
+    exempt = " ".join(
+        shlex.quote(f":!{path.rstrip('/')}") for path in _TRINITY_AUTHORED_PATHS
+    )
     script = (
         f"cd {shlex.quote(git_dir)} && "
         f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
@@ -1120,13 +1582,72 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     return f"bash -c {shlex.quote(script)}"
 
 
-async def _detect_git_dir(container_name: str) -> str:
-    """Pick the directory git operations should run in for an agent container.
+AGENT_HOME_DIR = "/home/developer"
+LEGACY_WORKSPACE_DIR = "/home/developer/workspace"
 
-    Standard path is ``/home/developer``. Returns ``/home/developer/workspace``
-    only for legacy agents (created before 2026-02) that have content under
-    that subdirectory. Mirrors the detection ``initialize_git_in_container``
-    has always used so init and the post-init migration agree.
+
+async def _git_toplevel(container_name: str) -> Optional[str]:
+    """Ask git where this agent's repository is rooted (#2075).
+
+    The probe starts at ``workspace/`` when that directory exists and at the
+    home directory otherwise. ``rev-parse --show-toplevel`` walks **up**, so
+    the nearest enclosing repository wins: a genuinely workspace-rooted legacy
+    repo still answers ``/home/developer/workspace``, while a standard agent
+    that merely keeps a populated non-git ``workspace/`` data directory answers
+    ``/home/developer`` — the case the old content heuristic got wrong.
+
+    ``safe.directory`` is relaxed for this read-only query only: the exec runs
+    as ``developer``, but a volume restored with foreign ownership would
+    otherwise make git refuse to answer and silently drop the caller onto the
+    fallback heuristic that this function exists to replace.
+
+    ``GIT_DISCOVERY_ACROSS_FILESYSTEM=1`` because the walk up has a second way to
+    stop that has nothing to do with repositories (#2245): git halts discovery at
+    a filesystem boundary by default, so on an agent whose ``workspace/`` is its
+    own mount — a bind mount, a distinct volume, an overlay — a probe started
+    inside it never reaches a repository rooted at the home directory. Git says so
+    in as many words: *"Stopping at filesystem boundary
+    (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)"*, exit 128. This function would then
+    return None and the caller would fall through to the content heuristic, which
+    answers ``/home/developer/workspace`` for exactly that topology — the
+    misclassification #2075 exists to eliminate, reintroduced by a mount.
+
+    Crossing the boundary is safe here specifically because the containment check
+    below is unchanged: discovery may walk out of the mount, but an answer outside
+    the agent home is still refused before it is trusted. (Carried over from #2076,
+    a competing #2075 fix closed as superseded — this flag was the one thing it had
+    that #2077 did not.)
+
+    Returns None when there is no repository at or above the probe point, or
+    when git answers with a path outside the agent home (never trusted).
+    """
+    script = (
+        f"start={shlex.quote(LEGACY_WORKSPACE_DIR)}; "
+        f'[ -d "$start" ] || start={shlex.quote(AGENT_HOME_DIR)}; '
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM=1 "
+        "git -c safe.directory='*' -C \"$start\" rev-parse --show-toplevel "
+        "2>/dev/null"
+    )
+    result = await execute_command_in_container(
+        container_name=container_name,
+        command=f"bash -c {shlex.quote(script)}",
+        timeout=5,
+    )
+    if result.get("exit_code") != 0:
+        return None
+    top = (result.get("output") or "").strip().splitlines()
+    top = top[-1].strip() if top else ""
+    if top == AGENT_HOME_DIR or top.startswith(f"{AGENT_HOME_DIR}/"):
+        return top
+    return None
+
+
+async def _detect_git_dir_fallback(container_name: str) -> str:
+    """Where to *create* a repo when the container has none yet.
+
+    Verbatim the pre-#2075 content heuristic: any non-empty ``workspace/``
+    means the repo goes there. ``initialize_git_in_container`` uses this to
+    place a brand-new repo, so fresh-agent placement stays byte-compatible.
     """
     check_workspace = await execute_command_in_container(
         container_name=container_name,
@@ -1142,6 +1663,20 @@ async def _detect_git_dir(container_name: str) -> str:
         and "1" in check_workspace.get("output", "")
     )
     return "/home/developer/workspace" if workspace_has_content else "/home/developer"
+
+
+async def _detect_git_dir(container_name: str) -> str:
+    """Pick the directory git operations should run in for an agent container.
+
+    Git's own answer wins (``_git_toplevel``). Only when the container has no
+    repository at all does the legacy content heuristic decide — that path is
+    reached by ``initialize_git_in_container``, which needs a placement for a
+    repo that does not exist yet.
+    """
+    top = await _git_toplevel(container_name)
+    if top:
+        return top
+    return await _detect_git_dir_fallback(container_name)
 
 
 async def _migrate_workspace_gitignore(agent_name: str) -> None:
@@ -1183,6 +1718,284 @@ async def _migrate_workspace_gitignore(agent_name: str) -> None:
         logger.warning(
             f"_migrate_workspace_gitignore failed for {agent_name}: {exc}. "
             "Push will proceed against the existing .gitignore."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #2069: creation-time canonical `.gitignore` seed
+# ---------------------------------------------------------------------------
+#
+# `_GITIGNORE_PATTERNS` was applied at exactly two operator-initiated moments —
+# the Push migration (`_migrate_workspace_gitignore`) and the init-path merge
+# (`initialize_git_in_container` step 2) — and NEVER at agent creation. But the
+# in-container 15-min auto-sync loop (`agent_server/auto_sync.py`, a bare
+# `git add -A`) is on FROM BIRTH for the `GIT_SYNC_AUTO` set (non-source-mode /
+# fork-to-own `github:` agents, ephemeral ghosts included), so such an agent
+# auto-committed `.trinity/` runtime state, `.claude/projects/`, `content/` and
+# the root-level `.env` / `.mcp.json` (which sit at the repo root because $HOME
+# IS the repo root, #1703) into its user-owned repo before any Push could
+# migrate the list — a credential-leak-into-a-private-repo hygiene hazard plus
+# the #1595/#1596 unbounded-`.git`-bloat class. This lands the canonical list on
+# disk after startup.sh's FULL git setup and before the first auto-sync cycle.
+# #1703 (repo root ≡ $HOME) is the structural fix that retires this whole layer.
+
+# Deadline sized to a slow full-history clone + startup, NOT to the 900s
+# pre-first-cycle sleep (which is NOT relied on for correctness). Env-tunable.
+_MERGE_READY_TIMEOUT_SECONDS = int(
+    os.getenv("TRINITY_GITIGNORE_MERGE_TIMEOUT_SECONDS", "1800")
+)
+_MERGE_READY_INTERVAL_SECONDS = int(
+    os.getenv("TRINITY_GITIGNORE_MERGE_INTERVAL_SECONDS", "5")
+)
+# Per-operation `asyncio.wait_for` belt around EVERY exec/HTTP (the /health
+# probe, the `.git` check, `_git_toplevel`, the merge exec): `execute_command_in_
+# container`'s `timeout=` arg is never forwarded to `container_exec_run`
+# (docker_service.py), so a hung exec would otherwise pin the fire-and-forget
+# task. HONEST: `wait_for` frees the TASK, not the pinned Docker pool thread (the
+# shared 4-worker executor, docker_utils.py) — hence the Semaphore cap below.
+_MERGE_EXEC_TIMEOUT_SECONDS = 30
+# Fleet-wide cap so N concurrent creations can't fire unbounded concurrent Docker
+# execs and starve unrelated Docker ops on the shared 4-thread pool. Scoped to the
+# EXEC section only (`.git` check / `_git_toplevel` / merge) — NOT the readiness
+# poll, which is pure agent-`/health` HTTP and touches no pool thread. Holding the
+# cap across a (<= _MERGE_READY_TIMEOUT_SECONDS) readiness wait would let a handful
+# of slow-/never-booting agents head-of-line-block a healthy, fast-booting agent's
+# merge past its OWN first auto-sync cycle (server-boot + ~900s) — re-opening the
+# exact leak this fix closes.
+_MERGE_POLLER_CONCURRENCY = int(os.getenv("TRINITY_GITIGNORE_MERGE_CONCURRENCY", "6"))
+_gitignore_merge_semaphore = asyncio.Semaphore(_MERGE_POLLER_CONCURRENCY)
+_inflight_gitignore_merge_tasks: "set[asyncio.Task]" = set()
+
+
+def _git_auto_sync_baked(
+    config,
+    github_repo: Optional[str],
+    github_pat: Optional[str],
+    fork_upstream: Optional[str],
+) -> bool:
+    """Does this agent bake ``GIT_SYNC_AUTO='true'`` at creation? — the single
+    owner of that predicate (the ent#109 `_apply_git_env_from_db` "single owner
+    of the env gate" discipline; used at both `crud.py::_apply_github_env` and
+    the #2069 merge spawn).
+
+    Mirrors `_apply_github_env` verbatim: the flag is set inside `if
+    github_repo:` when `(not source_mode or fork_upstream) and github_pat`. The
+    in-container auto-sync loop gates purely on this env var, so this predicate —
+    NOT the `_materialize_agent_files` DB-flag block, which additionally excludes
+    ephemeral ghosts (`and not config.ephemeral`) — is exactly the population
+    whose loop auto-commits, and therefore exactly what the #2069 merge must
+    cover: an ephemeral non-source `github:`+PAT ghost bakes the env, auto-commits
+    from birth, and is never operator-Pushed, so the DB-flag-gated path would
+    leave it leaking unremediated.
+    """
+    return (
+        bool(github_repo)
+        and bool(github_pat)
+        and (not config.source_mode or bool(fork_upstream))
+    )
+
+
+async def _probe_agent_server_ready(agent_name: str) -> bool:
+    """One DIRECT agent-server `/health` probe (#2069 / #1159).
+
+    Direct (`agent_httpx_client` → `http://agent-{name}:8000/health`), NEVER the
+    backend proxy route, which masks a mid-startup `httpx.ConnectError` as an
+    HTTP 200 fallback body carrying a `message` key (ent#15 / learnings
+    2026-08-04). Until the server is up the connect raises and we return False;
+    a real 200 returns True. `/health` is the ONE path the agent-server auth
+    middleware exempts, so the probe needs nothing beyond what the client stamps.
+    """
+    try:
+        async with agent_httpx_client(
+            agent_name, timeout=_MERGE_READY_INTERVAL_SECONDS
+        ) as client:
+            resp = await client.get(f"http://agent-{agent_name}:8000/health")
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _container_has_git_dir(container_name: str) -> bool:
+    """True iff `/home/developer/.git` exists (one exec)."""
+    result = await execute_command_in_container(
+        container_name=container_name,
+        command='bash -c "[ -d /home/developer/.git ]"',
+        timeout=5,
+    )
+    return result.get("exit_code") == 0
+
+
+async def merge_gitignore_after_clone(agent_name: str) -> None:
+    """Readiness-gated fire-and-forget merge of `_GITIGNORE_PATTERNS` into a
+    fresh `github:` agent's `.gitignore`, so the first in-container auto-sync
+    cycle stages none of the ignored runtime/credential paths (#2069).
+
+    Two-tier safety property:
+      * **Creation-time = PREVENT** — merge-only (NO `_build_rm_cached_ignored_
+        command`). The generated `.env`/`.mcp.json` are written post-clone as
+        UNTRACKED files, so a merge-installed `.gitignore` stops `git add -A`
+        from ever staging them (the common case). Untracking the template's own
+        committed content just because it matches a broad pattern would be
+        surprising; a template that COMMITTED a credential file (unusual
+        subclass) is remediated on the first Push (`_migrate_workspace_gitignore`)
+        + retired by #1703.
+      * **Push = REMEDIATE** — `_migrate_workspace_gitignore` still does
+        merge + untrack, unchanged (AC#5: no behaviour change on `sync_to_github`).
+
+    Merge point — the central correctness question. The merge must run AFTER
+    startup.sh finishes ALL of its git setup and BEFORE the first auto-sync
+    cycle, WITHOUT relying on the 900s pre-first-cycle sleep for correctness. The
+    gate is **agent-server /health readiness ∧ /home/developer/.git present**:
+      * The agent server is launched ONCE, at startup.sh:517 — strictly after the
+        entire git block (clone → tar-merge → `git checkout` of the source/working
+        branch → remote-config). A filesystem gate like `.git ∧ ¬.trinity-clone-
+        tmp` fires mid-git-setup, where a later `git checkout` can REVERT the
+        merged `.gitignore` (target branch ships a different one) or FAIL on the
+        uncommitted change — and because the poll fires the merge once and exits,
+        a reverted merge is not retried (Codex #1). `/health` responding proves
+        startup.sh is past ALL working-tree mutation, and is still ~900s before
+        the auto-sync loop (which lives inside that same server) runs its first
+        cycle. The readiness gate is therefore STRONGER than the filesystem check.
+      * The probe is DIRECT — the backend proxy masks a mid-startup ConnectError
+        as a 200 fallback body (ent#15).
+      * `.git` present handles the failed-clone case: the server still launches
+        (startup.sh has no `set -e`), so `/health` comes up, but `.git` is absent
+        → skip (nothing to pollute; the Push migration is the backstop).
+
+    Bounded & non-fatal: a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`,
+    sized to clone + startup, NOT the 900s cycle), a module-level Semaphore cap on
+    the DOCKER-EXEC section only (batch creation must not starve the shared 4-thread
+    Docker pool), and `asyncio.wait_for` around every exec/HTTP. wait_for frees the
+    TASK, not the pinned pool thread. The readiness poll runs OUTSIDE the Semaphore
+    — it is pure agent-`/health` HTTP and touches no pool thread, so capping it
+    would let slow-booting agents head-of-line-block a healthy agent's merge past
+    its own first cycle. Any failure logs and returns; on deadline the Push
+    migration remains the backstop.
+
+    Known limitation: a backend restart within the readiness-wait window loses
+    this in-memory task. Acceptable for a P2 — the Push migration remediates and
+    #1703 is the structural fix.
+    """
+    container_name = f"agent-{agent_name}"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _MERGE_READY_TIMEOUT_SECONDS
+    ready = False
+    try:
+        # Readiness poll — pure agent-`/health` HTTP, NOT a Docker exec, so it runs
+        # OUTSIDE `_gitignore_merge_semaphore` (which bounds only the Docker-pool
+        # exec section below). Holding the pool cap across a <=1800s readiness wait
+        # would let slow-booting agents head-of-line-block a healthy agent's merge
+        # past its own first auto-sync cycle — re-opening the leak this fix closes.
+        while loop.time() < deadline:
+            try:
+                ready = await asyncio.wait_for(
+                    _probe_agent_server_ready(agent_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                ready = False
+            if ready:
+                break
+            await asyncio.sleep(_MERGE_READY_INTERVAL_SECONDS)
+
+        if not ready:
+            logger.warning(
+                "[#2069] agent-server for %s never became ready within %ss; "
+                "skipping the creation .gitignore merge — the Push migration "
+                "remains the backstop.",
+                agent_name,
+                _MERGE_READY_TIMEOUT_SECONDS,
+            )
+            return
+
+        # Docker-exec section (`.git` check / `_git_toplevel` / merge) — bound the
+        # shared 4-thread pool HERE. Each exec is short, so the cap drains fast even
+        # under batch creation; a queued agent's exec still lands well inside its
+        # ~900s pre-first-cycle window because it is no longer stuck behind other
+        # agents' readiness waits.
+        async with _gitignore_merge_semaphore:
+            # Server is up ⟹ startup.sh is past ALL git mutation (single launch
+            # point, sequential) — no more `git checkout` can revert the merge.
+            try:
+                has_git = await asyncio.wait_for(
+                    _container_has_git_dir(container_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                has_git = False
+            if not has_git:
+                logger.info(
+                    "[#2069] %s is ready but has no .git (failed clone / not "
+                    "git-bound); skipping the creation .gitignore merge.",
+                    agent_name,
+                )
+                return
+
+            # The gate already proved a repo exists, so resolve the toplevel with
+            # `_git_toplevel` (None → skip) rather than `_detect_git_dir`'s
+            # heuristic fallback — safer to skip on unresolved than merge against
+            # a guessed path.
+            try:
+                git_dir = await asyncio.wait_for(
+                    _git_toplevel(container_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                git_dir = None
+            if git_dir is None:
+                logger.info(
+                    "[#2069] could not resolve the git toplevel for %s; "
+                    "skipping the creation .gitignore merge.",
+                    agent_name,
+                )
+                return
+
+            await asyncio.wait_for(
+                execute_command_in_container(
+                    container_name=container_name,
+                    command=_build_gitignore_merge_command(git_dir),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                ),
+                timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "[#2069] seeded the canonical .gitignore for %s at %s before "
+                "its first auto-sync cycle.",
+                agent_name,
+                git_dir,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[#2069] creation .gitignore merge failed for %s: %s. "
+            "The Push migration remains the backstop.",
+            agent_name,
+            exc,
+        )
+
+
+def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
+    """Fire ``merge_gitignore_after_clone`` fire-and-forget (mirrors
+    `activity_service.spawn_close_execution_activity`): zero creation latency;
+    the merge lands within one poll interval of agent-server readiness.
+
+    The Docker-exec section is bounded INSIDE the coro by
+    `_gitignore_merge_semaphore`, so an excess spawn's merge exec queues rather
+    than piling another concurrent exec onto the shared Docker pool; the readiness
+    poll runs OUTSIDE the cap (pure agent-`/health` HTTP, no pool thread). A strong
+    ref in `_inflight_gitignore_merge_tasks` defeats the
+    asyncio `create_task` GC footgun. With no running loop the coro is closed and
+    the spawn is skipped (logged), never raised — the Push migration is the
+    backstop.
+    """
+    coro = merge_gitignore_after_clone(agent_name)
+    try:
+        task = asyncio.create_task(coro)
+        _inflight_gitignore_merge_tasks.add(task)
+        task.add_done_callback(_inflight_gitignore_merge_tasks.discard)
+    except RuntimeError as e:
+        coro.close()
+        logger.debug(
+            "[#2069] spawn_gitignore_merge_after_clone skipped (no loop): %s", e
         )
 
 

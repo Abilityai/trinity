@@ -1,3 +1,4 @@
+# allow-root-live-test: raw-httpx against a live backend (feature-flags + settings API)
 """
 Tests for platform default model setting (#831).
 
@@ -34,88 +35,6 @@ def get_auth_headers():
     return {"Authorization": f"Bearer {token}"}
 
 
-# ---------------------------------------------------------------------------
-# Unit-style tests (backend service — no live server required)
-# ---------------------------------------------------------------------------
-
-class TestGetPlatformDefaultModelUnit:
-    """Tests for settings_service.get_platform_default_model() in isolation."""
-
-    def test_returns_fallback_when_no_db_row(self, monkeypatch):
-        """When system_settings has no platform_default_model row, return hardcoded default."""
-        import sys
-        import types
-
-        # Provide a minimal stub for the `database` module so we can import
-        # settings_service without a running database.
-        if "database" not in sys.modules:
-            db_stub = types.ModuleType("database")
-            db_stub.db = types.SimpleNamespace(
-                get_setting_value=lambda key, default=None: default
-            )
-            sys.modules["database"] = db_stub
-
-        # Clear the module cache so our monkeypatched db takes effect.
-        sys.modules.pop("services.settings_service", None)
-
-        import importlib
-        import services.settings_service as svc_module
-        importlib.reload(svc_module)
-
-        svc = svc_module.SettingsService()
-        result = svc.get_platform_default_model()
-        assert result == "claude-sonnet-4-6"
-
-    def test_returns_db_value_when_set(self, monkeypatch):
-        """When system_settings has a platform_default_model row, return that value."""
-        import sys
-        import types
-
-        db_stub = types.ModuleType("database")
-        db_stub.db = types.SimpleNamespace(
-            get_setting_value=lambda key, default=None: (
-                "claude-opus-4-7" if key == "platform_default_model" else default
-            )
-        )
-        sys.modules["database"] = db_stub
-        sys.modules.pop("services.settings_service", None)
-
-        import importlib
-        import services.settings_service as svc_module
-        importlib.reload(svc_module)
-
-        svc = svc_module.SettingsService()
-        result = svc.get_platform_default_model()
-        assert result == "claude-opus-4-7"
-
-    def test_ttl_cache_returns_cached_value(self, monkeypatch):
-        """TTL cache returns the cached value within 60s without a new DB read."""
-        import sys
-        import types
-
-        call_count = [0]
-
-        def counting_get(key, default=None):
-            if key == "platform_default_model":
-                call_count[0] += 1
-            return "claude-sonnet-4-6" if key == "platform_default_model" else default
-
-        db_stub = types.ModuleType("database")
-        db_stub.db = types.SimpleNamespace(get_setting_value=counting_get)
-        sys.modules["database"] = db_stub
-        sys.modules.pop("services.settings_service", None)
-
-        import importlib
-        import services.settings_service as svc_module
-        importlib.reload(svc_module)
-
-        svc = svc_module.SettingsService()
-        svc.get_platform_default_model()
-        svc.get_platform_default_model()
-        svc.get_platform_default_model()
-        # Only one DB read due to TTL cache
-        assert call_count[0] == 1
-
 
 # ---------------------------------------------------------------------------
 # Integration tests (live backend required)
@@ -137,19 +56,22 @@ class TestFeatureFlagsEndpoint:
 
     def test_feature_flags_default_is_claude_sonnet(self):
         """Out-of-box default must be claude-sonnet-4-6 unless overridden in DB."""
+        from services.model_catalog import MODEL_CATALOG
+
         headers = get_auth_headers()
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
         assert resp.status_code == 200
         data = resp.json()
-        # Accept either the code default or a valid admin override. The override
-        # set must stay in lockstep with the options offered in Settings.vue's
-        # platform-default dropdown (#1080 added claude-opus-4-8).
-        assert data["platform_default_model"] in (
-            "claude-sonnet-4-6",
-            "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-        ), f"Unexpected default: {data['platform_default_model']}"
+        # Accept the code default or any valid admin override. Sourced from the
+        # single catalog (#2086) instead of a hand-maintained tuple that was
+        # already stale (missing fable-5/sonnet-5) — the admin dropdown offers
+        # exactly the admin_default_selectable set, so the default must be one of
+        # them (#1080 keeps Haiku out of this set).
+        admin_default_models = {m.id for m in MODEL_CATALOG if m.admin_default_selectable}
+        assert data["platform_default_model"] in admin_default_models, (
+            f"Unexpected default: {data['platform_default_model']} "
+            f"(not admin_default_selectable in the catalog: {sorted(admin_default_models)})"
+        )
 
     def test_feature_flags_unauthenticated_returns_401(self):
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", timeout=10)

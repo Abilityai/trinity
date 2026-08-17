@@ -1,5 +1,28 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-08-16 (#1853, telemetry+transcript on the FAILED row):** the FAILED branch of
+> `apply_result` now **mirrors the SUCCESS branch's telemetry** so an `error_during_execution`
+> (502) / timeout (504) row is diagnosable via the same API as a SUCCESS row (the substrate for
+> the Aug-14 "system agent identifies errors" initiative; TOWARD the #1401 recovery trace). The
+> agent's structured error body now carries the full stream-json transcript
+> (`headless_executor._execution_error_502_detail` / the extended `_timeout_504_detail`, each with
+> a **UUID-validated** `session_id` fallback — `_valid_session_id`, FI-1: `ctx.claude_session_uuid`
+> can be an untrusted `resume_session_id`, a log-forging vector). `_extract_agent_error` returns
+> that transcript (now a 3-tuple); the `except httpx.HTTPError` handler threads it + `session_id`
+> onto the **existing** `TerminalEnvelope.execution_log`/`.session_id` fields (previously unset on
+> failure). In `apply_result`, the FAILED branch reuses the SUCCESS branch's identical
+> `sanitize_execution_log` + `extract_tool_calls` (#1741 summary, not a 2nd transcript copy) and
+> passes `execution_log`/`tool_calls`/`claude_session_id` into the **existing**
+> `db.update_execution_status` call (cost/context already salvaged from `metadata`). **Single
+> terminal applier (#1483) preserved** — the columns are added to the SET clause **above** the
+> `if won` gate: no new CAS writer, `_write_terminal_and_gate` untouched, and every side-effect
+> stays gated on `won` (#1578/#1804). No schema change (`execution_log`/`claude_session_id`/
+> `tool_calls` already exist). A bare-string old-image body leaves the columns null (graceful
+> mixed-fleet degrade). **Residual:** `_write_terminal_and_gate` terminals (backend
+> timeout/budget/crash) and standalone-scheduler RETRY-001 FAILED writes still land bare — so the
+> Aug-14 initiative must not assume *every* FAILED row carries telemetry. Base-image rebuild + cold
+> recreate for the agent half (#1809). Tests: `tests/unit/test_1853_error_telemetry_salvage.py`.
+
 > **Updated 2026-06-27 (#792, SUB-003 switch-retry):** `execute_task` now retries the
 > triggering execution **once** after a successful SUB-003 subscription auto-switch, so a
 > one-shot trigger (manual `…/schedules/{id}/trigger`, webhook, MCP `trigger_agent_schedule`)
@@ -9,8 +32,9 @@
 > and falls through to the single shared success-parse path by reassigning `response` — no
 > duplication. New module helpers: `classify_switch_failure(response)` maps the response to the
 > full SUB-003 surface (`429`→rate_limit; `503/401/403/402` or `is_auth_failure` body→auth; else
-> None); `_extract_agent_error(response, fallback)` is the shared body→`(msg, metadata)` extractor
-> reused by the `except httpx.HTTPError` handler; `_salvage_attempt_cost(metadata)` feeds the #678
+> None); `_extract_agent_error(response, fallback)` is the shared body→`(msg, metadata, execution_log)`
+> extractor (the 3rd element is the #1853 transcript) reused by the `except httpx.HTTPError`
+> handler; `_salvage_attempt_cost(metadata)` feeds the #678
 > R2 `previous_attempt_cost` rollup. The retry is guarded by a dedicated
 > `subscription_switch_attempted` local (NOT `retry_count`, which #678 owns — so the two retry
 > reasons never suppress each other) hoisted above the first agent call; the same flag gates the
@@ -312,6 +336,45 @@ Slot TTL: Dynamic (agent timeout + 5 min buffer). See parallel-capacity.md for d
 | Execution success | `complete_activity(status="completed")` | After response persisted (line 297) |
 | Execution failure | `complete_activity(status="failed")` | On any exception (lines 332, 374, 398) |
 | Terminal applier close | `complete_activity(status=activity_state_for_terminal(envelope.status))` | `apply_result` won-CAS failure branch + the SUCCESS-lost-CAS-to-cancel reconcile branch — a CANCELLED terminal closes the dispatch activity as `cancelled`, not `failed` (#1332) |
+| **Every** CAS-won terminal (#1804) | `activity_service.close_execution_activity(execution_id, terminal_status, …)` | The close is a property of **winning the terminal CAS**, not of holding the `activity_id` local. See [activity-stream.md → The Close Contract](activity-stream.md#the-close-contract-1804) for the owner, the lattice, and the full writer list |
+
+#### `_write_terminal_and_gate` — both CAS outcomes close (#1804)
+
+This writer handles the terminals that never reach `apply_result` (timeout,
+budget exhausted, unexpected exception, and the inline circuit-open/capacity/
+ephemeral fast-fails). It gated the close on `won` and did nothing on a loss —
+while the SUCCESS applier had reconciled its own lost CAS since #1332. Same
+file, two appliers, one of them handling it. Now:
+
+```python
+if won:
+    await activity_service.close_execution_activity(
+        execution_id, status, error=error, activity_id=activity_id)
+elif execution_id:
+    # The row holds someone else's terminal (a user cancel, or a
+    # watchdog/lease-reaper recovery). Close the activity in THAT state.
+    reconciled = db.get_execution(execution_id)
+    await activity_service.close_execution_activity(
+        execution_id,
+        reconciled.status if reconciled else TaskExecutionStatus.FAILED,
+        error=f"superseded by {…}", activity_id=activity_id)
+```
+
+The `activity_status` parameter is **gone** from the signature — the state is
+derived from `status` through the shared #1332 mapping, so the two can no longer
+drift. All four call sites passed `FAILED`/`ActivityState.FAILED`, so this is a
+no-op for behaviour and one fewer thing to keep in sync.
+
+#### Backend shutdown (`except asyncio.CancelledError`) — #1804
+
+`execute_task`'s cancellation handler (and its twin in
+`routers/internal._execute_task_internal_background`) writes FAILED so the
+cleanup sweep can't inflate the execution's duration (#767) — then left the
+activity open for the 120-minute activity backstop to inflate *its* duration
+instead. Worse: the row is now `failed`, so startup recovery (which scans
+`running`) skips it forever and the activity orphans permanently. Both handlers
+now close on the CAS-won branch. This is the issue's own reproduction step:
+restart the backend mid-run under `--reload` and watch the Timeline.
 
 ### WebSocket Broadcasts
 
@@ -391,7 +454,7 @@ When subscription tokens expire, Claude Code sometimes hangs for up to an hour b
 
 **Result**: Auth failures now fast-fail in seconds instead of hanging for up to an hour.
 
-> **Status Enums (#92)**: Execution statuses use `TaskExecutionStatus` (`running/success/failed/cancelled/skipped`). Activity statuses use `ActivityState` (`started/completed/failed`). Both are defined in `models.py`.
+> **Status Enums (#92)**: Execution statuses use `TaskExecutionStatus` (`running/success/failed/cancelled/skipped`). Activity statuses use `ActivityState` (`started/completed/failed`/`cancelled` since #1332). Both are defined in `models.py`; the terminal→activity mapping is `models.activity_state_for_terminal`, and the close itself is a CAS returning `ActivityCloseOutcome` (#1804).
 
 ## Execution Lifecycle Diagram
 

@@ -19,8 +19,10 @@ import pytest
 # conftest wires docker/base-image/agent_server as the `agent_server` package.
 from agent_server.model_context import (  # noqa: E402
     CODEX_CONTEXT_WINDOW,
+    CODEX_EXTENDED_CONTEXT_WINDOW,
     DEFAULT_CONTEXT_WINDOW,
     EXTENDED_CONTEXT_WINDOW,
+    pick_context_window,
     resolve_context_window,
 )
 from agent_server.models import ExecutionMetadata  # noqa: E402
@@ -54,6 +56,15 @@ class TestResolveContextWindow:
             ("gemini-3-flash", EXTENDED_CONTEXT_WINDOW),
             ("gemini-3-pro", EXTENDED_CONTEXT_WINDOW),
             ("gpt-5.1-codex", CODEX_CONTEXT_WINDOW),
+            # #2207 — the 5.6 family's window is 1.05M; 272K is only its PRICE
+            # break. Listed before "gpt-5" in _FAMILY_PREFIX_WINDOWS, so an
+            # accidental reorder shows up here.
+            ("gpt-5.6-sol", CODEX_EXTENDED_CONTEXT_WINDOW),
+            ("gpt-5.6-terra", CODEX_EXTENDED_CONTEXT_WINDOW),
+            ("gpt-5.6-luna", CODEX_EXTENDED_CONTEXT_WINDOW),
+            # A future generation must still land on the SAFE (small) floor here
+            # — the deliberate inverse of the pricing matcher (see the module).
+            ("gpt-5.7-sol", CODEX_CONTEXT_WINDOW),
             ("codex", CODEX_CONTEXT_WINDOW),
             # unknown / empty / None → safe floor
             ("some-future-model-x", DEFAULT_CONTEXT_WINDOW),
@@ -149,3 +160,86 @@ class TestAgentStateInitWindow:
         # None model → falls back to the runtime name (gemini-cli) → 1M.
         st = self._fresh_state(monkeypatch, runtime="gemini-cli", model=None)
         assert st.session_context_window == EXTENDED_CONTEXT_WINDOW
+
+
+class TestMultiModelUsageSelection:
+    """#1840: ``modelUsage`` carries one entry PER MODEL the turn touched.
+
+    Claude Code bills side work (tool-permission classification, title
+    generation) to a cheap Haiku, so a Sonnet-5 turn reports two entries. The
+    old parser took the FIRST one — the side model whenever one ran — so the
+    same agent flipped between 1M and 200K run to run. Observed live on
+    v0.8.6: 4 of 5 identical Sonnet-5 turns recorded 200000.
+    """
+
+    # The payload verbatim from a live Sonnet-5 turn (#1840).
+    REAL_WORLD = {
+        "claude-haiku-4-5-20251001": {"contextWindow": 200_000, "inputTokens": 522},
+        "claude-sonnet-5": {"contextWindow": 1_000_000, "inputTokens": 2},
+    }
+
+    def _run(self, model_usage: dict, model_name: str | None, seed: str = "claude-sonnet-5"):
+        metadata = ExecutionMetadata()
+        metadata.context_window = resolve_context_window(seed)
+        if model_name:
+            assistant = json.dumps({
+                "type": "assistant",
+                "message": {"model": model_name, "usage": {"input_tokens": 1}, "content": []},
+            })
+            process_stream_line(assistant, [], metadata, {}, [])
+        result = json.dumps({"type": "result", "result": "done", "modelUsage": model_usage})
+        process_stream_line(result, [], metadata, {}, [])
+        return metadata.context_window
+
+    def test_side_model_does_not_win(self):
+        """The exact regression: Haiku listed first must not set the window."""
+        assert self._run(self.REAL_WORLD, "claude-sonnet-5") == 1_000_000
+
+    def test_selection_is_order_independent(self):
+        reordered = dict(reversed(list(self.REAL_WORLD.items())))
+        assert self._run(reordered, "claude-sonnet-5") == 1_000_000
+
+    def test_larger_side_window_never_inflates_a_smaller_main_model(self):
+        """The dangerous direction: a 1M side model must not hide a 200K wall."""
+        usage = {
+            "claude-sonnet-5": {"contextWindow": 1_000_000},
+            "claude-opus-4-8": {"contextWindow": 200_000},
+        }
+        assert self._run(usage, "claude-opus-4-8", seed="claude-opus-4-8") == 200_000
+
+    def test_unidentifiable_model_keeps_the_seed(self):
+        """No match + ambiguous map ⇒ keep the catalog fallback, never guess."""
+        assert self._run(self.REAL_WORLD, "claude-some-unlisted-model") == DEFAULT_CONTEXT_WINDOW
+
+    def test_single_entry_still_wins_without_a_model_name(self):
+        """Unambiguous turns keep working even if the model id is unknown."""
+        assert self._run({"claude-sonnet-5": {"contextWindow": 1_000_000}}, None) == 1_000_000
+
+    def test_entry_without_context_window_does_not_abort_the_scan(self):
+        """The old `break` sat outside the `if`, so a first entry lacking
+        contextWindow ended the search before reaching a usable one."""
+        usage = {
+            "claude-haiku-4-5-20251001": {"inputTokens": 10},   # no contextWindow
+            "claude-sonnet-5": {"contextWindow": 1_000_000},
+        }
+        assert self._run(usage, "claude-sonnet-5") == 1_000_000
+
+
+class TestPickContextWindow:
+    """Direct unit coverage of the selection rule (#1840)."""
+
+    def test_matches_by_canonical_model_when_the_key_is_an_alias(self):
+        usage = {"sonnet": {"contextWindow": 1_000_000, "canonicalModel": "claude-sonnet-5"}}
+        assert pick_context_window(usage, "claude-sonnet-5") == 1_000_000
+
+    @pytest.mark.parametrize("bad", [None, {}, [], "nope", 42])
+    def test_non_map_input_returns_none(self, bad):
+        assert pick_context_window(bad, "claude-sonnet-5") is None
+
+    @pytest.mark.parametrize("value", [0, -1, "1000000", None, {}])
+    def test_non_positive_int_windows_are_ignored(self, value):
+        assert pick_context_window({"claude-sonnet-5": {"contextWindow": value}}, "claude-sonnet-5") is None
+
+    def test_ambiguous_map_without_a_match_returns_none(self):
+        usage = {"a": {"contextWindow": 200_000}, "b": {"contextWindow": 1_000_000}}
+        assert pick_context_window(usage, None) is None

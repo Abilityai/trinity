@@ -35,7 +35,7 @@
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
 - [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
 - [Agent Chat](agents/agent-chat.md) — Chat interface, voice, streaming, history
-- [Agent Session](agents/agent-session.md) — Resumable Claude session with full context
+- [Continuous Conversations](agents/agent-session.md) — What resuming preserves, auto-compact, per-turn limits
 - [Agent Terminal](agents/agent-terminal.md) — Web terminal, SSH access, mode switching
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
@@ -60,18 +60,20 @@
 ## Automation
 
 - [Scheduling](automation/scheduling.md) — Cron schedules, execution queue, misfire handling
-- [Skills and Playbooks](automation/skills-and-playbooks.md) — Skills library, assignment, chat autocomplete
+- [Skills and Playbooks](automation/skills-and-playbooks.md) — Multi-source skills library, assignment, injection, auto-sync
 - [Approvals](automation/approvals.md) — Human-in-the-loop approval gates
 - [Fan-Out](automation/fan-out.md) — Parallel task dispatch and result collection
 - [Agent Loops](automation/agent-loops.md) — Bounded sequential task repetition, templates, stop signals, failure policy
 - [Agent Reminders](automation/agent-reminders.md) — One-shot durable deferred self-triggers
+- [Abilities Marketplace](automation/abilities-marketplace.md) — Claude Code plugin marketplace: the 5 plugins, playbook-call convention, declared plugins, four-step workflow
 
 ## Operations
 
-- [Dashboard](operations/dashboard.md) — Grid and timeline views, tag clouds, activity feed
+- [Dashboard](operations/dashboard.md) — Timeline, Grid, and List views, org overlay, tag clouds, activity feed
 - [Operations Page](operations/operating-room.md) — Unified tabbed view: operator queue, notifications, health, executions
 - [Monitoring](operations/monitoring.md) — Fleet health checks, agent heartbeats, cleanup service, retention sweeps
 - [Executions](operations/executions.md) — Fleet execution list, stats, detail, live streaming, termination
+- [Agent Reports](operations/agent-reports.md) — Structured results agents publish, with rendering, filters, and export
 - [Audit Trail](operations/audit-trail.md) — Append-only administrative action log
 - [Telemetry](operations/telemetry.md) — Local product events and opt-in fleet sharing
 - [Agent Quotas](operations/agent-quotas.md) — Per-role agent creation limits
@@ -81,7 +83,7 @@
 - [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
 - [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory
-- [Customer Portal](sharing-and-access/customer-portal.md) — Branded signed-in client chat app with history and file upload (enterprise)
+- [Workspace](sharing-and-access/workspace.md) — Signed-in chat app with continuous conversations, agent pages, rooms, and file upload
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
 
@@ -92,8 +94,8 @@
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 100+ MCP tools, API keys, dedicated per-agent tools
-- [A2A Agent Card](integrations/a2a-protocol.md) — A2A v1.0 discovery for external orchestrators
+- [MCP Server](integrations/mcp-server.md) — 116 MCP tools, API keys, dedicated per-agent tools
+- [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, and outbound calls to external agents
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 
 ## CLI
@@ -104,8 +106,8 @@
 
 - [Overview](abilities/overview.md) — Plugin marketplace introduction, quick start
 - [create-agent Plugin](abilities/create-agent-plugin.md) — Agent creation wizards (14 wizards)
-- [agent-dev Plugin](abilities/agent-dev-plugin.md) — Development tools, memory systems, git sync, backlog cycle, pipelines
-- [trinity Plugin](abilities/trinity-plugin.md) — Platform deployment, sync, remote loops, instance provisioning
+- [agent-dev Plugin](abilities/agent-dev-plugin.md) — Development tools, memory systems, git sync, backlog cycle, pipelines, orchestration, canon, fleet analysis
+- [trinity Plugin](abilities/trinity-plugin.md) — Repository-first deployment, onboarding in place, sync, remote loops, instance provisioning
 - [dev-methodology Plugin](abilities/dev-methodology-plugin.md) — Documentation-driven development
 - [utilities Plugin](abilities/utilities-plugin.md) — Ops and productivity tools
 

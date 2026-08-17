@@ -6,6 +6,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check:tokens": "node scripts/check-design-tokens.mjs",
+    "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test --grep @smoke",
     "test:e2e:ui": "playwright test --ui",
@@ -19,33 +20,34 @@
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
-    "axios": "^1.18.1",
+    "axios": "^1.19.0",
     "chart.js": "^4.4.7",
     "dompurify": "^3.4.11",
-    "js-yaml": "^5.2.1",
-    "marked": "^18.0.7",
+    "js-yaml": "^5.2.3",
+    "marked": "^18.0.9",
     "mermaid": "^11.16.1",
     "monaco-editor": "^0.56.0",
-    "pinia": "^3.0.4",
+    "pinia": "^4.0.2",
     "qrcode": "^1.5.4",
     "uplot": "^1.6.32",
-    "vue": "^3.5.40",
+    "vue": "^3.5.41",
     "vue-chartjs": "^5.3.4",
     "vue-router": "^5.2.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/typography": "^0.5.20",
     "@types/js-yaml": "^4.0.9",
     "@vitejs/plugin-vue": "^6.0.8",
     "autoprefixer": "^10.5.4",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.19",
-    "vite": "^8.1.5"
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
   },
   "optionalDependencies": {
-    "@rollup/rollup-darwin-arm64": "^4.62.2",
-    "@rollup/rollup-linux-arm64-musl": "^4.62.2"
+    "@rollup/rollup-darwin-arm64": "^4.62.4",
+    "@rollup/rollup-linux-arm64-musl": "^4.62.4"
   },
   "overrides": {
     "dompurify": "^3.4.11"

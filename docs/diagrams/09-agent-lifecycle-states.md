@@ -201,7 +201,8 @@ async def inject_trinity_meta_prompt(agent_name: str, max_retries: int = 5, retr
 # Source: src/backend/services/agent_service/lifecycle.py:93-171
 async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, retry_delay: float = 2.0):
     # Get owner, fetch assigned credentials, push to agent HTTP endpoint
-    # Endpoint: http://agent-{name}:8000/api/credentials/update
+    # Endpoint: http://agent-{name}:8000/api/credentials/inject (#2008 — this
+    # diagram named /credentials/update, which had no callers and was removed)
 ```
 
 ---

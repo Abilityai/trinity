@@ -1,12 +1,19 @@
 <template>
-  <div class="fixed z-10 inset-0 overflow-y-auto">
+  <!-- z-50: the house modal tier (SystemViewEditor / OnboardingWizard). Was
+       z-10, which sat UNDER the Dashboard's z-30 filter pill + z-20
+       query-empty overlay (ent#261) — chassis chrome floated above the open
+       modal. All full-screen modals must outrank page-level overlay chrome. -->
+  <div class="fixed z-50 inset-0 overflow-y-auto">
     <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
       <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity"></div>
 
       <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
 
       <div class="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full max-h-[90vh] overflow-y-auto">
-        <form @submit.prevent="createAgent">
+        <!-- trinity-enterprise#15: after a github-sourced create succeeds the
+             body swaps to the post-create validation step (below). `created`
+             has already been emitted; only the auto-close is deferred. -->
+        <form v-if="!postCreate" @submit.prevent="createAgent">
           <div class="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
             <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">Create New Agent</h3>
 
@@ -152,6 +159,8 @@
                       @click.stop
                     />
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Enter a GitHub repository in <code>owner/repo</code> format</p>
+                    <!-- trinity-enterprise#15: clone/copy/fork intent selector -->
+                    <ImportIntentPicker v-model="importIntent" />
                   </div>
 
                   <!-- Local templates section (shown first after Blank Agent) -->
@@ -223,8 +232,9 @@
                   </div>
                 </div>
 
-                <!-- Fork-to-own fields (trinity-enterprise#93) -->
-                <div v-if="isForkToOwn" class="mt-3 p-3 border border-action-primary-200 dark:border-action-primary-800 rounded-lg space-y-3">
+                <!-- Fork-to-own fields (trinity-enterprise#93; also shown for
+                     the github-custom 'fork' intent, trinity-enterprise#15) -->
+                <div v-if="showForkFields" class="mt-3 p-3 border border-action-primary-200 dark:border-action-primary-800 rounded-lg space-y-3">
                   <p class="text-xs text-gray-600 dark:text-gray-300">
                     This template is copied into a repository <span class="font-medium">you own</span> — your agent's
                     knowledge lives there, and template updates stay one <code class="text-[11px]">git pull upstream</code> away.
@@ -306,7 +316,7 @@
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
-              {{ loading ? (isForkToOwn ? 'Creating your repository…' : 'Creating...') : 'Create Agent' }}
+              {{ loading ? (showForkFields ? 'Creating your repository…' : 'Creating...') : 'Create Agent' }}
             </button>
             <button
               type="button"
@@ -317,6 +327,12 @@
             </button>
           </div>
         </form>
+        <ImportValidationStep
+          v-else
+          :agent-name="postCreate.name"
+          :import-snapshot="postCreate.snapshot"
+          @close="$emit('close')"
+        />
       </div>
     </div>
   </div>
@@ -325,8 +341,9 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useAgentsStore } from '../stores/agents'
-import axios from 'axios'
-import { useAuthStore } from '../stores/auth'
+import api from '../api'
+import ImportIntentPicker from './ImportIntentPicker.vue'
+import ImportValidationStep from './ImportValidationStep.vue'
 
 const props = defineProps({
   initialTemplate: {
@@ -337,7 +354,6 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'created'])
 const agentsStore = useAgentsStore()
-const authStore = useAuthStore()
 
 const form = reactive({
   name: '',
@@ -347,6 +363,15 @@ const form = reactive({
 
 const githubRepoUrl = ref('')
 const githubRepoInput = ref(null)
+
+// trinity-enterprise#15: import intent for the github-custom path.
+// 'clone' (default) | 'copy' | 'fork'. Featured templates never send it.
+const importIntent = ref('clone')
+
+// trinity-enterprise#15: post-create validation context. Non-null swaps the
+// modal body to ImportValidationStep ({name, snapshot}) — set only for
+// github-sourced creates; other creates keep the immediate close.
+const postCreate = ref(null)
 
 // Fork-to-own inputs (trinity-enterprise#93)
 const forkDestination = ref('')
@@ -392,6 +417,13 @@ const localTemplates = computed(() => {
 
 const isForkToOwn = computed(() => selectedTemplate.value?.fork_to_own === 'required')
 
+// trinity-enterprise#15: the destination/PAT/visibility fieldset shows for
+// featured fork-to-own templates AND for the github-custom 'fork' intent.
+const isGithubCustomFork = computed(
+  () => form.template === 'github-custom' && importIntent.value === 'fork'
+)
+const showForkFields = computed(() => isForkToOwn.value || isGithubCustomFork.value)
+
 const selectedTemplate = computed(() => {
   if (!form.template) return null
   return templates.value.find(t => t.id === form.template)
@@ -432,9 +464,9 @@ const fetchTemplates = async () => {
   templatesLoading.value = true
   templatesError.value = ''
   try {
-    const response = await axios.get('/api/templates', {
-      headers: authStore.authHeader
-    })
+    // Invariant #7 — shared api client (was the last raw-axios /api/templates
+    // consumer alongside the Library page, migrated together in ent#263).
+    const response = await api.get('/api/templates')
     templates.value = response.data
     // If a caller injected an initialTemplate that doesn't exist in this
     // deploy (e.g. the onboarding wizard prefilling `local:scout` on an
@@ -477,14 +509,18 @@ const createAgent = async () => {
         return
       }
       payload.template = `github:${repo}`
+      // trinity-enterprise#15: explicit import intent. Only the github-custom
+      // path sends it — featured fork-to-own templates are unchanged (legacy).
+      payload.import_intent = importIntent.value
     } else if (form.template) {
       payload.template = form.template
     }
 
     // Fork-to-own (trinity-enterprise#93): destination + token are required
-    // for templates that declare it. Shape check only — the backend owns the
+    // for templates that declare it — and for the github-custom 'fork' intent
+    // (trinity-enterprise#15). Shape check only — the backend owns the
     // authoritative validation.
-    if (isForkToOwn.value) {
+    if (showForkFields.value) {
       const dest = forkDestination.value.trim()
       if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(dest)) {
         error.value = 'Enter your repository as owner/name (e.g., your-username/my-agent-brain)'
@@ -505,8 +541,22 @@ const createAgent = async () => {
 
     const agent = await agentsStore.createAgent(payload)
     forkPat.value = ''  // hygiene: don't keep the token in the reactive ref
+    // `created` fires immediately, exactly as before — Dashboard/Library/
+    // OnboardingWizard consumers keep working (the wizard unmounts us on
+    // `created`, so the validation step simply never renders there).
     emit('created', agent)
-    emit('close')
+    // trinity-enterprise#15: github-sourced creates (github-custom any intent,
+    // or a featured fork template) swap to the post-create validation step
+    // instead of auto-closing. Skippable — Close is always available there.
+    const githubSourced = form.template === 'github-custom' || isForkToOwn.value
+    if (githubSourced) {
+      postCreate.value = {
+        name: agent?.name || form.name,
+        snapshot: agent?.import_snapshot || null,
+      }
+    } else {
+      emit('close')
+    }
   } catch (err) {
     const detail = err.response?.data?.detail
     if (detail && typeof detail === 'object' && (detail.code === 'QUOTA_EXCEEDED' || detail.error)) {

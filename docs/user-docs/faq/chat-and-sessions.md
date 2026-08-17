@@ -4,35 +4,35 @@
 
 ## How do I start chatting with an agent?
 
-Open the agent's detail page and click the **Chat** tab. Pick an existing conversation from the dropdown or start a new one, type your message, and press Enter. While the agent works, the status label updates in real time (for example "Reading files..."), and the reply appears as a chat bubble. The agent must be running — if it's stopped, the chat surface asks you to start it first. See [Agent Chat](../agents/agent-chat.md).
+Two places. The **Workspace** (`/workspace`) is the main one: pick the agent, type, and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick stateless surface — fine for one-off questions, but each message starts fresh. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
 
-## What's the difference between Session mode and classic chat?
+## What's the difference between the Workspace and the Chat tab?
 
-The Chat tab has a **Session mode** toggle at the top-right, on by default. With Session mode on, every message reattaches to the same Claude Code session, so the agent keeps its working memory between turns. With it off, you get classic stateless chat: each turn replays the visible transcript as plain text, and the agent starts cold every time. Your choice persists in your browser across all agents, and the two surfaces share nothing — flipping the toggle does not transfer state. See [Agent Session](../agents/agent-session.md).
+Memory. A **Workspace** conversation resumes: every message reattaches to the same underlying session, so the agent keeps its working memory between turns. The **Chat** tab on Agent Detail is stateless — each turn replays the visible transcript as plain text and the agent starts cold every time. They are separate surfaces with separate history; the Chat tab carries a **Continue in Workspace →** link when you want continuity. (The old Session-mode toggle has been retired in the Workspace's favour.) See [Continuous Conversations](../agents/agent-session.md).
 
-## What does the agent actually remember between turns in Session mode?
+## What does the agent actually remember between turns in the Workspace?
 
-Session mode preserves the agent's full working memory: tool results (files it read, commands it ran), mid-skill state, and reasoning state — not just the text of the conversation. Classic chat only re-sends the visible message log as text, so the agent loses tool outputs and internal state between turns. Use Session mode for long multi-turn reasoning or multi-step work; classic chat is fine for one-shot questions. See [Agent Session](../agents/agent-session.md).
+It preserves the agent's full working memory: tool results (files it read, commands it ran), mid-skill state, and reasoning state — not just the text of the conversation. The stateless Chat tab only re-sends the visible message log as text, so the agent loses tool outputs and internal state between turns. Use the Workspace for long multi-turn reasoning or multi-step work; the Chat tab is fine for one-shot questions. See [Continuous Conversations](../agents/agent-session.md).
 
-## Why is the Session mode toggle missing for my agent?
+## Why doesn't my agent seem to remember anything between turns?
 
-The toggle hides — and the tab falls back to classic chat — in two cases: the platform's `session_tab_enabled` feature flag is off, or the agent runs on a runtime without resume support (currently Codex). In both cases you still have a working chat surface; you just lose cross-turn working memory. See [Agent Session](../agents/agent-session.md).
+Most likely you're on the **Chat** tab rather than the Workspace — the Chat tab is stateless by design. If you are in the Workspace, the other cause is the runtime: a Codex agent has no resume primitive, so its turns replay the visible history as text instead of carrying working memory forward. The conversation stays coherent either way; what's lost is the agent's tool results and mid-task state. See [Continuous Conversations](../agents/agent-session.md).
 
-## What does the "X% last cache" number under my session mean?
+## Why does a long conversation suddenly take much longer on one turn?
 
-It's the size of the most recent assistant turn's cache as a fraction of the model's context window — a per-turn reading, not a session-wide "fullness" meter. It bounces by design: a heavy turn climbs, an auto-compact resets the underlying history to a small summary so the next reading drops sharply, and a light turn reads low. A high value means the last turn loaded a lot into the model's cache, not that the session is about to fail. See [Agent Session](../agents/agent-session.md).
+That's auto-compact. When the agent's internal history approaches roughly 85% of the model's context window, it summarizes that history mid-turn and continues — which adds a couple of minutes to that one turn and is entirely normal. Your visible message log is untouched. After several compacts in one conversation the summary loses fidelity and answers get vaguer; that's the point to start a fresh chat. See [Continuous Conversations](../agents/agent-session.md).
 
 ## Is the context window always 200K tokens?
 
-No — the denominator is model-specific. Trinity prefers the context window the runtime itself reports for the model that actually ran; when that's unavailable it falls back to a per-model catalog (for example, Gemini and 1M-context Claude models such as Sonnet 5 report a 1M window, Codex around 272K, and plain Claude models default to 200K as a safe floor). So the percentage-used bar rescales to whichever model ran, and the same percentage can mean very different absolute token counts on different agents. See [Agent Runtimes](../agents/agent-runtimes.md).
+No — the denominator is model-specific. Trinity prefers the context window the runtime itself reports for the model that actually ran; when that's unavailable it falls back to a per-model catalog (for example, Gemini and 1M-context Claude models such as Sonnet 5 report a 1M window, Codex around 1.05M on the gpt-5.6 family and around 272K on older ones, and plain Claude models default to 200K as a safe floor). So the percentage-used bar rescales to whichever model ran, and the same percentage can mean very different absolute token counts on different agents. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I make the agent forget the conversation and start fresh?
 
-In Session mode you have two buttons that do different things. **Clear working memory** wipes the agent's Claude working memory but keeps your visible message log — the next turn starts cold in the same session; use it when the agent is stuck or going in circles. **+ New Session** starts a brand-new conversation with an empty log and fresh cost tracking. In classic chat, just start a **New Chat**. See [Agent Session](../agents/agent-session.md).
+Start a new chat. In the Workspace, **New chat** gives you an empty conversation with fresh cost tracking and no memory of the previous one. Reach for it when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab every message already starts fresh, so there is nothing to clear. See [Continuous Conversations](../agents/agent-session.md).
 
 ## Who can see my chat history?
 
-Chat messages are saved to the platform database and survive container restarts and even agent deletion. You see only your own messages; platform admins can see all messages. Session-mode sessions are strictly per-user — even the agent's owner cannot open another user's sessions on the same agent. See [Agent Chat](../agents/agent-chat.md).
+Chat messages are saved to the platform database and survive container restarts and even agent deletion. You see only your own messages; platform admins can see all messages. Workspace conversations are strictly per-person — even the agent's owner cannot open someone else's conversations with the same agent. See [Agent Chat](../agents/agent-chat.md).
 
 ## Where can I see what a chat message cost?
 
@@ -42,9 +42,9 @@ Every assistant reply is recorded with its cost, token usage, and execution time
 
 Yes, up to the agent's parallel-capacity limit (`max_parallel_tasks`, default 3), which chat shares with scheduled and background tasks. When all slots are busy, additional chat requests queue (up to 3 waiting); beyond that the request is rejected with a 429 "too many requests" error. Owners can raise the limit in the agent's Settings tab under **Parallel Capacity**, up to the fleet ceiling set by an admin. See [Agent Configuration](../agents/agent-configuration.md).
 
-## Why do I see "Another turn on this session is in progress"?
+## Why am I told the conversation is already handling a message?
 
-Session-mode turns on the same session are serialized on purpose — two simultaneous resumes of one Claude session could corrupt its state. If you send a second message (or a teammate script hits the same session) while a turn is still running, the API answers 429 with a retry hint. Wait for the current turn to finish, or start a separate session for the parallel line of work. See [Agent Session](../agents/agent-session.md).
+Turns on one conversation are serialized on purpose — two simultaneous resumes of the same session could corrupt its state. Send a second message while one is still running and you get a busy response with a retry hint rather than a queue. Wait for the current turn to finish, or start a separate chat for the parallel line of work. See [Continuous Conversations](../agents/agent-session.md).
 
 ## How do I stop a turn that's stuck or running too long?
 
@@ -56,7 +56,7 @@ Yes. An agent can dispatch a task to itself in parallel ("self-execute"), tell y
 
 ## What happens if I close my browser while the agent is still working?
 
-The turn keeps running on the server — the backend persists both your message and the agent's reply itself, so nothing is lost. When you come back to the Chat tab, the UI checks whether a turn is still in progress on the session and reattaches, polling until the reply lands instead of showing a false failure. Very long turns may take a moment to reconcile after the tab wakes up. See [Agent Session](../agents/agent-session.md).
+The turn keeps running on the server — the backend persists both your message and the agent's reply, so nothing is lost. When you come back, the UI checks whether a turn is still in progress on that conversation and reattaches, waiting for the reply instead of showing a false failure. Very long turns may take a moment to reconcile after the tab wakes up. See [Continuous Conversations](../agents/agent-session.md).
 
 ## Can I pick a different model for a chat?
 
@@ -72,4 +72,4 @@ Agent replies render as markdown (headings, lists, code blocks), sanitized befor
 
 ## Can I talk to my agent with voice?
 
-Yes — click the microphone button next to the chat input to open a full-screen voice overlay with real-time speech in both directions; transcripts are saved to the chat session when you end the call. It requires a Gemini API key configured on the platform, and it's available only in authenticated chat (not public links). The mic is hidden while Session mode is on — switch the toggle off for voice. See [Voice Chat](../advanced/voice-chat.md).
+Yes — click the microphone button next to the chat input on the agent's Chat tab to open a full-screen voice overlay with real-time speech in both directions; transcripts are saved to the chat session when you end the call. It requires a Gemini API key configured on the platform, and it's available only in authenticated chat, not public links. See [Voice Chat](../advanced/voice-chat.md).

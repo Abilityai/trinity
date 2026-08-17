@@ -23,26 +23,22 @@
                `xl` to buy the ~150px that keeps a 7-link entitled build
                scroll-free at the capped container width. -->
           <div class="hidden sm:ml-6 sm:flex sm:space-x-3 xl:space-x-6 min-w-0 overflow-x-auto nav-links-scroll">
+            <!-- trinity-enterprise#260 — the Agents entry is gone (the page is
+                 now the Dashboard's List mode); Dashboard inherits its
+                 agent-detail highlight, so /agents/:name pages light this up. -->
             <router-link
               to="/"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/' }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/' || isAgentSection }"
             >
               Dashboard
             </router-link>
             <router-link
-              to="/agents"
+              to="/library"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': isAgentSection }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/library') }"
             >
-              Agents
-            </router-link>
-            <router-link
-              to="/templates"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/templates' }"
-            >
-              Templates
+              Library
             </router-link>
             <!-- #1109 — single Operations entry replaces the former
                  Health / Ops / Executions links. One unified badge carries
@@ -85,16 +81,33 @@
                  is hidden entirely. The store's `featureFlagsLoaded`
                  guard means the link doesn't flicker on first paint
                  (loadFeatureFlags fires in onMounted below). -->
-            <!-- Shared sessions (ent#170) — visible only when the rooms
-                 backend is entitled (shared_sessions). Hidden entirely in
-                 OSS/unentitled builds, like every enterprise surface. -->
+            <!-- ent#381: the Sessions entry is gone. Rooms did not go away —
+                 the ent#8 substrate is what a multi-agent Workspace chat now
+                 runs on (ent#361/#362) — but two nav entries for one job was
+                 the overlap this epic exists to remove. `/sessions` redirects
+                 into the Workspace. -->
+            <!-- Workspace (ent#357) — the persistent entry point that makes it
+                 ONE CLICK from the platform. The surface is the same one an
+                 external client reaches by email OTP; for a signed-in user the
+                 session is simply the platform session, so no sign-in step
+                 stands between this link and the view.
+
+                 UNGATED (ent#356): this used to carry
+                 `v-if="enterpriseStore.isEntitled('client_portal')"`, correct
+                 while the module was entitled. ent#356 moved client_portal into
+                 OSS core — main.py mounts it unconditionally and nothing calls
+                 register_module('client_portal') any more — so that predicate is
+                 now false on every OSS build, and the one-click entry this issue
+                 exists to add would never render. It survived only because the
+                 enterprise submodule has not yet dropped its registration
+                 (trinity-enterprise#374), i.e. it was already relying on a
+                 registration that is about to disappear. -->
             <router-link
-              v-if="enterpriseStore.isEntitled('shared_sessions')"
-              to="/sessions"
+              to="/workspace"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/sessions') }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/workspace') }"
             >
-              Sessions
+              Workspace
             </router-link>
             <router-link
               v-if="enterpriseStore.hasAnyEnterprise"
@@ -134,7 +147,7 @@
           <button
             v-if="buildInfo.info.value"
             @click="showBuildInfoModal = true"
-            class="hidden xl:block text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono whitespace-nowrap"
+            class="hidden xl:block text-xs text-gray-400 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 font-mono whitespace-nowrap"
             :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
           >
             v{{ buildInfo.displayVersion.value }}<span
@@ -351,7 +364,6 @@ import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useEnterpriseStore } from '../stores/enterprise'
 import { useWebSocket } from '../utils/websocket'
 import { useBuildInfo } from '../composables/useBuildInfo'
-import axios from 'axios'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -367,9 +379,24 @@ const { isConnected } = useWebSocket()
 const buildInfo = useBuildInfo()
 const showBuildInfoModal = ref(false)
 
-// Check if user is admin (fetch from backend)
-const userRole = ref(null)
-const isAdmin = computed(() => userRole.value === 'admin')
+// #2198: read the role from the auth store instead of issuing a second
+// GET /api/users/me — `auth.js::fetchUserProfile` already merges the identical
+// response into `authStore.user`, and it runs on both session restore and
+// admin login. In-repo precedent: `MonitoringPanel.vue:278` reads the store
+// "rather than a duplicate /api/users/me round-trip" (#1109).
+//
+// `profileVerified` is required, not decorative. `initializeAuth()` restores
+// `user` — role included — synchronously from localStorage, which is
+// user-editable, so `user?.role === 'admin'` alone would fail OPEN on a forged
+// value. Requiring a successful server fetch keeps exactly today's posture,
+// where this gate only ever reflected a real response.
+//
+// A computed, never a read-once: the store reports `user` before
+// /api/users/me lands (see Library.vue:474), so the nav must become admin
+// reactively when it arrives.
+const isAdmin = computed(
+  () => authStore.profileVerified && authStore.user?.role === 'admin'
+)
 
 // Check if currently in agent section (for highlighting nav)
 const route = router.currentRoute
@@ -410,7 +437,7 @@ const showUserMenu = ref(false)
 const userMenuRef = ref(null)
 const avatarError = ref(false)
 
-onMounted(async () => {
+onMounted(() => {
   // Add click outside listener
   document.addEventListener('click', handleClickOutside)
 
@@ -420,16 +447,6 @@ onMounted(async () => {
   // #926: kick off the cached build-info fetch — failures are non-fatal
   // (chip is hidden if fetch fails; e.g., unauthenticated brief window).
   buildInfo.load().catch(() => {})
-
-  // Fetch user role from backend
-  try {
-    const response = await axios.get('/api/users/me', {
-      headers: authStore.authHeader
-    })
-    userRole.value = response.data.role
-  } catch (e) {
-    console.warn('Failed to fetch user role:', e)
-  }
 
   // #847 Phase 0 — load enterprise entitlements. Fires once per page
   // load (the store gates on `featureFlagsLoaded`). The Enterprise nav

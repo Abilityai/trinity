@@ -48,8 +48,14 @@ The Internal System Agent (`trinity-system`) is an auto-deployed, deletion-prote
 │  2. Database migrations run (is_system column)                      │
 │  3. system_agent_service.ensure_deployed() called                   │
 │  4. If trinity-system doesn't exist → create from template          │
-│  5. If exists but stopped → start it                                │
-│  6. If running → no action                                          │
+│  5. If exists but stopped → start_agent_internal() (#1816)          │
+│       → the shared lifecycle: config predicates, the #1809 image-   │
+│         drift cold-start gate, #1560 clear-before-recreate → ADOPTS │
+│  6. If running → READ-ONLY probe (#1816)                            │
+│       check_base_image_state() → base_image_state in the result     │
+│       stale   → WARNING + edge-triggered operator-queue alarm       │
+│       unknown → WARNING only, never alarms (fail-open probe)        │
+│       NEVER recreates — see the AC2 invariant below                 │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -92,6 +98,92 @@ The Internal System Agent (`trinity-system`) is an auto-deployed, deletion-prote
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## Base-image adoption (#1816)
+
+`trinity-system` runs `restart_policy: unless-stopped` and is never manually cycled, so before #1816 it
+was the **most-stale agent in every fleet**: `ensure_deployed` returned `action: none` the moment the
+container reported `running`, and no drift predicate ever ran. After `build-base-image.sh` the
+orchestrator kept the old image indefinitely, across every backend restart.
+
+### The convergence invariant (test-pinned)
+
+> For `trinity-system`, the container produced by `_create_system_agent` **and** the container produced by
+> the shared recreate path (`recreate_container_with_updated_config`) must both leave **all eight** config
+> predicates `True`. Any predicate that can be permanently false is an AC2 hole *by construction* — a
+> config-drift recreate resolves the image from the container's own `Config.Image` **tag**
+> (`trinity-agent-base:latest`), not the pinned id, so **every** config recreate is also an image adoption.
+
+Two predicates were permanently false for a freshly created system agent, and both are now converged in
+`_create_system_agent`:
+
+| Predicate | Was | Now |
+|---|---|---|
+| `check_agent_auth_token_env_matches` (#1159) | creation never wrote `TRINITY_AGENT_AUTH_TOKEN` | env carries `derive_agent_token(SYSTEM_AGENT_NAME)` |
+| `check_full_capabilities_match` | `cap_add=FULL_CAPABILITIES` but no `trinity.full-capabilities` label (missing → `false`) | label pinned `'true'`, **and** the predicate is system-aware (the system agent's capabilities are contractual, not fleet-derived — pinning the label alone would never converge on an `agent_full_capabilities=false` install) |
+
+`tests/unit/test_1816_system_agent_convergence.py` AST-extracts creation's actual `env_vars` / `labels`
+dicts and asserts all eight predicates against a container built **from them** — a hand-built fixture
+would assert only that a correct container is correct.
+
+### The three boundaries
+
+| Boundary | Behaviour |
+|---|---|
+| Backend boot, container **running** | **Read-only.** `check_base_image_state()` → `result["base_image_state"]` ∈ `stale \| current \| unknown`; `action: "none"`. WARNING names the remedy; an edge-triggered `base-image-stale-` operator-queue alarm fires on `stale` **only** (a fail-open probe must never manufacture an alert, so `unknown` never alarms). **No recreate call exists in this branch** — source-pinned. The alarm's cooldown cursor is **per-process**, and `ensure_deployed` runs once per worker's lifespan, so a stale boot files one item **per worker** (`--workers 2` ⇒ 2). Deliberate: a cross-worker cursor would put Redis or a DB read on the boot path for an advisory alarm, and the un-guessable timestamped id — which is what stops an agent pre-creating and silencing it — cannot be deduped by `on_conflict_do_nothing` anyway. |
+| Backend boot, container **stopped** | Delegates to `start_agent_internal(SYSTEM_AGENT_NAME)` instead of a bare `container_start`, inheriting the #1809 cold-start image gate, #1560 clear-before-recreate ordering, the 409/NotFound concurrent-recreate hardening and the post-recreate handle re-lookup. `recreated` / `recreate_reason` are surfaced into the result. **This is where adoption happens.** |
+| `POST /api/system-agent/restart` | Explicit stop, then `start_agent_internal` — same adoption path. The response re-fetches the container so it reports the replacement's status, not the removed handle's. |
+
+### AC2 — the structural gate
+
+`POST /api/agents/trinity-system/start` was the **one** path that could replace a *running*
+`trinity-system` (every other caller — subscription assign/remove, auto-switch, `restart_system`,
+`/restart`, `/reinitialize` — stops the container first; delete, rename, ephemeral discard, the cleanup
+orphan sweep and `restart_fleet` all refuse or skip system agents). `start_agent_internal` now carries a
+structural gate: **system agent AND `was_already_running` ⇒ skip the recreate entirely** and return
+`recreate_deferred: "system_agent_running"` (surfaced through `routers/agents.py`'s whitelisted response
+dict, not just the internal one).
+
+This is deliberately independent of predicate *count* — a ninth config predicate added next quarter cannot
+reopen AC2. The accepted cost: an admin who changes a running system agent's config and clicks Start gets
+no recreate; the response names the remedy (stop it, then start). This is a **deliberate divergence** from
+regular-agent semantics.
+
+### Consequences worth knowing
+
+- **Adoption destroys the container writable layer.** Everything installed outside `/home/developer` —
+  apt packages, system pip, `/usr/local`, `/etc` — is gone. `trinity-system` is the one agent that runs
+  `FULL_CAPABILITIES` explicitly for package installation, so this is the most consequential side effect.
+- **Adoption re-reads `ANTHROPIC_API_KEY`** from `get_anthropic_api_key()` and rewrites `trinity.cpu` /
+  `trinity.memory` from `db.get_resource_limits` — creation reads them from `template.yaml`, so the two
+  can legitimately disagree.
+- **On the canonical upgrade path adoption is operator-triggered** (alarm → Restart), not automatic:
+  `build-base-image.sh` only builds and tags, `start.sh`/`stop.sh` never touch agent containers, and
+  `unless-stopped` means the system agent is *running* after every canonical upgrade.
+- **`/reinitialize` deliberately does not adopt.** It is already an explicit stop and carries zero
+  incremental AC coverage.
+- **The system agent gets no `TRINITY_BACKEND_URL`.** The recreate `setdefault`s it for regular agents,
+  but that env var is the agent-side heartbeat loop's gate and `heartbeat_service.authorize_heartbeat`
+  accepts only `scope == "agent"` keys — the system agent's key is `scope == "system"`, so arming it would
+  yield a permanent 5-second 403 loop. Test-pinned.
+- **The generic recovery rebuild refuses `trinity-system`** (409). `start_agent_internal` falls through to
+  `recreate_missing_container` when the container lookup returns `None`, and #1816 newly reaches that
+  from the boot path and from `/restart` — `ensure_deployed` runs in **every** uvicorn worker with no
+  leader lock, so a concurrent recreate can null the lookup mid-flight. That path reconstructs a *regular*
+  agent: it deactivates the existing **system-scoped** MCP key and mints an *agent-scoped* one (plaintext
+  unrecoverable ⇒ the orchestrator irreversibly loses its permission bypass), omits `trinity.is-system`
+  and the read-only `/template` bind, drops `unless-stopped`, arms `TRINITY_BACKEND_URL`, and follows the
+  fleet capabilities setting. Failing closed is self-healing — `ensure_deployed`'s create branch rebuilds
+  it correctly on the next boot. The per-agent start lock (#1817) is the fix for the race itself.
+- **The boot path blocks the lifespan.** The STOPPED branch runs recreate + `wait_for_agent_ready` (60s)
+  + credential retries (3 × 2s) + skill injection + read-only sync, so the backend serves nothing for
+  ~20–90s. Absorbed by the prod healthcheck (`start_period` 60s + 5 × 30s) and rare in practice, since
+  `unless-stopped` means the container is normally *running* and takes the read-only branch.
+- **`/restart` and `/reinitialize` are human-only.** `assert_admin` rejects *connector* principals but not
+  *agent* ones, and `get_current_user` hands an agent-scoped MCP key its owner's role — so on a default
+  admin-owned install any non-ephemeral agent's `TRINITY_MCP_API_KEY` passed it. Harmless when `/restart`
+  was a stop+start; not once it replaces the container. Both now call `reject_agent_principal` first
+  (trinity-ops-agent#232 precedent). No-op for JWT / user-scoped / system-scoped callers.
+
 ## Key Files
 
 | File | Purpose |
@@ -106,22 +198,22 @@ The Internal System Agent (`trinity-system`) is an auto-deployed, deletion-prote
 | `src/backend/routers/settings.py` | Ops settings (OPS_SETTINGS_DEFAULTS) |
 | `src/backend/db/agents.py` | SYSTEM_AGENT_NAME constant, is_system checks |
 | `src/frontend/src/views/AgentDetail.vue` | **System Agent UI** - uses standard agent detail with tab filtering (lines 414-448) |
-| `src/frontend/src/views/Agents.vue` | System agent display on Agents page (admin-only, purple ring, SYSTEM badge, lines 46-75) |
-| `src/frontend/src/stores/agents.js` | `systemAgent` getter (line 25-27), `sortedAgentsWithSystem` getter (line 39-41) |
+| `src/frontend/src/components/AgentListPanel.vue` | System agent display on the Dashboard List mode (purple left border, SYSTEM badge, pinned first; Run toggle hidden — grid-tile guard; visibility is backend-scoped via `get_accessible_agents`, ent#260) |
+| `src/frontend/src/stores/agents.js` | `systemAgent` getter; system-first pinning now lives in `utils/agentSort.js::sortAgents` (the `sortedAgentsWithSystem` getter was deleted with the Agents page, ent#260) |
 | `src/frontend/src/router/index.js` | `/system-agent` redirects to `/agents/trinity-system` (lines 77-81) |
 
 ## Frontend UI
 
-### Route (Updated 2026-01-13)
+### Route (Updated 2026-01-13; Agents page retired ent#260)
 - **Path**: `/agents/trinity-system` (legacy `/system-agent` redirects here)
-- **Access**: Admin-only visibility on Agents page; full access on AgentDetail.vue
-- **NavBar**: "System" link removed - access via Agents page or direct URL
+- **Access**: listed on the Dashboard List/Grid/Timeline per the backend's `get_accessible_agents` scoping; full access on AgentDetail.vue
+- **NavBar**: "System" link removed - access via the Dashboard or direct URL
 
-### UI Consolidation (2026-01-13)
+### UI Consolidation (2026-01-13; historical line references — the Agents page itself was later retired into the Dashboard List mode, ent#260)
 
 The dedicated `SystemAgent.vue` has been removed. The system agent now uses the standard `AgentDetail.vue` with tab filtering:
 
-**Agents Page Display** (`src/frontend/src/views/Agents.vue`):
+**Agents Page Display** (`src/frontend/src/views/Agents.vue`, retired ent#260):
 - Lines 271-304: Admin check on mount (`GET /api/users/me`)
 - Lines 274-279: `displayAgents` computed - includes system agent for admins via `sortedAgentsWithSystem`
 - Lines 46-57: System agent card styling - purple ring (`ring-2 ring-purple-500/50`), purple border
@@ -179,9 +271,9 @@ The dedicated `SystemAgent.vue` has been removed. The system agent now uses the 
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/system-agent/status` | GET | Get system agent status |
-| `/api/system-agent/restart` | POST | Restart system agent (admin) |
-| `/api/system-agent/reinitialize` | POST | Reset to clean state (admin) |
+| `/api/system-agent/status` | GET | Get system agent status. **#1816:** adds `base_image_state` ∈ `stale \| current \| unknown` when the container is running — an **enum only**, never image ids or digests (mirrors the `/health clone_status` contract, #1439); admin-gated |
+| `/api/system-agent/restart` | POST | Restart system agent (admin **+ human-only**, `reject_agent_principal`). **#1816:** stop, then `start_agent_internal` — adopts a rebuilt base image; the response reads a freshly fetched container |
+| `/api/system-agent/reinitialize` | POST | Reset to clean state (admin **+ human-only**). Deliberately **not** an adoption path (#1816) |
 
 ### Fleet Operations
 
@@ -189,7 +281,7 @@ The dedicated `SystemAgent.vue` has been removed. The system agent now uses the 
 |----------|--------|-------------|
 | `/api/ops/fleet/status` | GET | All agents with status, context, activity |
 | `/api/ops/fleet/health` | GET | Health summary with critical/warning issues |
-| `/api/ops/fleet/restart` | POST | Restart all/filtered agents |
+| `/api/ops/fleet/restart` | POST | Restart all/filtered running agents through the canonical stop→`start_agent_internal` path — applies pending config drift and adopts a rebuilt base image (#1860). Skips system + ephemeral agents; agent-scoped keys 403 (`reject_agent_principal` — system-scoped keys unaffected); 409 while another fleet restart is in flight; outcome durably recorded in the audit log (`fleet_restart`) even if the client times out |
 | `/api/ops/fleet/stop` | POST | Stop all/filtered agents |
 
 ### Schedule Control
@@ -952,6 +1044,7 @@ ls -1 ~/reports/fleet/ | tail -1
 
 | Date | Changes |
 |------|---------|
+| 2026-07-28 | **#1816 base-image adoption**: `ensure_deployed` is read-only when the container is running (3-state `check_base_image_state` → `base_image_state`, WARNING + an edge-triggered `base-image-stale-` operator alarm on `stale` only) and delegates to `start_agent_internal` when stopped, so the cold boundary adopts a rebuilt base image through the shared lifecycle. Creation converges on the recreate path's contract (`TRINITY_AGENT_AUTH_TOKEN`, `trinity.full-capabilities`) — the convergence invariant. AC2 is a **structural** gate in `start_agent_internal` (`is_system AND was_already_running` ⇒ `recreate_deferred="system_agent_running"`), independent of predicate count. `/restart` delegates; `/status` gains `base_image_state`. |
 | 2026-02-11 | Fixed reinitialize flow diagram - cleanup command now shows actual paths (`/home/developer/.claude`, `.trinity`, `content`, `plans`) instead of obsolete workspace reference |
 | 2026-01-27 | **Emergency Stop Prefix Filter**: Added `system_prefix` query parameter to `POST /api/ops/emergency-stop` (`routers/ops.py:607-696`). Allows targeting specific agents/schedules by name prefix. Schedule pausing respects prefix (line 638-639), agent stopping respects prefix (line 658-659). Enables safe testing with nonexistent prefix. |
 | 2026-01-14 | **Emergency Stop Parallel Execution (LOW)**: Implemented parallel agent stopping with `ThreadPoolExecutor(max_workers=10)` in `routers/ops.py:591-696`. Added `_stop_agent_container()` helper function for thread pool execution. Reduces emergency stop time from 200+ seconds (sequential) to 20-30 seconds for a 20-agent fleet. Uses 60-second timeout for all futures with `concurrent.futures.as_completed()`. |

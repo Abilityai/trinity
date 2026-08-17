@@ -135,7 +135,7 @@
               <p class="text-sm text-gray-600 dark:text-gray-400">
                 📧 We sent a 6-digit code to <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong>
               </p>
-              <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-500 mt-1">
+              <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                 Code expires in {{ formatTime(countdown) }}
               </p>
             </div>

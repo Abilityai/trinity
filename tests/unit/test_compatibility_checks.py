@@ -18,10 +18,12 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from services.compatibility import spec
+from services.compatibility import static_checks
 from services.compatibility.static_checks import run_static, STATIC_CHECKS
 from services.compatibility import fixes
 from services.compatibility import ai_checks
@@ -106,7 +108,23 @@ class TestSpecConsistency:
         assert len(ids) == len(set(ids)), "duplicate check ids in spec.CHECKS"
 
     def test_catalog_size(self):
-        assert len(spec.CHECKS) == 100, f"expected 100 checks, found {len(spec.CHECKS)}"
+        # #2137: 101 -> 88. 17 retired (dead-field, legacy-layout, duplicate)
+        # + 4 DP checks implemented. Retired ids are never reissued.
+        assert len(spec.CHECKS) == 88, f"expected 88 checks, found {len(spec.CHECKS)}"
+
+    def test_retired_ids_are_never_reissued(self):
+        """#2137: persisted `checks_json` rows predate the retirement.
+
+        Reusing a retired id would silently re-interpret an old stored verdict
+        as a verdict about a different check.
+        """
+        retired = {
+            "F-008", "F-012", "F-013", "T-012", "T-016", "T-017", "C-009",
+            "K-002", "K-005", "G-002", "G-003", "G-004", "G-005", "D-006",
+            "I-003", "I-004", "I-005", "DP-005",
+        }
+        clash = retired & set(spec.ALL_IDS)
+        assert not clash, f"retired ids reissued: {sorted(clash)}"
 
     def test_severity_and_type_valid(self):
         for c in spec.CHECKS:
@@ -145,11 +163,39 @@ class TestSpecDocSync:
     def test_ids_match_doc(self):
         doc = Path(__file__).resolve().parents[2] / "docs" / "agent-validation-spec.md"
         text = doc.read_text(encoding="utf-8")
-        doc_ids = set(re.findall(r"^\|\s*([A-Z]-\d{3})\s*\|", text, flags=re.MULTILINE))
+        # #2137: was `[A-Z]-\d{3}` — a SINGLE letter. The doc's two-letter
+        # `DP-001`..`DP-005` never matched, so five checks sat documented,
+        # indexed, and entirely unimplemented while this test reported the two
+        # files in sync. The anti-drift guarantee did not hold for any
+        # two-letter category.
+        doc_ids = set(re.findall(r"^\|\s*([A-Z]{1,2}-\d{3})\s*\|", text, flags=re.MULTILINE))
         spec_ids = set(spec.ALL_IDS)
         assert doc_ids == spec_ids, (
             f"spec.py and docs/agent-validation-spec.md diverge: "
             f"in_doc_only={sorted(doc_ids - spec_ids)} in_spec_only={sorted(spec_ids - doc_ids)}"
+        )
+
+    def test_severities_match_doc(self):
+        """#2137: the id SET matching is not enough.
+
+        Every severity change has to land in both files, and an id-only test
+        passes happily while the doc claims HARD for a check the catalog now
+        emits as INFO — which is the column an operator actually reads.
+        """
+        doc = Path(__file__).resolve().parents[2] / "docs" / "agent-validation-spec.md"
+        text = doc.read_text(encoding="utf-8")
+        rows = re.findall(
+            r"^\|\s*([A-Z]{1,2}-\d{3})\s*\|\s*(HARD|SOFT|INFO)\s*\|",
+            text, flags=re.MULTILINE,
+        )
+        mismatched = {
+            cid: (sev.lower(), spec.BY_ID[cid].severity)
+            for cid, sev in rows
+            if cid in spec.BY_ID and sev.lower() != spec.BY_ID[cid].severity
+        }
+        assert not mismatched, (
+            "doc Severity column disagrees with spec.py (doc, spec): "
+            f"{mismatched}"
         )
 
 
@@ -458,3 +504,658 @@ class TestCollectorScript:
         snap = self._run(tmp_path)
         assert snap["files"]["CLAUDE.md"]["truncated"] is True
         assert len(snap["files"]["CLAUDE.md"]["content"]) <= 256 * 1024
+
+
+# ---------------------------------------------------------------------------
+# T-018 + the three in-radius corrections (trinity-enterprise#89)
+# ---------------------------------------------------------------------------
+
+def _template_snapshot(template_yaml: str, **extra):
+    """A snapshot whose only interesting content is `template.yaml`."""
+    snap = good_snapshot()
+    snap["files"]["template.yaml"] = _f(template_yaml)
+    snap.update(extra)
+    return snap
+
+
+_SCHEDULES_OK = """\
+name: acme-bot
+description: does things
+schedules:
+  - name: daily-briefing
+    cron: "0 9 * * MON"
+    message: /triage
+    enabled: true
+"""
+
+_SCHEDULES_MALFORMED = """\
+name: acme-bot
+description: does things
+schedules:
+  - cron: "0 9 * * *"
+    message: /triage
+"""
+
+# The live c_p006 fail-open shape: a non-iterable `schedules:`.
+_SCHEDULES_SCALAR = """\
+name: acme-bot
+description: does things
+schedules: 5
+"""
+
+_HOSTILE_TEMPLATES = [
+    _SCHEDULES_SCALAR,
+    "name: a\ndescription: d\nschedules: yes\n",
+    "name: a\ndescription: d\nschedules:\n  - null\n",
+    "name: a\ndescription: d\nschedules:\n  a: b\n",
+    "name: a\ndescription: d\nschedules:\n  - name: {z: 1}\n",
+    "name: a\ndescription: d\nschedules:\n  - name: x\n    cron: 5\n    message: m\n",
+    "name: a\ndescription: d\nschedules:\n  - name: x\n    cron: '* * * * *'\n"
+    "    message: m\n    timezone: 5\n",
+]
+
+
+class TestT018SchedulesWellFormed:
+    def test_passes_on_a_well_formed_block(self):
+        st, _msg, _detail = STATIC_CHECKS["T-018"](_template_snapshot(_SCHEDULES_OK))
+        assert st == "pass"
+
+    def test_passes_when_no_block_is_declared(self):
+        st, _msg, _detail = STATIC_CHECKS["T-018"](good_snapshot())
+        assert st == "pass"
+
+    def test_fails_on_a_missing_required_key(self):
+        st, _msg, detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_MALFORMED))
+        assert st == "fail"
+        assert any("name" in e for e in detail["errors"])
+
+    def test_fails_on_a_non_list_block(self):
+        st, _msg, _detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_SCALAR))
+        assert st == "fail"
+
+    def test_does_not_report_cron_syntax(self):
+        """A-002 owns cron. Two checks contradicting each other on the same
+        field is worse than either alone — and A-002 already ships."""
+        bad_cron = ("name: a\ndescription: d\nschedules:\n"
+                    "  - name: x\n    cron: '99 99 * * *'\n    message: /m\n")
+        st, _msg, detail = STATIC_CHECKS["T-018"](_template_snapshot(bad_cron))
+        assert st == "fail"
+        # It fires (the entry IS dropped at materialization), but the message is
+        # about the entry, and A-002 is the check that names cron validity.
+        a002, _m, _d = STATIC_CHECKS["A-002"](_template_snapshot(bad_cron))
+        assert a002 == "fail"
+
+    def test_fails_closed_when_the_reader_raises(self, monkeypatch):
+        """R4 — `run_static` turns a raise into `skipped`, and the report counts
+        only `fail`, so a raising SOFT check flips overall_status from `issues`
+        to `compatible` exactly when its finding was the only failure."""
+        import services.template_schedules as tsched
+
+        def _boom(_block):
+            raise RuntimeError("reader exploded")
+
+        monkeypatch.setattr(tsched, "schedule_shape_errors", _boom)
+        st, _msg, detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_MALFORMED))
+        assert st == "fail", "T-018 must not rely on the fail-open outer net"
+        assert detail == {"error_type": "RuntimeError"}
+
+    def test_failure_detail_never_echoes_the_exception_message(self, monkeypatch):
+        """`detail` is persisted to agent_compatibility_results.checks_json and
+        rendered in the UI; `str(e)` can carry untrusted template content."""
+        import services.template_schedules as tsched
+
+        def _boom(_block):
+            raise RuntimeError("SECRETTEMPLATECONTENT")
+
+        monkeypatch.setattr(tsched, "schedule_shape_errors", _boom)
+        _st, msg, detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_MALFORMED))
+        assert "SECRETTEMPLATECONTENT" not in repr(detail)
+        assert "SECRETTEMPLATECONTENT" not in msg
+
+    def test_run_static_does_not_convert_the_raise_to_skipped(self, monkeypatch):
+        import services.template_schedules as tsched
+
+        monkeypatch.setattr(
+            tsched, "schedule_shape_errors",
+            lambda _b: (_ for _ in ()).throw(RuntimeError("boom")))
+        out = run_static(_template_snapshot(_SCHEDULES_MALFORMED), ["T-018"])
+        assert out["T-018"][0] == "fail"
+
+
+class TestP006ScheduleGuard:
+    def test_non_list_schedules_no_longer_raises(self):
+        """The live instance of the fail-open class: `c_p006` iterated
+        `data.get("schedules") or []` with no list guard, unlike all four of its
+        siblings — so `schedules: 5` made a HARD check silently vanish from
+        hard_count."""
+        out = run_static(_template_snapshot(_SCHEDULES_SCALAR), ["P-006"])
+        st, _msg, detail = out["P-006"]
+        assert st != "skipped"
+        assert (detail or {}).get("skip_reason") != "check_error"
+
+
+class TestA002CronAuthority:
+    def test_accepts_a_named_day(self):
+        """`0 9 * * MON` is valid — the scheduler translates Unix day numbers to
+        APScheduler names and passes named days through. The old per-field
+        regex rejected it."""
+        tpl = ("name: a\ndescription: d\nschedules:\n"
+               "  - name: x\n    cron: '0 9 * * MON'\n    message: /m\n")
+        st, _msg, _detail = STATIC_CHECKS["A-002"](_template_snapshot(tpl))
+        assert st == "pass"
+
+    def test_rejects_an_out_of_range_field(self):
+        """The old regex accepted `99 99 * * *` — so the report said "cron
+        expressions are valid" for an expression creation silently drops."""
+        tpl = ("name: a\ndescription: d\nschedules:\n"
+               "  - name: x\n    cron: '99 99 * * *'\n    message: /m\n")
+        st, _msg, _detail = STATIC_CHECKS["A-002"](_template_snapshot(tpl))
+        assert st == "fail"
+
+    def test_rejects_macros_and_six_field_crons(self):
+        for cron in ("@daily", "0 9 * * * *"):
+            tpl = ("name: a\ndescription: d\nschedules:\n"
+                   f"  - name: x\n    cron: '{cron}'\n    message: /m\n")
+            st, _msg, _detail = STATIC_CHECKS["A-002"](_template_snapshot(tpl))
+            assert st == "fail", cron
+
+    def test_agrees_with_the_materializer(self):
+        """One cron authority: what A-002 blesses is what the reader keeps."""
+        from services.template_schedules import normalize_declared_schedules
+
+        for cron, expect_ok in [("0 9 * * MON", True), ("*/15 * * * 1-5", True),
+                                ("99 99 * * *", False), ("@daily", False)]:
+            tpl = ("name: a\ndescription: d\nschedules:\n"
+                   f"  - name: x\n    cron: '{cron}'\n    message: /m\n")
+            report_ok = STATIC_CHECKS["A-002"](_template_snapshot(tpl))[0] == "pass"
+            kept = bool(normalize_declared_schedules(
+                [{"name": "x", "cron": cron, "message": "/m"}]))
+            assert report_ok is expect_ok and kept is expect_ok, cron
+
+
+class TestNoCheckFailsOpenOnAHostileTemplate:
+    """R4.4 — asserted across the WHOLE static catalog, not just T-018.
+
+    A T-018-only assertion would never have caught `c_p006`, which had been
+    failing open on `schedules: 5` for months.
+    """
+
+    @pytest.mark.parametrize("template_yaml", _HOSTILE_TEMPLATES)
+    def test_no_static_check_lands_at_check_error(self, template_yaml):
+        out = run_static(_template_snapshot(template_yaml), list(spec.STATIC_IDS))
+        offenders = {
+            cid: res for cid, res in out.items()
+            if (res[2] or {}).get("skip_reason") == "check_error"
+        }
+        assert not offenders, offenders
+
+
+class TestReportDirectionOnAFailingValidator:
+    """Pins the DIRECTION, not just the absence of a raise: a broken validator
+    must not report a healthy agent."""
+
+    def test_build_report_stays_issues_when_the_reader_raises(self, monkeypatch):
+        import services.compatibility as svc
+        import services.template_schedules as tsched
+
+        snap = _template_snapshot(_SCHEDULES_MALFORMED)
+
+        async def fake_collect(_name):
+            return {"status": "ok", "snapshot": snap, "runtime": "claude-code"}
+
+        monkeypatch.setattr(svc, "collect", fake_collect)
+        monkeypatch.setattr(
+            tsched, "schedule_shape_errors",
+            lambda _b: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        report = asyncio.run(svc.build_report("t018-agent", include_ai=False))
+        t018 = next(c for c in report["checks"] if c["check_id"] == "T-018")
+        assert t018["status"] == "fail"
+        assert report["soft_count"] >= 1
+        assert report["overall_status"] == "issues"
+
+    def test_persisted_check_error_does_not_replay_as_clean(self):
+        """`_report_from_persisted` recomputes counts from `checks_json`, so a
+        swallowed raise persisted once used to be replayed as a clean bill of
+        health on every stopped-agent read. ent#128 closed that at the sink:
+        `_did_not_pass` counts a `skipped` row carrying `check_error` as a
+        finding, so a row persisted by an OLDER build — before the swallow
+        started returning `fail` — still cannot replay as clean."""
+        import services.compatibility as svc
+
+        swallowed = {"checks": [{
+            "check_id": "T-018", "status": "skipped", "severity": "soft",
+            "skip_reason": "check_error",
+        }]}
+        failed = {"checks": [{
+            "check_id": "T-018", "status": "fail", "severity": "soft",
+            "skip_reason": None,
+        }]}
+
+        assert svc._counts(swallowed["checks"])["soft_count"] == 1
+        assert svc._counts(failed["checks"])["soft_count"] == 1
+
+        degraded = svc._report_from_persisted(
+            "a", failed, False, "stopped", "msg", "claude-code")
+        assert degraded["soft_count"] == 1
+
+
+class TestRunStaticLogsItsSwallow:
+    def test_a_raising_check_is_logged(self, monkeypatch, caplog):
+        """Before ent#89 this swallow left no trace anywhere, for all ~100
+        checks — a broken validator reported "healthy" and the logs were
+        silent. Both halves are now closed: ent#128 makes the result a FAIL so
+        `_counts` sees it, and ent#89 logs it so it is diagnosable."""
+        import logging
+
+        monkeypatch.setitem(
+            STATIC_CHECKS, "T-001",
+            lambda _s: (_ for _ in ()).throw(RuntimeError("kaboom")))
+        with caplog.at_level(logging.ERROR):
+            out = run_static(good_snapshot(), ["T-001"])
+
+        status, _msg, detail = out["T-001"]
+        # FAIL, not a skip: a check that could not evaluate is not a check that
+        # passed, and only a counted status reaches `hard_count`/`soft_count`.
+        assert status == "fail"
+        assert (detail or {}).get("check_error") == "kaboom"
+        assert any("T-001" in r.message or "T-001" in str(r.args)
+                   for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #2137 — catalog alignment with what the platform implements and the
+# `create-agent` marketplace wizards actually generate.
+# ---------------------------------------------------------------------------
+
+_WIZARD_SKILL = """\
+---
+name: weekly-report
+description: Produce the weekly pipeline report. Use when the user asks for a weekly summary.
+---
+
+# Weekly Report
+
+1. Pull the pipeline.
+2. Summarize movement.
+3. Write the report.
+"""
+
+# The layout `plugins/create-agent/skills/custom/SKILL.md` documents verbatim:
+# skills under `.claude/skills/<name>/SKILL.md`, never `.claude/commands/`.
+_WIZARD_TEMPLATE = """\
+name: acme-scout
+display_name: Acme Scout
+description: |
+  Acme Scout tracks competitor movement for the Acme product team.
+  It sweeps public sources weekly and reports material changes.
+resources:
+  cpu: "2"
+  memory: 2g
+schedules:
+  - name: Weekly competitor sweep
+    cron: "0 9 * * 1"
+    message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."
+"""
+
+_WIZARD_GITIGNORE = "\n".join([
+    ".env", ".env.*", ".mcp.json", ".claude/projects/", ".trinity/",
+    ".claude/statsig/", ".claude/todos/", ".claude/debug/", ".claude/sessions/",
+    ".claude/shell-snapshots/", "content/", "*.pem", "*.key", "credentials.json",
+]) + "\n"
+
+
+def wizard_snapshot():
+    """An agent exactly as a `create-agent` wizard scaffolds it.
+
+    Skills live at `.claude/skills/<name>/SKILL.md` with NO `.claude/commands/`,
+    and schedule messages are prose. Before #2137 this shape drew a fistful of
+    findings the author could not act on.
+    """
+    return {
+        "schema": 1,
+        "root": "/home/developer",
+        "files": {
+            "template.yaml": _f(_WIZARD_TEMPLATE),
+            "CLAUDE.md": _f("# Acme Scout\n\nYou track competitors.\n\n## Workflow\n1. Sweep\n2. Report\n"),
+            ".gitignore": _f(_WIZARD_GITIGNORE),
+            ".env.example": _f("# Acme API key\nACME_API_KEY=your-key-here\n"),
+            ".mcp.json.template": _f('{"mcpServers": {}}'),
+            "README.md": _f("# Acme Scout\n"),
+            "ARCHITECTURE.md": _f("# Architecture\n"),
+            "dashboard.yaml": _f("widgets:\n  - type: text\n    content: ok\n"),
+        },
+        "dirs": {
+            ".claude/commands": None,          # the wizards never create it
+            ".claude/skills": ["weekly-report"],
+            ".claude/agents": None,
+            "schemas": None,
+        },
+        "skills": {".claude/skills/weekly-report/SKILL.md": _f(_WIZARD_SKILL)},
+        "hit_total_cap": False,
+    }
+
+
+class TestWizardAgentIsClean:
+    """The headline regression: a freshly-scaffolded agent has nothing to fix."""
+
+    def _static_results(self, snap):
+        static_ids = [c.id for c in spec.CHECKS if c.type == "static"]
+        return run_static(snap, static_ids)
+
+    def test_no_hard_findings(self):
+        res = self._static_results(wizard_snapshot())
+        hard = [
+            cid for cid, r in res.items()
+            if r[0] == "fail" and spec.BY_ID[cid].severity == "hard"
+        ]
+        assert hard == [], f"wizard-scaffolded agent has HARD findings: {hard}"
+
+    def test_no_soft_findings(self):
+        """SOFT means 'the author should act'. A wizard agent gives them nothing."""
+        res = self._static_results(wizard_snapshot())
+        soft = [
+            (cid, res[cid][1]) for cid in res
+            if res[cid][0] == "fail" and spec.BY_ID[cid].severity == "soft"
+        ]
+        assert soft == [], f"wizard-scaffolded agent has unactionable SOFT findings: {soft}"
+
+    def test_no_check_errors(self):
+        """`run_static` captures a raise as a FAIL carrying `check_error`."""
+        res = self._static_results(wizard_snapshot())
+        errored = [cid for cid, r in res.items() if (r[2] or {}).get("check_error")]
+        assert errored == [], f"checks raised on the wizard fixture: {errored}"
+
+
+class TestSlashCommandAnywhere:
+    """#2137: `_slash_command` anchored at position 0, so the marketplace's own
+    `"Run /skill"` schedules resolved to nothing and P-006 was inert."""
+
+    def test_matches_mid_message(self):
+        assert static_checks._slash_command("Run /pipeline-tick") == "pipeline-tick"
+        assert static_checks._slash_command("Run /weekly-report and post it") == "weekly-report"
+        assert static_checks._slash_command("  /leading") == "leading"
+
+    def test_still_matches_at_position_zero(self):
+        assert static_checks._slash_command("/report now") == "report"
+
+    def test_prose_has_no_command(self):
+        assert static_checks._slash_command("Summarize yesterday's activity.") is None
+
+    def test_paths_and_urls_are_not_commands(self):
+        """X-007 turns a resolved name into a SOFT finding, so a path read as a
+        command manufactures the exact unactionable failure #2137 removes."""
+        assert static_checks._slash_command("Read reports/daily and summarize") is None
+        assert static_checks._slash_command("Fetch https://example.com/status") is None
+        # Absolute paths: a command is ONE segment; these are not.
+        assert static_checks._slash_command("Open /etc/passwd") is None
+        assert static_checks._slash_command("Check /var/log/app.log for errors") is None
+
+    def test_a_command_after_a_path_is_still_found(self):
+        assert static_checks._slash_command(
+            "Read /var/log/app.log then run /weekly-report"
+        ) == "weekly-report"
+
+    def test_p006_now_fires_on_a_run_slash_schedule(self):
+        """The HARD guard that had never fired."""
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report and post the summary"',
+        ))
+        snap["skills"][".claude/skills/weekly-report/SKILL.md"] = _f(
+            _WIZARD_SKILL.replace("2. Summarize movement.", "2. Ask the user which region to cover.")
+        )
+        r = _run_one("P-006", snap)
+        assert r[0] == "fail", r
+        assert "approval gate" in r[1]
+
+    def test_x007_resolves_a_skill_directory(self):
+        """Before #2137 `_command_names` globbed only `.claude/commands/`."""
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report and post the summary"',
+        ))
+        assert _run_one("X-007", snap)[0] == "pass"
+
+    def test_x007_still_fails_on_a_genuinely_missing_target(self):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /does-not-exist"',
+        ))
+        r = _run_one("X-007", snap)
+        assert r[0] == "fail"
+        assert r[2]["missing"] == ["does-not-exist"]
+
+    def test_command_names_resolves_both_layouts(self):
+        snap = wizard_snapshot()
+        snap["skills"][".claude/commands/legacy.md"] = _f("# Legacy\n")
+        snap["dirs"][".claude/commands"] = ["legacy.md"]
+        assert set(static_checks._command_names(snap)) >= {"weekly-report", "legacy"}
+
+
+class TestP006AutomationOptOut:
+    """A skill that gates BY DESIGN is a decision, not a defect."""
+
+    def _snap_with(self, frontmatter_extra, body_line):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report"',
+        ))
+        skill = _WIZARD_SKILL.replace(
+            "description: Produce the weekly pipeline report. Use when the user asks for a weekly summary.",
+            "description: Produce the weekly pipeline report. Use when the user asks for a weekly summary."
+            + frontmatter_extra,
+        ).replace("2. Summarize movement.", body_line)
+        snap["skills"][".claude/skills/weekly-report/SKILL.md"] = _f(skill)
+        return snap
+
+    def test_gated_skill_is_not_a_hard_failure(self):
+        snap = self._snap_with("\nautomation: gated", "2. Ask the user which region to cover.")
+        r = _run_one("P-006", snap)
+        assert r[0] == "pass", r
+        assert r[2]["declared_gated"][0]["mode"] == "gated"
+
+    def test_manual_skill_is_not_a_hard_failure(self):
+        snap = self._snap_with("\nautomation: manual", "2. Wait for the user to confirm.")
+        assert _run_one("P-006", snap)[0] == "pass"
+
+    def test_explicit_autonomous_is_still_held_to_the_rule(self):
+        snap = self._snap_with("\nautomation: autonomous", "2. Ask the user which region to cover.")
+        assert _run_one("P-006", snap)[0] == "fail"
+
+    def test_absent_frontmatter_key_is_still_held_to_the_rule(self):
+        snap = self._snap_with("", "2. Ask the user which region to cover.")
+        assert _run_one("P-006", snap)[0] == "fail"
+
+    def test_the_word_in_prose_does_not_flip_the_check_off(self):
+        """Parsed from frontmatter, never grepped from the body."""
+        snap = self._snap_with("", "2. Ask the user which region to cover (automation: gated).")
+        assert _run_one("P-006", snap)[0] == "fail"
+
+
+class TestP004ScopedToSkillMd:
+    def test_companion_reference_file_is_not_flagged(self):
+        """P-009 tells authors to create these; P-004 used to flag them."""
+        snap = wizard_snapshot()
+        snap["skills"][".claude/skills/weekly-report/reference.md"] = _f("x\n" * 900)
+        assert _run_one("P-004", snap)[0] == "pass"
+
+    def test_oversized_skill_md_still_fails(self):
+        snap = wizard_snapshot()
+        snap["skills"][".claude/skills/weekly-report/SKILL.md"] = _f("x\n" * 900)
+        r = _run_one("P-004", snap)
+        assert r[0] == "fail"
+        assert r[2]["files"] == [".claude/skills/weekly-report/SKILL.md"]
+
+
+class TestA001AcceptsSlashAnywhere:
+    def test_run_slash_message_passes(self):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report and post the summary"',
+        ))
+        assert _run_one("A-001", snap)[0] == "pass"
+
+    def test_prose_message_is_info_not_soft(self):
+        assert spec.BY_ID["A-001"].severity == "info"
+        assert _run_one("A-001", wizard_snapshot())[0] == "fail"
+
+
+class TestF004Conditional:
+    def test_no_env_example_is_fine_without_credentials(self):
+        snap = wizard_snapshot()
+        del snap["files"][".env.example"]
+        assert _run_one("F-004", snap)[0] == "pass"
+
+    def test_missing_env_example_still_fails_when_credentials_declared(self):
+        snap = wizard_snapshot()
+        del snap["files"][".env.example"]
+        snap["files"][".mcp.json.template"] = _f(
+            '{"mcpServers": {"acme": {"env": {"ACME_API_KEY": "${ACME_API_KEY}"}}}}'
+        )
+        assert _run_one("F-004", snap)[0] == "fail"
+
+
+class TestRuntimeDataPathChecks:
+    """DP-001..DP-004 — documented since #1169, implemented in #2137."""
+
+    def _snap(self, data_paths_yaml):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE + data_paths_yaml)
+        return snap
+
+    def test_absent_data_paths_passes_every_dp_check(self):
+        snap = wizard_snapshot()
+        for cid in ("DP-001", "DP-002", "DP-003", "DP-004"):
+            assert _run_one(cid, snap)[0] == "pass", cid
+
+    def test_dp001_accepts_entries_under_the_data_root(self):
+        snap = self._snap('data_paths:\n  - "data/*.sqlite"\n  - "data/exports/*.csv"\n')
+        assert _run_one("DP-001", snap)[0] == "pass"
+
+    def test_dp001_rejects_a_path_outside_the_data_root(self):
+        """`data/export` archives `/home/developer/data` and nothing else, so a
+        plain relative entry is as unsnapshotted as `../escape`."""
+        snap = self._snap('data_paths:\n  - "outputs/*.csv"\n')
+        r = _run_one("DP-001", snap)
+        assert r[0] == "fail"
+        assert r[2]["entries"][0]["reason"] == "outside_data_root"
+
+    def test_dp001_accepts_the_bare_data_root(self):
+        snap = self._snap('data_paths:\n  - "data"\n')
+        assert _run_one("DP-001", snap)[0] == "pass"
+
+    def test_dp001_rejects_absolute_and_traversal(self):
+        for bad in ("/etc/passwd", "../escape", "~/secrets"):
+            snap = self._snap(f'data_paths:\n  - "{bad}"\n')
+            r = _run_one("DP-001", snap)
+            assert r[0] == "fail", bad
+            assert r[2]["entries"][0]["path"] == bad
+
+    def test_dp001_rejects_what_the_materializer_would_drop(self):
+        """Shares `git_service._is_safe_data_path` with the executor."""
+        snap = self._snap('data_paths:\n  - "data/$(whoami).db"\n')
+        r = _run_one("DP-001", snap)
+        assert r[0] == "fail"
+        assert r[2]["entries"][0]["reason"] == "shell_metacharacters"
+
+    def test_dp001_reports_a_non_list_block(self):
+        snap = self._snap("data_paths: 5\n")
+        r = _run_one("DP-001", snap)
+        assert r[0] == "fail"
+        assert r[2]["found_type"] == "int"
+
+    def test_dp002_requires_the_data_root_ignored(self):
+        snap = self._snap('data_paths:\n  - "data/*.sqlite"\n')
+        assert _run_one("DP-002", snap)[0] == "fail"
+        snap["files"][".gitignore"] = _f(_WIZARD_GITIGNORE + "data/\n")
+        assert _run_one("DP-002", snap)[0] == "pass"
+
+    def test_dp003_flags_overlap_with_managed_paths(self):
+        snap = self._snap('data_paths:\n  - ".trinity/state.json"\n')
+        assert _run_one("DP-003", snap)[0] == "fail"
+
+    def test_dp003_flags_overlap_with_persistent_state(self):
+        snap = self._snap('persistent_state:\n  - "data/keep.db"\ndata_paths:\n  - "data/keep.db"\n')
+        r = _run_one("DP-003", snap)
+        assert r[0] == "fail"
+        assert r[2]["entries"][0]["conflicts_with"] == "persistent_state"
+
+    def test_dp004_is_info_and_reports_a_property(self):
+        assert spec.BY_ID["DP-004"].severity == "info"
+        snap = self._snap('data_paths:\n  - "data/*.sqlite"\n')
+        assert _run_one("DP-004", snap)[0] == "fail"
+
+
+class TestCompatFixLock:
+    """#1920: compat_fix adopts the shared ownership-checked SingleFlightLock.
+    A busy holder -> FixBusy, and release is a compare-and-delete against the
+    minted token -- never the pre-#1920 constant-'1' + unconditional delete
+    that could remove a *successor's* lock."""
+
+    @staticmethod
+    def _store_backed_redis():
+        client = MagicMock()
+        store = {}
+
+        def _set(key, val, nx=None, ex=None):
+            if nx and key in store:
+                return None
+            store[key] = val
+            return True
+
+        client.set.side_effect = _set
+        client.get.side_effect = lambda key: store.get(key)
+        client.delete.side_effect = lambda key: store.pop(key, None)
+        client.store = store
+        return client
+
+    def test_lock_win_busy_then_ownership_checked_release(self, monkeypatch):
+        client = self._store_backed_redis()
+        monkeypatch.setattr(
+            fixes, "_redis_lib", MagicMock(from_url=lambda *a, **k: client)
+        )
+        monkeypatch.setattr(fixes, "_REDIS_URL", "redis://x")
+
+        lock = fixes._lock("agent-x")
+        assert lock is not None and lock.held
+        # a real uuid token was stored, not the constant '1'
+        assert client.store["compat_fix:agent-x"] == lock.token
+
+        # A concurrent fix finds the key held -> FixBusy.
+        with pytest.raises(fixes.FixBusy):
+            fixes._lock("agent-x")
+
+        # A successor took the key after our TTL lapsed -> release must NOT
+        # delete it (the #1920 successor-safety property).
+        client.store["compat_fix:agent-x"] = "successor-token"
+        fixes._unlock(lock, "agent-x")
+        assert client.store["compat_fix:agent-x"] == "successor-token"
+
+    def test_lock_fails_open_when_redis_unconfigured(self, monkeypatch):
+        monkeypatch.setattr(fixes, "_redis_lib", None)
+        assert fixes._lock("agent-x") is None  # fail-open
+        fixes._unlock(None, "agent-x")  # no-op, no raise
+
+    def test_lock_fails_open_when_client_connect_raises(self, monkeypatch, caplog):
+        """Redis is CONFIGURED (URL present) but the client build throws — the
+        distinct fail-open branch from the ``None`` case above: it logs a
+        warning and returns ``None`` so the fix still runs best-effort."""
+
+        def _boom(*a, **k):
+            raise RuntimeError("redis unreachable")
+
+        monkeypatch.setattr(fixes, "_redis_lib", MagicMock(from_url=_boom))
+        monkeypatch.setattr(fixes, "_REDIS_URL", "redis://x")
+        with caplog.at_level("WARNING"):
+            assert fixes._lock("agent-x") is None  # fail-open, not FixBusy
+        assert any("fix lock unavailable" in r.getMessage() for r in caplog.records)

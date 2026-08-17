@@ -25,6 +25,108 @@ logger = logging.getLogger(__name__)
 # rotate SECRET_KEY (invalidating every token).
 _JWT_REVOKED_PREFIX = "jwt:revoked:"
 
+# Bulk portal-session revocation (trinity-enterprise#281): "log this client out
+# everywhere, now". A per-`jti` blacklist cannot express it — `jti` is random per
+# token and nothing indexes email → issued jtis, so answering "which tokens does
+# this email hold?" would need a write-side index maintained at every mint.
+#
+# Instead store ONE cutoff timestamp per email and reject any portal token issued
+# at or before it. O(1) to write, O(1) to check, nothing to enumerate, and it
+# covers every mint path by construction — interactive email-OTP sign-in and the
+# ent#163 delegated exchange both go through `create_portal_session_token`, so
+# neither can be forgotten here (the failure mode a hand-maintained index has).
+#
+# The TTL is the max session lifetime: a token older than that is expired anyway,
+# so the key self-expires exactly when it stops mattering — same bounded-growth
+# property as the `jti` blacklist above, no sweep.
+#
+# Fail-open on Redis, matching #187 and the platform posture. This is deliberate
+# and is why revocation is NOT the whole feature: a *blocked* client is refused
+# from a durable DB row on the enterprise side, which keeps working with Redis
+# down. Revocation is the fast path; the block is the load-bearing one.
+_PORTAL_REVOKED_PREFIX = "portal:revoked_before:"
+
+
+def _portal_revoked_key(email: str) -> str:
+    return f"{_PORTAL_REVOKED_PREFIX}{email.strip().lower()}"
+
+
+def _portal_session_policy() -> tuple:
+    """`(idle_seconds, absolute_seconds)` — the sliding-session policy (ent#375).
+
+    Imported lazily: `settings_service` imports `db`, and `dependencies` is
+    imported by nearly everything, so a module-level import here would make an
+    import cycle out of what is one settings read.
+    """
+    try:
+        from services.settings_service import settings_service
+        return settings_service.get_portal_session_policy()
+    except Exception:  # pragma: no cover — settings unavailable
+        # Auth path: degrade to the shipped policy rather than 500 the request.
+        from config import (
+            PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT,
+            PORTAL_SESSION_IDLE_DAYS_DEFAULT,
+        )
+        return (
+            int(PORTAL_SESSION_IDLE_DAYS_DEFAULT * 86400),
+            int(PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT * 86400),
+        )
+
+
+def revoke_portal_sessions_for_email(email: str) -> bool:
+    """Invalidate every portal session token already issued to ``email``.
+
+    Edition-agnostic primitive: OSS owns the mint, the decode, and this bulk
+    revoke; the entitled module decides *when* to call it (same split as the
+    ent#163 mint). Returns True when the cutoff was durably written — the caller
+    reports an honest outcome rather than claiming success on a Redis outage.
+    """
+    if not email:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        logger.warning("[auth] portal session revoke skipped — Redis unavailable")
+        return False
+    # Cutoff is `now`, and the check below rejects `iat <= cutoff`, so a token
+    # minted in the same second as the revoke is killed too. For a kill switch,
+    # rounding toward revoking is the only safe direction.
+    now = int(datetime.now(timezone.utc).timestamp())
+    # TTL must outlive the LONGEST-LIVED token this cutoff has to kill, which is
+    # the absolute cap — not the idle window and (ent#375) no longer the old flat
+    # 12 hours. Getting this wrong resurrects revoked sessions: with sliding
+    # sessions capped at 30 days, a 12-hour cutoff evaporates while tokens minted
+    # before the revoke are still valid, and the next request sails through
+    # because there is no cutoff left to compare against. Read the policy so the
+    # TTL tracks the cap automatically instead of restating it.
+    _, absolute_s = _portal_session_policy()
+    ttl = absolute_s + 60  # + slack for clock skew
+    try:
+        r.setex(_portal_revoked_key(email), ttl, str(now))
+        return True
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_portal_sessions_for_email failed: {exc}")
+        return False
+
+
+def portal_sessions_revoked_at(email: str) -> Optional[int]:
+    """The active revocation cutoff for ``email``, or None. Fail-open → None."""
+    if not email:
+        return None
+    r = get_breaker_redis()
+    if r is None:
+        return None
+    try:
+        raw = r.get(_portal_revoked_key(email))
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] portal_sessions_revoked_at failed: {exc}")
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+    except (ValueError, AttributeError):
+        return None
+
 
 def revoke_token_jti(jti: str, exp_ts: Optional[int]) -> None:
     """Blacklist a token's `jti` until its own expiry (best-effort, fail-open).
@@ -181,15 +283,89 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
 # verification of a client whose email has a share). No new secret — same
 # SECRET_KEY/ALGORITHM, so a backend restart invalidates portal sessions too.
 PORTAL_SESSION_SCOPE = "portal_session"
-PORTAL_SESSION_EXPIRE_HOURS = 12
+
+# RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
+# supplies an idle window and an absolute cap, and every consumer reads those.
+#
+# Deleted rather than left at 12: a stale constant beside a live policy is the
+# hazard this feature already tripped over once. `revoke_portal_sessions_for_email`
+# derived its Redis TTL from it, so extending sessions to 30 days while it still
+# said 12 hours would have expired the revoke cutoff 29.5 days before the tokens
+# it exists to kill — silently resurrecting revoked sessions. Anything still
+# reading a fixed portal lifetime should read the policy instead, and a NameError
+# is the right way to find that out.
+
+# --- Delegated portal identity (ent#163) ---------------------------------
+#
+# A `portal_delegate` MCP key lets a TRUSTED backend assert which of *its* end
+# users a request is for, and exchange that assertion for a portal session
+# token. It is how a licensee runs their own customer portal against Trinity
+# while keeping their own IdP: they already authenticated bob@example.com and
+# want Trinity to act as bob, not as the key owner.
+#
+# Why a dedicated scope rather than reusing `scope='user'`: this capability
+# reads another person's chat history. Riding it on an ordinary user key would
+# silently turn EVERY user key into a fleet-wide impersonation key. It is
+# admin-issued, and revoking the key stops delegation immediately.
+#
+# Why a mint rather than a per-request `X-On-Behalf-Of` header: a header puts
+# impersonation in the auth path of every current *and future* portal endpoint —
+# an ambient capability each new route silently inherits. A mint is one
+# auditable event, and everything downstream keeps using the portal session
+# token it already understands.
+#
+# Edition-agnostic, exactly like PORTAL_SESSION_SCOPE above: OSS owns the scope,
+# the containment fence, and the mint primitive; the entitled module owns the
+# endpoint that decides *whether* this email may be delegated. In an OSS-only
+# build the fenced path is not registered, so such a key can reach nothing.
+PORTAL_DELEGATE_SCOPE = "portal_delegate"
+
+# The ONLY (method, path) a portal_delegate key may reach. Deliberately a single
+# exchange route, not a prefix: the minted portal session — not this key — is
+# what drives the portal surface afterwards, so this key never needs breadth.
+PORTAL_DELEGATE_ALLOWED_ROUTES = {
+    ("POST", "/api/enterprise/client-portal/auth/exchange"),
+}
 
 
-def create_portal_session_token(email: str, mode: str = "prod") -> str:
-    """Mint a Client Portal session token for a verified email. Carries no
-    ``sub`` (no platform identity) — only the email + the portal scope."""
+def create_portal_session_token(
+    email: str, mode: str = "prod", session_start: Optional[int] = None
+) -> str:
+    """Mint a Workspace session token for a verified email. Carries no ``sub``
+    (no platform identity) — only the email + the portal scope.
+
+    Carries an explicit ``iat`` so bulk revocation (ent#281) can date the token
+    against the per-email cutoff. Set here rather than in ``create_access_token``
+    to keep the claim set of every other token type unchanged.
+
+    ent#375 — the session SLIDES, so two clocks are needed and ``iat`` can only
+    be one of them. ``iat`` moves on every rotation (it is what the revoke cutoff
+    dates against, so it MUST move, otherwise a rotated token would look older
+    than the revoke that should have killed it). ``sst`` — session start — is
+    carried through rotations unchanged and is what the absolute cap measures
+    from. With only ``iat``, rotation would reset the cap on every request and
+    the session would live forever, which is the one thing an absolute cap
+    exists to prevent.
+
+    ``exp`` is the idle deadline, additionally clamped to the absolute cap so a
+    token can never advertise a validity its own session no longer has.
+    """
+    now = int(datetime.now(timezone.utc).timestamp())
+    start = int(session_start) if session_start else now
+    idle_s, absolute_s = _portal_session_policy()
+
+    idle_deadline = now + idle_s
+    absolute_deadline = start + absolute_s
+    expires_in = max(1, min(idle_deadline, absolute_deadline) - now)
+
     return create_access_token(
-        data={"scope": PORTAL_SESSION_SCOPE, "email": email.lower()},
-        expires_delta=timedelta(hours=PORTAL_SESSION_EXPIRE_HOURS),
+        data={
+            "scope": PORTAL_SESSION_SCOPE,
+            "email": email.lower(),
+            "iat": now,
+            "sst": start,
+        },
+        expires_delta=timedelta(seconds=expires_in),
         mode=mode,
     )
 
@@ -207,7 +383,170 @@ def decode_portal_session(token: str) -> Optional[str]:
     if is_token_revoked(payload.get("jti")):
         return None
     email = payload.get("email")
-    return email.lower() if email else None
+    if not email:
+        return None
+    email = email.lower()
+
+    # ent#281 bulk revoke: reject anything issued at or before the cutoff.
+    cutoff = portal_sessions_revoked_at(email)
+    if cutoff is not None:
+        iat = payload.get("iat")
+        # A token with no `iat` cannot be dated, so it cannot be shown to
+        # post-date the revoke — treat it as revoked. Fail CLOSED here, unlike
+        # the Redis read above: the only tokens this affects are ones minted
+        # before ent#281 shipped (all expired within
+        # PORTAL_SESSION_EXPIRE_HOURS of the upgrade), and only for an email an
+        # operator has actively revoked. Letting an undatable token survive an
+        # explicit kill switch is the worse failure.
+        if iat is None:
+            return None
+        try:
+            if int(iat) <= cutoff:
+                return None
+        except (TypeError, ValueError):
+            return None  # malformed `iat` — same reasoning as missing
+
+    # ent#375 absolute cap. `exp` is clamped to it at mint, so this is redundant
+    # for a token minted under the CURRENT policy — and load-bearing for one
+    # minted under a wider policy that an operator has since narrowed. Enforcing
+    # it on read is what makes shortening the cap take effect immediately
+    # instead of only for sessions started afterwards.
+    #
+    # A token with no `sst` predates ent#375. Fall back to `iat`: those tokens
+    # were minted under the flat 12-hour lifetime and have already expired, so
+    # the fallback is unreachable in practice and cannot widen anything.
+    _, absolute_s = _portal_session_policy()
+    started = payload.get("sst", payload.get("iat"))
+    if started is not None:
+        try:
+            if int(started) + absolute_s <= int(datetime.now(timezone.utc).timestamp()):
+                return None
+        except (TypeError, ValueError):
+            return None
+    return email
+
+
+def portal_session_needs_rotation(token: str) -> bool:
+    """True when `token` is far enough into its idle window to be worth
+    re-minting (ent#375).
+
+    Pure and side-effect-free — a caller can ask without committing to rotate.
+    Rotating on every request would revoke a token that concurrent in-flight
+    requests are still carrying; rotating only past the threshold keeps that
+    window rare.
+    """
+    from config import PORTAL_SESSION_ROTATE_AFTER_FRACTION
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return False
+    iat = payload.get("iat")
+    if iat is None:
+        return False
+    idle_s, _ = _portal_session_policy()
+    try:
+        age = int(datetime.now(timezone.utc).timestamp()) - int(iat)
+    except (TypeError, ValueError):
+        return False
+    return age >= idle_s * PORTAL_SESSION_ROTATE_AFTER_FRACTION
+
+
+def renew_portal_session(token: str) -> Optional[str]:
+    """Rotate a live Workspace session token, or None if it may not be renewed.
+
+    Renewal is a NEW grant, so it is held to a stricter standard than reading an
+    existing one:
+
+    * **Fails CLOSED on the revocation store.** `is_token_revoked` and
+      `portal_sessions_revoked_at` both fail OPEN — correct for a read (a Redis
+      blip must not sign every client out), indefensible for a mint. Failing open
+      here would hand a *fresh* token to a session an operator just killed, and
+      the new token post-dates the cutoff, so the kill would not re-apply when
+      Redis came back: one blip at the wrong moment permanently resurrects a
+      revoked session. The issue calls this out and it is the sharpest edge in
+      the feature.
+    * **Never extends past the absolute cap.** `sst` is carried through
+      unchanged, so the cap measures from the original sign-in however many
+      rotations have happened.
+    * **Revokes the token it replaces**, after a short grace, so a superseded
+      token is not left independently valid for its full remaining lifetime.
+
+    Returns the new token; None means "do not renew" and the caller keeps
+    serving the request with the existing one (renewal is opportunistic — a
+    failed renewal must never break a request that was otherwise authorised).
+    """
+    from config import PORTAL_SESSION_ROTATION_GRACE_SECONDS
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return None
+    email = payload.get("email")
+    if not email:
+        return None
+    email = email.lower()
+
+    # --- fail-CLOSED revocation checks -------------------------------------
+    r = get_breaker_redis()
+    if r is None:
+        return None  # cannot verify -> do not mint
+    jti = payload.get("jti")
+    try:
+        if jti and r.exists(f"{_JWT_REVOKED_PREFIX}{jti}") > 0:
+            return None
+        raw_cutoff = r.get(_portal_revoked_key(email))
+    except Exception as exc:
+        logger.warning(f"[auth] renew_portal_session: revocation read failed, refusing: {exc}")
+        return None
+
+    iat = payload.get("iat")
+    if raw_cutoff is not None:
+        try:
+            cutoff = int(raw_cutoff.decode() if isinstance(raw_cutoff, (bytes, bytearray)) else raw_cutoff)
+        except (ValueError, AttributeError):
+            return None  # unreadable cutoff -> assume revoked
+        if iat is None:
+            return None
+        try:
+            if int(iat) <= cutoff:
+                return None
+        except (TypeError, ValueError):
+            return None
+
+    # --- absolute cap -------------------------------------------------------
+    now = int(datetime.now(timezone.utc).timestamp())
+    _, absolute_s = _portal_session_policy()
+    started = payload.get("sst", iat)
+    if started is None:
+        return None
+    try:
+        started = int(started)
+    except (TypeError, ValueError):
+        return None
+    if started + absolute_s <= now:
+        return None  # capped out — a fresh sign-in is required
+
+    new_token = create_portal_session_token(email, session_start=started)
+
+    # Retire the old jti, but only after a grace: requests already in flight are
+    # still carrying it, and a hard revoke here would 401 them mid-rotation.
+    if jti:
+        try:
+            r.setex(
+                f"{_JWT_REVOKED_PREFIX}{jti}",
+                PORTAL_SESSION_ROTATION_GRACE_SECONDS,
+                "1",
+            )
+        except Exception as exc:  # pragma: no cover
+            # Best-effort: the superseded token still expires on its own `exp`.
+            logger.warning(f"[auth] renew_portal_session: could not retire old jti: {exc}")
+
+    return new_token
 
 
 def decode_token(token: str) -> Optional[dict]:
@@ -330,6 +669,24 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # agent (see _enforce_connector_scope). The key is minted by an
             # entitled module; core only recognizes + enforces the scope.
             connector_agent = mcp_key_info.get("agent_name") if scope == "connector" else None
+            # ent#163: a delegated-portal key is fenced to the single exchange
+            # route. Enforced HERE at the one auth entry point — not only in the
+            # portal router — for the same reason as the connector fence above:
+            # this principal resolves to the key OWNER, so any endpoint doing an
+            # inline access check would otherwise treat it as that human. The
+            # key's whole job is to mint a portal session; it never needs to
+            # reach anything else, including the portal endpoints themselves.
+            portal_delegate = scope == PORTAL_DELEGATE_SCOPE
+            if portal_delegate and (
+                (request.method.upper(), request.url.path) not in PORTAL_DELEGATE_ALLOWED_ROUTES
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "Portal delegate keys may only exchange an end-user email "
+                        "for a portal session"
+                    ),
+                )
             if connector_agent:
                 # Central containment (ent#46): a connector key may reach ONLY
                 # its bound agent's chat + connector playbook list. Enforced here
@@ -365,6 +722,16 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                 role=user["role"],
                 agent_name=agent_name,
                 connector_agent=connector_agent,
+                portal_delegate=portal_delegate,
+                # #1854: carry the RAW scope, unconditionally. Every field above
+                # is set only for its own scope, so a principal outside those
+                # three (today: `user`, `system`; tomorrow: whatever a future PR
+                # adds to this free-text column) is indistinguishable from a
+                # browser session downstream. `reject_non_interactive_principal`
+                # allowlists on this being None, so a NULL scope column must
+                # NOT read as "interactive" — coerce it the same way
+                # `validate_mcp_api_key` does.
+                mcp_scope=scope or "user",
             )
 
     # Both JWT and MCP key failed
@@ -434,6 +801,35 @@ def reject_agent_principal(current_user: User) -> None:
         )
 
 
+def reject_non_interactive_principal(current_user: User) -> None:
+    """Interactive-human-only guard — an ALLOWlist, not a denylist (#1854).
+
+    `reject_agent_principal` + `_reject_connector_principal` together cover only
+    two of the five live `mcp_api_keys.scope` values. For a `scope='system'` key
+    BOTH are no-ops (`agent_name` is set only for scope='agent',
+    `connector_agent` only for scope='connector'), and the principal still
+    resolves to the key OWNER carrying the owner's role — on a default
+    admin-owned install `can_user_share_agent` is then True for every agent in
+    the fleet. `scope` is a free-text column with no CHECK constraint, so any
+    denylist is open at the top.
+
+    This inverts it: pass ONLY when the caller authenticated interactively (JWT
+    ⇒ `mcp_scope is None`). Fail-closed against `user`, `agent`, `system`,
+    `connector`, `portal_delegate` and whatever scope ships next.
+
+    Use for credential-lifecycle operations whose whole point is that a human
+    decided — never for read/chat surfaces an MCP key legitimately drives.
+    """
+    if current_user.mcp_scope is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This operation requires an interactive session; "
+                "MCP API keys cannot perform it"
+            ),
+        )
+
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
@@ -488,9 +884,36 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     Dependency that requires the current user to be an admin.
 
     Raises:
-        HTTPException(403): If user is not an admin
+        HTTPException(403): If user is not an admin, or is an agent/connector
+            principal.
+
+    ent#293 — an ADMIN gate is never agent-callable.
+
+    An agent-scoped key resolves to its owner CARRYING THE OWNER'S ROLE, so on a
+    default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
+    satisfied this gate. ent#297 traced FIVE occurrences of one class —
+    trinity-ops-agent#232, #1644 (retention acknowledge), #1816 (system-agent
+    restart), ent#236 and ent#293 (skills-library repointing) — each previously
+    closed by bolting `reject_agent_principal` onto one more endpoint, 18 of
+    them, against 114 admin-gated call sites. Five occurrences means the GATE
+    was wrong, not the endpoints, so the rejection moves here.
+
+    Note this closes the class for THIS gate and `assert_admin`. It does not
+    reach `require_role("admin")`, a third spelling that must not exist — see
+    `require_role`'s docstring for why it stays permissive and the guard that
+    keeps the spelling from coming back.
+
+    Safe by construction, verified rather than assumed: the agent-key flows that
+    must keep working — heartbeat, structured reports, the #1083 result callback
+    — authorize on `current_user.agent_name` self-checks and never touch an admin
+    gate. System-scoped keys are unaffected because `User.agent_name` is set only
+    for `scope == "agent"`, so `trinity-system` still passes.
+
+    This is the grant-vs-use line from `learnings.md`: the endpoint that USES a
+    capability may be agent-callable; the endpoint that GRANTS one is human-only.
     """
     _reject_connector_principal(current_user)
+    reject_agent_principal(current_user)
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -514,6 +937,24 @@ def require_role(min_role: str):
 
     Raises:
         HTTPException(403): If user's role is below the minimum required
+
+    **Deliberately does NOT call `reject_agent_principal`** — read this before
+    "fixing" it to match `require_admin`/`assert_admin` (ent#293/ent#297).
+
+    Those two gates reject agent principals because an admin gate is never
+    agent-callable. This one is different: its main consumer is
+    `require_role("creator")` on `POST /api/agents`, and agent-spawned agent
+    creation is a SUPPORTED feature (ent#69 Part 2 — the spawn persists
+    `spawned_by_agent`, auto-grants the parent→child permission edge, and is
+    bounded by `enforce_agent_spawn_scope` + the per-parent spawn rate limit).
+    Adding a blanket rejection here would break ghost spawning outright.
+
+    The corollary, and the trap ent#297 walked into: `require_role("admin")` was
+    a THIRD spelling of an admin gate that this permissiveness left open after
+    the other two were closed. Do not write `require_role("admin")` — use
+    `require_admin`, which is equivalent (`admin` is last in ROLE_HIERARCHY) and
+    carries the agent rejection. `tests/unit/test_293_admin_gate_rejects_agent_keys.py`
+    fails the build if a `require_role("admin")` reappears.
     """
     def _require_role(current_user: User = Depends(get_current_user)) -> User:
         _reject_connector_principal(current_user)
@@ -740,11 +1181,37 @@ def get_owned_agent_by_name(
 def assert_admin(current_user: User, *, detail: str = "Admin access required") -> None:
     """Imperative admin gate — parity with the ``require_admin`` Depends form.
 
-    Rejects connector principals first (they are consumption-only), then requires
-    ``role == "admin"``. Raises 403 on failure; returns None on success. Use in a
-    router body where the admin check is inline rather than a ``Depends``.
+    Rejects connector AND agent principals (neither is a human admin), then
+    requires ``role == "admin"``. Raises 403 on failure; returns None on success.
+    Use in a router body where the admin check is inline rather than a ``Depends``.
+
+    ent#293 — an ADMIN gate is never agent-callable.
+
+    An agent-scoped key resolves to its owner CARRYING THE OWNER'S ROLE, so on a
+    default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
+    satisfied this gate. ent#297 traced FIVE occurrences of one class —
+    trinity-ops-agent#232, #1644 (retention acknowledge), #1816 (system-agent
+    restart), ent#236 and ent#293 (skills-library repointing) — each previously
+    closed by bolting `reject_agent_principal` onto one more endpoint, 18 of
+    them, against 114 admin-gated call sites. Five occurrences means the GATE
+    was wrong, not the endpoints, so the rejection moves here.
+
+    Note this closes the class for THIS gate and `assert_admin`. It does not
+    reach `require_role("admin")`, a third spelling that must not exist — see
+    `require_role`'s docstring for why it stays permissive and the guard that
+    keeps the spelling from coming back.
+
+    Safe by construction, verified rather than assumed: the agent-key flows that
+    must keep working — heartbeat, structured reports, the #1083 result callback
+    — authorize on `current_user.agent_name` self-checks and never touch an admin
+    gate. System-scoped keys are unaffected because `User.agent_name` is set only
+    for `scope == "agent"`, so `trinity-system` still passes.
+
+    This is the grant-vs-use line from `learnings.md`: the endpoint that USES a
+    capability may be agent-callable; the endpoint that GRANTS one is human-only.
     """
     _reject_connector_principal(current_user)
+    reject_agent_principal(current_user)
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 

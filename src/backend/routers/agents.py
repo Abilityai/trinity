@@ -14,7 +14,9 @@ import json
 import logging
 import random
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query, WebSocket
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from models import (
     AgentConfig,
@@ -31,7 +33,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -40,6 +42,7 @@ from services.docker_utils import (
     container_stop, container_remove,
 )
 from services import heartbeat_service
+from services import idempotency_service
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -368,7 +371,6 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
             raise HTTPException(status_code=404, detail="Agent not found")
         agent_dict = {
             "name": agent_name,
-            "type": "",
             "status": "stopped",
             "port": 0,
             "created": owner_row.get("created_at"),
@@ -433,9 +435,80 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
 
 
 @router.post("")
-async def create_agent_endpoint(config: AgentConfig, request: Request, current_user: User = Depends(require_role("creator"))):
-    """Create a new agent. Requires creator role or above."""
-    result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
+async def create_agent_endpoint(
+    config: AgentConfig,
+    request: Request,
+    current_user: User = Depends(require_role("creator")),
+    idempotency_key: Optional[str] = Header(None),
+):
+    """Create a new agent. Requires creator role or above.
+
+    Invariant #18 (trinity-enterprise#15): accepts an optional
+    ``Idempotency-Key`` so a retried import (long fork/copy creates can outlive
+    client timeouts) replays the original response instead of 409ing on the
+    name. Header-only — no auto-derived key: name uniqueness already prevents a
+    double-create, the header adds transparent REPLAY. The scope folds the
+    caller (2026-07-20 learning: another user's identical key must never replay
+    a foreign create response).
+    """
+    idem = None
+    if idempotency_key:
+        scope = f"agent_create:{current_user.id}"
+        idem = idempotency_service.begin(scope, idempotency_key)
+        if idem.replay:
+            if idem.in_flight:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "An agent create with this Idempotency-Key is "
+                            "still being processed."
+                        ),
+                        # Named distinctly from the name-taken 409 so clients
+                        # can tell "wait" from "pick another name".
+                        "code": "CREATE_IN_FLIGHT",
+                    },
+                )
+            # A completed replay is only truthful while the agent it reports
+            # still exists (#2040 review F3): MCP derives a deterministic key
+            # over name+config, so delete-then-identical-recreate within 24h
+            # would otherwise replay a 200 naming an agent that is gone —
+            # and no agent gets created. Discard the stale row and fall
+            # through to a genuinely fresh create (which then answers
+            # honestly: name-reserved 409 for a soft-deleted agent, a real
+            # create for a hard-purged one).
+            recorded_name = (idem.snapshot or {}).get("name") or config.name
+            if db.is_agent_live(recorded_name):
+                return JSONResponse(
+                    content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+                )
+            idempotency_service.discard_stale_replay(idem.scope, idem.key)
+            idem = idempotency_service.begin(scope, idempotency_key)
+            if idem.replay:
+                # Lost the re-claim race to a concurrent identical retry —
+                # let that attempt own the create.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "An agent create with this Idempotency-Key is "
+                            "being retried concurrently."
+                        ),
+                        "code": "CREATE_IN_FLIGHT",
+                    },
+                )
+
+    try:
+        result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
+    except Exception:
+        # Release the fresh claim so a corrected retry can proceed (fail-open;
+        # never converts the underlying error).
+        if idem is not None:
+            idempotency_service.fail(idem)
+        raise
+
+    if idem is not None:
+        idempotency_service.complete(idem, config.name, jsonable_encoder(result))
     # SEC-001: audit after successful creation. Failures here swallowed by the service.
     await platform_audit_service.log(
         event_type=AuditEventType.AGENT_LIFECYCLE,
@@ -449,7 +522,13 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
         details={
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
-            "agent_type": getattr(config, "agent_type", None),
+            # #2104: the always-null `agent_type` field (a typo for the retired
+            # `type`) is dropped rather than fixed — the taxonomy is gone.
+            # trinity-enterprise#15: import provenance — intent always; for a
+            # copy the snapshot's source repo + exact SHA (the only durable
+            # record of what a volume-lost snapshot agent was cloned from).
+            "import_intent": getattr(config, "import_intent", None),
+            "import_snapshot": getattr(result, "import_snapshot", None),
         },
     )
     return result
@@ -628,7 +707,24 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             target_type="agent",
             target_id=agent_name,
             endpoint=str(request.url.path),
-            details={"credentials_injection": credentials_status},
+            details={
+                "credentials_injection": credentials_status,
+                # #1809: record container replacement + cause (config_drift |
+                # image_drift) so a changed container id is traceable.
+                **(
+                    {"recreated": True, "recreate_reason": result.get("recreate_reason")}
+                    if result.get("recreated")
+                    else {}
+                ),
+                # #1816: a recreate the AC2 gate suppressed (running
+                # trinity-system). Audited so "I clicked Start and my config
+                # change did not apply" is answerable from the trail.
+                **(
+                    {"recreate_deferred": result.get("recreate_deferred")}
+                    if result.get("recreate_deferred")
+                    else {}
+                ),
+            },
         )
 
         event = {
@@ -646,12 +742,29 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
         return {
             "message": f"Agent {agent_name} started",
             "credentials_injection": credentials_status,
-            "credentials_result": credentials_result
+            "credentials_result": credentials_result,
+            # #1809: whether (and why) this start replaced the container —
+            # answers "why did my container id change / uptime reset".
+            "recreated": bool(result.get("recreated")),
+            "recreate_reason": result.get("recreate_reason"),
+            # #1816: set when the AC2 gate suppressed a recreate the predicates
+            # asked for — a running trinity-system is never replaced
+            # mid-operation. None on every normal start. This dict is a fresh
+            # whitelist, NOT start_agent_internal's return value, so a field
+            # added there does not reach the API unless it is also added here.
+            "recreate_deferred": result.get("recreate_deferred"),
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start agent: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to start agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 @router.post("/{agent_name}/stop")
@@ -694,7 +807,14 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
 
         return {"message": f"Agent {agent_name} stopped"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to stop agent: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to stop agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 # ============================================================================
@@ -717,7 +837,14 @@ async def get_agent_logs_endpoint(
 
         return {"logs": logs}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to get logs "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 @router.get("/{agent_name}/stats")
@@ -778,7 +905,20 @@ async def force_release_agent(
 @router.post("/{agent_name}/circuit-breaker/reset")
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
-    current_user: User = Depends(require_role("admin")),
+    # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
+    # admin gate, and the one this PR's first pass missed. `require_role`
+    # rejects connector principals but NOT agent ones, deliberately: agent
+    # -spawned agent creation runs through `require_role("creator")` (ent#69
+    # Part 2). So after `require_admin`/`assert_admin` were closed, an
+    # admin-owned agent's own key still passed HERE — and ent#297 names
+    # circuit-breaker resets in its blast radius. An agent that can re-close its
+    # own dispatch breaker on demand defeats the control built to contain it.
+    #
+    # `require_admin` is equivalent for this case (`admin` is last in
+    # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
+    # agent principals. Swapping this ONE call site is the fix; adding the
+    # rejection to `require_role` itself would break ghost spawning.
+    current_user: User = Depends(require_admin),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 
@@ -1113,6 +1253,7 @@ async def send_voice_reply_endpoint(
     misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
     to text; an in-flight duplicate for the same turn returns 409.
     """
+    import config as app_config
     from services import voice_reply_service, idempotency_service
 
     # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
@@ -1126,6 +1267,47 @@ async def send_voice_reply_endpoint(
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
+    if channel == app_config.PORTAL_SOURCE_CHANNEL:
+        # #2157: the Workspace has no audio destination — but it is NOT text-only;
+        # it narrates the agent's text whenever the client turns the speaker on.
+        # A bare `not_a_channel_turn` stated only the first half, and agents
+        # generalized it into "this surface is text-only, go to Slack" — a false
+        # claim, made to a client, in the most credible voice in that UI. So the
+        # portal gets its own reason plus a plain-language line, which keeps the
+        # answer right even for a turn that never carried the system-prompt
+        # fragment (older session, prompt trimmed).
+        #
+        # The two portal answers split on the SAME gate the speaker control
+        # renders on — because "just switch the speaker on" is itself a false
+        # remedy for an agent that has no voice configured, and pointing a client
+        # at a control that is not there would re-make this bug facing the other
+        # way.
+        import services.tts_service as tts_service
+
+        if tts_service.resolve_voice_id(agent_name):
+            return {
+                "delivered": False,
+                "channel": channel,
+                "reason": "portal_client_narrated",
+                "guidance": (
+                    "You cannot send an audio file on this surface, but it is not "
+                    "text-only: the client hears your reply read aloud when they switch "
+                    "on the speaker control in this conversation. Reply with text and, if "
+                    "they asked to be spoken to, point them at that control — do not send "
+                    "them to another channel, and do not repeat this status message to them."
+                ),
+            }
+        return {
+            "delivered": False,
+            "channel": channel,
+            "reason": "portal_voice_not_configured",
+            "guidance": (
+                "Voice is not set up for you, so this reply cannot be spoken here or "
+                "anywhere else. Answer in text. Do not promise a spoken reply, do not "
+                "send the client to another channel for one, and do not repeat this "
+                "status message to them — the operator enables voice, not the client."
+            ),
+        }
     if channel not in ("telegram", "slack", "whatsapp"):
         return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
     if not execution.source_channel_chat_id:
@@ -1401,7 +1583,14 @@ async def agent_execution_result(
     result = await svc.apply_result(
         agent_name,
         envelope,
-        activity_id=db.get_open_activity_id_for_execution(execution_id),
+        # #1804: `include_failed=True` — this endpoint IS the late-SUCCESS path.
+        # A lease reaper that beat the callback already FAILED the row and closed
+        # the activity FAILED; the CAS lets a genuine late SUCCESS correct the
+        # row, and the activity must follow. A `started`-only lookup returns None
+        # here, so the pair would settle at execution=success, activity=failed —
+        # permanently. Harmless for a FAILED callback: the close CAS refuses to
+        # overwrite an already-closed activity.
+        activity_id=db.get_open_activity_id_for_execution(execution_id, include_failed=True),
         breaker_enabled=dispatch_breaker_active(agent_name),
         release_slot=True,
     )

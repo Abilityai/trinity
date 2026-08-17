@@ -5,6 +5,7 @@ Provides endpoints for managing system-wide configuration like the Trinity promp
 Admin-only access for modification, read access for all authenticated users.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 from models import (
+    A2AOutboundEndpointUpsert,
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
     AgentQuotaUpdate,
@@ -25,10 +27,12 @@ from models import (
     BrainOrbSettingsUpdate,
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
+    TemplateRegistryUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
     RetentionAcknowledge,
+    SkillsLibraryAutomationUpdate,
     SlackConnectRequest,
     SlackSettingsUpdate,
     TelemetrySharingUpdate,
@@ -66,7 +70,32 @@ from services.settings_service import (
     PROACTIVE_RATE_LIMIT_DESCRIPTIONS,
     PROACTIVE_RATE_LIMIT_MAX,
     get_proactive_rate_limit,
+    SKILLS_AUTO_REINJECT_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_DEFAULT,
+    SKILLS_AUTO_SYNC_INTERVAL_MIN,
+    SKILLS_AUTO_SYNC_INTERVAL_MAX,
 )
+
+# ent#236: the three keys the dedicated /skills-library route owns. Blocked on
+# the generic PUT /{key} so they can only ever be written range-validated.
+SKILLS_AUTOMATION_KEYS = {
+    SKILLS_AUTO_SYNC_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_KEY,
+    SKILLS_AUTO_REINJECT_ENABLED_KEY,
+}
+
+# ent#346: the pre-ent#237 single-repo settings. `_adopt_legacy_clone` converts
+# these into a `skill_sources` row, so writing them IS registering a skills
+# source — the grant action ent#237 gates behind `reject_agent_principal` on
+# every `/skills/sources` route. Blocked on the generic PUT so the gate cannot
+# be walked around. `skills_library_branch` is included because a source is
+# (url, ref): re-pointing the ref alone changes which commit the fleet executes.
+LEGACY_SKILLS_LIBRARY_KEYS = {
+    "skills_library_url",
+    "skills_library_branch",
+}
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -141,9 +170,15 @@ async def get_public_feature_flags(
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
+        MCP_INLINE_AUTH_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
+    from services import a2a_outbound_service
+    # Function-local (#2217): a top-level import would pull the whole canary
+    # package into the settings-router load; the handler pattern here is
+    # function-local imports.
+    from services.canary_service import canary_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
@@ -181,15 +216,34 @@ async def get_public_feature_flags(
         # of the same env var. Lets an operator confirm, via the API, whether the
         # treatment window is active during the soak. NOT a UI surface.
         "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
+        # MCP inline email auth (#848) — default OFF. Observability-only here,
+        # mirroring the two flags around it: the real gates are the mcp-server's
+        # own read of the same env var (the keyless session tier) and
+        # require_inline_auth_enabled on /api/internal/mcp-auth/*. Both processes
+        # read ONE key, so this is also how an operator confirms the two halves
+        # actually agree after a deploy — the failure mode that shipped this PR
+        # with the flag wired into neither container. NOT a UI surface.
+        "mcp_inline_auth_enabled": MCP_INLINE_AUTH_ENABLED,
         # Re-delivery governor (#1085) — default OFF. Observability-only here:
         # the actual gates live at the callback endpoint / reaper / drain read
         # points. Lets an operator confirm via the API whether the correlated-
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
+        # Canary run-state (#2217) — observability-only boolean, beside the
+        # other observability flags; any authed user, public-safe. Whether
+        # the canary harness is enabled. Last-cycle/stale/sink detail stays
+        # admin-only on GET /api/canary/status.
+        "canary_enabled": canary_service.is_enabled(),
         # Outbound voice replies (ent#117) — true when an ElevenLabs key resolves
         # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
         # config UI + the send_voice_reply capability. Non-sensitive boolean.
         "tts_available": bool(settings_service.get_elevenlabs_api_key()),
+        # Outbound A2A (#736) — the kill switch on the platform's first
+        # backend-executed, credentialed, agent-triggerable outbound fetcher.
+        # Runtime-resolved (system_settings → A2A_OUTBOUND_ENABLED env → OFF);
+        # both call routes 404 when off. Observability + UI gating only — the
+        # routes enforce it themselves.
+        "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run wizard uses
@@ -355,6 +409,54 @@ async def acknowledge_retention_prune(
     return {"success": True, "key": body.key, "window_days": effective}
 
 
+@router.get("/portal-session-policy")
+async def get_portal_session_policy_status(current_user: User = Depends(get_current_user)):
+    """The Workspace session policy actually in force (ent#375).
+
+    READ lives in OSS and is available in EVERY edition, mirroring
+    ``GET /api/settings/retention`` (#1039): the sliding session itself is OSS —
+    every install slides on the shipped defaults — so every install's operator is
+    entitled to see the windows their clients are subject to. Only the *setter*
+    is entitled (``PUT /api/enterprise/portal-session-policy``).
+
+    Gating the read too, which the first cut of the enterprise module did, would
+    have left a community operator unable to see a policy that is nonetheless
+    enforcing on them — a security control they cannot inspect. That is worse
+    than not shipping the panel.
+
+    ``sources`` distinguishes ``db-row`` (an operator chose this) from
+    ``code-default`` (the shipped value, which a future default change can move
+    under them) — the #1638 distinction.
+
+    Admin-only.
+    """
+    assert_admin(current_user)
+
+    from config import (
+        PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
+        PORTAL_SESSION_MIN_IDLE_MINUTES,
+    )
+    from services.entitlement_service import entitlement_service
+    from services.settings_service import settings_service
+
+    idle_s, absolute_s = settings_service.get_portal_session_policy()
+
+    def _source(key: str) -> str:
+        return "db-row" if db.get_setting_value(key, None) is not None else "code-default"
+
+    return {
+        "idle_days": round(idle_s / 86400.0, 4),
+        "absolute_days": round(absolute_s / 86400.0, 4),
+        "sources": {
+            "portal_session_idle_days": _source("portal_session_idle_days"),
+            "portal_session_absolute_days": _source("portal_session_absolute_days"),
+        },
+        "min_idle_minutes": PORTAL_SESSION_MIN_IDLE_MINUTES,
+        "max_absolute_days": PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
+        "editable": "portal_session_policy" in entitlement_service.list_entitled_features(),
+    }
+
+
 @router.get("/retention")
 async def get_retention_status(
     current_user: User = Depends(get_current_user),
@@ -429,6 +531,7 @@ async def get_retention_status(
          FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
     )
     pending_acknowledgements = []
+    blocked_sweeps = []
     for _key, _label, _floor, _count_fn in _ack_sweeps:
         _window = _ops_int(_key)
         if _window <= 0:
@@ -439,9 +542,10 @@ async def get_retention_status(
             floor=_floor,
         )
         # Only "over_threshold" is a genuine pending-approval. `count_failed` /
-        # `ack_lookup_failed` are fail-closed error states, not approvable, and
-        # an already-acked sweep returns allowed=True (so it drops off the list —
-        # the single-use, no-stale-state guarantee the panel needs).
+        # `count_uninterpretable` / `count_negative` / `ack_lookup_failed` are
+        # fail-closed error states, not approvable, and an already-acked sweep
+        # returns allowed=True (so it drops off the list — the single-use,
+        # no-stale-state guarantee the panel needs).
         if not _verdict.allowed and _verdict.reason == "over_threshold":
             pending_acknowledgements.append({
                 "key": _key,
@@ -449,6 +553,21 @@ async def get_retention_status(
                 "window_days": _window,
                 "candidate_count": _verdict.candidates,
                 "floor": _floor,
+            })
+        elif not _verdict.allowed:
+            # #1833: NOT approvable is not the same as NOT worth showing. Before
+            # #1833 an uninterpretable count raised out of `evaluate` and took
+            # this whole endpoint down with a 500 — ugly, but loud. Now it
+            # refuses, so without this the sweep is blocked forever in
+            # `cleanup_service` while the panel renders a clean "nothing
+            # pending" — the guard's own anti-pattern ("a guard that fails open
+            # manufactures confidence") relocated from the prune to the operator
+            # surface. Identifiers and reason codes ONLY, the same SECURITY rule
+            # as the alarm payload: no counts of row content, no sample rows.
+            blocked_sweeps.append({
+                "key": _key,
+                "window_days": _window,
+                "reason": _verdict.reason,
             })
 
     return {
@@ -474,16 +593,52 @@ async def get_retention_status(
         # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
         # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
         "pending_acknowledgements": pending_acknowledgements,
+        # #1833: sweeps the guard is refusing for a reason this panel cannot
+        # offer an approve control for (the count failed / could not be
+        # interpreted / was a negative error sentinel, or the ack lookup itself
+        # failed). Blocked, not pending. SCOPE: the same two ack-gated sweeps
+        # `_ack_sweeps` re-runs above — the other six windows are not evaluated
+        # here at all, so a refusal on those reaches an operator only through the
+        # durable operator-queue alarm `cleanup_service` raises.
+        "blocked_sweeps": blocked_sweeps,
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
             "log_archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
-            # Execution + health + soft-delete (OPS settings, 0 = disabled)
-            **{k: _ops_int(k) for k in RETENTION_OPS_KEYS},
+            # Execution + health + soft-delete (OPS settings, 0 = disabled).
+            # #2216: `backup_retention_days` is EXCLUDED here — _ops_int's
+            # garbage→0 coercion means "sweep disabled" for row windows but
+            # "keep backups forever" (the #1871 disk-fill trap) for backups,
+            # so on a malformed stored row this map and the backup service
+            # would disagree inside ONE response. The key is reported only in
+            # the `backup` block below, through the service's own inverted
+            # reader (garbage → 14). Pinned by
+            # tests/unit/test_2216_backup_observability.py.
+            **{
+                k: _ops_int(k)
+                for k in RETENTION_OPS_KEYS
+                if k != "backup_retention_days"
+            },
             # Audit log — exempt from the community floor (365-day integrity floor)
             "audit_log_retention_days": audit_days,
         },
+        # #2216: automatic database-backup status (BKUP-014) — durable
+        # system_settings keys + a live /data/backups listing, rendered by
+        # the one shared reader. `scope: "same-disk"` is the machine-readable
+        # boundary statement (protects against corruption/slips, not disk loss).
+        "backup": await _backup_block(),
     }
+
+
+async def _backup_block():
+    """Backup status for GET /retention — fail-soft: a broken block must not
+    take down the whole retention panel."""
+    try:
+        from services.db_backup_service import build_backup_status_block
+        return await build_backup_status_block()
+    except Exception as e:
+        logger.error(f"Could not build backup status block: {e}")
+        return {"error": "unavailable"}
 
 
 # ============================================================================
@@ -1383,6 +1538,190 @@ async def delete_github_templates(
 
 
 # ============================================================================
+# Remote Template Registry (TMPL-002, trinity-enterprise#14)
+# ============================================================================
+#
+# Same shape as GitHub Templates above, deliberately — the registry is a new
+# SOURCE for that seam, not a second settings idiom. Registered here, well
+# before the `/{key}` catch-all (Invariant #4), like `/skills-library` and
+# `/brain-orb`.
+
+
+@router.get("/template-registry")
+async def get_template_registry(current_user: User = Depends(get_current_user)):
+    """Remote template registry configuration + live status. Admin-only.
+
+    The `status` block is part of the contract, not a nicety: fail-open makes
+    every registry failure invisible in the catalog by design, so the ONLY place
+    an operator can see that their registry 404s is here. A panel that cannot
+    show a failing fetch is a panel they cannot debug with (ent#236).
+
+    Resolving the status goes through the same cache the catalog uses, so this
+    fetches only when a fetch was already due — an admin opening the panel costs
+    no more than a user listing templates.
+    """
+    assert_admin(current_user)
+
+    from config import TEMPLATE_REGISTRY_URL
+    from services.settings_service import TEMPLATE_REGISTRY_URL_KEY
+    from services.template_registry_service import get_registry_status
+
+    stored_url = settings_service.get_setting(TEMPLATE_REGISTRY_URL_KEY)
+    return {
+        "source": "settings" if stored_url else "default",
+        "url": stored_url or "",
+        "default_url": TEMPLATE_REGISTRY_URL,
+        "effective_url": settings_service.get_template_registry_url(),
+        "enabled": settings_service.is_template_registry_enabled(),
+        # Rendered as an inert toggle rather than a working one, the
+        # `TelemetrySharingPanel` shape: TEMPLATE_REGISTRY_ENABLED=false is a
+        # config/air-gap decision no DB row may override, and a toggle that
+        # silently does nothing is worse than one that says why.
+        "hard_disabled": settings_service.is_template_registry_hard_disabled(),
+        # An admin-curated GitHub list wins outright (TMPL-001), and the catalog
+        # never even asks the registry in that case. Surfaced so the panel does
+        # not report a healthy registry that is contributing nothing.
+        "suppressed_by_github_templates": (
+            settings_service.get_github_templates() is not None
+        ),
+        "status": get_registry_status(),
+    }
+
+
+@router.put("/template-registry")
+async def update_template_registry(
+    body: TemplateRegistryUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set the registry URL and/or toggle. Admin **and human**-only. Audit-logged.
+
+    `reject_agent_principal` is not optional here. `assert_admin` answers *what
+    role*, never *is this a human*: `get_current_user` resolves an agent-scoped
+    MCP key to its owner CARRYING THE OWNER'S ROLE, so on a default admin-owned
+    install any agent's injected `TRINITY_MCP_API_KEY` satisfies a bare admin
+    gate (trinity-ops-agent#232, spelled out in Invariant #8). The consequence
+    here is direct and total: an agent could repoint the platform's template
+    registry at a URL it controls, and every operator browsing templates would
+    see its catalog. GET stays admin-only without the human gate — it reads an
+    operator-set URL, same as TMPL-001's GET.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    if body.url is None and body.enabled is None:
+        raise HTTPException(
+            status_code=400, detail="Provide `url` and/or `enabled`."
+        )
+
+    if settings_service.is_template_registry_hard_disabled() and body.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The template registry is disabled by configuration "
+                "(TEMPLATE_REGISTRY_ENABLED=false); no setting can enable it."
+            ),
+        )
+
+    url = body.url
+    if url is not None:
+        from utils.url_validation import validate_template_registry_url
+
+        url = url.strip()
+        if not url:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Registry URL cannot be blank. Use "
+                    "DELETE /api/settings/template-registry to revert to the default."
+                ),
+            )
+        try:
+            url = validate_template_registry_url(url)
+        except ValueError as e:
+            # `str(e)` is safe: every message in that validator is built from
+            # our own literals, never from the resolved address or the URL.
+            raise HTTPException(status_code=400, detail=str(e))
+
+    previous_url = settings_service.get_template_registry_url()
+    previous_enabled = settings_service.is_template_registry_enabled()
+
+    settings_service.set_template_registry_config(url=url, enabled=body.enabled)
+
+    # Per-process convenience; the generation counter bumped above is what
+    # actually reaches the other uvicorn worker.
+    from services.template_registry_service import invalidate_registry_cache
+
+    invalidate_registry_cache()
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="template_registry_config_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "url": {"old": previous_url, "new": settings_service.get_template_registry_url()},
+            "enabled": {
+                "old": previous_enabled,
+                "new": settings_service.is_template_registry_enabled(),
+            },
+        },
+    )
+
+    return await get_template_registry(current_user=current_user)
+
+
+@router.delete("/template-registry")
+async def delete_template_registry(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Reset the registry to its config defaults. Admin **and human**-only.
+
+    Also drops the durable last-known-good — it was captured under the
+    overridden URL, and serving it afterwards would attribute one registry's
+    catalog to another.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    previous_url = settings_service.get_template_registry_url()
+    deleted = settings_service.delete_template_registry_config()
+
+    from services.template_registry_service import invalidate_registry_cache
+
+    invalidate_registry_cache()
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="template_registry_config_reset",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "previous_url": previous_url,
+            "new_url": settings_service.get_template_registry_url(),
+            "removed_override": deleted,
+        },
+    )
+
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": "Template registry reset to defaults",
+    }
+
+
+# ============================================================================
 # MCP Server URL Configuration (#76)
 # ============================================================================
 
@@ -1809,6 +2148,152 @@ async def update_max_parallel_tasks_ceiling_setting(
     }
 
 
+@router.get("/skills-library")
+async def get_skills_library_automation_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Skills-library lifecycle automation config + last-run status (ent#236).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
+
+    Also reports the durable sync status and the last fleet re-inject report, so
+    the panel can show a FAILING auto-sync — the AC's "never silent" half. Both
+    read from `system_settings` rather than service memory because the loop runs
+    on ONE leader worker and this request usually lands on a different one.
+    """
+    assert_admin(current_user)
+
+    from services.settings_service import (
+        get_skills_auto_sync_interval,
+        is_skills_auto_reinject_enabled,
+        is_skills_auto_sync_enabled,
+    )
+    from services.skill_service import (
+        SKILLS_LAST_ERROR_KEY, SKILLS_LAST_STATUS_KEY, SKILLS_LAST_SYNC_KEY,
+    )
+    from services.skills_sync_service import FLEET_LAST_RUN_KEY
+
+    last_run = None
+    try:
+        raw = db.get_setting_value(FLEET_LAST_RUN_KEY, None)
+        if raw:
+            last_run = json.loads(raw)
+    except Exception:  # noqa: BLE001 — a malformed blob must not 500 the panel
+        last_run = None
+
+    return {
+        "auto_sync_enabled": is_skills_auto_sync_enabled(),
+        "auto_sync_interval_seconds": get_skills_auto_sync_interval(),
+        "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
+        "interval_default": SKILLS_AUTO_SYNC_INTERVAL_DEFAULT,
+        "interval_min": SKILLS_AUTO_SYNC_INTERVAL_MIN,
+        "interval_max": SKILLS_AUTO_SYNC_INTERVAL_MAX,
+        "last_sync": db.get_setting_value(SKILLS_LAST_SYNC_KEY, None),
+        "last_sync_status": db.get_setting_value(SKILLS_LAST_STATUS_KEY, None),
+        "last_sync_error": db.get_setting_value(SKILLS_LAST_ERROR_KEY, None) or None,
+        "last_fleet_reinject": last_run,
+    }
+
+
+@router.put("/skills-library")
+async def update_skills_library_automation_setting(
+    body: SkillsLibraryAutomationUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set skills-library automation flags + interval (ent#236).
+
+    Admin **and human-only**, partial update — every field is optional, and an
+    omitted field is left untouched (so toggling re-inject can't silently reset
+    the interval). Interval is range-validated here with a 400 rather than being
+    clamped silently: an operator who typed 30 should be told the floor exists,
+    not quietly given 300.
+
+    `reject_agent_principal` is load-bearing, not decoration. `assert_admin`
+    answers "what role", never "is this a human": an agent-scoped MCP key
+    resolves to its owner *carrying the owner's role*, so on a default
+    admin-owned install every agent's injected `TRINITY_MCP_API_KEY` satisfies
+    it. This endpoint is the ON-SWITCH for an unattended, fleet-wide write into
+    every running agent's `~/.claude/skills/` — and a `SKILL.md` is instructions
+    Claude executes, not data. Pre-#236 that write needed two deliberate human
+    actions (click Sync, then inject per agent); automating it removed the human,
+    so the gate has to put one back. Third occurrence of the
+    trinity-ops-agent#232 class (see #1644, #1816), and the rule from
+    learnings.md applies directly: the endpoint that USES a capability may be
+    agent-callable, the endpoint that GRANTS it must be human-only.
+
+    The GET stays role-only: it reads non-secret config, and its error string is
+    PAT-scrubbed at the write.
+    """
+    from dependencies import reject_agent_principal
+
+    reject_agent_principal(current_user)
+    assert_admin(current_user)
+
+    from services.settings_service import (
+        SKILLS_AUTO_REINJECT_ENABLED_KEY,
+        SKILLS_AUTO_SYNC_ENABLED_KEY,
+        SKILLS_AUTO_SYNC_INTERVAL_KEY,
+        get_skills_auto_sync_interval,
+        is_skills_auto_reinject_enabled,
+        is_skills_auto_sync_enabled,
+    )
+
+    changed: Dict[str, Any] = {}
+
+    if body.auto_sync_interval_seconds is not None:
+        value = body.auto_sync_interval_seconds
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < SKILLS_AUTO_SYNC_INTERVAL_MIN
+            or value > SKILLS_AUTO_SYNC_INTERVAL_MAX
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"auto_sync_interval_seconds must be an integer between "
+                    f"{SKILLS_AUTO_SYNC_INTERVAL_MIN} and {SKILLS_AUTO_SYNC_INTERVAL_MAX}"
+                ),
+            )
+        db.set_setting(SKILLS_AUTO_SYNC_INTERVAL_KEY, str(value))
+        changed["auto_sync_interval_seconds"] = value
+
+    if body.auto_sync_enabled is not None:
+        db.set_setting(
+            SKILLS_AUTO_SYNC_ENABLED_KEY, "true" if body.auto_sync_enabled else "false"
+        )
+        changed["auto_sync_enabled"] = bool(body.auto_sync_enabled)
+
+    if body.auto_reinject_enabled is not None:
+        db.set_setting(
+            SKILLS_AUTO_REINJECT_ENABLED_KEY,
+            "true" if body.auto_reinject_enabled else "false",
+        )
+        changed["auto_reinject_enabled"] = bool(body.auto_reinject_enabled)
+
+    if changed:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"setting": "skills_library_automation", "changed": changed},
+        )
+
+    return {
+        "success": True,
+        "auto_sync_enabled": is_skills_auto_sync_enabled(),
+        "auto_sync_interval_seconds": get_skills_auto_sync_interval(),
+        "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
+        "changed": changed,
+    }
+
+
 @router.get("/proactive-rate-limits")
 async def get_proactive_rate_limits_setting(
     request: Request,
@@ -2125,6 +2610,141 @@ async def update_elevenlabs_settings(
     return {"success": True, **after}
 
 
+# ============================================================================
+# Outbound A2A endpoint registry (#736 §32.5 FR-2)
+# NOTE: These routes MUST be defined BEFORE the /{key} catch-all (Invariant #4).
+# ============================================================================
+#
+# The OSS target source for `call_a2a_agent`. It lives in `system_settings` as
+# one AES-256-GCM envelope rather than a new table — the shape Invariant #12
+# already blesses for `elevenlabs_api_key_encrypted` — which is why #736 ships
+# with no migration and no Alembic revision.
+#
+# Admin-only AND human-only. `assert_admin` rejects agent principals since
+# ent#293, and `reject_agent_principal` is kept explicitly beside it because
+# this is the GRANT half of the grant-vs-use line: registering an endpoint
+# decides where a credentialed server-side request may go, and an agent-scoped
+# key resolves to its owner carrying the owner's role. *Using* a registered
+# endpoint is agent-callable; *creating* one is not.
+
+
+@router.get("/a2a-endpoints")
+async def list_a2a_outbound_endpoints(
+    current_user: User = Depends(get_current_user)
+):
+    """List the registered outbound A2A endpoints (#736).
+
+    Credentials are never returned — each row reports `has_credentials` only,
+    matching the write-only property the A2A management tools already document.
+
+    Reads the OSS store directly rather than through the resolver seam: a
+    registered enterprise provider may legitimately answer a different question
+    ("what can THIS agent call?"), and an admin panel whose GET and PUT
+    addressed different stores would be worse than no panel.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound, a2a_outbound_service
+
+    return {
+        "endpoints": a2a_outbound.list_oss_endpoints(),
+        "enabled": a2a_outbound_service.is_outbound_enabled(),
+    }
+
+
+@router.put("/a2a-endpoints")
+async def upsert_a2a_outbound_endpoint(
+    body: A2AOutboundEndpointUpsert,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Register or update one outbound A2A endpoint by name (#736).
+
+    The URL is SSRF-validated here so an operator finds out immediately rather
+    than at first call — but that is a usability improvement, not the security
+    boundary: the call path re-validates every URL on every call regardless,
+    because a stored row is not trusted and a DNS record can move.
+
+    `credentials` is write-only. Omitting it on an update leaves any existing
+    secret in place; `clear_credentials` removes it. The audit row records
+    whether a credential was set or cleared, never its value.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound
+
+    credential = body.credentials.get_secret_value() if body.credentials else None
+    try:
+        record = a2a_outbound.upsert_endpoint(
+            body.name,
+            body.url,
+            credential,
+            clear_credential=body.clear_credentials,
+        )
+    except a2a_outbound.EndpointValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": "a2a_outbound_endpoints",
+            "action": "upsert",
+            "endpoint": record["name"],
+            "url": record["url"],
+            "credential_set": bool(credential),
+            "credential_cleared": bool(body.clear_credentials),
+        },
+    )
+    return {"success": True, "endpoint": record}
+
+
+@router.delete("/a2a-endpoints/{ref}")
+async def remove_a2a_outbound_endpoint(
+    ref: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove one registered outbound A2A endpoint by id or name (#736)."""
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound
+
+    removed = a2a_outbound.remove_endpoint(ref)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"A2A endpoint '{ref}' not found")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": "a2a_outbound_endpoints",
+            "action": "remove",
+            "endpoint": ref,
+        },
+    )
+    return {"success": True, "removed": ref}
+
+
 @router.get("/{key}")
 async def get_setting(
     key: str,
@@ -2221,13 +2841,114 @@ async def update_setting(
             ),
         )
 
-    # Validate URL-based settings to prevent SSRF (SEC-179)
-    if key == "skills_library_url" and body.value:
-        from utils.url_validation import validate_skills_library_url
-        try:
-            validate_skills_library_url(body.value)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    # ent#297: the retention WINDOWS themselves. #1644 blocked the guard's ack
+    # keys here but left the windows falling through to a bare `db.set_setting`
+    # with no type or range check — so the generic PUT was a second, completely
+    # unvalidated write path to the values that drive irreversible deletion
+    # (execution history, health checks, and via agent_soft_delete_retention_days
+    # the #1581 volume purge, which is unrecoverable).
+    #
+    # Route them to `PUT /api/settings/ops/config`, which validates and audits.
+    # Same 422-with-a-pointer shape as max_parallel_tasks_ceiling (#506),
+    # PROACTIVE_RATE_LIMIT_DEFAULTS (#1609) and telemetry_sharing_* (ent#12):
+    # a settings key whose value has a safe range gets a route that knows the
+    # range, and the catch-all refuses to be a way around it.
+    # ent#14: the registry URL is an SSRF sink and the toggle is a security
+    # control, so both must go through the dedicated validated + human-gated
+    # route — without this block the whole SSRF gate is one generic PUT away
+    # from being bypassed. `generation` and `lkg` are blocked for a different
+    # reason: they ARE the cache, and a writable cache is a poisonable one.
+    # Validate at the boundary AND at the sink (#1525).
+    from services.settings_service import TEMPLATE_REGISTRY_KEYS
+
+    if key in TEMPLATE_REGISTRY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/template-registry "
+                "(HTTPS + SSRF validated, admin + human-only, audit-logged)"
+            ),
+        )
+
+    from services.settings_service import RETENTION_OPS_KEYS
+
+    if key in RETENTION_OPS_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a retention window and must be set via "
+                "PUT /api/settings/ops/config (type- and range-validated, "
+                "audit-logged). See GET /api/settings/retention for the "
+                "effective values (ent#297)"
+            ),
+        )
+
+    # ent#236: the automation keys go through the dedicated validated route.
+    # The interval especially: this generic PUT takes `Dict[str, str]` with no
+    # type or range check, so "10" would be accepted verbatim and the auto-sync
+    # loop would fork `git fetch` six times a minute against GitHub forever.
+    # (The read-side clamp in `get_skills_auto_sync_interval` is the second
+    # layer; this is the first — validate at the boundary AND at the sink, #1525.)
+    if key in SKILLS_AUTOMATION_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/skills-library "
+                f"(range-validated; interval {SKILLS_AUTO_SYNC_INTERVAL_MIN}–"
+                f"{SKILLS_AUTO_SYNC_INTERVAL_MAX}s)"
+            ),
+        )
+
+    # ent#346: the legacy skills-library keys are a SOURCE GRANT in disguise.
+    #
+    # ent#237 put `reject_agent_principal` on every `/skills/sources` route and
+    # states why: adding a source is the GRANT action, and a prompt-injected
+    # agent that could register its own repo gets unattended, fleet-wide,
+    # persistent prompt injection — skills are instructions Claude follows and
+    # they ship executable `scripts/`.
+    #
+    # This key reaches the same room by another door. `_adopt_legacy_clone`
+    # turns `skills_library_url` into a `skill_sources` row on the next sync at
+    # CUSTOM priority — which outranks the bundled community catalog — then
+    # deletes the setting, erasing where the row came from. This generic PUT is
+    # `assert_admin`-gated but NOT `reject_agent_principal`-gated, and an
+    # agent-scoped key resolves to its owner carrying the owner's role, so on
+    # the default admin-owned install it passes (trinity-ops-agent#232 class).
+    #
+    # Validating the URL is not sufficient and never was: `github.com/attacker/skills`
+    # passes `validate_skills_library_url` cleanly. The question is WHO may grant
+    # a source, not what the string looks like — so block the keys and point at
+    # the route that carries the gate. ent#237 already removed the UI writer, so
+    # nothing supported breaks.
+    # #736: the outbound A2A endpoint list is a TARGET grant carrying encrypted
+    # credentials — the value is an AES-256-GCM envelope, so a plaintext write
+    # here would both bypass the SSRF/shape validation and corrupt the store
+    # into something the reader refuses (fail-closed, but silently and with a
+    # confusing cause). It is also the answer to "where may a credentialed
+    # server-side request go?", which is exactly the class this catch-all keeps
+    # being a way around (#506 / #1609 / ent#12 / #1644 / ent#14 / ent#346).
+    from services.a2a_outbound import A2A_ENDPOINTS_SETTING
+
+    if key == A2A_ENDPOINTS_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} holds encrypted outbound A2A endpoints and must be set via "
+                "PUT /api/settings/a2a-endpoints (admin + human-only, SSRF-validated, "
+                "audit-logged)"
+            ),
+        )
+
+    if key in LEGACY_SKILLS_LIBRARY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a skills SOURCE grant and must be set via "
+                "POST /api/skills/sources (admin + human-only, validated, audited). "
+                "Writing it here would register a fleet-wide skills source without "
+                "the grant gate (ent#346)."
+            ),
+        )
 
     try:
         setting = db.set_setting(key, body.value)
@@ -2306,6 +3027,23 @@ async def delete_setting(
     """
     assert_admin(current_user)
 
+    # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
+    # Deleting an ack re-arms a guard and therefore fails safe; deleting
+    # `template_registry_enabled` reverts it to its default of ON, which
+    # re-enables egress an operator deliberately switched off — and this route
+    # carries no `reject_agent_principal`, so an admin-owned agent key could do
+    # it. The dedicated DELETE has the human gate and the audit action.
+    from services.settings_service import TEMPLATE_REGISTRY_KEYS
+
+    if key in TEMPLATE_REGISTRY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be cleared via DELETE /api/settings/template-registry "
+                "(admin + human-only, audit-logged)"
+            ),
+        )
+
     try:
         deleted = db.delete_setting(key)
 
@@ -2377,25 +3115,79 @@ async def update_ops_settings(
 
     Admin-only. Only accepts valid ops setting keys.
     Invalid keys are ignored with a warning.
+
+    ent#297 — the OSS write path for the eight retention windows (the enterprise
+    `retention` module has its own already-validated `PUT /api/enterprise/
+    retention/config`, which clamps to the community floor and covers 7 of the 8
+    — `agent_reminders_retention_days` is absent there). This one used to write
+    `Dict[str, str]` straight through with no type or range check.
+    Two things changed:
+
+    * **Values are validated** (`config.validate_ops_setting`); the request is
+      rejected 422 on the first bad one. Validation is deliberately NOT sold as
+      the fix for ent#297 — a small valid integer is the dangerous input, and no
+      range check can tell it apart from a legitimate short window. What it buys
+      is a loud failure instead of a silent coercion to 0 ("sweep disabled"),
+      which is the one thing the old shape got exactly backwards.
+    * **Writes are audited.** Neither this endpoint nor `/ops/reset` logged
+      anything, while the generic `PUT /{key}` directly above them does — so the
+      one route that can shrink a retention window was also the one route that
+      left no trace of having done so. ent#297 lists the audit surface in its
+      blast radius; this closes the half of it that was self-inflicted.
+
+    Validation is **all-or-nothing on purpose**: a partial apply would leave the
+    operator with some windows moved and some not, and no way to tell which from
+    the response.
     """
     assert_admin(current_user)
 
+    from config import validate_ops_setting
+
+    # Validate EVERYTHING before writing ANYTHING.
+    to_write: list = []
+    ignored: list = []
+    for key, value in body.settings.items():
+        if key not in OPS_SETTINGS_DEFAULTS:
+            ignored.append(key)
+            continue
+        try:
+            to_write.append((key, validate_ops_setting(key, value)))
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
     try:
         updated = []
-        ignored = []
+        for key, value in to_write:
+            db.set_setting(key, value)
+            updated.append(key)
 
-        for key, value in body.settings.items():
-            if key in OPS_SETTINGS_DEFAULTS:
-                db.set_setting(key, value)
-                updated.append(key)
-            else:
-                ignored.append(key)
+        if updated:
+            from services.settings_service import RETENTION_OPS_KEYS
+
+            touched = sorted(k for k in updated if k in RETENTION_OPS_KEYS)
+            await platform_audit_service.log(
+                event_type=AuditEventType.CONFIGURATION,
+                event_action="ops_settings_change",
+                source="api",
+                actor_user=current_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=str(request.url.path),
+                request_id=getattr(request.state, "request_id", None),
+                # Values are operator config, not secrets, and the whole point is
+                # being able to answer "who shortened retention, to what, when".
+                details={
+                    "settings": dict(to_write),
+                    "retention_windows_changed": touched or None,
+                },
+            )
 
         return {
             "success": True,
             "updated": updated,
             "ignored": ignored if ignored else None
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update ops settings: {str(e)}")
 
@@ -2429,6 +3221,40 @@ async def reset_ops_settings(
                 continue
             if db.delete_setting(key):
                 deleted.append(key)
+
+        # #1966: ent#297 added the audit entry to `/ops/config` but not here,
+        # while its own prose ("neither this route nor /ops/reset logged
+        # anything before") read as though it had covered both. So the exact
+        # asymmetry ent#297 objected to survived one route over: the generic
+        # `PUT /{key}` audits, `/ops/config` audits, this one did not.
+        #
+        # Retention windows genuinely cannot be reset here (#1638 skips them),
+        # but `ssh_access_enabled` can — resetting it changes whether ephemeral
+        # SSH credentials may be minted at all, and that left no trace.
+        #
+        # Logged unconditionally, NOT gated on `deleted` the way /ops/config
+        # gates on `updated`: there the empty case means nothing was asked for,
+        # whereas an admin pressing reset on already-default settings is a real
+        # administrative act whose absence from the log is indistinguishable
+        # from it never having been attempted.
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="ops_settings_reset",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            # Keys and counts only. Unlike /ops/config there is no value worth
+            # recording — every one of these is being DELETED, so the durable
+            # fact is which keys reverted to their code default and which were
+            # protected, not what they held on the way out.
+            details={
+                "reset": deleted,
+                "reset_count": len(deleted),
+                "skipped": sorted(RETENTION_OPS_KEYS),
+            },
+        )
 
         return {
             "success": True,

@@ -35,6 +35,13 @@ export default {
         'accent-purple':     colors.purple,
         'action-primary':    colors.indigo,
       },
+      // The dark-theme tinted-ground recipe is `token-500 at 16%`
+      // (design-system.md §5 — badges, alerts, accent-soft). 16 is not in
+      // Tailwind's default opacity scale, so `/16` classes silently emitted
+      // NOTHING until this entry made the documented recipe expressible.
+      opacity: {
+        16: '.16',
+      },
     },
   },
   plugins: [

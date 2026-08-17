@@ -17,7 +17,12 @@ function agentTabTitle(slug) {
   }
 }
 
-const routes = [
+// Exported so the route table can be exercised without constructing a
+// web-history router (ent#357): the redirect behaviour for the legacy /portal
+// links is a property of these definitions, and asserting it through a
+// memory-history router is the only way to test the real thing rather than a
+// restatement of it.
+export const routes = [
   {
     path: '/setup',
     name: 'Setup',
@@ -42,11 +47,15 @@ const routes = [
     component: () => import('../views/Dashboard.vue'),
     meta: { requiresAuth: true, title: 'Dashboard' }
   },
+  // trinity-enterprise#260 — the standalone Agents page is retired; its list
+  // lives on as the Dashboard's List mode. Query-preserving function redirect
+  // (#1109 /operating-room precedent): `?view=list` is a one-shot,
+  // NON-persisting intent the Dashboard applies then strips — it never
+  // rewrites the user's saved view selection. Exact-segment matching leaves
+  // /agents/:name and deeper routes untouched.
   {
     path: '/agents',
-    name: 'Agents',
-    component: () => import('../views/Agents.vue'),
-    meta: { requiresAuth: true, title: 'Agents' }
+    redirect: to => ({ path: '/', query: { ...to.query, view: 'list' } })
   },
   // #1109 — Health consolidated into the Operations "Health" tab.
   // Redirect preserves bookmarks; the tab is admin-gated inside Operations.vue.
@@ -110,11 +119,20 @@ const routes = [
   // REMOVED: /files route - file management is now per-agent via Files tab in AgentDetail
   // REMOVED: /credentials route - credentials are now managed per-agent only
   // Old global credential management is replaced by per-agent CredentialsPanel
+  // ent#263 — Templates page renamed to Library: one surface for installable
+  // assets (agent templates + the skills library).
+  {
+    path: '/library',
+    name: 'Library',
+    component: () => import('../views/Library.vue'),
+    meta: { requiresAuth: true, title: 'Library' }
+  },
+  // Legacy redirect — function form so query AND hash survive the hop (the
+  // #1109 precedent preserves query only; hash carry added here for the
+  // Library's in-page section anchors).
   {
     path: '/templates',
-    name: 'Templates',
-    component: () => import('../views/Templates.vue'),
-    meta: { requiresAuth: true, title: 'Templates' }
+    redirect: to => ({ path: '/library', query: to.query, hash: to.hash })
   },
   // Legacy redirect: Events consolidated into the Operations Notifications tab (#1109)
   {
@@ -189,36 +207,76 @@ const routes = [
     meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
   {
-    // Shared sessions / rooms (ent#170, backend ent#169). Top-level view — a
-    // room spans multiple agents, so it is NOT an Agent Detail tab. Gated Vue in
-    // the OSS bundle (portal precedent): the route + NavBar entry only appear
-    // when `shared_sessions` is in enterprise_features; the guard below catches a
-    // direct URL. `:roomId?` makes a session deep-linkable / refresh-safe.
+    // ent#381: the standalone Sessions page is retired — a multi-agent Workspace
+    // chat runs on the same ent#8 rooms substrate, so keeping both was two nav
+    // entries for one job. The DATA is untouched; only this UI is gone.
+    //
+    // Function form so query and hash survive: these URLs were deep-linked and
+    // shared, and a room id maps exactly onto the Workspace room route, so a
+    // link to a specific room still lands on that conversation rather than
+    // dumping the user at a generic index.
     path: '/sessions/:roomId?',
-    name: 'Sessions',
-    component: () => import('../views/enterprise/Sessions.vue'),
-    meta: { requiresAuth: true, requiresEntitlement: 'shared_sessions', title: 'Sessions' }
+    redirect: to => (
+      to.params.roomId
+        ? { path: `/workspace/r/${to.params.roomId}`, query: to.query, hash: to.hash }
+        : { path: '/workspace', query: to.query, hash: to.hash }
+    ),
   },
   {
-    // Public client-facing portal — a client signs in with a verified email
-    // (no platform account) and sees the agents shared with them. Standalone
-    // (no NavBar / platform chrome), no requiresAuth. Backend 404s in
-    // OSS/unentitled builds; the page shows its sign-in / empty state.
-    path: '/portal',
-    name: 'ClientPortalPublic',
+    // Workspace (ent#357, formerly "Client Portal") — a view of the agents
+    // shared with WHOEVER is looking: an external client who signed in with a
+    // verified email, or a platform user who is already logged in and arrives
+    // in one click. Standalone (no NavBar / platform chrome), no requiresAuth:
+    // the external path must stay reachable without an account. Backend 404s in
+    // OSS/unentitled builds; the page shows its sign-in / unavailable state.
+    path: '/workspace',
+    name: 'Workspace',
     component: () => import('../views/Portal.vue'),
-    // hideHelpWidget: the operator-only help widget would overlap the portal
-    // chat's Send button (and is meaningless to a client) — off here.
-    meta: { title: 'Client Portal', hideHelpWidget: true }
+    // hideHelpWidget: the operator-only help widget would overlap the
+    // conversation's Send button (and is meaningless to a client) — off here.
+    meta: { title: 'Workspace', hideHelpWidget: true }
   },
   {
     // #138: deep-linkable, refresh-safe conversation thread. The same shell as
-    // /portal (new-chat state); the :sessionId opens that thread. Back/forward
+    // /workspace (new-chat state); the :sessionId opens that thread. Back/forward
     // navigate between new-chat and threads.
-    path: '/portal/c/:sessionId',
-    name: 'ClientPortalThread',
+    path: '/workspace/c/:sessionId',
+    name: 'WorkspaceThread',
     component: () => import('../views/Portal.vue'),
-    meta: { title: 'Client Portal', hideHelpWidget: true }
+    meta: { title: 'Workspace', hideHelpWidget: true }
+  },
+  {
+    // ent#361: a multi-agent chat is a ROOM, not a portal thread — different
+    // substrate, different id space — so it gets its own deep link rather than
+    // overloading `/c/`.
+    path: '/workspace/r/:roomId',
+    name: 'WorkspaceRoom',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace', hideHelpWidget: true }
+  },
+  {
+    // ent#360: an agent is a destination, so it gets a URL. Deliberately NOT
+    // `/workspace/:name` — that would collide with any future literal segment
+    // and make every unknown path resolve to an agent page.
+    path: '/workspace/a/:agentName',
+    name: 'WorkspaceAgent',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace', hideHelpWidget: true }
+  },
+  // ent#357 legacy paths. Function form so query AND hash survive the hop —
+  // these URLs were handed to real clients by email, and a client landing on a
+  // dead link has no way to report it. `/portal/c/:sessionId` keeps the thread.
+  {
+    path: '/portal',
+    redirect: to => ({ path: '/workspace', query: to.query, hash: to.hash })
+  },
+  {
+    path: '/portal/c/:sessionId',
+    redirect: to => ({
+      path: `/workspace/c/${to.params.sessionId}`,
+      query: to.query,
+      hash: to.hash,
+    })
   },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {

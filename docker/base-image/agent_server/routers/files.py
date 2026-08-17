@@ -179,10 +179,22 @@ PROTECTED_PATHS = [
 #
 # .mcp.json and .mcp.json.template were historically editable here because
 # "users need to modify them" — but raw editing of either is RCE-by-config:
-# tool `command:` fields run as the agent process. Owners modify MCP servers
-# at agent-creation time via the template, or via the platform-internal
-# /api/credentials/update flow which regenerates .mcp.json from the template
-# with envsubst (no arbitrary content). See #590 (AISEC-C2).
+# tool `command:` fields run as the agent process. See #590 (AISEC-C2).
+#
+# The sanctioned path (#2008 — this comment previously named
+# `/api/credentials/update`, which had no callers anywhere and was removed;
+# both blocks below were justified by a route that did not run):
+#   * `POST /api/agents/{name}/credentials/inject`, gated by
+#     `validate_mcp_config` — Layer 2 of the #590 closure (#598). Real today.
+#
+# PLANNED, not yet available: rendering `.mcp.json.template` into `.mcp.json`
+# at container startup (`${VAR}` substituted inside `env` only, each server
+# validated) — #2007 / PR #2013. Deleting `update_credentials` removed the only
+# code that ever rendered the template, `startup.sh` performs no substitution,
+# and `credential_paths.py` denies the template on the inject path — so until
+# #2013 lands, declaring a server in the template alone never reaches
+# `.mcp.json`. Written as planned rather than present so this comment does not
+# replace one forward reference with another.
 #
 # CLAUDE.md is intentionally NOT here — owners do edit their agent's
 # instructions directly.
@@ -249,11 +261,37 @@ _DEFAULT_PERSISTENT_STATE = [
 def _read_persistent_state() -> list[str]:
     """Read the persistent-state allowlist from disk, with defaults."""
     import yaml
+
+    # #1965 + #1795: imported HERE, not at module scope. `files.py` must stay
+    # loadable by `spec_from_file_location` with NO package context — a
+    # module-level `from ..safe_yaml import …` raises `attempted relative import
+    # with no known parent package` and breaks
+    # `test_files_router_stays_standalone_importable` and the ent#183
+    # protected-path test. That constraint is why this file duplicates
+    # `_iso_z_from_mtime` instead of importing it, and why `yaml` is already
+    # function-local above. In production the package context always exists, so
+    # the deferred import is free.
+    from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+
     if not _PERSISTENT_STATE_PATH.exists():
         return list(_DEFAULT_PERSISTENT_STATE)
     try:
-        data = yaml.safe_load(_PERSISTENT_STATE_PATH.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        # #1965: `~/.trinity/persistent-state.yaml` is written by the agent
+        # itself (S4, #383) — the most agent-writable document of the set — and
+        # the returned patterns drive what survives a reset. REJECT: no
+        # legitimate allowlist needs an anchor.
+        #
+        # HardenedYamlError is a ValueError, NOT a YAMLError, so it is named in
+        # the except tuple explicitly. Falling back to the defaults on a refused
+        # document is the right failure here: this helper already treats an
+        # unreadable file as "use the defaults", and a bomb is a species of
+        # unreadable.
+        data = load_hardened_yaml(
+            _PERSISTENT_STATE_PATH.read_text(),
+            kind="persistent_state",
+            alias_policy=AliasPolicy.REJECT,
+        ) or {}
+    except (OSError, yaml.YAMLError, HardenedYamlError):
         return list(_DEFAULT_PERSISTENT_STATE)
     patterns = data.get("persistent_state")
     if not isinstance(patterns, list) or not patterns:

@@ -19,12 +19,11 @@ test.describe('browser tab titles (#1418)', () => {
     await expect(page).toHaveTitle('Trinity — Dashboard')
 
     // Top-nav clicks are client-side transitions (no reload) — the guard must
-    // still fire and repaint the title.
-    await page.getByRole('link', { name: 'Agents', exact: true }).click()
-    await expect(page).toHaveTitle('Trinity — Agents')
-
-    await page.getByRole('link', { name: 'Templates', exact: true }).click()
-    await expect(page).toHaveTitle('Trinity — Templates')
+    // still fire and repaint the title. (The Agents hop was removed with the
+    // page in trinity-enterprise#260; Dashboard → Library — Templates renamed
+    // to Library in ent#263 — still proves the client-side repaint.)
+    await page.getByRole('link', { name: 'Library', exact: true }).click()
+    await expect(page).toHaveTitle('Trinity — Library')
   })
 
   test('@smoke redirect resolves to the destination route title', async ({ page }) => {
@@ -33,5 +32,18 @@ test.describe('browser tab titles (#1418)', () => {
     await page.goto('/operating-room')
     await expect(page).toHaveURL(/\/operations/, { timeout: 10000 })
     await expect(page).toHaveTitle('Trinity — Operations')
+
+    // /templates → /library (ent#263 rename) — same title-follows-redirect
+    // contract.
+    await page.goto('/templates')
+    await expect(page).toHaveURL(/\/library/, { timeout: 10000 })
+    await expect(page).toHaveTitle('Trinity — Library')
+
+    // /agents → / (trinity-enterprise#260 redirect into the Dashboard's List
+    // mode). The retired route has no title of its own — the guard fires for
+    // the destination, so the tab reads Dashboard, never a stale "Agents".
+    await page.goto('/agents')
+    await expect(page).toHaveURL(/^https?:\/\/[^/]+\/$/, { timeout: 10000 })
+    await expect(page).toHaveTitle('Trinity — Dashboard')
   })
 })

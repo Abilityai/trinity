@@ -221,7 +221,7 @@
 
 Trinity agents may run on the **OpenAI Codex CLI** as a third execution runtime
 ("harness == runtime") alongside Claude Code and Gemini. A template selects it
-via `runtime: { type: codex, model: gpt-5.1-codex }`; the container is created
+via `runtime: { type: codex, model: gpt-5.6-sol }`; the container is created
 with `AGENT_RUNTIME=codex` and `codex_runtime.py` implements the `AgentRuntime`
 ABC. Follow-up to spike #854.
 
@@ -265,5 +265,92 @@ cached-UUID resume for Codex; backend reading `ExecutionMetadata.error_code`
 directly; Codex SSE streaming; vision/images; a post-creation runtime-switch
 endpoint. See the [Harness Authoring Guide](harness-authoring-guide.md) for adding
 a fourth runtime.
+
+---
+
+## 41. Model-Conditional Prompt Tiers (ent#243)
+
+### 41.1 Tier Resolution — the axis is the MODEL, not the runtime
+
+Anthropic's Claude 5-generation context-engineering guidance (rules → judgment,
+examples → interface design) applies to *frontier coding-post-trained models*,
+and is **actively harmful** on smaller/older ones — Sonnet 4.5 and Haiku 4.5 need
+the explicit structure it removes. Three vendors reached the same conclusion
+independently (OpenAI on GPT-5-Codex over-prompting, Google on Gemini 3
+over-analyzing verbose prompt engineering), so the fault line is model class, not
+vendor and not harness.
+
+This is why the tier is **not** keyed on `AGENT_RUNTIME`. MODEL-001 lets a
+schedule, loop, or chat turn pin any model string — including free-text — so a
+`claude-code` agent routinely runs Haiku 4.5. Gating on the runtime label would
+silently degrade the majority of the selectable surface (7 of 9 `PRESET_MODELS`
+entries sit in the tier where the guidance does not apply). Runtime already has
+its own orthogonal job in this module: `_adapt_instructions_for_runtime` rewrites
+MCP tool naming for Codex (#1187 F-MCP). The two axes stay separate.
+
+**Functional requirements:**
+- **FR-1 — Classifier:** `services/prompt_tier.py::resolve_prompt_tier(model)`
+  returns `PromptTier.MINIMAL | PromptTier.VERBOSE`. Total function, never raises,
+  pure-stdlib. Mirrors the `services/model_context.py` shape: family-prefix rules,
+  first-match-wins, most-specific-first.
+- **FR-2 — Unknown fails toward VERBOSE.** An unrecognized, empty, or `None` model
+  resolves to `VERBOSE` — today's prompt. Over-instructing a Claude 5 model costs
+  tokens; under-instructing a 4.5 model silently degrades it, and free-text model
+  passthrough makes an unknown id routine rather than exceptional. This mirrors
+  `model_context.py`'s "fail toward the conservative value" invariant and is the
+  property that bounds this feature's blast radius to *status quo*.
+- **FR-3 — Section-level gating, never two prompt strings.** `PLATFORM_INSTRUCTIONS`
+  stays a single authored literal; sections are derived from it by splitting on
+  its `###` headings and filtered by tier at render time. Maintaining two full
+  prompts guarantees drift — a security instruction added to one variant and not
+  the other is the failure mode this forbids by construction.
+- **FR-4 — A section with no explicit tier renders always.** An unmapped or renamed
+  heading falls back to always-render, and the heading set is CI-pinned so a rename
+  fails loudly instead of silently changing what agents are told.
+- **FR-5 — Safety and privacy sections are un-gateable.** Operator Communication
+  (the #1402 fire-and-park contract, itself sentinel-locked and synced to
+  `config/trinity-meta-prompt/prompt.md`) and the per-user memory-leak warning
+  render at every tier. They are not tool-usage guidance and have no tool
+  description to live in.
+
+**Non-functional:**
+- **Provable no-op on landing.** The MINIMAL prefix set ships **empty**, so every
+  model resolves VERBOSE and the rendered prompt is byte-identical to the previous
+  release. Enabling a family is a separate, evidence-gated change (ent#243 PR 2),
+  which is what keeps a fleet-wide prompt change out of the same PR as its mechanism.
+- **Prompt caching is unaffected.** The cache is keyed per model, so a cache entry
+  is never shared across models; varying the prefix by model adds no fragmentation.
+- Not vendored to the agent server (unlike `model_context.py`, Invariant #5): the
+  backend composes the prompt and ships it in the turn payload, so the agent server
+  never resolves a tier.
+
+### 41.2 Model Availability at Compose Time
+
+The prompt is composed **per turn** and is never baked into the container:
+`get_platform_system_prompt()` is uncached and re-reads the operator's
+`trinity_prompt` setting on every call, and the result travels in the request
+payload. A model changed in the UI therefore takes effect on the next turn with no
+container recreate, restart, or cache invalidation.
+
+Composition paths and whether the model is known:
+
+| Path | Model at compose time |
+|---|---|
+| `task_execution_service` (schedules, loops, webhooks, public/paid/channel via `execute_task`) | resolved to a concrete string before compose |
+| `chat_execution_service` | `request.model`, **nullable** — no default-resolution step on this path |
+| `pull_coordination_service` | **absent** — not passed into `ExecutionContext` at all (fixed here) |
+
+- **FR-6 — The pull path threads its model.** `pull_coordination_service` populates
+  `ExecutionContext.model`, so a pull-claimed turn is classified like any other.
+- **FR-7 — An unpinned chat turn resolves VERBOSE, by design.** When the caller
+  sends no model the *agent container* selects one (`claude_code.py` →
+  `claude-sonnet-4-6`) **after** the prompt was composed — the decision does not
+  exist backend-side at compose time and cannot be threaded. `claude-sonnet-4-6` is
+  a 4.x model that wants the verbose prompt, so FR-2's default is already correct
+  for this case. Resolving the platform default backend-side instead would trade a
+  known-safe gap for a hidden one, since the backend default and the agent's
+  `get_default_model()` can diverge silently. Making that second decision point
+  explicit is a tracked follow-up, not a prerequisite (the same split underlies
+  #1521's context-window "safe floor").
 
 ---

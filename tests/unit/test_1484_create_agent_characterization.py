@@ -102,12 +102,48 @@ def _load_crud(monkeypatch, docker_available=True):
     docker_utils.volume_get = AsyncMock(side_effect=_NotFound("no such volume"))
     docker_utils.volume_create = AsyncMock()
     docker_utils.containers_run = AsyncMock(return_value=MagicMock())
+    # ent#313: the failed-creation rollback now removes the container.
+    docker_utils.container_remove = AsyncMock()
 
     template_service = MagicMock()
     template_service.generate_credential_files = MagicMock(return_value={})
     # Dynamic-vs-predefined dispatch keys on this: a truthy return picks the
     # predefined branch. Default None ⇒ dynamic github:owner/repo path.
     template_service.get_github_template = MagicMock(return_value=None)
+    # ent#14 S2: the creation path reads `template.yaml` through the
+    # reason-preserving form and UNPACKS the pair — the `fork_to_own` gate
+    # decides on the reason, so it can no longer be dropped. An unstubbed
+    # MagicMock iterates empty and fails the unpack, which is the loud failure
+    # we want rather than a Mock silently standing in for a security decision.
+    template_service.fetch_template_metadata_result_for_create = MagicMock(
+        return_value=({}, None)
+    )
+    # ent#14 S2: the `fork_to_own` gate calls this classifier, which crud
+    # imports FROM this module — an unstubbed MagicMock returns a truthy Mock,
+    # so every github create would 503 TEMPLATE_METADATA_UNAVAILABLE. Mirrored
+    # faithfully (real: services/template_service.py::metadata_reason_is_unreadable
+    # — a clean 404 is absence, everything else is unreadable) rather than
+    # pinned to False, so a case that DOES script an unreadable reason still
+    # exercises the refusal.
+    template_service.metadata_reason_is_unreadable = MagicMock(
+        side_effect=lambda reason: bool(reason) and not reason.startswith("HTTP 404")
+    )
+    # ent#128: `_resolve_local_template` reads the template's declared MCP servers
+    # through this tolerant accessor instead of reaching through `credentials:`
+    # raw (a null/list/string block raised AttributeError, and that read sits
+    # FIRST in a run of `config` mutations under one broad `except` — so it cost
+    # the agent its `runtime:` and `shared_folders:` too). This harness MagicMocks
+    # the whole module, so an unstubbed call returns a truthy Mock that lands in
+    # `config.mcp_servers` and later blows up in a `yaml.dump`. Stubbed with a
+    # faithful mirror rather than a fixed `[]` so a fixture that DOES declare
+    # credentials cannot be silently masked.
+    def _mcp_server_names(block):
+        servers = block.get("mcp_servers") if isinstance(block, dict) else None
+        return [str(n) for n in servers] if isinstance(servers, dict) else []
+
+    template_service.credential_mcp_server_names = MagicMock(
+        side_effect=_mcp_server_names
+    )
 
     git_service = MagicMock()
     git_service.DEFAULT_PERSISTENT_STATE = ["memory/"]
@@ -150,6 +186,8 @@ def _load_crud(monkeypatch, docker_available=True):
 
     runtime_state_mod = MagicMock()
     runtime_state_mod.clear_agent_breakers = MagicMock()
+    # ent#313: cleared on the failed-creation path (async).
+    runtime_state_mod.clear_agent_runtime_state = AsyncMock()
 
     helpers_mod = MagicMock()
     helpers_mod.validate_base_image = MagicMock()
@@ -911,9 +949,16 @@ async def test_case15_local_rollback_mcp_key_only(crud_env, monkeypatch):
     ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-local")
     ctx["db"].delete_git_config.assert_not_called()      # no git handle (local)
     ctx["ephemeral"].release_ephemeral_slot.assert_not_called()
-    # The orphaned container is left for the cleanup watchdog (PRESERVED).
-    container_mock.stop.assert_not_called()
-    container_mock.remove.assert_not_called()
+    # ent#313: the container is now removed inline. This assertion used to read
+    # `remove.assert_not_called()` with the comment "left for the cleanup
+    # watchdog (PRESERVED)" — characterizing the leak, because no watchdog
+    # covers a non-ephemeral orphan. `container_remove(force=True)` reaches
+    # `.remove(force=True)`; the graceful stop is deliberately skipped (nothing
+    # is running yet to shut down cleanly).
+    ctx["docker_utils"].container_remove.assert_awaited_once_with(
+        container_mock, force=True)
+    ctx["runtime_state"].clear_agent_runtime_state.assert_awaited_once_with("rb-local")
+    container_mock.stop.assert_not_called()  # nothing running yet to stop gracefully
 
 
 @pytest.mark.asyncio
@@ -1047,4 +1092,36 @@ async def test_case21_fork_destination_race_loser_rolls_back(crud_env, monkeypat
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "FORK_DESTINATION_IN_USE"
     ctx["db"].delete_git_config.assert_called_once_with("z-loser")
+    ctx["docker_utils"].containers_run.assert_not_awaited()
+
+
+# ===========================================================================
+# Case 22 — #2215: a raising allocator lands INSIDE the rollback fence
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_case22_allocator_raise_rolls_back_gitconfig_and_mcp_key(
+        crud_env, monkeypatch):
+    """#2215 made `get_next_available_port` fail LOUD on a Docker listing fault
+    (it used to degrade to the empty set and hand out 2222). A raise there must
+    reach the same rollback as any other in-try failure: `_resolve_template`
+    has already written the `agent_git_config` reservation, and a stranded row
+    makes every later create of that name fail `agent_git_config already
+    exists` (Cornelius's next-boot retry included — a permanent seed failure
+    by a new route). Pinned so the allocation call cannot drift back out of
+    the docker try-block."""
+    crud, ctx = crud_env
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+    monkeypatch.setattr(
+        crud, "get_next_available_port",
+        MagicMock(side_effect=RuntimeError(
+            "cannot allocate a port: Docker listing failed (read timed out)")))
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        await crud.create_agent_internal(_github_config("rb-alloc"), _user(), None)
+    assert exc.value.status_code == 500
+    ctx["db"].delete_git_config.assert_called_once_with("rb-alloc")
+    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-alloc")
     ctx["docker_utils"].containers_run.assert_not_awaited()

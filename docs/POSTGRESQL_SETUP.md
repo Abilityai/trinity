@@ -199,6 +199,14 @@ For PostgreSQL the engine uses a real connection pool with `pool_pre_ping`
   `schema_migrations` gate (the SQLite-only bespoke runner). On PostgreSQL that
   gate is skipped — Postgres schema is owned by Alembic, whose state lives in
   the `alembic_version` table (#1183). Both return `{"status":"healthy"}` when up.
+- **Canary harness is backend-agnostic (#1540).** Every SQL-tier collector in
+  `src/backend/canary/` reads the configured backend through the
+  `get_engine()`/`DATABASE_URL` seam (`src/backend/canary/` has zero `sqlite3`
+  imports), so the CANARY-001 invariant harness works the same on PostgreSQL as
+  on SQLite. It is safe — and intended — to keep `CANARY_ENABLED=1` on
+  PostgreSQL; do **not** re-derive the retired SQLite-only constraint. Run-state
+  is observable via `GET /api/canary/status` (admin) and the `canary_enabled`
+  flag on `GET /api/settings/feature-flags` (#2217).
 - **Backups.** SQLite = copy `~/trinity-data/trinity.db` (see
   `scripts/deploy/backup-database.sh`). PostgreSQL = `pg_dump`:
   ```bash

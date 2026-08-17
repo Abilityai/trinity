@@ -15,8 +15,10 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
+import { BUCKET_COLORS } from '@/utils/executionBuckets'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
+import { useAgentsStore } from '../stores/agents'
 import StackedBarChart from './StackedBarChart.vue'
 import TrendLineChart from './TrendLineChart.vue'
 import CompatibilityPanel from './CompatibilityPanel.vue'
@@ -28,6 +30,7 @@ const emit = defineEmits(['navigate-tab', 'open-task'])
 
 const authStore = useAuthStore()
 const executionsStore = useExecutionsStore()
+const agentsStore = useAgentsStore()
 
 const agentName = computed(() => props.agent?.name)
 const isRunning = computed(() => props.agent?.status === 'running')
@@ -35,26 +38,9 @@ const isRunning = computed(() => props.agent?.status === 'running')
 // plain guidance (only admins can enable the monitoring loop).
 const isAdmin = computed(() => authStore.role === 'admin')
 
-// Shared palette — bucket order must match db `_BUCKET_ORDER` (#1107).
-// An *analogous cool* ramp (indigo → violet → blue → sky → cyan → teal →
-// emerald) led by the indigo `action-primary`. Deliberately no warm hues:
-// mixing amber/rose with green/blue reads as a traffic light. Soft
-// 400-level shades keep it calm on the dark theme; the ramp reads as one
-// cohesive family rather than a categorical rainbow. One deliberate
-// exception (#1150): Loops is a fuchsia accent — it sits stacked between
-// Scheduled (cyan) and Agent-to-agent (teal) and the whole point of the
-// bucket is distinguishing loop bursts from scheduled work.
-const BUCKET_COLORS = {
-  'Chat/Tasks': '#6366f1',     // indigo-500  (action-primary, anchor)
-  'MCP': '#a78bfa',            // violet-400  (accent-purple)
-  'Channels': '#60a5fa',       // blue-400
-  'Public': '#38bdf8',         // sky-400
-  'Scheduled': '#22d3ee',      // cyan-400
-  'Loops': '#e879f9',          // fuchsia-400 (deliberate accent, #1150)
-  'Agent-to-agent': '#2dd4bf', // teal-400
-  'Voice': '#34d399',          // emerald-400
-  'Other': '#94a3b8',          // slate-400
-}
+// Shared palette — bucket order must match db `_BUCKET_ORDER` (#1107). Moved to
+// `utils/executionBuckets.js` when the Workspace agent page became a second
+// consumer (#2161); the ramp's rationale lives there with it.
 
 // Line-chart colors, also from the design-system semantic hues.
 const SUCCESS_COLOR = '#22c55e'  // green-500  (status-success)
@@ -117,7 +103,7 @@ function fmtDateTime(iso) {
 const dates = computed(() => (analytics.value?.timeline || []).map((p) => p.date))
 
 const successSeries = computed(() => [{
-  label: 'Success rate',
+  label: 'Completion',  // ent#206: exit-based, not answer quality
   color: SUCCESS_COLOR,
   fill: true,
   data: (analytics.value?.timeline || []).map((p) =>
@@ -217,12 +203,22 @@ async function loadSidecars() {
     get(`/api/agents/${name}/schedules`),
     get(`/api/agents/${name}/skills`),
     get('/api/executions', { agent: name, limit: 5 }),
-    get(`/api/agents/${name}/info`),
+    // #2198: through the store, not a raw axios.get. Overview is the default
+    // landing tab, so this fired concurrently with AgentDetail's own
+    // `checkBrainOrbCapability()` — three `/info` requests for one mount. The
+    // store's in-flight join collapses them; `loadAnalytics()` two functions up
+    // already uses the cached store methods, so the precedent is adjacent.
+    agentsStore.getAgentInfo(name),
   ])
 
   const [stats, notif, opq, sync, hDetail, hHist, scheds, skills, recents, agentInfo] = results
 
-  if (agentInfo.status === 'fulfilled') info.value = agentInfo.value.data
+  // NOTE the missing `.data`: the store returns `response.data` already
+  // unwrapped, unlike the nine raw-axios siblings below. Keeping `.data` here
+  // would set `info` to `undefined` with no throw and no console error — a
+  // permanently blank "About" lead on the default tab. Do not "restore" it, and
+  // do not mass-edit the siblings, which are still raw Axios responses.
+  if (agentInfo.status === 'fulfilled') info.value = agentInfo.value
   if (stats.status === 'fulfilled') live.value = stats.value.data
   if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
   if (opq.status === 'fulfilled') opQueuePending.value = opq.value.data?.count || 0
@@ -360,7 +356,7 @@ onMounted(() => {
         <!-- success rate -->
         <div>
           <div class="flex items-baseline justify-between mb-2">
-            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">Execution success rate</h4>
+            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Execution completion rate</h4>
             <span class="text-sm font-semibold text-status-success-600 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
           </div>
           <TrendLineChart :dates="dates" :series="successSeries" :y-min="0" :y-max="100" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />

@@ -60,6 +60,18 @@
           </svg>
         </div>
 
+        <!-- Action failure banner (#1926) — start/stop, autonomy, queue respond
+             and acknowledge used to fail to console only, so on a phone the
+             verb simply appeared to do nothing. Persists until dismissed
+             (principle 18: toasts are for completed verbs, not errors). -->
+        <div v-if="actionError" class="action-error result-error" role="alert">
+          <div class="action-error-body">
+            <p>{{ actionError }}</p>
+            <p v-if="actionErrorDetail" class="action-error-detail">{{ actionErrorDetail }}</p>
+          </div>
+          <button class="action-error-dismiss" aria-label="Dismiss error" @click="clearActionError">✕</button>
+        </div>
+
         <!-- AGENTS TAB -->
         <div v-if="activeTab === 'agents'" class="tab-panel">
           <!-- Search -->
@@ -89,7 +101,6 @@
                     <span class="status-dot" :class="agent.status === 'running' ? 'bg-status-success-400' : 'bg-gray-500'"></span>
                     <span class="text-xs text-gray-400">{{ agent.status }}</span>
                     <span v-if="agent.autonomy_enabled" class="autonomy-badge auto">AUTO</span>
-                    <span v-if="agent.type" class="type-badge">{{ agent.type }}</span>
                   </div>
                   <!-- Success rate bar -->
                   <div v-if="getAgentSuccessPercent(agent.name) > 0" class="success-bar-row">
@@ -442,6 +453,7 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
+import { apiErrorMessage } from '../utils/apiError'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -493,6 +505,10 @@ const executionStats = ref({})
 const confirmDialog = ref(null)
 const actionLoading = ref(false)
 const actionResult = ref(null)
+// #1926: failed verbs (start/stop, autonomy, queue respond, acknowledge) land
+// here instead of console.error, and stay until the operator dismisses them.
+const actionError = ref('')
+const actionErrorDetail = ref('')
 
 // Loading states
 const loading = reactive({
@@ -650,6 +666,20 @@ function toggleAgentExpand(name) {
   expandedAgent.value = expandedAgent.value === name ? null : name
 }
 
+// #1926 — one persistent, dismissible surface for every failed verb on this
+// screen. console.error alone is invisible on a phone, where there is no
+// devtools pane to open.
+function clearActionError() {
+  actionError.value = ''
+  actionErrorDetail.value = ''
+}
+
+function reportActionFailure(e, what) {
+  console.error(`Failed to ${what}:`, e)
+  actionError.value = `Couldn't ${what}. Nothing was changed — try again.`
+  actionErrorDetail.value = apiErrorMessage(e, 'Request failed')
+}
+
 async function toggleAgent(name, currentStatus) {
   togglingAgents[name] = true
   try {
@@ -660,7 +690,7 @@ async function toggleAgent(name, currentStatus) {
     }
     await fetchAgents()
   } catch (e) {
-    console.error(`Failed to toggle ${name}:`, e)
+    reportActionFailure(e, `${currentStatus === 'running' ? 'stop' : 'start'} ${name}`)
   } finally {
     togglingAgents[name] = false
   }
@@ -673,7 +703,9 @@ async function toggleAutonomy(agent) {
     await axios.put(`/api/agents/${agent.name}/autonomy`, { enabled: newState })
     agent.autonomy_enabled = newState
   } catch (e) {
-    console.error(`Failed to toggle autonomy for ${agent.name}:`, e)
+    // The toggle reverts to the server value, so without this the switch just
+    // springs back with no reason given (#1926).
+    reportActionFailure(e, `change autonomy for ${agent.name}`)
   } finally {
     togglingAutonomy[agent.name] = false
   }
@@ -858,7 +890,8 @@ async function respondToQueueItem(id, response) {
     responseTexts[id] = ''
     await fetchQueue()
   } catch (e) {
-    console.error('Failed to respond:', e)
+    // Critical: the operator believes they answered the agent. They did not.
+    reportActionFailure(e, 'send your response — the agent is still waiting')
   } finally {
     respondingItems[id] = false
   }
@@ -869,7 +902,7 @@ async function acknowledgeNotification(id) {
     await axios.post(`/api/notifications/${id}/acknowledge`)
     await fetchNotifications()
   } catch (e) {
-    console.error('Failed to acknowledge:', e)
+    reportActionFailure(e, 'acknowledge that notification')
   }
 }
 
@@ -1363,14 +1396,6 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   flex-shrink: 0;
 }
 
-.type-badge {
-  font-size: 11px;
-  padding: 1px 6px;
-  background: #374151;
-  border-radius: 4px;
-  color: #9ca3af;
-}
-
 .agent-actions {
   margin-left: 12px;
   flex-shrink: 0;
@@ -1728,6 +1753,45 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 .result-error {
   background: #7f1d1d;
   color: #fca5a5;
+}
+
+/* #1926: persistent failed-verb banner (see the template note). Layout only —
+   it composes `.result-error` for the palette, so failure reads the same
+   everywhere on this screen and no new hardcoded color enters the ratchet. */
+.action-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  text-align: left;
+}
+
+.action-error-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.action-error-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+
+.action-error-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  min-width: 32px;
+  min-height: 32px;
 }
 
 /* ─── Confirm Dialog ────────────────────────────────────────────────────── */

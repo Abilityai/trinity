@@ -14,6 +14,31 @@
 - **Status**: ✅ Implemented
 - **Description**: Users, ownership, API keys, chat sessions via bind mount
 
+### 8.2a Automatic Database Backups (#2216)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #2216 (epic #1258 — First-run & self-host robustness)
+- **Description**: The platform database gets automatic recovery points on every install, both backends, with zero operator setup. Before this, `scripts/deploy/backup-database.sh` shipped but nothing invoked it — and it was a workstation-side GCP pull doing a naive live `cp` (no journal sidecars, no writer quiescing, no PG arm, no retention). A real instance lost its entire DB to a single stray write over the SQLite header with no recovery point; the file was `sqlite3 .recover`-able but there was nothing to restore. The backup gap turns an ordinary human slip into total data loss — no code hardening addresses that; only recovery points do.
+- **Requirements**:
+  - **BKUP-001** (automatic, both backends, zero setup): `services/db_backup_service.py` runs a daily job (default **03:30 UTC** — before the 04:15 audit prune and 04:30 VACUUM, so a backup captures more data, and after the 03:00 log archival which touches a different volume) from the backend lifespan, the `db_vacuum_service` shape. SQLite arm: stdlib `sqlite3.Connection.backup()` (one-shot — a consistent snapshot as of backup start, standalone `.db`, no sidecars; correct in both DELETE and WAL journal modes — the live platform DB runs SQLite's default **DELETE** mode, verified on a live instance). PG arm: `pg_dump -Fc` subprocess; `postgresql-client-17` (major-pinned, #1823 rationale — the base image's Debian codename floats) is baked into `docker/backend/Dockerfile`. Default **ON**.
+  - **BKUP-002** (never `cp` a live DB): the copy primitive is the online-backup API, never a file copy. A naive `cp` of a live SQLite file is the exact torn-page/hot-journal hazard the incident class rides on. The legacy scripts and the user-doc manual recipes are corrected to the safe primitive in the same change.
+  - **BKUP-003** (destination + scope, stated honestly): artifacts land in `/data/backups/` (derived as `<db dir>/backups`, created `0700`), day-keyed `trinity-backup-YYYYMMDD.db` / `.dump` and `pre-migration-YYYYMMDD-HHMMSS.db`. **Same-disk scope**: protects against the incident class (stray write, fat-fingered delete, bad migration) — NOT against disk loss. The scope is machine-readable (`scope: "same-disk"` in the status block); off-site is a flagged follow-up (the `ArchiveStorage` ABC is the ready seam). `.env`/`CREDENTIAL_ENCRYPTION_KEY`/Redis stay documented operator steps; agent workspaces are #1169's domain.
+  - **BKUP-004** (retention, both directions bounded — the #1638 fail-safe direction INVERTS here): `backup_retention_days` joins the ops-settings retention model (`OPS_SETTINGS_DEFAULTS` = 14, `OPS_SETTINGS_VALIDATION` bounds **1**–3650 — `0` is deliberately INVALID: in the existing model `0` means "disable the sweep", which for backups means keep-forever = the #1871 disk-fill trap; disabling backups is the separate explicit `DB_BACKUP_ENABLED=false`), `RETENTION_OPS_KEYS` membership (⇒ `/ops/reset` skips it, generic `PUT /api/settings/{key}` 422-blocks it, writes only via the validated `PUT /api/settings/ops/config`). NOT in `COMMUNITY_FRESH_INSTALL_SEED` (floor-seeding means *fewer* days = the destructive direction here).
+  - **BKUP-005** (floor — never zero recovery points): fixed `BACKUP_MIN_KEEP = 3`, a constant and deliberately NOT a knob (#1644: a control that must explain which way is safe is the wrong control). Prune never deletes the newest 3 artifacts regardless of age — a `backup_retention_days=1` slip keeps 3 recovery points. Pinned ≥ 2 by test.
+  - **BKUP-006** (prune runs on EVERY scheduled attempt — success, failure, or space-skip): prune-only-after-success is a disk-full Catch-22 (disk fills → preflight skips the backup → prune never runs → lowering the window frees nothing). Safety is carried by prune's own bounds: the MIN_KEEP floor, the retention window (never prune-to-make-room below it), and a pattern scope (`trinity-backup-*.db`, `trinity-backup-*.dump`, `pre-migration-*.db` — never arbitrary files). A failed copy never enters the artifact namespace (verify-before-`os.replace`), so it cannot displace anything.
+  - **BKUP-007** (inverted reader coercion): the generic ops-settings readers coerce garbage → `0` → "sweep disabled" — safe for row retention, catastrophic here (keep-forever). ONE shared reader (`effective_backup_retention_days()`) coerces unparseable/out-of-bounds → **default 14 + WARNING**; `GET /api/settings/retention` EXCLUDES the key from the generic `windows` map and reports it only inside the `backup` block via that reader, and the boot retention log special-cases it the same way — so no two surfaces can disagree about the effective value.
+  - **BKUP-008** (free-space preflight): before every write, destination free space must be ≥ 1.2× the source size (SQLite: file + sidecar bytes; PG: `pg_database_size(current_database())` — `-Fc` compresses, so this over-estimates, the safe direction). Short → skip + WARNING + alarm; never die, and never prune-to-make-room. An unavailable estimate proceeds (the write itself fails loudly on ENOSPC).
+  - **BKUP-009** (tmp hygiene): writes go to `<final>.tmp.<pid>` then atomic `os.replace`; a `finally:` unlinks the run's own tmp on any failure/timeout; each run sweeps `*.tmp.*` older than 24h (the SIGKILL-mid-copy crash window — an orphaned tmp is unbounded growth in a dir the pattern-scoped prune deliberately won't touch).
+  - **BKUP-010** (double-fire safety, `--workers 2`): two independent fail-safe guards — day-keyed idempotence (today's artifact exists → skip, works with Redis down) and a fail-open Redis SETNX lease (`db_backup:running`, own-token compare-and-delete release, TTL derived comment-linked from the pg_dump timeout). The lease is **duplicate-I/O suppression, never a correctness boundary** — correctness is pid-suffixed tmps + atomic replace + day-keyed names + pattern-scoped prune; the worst concurrent-duplicate outcome is one clean loud ENOSPC while the sibling completes.
+  - **BKUP-011** (PG conninfo handling): `pg_dump -Fc -d <conninfo>` receives the operator's `DATABASE_URL` with exactly two rewrites — the SQLAlchemy driver suffix normalized away (`postgresql+psycopg2://` → `postgresql://`) and the password stripped. Query params (`sslmode`, `sslrootcert`, `options`) pass through untouched — re-parsing into `-h/-p/-U` flags would silently drop the SSL params managed PG (RDS/Cloud SQL) mandates. Password travels ONLY via subprocess-env `PGPASSWORD`, never argv (world-readable /proc), never logged. Timeout → explicit `kill` → `wait()` reap → tmp unlink. A missing `pg_dump` binary (un-rebuilt image) fails loudly with a status + alarm naming the rebuild.
+  - **BKUP-012** (boot-time pre-migration backup, SQLite arm only): inside `init_database()`'s `migration_lock` window, BEFORE the first migration pass, `db/backup_primitives.maybe_backup_before_migrations()` takes a safety copy when migrations are actually pending (`migration_health`). Fresh install → **silent** skip (INFO — a first boot must not emit a scary ERROR); corrupt DB → ERROR + best-effort status row, and the subsequent migration run raises the SAME exception fingerprint as before this feature (the incident's uvicorn-dies-at-import signature is provably unchanged by test). **Fail-open, never crash-loops boot** (`init_database` runs at import — the #1638 seed contract). PG deliberately excluded in v1 (Alembic DDL is transactional; flagged follow-up).
+  - **BKUP-013** (failure is operator-visible, over TIME not just at the edge): (a) edge-triggered operator-queue alarm on the success→failure transition and on a no-space skip — one alarm per failure episode, re-armed by an intervening success; (b) a staleness re-alarm once `now − last_success` exceeds 3 days (≈3 missed dailies), re-fired at most weekly — silence over time is also a failure. Alarms are platform-created (direct `db.create_operator_queue_item`, bypassing the #1632 agent-ingestion caps by construction), hosted on sentinel `_db-backup` (uncreatable — `sanitize_agent_name` strips the leading `_`), id prefix `db-backup-` registered in `_RESERVED_ID_PREFIXES` (else an agent could pre-create and, via `on_conflict_do_nothing`, silence its own backup-failure alarm), and the sentinel excluded from canary L-03's orphan scan (sentinel tuple, service↔canary parity-tested). Alarm context carries status/paths/sizes only — never row data (canary G-04 rule).
+  - **BKUP-014** (status readable without shell): durable `system_settings` keys (`db_backup_last_status` ∈ `ok|failed|skipped_no_space` (a disabled job writes nothing — the status block's separate `enabled` field carries that), `db_backup_last_success_at`, `db_backup_last_error`, `db_backup_last_path`, `db_backup_last_size_bytes`, `db_backup_last_duration_ms`, `db_backup_last_trigger` ∈ `scheduled|boot_pre_migration`) written by the job and the boot hook (in-process state is invisible to the other uvicorn worker — ent#236 lesson). Surfaced as a `backup` block on the existing admin-only `GET /api/settings/retention` (no new endpoint, no new auth surface): last-run keys + live dir listing (count, total bytes, newest artifact age) + `enabled` + `retention_days` + `min_keep` + `stale` + `scope`.
+  - **BKUP-015** (restore documented AND exercised): `docs/user-docs/guides/deploying/backup-and-restore.md` rewritten (automatic backups, safe manual primitive, restore incl. stale `-wal`/`-shm`/`-journal` removal beside the restored file, PG `pg_restore -Fc` into an empty DB services-stopped, both writers — backend AND scheduler — stopped first); the incident is replayed by test: seed → backup → overwrite the source header with the literal `HTTP/1.1 200 OK` bytes → restore from the artifact → row counts equal.
+  - **BKUP-016** (default ON, documented disable): `DB_BACKUP_ENABLED` default `true` — read through ONE helper (`backup_primitives.backup_enabled_from_env`) by BOTH producers, so `false` disables the nightly job AND the boot pre-migration copy (the prune lives only in the job's tail; a boot hook that ignored the knob would write one un-pruned full-DB copy per upgrade forever — the #1871 class in the one configuration where the operator opted out); `DB_BACKUP_HOUR`/`DB_BACKUP_MINUTE`/`DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS` env-tunable. All forwarded in **BOTH** compose files (the #1486/#1488 inert-knob class — the backend service uses explicit env lists, no `env_file`) + documented in `.env.example`. Malformed hour/minute fall back to defaults with a WARNING instead of crashing at import.
+- **Explicit non-goals (flagged, not filed)**: off-site destinations (ArchiveStorage seam), PG boot-time backup, compression, manual backup-now endpoint, WAL migration, the pre-existing unforwarded `DB_VACUUM_*`/`AUDIT_RETENTION_*` env knobs.
+- **Tests**: `tests/unit/test_2216_backup_primitives.py`, `test_2216_db_backup_service.py`, `test_2216_boot_pre_migration_backup.py`, `test_2216_backup_restore_roundtrip.py`, `test_2216_backup_observability.py`
+- **Docs**: [database-backup.md](../feature-flows/database-backup.md); cross-ref §12.10 (retention model)
+
 ### 8.3 Redis for Secrets
 - **Status**: ✅ Implemented
 - **Description**: Credential storage, OAuth state with AOF persistence
@@ -27,6 +52,36 @@
 - **Description**: Non-root execution, CAP_DROP ALL, isolated network, base image allowlist
 - **Key Features**: Optional full capabilities mode for containers needing system access, base image allowlist validation (SEC-172)
 - **Base Image Allowlist** (SEC-172): Agent creation validates `base_image` against configurable allowlist (`base_image_allowlist` system setting, default `["trinity-agent-base:*"]`). Blocks arbitrary Docker image pulls that could access internal network services. Returns HTTP 403 for disallowed images.
+
+### 8.5b Base-Image Adoption Semantics (#1809, #1816)
+- **Status**: ✅ Implemented (2026-07-28)
+- **GitHub Issues**: #1809 (regular agents), #1816 (`trinity-system`)
+- **Description**: A rebuilt `trinity-agent-base:latest` must be adopted by existing agent containers, which stay pinned to the image **id** they were created from. Adoption happens only at a **cold boundary**.
+- **Requirements**:
+  - **ADOPT-001**: An agent container whose own `Config.Image` tag no longer resolves to the image id it runs is recreated on its next **cold** start (`check_base_image_matches`, the lazy ninth predicate). Fail-open: any unreadable state skips the evaluation and logs a WARNING.
+  - **ADOPT-002**: A **running** agent is never image-recreated. A start of a running agent is a load-bearing idempotent no-op (MCP ensure-running, the SUB-003 auto-switch restart, `restart_system`); image drift is armed fleet-wide by any `build-base-image.sh` run and must never turn it into a container kill. Ephemeral ghosts are excluded outright (volume-less by design).
+  - **ADOPT-003** (`trinity-system`): the platform orchestrator adopts at the same cold boundary — backend boot with the container **stopped**, or an explicit `POST /api/system-agent/restart`. `ensure_deployed`'s running branch is **read-only**: it reports `base_image_state` ∈ `stale | current | unknown` and raises an edge-triggered operator-queue alarm on `stale` only (never on `unknown` — a fail-open probe must not manufacture an alert).
+  - **ADOPT-004** (AC2, structural): **no** code path may replace the container of a *running* `trinity-system` without an explicit operator stop. Enforced in `start_agent_internal` as an `is_system AND was_already_running` gate over the whole `needs_recreation` block — deliberately independent of predicate count — returning `recreate_deferred: "system_agent_running"` rather than silently doing nothing.
+  - **ADOPT-005** (convergence invariant): the container produced by `_create_system_agent` and the container produced by `recreate_container_with_updated_config` must both leave **all eight** config predicates `True`. A permanently-false predicate is an ADOPT-004 hole by construction, because a config-drift recreate resolves the image from a *tag* and is therefore also an image adoption.
+  - **ADOPT-006** (rebuild fences): `recreate_missing_container` — the #1559 soft-delete recovery rebuild — **refuses** `trinity-system` with a 409. It reconstructs a regular agent and would irreversibly downgrade the orchestrator (deactivates the **system-scoped** MCP key and mints an agent-scoped replacement, drops `trinity.is-system` / the `/template` bind / `unless-stopped`, arms the scope-403 `TRINITY_BACKEND_URL`). `ensure_deployed`'s create branch is the only supported rebuild. Reachable because `ensure_deployed` runs per uvicorn worker with no leader lock — the race itself is #1817.
+  - **ADOPT-007** (operator remedy is human-only): `POST /api/system-agent/restart` and `/reinitialize` require an admin **and** a human principal (`reject_agent_principal`). `assert_admin` alone lets an agent-scoped key through on a default admin-owned install, and #1816 turns `/restart` into a container replacement.
+- **Tests**: `tests/unit/test_1809_image_drift_recreate.py`, `tests/unit/test_1816_system_agent_convergence.py`, `tests/unit/test_1816_system_agent_adoption.py`
+- **Docs**: [internal-system-agent.md](../feature-flows/internal-system-agent.md) → Base-image adoption; [agent-lifecycle.md](../feature-flows/agent-lifecycle.md)
+
+### 8.5c Container Log Rotation (#1871)
+- **Status**: ✅ Implemented (2026-07-29)
+- **GitHub Issue**: #1871
+- **Description**: Docker's `json-file` driver ships with **no** `max-size` and **no** `max-file`, so every platform and agent container log grew without bound under `/var/lib/docker/containers/`. Nothing fails while it happens; then the Docker data root reaches 100%, dockerd can no longer parse its own logs, and the entire fleet wedges at once (2026-07-27 incident). Trinity's existing retention (`log_archive_service`, `LOG_RETENTION_DAYS`) governs only Vector's aggregate copy at `/data/logs` — the raw Docker copy had no owner.
+- **Requirements**:
+  - **LOG-001** (platform services): every service in **both** `docker-compose.yml` and `docker-compose.prod.yml` carries a bounded `logging:` block, sourced from one shared `x-logging` anchor so the two files cannot drift. Operator-tunable via `CONTAINER_LOG_MAX_SIZE` / `CONTAINER_LOG_MAX_FILE`.
+  - **LOG-002** (agent containers): compose's `logging:` **cannot** reach agent containers — they are created through the Docker SDK, not compose. `AGENT_LOG_CONFIG` (`services/agent_service/capabilities.py`) is the agent-side half, defined once and imported by all three agent-container create sites beside `AGENT_TMPFS_MOUNT`. Operator-tunable via `AGENT_LOG_MAX_SIZE` / `AGENT_LOG_MAX_FILE`.
+  - **LOG-003** (fail-safe in **both** directions): a malformed value falls back to the bounded default, **and so does a well-formed but out-of-range one** (>`1g` per file, >`10` files, or zero). A format-only check is insufficient: `1000g` parses cleanly while effectively removing the cap — the exact failure this control exists to prevent, so magnitude is bounded too. A typo must never silently disable rotation (same principle as #1638).
+  - **LOG-004** (discoverability): an *explicitly set* value that is rejected logs a `WARNING` naming the variable, the rejected value and the applied default; an **unset** variable is the normal case and stays silent. A silently-ignored knob is the #1039 inert-by-obscurity class.
+  - **LOG-005** (apply semantics): `log_config` is **creation-time**, like the tmpfs spec. Platform services adopt on the next `docker compose up`; existing agents adopt on **recreate**, not on a plain restart. Capping does not shrink logs already on disk — reclaiming those on deployed instances is ops-tooling follow-up, out of scope here.
+  - **LOG-006** (drift guard): a CI guard fails when a **new** durable-container create site ships without `log_config`, closing the `learnings.md` (2026-07-10) "the create path is never one call site" class. Ephemeral `remove=True` helpers are exempt — Docker deletes their log with the container.
+- **Non-goal**: a host-level `/etc/docker/daemon.json`. That belongs to ops provisioning and is defense-in-depth; this makes Trinity correct regardless of host configuration.
+- **Tests**: `tests/unit/test_1871_container_log_rotation.py`, `tests/unit/test_1871_log_config_parity.py`
+- **Docs**: [container-capabilities.md](../feature-flows/container-capabilities.md) → Container Log Rotation; [vector-logging.md](../feature-flows/vector-logging.md) → Interaction with Docker Log Rotation
 
 ### 8.5a SSRF Prevention — Skills Library URL Validation (SEC-179)
 - **Status**: ✅ Implemented (2026-03-27)
@@ -145,7 +200,16 @@
   - Dispatch grace period: 60s grace for newly created executions before orphan detection
   - Systemic failure detection: Warns if >50% of recovery attempts fail in a single cycle
   - **Passive stale cleanup**: Marks stale executions (`status='running'` > 120 min) as `failed`
-  - Marks stale activities (`activity_state='started'` > 120 min) as `failed`
+  - Marks stale activities (`activity_state='started'` > 120 min) as `failed` — a **backstop for
+    the unclaimed only** (#1804): every writer that wins a terminal CAS now closes the paired
+    dispatch activity itself (§10.15 in `scheduling.md`), so a row reaching this sweep means a
+    producer is unowned. Runs **after** `_sweep_stale_slots` in the cycle (it used to run one line
+    before the stale-slot reaper, so within a single cycle the 120-minute duration fabricator could
+    beat a legitimate closer).
+  - Recovery paths (watchdog `_recover_execution`, startup recovery, the two bulk sweeps via
+    `_close_bulk_swept_activities`, the lease reaper, both backend-shutdown `CancelledError`
+    handlers) close their execution's activity on the CAS-won branch — counted in
+    `CleanupReport.activities_closed_on_recovery` (#1804)
   - Cleans up stale Redis slots (entries older than TTL)
   - One-shot startup sweep on backend restart
   - Periodic cleanup every 5 minutes
@@ -261,7 +325,68 @@
 - **Storage**: `canary_violations` table; observed_state JSON column.
 - **Activation**: gated by `CANARY_ENABLED=1` env var; disabled by
   default. Production deployment is staging/dev — the harness watches
-  there, not in user-facing prod.
+  there, not in user-facing prod. `CANARY_ENABLED` and
+  `CANARY_SLACK_WEBHOOK_URL` must be forwarded under `backend.environment:`
+  in **both** `docker-compose.yml` and `docker-compose.prod.yml` (#1881
+  part 1, shipped as #1876): prod compose launches standalone — no base-compose merge and no
+  `env_file:` — so the explicit `environment:` list is the only path into
+  the container, and the vars were wired into the dev file only. Staging/dev
+  runs prod compose, so the harness was un-enableable on exactly the
+  deployment it exists for: a documented `.env` lever that silently did
+  nothing (#1039/#1056 packaging-gap class), and a silent-green one level
+  above H-01 that no invariant can catch, since invariants only run inside
+  the thing that isn't running. Pinned by
+  `tests/unit/test_canary_env_prod_parity.py`.
+- **Single-cycling-worker lease** (#1881 part 2): the FastAPI lifespan
+  starts `canary_service` in **every** uvicorn worker (prod runs
+  `--workers 2`) and the service held only a per-process `asyncio.Lock`,
+  which guards re-entrancy inside one process and says nothing about
+  cross-worker exclusion. Enabling the harness therefore meant two full
+  cycles per interval — R-01 `docker exec`ing into every running agent
+  container twice per 5 min, violations double-persisted (11,942
+  `canary_violations` rows in 24h, measured on eu2), and two independent
+  writers on every shared marker (`canary:last_cycle_at`,
+  `canary:last_cycle_red`, `canary:e02:terminal_seen`,
+  `canary:h01:suspect_since`). The two defects had to ship together: the
+  compose fix alone converts a dormant bug into a live one. The scheduled
+  loop now runs only when it holds the Redis `canary:leader` lease — SET
+  NX, TTL `max(3×interval, 900s)`, own-lease-only refresh, best-effort
+  release on `stop()` — mirroring `monitoring:leader` (#1464) and
+  `opqueue:leader` (#1632). Every worker still runs its loop and re-checks
+  each cycle, so leadership fails over when the holder dies with no
+  restart; non-leaders log on the **transition** only, never per cycle.
+  - **TTL floor**, the one deviation from `interval × 3`: a canary cycle's
+    cost is dominated by R-01's `container.exec_run` sweep, which is bounded
+    by no timeout and scales with *fleet size*, not with how often we look.
+    A shortened interval must not shorten the lease below one sweep, or it
+    lapses mid-cycle and leadership flaps — restoring the concurrent
+    probing the lease exists to remove. The floor is a no-op at the default
+    300s interval.
+  - **Fail-open to leader** when Redis is unreachable. The precedents' own
+    justification does not transfer — a duplicate canary cycle is *not*
+    inert (it re-runs the sweep and double-persists rows) — so it is taken
+    on different grounds: this is the one subsystem whose purpose is
+    noticing that something went quiet, and a canary that stops is the
+    silent-green failure H-01 exists to catch, one level up where nothing
+    can see it. Duplicated probes are noisy and visible; silence is not.
+    A Redis outage is also already a degraded state the harness announces
+    (`sources_unavailable`; H-01 fires unconfirmed on an unreadable
+    marker), and failing closed would suppress precisely those paths.
+  - Consequently the lease is **best-effort, not mutual exclusion**:
+    H-01's `CONFIRMATION_MIN_SECONDS` and R-01's `DWELL_SECONDS`
+    elapsed-wall-clock gates stay load-bearing and must not be relaxed to
+    "seen in a second cycle" on the strength of it. Both also ride out a
+    real-time transient, which is a single-worker property.
+  - Knock-on: a leader failover leaves up to ~1200s (TTL + interval) with
+    nobody cycling, which exceeds R-01's `_MAX_OBSERVATION_GAP_SECONDS`
+    (600) and restarts its dwell. Correct — a crashed leader is a genuine
+    observation outage, and restarting is the fail-safe direction.
+  - `run_cycle()` is deliberately **not** gated: `POST /api/canary/run-cycle`
+    lands on an arbitrary worker, so gating it would make an explicit admin
+    request return an empty payload roughly half the time under
+    `--workers 2` — structurally identical to a green cycle, the exact
+    ambiguity the 409 `"cycle in progress"` contract exists to remove.
+  - Guard: `tests/unit/test_1881_canary_leader_lease.py`.
 - **Fleet**: `config/canary-fleet.yaml` deploys two synthetic agents
   (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
   the existing `/api/systems/deploy` endpoint. Without the fleet, the
@@ -274,9 +399,88 @@
   line with snapshot_time + violation count + "last red Xm ago"
   badge). Unset = silent sink: cycles still run, violations still
   persist to `canary_violations`, only the outbound POST is skipped.
-  Continuing-red invariants don't re-post. The dashboard-notifications
+  Continuing-red invariants don't re-post — **except to complete an
+  alert that was never delivered** (#1897). The dashboard-notifications
   path (writing `agent_notifications` rows via `db.create_notification`)
   was rejected on the product call.
+  **Delivery is an outcome, not an assumption (#1897).**
+  `emit_transition` reports `DELIVERED` / `SKIPPED` (no webhook
+  configured — deliberately *not* a failure, or every default install
+  would arm a retry per transition) / `FAILED`, and only a non-FAILED
+  outcome counts the transition in `cumulative_transitions` or lists it
+  under `transitions` in the run-cycle response; the undelivered set is
+  surfaced beside it as `undelivered_invariant_ids`, so a webhook outage
+  cannot make an admin `POST /api/canary/run-cycle` look like a green
+  cycle. An undelivered transition is **re-attempted on a later cycle
+  while the invariant is still red**, at most once per cycle interval
+  (a floor, because `run_cycle()` is deliberately not leader-gated and
+  manual polling would otherwise spend the whole window in seconds), for
+  up to `MAX_ALERT_PENDING_AGE_SECONDS` (1800s, a module constant per
+  the #1644 `MAX_ROWS_PER_SWEEP` precedent) per *contiguous failure run*
+  — failures separated by more than 3× the interval start a fresh run,
+  so brief flaps cannot consume the window a later long outage needs.
+  Past the window a distinct ERROR names the invariant, the elapsed
+  seconds and the last webhook error, and `cumulative_alerts_dropped`
+  increments; `cumulative_transitions_detected` keeps counting flips so
+  no single counter has to mean both "detected" and "delivered".
+  **The exact bound, because "up to 1800s" reads tighter than it is:**
+  the budget is evaluated AFTER each attempt (so the ERROR quotes the
+  elapsed and error of the attempt that actually just failed, not a
+  stale one), which means a run ends on the first attempt whose age
+  *exceeds* the window rather than the last one inside it — at the
+  5-minute default, **8 POSTs spanning 2100s (35 min)** per run, then
+  silence. The **dual of the run-decay**, stated so it is not
+  rediscovered as a bug: an invariant flapping red→green→red on a
+  period longer than 3× the interval never accumulates run age and so
+  never reaches a give-up — but it also never *retries* (it is green
+  again before the floor opens), so it costs exactly one POST per red
+  episode, which is the detection rate and is precisely the pre-#1897
+  behaviour. A delivery-layer budget deliberately does not bound its
+  own detector.
+  The retried payload is always rebuilt from the CURRENT cycle's
+  violations, and a pending entry only acts on a cycle where its
+  invariant is red, so a retry is never stale content and never fires
+  for something that went green. Retry state is **per-invariant**, in
+  the Redis hash `canary:alert_pending` (field = invariant id),
+  deliberately independent of the cycle-global `canary:last_cycle_at`
+  cursor: withholding that cursor retries nothing (the invariant's own
+  freshly-inserted row already post-dates it) and silently swallows an
+  unrelated red→green→red flip instead. The entry is armed BEFORE the
+  POST and `HDEL`'d on success, not armed on failure, because
+  `asyncio.CancelledError` is not an `Exception` and `stop()` cancels a
+  live cycle — a SIGTERM landing inside the webhook await would
+  otherwise lose the alert on every deploy that coincides with a red
+  cycle. Everything fails open: an unreadable or unwritable pending
+  store degrades to exactly the pre-#1897 behaviour, never worse, and
+  the *evidence* is never at risk because it lives in
+  `canary_violations` (SQL) rather than in Redis. The alternative of an
+  `alert_state` column on `canary_violations` — delivery state in the
+  same failure domain as the evidence, queryable via
+  `GET /api/canary/violations` — was rejected on scope (a dual-track
+  SQLite + Alembic migration for a delivery bug), not on merit. Two
+  workers can both retry one pending entry, which costs at most one
+  duplicate message; #1881's posture on this same subsystem ("choose the
+  duplicate over the silence") decides it. Guard:
+  `tests/unit/test_1897_canary_alert_delivery.py` — under `tests/unit/`
+  because no CI workflow runs the canary suite itself (#2037).
+- **Instance attribution (#1987)**: the payload names the instance that
+  fired it — a `[eu2]` prefix on both the Block Kit header and the `text`
+  fallback — so instances sharing one webhook (as `dev` and `eu2` do since
+  the #1766 soak) stay tellable apart. A webhook carries no sender
+  identity, and continuing-red gating makes each alert a one-shot, so
+  anything the message omits is not recoverable from a later one.
+  `services/instance_identity.py::get_instance_label()` resolves it:
+  optional `TRINITY_INSTANCE_NAME` override → first DNS label of
+  `FRONTEND_URL`'s host (`https://eu2.abilityai.dev` → `eu2`; an IP
+  literal keeps its whole host) → `installation_id[:8]` → unlabelled.
+  Deliberately no new *required* var: managed instances already carry
+  `FRONTEND_URL`, so attribution improves fleet-wide without an `.env`
+  rollout. Every tier degrades instead of raising — an unlabelled alert
+  is the prior behaviour, a lost alert is the failure the sink exists to
+  prevent. The label is sanitized (ASCII-alnum + hostname punctuation,
+  32-char cap) at resolution *and* at the render boundary, so it can
+  neither forge Slack markup (`<!channel>`) nor overflow the 150-char
+  header cap Slack rejects the whole message on.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.
@@ -296,10 +500,163 @@
   after it. **Credential safety:** E-04/G-04 violations persist to
   `canary_violations`, so neither ever echoes the raw `backlog_metadata` — E-04
   reports the failed-predicate reason code, G-04 the matched pattern name only.
+- **Phase 5 (shipped, #1813)**: **H-01 collector blindness** — the harness's
+  first *self*-check, and the reason the `H-` (harness health) id family exists:
+  every other invariant means "the system is broken", H-01 means "the observer
+  is blind", and an H-01 violation invalidates every other green in that cycle.
+  #1540 repointed the SQL-tier collectors onto the configured engine but left
+  the failure *shape* untouched — a collector reading an empty or unreachable
+  source returns zero rows, which is indistinguishable from a genuinely clean
+  fleet, so both report green. H-01 fires when the roster read
+  (`_collect_known_agents`) returns zero rows or raises **while an independent,
+  non-SQL source proves the fleet is alive**: Docker container presence
+  (`docker_agent_names`, read from the container list *before* any `exec_run`,
+  since `zombie_counts` is keyed by exec success and thins on a degraded
+  container) ∪ Redis slot keys (`orphan_redis_slots`, corroborating only — slot
+  keys exist solely while an execution holds a slot). Docker is collected
+  **before** the roster read, so it still supplies evidence on the arm where
+  that read raises and the collector returns early; Redis needs `known_agents`
+  and cannot. Reason codes
+  (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
+  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major —
+  the evidence source was unreachable, was never read, or **only Redis** had
+  anything to say: `orphan_redis_slots` is by definition slot keys whose agent
+  is absent from `agent_ownership`, i.e. L-03's leaked-slot state, so treating
+  it as a contradiction would page critical over a correct roster plus an
+  unrelated leak). `docker_available`/`redis_available` are **tri-state**
+  (`None` = the collector never ran) because `sources_unavailable` cannot
+  express a skipped collector. **Confirmation on elapsed
+  wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
+  gone, container still tearing down — cannot false-fire. Deliberately NOT "a
+  second cycle": prod runs `--workers 2` and, when the gate was written,
+  `canary_service` held no leader lease, so both loops shared the marker and
+  worker B would confirm worker A's sighting seconds later, collapsing the
+  gate. The #1881 `canary:leader` lease does not retire the rule — it fails
+  open to leader on a Redis outage, restoring concurrent loops over the shared
+  marker, and the transient being ridden out is real-time regardless of worker
+  count. An unreadable *or unwritable*
+  marker fires *unconfirmed* rather than skipping,
+  because a guard that cannot self-check must say so; the marker carries a 24h
+  TTL refreshed every suspicious cycle, so a `_clear_marker` that silently
+  failed cannot leave the gate armed forever. The gate applies to **every**
+  arm including `roster_read_failed` — a raised roster read is often a
+  momentary DB blip, and paging critical on one is how a safety net gets muted.
+  A whole-database outage now reaches the check at all: `_run_cycle_inner`'s
+  pre-cycle latest-violation read is fail-open (it previously raised before
+  `collect_snapshot` ran, so H-01 never executed), with transition detection
+  falling back to `canary:last_cycle_red` so a persistent outage chirps once
+  rather than every cycle. Scoped to the roster read
+  ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
+  `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a
+  general "any SQL collector reads zero" rule would false-alarm on every idle
+  install. Dual-track by construction (a pure function over the `Snapshot`; it
+  issues no SQL). **Residual:** an entirely *stopped* fleet has no containers
+  and no slots, so no evidence exists and H-01 can only reach
+  `roster_empty_unverifiable`; partial blindness (roster returns 1 of 20) is out
+  of scope, since a count comparison would false-fire on create/stop races.
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API
-  surface stay unchanged.
+  surface stay unchanged. **It must also carry all four per-invariant alert
+  surfaces in `services/canary_alerts.py`** — `_INVARIANT_NAMES`,
+  `_INVARIANT_RUNBOOKS`, and an id branch in each of `_render_message` and
+  `_render_forensic` — or its green→red Slack alert degrades to a bare-id
+  fallback with no name, evidence, or next step (#1880). Enforced by
+  `tests/unit/test_1880_canary_alert_parity.py`, bidirectionally (a stale or
+  typo'd id fails too). Source the name from the invariant module's own
+  docstring title, **not** the catalog: catalog ids are not registry ids
+  (catalog `E-06` is the unimplemented #129 check, while registry `E-06` is
+  "no overdue `next_run_at`"), so a catalog-sourced name can confidently
+  mislabel a live alert.
+
+### 31.2 Canary Run-State Observability (#2217)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #2217
+- **Problem**: nothing reported whether the harness is running. A disabled
+  canary emits zero violations — byte-for-byte identical to a clean fleet. This
+  is the **H-01 class one level up, applied to the detector itself**: H-01
+  catches a blind collector *while a cycle runs*; it structurally cannot catch
+  "no cycle is running at all" (a dead loop emits nothing). The harness had been
+  switched OFF on the dev instance on the belief its snapshot reader was
+  SQLite-only and would go blind on PostgreSQL — a constraint **retired by #1540**
+  (every SQL-tier collector now reads the configured backend through the
+  `get_engine()`/`DATABASE_URL` seam; `src/backend/canary/` has zero `sqlite3`
+  imports). Re-enabling is a pure ops toggle (`CANARY_ENABLED=1` in the instance
+  `.env` + redeploy) — the compose wiring shipped in #1876; this requirement adds
+  only the surface that makes the state observable.
+- **Primary surface**: `GET /api/canary/status` (admin-only, `require_admin`) →
+  `CanaryService.get_run_status()` (Invariant #1 — logic in the service, thin
+  router). Response `CanaryStatusResponse` (`models.py`, Invariant #14):
+  `enabled` (`CANARY_ENABLED == "1"`), `status`
+  (`disabled|healthy|stale|unknown`), `last_cycle_at`,
+  `seconds_since_last_cycle` (clamped `max(0, int(age))`), `interval_seconds`,
+  `stale_after_seconds`, `alert_sink_configured`, `redis_available`.
+- **The contract the surface answers**: it reports the **shared** Redis cursor
+  `canary:last_cycle_at` — written at cycle END with `snapshot.snapshot_time`,
+  the instant the leader's collection *started*. So it answers "the
+  collection-start instant of the last cycle the leader completed", and **lags
+  real completion by up to one cycle's duration**. It is NOT "is the loop alive"
+  and NOT literally "when a cycle finished". The **shared** cursor is read (never
+  the per-worker `self.last_run_at`/`cumulative_cycles`): with #1881's leader
+  lease only one worker cycles, so a non-leader answering the request has
+  stale/zero in-process counters.
+- **`status` derivation** (AC#3 — three states all distinct from
+  enabled+fresh+zero-violations):
+  - `disabled` — `enabled=False`. Clean, **never** an alarm; Redis is never read
+    (`redis_available=None`). Default-OFF is the normal state for most installs.
+  - `unknown` — enabled but no readable timestamp (cursor never written yet **or**
+    Redis raised **or** unparseable). **Fail-open**, never an alarm.
+  - `stale` — enabled, cursor readable, `age > stale_after_seconds`. The incident
+    case.
+  - `healthy` — enabled, cursor readable, `age ≤ stale_after_seconds`.
+- **Staleness threshold** `stale_after_seconds =
+  _max_failover_seconds() + _MAX_CYCLE_LEASE_SECONDS` (≈780 + 900 = **1680s** at
+  defaults), both terms the service's own constants so the threshold cannot drift
+  out of step with the timing it guards. It is **provably above BOTH** the
+  leader-failover window (~780s) AND a legitimately-slow-but-healthy cycle: a
+  cycle may run up to `_MAX_CYCLE_LEASE_SECONDS` (900s, R-01's `docker exec`
+  sweep wedge-yield ceiling) before it is deemed wedged, and because the cursor
+  carries the collection-start instant, a healthy leader's observed cursor age
+  reaches `interval + cycle_duration` (up to 1200s). Budgeting only
+  `_max_failover + interval` (1080s) would false-`stale` a working harness.
+- **`alert_sink_configured` is a deliberately separate field** (not folded into
+  `status`): liveness and can-it-alert are orthogonal facts, and an
+  enabled+cycling canary with no `CANARY_SLACK_WEBHOOK_URL` persists violations
+  but **pushes nothing** — a silent-green canary that must not read as an
+  unqualified `healthy`. Read on **every** path (including disabled — an operator
+  wiring up a canary wants the sink state before flipping it on).
+- **Secondary surface**: `canary_enabled` boolean on `GET /api/settings/feature-flags`
+  (any authed user, public-safe), beside `mcp_agent_chat_pull_enabled` /
+  `redelivery_governor_enabled` — the observability-only flag home. **Boolean
+  only**; last-cycle/stale/sink detail stays admin-only on `/status`. Backed by a
+  thin public `CanaryService.is_enabled()` wrapping `_is_enabled()` so "is the
+  canary enabled" has one source of truth; the handler imports `canary_service`
+  **function-locally** (a top-level import would pull the whole `canary` package
+  into the settings-router load).
+- **A manual `POST /api/canary/run-cycle` also advances the cursor**, so
+  `/status` reports last-cycle across scheduled AND on-demand cycles — it is not a
+  probe for scheduled-loop liveness specifically.
+- **Backend-agnostic since #1540** — safe to keep `CANARY_ENABLED=1` on
+  PostgreSQL. Stated in `docs/POSTGRESQL_SETUP.md` and
+  `docs/migrations/SQLITE_TO_POSTGRES.md` (AC#4) so the next operator does not
+  re-derive the retired SQLite-only constraint from the docs.
+- **Deferred (follow-up)**: an **active push** liveness alarm. A pull-only
+  `/status` is queryable-if-asked; the bug's narrative ("switched off during an
+  incident, silently never switched back on") is a push problem. The canary
+  cannot self-emit its own not-running (H-01 recursion), but a different
+  always-on process (`cleanup_service` / `src/scheduler/`) could read
+  `canary:last_cycle_at` + `_is_enabled()` and push via the existing Slack sink on
+  `enabled && stale`. Deferred because it needs its own default-OFF gating so it
+  never alarms an install that never opted in — the exact false-alarm risk the
+  issue warns against.
+- **Location**: `src/backend/services/canary_service.py`
+  (`get_run_status`, `is_enabled`, `_read_last_cycle_for_status`),
+  `src/backend/routers/canary.py` (`GET /status`),
+  `src/backend/models.py` (`CanaryStatusResponse`),
+  `src/backend/routers/settings.py` (`canary_enabled` flag).
+- **Guard**: `tests/unit/test_2217_canary_status.py` (the `tests/test_canary_*.py`
+  root suite runs in no CI workflow, #1880 — new guards go under `tests/unit/`).
 
 ---
 

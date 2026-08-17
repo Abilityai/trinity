@@ -195,9 +195,14 @@
   `reset_to_main_preserve_state`) pre-check write credentials — baked env
   `GITHUB_PAT` **or** the per-agent PAT row (never the global tier, which
   cannot reach a tokenless container) — and return conflict_type
-  `no_write_credentials` with the actionable message (create a new agent with
-  fork-to-own + data import, or add a token). MCP `git_sync` suppresses the
-  "resolve via chat" hint for this conflict type.
+  `no_write_credentials` with the actionable message. MCP `git_sync` suppresses
+  the "resolve via chat" hint for this conflict type.
+  **Amended by §11.12 (ent#109):** the message no longer teaches the manual
+  workaround ("create a new agent with fork-to-own + data import"). It now points
+  at **Bind to your own repo** in *this* agent's Git tab — the in-place retrofit
+  that keeps the accumulated workspace — or at adding a GitHub token. Both
+  surfaces change together (Invariant #13): `git_service.NO_WRITE_CREDENTIALS_MESSAGE`
+  and the MCP `git.ts` 409 hint.
 - **FR-6 — Private repos with no token fail with a named error**, never a raw
   500 (FR-2's combined 400 at create; auth-classified clone failure +
   `.git-clone-status` marker in-container if a repo goes private later).
@@ -212,5 +217,333 @@
   (`probe_anonymous_repo_access`, write-credential guard),
   `docker/base-image/startup.sh`.
 - **GitHub Issue**: trinity-enterprise#123 (Epic ent#122)
+
+---
+
+### 11.12 Post-Creation Repo Binding — "Bind to your own repo" (trinity-enterprise#109)
+
+- **Status**: ✅ Implemented (2026-08-02) — the last gate in the ent#122
+  fresh-install fleet-provisioning flow; supersedes ent#230.
+- **Description**: Point a **live** agent at a GitHub repo the **user** owns,
+  creating the repo if needed, from the agent's *current workspace* — not from
+  the template. Closes the ownership retrofit that §11.11 opened: a tokenless
+  public-template agent (ent#123, e.g. the default Cornelius) accumulates a
+  knowledge base it cannot push anywhere, and the only previously documented
+  escape was "create a new agent with fork-to-own and import your data", which
+  discards the agent's identity, name reservation, and history.
+- **Framing**: this is a **rebind**, not a fork verb. The operation is *"point
+  this agent at a GitHub repo you own."* An agent that already has a writable
+  repo is therefore an ordinary rebind (typo'd destination, wrong PAT account,
+  org migration, partial-failure retry), not a refusal — which is what makes
+  ent#109 AC #3 ("works for any agent") literally true.
+- **Endpoint**: `POST /api/agents/{name}/git/bind-to-own-repo` (+
+  `GET /api/agents/{name}/git/bind-to-own-repo/status` so a client that eats a
+  proxy timeout can resolve the outcome). Orchestration lives in
+  `services/agent_service/repo_binding.py` (Invariant #1); the router is a thin
+  HTTP mapper over domain errors.
+
+- **FR-1 — Supported row states are an explicit table; the unclassified is
+  refused by name, never guessed.** Partitioned by `source_mode`, which is the
+  column `idx_git_config_repo_branch_unique` actually keys on
+  (`WHERE source_mode = 0`) — *not* by write-credential state, which is an
+  orthogonal column and would mis-route:
+
+  | Row state | Handling |
+  |---|---|
+  | No `agent_git_config` row (`local:` template agent) | 400 `BIND_NO_GIT_CONFIG`, pointing at Initialize GitHub Sync. Deferred; see the State-A note below. |
+  | Row, `source_mode = 1`, any credential state | **Supported — the main path.** Includes tokenless (Cornelius) *and* already-writable ent#93 fork agents. |
+  | Row, `source_mode = 0` (carved `trinity/<agent>/<id>` working branch) | 409 `BIND_WORKING_BRANCH_MODE_UNSUPPORTED` — rebinding moves the row *within* the partial unique index and needs a branch re-reservation. Out of scope explicitly. |
+  | Row present, container has no `.git`, or the live `origin` disagrees with the row | 409 `BIND_STATE_UNCLASSIFIED`, reporting **both** observed values. |
+  | `is_system` agent (`trinity-system`) | Refused by the existing `BIND_NO_GIT_CONFIG` path — it is provisioned from a bundled template and has no git-config row, so it never reaches the container recreate. Asserted by test, not inferred. |
+
+  Every refusal is **structural** ("this shape needs machinery this feature does
+  not build"), not product gating, and each names the state and the next action.
+
+  **Resumption exception.** When the row *already names the requested
+  destination*, the operation is a retry of a partially-applied bind and the
+  last two refusals do not apply: `origin` is allowed to lag the row, and
+  branches already in the destination are the agent's own pushed history. Both
+  are safe — `origin` never selects what is pushed (step 4 pushes by explicit
+  URL and writes `origin` afterwards), and the push carries no `--force`/`+`
+  refspec so unrelated history is rejected non-fast-forward. Without this,
+  every post-commit failure message promises a retry that returns 409.
+
+- **FR-8 — A GitHub PAT must be header-safe before it leaves the model.**
+  A PAT is sent as `Authorization: Bearer <pat>` and embedded in a git remote
+  URL; h11 rejects an illegal header value by **echoing** it, so a token
+  carrying `\r`/`\n` — what a paste from a terminal or clipboard routinely
+  produces — puts the raw credential in an error response and the
+  Vector-captured platform log. `models._validate_pat_secret` strips surrounding
+  whitespace (the common case must keep working) and rejects anything outside
+  printable ASCII, for **both** `BindAgentRepoRequest` and `ForkToOwnRequest`.
+  Because Pydantic v2 records the rejected value in `errors()["input"]` and
+  FastAPI returns `exc.errors()` verbatim, `error_handlers.validation_error_without_input`
+  strips `input` from every 422 entry — otherwise the guard would relocate the
+  leak rather than close it.
+  No refusal is reachable for the flagship tokenless agent or for a user
+  re-running the operation after a typo or a partial failure.
+
+- **FR-2 — `source_mode` is preserved at `1`; no branch reservation.** A rebind
+  does **not** flip to working-branch mode. `source_mode` means *"track the
+  source branch instead of carving `trinity/<agent>/<id>`"* — **not** read-only:
+  ent#93's own fork-to-own agents are source-mode and still auto-push. Keeping
+  it at `1` means the user's default branch holds their captures, `working_branch`
+  is untouched, and no `reserve_and_generate_instance_id` call is needed. That the
+  row also stays outside the partial unique index is a *fact about the index*,
+  not the safety argument — FR-3 supplies the actual safety.
+
+- **FR-3 — Concurrency: destination-scoped lock + a real CAS + a compensating
+  restore.** The collision this feature can produce is *two different agents
+  binding one destination repo*, so:
+  - **`agent:bind_dest:{sha256(lower(destination))}`** — the lock that actually
+    serializes the collision. SETNX + TTL, and **fail-closed (503 +
+    `Retry-After`)**: a lost lock here means two repo creates, two DB writes,
+    and two concurrent recreates of one container, so the export/import lock's
+    fail-open calibration does not transfer.
+  - **`agent:bind_op:{name}`** — agent-scoped, guards double-submit on one agent.
+  - **CAS**: `db.rebind_git_config()` is a single
+    `UPDATE agent_git_config SET github_repo=:new, source_branch=:default,
+    auto_sync_enabled=1 WHERE agent_name=:a AND github_repo=:expected_old`.
+    rowcount 0 ⇒ 409 `BIND_CONCURRENT_MODIFICATION` with **nothing partial
+    written**. The predicate is named in the function's docstring.
+  - **Loser path is a compensating `UPDATE` restoring the captured previous
+    values — never `delete_git_config`.** On a *pre-existing* row a delete is
+    destruction, not rollback: it strips a live agent's binding, so the next
+    recreate drops `GITHUB_REPO` (the silently-empty-agent class, #843/#1439).
+  - The ent#93 post-write re-check against
+    `get_git_config_agent_names_for_repo` is kept as a **belt** (409
+    `BIND_DESTINATION_IN_USE`), not as the mechanism.
+
+- **FR-4 — The PAT is persisted LAST, after the container owns the new repo.**
+  Ordering: classify → create/inspect destination → capture previous values →
+  **CAS commit point** → in-container push + origin rewire → `set_agent_github_pat`
+  → recreate → verify + audit. The in-container push uses the *request's* PAT
+  directly and never needs the persisted row, so writing the credential early
+  buys nothing and costs correctness: `_agent_has_write_credentials` reads the
+  per-agent PAT row, so an early write makes the agent look already-writable on
+  a retry and makes a mid-window manual push succeed against the **old** repo
+  with the **new** token. A failure before the PAT write leaves the agent exactly
+  as not-writable as it was, and the retry is clean.
+
+- **FR-5 — A container recreate is mandatory; a DB-only rebind is silently
+  reverted.** `docker/base-image/startup.sh`'s "repository already exists"
+  branch rewrites `git remote set-url origin` **unconditionally** from the baked
+  `GITHUB_REPO`, and the workspace-`.env` fallback covers `GITHUB_PAT` only —
+  there is no `GITHUB_REPO` fallback. So the operation ends in
+  `recreate_container_with_updated_config()`, which re-bakes the git env from
+  the DB via `_apply_git_env_from_db` (`pat_gate="per_agent_only"`; this is why
+  FR-4's PAT write must precede the recreate — the gate reads the per-agent PAT
+  row). **A recreate is not a re-provision**: the same volumes are reused via the
+  `volume_base_name` pin (#1664), and `agent_ownership` plus the 180-day name
+  reservation are untouched (ent#109 AC #7). Consequently the S4 persistent-state
+  allowlist (AC #2) is preserved **by construction** — the workspace volume is
+  never detached and no snapshot/overlay step is required.
+
+- **FR-6 — Owner-only *and* human-only, with explicit PAT disclosure.**
+  `OwnedAgentByName` (uniform 404 for unknown *and* inaccessible, Invariant #8)
+  **plus** `reject_agent_principal`. A role gate alone is insufficient: an
+  agent-scoped key resolves to its owner *carrying the owner's role*, so on a
+  default admin-owned install any agent's injected `TRINITY_MCP_API_KEY` would
+  satisfy it (the trinity-ops-agent#232 trap; #1644/#1816 precedent). Blast
+  radius is operator-scale — it creates external GitHub state, persists a
+  credential, and replaces the container. The PAT is `SecretStr`, unwrapped once
+  at the service boundary, persisted AES-256-GCM (Invariant #12), and **never**
+  logged: every message crosses `scrub_secret(text, user_pat)` **and**
+  `redact_url_userinfo` (git stderr can embed a *stale baked* token that is not
+  `user_pat`). The UI carries the create-path disclosure verbatim — *the agent
+  can read its own git credential, so prefer the narrow token*. **No MCP tool**:
+  it would push a user PAT through the MCP layer.
+
+- **FR-7 — The `no_write_credentials` surfaces point at this action.** Both
+  surfaces change together (Invariant #13): `git_service.NO_WRITE_CREDENTIALS_MESSAGE`
+  (consumed by `sync_to_github` and `reset_to_main_preserve_state`, mapped 409 in
+  `routers/git.py`) and the MCP `git.ts` 409 hint. Neither teaches
+  create-a-new-agent-and-import any more. The in-container blackhole sentinel in
+  `startup.sh` is a third, agent-side surface that already reads correctly and is
+  deliberately left unchanged.
+
+- **Failure honesty**: a failure *after* the CAS commit point returns a
+  structured 502 naming precisely what is saved (the row binding) and what is not
+  (origin, PAT, env), and states that retrying converges — the destination
+  inspect/create reuses the repo, and the push and rewire are idempotent. It does
+  **not** claim self-healing: nothing re-drives the operation on its own.
+  `BIND_RECREATE_FAILED` specifically instructs the operator to **start the agent
+  through Trinity** to finish, because a *plain* container restart re-runs the
+  `startup.sh` origin rewrite and reverts the rebind.
+
+- **State-A note (`local:` template agents)**: deferred. On a fresh install that
+  population is the three bundled demo agents plus the `is_system`-protected
+  `trinity-system`, and the ent#128 "Trinity-installable agent" work may convert
+  bundled templates to `github:` and shrink it further. When it is picked up,
+  prefer extending `initialize_github_sync` (which already gates on a running
+  container, creates the repo with visibility, pre-reserves the branch, writes
+  the row, rolls back on failure, and audits) over a second engine — the gap is
+  only the PAT source. Two traps are recorded in the implementation plan:
+  `initialize_git_in_container` must be passed `working_branch=None` for
+  source-mode, and its `git add .` over `/home/developer` needs
+  `.claude/.credentials.json` added to `_GITIGNORE_PATTERNS` first.
+
+- **Source of truth**: `services/agent_service/repo_binding.py` (orchestration),
+  `services/agent_service/fork_to_own.py`
+  (`inspect_or_create_destination_repo` — the shared destination primitive;
+  reuse/refuse **policy** stays in each caller because the create path's reuse
+  branch *is* its template-tip SHA comparison),
+  `services/git_service.py` (`rebind_origin_and_push`,
+  `NO_WRITE_CREDENTIALS_MESSAGE`), `db/schedules/git_config.py`
+  (`rebind_git_config` — the CAS), `routers/git.py` (endpoint + status + locks +
+  audit), `services/agent_runtime_state.py` (`agent:bind_op:` /
+  `agent:bind_dest:` exemptions), `models.py` (`BindAgentRepoRequest` /
+  `BindAgentRepoResponse`), `src/frontend/src/components/GitPanel.vue`,
+  `src/mcp-server/src/tools/git.ts`.
+- **Flow**: `docs/memory/feature-flows/agent-repo-binding.md`
+- **GitHub Issue**: trinity-enterprise#109 (Epic ent#122); supersedes ent#230
+
+---
+
+### 11.13 GitHub-Repo Import Intents — fork / copy / clone (trinity-enterprise#15)
+
+- **Status**: 🔨 In development (2026-08-06)
+- **Description**: Creating an agent from a `github:owner/repo[@branch]` template
+  accepts an explicit **`import_intent`** — `fork` | `copy` | `clone` — so the three
+  user intents ("start from someone else's agent and own my changes" / "give me a
+  point-in-time snapshot, no upstream tie" / "this is my agent's repo") stop sharing
+  one one-size clone flow. Absent intent → today's behavior exactly (clone semantics;
+  fork when a `fork_to_own` block is present) — fully additive.
+- **FR-1 — Intent mapping (parameterizes existing machinery, no new clone engine)**:
+  - `fork` → the ent#93 fork-to-own path unchanged; requires the `fork_to_own` block
+    (400 `FORK_PARAMS_REQUIRED` without it).
+  - `clone` → today's default `github:` path unchanged (`source_mode` true/false as
+    before); a stray `fork_to_own` block with explicit `clone`/`copy` intent is a
+    400 `INTENT_FORK_BLOCK_CONFLICT` (presence-triggered forking would silently
+    create a GitHub repo against stated intent).
+  - `copy` → **backend-materialized snapshot** (new): staging clone
+    (`--depth 1 --single-branch --branch <source_branch or repo default>` — `@branch`
+    is honored) via the fork-to-own git machinery (disk-backed `/data` staging, PAT
+    via `GIT_CONFIG_*` env, output scrubbed), `.git` stripped, then the workspace
+    volume is pre-populated via the deploy-local primitive
+    (`_prepopulate_workspace_from_template`, `.trinity-initialized` included) BEFORE
+    the container exists. The container carries **no GitHub env and no PAT**; no
+    `agent_git_config` row is written (not sync-polled, git endpoints refuse as for
+    `local:` agents); the PAT is used server-side only and persisted nowhere.
+- **FR-2 — Copy-mode guards**: empty source (zero files staged) → 400
+  `COPY_SOURCE_EMPTY`, never a green blank agent. Private-no-PAT → the ent#123-style
+  combined named 400; transient staging failure → 502, fail-fast pre-side-effect.
+  Copy does NOT run the ent#123 tokenless source-mode gate (that 400 protects
+  boot-time push; copy never pushes — tokenless public copy is legal for any
+  `source_mode`). Symlinks in the staged tree are preserved only when their target
+  resolves inside the tree; escapers are dropped with a warning; never followed.
+  Copy + `ephemeral` → 400 `COPY_EPHEMERAL_UNSUPPORTED` (ghosts are volume-less by
+  the ent#69 invariant; the snapshot lives on the workspace volume).
+- **FR-3 — Provenance**: `import_intent` + source repo + cloned SHA are recorded in
+  the create audit entry's details; the container carries a `trinity.import-intent`
+  label. No schema column in v1 (volume-loss rebuild of a copy agent yields an empty
+  workspace by design — a snapshot must not silently re-clone CURRENT upstream; the
+  documented mitigations are #1169 data export + the advisory compat check going red).
+  Own-it-later path: **Initialize GitHub Sync** (copy agents are the same class as
+  `local:` agents; `bind-to-own-repo` refuses `BIND_NO_GIT_CONFIG` by design).
+- **FR-4 — Inline compatibility check (reuses #668 wholesale)**: the Create Agent
+  flow ends with a post-create validation step that polls the existing
+  `GET /api/agents/{name}/compatibility` (STATIC only; AI stays on-demand), gated on
+  agent-server readiness — a REAL `/info` response, discriminated as **200 without a
+  `message` key** (the backend proxy fail-opens to 200 + a fallback body carrying
+  `message` while the container is mid-clone, so a bare 200 is NOT readiness; Docker
+  "running" races the clone for fork/clone intents and false HARD failures would
+  persist via the results upsert; old agent images without the endpoint honestly land
+  in the timeout state) — with an honest "agent failed to start" branch on a
+  non-running container (checked periodically). Non-blocking — the agent exists
+  regardless.
+- **FR-5 — Trigger-boundary idempotency (Invariant #18)**: `POST /api/agents` accepts
+  `Idempotency-Key` (scope `agent_create:{user_id}` — the scope folds the caller so
+  another user's identical key can never replay a foreign create response); replay
+  returns the original response + `X-Idempotent-Replay: true`; in-flight duplicate
+  409 is named distinctly from name-taken 409. MCP `create_agent` derives a
+  deterministic key from call args (name included) so long fork creates survive MCP
+  client retries.
+- **FR-6 — Surfaces**: UI Create Agent modal gains a 3-way intent selector on the
+  free-form GitHub path (default `clone`; fork reveals the existing destination/PAT/
+  visibility fieldset; copy explains the no-upstream contract + own-it-later); MCP
+  `create_agent` gains `import_intent: "copy" | "clone"` only — fork stays UI-only
+  (standing decision: MCP tool args are audit-logged, a PAT arg would persist in
+  plaintext). Fork-scope failures name the alternative intents (never silent
+  auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
+- **Source of truth**: `services/agent_service/snapshot_import.py` (copy staging),
+  `services/agent_service/crud.py` (intent gates + wiring),
+  `services/agent_service/deploy.py::_prepopulate_workspace_from_template` (reused),
+  `models.py::AgentConfig.import_intent`, `routers/agents.py` (idempotency),
+  `src/mcp-server/src/tools/agents.ts`,
+  `src/frontend/src/components/CreateAgentModal.vue` + `ImportValidationStep.vue`.
+- **GitHub Issue**: trinity-enterprise#15 (Epic ent#122)
+
+### 11.14 Creation-Time Canonical `.gitignore` Seed (#2069)
+- **Status**: ✅ Implemented (2026-08-16)
+- **Description**: The canonical fleet-wide ignore list `_GITIGNORE_PATTERNS` was
+  applied at exactly two operator-initiated moments — the on-Push migration
+  (`_migrate_workspace_gitignore`) and the init-path merge
+  (`initialize_git_in_container` step 2) — and **never at agent creation**.
+  Meanwhile the in-container 15-min auto-sync loop is on **from birth** for the
+  `GIT_SYNC_AUTO` set (non-source-mode / fork-to-own `github:` agents), so such an
+  agent auto-committed `.trinity/` runtime state, `.claude/projects/`, `content/`
+  and the root-level `.env` / `.mcp.json` into its **user-owned** repo on the first
+  cycle — before any Push could migrate the list (a credential-leak-into-a-private-repo
+  hygiene hazard + the #1595/#1596 unbounded-`.git`-bloat class). #1908 fixed only the
+  bundled templates; external `github:` templates are the general case. This lands the
+  merged list on disk **after** startup.sh finishes ALL its git setup and **before**
+  the first auto-sync cycle can commit — the bounded fix until #1703 (repo root ≡
+  `$HOME`) retires this compensation layer.
+- **Key Features**:
+  - **Reuses `_build_gitignore_merge_command`** verbatim — `_GITIGNORE_PATTERNS`
+    stays the single source of truth; no fourth call site with its own list (one
+    backend `docker exec`, nothing moves into the agent-server / Invariant #5). An
+    AST writer-SET guard pins both the merge-command callers and the
+    `_GITIGNORE_PATTERNS` name-refs (`tests/unit/test_2069_gitignore_merge_caller_guard.py`).
+  - **Readiness-gated, not filesystem-gated**: `merge_gitignore_after_clone` polls the
+    agent-server `/health` (a **direct** `agent_httpx_client` probe, never the masking
+    backend proxy) ∧ `/home/developer/.git` present. The server is launched **once**,
+    at `startup.sh:517`, strictly after the whole clone→tar→checkout→remote-config git
+    block — so `/health` responding proves startup.sh is past all working-tree mutation
+    (no `git checkout` can revert the merge) while still ~900s before the auto-sync
+    loop's first cycle. The `.git`-present arm skips a failed clone (Push migration is
+    the backstop). Correctness does **not** depend on the 900s pre-first-cycle sleep.
+  - **Fire-and-forget** (`spawn_gitignore_merge_after_clone`, mirroring
+    `activity_service.spawn_close_execution_activity`): zero creation latency, bounded
+    by a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`, default 1800, env-tunable,
+    sized to a slow full-history clone + startup — decoupled from the 900s cycle) and a
+    module-level `asyncio.Semaphore` so batch creation can't starve the shared 4-thread
+    Docker pool. Every exec/HTTP is `asyncio.wait_for`-bounded (honestly: that frees the
+    task, not the pinned pool thread). Non-fatal — logs and swallows on any failure.
+  - **Merge-only at creation = PREVENT** (no `_build_rm_cached_ignored_command`): the
+    generated `.env`/`.mcp.json` are written post-clone as **untracked** files, so a
+    merge-installed `.gitignore` stops `git add -A` from ever staging them. A template
+    that *committed* a credential file (an unusual subclass) stays tracked and is
+    remediated on the first operator Push + retired by #1703 — no creation-time untrack.
+  - **Gated on the ENV `GIT_SYNC_AUTO`-baking predicate** via the shared
+    `_git_auto_sync_baked(config, github_repo, github_pat, fork_upstream)` helper (the
+    single owner of "does this agent bake `GIT_SYNC_AUTO`", used at both
+    `crud.py::_apply_github_env` and the merge spawn), so the merge covers exactly the
+    population whose loop auto-commits — **ephemeral non-source `github:`+PAT ghosts
+    included** (the DB-flag block excludes them via `and not config.ephemeral`, but the
+    baked env does not, and a ghost is never operator-Pushed). Source-mode stays
+    excluded — the uncommitted `.gitignore` change would block a pull-only agent's next
+    `git pull`; a non-source/fork agent's first auto-commit turns it into the committed fix.
+  - **Idempotent (#953)**: the `grep -qxF` gate means a template already shipping the
+    patterns shows no `M .gitignore` drift against `origin`; a template carrying the
+    stale wholesale `.trinity/` line gets a *legitimate* supersede→append (#2070).
+  - **Fleet remediation (T1)**: the same spawn is wired into `start_agent_internal`
+    (gated on the DB `auto_sync_enabled` flag — ghosts never recreate, so the ephemeral
+    gap does not apply here), so already-leaking existing agents converge on their next
+    base-image-drift recreate / restart. Touches neither `sync_to_github` nor the Push
+    migration — an additive convergence path, no behaviour change on Push.
+  - **Known limitation**: a backend restart within the readiness-wait window loses the
+    in-memory `create_task`; the Push migration remediates and #1703 is the structural fix.
+- **Source of truth**: `services/git_service.py`
+  (`merge_gitignore_after_clone` / `spawn_gitignore_merge_after_clone` /
+  `_git_auto_sync_baked`), `services/agent_service/crud.py`
+  (`_apply_github_env` predicate unification + `_materialize_agent_files` spawn),
+  `services/agent_service/lifecycle.py` (`start_agent_internal` T1 spawn).
+- **Flow**: `docs/memory/feature-flows/git-sync-health.md`
+- **GitHub Issue**: #2069 (sub-issue of Epic #1045)
+- **Follow-up (filed separately)**: `GIT_SYNC_AUTO` is baked for ephemeral ghosts at
+  all, contradicting the "ghosts never auto-push" intent — a distinct pre-existing bug;
+  #2069 only ensures the merge *covers* everyone who auto-syncs.
 
 ---

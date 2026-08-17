@@ -29,7 +29,8 @@ integration stage gated on defect confirmation):
 1. ✅ **P0 defect confirmation** — B1–B6 via code + DB/unit repro (§2). All six CONFIRMED.
 2. ✅ **P0 dark-regression baseline** — existing suite green + live-PG dark-schema check (§4).
 3. ✅ **P0 concurrency on real PG** — T2.1 double-claim → surfaced + fixed **C1** (§5).
-4. ⬜ **P0 canary lease-awareness** — T3.6 (E-05) / T3.7 (E-01); pilot confirmed E-05 fires. Still open.
+4. ✅ **P0 canary lease-awareness** — T3.6 (E-05, closed by #1766) / T3.7 (E-01, closed by #1990). Every
+   invariant that reads the running-row set is now lease-aware except E-02, which deliberately is not.
 5. ✅ **P1 correctness** — Tiers 1/4/5; B1/B2/B3/B5 fixed + verified; B6 fixed (static).
 6. ⬜ **Opt-in gate** — Tier 6 side-effect safety (`effect_guard` fail-open when `execution_id` absent). Open.
 7. ✅ **Integration** — live pilot (#946), pull PROVEN end-to-end on `gtm-synthesizer` (§6).
@@ -148,7 +149,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 | T3.4 | Meter disjoint under re-delivery | P2 | A re-queued (`queued`) row counted by neither meter nor ZSET until re-claimed; a parked (FAILED) row by neither. |
 | T3.5 | Canary S-01 fix verified | P1 | Excludes `lease_expires_at IS NOT NULL` rows → no false-fire on a pilot; still fires for a genuine non-pull mismatch. |
 | T3.6 | **Canary E-05 false-fire (KNOWN pre-opt-in blocker)** | P0 | A pull-`running` row >60s with `claude_session_id IS NULL` trips E-05. Apply the same lease-exclusion **before any pilot opt-in**. |
-| T3.7 | Canary E-01 transient fire during re-delivery | P1 | A row `running` past `timeout+300s` mid-re-delivery may trip E-01. Fix via lease-exclusion or accept as retiring-with-ZSET at Phase 5. |
+| T3.7 | Canary E-01 fire on a legitimately-running pull turn | P1 | ✅ **CLOSED by #1990** — fixed via a bounded lease grace, not accepted and not a blanket exclusion. Not merely a re-delivery transient: `claim_next_queued` stamps the lease at `started_at + timeout + SLOT_TTL_BUFFER`, the **identical** window, so E-01 fired at the instant the reaper's recovery window opened and stayed red until its next sweep, every re-delivery, per execution, at **critical**. A leased row is now silent only while its lease is overdue by ≤ 600s (2 × the `cleanup_service` interval the reaper runs in); past that it fires as a *lease-reaper* failure — see M4 in §9. A NULL-lease control of the same age still fires. |
 
 ### TIER 4 — Lease reaper / redelivery / poison-park — P1
 
@@ -329,8 +330,380 @@ Ran on `gtm-synthesizer` (rebuilt image, `AGENT_AUTH_SECRET` fixed; chosen becau
 
 ## 8. Net remaining before a default-ON decision
 
-Canary lease-awareness (E-05/E-01, §3 T3.6/T3.7) · Tier-6 `effect_guard` `execution_id` injection · ~~G3
-canary-on-PG (#1540)~~ ✅ closed · B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856).
+~~Canary lease-awareness E-05 (§3 T3.6)~~ ✅ **closed by #1766** — E-05 now excludes leased rows, mirroring
+S-01 and the `mark_no_session_executions_failed` sweep it watches (which already carried
+`lease_expires_at IS NULL`); without it E-05 fired on every pull turn past 60s ·
+~~canary lease-awareness E-01 (§3 T3.7)~~ ✅ **closed by #1990** — the same lease-awareness, on the invariant
+with the worst overlap: the lease is stamped at exactly `timeout + SLOT_TTL_BUFFER`, so E-01 fired **critical**
+the moment the lease-reaper became eligible and stayed red until its next sweep. E-01's is a **bounded grace**
+(600s = 2 × the `cleanup_service` interval the reaper runs in), not a blanket exclusion, so an overdue lease
+the reaper never touches still fires — that is M4's automated owner (§9). Canary lease-awareness is now
+complete: S-01 and E-05 exclude leased rows, E-01 grace-bounds them; E-02 deliberately does neither (a
+terminal→non-terminal reversal is corruption regardless of ownership, and pull is the more exposed path) ·
+Tier-6 `effect_guard` `execution_id` injection · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
+B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, measurement set in §9).
+
+**Also closed by #1766:** the pilot flag was purely additive, so a pilot ran push AND pull concurrently —
+the producer never force-queued (a free slot still meant a push, so rows only queued on overflow) and the
+backend's own `drain_next` raced the agent's worker for whatever did queue. Two independent capacity
+counters meant up to 2x `max_parallel_tasks`, invisible to S-02. The flag is now a true either/or for
+autonomous triggers; interactive turns keep the synchronous path (Open Question 7 scope cut).
+
+## 9. Soak measurement set (#1766)
+
+The queries that turn "we ran it for a few days" into a verdict. **Nothing else
+currently covers this**: `instance-monitor` has zero references to leases,
+`claim_token`, `redelivery_count`, or queue depth — its probes report generic
+health and will stay green whether pull carries the fleet or does nothing at all.
+Run these instead (or fold M1/M3/M5 into the monitor's deep-probe).
+
+PostgreSQL flavour. All timestamp columns are `Text` holding ISO-Z strings
+(Invariant #16), hence the explicit `::timestamptz` casts. Substitute the pilot
+name for `'<agent>'`.
+
+### Pre-flight — pick a viable pilot, then capture a baseline
+
+**First, check the candidate can be piloted at all.** Only `agent` and `event`
+traffic can reach the durable queue (#2048) — a cron-driven agent will read ~0
+`pulled` on M1 no matter how the flag is set. Run the pull-eligible-volume query
+under M1 below and pick from its `pull_eligible` column *before* flipping
+anything; a week of soak on a cron-only agent measures nothing.
+
+Then run M4 + M6 + M7 + M9 on the pilot for the 7 days *preceding* the flip and
+keep the output. Without a baseline, a 4% success-rate dip during the soak is
+unattributable and the write-up degrades to "felt fine".
+
+**Record the baseline as a breakdown by failure class, never as one percentage.**
+A single "7.7% failed" is unusable, because the classes move independently and
+only one of them is about pull:
+
+```sql
+SELECT CASE
+         WHEN error LIKE 'Subscription usage limit%'      THEN 'quota'
+         WHEN error LIKE 'Task execution timed out%'      THEN 'caller_timeout'
+         WHEN error LIKE '%recovered by watchdog%'        THEN 'lost_result'
+         ELSE COALESCE(LEFT(error, 60), '(none)')
+       END AS failure_class,
+       COUNT(*) AS n
+FROM schedule_executions
+WHERE agent_name = '<agent>' AND status = 'failed'
+  AND started_at::timestamptz > now() - interval '7 days'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+- **`lost_result`** — the class pull exists to remove (the agent finished, the
+  result never landed, the watchdog wrote the row off hours later). This count is
+  the number the soak is trying to drive to zero. Under pull the same event
+  surfaces as M5 instead: lease expiry → re-queue of the same `execution_id` →
+  poison-park at cap.
+- **`caller_timeout`** — see the M6 warning below. Do **not** expect these to
+  reappear under treatment; their disappearance proves nothing.
+- **`quota`** — exogenous. Exclude from the M6 comparison entirely, and check M1
+  volume mid-window: a quota-exhausted stretch starves the treatment arm and you
+  end up soaking a near-idle agent. Don't open the window right before a weekly
+  subscription reset.
+
+### The set
+
+| ID | Answers | AC | When to run |
+|----|---------|-----|-------------|
+| M1 | Is pull actually carrying load? | coverage (the #1766 premise) | once + mid-window |
+| M2 | Push/pull split over time | coverage | once at end |
+| M3 | Is the agent over its configured concurrency? | no slot/backlog drift | **sampled, at peak** |
+| M4 | Lost or phantom executions | no lost/phantom | **sampled, hourly** |
+| M5 | Re-delivery + poison-park behaviour | leases behave as designed | once at end |
+| M6 | Outcome regression vs baseline | no regression | baseline + end |
+| M7 | Canary state | canary green throughout | once at end |
+| M8 | Queue starvation | no drift | once at end |
+| M9 | Caller-side timeouts (M6 counter-check) | no regression | baseline + end |
+
+**M3 and M4 must be sampled, not run once.** M3 counts *concurrent* leased rows,
+so a single daily run lands off-peak and never sees the overbooking it exists to
+catch. M4 is subtler: its predicate is `status IN ('queued','running')`, and
+`cleanup_service`'s stale sweep eventually fails stranded rows to `failed` — at
+which point they leave the predicate and M4 reads clean. **A soak that genuinely
+lost executions reports zero rows if M4 is only run at the end.**
+
+**M1 — is the pull path carrying anything?** The single most important query: if
+`pulled` is ~0 the soak is measuring nothing and everything downstream is void.
+
+```sql
+SELECT COUNT(*) FILTER (WHERE claimed_by_worker IS NOT NULL) AS pulled,
+       COUNT(*) FILTER (WHERE claimed_by_worker IS NULL)     AS pushed
+FROM schedule_executions
+WHERE agent_name = '<agent>'
+  AND started_at::timestamptz > now() - interval '24 hours';
+```
+
+Expected after the #1766 gate: **`agent` and `event` rows ~100% `pulled`; every
+other trigger 100% `pushed`.** That second half is correct behaviour, not a
+fault — read the reach table below before concluding anything from it. Confirm
+the split per trigger with:
+
+```sql
+SELECT triggered_by,
+       COUNT(*) FILTER (WHERE claimed_by_worker IS NOT NULL) AS pulled,
+       COUNT(*) FILTER (WHERE claimed_by_worker IS NULL)     AS pushed
+FROM schedule_executions
+WHERE agent_name = '<agent>'
+  AND started_at::timestamptz > now() - interval '24 hours'
+GROUP BY 1 ORDER BY 1;
+```
+
+#### Which triggers can be pulled at all (#2048)
+
+`PULL_MODE_PILOT_AGENTS` routes **agent-to-agent work only**. `capacity_manager`
+offers a row to the durable queue solely when its producer passed
+`overflow_policy="queue_persistent"`, and one of the three producers does:
+
+| Producer | Carries | `overflow_policy` | Pullable? |
+|---|---|---|---|
+| `task_execution_service` | scheduler — **all cron** — + fan-out | `reject` | **No** |
+| `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
+| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes** |
+
+`POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
+event}`; intersect with `_AUTONOMOUS_TRIGGERS` and the pullable set is exactly
+**`{agent, event}`** (`pull_pilot.PULL_REACHABLE_TRIGGERS`). `schedule`,
+`webhook`, `loop`, `fan_out` and `reminder` are declared autonomous but reach
+dispatch through the `reject` producer, so **they are pushed no matter what the
+flag says.**
+
+**Reading a pushed autonomous row.** Two different situations, previously
+indistinguishable:
+
+- `triggered_by` ∈ `{schedule, webhook, loop, fan_out, reminder}` → **expected.**
+  The flag is applied and correct; the dispatch topology is the limit. The
+  backend logs this once per (agent, trigger) — grep `[#2048]` to confirm:
+  ```bash
+  docker logs trinity-backend 2>&1 | grep '\[#2048\]'
+  ```
+- `triggered_by` ∈ `{agent, event}` → **a real fault.** This is the only case
+  where the old advice applies: check the backend actually has
+  `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose must forward
+  it).
+
+#### Choosing a pilot: a cron-only agent cannot be piloted
+
+Because cron cannot reach the queue, **an agent whose traffic is mostly
+`schedule` will read ~0 `pulled` on M1 no matter how the flag is set, and the
+soak measures nothing.** Verify pull-eligible volume *before* selecting a pilot,
+not after a week of soak:
+
+```sql
+SELECT agent_name,
+       COUNT(*)                                          AS total,
+       COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
+       COUNT(*) FILTER (WHERE triggered_by IN ('agent','event')) AS pull_eligible
+FROM schedule_executions
+WHERE started_at::timestamptz > now() - interval '7 days'
+GROUP BY 1 ORDER BY pull_eligible DESC;
+```
+
+Pick from the `pull_eligible` column. In practice that means a **fan-in hub fed
+by parallel `chat_with_agent`** — on `eu2` exactly one agent
+(`cornelius-oracle`, 329/329) had the volume, while the cron-driven oracles sat
+at 2–5 and `brier-hq` at 0.
+
+Extending pull to cron is the issue's deferred Option 2 (give
+`task_execution_service` a `queue_persistent` policy under the pilot flag); it is
+**not** implemented. `tests/unit/test_2048_pull_pilot_reach.py` fails if that
+producer's policy changes, so this section cannot go stale silently.
+
+**M2 — split over time.** Confirms the flip took effect at the moment you think
+it did, and shows drift.
+
+```sql
+SELECT date_trunc('hour', started_at::timestamptz) AS hr,
+       COUNT(*) FILTER (WHERE claimed_by_worker IS NOT NULL) AS pulled,
+       COUNT(*) FILTER (WHERE claimed_by_worker IS NULL)     AS pushed
+FROM schedule_executions
+WHERE agent_name = '<agent>'
+  AND started_at::timestamptz > now() - interval '7 days'
+GROUP BY 1 ORDER BY 1;
+```
+
+**M3 — overbooking.** Concurrent leased rows must never exceed the agent's
+`max_parallel_tasks`. This is the 2x-concurrency failure the #1766 gate closes;
+canary S-02 cannot see it (it counts `ZCARD` only), so it needs its own check.
+Sample on a short interval during peak, not once.
+
+```sql
+SELECT o.agent_name, o.max_parallel_tasks AS cap,
+       COUNT(*) FILTER (WHERE e.lease_expires_at IS NOT NULL) AS leased_running,
+       COUNT(*) FILTER (WHERE e.lease_expires_at IS NULL)     AS pushed_running
+FROM agent_ownership o
+LEFT JOIN schedule_executions e
+       ON e.agent_name = o.agent_name AND e.status = 'running'
+WHERE o.agent_name = '<agent>'
+GROUP BY 1, 2;
+```
+
+Verdict: `leased_running <= cap` always. `leased_running > 0 AND pushed_running > 0`
+for an autonomous workload means coexistence is still live.
+
+**M4 — lost / phantom executions.** Any non-terminal row older than the lease
+window is the headline AC failing.
+
+```sql
+SELECT id, status, triggered_by, started_at, lease_expires_at,
+       claimed_by_worker, redelivery_count,
+       EXTRACT(epoch FROM (now() - started_at::timestamptz))::int AS age_s
+FROM schedule_executions
+WHERE agent_name = '<agent>'
+  AND status IN ('queued', 'running')
+  AND started_at::timestamptz < now() - interval '2 hours'
+ORDER BY started_at;
+```
+
+Expect **zero rows**. A `running` row past its `lease_expires_at` that the reaper
+has not touched is a reaper failure; a `queued` row aging with idle workers is a
+claim failure.
+
+**M5 — re-delivery + poison-park.** Proves the lease machinery behaves under real
+load rather than in the 2026-07-08 synthetic pilot.
+
+```sql
+SELECT redelivery_count, COUNT(*)
+FROM schedule_executions
+WHERE agent_name = '<agent>'
+  AND started_at::timestamptz > now() - interval '7 days'
+GROUP BY 1 ORDER BY 1;
+```
+
+Healthy: overwhelmingly `0`, a thin tail at 1–2, nothing at `MAX_REDELIVERY`
+without a matching operator alert. Cross-check the parks:
+
+```sql
+SELECT id, agent_name, title, created_at, status
+FROM operator_queue
+WHERE id LIKE 'poison-%' AND created_at::timestamptz > now() - interval '7 days'
+ORDER BY created_at DESC;
+```
+
+Every row at the cap in the first query must have a `poison-` item here. A park
+with no alert is a silent drop — treat as a blocker.
+
+**M6 — outcome regression.** Compare against the pre-flight baseline. Bound this
+on the flip timestamp — **not** a rolling `interval '7 days'`, which straddles the
+flip and blends control rows into the treatment number, diluting the exact
+regression the query exists to find.
+
+```sql
+-- :flip_ts = the moment the pilot agent was RECREATED (not the backend restart)
+SELECT status, COUNT(*),
+       ROUND(AVG(duration_ms)::numeric, 0) AS avg_ms,
+       ROUND(SUM(cost)::numeric, 4)        AS cost
+FROM schedule_executions
+WHERE agent_name = '<agent>'
+  AND started_at::timestamptz >= :flip_ts
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Watch for a `failed` share above baseline and for `duration_ms` inflation (pull
+adds up to one poll interval of latency by design — the worker idles up to 15s
+between claims, so a small p50 rise is expected, a p95 blow-up is not).
+
+> **M6 alone will over-credit pull. Do not read a lower `failed` share as a win.**
+>
+> Under push, a caller that gives up (`chat_with_agent` sequential, or any `/task`
+> caller with a short budget) kills the turn and the row is written `failed` with
+> `Task execution timed out after N seconds`. Under pull that budget no longer
+> governs the row: the lease is `execution_timeout_seconds + SLOT_TTL_BUFFER`, so
+> the work runs to its natural end and the row lands **`success`** — while the
+> caller still got nothing in time. Nothing improved; the failure moved off the
+> row.
+>
+> The row cannot tell you this happened. `schedule_executions` never records the
+> caller's timeout budget, so no query over it can separate "pull fixed it" from
+> "pull outran the caller." A pilot whose baseline carries a meaningful
+> `caller_timeout` share can therefore book a large, entirely fake M6 improvement.
+>
+> **The check is M9 (caller-side), and it must be baselined before the flip** —
+> afterwards the information no longer exists.
+
+**M7 — canary.** With E-05 lease-excluded (this branch), violations should be
+genuinely rare.
+
+```sql
+SELECT invariant_id, severity, COUNT(*), MAX(snapshot_time) AS last_seen
+FROM canary_violations
+WHERE snapshot_time::timestamptz > now() - interval '7 days'
+GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+Any **S-01 / S-02 / E-01 / E-02 / L-03** hit on the pilot is an abort signal.
+E-05 hits mean the lease exclusion is not deployed — verify the build.
+
+**M8 — starvation.** Queue depth should oscillate, not climb monotonically.
+
+```sql
+SELECT COUNT(*) AS queued,
+       EXTRACT(epoch FROM (now() - MIN(queued_at)::timestamptz))::int AS oldest_s
+FROM schedule_executions
+WHERE agent_name = '<agent>' AND status = 'queued';
+```
+
+A steadily rising `oldest_s` with healthy workers means claims are failing;
+with busy workers it just means the agent is undersized — check M3 before
+concluding.
+
+**M9 — caller-side timeouts (the M6 counter-check).** The only observable that
+survives the flip. Under push, a caller giving up produces BOTH a
+`[Chat Timeout Recovery]` line in the MCP server and a `failed` row; under pull it
+produces the log line and a `success` row. So the two counts **diverging** is the
+signature of the M6 trap, and neither count alone is interpretable.
+
+```bash
+# Durable copy (Vector, survives container log rotation — #1871 bounds docker logs)
+docker exec trinity-vector sh -c \
+  "grep -h 'Chat Timeout Recovery' /data/logs/platform.json" \
+  | jq -r 'select(.message | contains("<agent>")) | .timestamp' | sort | uniq -c
+
+# Live tail equivalent
+docker logs trinity-mcp-server 2>&1 | grep -c "Chat Timeout Recovery.*<agent>"
+```
+
+Read it against M6's `caller_timeout` baseline class:
+
+| M9 log lines | M6 `caller_timeout` rows | Reading |
+|---|---|---|
+| ~baseline | ~0 (was N) | **The trap.** Callers still time out; the rows just stopped recording it. No improvement. |
+| ~0 | ~0 | Genuine — callers now get answers inside their budget. |
+| ↑ above baseline | ~0 | Regression: pull's poll interval pushed more callers past their budget. |
+
+**Limitation, stated so it isn't rediscovered mid-analysis:** true
+receipt→terminal wall-clock — the number the calling orchestrator actually feels
+(`PULL_PILOT_946_SOAK.md` §3a) — is recorded **nowhere** on the platform. The row
+carries no caller budget and no receipt timestamp. If that number is wanted, the
+caller has to log it, and that instrumentation must exist *before* the flip.
+
+### Abort criteria
+
+Stop the soak and revert if any of these hold: a non-empty **M4**; **M3**
+`leased_running > cap`; a critical canary violation on the pilot (**M7**); a
+park with no operator alert (**M5**); or a `failed` share materially above the
+pre-flight baseline (**M6**), **excluding the `quota` class** — a subscription
+limit is exogenous and reverting pull will not fix it.
+
+M9 is **not** an abort criterion; it is the interpretation guard on M6. A soak
+that ends with a *better* M6 and an unchanged M9 has not demonstrated anything
+and must not be written up as a pass.
+
+**A pre-existing critical violation on the candidate pilot has to be resolved or
+explicitly carved out before the flip**, not during the window — otherwise the
+soak trips its own abort rule at t=0, or worse, trains the operator to ignore the
+one signal the "canary green throughout" AC rests on.
+
+### Rollback
+
+Remove the agent from `PULL_MODE_PILOT_AGENTS` → restart backend → **recreate the
+agent** (the flag only clears at create/recreate; `PULL_MODE_ENV_KEYS` is popped
+on recreate precisely so de-piloting takes effect). Queued rows are picked up by
+the backend drain again as soon as the pilot guard stops matching, so in-flight
+work is not stranded.
+
+---
 
 ## Appendix — key file references
 

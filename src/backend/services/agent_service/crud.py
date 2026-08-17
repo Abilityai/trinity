@@ -3,6 +3,7 @@ Agent Service CRUD - Agent creation and deletion operations.
 
 Contains the core logic for creating and deleting agents.
 """
+import asyncio
 import os
 import re
 import json
@@ -12,27 +13,35 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yaml
 from fastapi import HTTPException, Request
 
 from models import AgentConfig, AgentStatus, User
+from db_models import ScheduleCreate
 from database import db
 from services.docker_service import (
     docker_client,
     get_agent_by_name,
+    get_agent_container,
     get_next_available_port,
     get_agent_status_from_container,
 )
 from services.docker_utils import (
-    volume_get, volume_create, containers_run
+    volume_get, volume_create, containers_run, container_remove
 )
-from services.agent_runtime_state import clear_agent_breakers
+from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
 from services.template_service import (
+    CredentialDeclarationError,
+    credential_mcp_server_names,
+    fetch_template_metadata_result_for_create,
     get_github_template,
+    metadata_reason_is_unreadable,
     generate_credential_files,
 )
+from services.template_schedules import normalize_declared_schedules
+from services.template_plugins import normalize_declared_plugins
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -40,11 +49,19 @@ from services import rate_limiter
 from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
-from utils.helpers import sanitize_agent_name, to_utc_iso, utc_now_iso
+from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
+from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import fork_template_to_own_repo
+from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
-from .capabilities import AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR, normalize_cpu, normalize_memory
+from .capabilities import (
+    AGENT_TMPFS_MOUNT,
+    AGENT_DEFAULT_TMPDIR,
+    AGENT_LOG_CONFIG,
+    normalize_cpu,
+    normalize_memory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +70,12 @@ logger = logging.getLogger(__name__)
 # directory join in `create_agent_internal` can't escape into arbitrary
 # filesystem reads (CodeQL py/path-injection on #950 PR).
 _LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+# Allowed chars in a template-declared credential-file path. Unlike
+# `_LOCAL_TEMPLATE_NAME_RE` this is a *relative path*, so `/` is permitted —
+# but nothing that could start an absolute path or a traversal.
+# (trinity-enterprise#128)
+_CRED_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 
 _CONTAINER_CURATED_TEMPLATES = Path("/agent-configs/templates")
 
@@ -120,9 +143,14 @@ def _default_host_templates_base() -> str:
 
 
 # Roots that a resolved local-template path must stay within (#950). Read at
-# TWO seams — `_resolve_local_template` and the `/template` bind decision in
-# `_stage_config_files` — which must always agree (#1759). Kept a module-level
-# tuple: it is the single monkeypatch point the create tests use.
+# THREE seams — `_resolve_local_template`, the `/template` bind decision in
+# `_stage_config_files`, and (since #1900) the credential-file stager in the
+# same function — which must always agree (#1759). The first two were named by
+# #1759; the third existed all along and did NOT agree, because it re-derived
+# the directory from the template's untrusted `name:` field. Two of the three
+# now share `_resolve_local_template_dir`, which is what makes the agreement
+# structural rather than a convention. Kept a module-level tuple: it is the
+# single monkeypatch point the create tests use.
 _LOCAL_TEMPLATE_ROOTS = (
     _curated_templates_root(),
     Path("/data/deployed-templates").resolve(),
@@ -168,6 +196,65 @@ def _safe_local_template_path(template_name: str, root: Path) -> Path:
                     f"Resolved template path {candidate} escaped expected root {root}."
                 ),
                 "code": "INVALID_LOCAL_TEMPLATE_NAME",
+            },
+        )
+    return candidate
+
+
+def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
+    """Join a template-declared credential-file path onto `root`, proving it stays inside.
+
+    `credentials.config_files[].path` is an author-controlled string that ends
+    up as `open(root / path, "w")`, and a template is untrusted input — any
+    authenticated user can upload one through `deploy_local_agent_logic`. An
+    absolute path silently wins the join (`Path("/a") / "/etc/x"` is `/etc/x`)
+    and `..` walks out of it, so without this the declaration is an
+    arbitrary-file-write primitive. (trinity-enterprise#128)
+
+    `template_service.credential_shape_errors` already rejects both shapes at
+    the parse boundary; this is the barrier at the sink. Two steps, mirroring
+    `_safe_local_template_path`:
+
+    1. Allowlist the raw string — reject empty, absolute, `..`-bearing and
+       anything outside `[A-Za-z0-9._/-]`, BEFORE it reaches the join.
+    2. Resolve the joined path and assert `is_relative_to(root)`.
+
+    Step 1 is not redundant: it is what makes the guard legible to a reader
+    *and* to CodeQL, which does not treat resolve + `is_relative_to` alone as a
+    `py/path-injection` barrier (this helper was flagged high-severity twice
+    when it had only step 2).
+
+    Raises `HTTPException(400)` with code `INVALID_CREDENTIAL_FILE_PATH`.
+    """
+    if (
+        not relative_path
+        or relative_path.startswith("/")
+        or ".." in relative_path
+        or not _CRED_FILE_PATH_RE.match(relative_path)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template credential file path {relative_path!r} is not a "
+                    f"plain relative path inside the agent's credential "
+                    f"directory."
+                ),
+                "code": "INVALID_CREDENTIAL_FILE_PATH",
+            },
+        )
+
+    root = root.resolve()
+    candidate = (root / relative_path).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template credential file path {relative_path!r} escapes "
+                    f"the agent's credential directory."
+                ),
+                "code": "INVALID_CREDENTIAL_FILE_PATH",
             },
         )
     return candidate
@@ -241,6 +328,25 @@ class _TemplateResolution:
     git_working_branch: Optional[str] = None
     fork_upstream_repo: Optional[str] = None
     template_shared_folders: Optional[dict] = None
+    # trinity-enterprise#89: NORMALIZED declared `schedules:`, fed by BOTH
+    # resolver branches. Deliberately NOT folded into `template_data`, which
+    # carries two different shapes: raw template YAML on the `local:` path and
+    # `{}` on the `github:` path (which has never populated it — hence #383's
+    # `persistent_state` and #1169's `data_paths` being silently `local:`-only).
+    # `_stage_config_files` gates credential-file generation on
+    # `if template_data:`, and the `github:` catalog dict has no `credentials`
+    # key at all, so merging the two would change credential generation for
+    # every GitHub agent. One normalized carrier, two producers.
+    declared_schedules: list = field(default_factory=list)
+    # #1704: NORMALIZED declared `plugins:` (Claude Code marketplace plugins),
+    # fed by ALL THREE resolver branches — same one-carrier-two-producers shape
+    # as `declared_schedules`, NOT folded into `template_data` (the `github:`
+    # path never populates it). Empty dict = opt-in no-op.
+    declared_plugins: dict = field(default_factory=dict)
+    # trinity-enterprise#15: staged backend-materialized snapshot for the
+    # "copy" import intent. When set, `github_repo_for_agent` stays None by
+    # design — the container gets NO GitHub env, no git-config row, no PAT.
+    copy_snapshot: Optional["snapshot_import.SnapshotStaging"] = None
 
 
 @dataclass
@@ -254,6 +360,18 @@ class _RollbackHandles:
     github_repo_for_agent: Optional[str] = None
     ephemeral_slot_reserved: bool = False
     ephemeral_owner_id: Optional[int] = None
+    # ent#313: wall-clock instant captured immediately BEFORE the docker block.
+    # A container carrying a `trinity.created` label older than this existed
+    # before this attempt, so this attempt did not create it and must not
+    # remove it. See `_reclaim_failed_creation_container`.
+    container_floor_ts: Optional[str] = None
+    # trinity-enterprise#15: copy-intent snapshot cleanup — the staged clone
+    # dir (always removable) and the volume THIS attempt pre-populated (set
+    # only after `_prepopulate_workspace_from_template` succeeds, so the
+    # rollback never removes a volume another owner claims; removing it keeps
+    # the #1667 leftover-volume guard from 409ing the user's retry).
+    copy_staging_dir: Optional[str] = None
+    copy_volume_name: Optional[str] = None
 
 
 def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Optional[str]:
@@ -418,6 +536,76 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     return template_lookup, template_str, url_branch
 
 
+def _read_source_template(
+    repo: str, pat: Optional[str], ref: Optional[str]
+) -> tuple:
+    """The ONE creation-time read of a `github:` template's `template.yaml`.
+    Returns `(metadata, reason)`.
+
+    Deliberately NOT the catalog's `gh_template` (trinity-enterprise#89 R2):
+    that dict comes from `_get_cached_metadata`, which reads with the **global
+    platform** PAT off the **default branch** through a 10-minute per-process
+    cache. Creation resolves its PAT completely differently (per-agent ->
+    per-user -> global, ent#162), so a user creating from their own private repo
+    with their own token would clone successfully and then read zero
+    declarations with no signal at all — the exact silent-ignore class this
+    feature exists to close, reintroduced one layer up.
+
+    ent#89 wrote that warning about `schedules:` and then the ent#14 fork gate
+    was built on the catalog dict anyway, one line below the call site that had
+    already read the file correctly (trinity-enterprise#14 S2). So this returns
+    the whole `(metadata, reason)` pair and BOTH consumers — the schedules
+    normalizer and the `fork_to_own` gate — read it. One GitHub call, one set of
+    credentials, one ref, and no second source that can disagree.
+
+    Non-fatal by construction for schedules (the normalizer is total, and any
+    failure yields `{}` plus a WARNING naming the repo, the ref and the reason).
+    The `reason` is what makes the gate's fail-closed decision possible.
+    """
+    return fetch_template_metadata_result_for_create(repo, pat=pat, ref=ref)
+
+
+def _declared_schedules_for_snapshot(snapshot) -> list:
+    """Normalized `schedules:` for a copy-intent agent, read from the STAGED
+    tree (trinity-enterprise#15) — the snapshot's exact content is the truth,
+    so no API re-fetch (which could see a different ref). Non-fatal by
+    construction, mirroring `_declared_schedules_for_github`."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return []
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return []
+        return normalize_declared_schedules(metadata.get("schedules"))
+    except Exception as e:  # noqa: BLE001 — schedules are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml schedules for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return []
+
+
+def _declared_plugins_for_snapshot(snapshot) -> dict:
+    """Normalized `plugins:` for a copy-intent agent, read from the STAGED tree
+    (#1704) — twin of `_declared_schedules_for_snapshot`. Non-fatal: plugins are
+    advisory, so any read failure yields the opt-in empty declaration."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return {}
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return {}
+        return normalize_declared_plugins(metadata.get("plugins"))
+    except Exception as e:  # noqa: BLE001 — plugins are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml plugins for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return {}
+
+
 def _gate_tokenless_request(
     config: AgentConfig, github_pat: str
 ) -> Optional[str]:
@@ -512,14 +700,103 @@ async def _apply_fork_to_own(
     github_pat_for_agent: Optional[str],
     github_pat_tier: str,
     url_branch: Optional[str],
+    *,
+    source_metadata: dict,
+    source_metadata_reason: Optional[str],
 ) -> tuple[str, Optional[str], str, Optional[str]]:
     """trinity-enterprise#93: enforce a `fork_to_own: required` template and, when
     the caller forks, copy the template into a user-owned repo and return the
     updated `(repo, pat, tier, fork_upstream_repo)`. Runs BEFORE the docker
     try-block so the structured FORK_* errors reach the UI. When the caller is
     NOT forking the inputs pass through unchanged (tier untouched)."""
-    fork_meta = (gh_template or {}).get("fork_to_own")
-    if fork_meta == "required" and not config.fork_to_own:
+    # trinity-enterprise#14 F2 — an unreadable template.yaml is UNKNOWN, not absent.
+    #
+    # The chain this closes, every link verified in source:
+    #   _fetch_template_yaml_result()  -> ({}, "HTTP 403") on a rate limit
+    #   _build_template()              -> "fork_to_own": None
+    #   the test below                 -> `None == "required"` is False
+    #   => the gate never fires and the agent is created bound to the SHARED
+    #      UPSTREAM TEMPLATE REPO instead of a user-owned copy.
+    #
+    # `fork_to_own: required` exists precisely to stop that, and the failure is
+    # silent: the user's knowledge base ends up in the wrong place with no error.
+    # It is the ent#162 class ("a private KB could reach the shared public
+    # upstream") reached without any attacker.
+    #
+    # Pre-existing, but the remote template registry converts it from
+    # unreachable to EXPECTED: it re-introduces per-repo GitHub metadata fetches
+    # on a DEFAULT install (#1931 had driven them to zero), ships default-on, and
+    # its own arithmetic — workers x windows/hr x entries — exceeds GitHub's
+    # 60/hr ANONYMOUS limit above ~5 listed repos, while the curated fleet is
+    # very likely to include the fork_to_own template (Cornelius).
+    #
+    # WHICH READ DECIDES (trinity-enterprise#14 S2). Both inputs below come from
+    # `_read_source_template` — the creation-path read — and NOT from
+    # `gh_template`, whose `metadata_unavailable`/`fork_to_own` are computed from
+    # `_get_cached_metadata_result`: the global platform PAT, off the default
+    # branch, through a 600s cache. Reading the catalog here failed in both
+    # directions at once:
+    #
+    #   FALSE PASS. GitHub answers 404 — not 403 — for a repo a token cannot
+    #   see. So a PRIVATE `fork_to_own: required` template that only the
+    #   creator's per-user PAT can read (ent#162, a supported flow) came back
+    #   `("HTTP 404" -> absent, fork_to_own=None)`, the gate passed, and the
+    #   agent bound to the shared upstream. The precise outcome this gate
+    #   exists to prevent, with no attacker involved. Note that fixing only
+    #   the availability half would NOT have closed it: the `fork_to_own`
+    #   VALUE has to come from the correctly-credentialed read too, which is
+    #   why `source_metadata` is threaded in beside the reason.
+    #
+    #   FALSE REFUSE. A creator whose own PAT reads the template fine was 503'd
+    #   because the SHARED cache entry said 403 — for the full 600s TTL, on
+    #   every non-forking `github:` create, including the plain
+    #   `github:owner/repo` escape hatch.
+    #
+    # Costs zero extra GitHub calls: `_resolve_template` already made this read
+    # one call earlier, for ent#89's schedules, with the PAT that will clone.
+    # That last part is the structural argument — the read that DECIDES is now
+    # made with the same credentials as the clone that follows, so "we could not
+    # see it" and "the agent could not have cloned it" can no longer disagree.
+    #
+    # Scoped to the branch that is actually unsafe. A caller who IS forking ends
+    # up with a user-owned repo whatever the template declares, so an outage must
+    # not block them; only the non-forking path has to treat unknown as refuse.
+    # A clean HTTP 404 stays "absent" (`metadata_reason_is_unreadable`), so a repo
+    # that genuinely ships no template.yaml creates exactly as it always has —
+    # and on this path a 404 the creator's own token cannot get past is caught
+    # loudly downstream by `_validate_github_access` anyway.
+    #
+    # The trade is deliberate: creation now depends on GitHub API reachability
+    # where it previously depended only on `git clone`. A loud, retryable refusal
+    # beats a silent wrong-repo binding — the learnings.md 2026-07-15
+    # direction-of-failure rule, applied to a gate instead of a retention window.
+    if metadata_reason_is_unreadable(source_metadata_reason) and not config.fork_to_own:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    f"Could not read '{config.template}' template metadata from "
+                    f"GitHub, so Trinity cannot tell whether this template must "
+                    f"be copied into a repo you own. Refusing rather than "
+                    f"guessing. This is usually a transient GitHub rate limit — "
+                    f"retry shortly, or configure a platform GitHub token in "
+                    f"Settings to raise the limit from 60 to 5000 requests/hour."
+                ),
+                "code": "TEMPLATE_METADATA_UNAVAILABLE",
+            },
+        )
+
+    # The union, not a precedence: `required` from EITHER read wins. The
+    # creation read is the better one (right credentials, pinned ref, no cache),
+    # but taking it alone would mean a repo whose default branch declares
+    # `required` could be created from an `@branch` that drops the line. Both
+    # sources feed one boolean, so this change can only ever REMOVE a false pass
+    # relative to the catalog-only gate, never add one.
+    declared_fork_modes = {
+        (source_metadata or {}).get("fork_to_own"),
+        (gh_template or {}).get("fork_to_own"),
+    }
+    if "required" in declared_fork_modes and not config.fork_to_own:
         raise HTTPException(
             status_code=400,
             detail={
@@ -737,6 +1014,25 @@ async def _reserve_git_instance(
     return git_instance_id, git_working_branch
 
 
+def _resolve_local_template_dir(raw_name: str) -> Path:
+    """Curated root first, then the deploy-local store (#950) — the single
+    definition of "where does `local:<raw_name>` live".
+
+    Every candidate is `_safe_local_template_path`-validated (regex barrier +
+    `is_relative_to` barrier) before any filesystem access, so the returned path
+    is proven to be inside one of `_LOCAL_TEMPLATE_ROOTS`.
+
+    Extracted in #1900 so the THREE seams that must agree cannot drift: the
+    resolver, the `/template` bind decision, and the credential-file stager.
+    #1759 named the first two; the third existed and re-derived the directory
+    from the template's own untrusted `name:` field instead of reusing this.
+    """
+    candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+    if not (candidate / "template.yaml").exists():
+        candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+    return candidate
+
+
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
@@ -759,13 +1055,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     # is validated + resolved to prove it stays under the root before
     # any filesystem access (regex barrier + is_relative_to barrier).
     raw_name = config.template[6:]
-    template_path = _safe_local_template_path(
-        raw_name, _LOCAL_TEMPLATE_ROOTS[0]
-    )
-    if not (template_path / "template.yaml").exists():
-        template_path = _safe_local_template_path(
-            raw_name, _LOCAL_TEMPLATE_ROOTS[1]
-        )
+    template_path = _resolve_local_template_dir(raw_name)
 
     template_yaml = template_path / "template.yaml"
 
@@ -778,8 +1068,10 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     if template_yaml.exists():
         try:
             with open(template_yaml) as f:
-                template_data = yaml.safe_load(f)
-        except (OSError, yaml.YAMLError) as e:
+                # ent#314: hardened parse — this is the create path for a
+                # template that may have come from any public repo.
+                template_data = load_template_yaml(f.read())
+        except (OSError, yaml.YAMLError, HardenedYamlError) as e:
             # #1759: previously swallowed by the broad `except Exception:
             # logger.warning(...)` below, which produced the *identical*
             # observable outcome as an absent template — blank agent, HTTP 200 —
@@ -824,11 +1116,18 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
         # its template files and only some config mutations are skipped.
         # Unchanged pre-#1759 behaviour, deliberately left out of scope.
         try:
-            config.type = template_data.get("type", config.type)
+            # #2104: template.yaml `type:` stays parseable but is ignored —
+            # the agent type taxonomy is retired (tags classify agents).
             config.resources = template_data.get("resources", config.resources)
             config.tools = template_data.get("tools", config.tools)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
+            # Read through the tolerant accessor rather than reaching straight
+            # through the block. `creds.get("mcp_servers", {}).keys()` raises
+            # AttributeError on a null / list / string `credentials:`, and the
+            # broad `except` below then silently drops this template's `runtime:`
+            # and `shared_folders:` config alongside the credential parse — one
+            # malformed key costing the agent three unrelated ones.
+            # (trinity-enterprise#128)
+            mcp_servers = credential_mcp_server_names(template_data.get("credentials"))
             if mcp_servers:
                 config.mcp_servers = mcp_servers
             # Multi-runtime support - extract runtime config from template
@@ -909,6 +1208,61 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             },
         )
 
+    # trinity-enterprise#15: import-intent intake gates, all pre-side-effect.
+    if config.import_intent:
+        if not (config.template or "").startswith("github:"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "import_intent requires a 'github:owner/repo' template "
+                        "— fork/copy/clone are meaningless without a source repo."
+                    ),
+                    "code": "INTENT_REQUIRES_GITHUB_TEMPLATE",
+                },
+            )
+        if config.import_intent == "fork" and not config.fork_to_own:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "import_intent 'fork' needs the fork_to_own block "
+                        "(destination_repo + github_pat) — the fork is created "
+                        "in YOUR account."
+                    ),
+                    "code": "FORK_PARAMS_REQUIRED",
+                },
+            )
+        if config.import_intent == "copy" and config.ephemeral:
+            # Ghosts are volume-less by invariant (ent#69) and the snapshot
+            # lives on the workspace volume — the combination would boot a
+            # green blank ghost and strand the populated volume (review F2).
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "import_intent 'copy' cannot be combined with "
+                        "ephemeral — a snapshot needs the durable workspace "
+                        "volume that ghost agents deliberately do not mount."
+                    ),
+                    "code": "COPY_EPHEMERAL_UNSUPPORTED",
+                },
+            )
+        if config.import_intent in ("copy", "clone") and config.fork_to_own:
+            # A stray fork block with an explicit non-fork intent would
+            # otherwise silently create a GitHub repo (fork_to_own triggers on
+            # block presence alone) — refuse the contradiction by name.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"import_intent '{config.import_intent}' contradicts "
+                        f"the fork_to_own block — remove one of them."
+                    ),
+                    "code": "INTENT_FORK_BLOCK_CONFLICT",
+                },
+            )
+
     # Load template configuration
     if config.template:
         # #843: reject template strings that don't start with a known
@@ -933,6 +1287,65 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
         if config.template.startswith("github:"):
             template_lookup, repo_path, url_branch = _parse_github_ref(config)
+
+            if config.import_intent == "copy":
+                # trinity-enterprise#15: backend-materialized snapshot. The
+                # staged clone IS the reachability check (same transport class
+                # as ent#123's probe); the tokenless source-mode gate is
+                # deliberately NOT run — that 400 protects boot-time push, and
+                # copy never pushes. `github_repo_for_agent` stays None so the
+                # container gets no GitHub env, no git-config row is reserved,
+                # and the PAT-persist site below never fires.
+                gh_template = get_github_template(template_lookup)
+                if (gh_template or {}).get("fork_to_own") == "required":
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": (
+                                "This template requires fork-to-own creation "
+                                "— use import_intent 'fork' with a "
+                                "fork_to_own block."
+                            ),
+                            "code": "FORK_TO_OWN_REQUIRED",
+                        },
+                    )
+                if gh_template:
+                    # Catalog parity with `_resolve_github_repo_and_pat`: the
+                    # catalog id maps to its declared repo, and the template's
+                    # resource/MCP defaults still apply to the snapshot agent.
+                    copy_repo = gh_template["github_repo"]
+                    config.resources = gh_template.get("resources", config.resources)
+                    config.mcp_servers = gh_template.get("mcp_servers", config.mcp_servers)
+                else:
+                    if "/" not in repo_path:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch",
+                        )
+                    copy_repo = repo_path
+                copy_pat, _copy_tier = resolve_github_pat(
+                    owner_id=current_user.id
+                )
+                # GIT-002 parity with startup.sh (`-b` only when ≠ "main"):
+                # the default "main" means "the repo's default branch".
+                copy_branch = (
+                    config.source_branch
+                    if config.source_branch and config.source_branch != "main"
+                    else None
+                )
+                tr.copy_snapshot = await snapshot_import.stage_github_snapshot(
+                    copy_repo,
+                    copy_branch,
+                    copy_pat or None,
+                )
+                tr.declared_schedules = _declared_schedules_for_snapshot(
+                    tr.copy_snapshot
+                )
+                tr.declared_plugins = _declared_plugins_for_snapshot(
+                    tr.copy_snapshot
+                )
+                return tr
+
             (
                 gh_template,
                 tr.github_repo_for_agent,
@@ -940,6 +1353,21 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.github_pat_tier,
             ) = _resolve_github_repo_and_pat(
                 config, current_user, template_lookup, repo_path
+            )
+            # Read the SOURCE template's declarations here, before
+            # `_apply_fork_to_own` swaps in the user's fork + PAT: this pairing
+            # (source repo, PAT resolved to read it) is the one that can
+            # actually see a private template. ONE read feeds both consumers —
+            # ent#89's schedules and ent#14's fork gate (which used to decide
+            # from the catalog cache instead; see `_apply_fork_to_own`).
+            source_metadata, source_metadata_reason = _read_source_template(
+                tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch
+            )
+            tr.declared_schedules = normalize_declared_schedules(
+                source_metadata.get("schedules")
+            )
+            tr.declared_plugins = normalize_declared_plugins(
+                source_metadata.get("plugins")
             )
             (
                 tr.github_repo_for_agent,
@@ -954,6 +1382,8 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.github_pat_for_agent,
                 tr.github_pat_tier,
                 url_branch,
+                source_metadata=source_metadata,
+                source_metadata_reason=source_metadata_reason,
             )
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
@@ -965,38 +1395,73 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
+            # Same normalizer as the `github:` branch above — symmetric by
+            # construction, so neither source can quietly diverge.
+            tr.declared_schedules = normalize_declared_schedules(
+                tr.template_data.get("schedules")
+            )
+            tr.declared_plugins = normalize_declared_plugins(
+                tr.template_data.get("plugins")
+            )
     return tr
 
 
 def _stage_config_files(
-    config: AgentConfig, template_data: dict, github_template_path: Optional[str]
+    config: AgentConfig, template_data: dict,
+    github_template_path: Optional[Union[Path, str]]
 ) -> tuple[Path, Path, Optional[dict], Optional[dict]]:
     """CRED-002: write the agent-config.yaml + empty credentials.json + template
     cred files under /tmp and compute the template/cred bind specs. Also
     normalizes + writes back the resource fields (#1197) so container labels +
     limits use canonical values. Returns
     `(config_path, credentials_path, template_volume, cred_files_volume)`."""
+    # #1900: hand `generate_credential_files` the directory we ALREADY validated
+    # rather than letting it re-derive one from the template's untrusted `name:`
+    # field (a traversal into any readable `.mcp.json`). This is the same
+    # `_safe_local_template_path`-validated ladder the `/template` bind decision
+    # below uses, so all three seams agree by construction (#1759).
+    local_template_base = None
+    if config.template and config.template.startswith("local:"):
+        # Cannot newly raise: `_resolve_local_template` already ran this exact
+        # `raw_name` through the same barrier before `template_data` could be
+        # non-empty, and a templateless agent has a falsy `config.template`.
+        local_template_base = _resolve_local_template_dir(config.template[6:])
+
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
-        generated_files = generate_credential_files(
-            template_data, {}, config.name,
-            template_base_path=github_template_path
-        )
+        try:
+            generated_files = generate_credential_files(
+                template_data, {}, config.name,
+                # `github_template_path` first so the field's eventual revival
+                # wins; it has zero writers today (#1900 follow-up).
+                template_base_path=github_template_path or local_template_base
+            )
+        except CredentialDeclarationError as e:
+            # Invariant #1: the service raises an HTTP-free domain error and
+            # this, its only caller, maps it 1:1. A named 400 beats both of the
+            # alternatives it replaces — an uncaught TypeError (500) and a
+            # silently corrupt `.env`. (trinity-enterprise#128)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": str(e),
+                    "code": "INVALID_CREDENTIAL_DECLARATION",
+                },
+            )
 
     cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
     cred_files_dir.mkdir(exist_ok=True)
 
     # Write template-generated files (.env, .mcp.json, etc.)
     for filepath, content in generated_files.items():
-        file_path = cred_files_dir / filepath
+        file_path = _safe_cred_file_path(filepath, cred_files_dir)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, "w") as f:
             f.write(content)
 
     agent_config = {
         "agent": {
-            "type": config.type,
             "base_image": config.base_image,
             "resources": config.resources,
             "tools": config.tools,
@@ -1079,7 +1544,6 @@ def _build_base_env(config: AgentConfig) -> dict:
     stall-watchdog ceiling and GUARD-001 guardrails overrides."""
     env_vars = {
         'AGENT_NAME': config.name,
-        'AGENT_TYPE': config.type,
         'CREDENTIALS_FILE': '/config/credentials.json',
         'ANTHROPIC_API_KEY': get_anthropic_api_key(),
         'ENABLE_SSH': 'true',
@@ -1102,6 +1566,15 @@ def _build_base_env(config: AgentConfig) -> dict:
     _stall_limit = (os.getenv('AGENT_TOOL_STALL_LIMIT_S') or '').strip()
     if _stall_limit:
         env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
+
+    # #2127: operator-configurable headless early-finalize idle ceiling. Same
+    # propagation idiom as the stall limit above — unset leaves the agent-side
+    # default (300s). This is the documented escape hatch for the known bound
+    # that agents with an execution timeout under the ceiling lose #970's early
+    # finalize, so it has to actually be settable end to end.
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
+    if _idle_finalize:
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
 
     # GUARD-001: per-agent guardrails overrides (empty by default; baseline
     # is always applied inside the container).
@@ -1238,7 +1711,13 @@ def _apply_github_env(
         # ent#123: `and github_pat_for_agent` is a belt — tokenless is
         # provably source-mode+non-fork today, but auto-push must never
         # engage without credentials if that restriction is ever relaxed.
-        if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
+        # #2069: this exact condition is the single owner
+        # `git_service._git_auto_sync_baked`, shared with the creation-time
+        # `.gitignore` merge spawn so the merge covers EXACTLY the population
+        # whose in-container auto-sync loop commits (ephemeral ghosts included).
+        if git_service._git_auto_sync_baked(
+            config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+        ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -1449,10 +1928,19 @@ async def _build_volume_mounts(
     # /home/developer lives on the container writable layer (overlayfs),
     # auto-reclaimed by container removal. Volumes exist to survive
     # recreate, and ghosts never recreate.
+    # #1811: the `encrypted-data:/data` mount was removed rather than copied
+    # into the recovery path. It was dead AND unsafe:
+    #   * nothing in the agent image ever touched /data — the Dockerfile only
+    #     `mkdir`s it, and no code in docker/base-image references it;
+    #   * the volume name was a LITERAL, so a single volume was mounted rw into
+    #     every agent at once — a cross-agent read/write surface in a product
+    #     whose premise is per-agent isolation. Unused today is not a guarantee.
+    # Removing it here (instead of adding it to recreate_missing_container)
+    # makes both paths agree and closes the surface. The volume itself is not
+    # deleted, so anything historically written to it remains on the host.
     volumes = {
         str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
         str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
-        'encrypted-data': {'bind': '/data', 'mode': 'rw'},
     }
     if not config.ephemeral:
         await _workspace_volume_mount(config, volumes)
@@ -1488,7 +1976,6 @@ async def _create_agent_container(
     container_labels = {
         'trinity.platform': 'agent',
         'trinity.agent-name': config.name,
-        'trinity.agent-type': config.type,
         'trinity.ssh-port': str(config.port),
         'trinity.cpu': config.resources['cpu'],
         'trinity.memory': config.resources['memory'],
@@ -1498,6 +1985,10 @@ async def _create_agent_container(
         'trinity.full-capabilities': str(full_capabilities).lower(),
         'trinity.base-image-version': get_platform_version()
     }
+    if config.import_intent:
+        # trinity-enterprise#15: ops-visible import provenance (a copy agent
+        # is otherwise indistinguishable from a local agent post-hoc).
+        container_labels['trinity.import-intent'] = config.import_intent
     if config.ephemeral:
         # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
         # orphan pass reclaims labeled containers whose ownership row
@@ -1527,6 +2018,10 @@ async def _create_agent_container(
         # Always apply noexec,nosuid to /tmp for security (#1098: scratch
         # is redirected off this tiny tmpfs via the TMPDIR env var).
         tmpfs=AGENT_TMPFS_MOUNT,
+        # #1871: bound the container's json-file log. Docker's default is
+        # unbounded, so without this the log grows until the Docker data root
+        # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
+        log_config=AGENT_LOG_CONFIG,
         network='trinity-agent-network',
         # #1197: cpu/memory normalized + validated above (raises 400 on
         # a bad template value), so these are guaranteed Docker-valid.
@@ -1546,7 +2041,6 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
             "event": "agent_created",
             "data": {
                 "name": agent_status.name,
-                "type": agent_status.type,
                 "status": agent_status.status,
                 "port": agent_status.port,
                 "created": agent_status.created.isoformat(),
@@ -1659,16 +2153,96 @@ def _register_agent(
     # a Layer 2 conflict.
 
 
+def reconcile_declared_schedules(
+    agent_name: str, declared: list, owner_username: str
+) -> None:
+    """Create a template's declared schedules on `agent_name`, skipping by name.
+
+    Shaped as a RECONCILE primitive — it takes `agent_name`, not `AgentConfig`,
+    so an operator-triggered "re-apply template" can call it unchanged. It is
+    NOT hooked into container recreate today, deliberately: an eager
+    re-materialize would resurrect schedules an operator deliberately deleted,
+    which is strictly worse than the gap it would close. (ent#89 D2/D2b)
+
+    Non-fatal by contract — the caller wraps the whole call, so a failure here
+    (including the `list_agent_schedules` read) costs the schedules, never the
+    agent.
+
+    Counts come from ACTUAL outcomes, never from `len(declared)`:
+    `db.create_schedule` returns **None** — it does not raise — on three silent
+    paths (unknown user, no agent access, and the #1445 `is_agent_live`
+    no-orphan gate), so a length-derived counter would report schedules that
+    were never written.
+    """
+    if not declared:
+        return
+
+    # Name-match idempotency (AC #4). Known blind spot: `list_agent_schedules`
+    # excludes soft-deleted rows (#834), so a soft-deleted schedule of the same
+    # name does not suppress a re-create. Accepted and documented.
+    seen = {s.name for s in db.list_agent_schedules(agent_name)}
+    created = skipped = failed = 0
+
+    for entry in declared:
+        name = entry["name"]
+        if name in seen:
+            skipped += 1
+            continue
+        try:
+            # `enabled` is passed EXPLICITLY: `ScheduleCreate.enabled` defaults
+            # to True, so omitting it would arm every undeclared schedule and
+            # invert AC #3.
+            schedule = db.create_schedule(
+                agent_name=agent_name,
+                username=owner_username,
+                schedule_data=ScheduleCreate(
+                    name=name,
+                    cron_expression=entry["cron"],
+                    message=entry["message"],
+                    enabled=entry["enabled"],
+                    timezone=entry["timezone"],
+                    description=entry["description"],
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 — one bad entry never costs the rest
+            failed += 1
+            logger.warning(
+                "[ent#89] Failed to create declared schedule %r for %s: %s",
+                name, agent_name, e,
+            )
+            continue
+        if not schedule:
+            failed += 1
+            logger.warning(
+                "[ent#89] Declared schedule %r for %s was not created "
+                "(no user, no access, or the agent is not live)",
+                name, agent_name,
+            )
+            continue
+        seen.add(name)
+        created += 1
+
+    logger.info(
+        "[ent#89] Declared schedules for %s: %d created, %d already existed, "
+        "%d failed (%d declared)",
+        agent_name, created, skipped, failed, len(declared),
+    )
+
+
 async def _materialize_agent_files(
     config: AgentConfig,
     template_data: dict,
     github_repo_for_agent: Optional[str],
     fork_upstream_repo: Optional[str],
     github_pat_for_agent: Optional[str] = None,
+    declared_schedules: Optional[list] = None,
+    owner_username: str = "",
+    declared_plugins: Optional[dict] = None,
 ) -> None:
-    """Materialize the S4 persistent-state allowlist (#383) and the declared
-    data_paths (#1169) into the agent, then opt non-source-mode GitHub agents
-    into the auto-sync heartbeat (#389). All three are non-fatal."""
+    """Materialize the S4 persistent-state allowlist (#383), the declared
+    data_paths (#1169), the declared `plugins:` (#1704) and the declared
+    `schedules:` (trinity-enterprise#89) into the agent, then opt non-source-mode
+    GitHub agents into the auto-sync heartbeat (#389). All are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -1708,6 +2282,43 @@ async def _materialize_agent_files(
             f"{config.name}: {e}"
         )
 
+    # #1704: materialize the template's declared Claude Code `plugins:` into a
+    # COMMITTED `.trinity/plugins.yaml`, so the plugin selection survives a
+    # git-based reconstitution (the boot hook re-installs anything missing).
+    # Opt-in (empty = no-op) and ghost-skipped: an ephemeral agent never
+    # recreates and never persists. Non-fatal — sits inside the destructive
+    # rollback fence, so a raise here must never cost a successful creation
+    # (`declared_plugins` comes from the resolver, NOT `template_data`, since the
+    # `github:` path never populates the latter).
+    if declared_plugins and not config.ephemeral:
+        try:
+            await git_service.materialize_plugins(
+                config.name, declared_plugins
+            )
+        except Exception as e:
+            logger.warning(
+                f"[#1704] Failed to materialize plugins.yaml for "
+                f"{config.name}: {e}"
+            )
+
+    # trinity-enterprise#89: materialize the template's declared `schedules:`.
+    # The ghost skip lives HERE rather than in the helper: schedules on an
+    # ephemeral agent are a 400 by ent#69 fleet hygiene, and a new caller must
+    # exclude ghosts itself. The try/except wraps the ENTIRE call, including
+    # the helper's `list_agent_schedules` read — this whole function sits inside
+    # the destructive rollback fence, so a raise that escapes here would roll
+    # back a successful creation over a schedule.
+    if declared_schedules and not config.ephemeral:
+        try:
+            reconcile_declared_schedules(
+                config.name, declared_schedules, owner_username
+            )
+        except Exception as e:
+            logger.warning(
+                f"[ent#89] Failed to materialize declared schedules for "
+                f"{config.name}: {e}"
+            )
+
     # #389 S1a: opt non-source-mode GitHub-template agents into the
     # auto-sync heartbeat by default. Source-mode agents stay opt-in
     # (auto-pushing to main would clobber protected branches) —
@@ -1723,12 +2334,35 @@ async def _materialize_agent_files(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
 
+    # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
+    # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO
+    # set — non-source/fork `github:` agents, ephemeral ghosts INCLUDED) staged
+    # `.trinity/` runtime state + the root-level `.env`/`.mcp.json` into a
+    # user-owned repo before any Push could migrate the list. Land the canonical
+    # list after startup.sh's FULL git setup (gated inside the merge on
+    # agent-server /health readiness, which follows the clone+checkout at
+    # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
+    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
+    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
+    # so the merge covers exactly the auto-committing population.
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
+        git_service.spawn_gitignore_merge_after_clone(config.name)
+
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
-    """The except-path rollback (AC #3, PRESERVED exactly): roll back the
-    agent_git_config reservation, the ephemeral quota slot, and the agent MCP
-    key — each guarded, each best-effort. Deliberately does NOT stop/remove the
-    container or its volumes (left for the cleanup watchdog)."""
+    """The except-path DB/quota rollback: the agent_git_config reservation, the
+    ephemeral quota slot, and the agent MCP key — each guarded, each
+    best-effort.
+
+    Scope note (ent#313): this function stays DB/quota-only, but its old
+    docstring justified the omission by saying the container and volumes were
+    "left for the cleanup watchdog". No such watchdog exists for a
+    non-ephemeral agent, so that deferral leaked a running, ownerless
+    container. The container is now reclaimed by
+    ``_reclaim_failed_creation_container``, called right after this one.
+    """
     # S7 Layer 0 (#382): if anything after the reservation fails,
     # roll back the agent_git_config row so the working branch is
     # released and a retry can claim it fresh.
@@ -1767,6 +2401,381 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
                 handles.agent_name,
                 cleanup_exc,
             )
+
+
+def _cleanup_copy_artifacts(handles: _RollbackHandles) -> None:
+    """trinity-enterprise#15: copy-intent except-path cleanup — the staged
+    snapshot dir (best-effort, idempotent) and the volume THIS attempt
+    pre-populated. Called AFTER ``_reclaim_failed_creation_container`` so a
+    created-then-reclaimed container no longer holds the volume mount.
+    Removing the volume keeps the #1667 leftover-volume guard from 409ing the
+    user's retry; safe because ``copy_volume_name`` is set only after this
+    attempt created+populated it."""
+    snapshot_import.cleanup_staging(handles.copy_staging_dir)
+    if handles.copy_volume_name and docker_client:
+        try:
+            docker_client.volumes.get(handles.copy_volume_name).remove(force=True)
+        except Exception as cleanup_exc:  # noqa: BLE001 — NotFound/in-use both fine
+            logger.warning(
+                "Failed to remove pre-populated copy volume %s after creation "
+                "failure (the #1581 orphan sweep will reclaim it): %s",
+                handles.copy_volume_name,
+                cleanup_exc,
+            )
+
+
+def _is_container_name_conflict(exc: BaseException) -> bool:
+    """True when the failure is Docker refusing a duplicate container name.
+
+    On a 409 the daemon created NOTHING, so any `agent-{name}` container that
+    exists belongs to somebody else — a live agent of this install, or (on a
+    shared Docker daemon: git worktrees, a second stack) another install's
+    agent entirely. Removing it would be catastrophic, so this is the first
+    thing the reclaim checks.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        # Duck-typed on purpose: `isinstance(exc, docker.errors.APIError)` raises
+        # `TypeError: isinstance() arg 2 must be a type` wherever the docker
+        # module is a test double, which would propagate out of a function whose
+        # whole contract is "never raises" and REPLACE the creation error the
+        # caller is trying to report. Any exception carrying a 409 response is
+        # the signal we want, whatever its class.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 409:
+            return True
+        text = str(exc).lower()
+        if "already in use" in text or "conflict" in text:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _created_by_this_attempt(container, floor_ts: Optional[str]) -> bool:
+    """True only if the container's own `trinity.created` label is at or after
+    the instant this creation attempt entered the docker block.
+
+    Fail-closed: a missing floor, a missing label, or an unparseable value all
+    return False. The cost of a false negative is one orphan an operator removes
+    by hand; the cost of a false positive is deleting a running agent.
+    """
+    if not floor_ts:
+        return False
+    try:
+        labels = (container.attrs or {}).get("Config", {}).get("Labels") or {}
+        created = labels.get("trinity.created")
+        if not created:
+            return False
+        return parse_iso_timestamp(created) >= parse_iso_timestamp(floor_ts)
+    except Exception as exc:  # noqa: BLE001 — unparseable ⇒ not ours
+        logger.warning(
+            "ent#313: could not establish creation provenance for a container: %s",
+            exc,
+        )
+        return False
+
+
+# #2215 D2: bounded port-bind-conflict retry around `_create_agent_container`.
+# The per-port Redis reservation (docker_service, D1) is fail-open, so a Redis
+# outage/restart, an expired reservation, or a foreign host process can still
+# surface as a bind failure at `containers.run` — this belt converges those
+# within the same create call, before the caller (e.g. a first-run seed deploy)
+# computes a permanently-latched `partial`.
+_PORT_BIND_RETRY_MAX_ATTEMPTS = 3
+
+
+def _is_port_bind_conflict(exc: BaseException) -> bool:
+    """True when the failure is Docker failing to BIND the published SSH port.
+
+    Deliberately NARROW — exactly two daemon phrasings:
+      * "port is already allocated"  (docker-proxy, native Linux)
+      * "address already in use"     (userland-proxy phrasing, Docker Desktop)
+    and deliberately NOT the generic "conflict": daemon-unreachable / timeout /
+    name-conflict errors must bubble immediately without burning retries.
+
+    NOTE the overlap with `_is_container_name_conflict`, whose text fallback
+    matches the bare substring "already in use" — which Docker Desktop's bind
+    failure CONTAINS. A bind conflict proves `containers.create` SUCCEEDED
+    (only the start/bind failed) — the exact opposite of a name conflict (the
+    daemon created NOTHING) — so wherever both could match, bind must be
+    classified FIRST (see `_reclaim_failed_creation_container`). Duck-typed,
+    cycle-guarded cause/context walk, mirroring `_is_container_name_conflict`
+    (never `isinstance` against the docker module — it may be a test double).
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        # Defensive str(): docker.errors.APIError.__str__ dereferences response
+        # attributes and can itself raise on a partial/stubbed response object —
+        # and this classifier runs inside the never-raises reclaim (D2b), where
+        # a raise would REPLACE the creation error being reported.
+        try:
+            text = str(exc).lower()
+        except Exception:
+            text = ""
+        if "port is already allocated" in text or "address already in use" in text:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+async def _cleanup_bind_failed_container(agent_name: str, floor_ts: Optional[str]) -> bool:
+    """Remove the Created container a failed port bind left behind (#2215 D2).
+
+    A bind failure means `containers.create` succeeded and only the start
+    failed — the daemon holds a Created `agent-{name}` husk that would 409 the
+    next attempt's name. Runs on EVERY bind-classified attempt, the final one
+    included, so a bind husk is never handed to the generic ent#313 reclaim
+    still on the name.
+
+    Returns True only when the name is PROVABLY clear for another attempt
+    (husk removed, or no container exists). Returns False on ANY doubt —
+    ownership row present, lookup failure, unprovable provenance, removal
+    failure — so the caller aborts retries and re-raises the ORIGINAL bind
+    error (the outer ent#313 reclaim then takes its own gated removal shot via
+    the bind-before-name precedence guard there). Proceeding after a failed
+    removal would make the next attempt 409 against our OWN husk, which the
+    reclaim reads as "not ours" and strands.
+
+    The lookup is a direct `containers.get`, NOT `get_agent_container`: that
+    helper flattens a lookup FAILURE into "absent", and here absent means
+    "safe to retry" while failure must abort. NotFound is duck-typed off the
+    response status (the `_is_container_name_conflict` rationale — the docker
+    module may be a test double).
+    """
+    try:
+        if db.is_agent_name_reserved(agent_name):
+            # Ownership-gate parity with the ent#313 reclaim: on a shared
+            # daemon the name may be claimed by an agent that is not ours.
+            logger.warning(
+                "#2215: %s has an ownership row — leaving its container alone; "
+                "aborting port retries",
+                agent_name,
+            )
+            return False
+    except Exception as lookup_exc:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "#2215: ownership lookup failed for %s (%s) — aborting port retries",
+            agent_name,
+            lookup_exc,
+        )
+        return False
+    try:
+        target = docker_client.containers.get(f"agent-{agent_name}")
+    except Exception as lookup_exc:  # noqa: BLE001
+        status = getattr(getattr(lookup_exc, "response", None), "status_code", None)
+        if status == 404:
+            # No husk — the daemon kept nothing; the name is clear.
+            return True
+        logger.warning(
+            "#2215: container lookup failed for %s (%s) — aborting port retries",
+            agent_name,
+            lookup_exc,
+        )
+        return False
+    if not _created_by_this_attempt(target, floor_ts):
+        logger.warning(
+            "#2215: a container named agent-%s exists but is not provably this "
+            "attempt's — aborting port retries",
+            agent_name,
+        )
+        return False
+    try:
+        await container_remove(target, force=True)
+    except Exception as remove_exc:  # noqa: BLE001
+        logger.warning(
+            "#2215: could not remove the bind-failed container for %s (%s) — "
+            "aborting port retries",
+            agent_name,
+            remove_exc,
+        )
+        return False
+    logger.info(
+        "#2215: removed the bind-failed container for %s before the port retry",
+        agent_name,
+    )
+    return True
+
+
+async def _run_agent_container_with_port_retry(
+    config: AgentConfig,
+    volumes: dict,
+    env_vars: dict,
+    current_user: User,
+    ephemeral_expires_at: Optional[str],
+    handles: "_RollbackHandles",
+    auto_allocated_port: bool,
+):
+    """`_create_agent_container` with a bounded port-bind-conflict retry (#2215).
+
+    The D1 reservation is fail-open, so a collision can still surface at
+    `containers.run` (Redis down/restarted, reservation expired, a foreign
+    process on the host). On a bind-classified failure, in strict order:
+    (1) record the failed port; (2) clean up the leaked husk — on EVERY
+    bind-classified attempt, the final one included; (3) if attempts remain,
+    re-allocate with the failed ports excluded and retry. Bounded at
+    `_PORT_BIND_RETRY_MAX_ATTEMPTS` total attempts, and gated on the port
+    having been AUTO-allocated — a caller-pinned port never silently moves.
+    Any cleanup doubt aborts and re-raises the ORIGINAL bind error, never the
+    cleanup error. Mutating `config.port` between attempts is safe: it is
+    consumed only inside `_create_agent_container` (label + ports map, rebuilt
+    per call) and no DB copy of the port exists anywhere.
+    """
+    attempted_ports: set = set()
+    attempt = 1
+    while True:
+        try:
+            return await _create_agent_container(
+                config, volumes, env_vars, current_user, ephemeral_expires_at
+            )
+        except Exception as exc:  # noqa: BLE001 — non-bind re-raised immediately
+            if not auto_allocated_port or not _is_port_bind_conflict(exc):
+                raise
+            attempted_ports.add(config.port)
+            if not await _cleanup_bind_failed_container(
+                config.name, handles.container_floor_ts
+            ):
+                # Cleanup doubt: abort — the bare raise re-raises the ORIGINAL
+                # bind error, so the outer ent#313 reclaim gets its own shot.
+                raise
+            if attempt >= _PORT_BIND_RETRY_MAX_ATTEMPTS:
+                raise
+            new_port = get_next_available_port(exclude=attempted_ports)
+            logger.warning(
+                "#2215: port %s was already bound — retrying %s on port %s "
+                "(attempt %d/%d)",
+                config.port,
+                config.name,
+                new_port,
+                attempt + 1,
+                _PORT_BIND_RETRY_MAX_ATTEMPTS,
+            )
+            config.port = new_port
+            attempt += 1
+
+
+async def _reclaim_failed_creation_container(
+    handles: _RollbackHandles, container, exc: BaseException
+) -> None:
+    """ent#313 — remove the container a failed creation left behind, and clear
+    the per-agent Redis keyspace.
+
+    Before this, `_rollback_failed_creation` rolled back only DB/quota handles
+    and deferred the container to "the cleanup watchdog" — which does not exist
+    for a non-ephemeral agent (`_sweep_ephemeral_agents` is gated on the
+    `trinity.ephemeral` label). The two guards deadlocked: nothing removed the
+    container, and because the container kept its workspace volume mounted, the
+    #1581 orphan-volume sweep could never advance its unattached-strike counter
+    either. The agent still appeared in the fleet listing, which is
+    Docker-as-truth (Invariant #11) — a phantom with no `agent_ownership` row.
+
+    Two arrival shapes, because the reported failure has no handle:
+
+    * `container` is not None — the create returned and a later step raised.
+      Ownership is unambiguous; remove by handle.
+    Both shapes first require that the name has NO `agent_ownership` row: the
+    create registers the row before the last step, so a late failure must not
+    strip the container off an agent the DB already considers created.
+
+    * `container` is None — the failure happened INSIDE `containers.run`
+      (the observed case: a 60s Docker read timeout). The daemon may still have
+      created it, so re-derive by name — under three fail-closed gates, since a
+      lookup by name can resolve to a container this attempt did not create:
+      not a name conflict (above), no `agent_ownership` row (a concurrent
+      creation that won the name has already registered one), and the
+      `trinity.created` provenance check.
+
+    Never raises: this runs inside the creation except-path, which must keep
+    reporting the original failure.
+    """
+    agent_name = handles.agent_name
+    target = container
+
+    # Gate BOTH arrival shapes on ownership. Registration happens inside the
+    # same try, so a failure in a LATER step (file materialization) arrives here
+    # with the row already written — and this is the one case where removing the
+    # container makes things worse: the agent would become a row with no
+    # container, still holding its name, where before it was at least present
+    # and deletable through the normal path. It also covers the no-handle race
+    # where a concurrent creation won the name and registered it.
+    try:
+        if db.is_agent_name_reserved(agent_name):
+            logger.warning(
+                "ent#313: %s already has an ownership row — leaving its "
+                "container in place (delete the agent to remove both)",
+                agent_name,
+            )
+            return
+    except Exception as lookup_exc:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "ent#313: ownership lookup failed for %s; leaving any container in "
+            "place: %s",
+            agent_name,
+            lookup_exc,
+        )
+        return
+
+    if target is None:
+        # #2215 D2b: classify bind-conflict BEFORE the name-conflict decline —
+        # Docker Desktop's bind failure ("… bind: address already in use")
+        # contains the name-conflict text fallback's substring, but a bind
+        # conflict proves the create SUCCEEDED, so fall through to the
+        # fail-closed lookup + ownership + provenance gates instead.
+        if _is_container_name_conflict(exc) and not _is_port_bind_conflict(exc):
+            logger.info(
+                "ent#313: creation of %s hit a container-name conflict — the "
+                "existing container is not ours, leaving it untouched",
+                agent_name,
+            )
+            return
+        try:
+            target = get_agent_container(agent_name)
+        except Exception as lookup_exc:  # noqa: BLE001
+            logger.warning(
+                "ent#313: container lookup failed for %s: %s", agent_name, lookup_exc
+            )
+            return
+        if target is not None and not _created_by_this_attempt(
+            target, handles.container_floor_ts
+        ):
+            logger.warning(
+                "ent#313: a container named agent-%s exists but predates this "
+                "attempt — leaving it untouched",
+                agent_name,
+            )
+            return
+
+    if target is not None:
+        try:
+            await container_remove(target, force=True)
+            logger.info(
+                "ent#313: removed the orphaned container for %s after a failed "
+                "creation",
+                agent_name,
+            )
+        except Exception as remove_exc:  # noqa: BLE001
+            # Leave the Redis keyspace alone: the container is still up, so the
+            # slot ZSET is not provably idle.
+            logger.warning(
+                "ent#313: could not remove the orphaned container for %s — it "
+                "needs manual `docker rm -f agent-%s`: %s",
+                agent_name,
+                agent_name,
+                remove_exc,
+            )
+            return
+
+    # Reached only when the container is provably gone (removed just now, or
+    # never created). #1560: the keyspace is name-keyed and TTL-less, so a
+    # later agent reusing this name would otherwise inherit stale breaker
+    # verdicts and be fast-failed as unhealthy without ever being contacted.
+    try:
+        await clear_agent_runtime_state(agent_name)
+    except Exception as clear_exc:  # noqa: BLE001
+        logger.warning(
+            "ent#313: Redis state clear failed for %s: %s", agent_name, clear_exc
+        )
 
 
 def _release_ephemeral_on_no_docker(handles: _RollbackHandles) -> None:
@@ -2017,8 +3026,10 @@ async def create_agent_internal(
     if config.runtime:
         config.runtime = config.runtime.lower()
 
-    if config.port is None:
-        config.port = get_next_available_port()
+    # #2215: the SSH-port allocation moved INTO the docker try-block below (just
+    # before the container run) — see the comment there. `config.port` is
+    # consumed only by `_create_agent_container`, so nothing between here and
+    # there needs it.
 
     # CRED-002: Credentials are now injected directly into agents after creation
     # via the inject_credentials endpoint, not auto-injected during creation.
@@ -2057,9 +3068,22 @@ async def create_agent_internal(
         github_repo_for_agent=tr.github_repo_for_agent,
         ephemeral_slot_reserved=ephemeral_slot_reserved,
         ephemeral_owner_id=ephemeral_owner_id,
+        # ent#313: stamped before anything can create a container, so the
+        # rollback can tell a container THIS attempt created from one that was
+        # already there.
+        container_floor_ts=utc_now_iso(),
+        # trinity-enterprise#15: staged snapshot dir travels into the rollback
+        # so a mid-try failure never strands it.
+        copy_staging_dir=(
+            tr.copy_snapshot.staging_dir if tr.copy_snapshot else None
+        ),
     )
 
     if docker_client:
+        # ent#313: the except-path needs whatever handle we got. It stays None
+        # when the failure happens inside container creation itself — the
+        # reclaim re-derives it by name under provenance gates.
+        created_container = None
         try:
             # Persist the resolved PAT as the per-agent PAT (#347) onto the
             # agent_git_config row the reservation above just created. Inside
@@ -2074,6 +3098,28 @@ async def create_agent_internal(
                         f"failed to persist per-agent GitHub PAT for {config.name}"
                     )
 
+            # trinity-enterprise#15: copy intent — stream the staged snapshot
+            # (+ .trinity-initialized marker) into the workspace volume BEFORE
+            # the container exists; `_workspace_volume_mount` below then adopts
+            # the volume this attempt just created (the #1667 refusal gate
+            # already passed pre-try, so no other owner can claim it).
+            if tr.copy_snapshot:
+                from .deploy import _prepopulate_workspace_from_template
+                # Armed BEFORE the call (review F4): `_prepopulate` creates the
+                # volume first and can fail mid-stream — an unarmed handle
+                # would strand a half-populated volume that 409s the user's
+                # retry via the #1667 guard until the orphan sweep. Safe
+                # single-flight: the #1667 gate already proved no volume
+                # existed pre-try, so anything under this name is ours.
+                handles.copy_volume_name = f"agent-{config.name}-workspace"
+                await asyncio.to_thread(
+                    _prepopulate_workspace_from_template,
+                    config.name,
+                    Path(tr.copy_snapshot.staging_dir),
+                )
+                snapshot_import.cleanup_staging(tr.copy_snapshot.staging_dir)
+                handles.copy_staging_dir = None
+
             volumes = await _build_volume_mounts(
                 config,
                 config_path,
@@ -2082,10 +3128,45 @@ async def create_agent_internal(
                 cred_files_volume,
                 tr.template_shared_folders,
             )
-            container = await _create_agent_container(
-                config, volumes, env_vars, current_user, ephemeral_expires_at
+            # #2215: allocate the SSH port HERE — inside the rollback fence and
+            # as close to `containers.run` as possible. Two reasons it is not
+            # up with the other pre-try resolution steps: (1) the allocator now
+            # fails LOUD on a Docker listing fault (a swallowed fault would
+            # allocate 2222 over the existing fleet), and a raise before this
+            # try would strand the `agent_git_config` reservation
+            # `_resolve_template` already wrote — after which every create of
+            # that name fails `agent_git_config already exists`, Cornelius's
+            # next-boot retry included; (2) the per-port Redis reservation is
+            # TTL-bounded (600s), so the ent#15 snapshot prepopulate and the
+            # volume builds above must not eat into it. `auto_allocated_port`
+            # is captured BEFORE the mutation — captured after it, the gate is
+            # always-False and the bind-conflict retry ships dead. Only an
+            # auto-allocated port may move between attempts; a caller-pinned
+            # port never silently changes (a published port differing from the
+            # requested one is a surprise with security texture).
+            auto_allocated_port = config.port is None
+            if config.port is None:
+                config.port = get_next_available_port()
+            container = await _run_agent_container_with_port_retry(
+                config,
+                volumes,
+                env_vars,
+                current_user,
+                ephemeral_expires_at,
+                handles,
+                auto_allocated_port,
             )
+            created_container = container
             agent_status = get_agent_status_from_container(container)
+            if tr.copy_snapshot:
+                # trinity-enterprise#15: surface snapshot provenance on the
+                # create response (the endpoint folds it into the audit entry).
+                agent_status.import_snapshot = {
+                    "source_repo": tr.copy_snapshot.source_repo,
+                    "source_branch": tr.copy_snapshot.source_branch,
+                    "head_sha": tr.copy_snapshot.head_sha,
+                    "file_count": tr.copy_snapshot.file_count,
+                }
             await _broadcast_agent_created(agent_status, ws_manager)
             _register_agent(
                 config,
@@ -2100,10 +3181,21 @@ async def create_agent_internal(
                 tr.github_repo_for_agent,
                 tr.fork_upstream_repo,
                 tr.github_pat_for_agent,
+                tr.declared_schedules,
+                current_user.username,
+                tr.declared_plugins,
             )
             return agent_status
         except Exception as e:
             _rollback_failed_creation(handles)
+            # ent#313: and the container + its name-keyed Redis state, which the
+            # DB/quota rollback above deliberately left to a watchdog that only
+            # covers ephemeral agents.
+            await _reclaim_failed_creation_container(handles, created_container, e)
+            # trinity-enterprise#15: AFTER the container reclaim, so the volume
+            # this attempt pre-populated is no longer mounted and its removal
+            # keeps the #1667 guard from 409ing the retry.
+            _cleanup_copy_artifacts(handles)
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:

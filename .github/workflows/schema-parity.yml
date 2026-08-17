@@ -28,6 +28,19 @@ name: Schema Parity Gate
 # positive guard (comments / data-only / down migrations carry no DDL keyword,
 # so they don't trip) are documented in that script's module docstring. PR-only
 # (it needs the PR base/head to diff); pure stdlib, no extra deps.
+#
+# ALEMBIC SINGLE-HEAD GUARD (#2068): a version-line must resolve to exactly ONE
+# head. Two revisions declaring the same `down_revision` are two heads, and
+# `alembic upgrade head` — singular, which is what both runners call — resolves
+# its target BEFORE applying anything, so it applies ZERO revisions. On the OSS
+# track that aborts `init_database()` and crash-loops boot; on the enterprise
+# version-line the same fault is swallowed by the registration seam's broad
+# `except` and the instance silently degrades to OSS-only. Git reports no
+# conflict for this class: each revision file is individually valid and the
+# defect exists only in the relationship between two files that were never
+# edited together, so only a graph-level assertion sees it. The step below runs
+# UNCONDITIONALLY — see the comment on it for why it must not sit behind the
+# self-skip.
 
 on:
   pull_request:
@@ -41,6 +54,7 @@ on:
       - 'tests/unit/test_schema_parity.py'
       - 'tests/unit/test_alembic_parity_guard.py'
       - 'scripts/ci/check_alembic_parity.py'
+      - 'scripts/ci/check_alembic_heads.py'
       - 'tests/requirements-test.txt'
       - '.github/workflows/schema-parity.yml'
   workflow_dispatch:
@@ -64,6 +78,34 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/ci/check_alembic_parity.py
+
+      # Single-head guard (#2068). UNCONDITIONAL, and that is load-bearing:
+      # the "Detect schema-relevant changes" regex below omits
+      # `src/backend/migrations/`, so a PR that adds ONLY an Alembic revision
+      # self-skips — placing this behind `steps.changes.outputs.relevant` would
+      # silently neuter it on exactly the PR class it exists for. (Fixing that
+      # regex is a separate follow-up; it is harmless for the SQLite-only
+      # parity pytest it actually gates.) Pure stdlib and sub-second, so running
+      # it on every PR is free, and it makes OSS multi-head a REQUIRED,
+      # always-evaluated gate — strictly stronger than `pg-migrations`, which is
+      # path-filtered (a submodule-pin-advance PR touches none of its paths) and
+      # deliberately advisory.
+      #
+      # The enterprise arm is INERT on public CI today — said out loud rather
+      # than left to imply coverage. Public CI never checks out the private
+      # submodule (`.gitmodules` sets `update = none`, and no read credential
+      # exists in this repo), so that directory is absent and the guard skips it
+      # with an explicit "skipped" line. It still ships: it is live for free in
+      # every populated checkout (local dev, the dev VM), the private repo runs
+      # the same assertion at its own branch point, and `deploy-dev` asserts the
+      # deployed outcome. A private-repo-read PAT would make this arm live on
+      # core-team PRs, and was rejected — a credential readable from a public
+      # repository's workflow environment, for a check performed at the source.
+      - name: Alembic single-head guard (both version-lines)
+        run: |
+          python3 scripts/ci/check_alembic_heads.py \
+            src/backend/migrations/versions \
+            src/backend/enterprise/backend/migrations/versions
 
       - name: Detect schema-relevant changes
         id: changes
@@ -98,7 +140,7 @@ jobs:
       - uses: actions/setup-python@v7
         if: steps.changes.outputs.relevant == 'true'
         with:
-          python-version: '3.11'
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: 'tests/requirements-test.txt'
 

@@ -132,20 +132,33 @@ def _load_lifecycle():
     read_only_mod = Mock(inject_read_only_hooks=AsyncMock(return_value={"success": True}))
     file_sharing_mod = Mock(check_public_folder_mount_matches=Mock(return_value=True))
 
-    # Names that downstream tests import from `services.agent_service`. Adding
-    # them here prevents this stub package — which persists for the rest of
-    # the pytest session — from breaking later tests with ImportError.
-    pkg.get_accessible_agents = Mock(return_value=[])
-    pkg.get_agent_owner_id = Mock(return_value=1)
-    pkg.list_agents_data = Mock(return_value=[])
-
+    # Private, uniquely-named slots: `lifecycle.py`'s RELATIVE imports
+    # (`from .helpers import ...`) resolve against these, and the name cannot
+    # collide with anything else in the session.
     sys.modules[f"{pkg_name}.helpers"] = helpers_mod
     sys.modules[f"{pkg_name}.read_only"] = read_only_mod
     sys.modules[f"{pkg_name}.file_sharing"] = file_sharing_mod
-    sys.modules["services.agent_service"] = pkg
-    sys.modules["services.agent_service.helpers"] = helpers_mod
-    sys.modules["services.agent_service.read_only"] = read_only_mod
-    sys.modules["services.agent_service.file_sharing"] = file_sharing_mod
+
+    # The REAL names, needed only while `lifecycle.py` executes: line 27 is an
+    # absolute `from services.agent_service.helpers import validate_base_image`,
+    # so the relative slots above are not enough to load it.
+    #
+    # #2140: these used to be installed permanently, and that broke a property
+    # two files away. `services/compatibility/spec.py::applies_to_runtime`
+    # lazily imports `is_claude_runtime` from this exact module, so any test
+    # running after this one lost `claude_only` filtering — surfacing as
+    # `test_codex_runtime_omits_claude_only_checks` failing, i.e. a fake #1187
+    # multi-runtime regression. `pytest-randomly` made it a latent flake rather
+    # than a deterministic failure, which is worse: it fires only when file
+    # order happens to put this one first.
+    #
+    # They are now snapshotted and restored with the rest, below.
+    agent_service_aliases = {
+        "services.agent_service": pkg,
+        "services.agent_service.helpers": helpers_mod,
+        "services.agent_service.read_only": read_only_mod,
+        "services.agent_service.file_sharing": file_sharing_mod,
+    }
 
     # Add backend dir to path so credential_encryption (a non-package
     # module) imports succeed inside lifecycle.
@@ -166,24 +179,19 @@ def _load_lifecycle():
     # (test_voice_auth needs real FastAPI; test_file_upload needs the real
     # services.docker_service / services.docker_utils so its workspace-
     # delivery code paths await coroutines instead of plain Mocks).
-    _snapshot: dict[str, object] = {
-        name: sys.modules.get(name) for name in _SYS_MOCKS.keys()
-    }
-    sys.modules.update(_SYS_MOCKS)
+    # #2140: everything installed here is scoped to the load. `stubbed_modules`
+    # restores each slot and ASSERTS the restore happened, so a leak fails at
+    # import — in this file, naming this file — rather than as a mystery failure
+    # in whatever runs next.
+    from conftest import stubbed_modules
 
-    spec = importlib.util.spec_from_file_location(
-        f"{pkg_name}.lifecycle",
-        os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    # Restore the real modules (or evict our Mock if the slot was empty).
-    for name, original in _snapshot.items():
-        if original is not None:
-            sys.modules[name] = original  # type: ignore[assignment]
-        else:
-            sys.modules.pop(name, None)
+    with stubbed_modules({**_SYS_MOCKS, **agent_service_aliases}):
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_name}.lifecycle",
+            os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
     return mod
 
 
@@ -199,7 +207,7 @@ def _run(coro):
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
     _mock_db.reset_mock()
     # Default: not a subscription agent.
     _mock_db.get_agent_subscription_id.return_value = None
@@ -210,7 +218,12 @@ def _reset():
     # the real DB instead of our mock — and our subscription-mode short-circuit
     # silently misses. Re-stamp the slot for every test so the lazy import
     # resolves to _mock_db regardless of what other files did to sys.modules.
-    sys.modules["database"] = _SYS_MOCKS["database"]
+    # #2140 (review): via monkeypatch, so the slot is RESTORED after each test.
+    # A bare assignment here re-stamped a Mock `database` permanently — same leak
+    # class as the agent_service stubs, and not covered by the helper because it
+    # happens per-test rather than during the load. Any later test lazily doing
+    # `from database import db` got this file's configured return values.
+    monkeypatch.setitem(sys.modules, "database", _SYS_MOCKS["database"])
 
 
 # ── Subscription-mode short-circuit (#612) ───────────────────────────────

@@ -82,15 +82,6 @@ const features = [
     entitlement: 'audit',
     soon: false,
   },
-  {
-    id: 'client_portal',
-    title: 'Client Portal',
-    icon: '🪟',
-    description: 'Client-facing surface: the agents shared with your email, in one place. Configurable public or private (VPN/LAN) exposure.',
-    route: '/portal',
-    entitlement: 'client_portal',
-    soon: false,
-  },
 ]
 
 const cards = computed(() =>

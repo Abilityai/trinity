@@ -1,9 +1,18 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+import { once } from '../utils/inflight'
 
 /**
  * Session tab store (SESSION_TAB_2026-04 Phase 3.2).
+ *
+ * ent#358: the Agent Detail Session panel this store was written for is gone —
+ * the Workspace is the continuous-conversation surface now and talks to the
+ * portal endpoints instead. What is still load-bearing here is
+ * `loadFeatureFlags()`, which several views read for voice / workspace /
+ * brain-orb gating. The session actions below still map 1:1 to live endpoints
+ * over `agent_sessions` (which remain readable by design), so they are kept
+ * rather than deleted; retiring them belongs with retiring those endpoints.
  *
  * Wraps the six /api/agents/{name}/sessions* endpoints. State is keyed
  * by agentName so tab switching between agents doesn't bleed sessions.
@@ -26,7 +35,7 @@ export const useSessionsStore = defineStore('sessions', {
     errorByAgent: {},
 
     // -- Per-session turn state (Issue #759) --------------------------------
-    // SessionPanel lives inside an AgentDetail view that is wrapped in
+    // This store's consumer lived inside an AgentDetail view wrapped in
     // <KeepAlive>, so the same component instance services all `/agents/*`
     // routes. Local refs would survive navigation and bleed across agents.
     // Keying turn state by sessionId scopes it to the actual conversation.
@@ -44,6 +53,7 @@ export const useSessionsStore = defineStore('sessions', {
     workspaceAvailable: false,
     voipAvailable: false,
     brainOrbAvailable: false,      // trinity-enterprise#58 — Brain Orb platform flag
+    a2aAvailable: false,           // trinity-enterprise#158 — A2A config tab (enterprise_features)
     brainOrbVoiceAvailable: false, // trinity-enterprise#60 — Brain Orb voice tile (Phase 3)
     brainOrbWriteAvailable: false, // trinity-enterprise#61 — Brain Orb KB-write surface (Phase 4a)
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
@@ -70,9 +80,23 @@ export const useSessionsStore = defineStore('sessions', {
       if (this.featureFlagsLoaded && !force) return
       const authStore = useAuthStore()
       try {
-        const r = await axios.get('/api/settings/feature-flags', {
-          headers: authStore.authHeader,
-        })
+        // #2198: shared with `stores/enterprise.js`, which parses a disjoint
+        // slice of the SAME payload — two HTTP calls for one document on every
+        // authenticated page. `once`, not `dedupe`: the two were measured 319 ms
+        // apart, so the second starts after the first has resolved and a
+        // pure in-flight join does not reach it.
+        //
+        // Shared fetch rather than making one store call the other: delegation
+        // would require sessions.js to start retaining `enterprise_features`
+        // (it derives `a2aAvailable` inline and stores nothing), couple two
+        // domain-scoped stores against design-system-contract:87, and risk an
+        // import cycle. `force` is threaded through, so `Settings.vue`'s
+        // explicit refresh still refetches.
+        const r = await once(
+          'featureFlags',
+          () => axios.get('/api/settings/feature-flags', { headers: authStore.authHeader }),
+          { force }
+        )
         this.sessionTabEnabled = !!r.data?.session_tab_enabled
         this.voiceAvailable = !!r.data?.voice_available
         this.workspaceAvailable = !!r.data?.workspace_available
@@ -81,6 +105,10 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
         this.brainOrbWriteAvailable = !!r.data?.brain_orb_write_available
         this.claudeAuthConfigured = !!r.data?.claude_auth_configured
+        // ent#158: the A2A config tab shows only when the enterprise A2A module
+        // is entitled (registered in enterprise_features).
+        this.a2aAvailable = Array.isArray(r.data?.enterprise_features)
+          && r.data.enterprise_features.includes('a2a')
       } catch {
         this.sessionTabEnabled = false
         this.voiceAvailable = false
@@ -90,6 +118,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = false
         this.brainOrbWriteAvailable = false
         this.claudeAuthConfigured = false
+        this.a2aAvailable = false
       } finally {
         this.featureFlagsLoaded = true
       }
@@ -192,7 +221,7 @@ export const useSessionsStore = defineStore('sessions', {
      * Issue #759 — in-flight state lives in the store keyed by sessionId
      * (`inFlightBySession`, `errorBySession`, `fallbackNoticeBySession`)
      * so it survives KeepAlive deactivation and doesn't bleed across
-     * agents (one SessionPanel instance services all `/agents/*` routes).
+     * agents (one panel instance serviced all `/agents/*` routes).
      *
      * Optimistic insert without rollback: the user's message is appended
      * to `messagesBySession` synchronously so the UI doesn't sit on a
@@ -364,7 +393,7 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     // ----- polling (reattach to in-flight turn on KeepAlive activation) --
-    // The flow: on `onActivated` in SessionPanel, call loadSession; if the
+    // The flow: on the panel's `onActivated`, call loadSession; if the
     // returned session row has `turn_in_progress=true` AND no assistant
     // reply has landed since the last user message, call startPolling.
     // Ref-counted so two activations on the same session don't double-fire.
