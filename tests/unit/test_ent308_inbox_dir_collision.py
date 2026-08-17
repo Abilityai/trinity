@@ -32,6 +32,26 @@ import pytest
 
 @pytest.fixture()
 def portal_db(tmp_path, monkeypatch):
+    """Seed the three tables these tests read — WITHOUT assuming an empty DB.
+
+    #2242: this fixture was written for its own temp SQLite file, but `get_engine()`
+    honours `DATABASE_URL`, and the PostgreSQL tier sets it. So on that tier the
+    fixture ran against the tier's ONE shared database and its
+    `insert(users).values(id=1, ...)` hit
+    `UniqueViolation: duplicate key value violates unique constraint "users_pkey"`
+    against a user a previous test had already seeded — a setup error, so the test
+    never even ran. (It reaches that tier at all because the tier selects on
+    `-k "postgres or alembic or migration or dual_backend"` and these test NAMES
+    contain "migration"; that keyword match is incidental, not a dual-backend
+    claim.)
+
+    Fixed in two parts: seed idempotently, and own the rows this fixture's tests
+    actually assert on. The claimant assertions in
+    `test_a_two_claimant_inbox_is_never_migrated` compare an exact tuple, so a
+    leftover `agent_sharing` row for the same agent from an earlier test would
+    break them on a shared database even after the pkey clash is gone — hence the
+    delete at both ends rather than only at teardown.
+    """
     db_file = tmp_path / "trinity-308.db"
     monkeypatch.setenv("TRINITY_DB_PATH", str(db_file))
     import db.connection as conn_mod
@@ -41,14 +61,31 @@ def portal_db(tmp_path, monkeypatch):
     from db.tables import metadata as m, agent_sharing, agent_ownership, users
     m.create_all(get_engine(), tables=[agent_sharing, agent_ownership, users])
 
-    from sqlalchemy import insert
+    from sqlalchemy import delete, insert, select
+
+    def _clear_shares(conn):
+        conn.execute(delete(agent_sharing).where(agent_sharing.c.agent_name == "atlas"))
+
     with get_engine().begin() as conn:
-        conn.execute(insert(users).values(
-            id=1, username="admin", role="admin", email="admin@example.com",
-            created_at="t", updated_at="t"))
-        conn.execute(insert(agent_ownership).values(
-            agent_name="atlas", owner_id=1, created_at="t", is_system=0, deleted_at=None))
+        # Present-or-insert, not insert-and-hope: on a shared database the row may
+        # already be there, and on a private one it never is.
+        if not conn.execute(select(users.c.id).where(users.c.id == 1)).first():
+            conn.execute(insert(users).values(
+                id=1, username="admin", role="admin", email="admin@example.com",
+                created_at="t", updated_at="t"))
+        if not conn.execute(
+            select(agent_ownership.c.agent_name)
+            .where(agent_ownership.c.agent_name == "atlas")
+        ).first():
+            conn.execute(insert(agent_ownership).values(
+                agent_name="atlas", owner_id=1, created_at="t", is_system=0,
+                deleted_at=None))
+        _clear_shares(conn)
+
     yield get_engine()
+
+    with get_engine().begin() as conn:
+        _clear_shares(conn)
 
 
 def _share(engine, agent: str, email: str) -> None:
@@ -173,7 +210,7 @@ def test_migration_check_fails_closed_on_a_db_error(portal_db, monkeypatch):
     assert service._legacy_migration_is_safe("atlas", "solo@example.com") is False
 
 
-def test_migration_is_conditional_inside_the_container(portal_db):
+def test_migration_is_conditional_inside_the_container():
     """The rename is decided in the container, not by a read-then-write from the
     backend: two concurrent requests would otherwise both see 'legacy exists' and
     race. Folded into the listing script so it also costs no extra docker exec.
@@ -192,7 +229,7 @@ def test_migration_is_conditional_inside_the_container(portal_db):
     assert "except OSError" in script, "a failed rename must degrade to an empty listing, not crash"
 
 
-def test_no_legacy_dir_is_passed_when_migration_is_unsafe(portal_db, monkeypatch):
+def test_no_legacy_dir_is_passed_when_migration_is_unsafe():
     """The refusal has to reach the container command, not just the log."""
     from client_portal.service import _inbox_list_cmd, _client_inbox
     import base64 as _b64
