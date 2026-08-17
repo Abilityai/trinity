@@ -472,11 +472,15 @@ const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.ite
 // #2213: rows the popup could not RENDER are `typeaheadBound.overflow`; skills that
 // never reached the client at all are this. Two different omissions, so the popup
 // is told about them separately rather than adding them into one misleading number.
-const typeaheadHidden = computed(() => (
-  typeaheadResult.value?.kind === '/'
-    ? hiddenPlaybookCount(props.agent, playbookSearchSource(props.agent).length)
-    : 0
-))
+const typeaheadHidden = computed(() => {
+  // Review finding: only on a BARE `/`. Mid-query the same number reads as "N more
+  // results matching what you typed", which is false — these are entries that never
+  // reached the browser and no amount of typing will surface them. On a bare trigger
+  // it reads correctly as a property of the list.
+  if (typeaheadResult.value?.kind !== '/') return 0
+  if (typeaheadTrigger.value?.query) return 0
+  return hiddenPlaybookCount(props.agent, playbookSearchSource(props.agent).length)
+})
 
 // The two empty conditions are NOT the same: a source with nothing in it shows
 // one honest line, while a query that matches nothing CLOSES the popup (AC#6 —

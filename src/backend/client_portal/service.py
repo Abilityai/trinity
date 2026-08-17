@@ -581,20 +581,6 @@ _MAX_USE_CASE_CHARS = 200
 # Field caps too — every hint field is agent-author-controlled, and 24 multi-MB
 # descriptions would defeat a count-only belt (title cap aligns with the
 # ent#380 use-case hint cap; the UI clamps descriptions to two lines anyway).
-class AgentBriefing(NamedTuple):
-    """What `_agent_briefing` resolves for one agent (#2213).
-
-    `playbooks` feeds the hint-card grid (bounded for layout, #2101);
-    `searchable_playbooks` feeds the composer's `/` search (its own, larger bound,
-    no descriptions); `playbooks_total` is the count before either bound, so a
-    truncated list can say so instead of looking complete.
-    """
-    description: Optional[str] = None
-    playbooks: list = []
-    searchable_playbooks: list = []
-    playbooks_total: int = 0
-
-
 _MAX_BRIEFING_HINTS = 24
 # #2213: the SEARCH bound, deliberately separate from the card bound above.
 #
@@ -613,6 +599,24 @@ _MAX_SEARCHABLE_PLAYBOOKS = 200
 _MAX_HINT_TITLE_CHARS = 200
 _MAX_HINT_DESCRIPTION_CHARS = 300
 _MAX_HINT_STARTER_CHARS = 500
+
+
+class AgentBriefing(NamedTuple):
+    """What `_agent_briefing` resolves for one agent (#2213).
+
+    `playbooks` feeds the hint-card grid (bounded for layout, #2101);
+    `searchable_playbooks` feeds the composer's `/` search (its own, larger bound,
+    no descriptions); `playbooks_total` is the count before either bound, so a
+    truncated list can say so instead of looking complete.
+    """
+    description: Optional[str] = None
+    # Immutable defaults on purpose (review finding): a NamedTuple's defaults are
+    # CLASS-level, so `[]` would be one shared list aliased by every stopped/failed
+    # agent's card — in a module that mutates hint lists in place. Pydantic coerces
+    # the empty tuple to a list on the card.
+    playbooks: tuple = ()
+    searchable_playbooks: tuple = ()
+    playbooks_total: int = 0
 
 
 def _bound_briefing_hints(hints: list) -> list:
@@ -758,16 +762,28 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
         # ent#380 fallback ladder: an operator-exposed playbook set is the
         # curated capability surface and wins outright; only an agent with NO
         # exposed playbooks advertises its template's "What You Can Ask".
+        # `total` must be the count BEFORE any cap, including this tier's own:
+        # `_use_case_hints` truncates to 6, so counting after it reported 0 hidden
+        # while declared use-cases were silently dropped — the same "looks complete"
+        # bug this issue is about, one tier over (review finding).
+        total = len(playbooks)
         if not playbooks:
             playbooks = _use_case_hints(use_cases)
+            total = len(use_cases or [])
         # #2213: the search surface is built from the SAME client-visible set (so
         # the two can never disagree about what is offered) but bounded and
         # trimmed for its own purpose — no descriptions, and a much higher count.
         # `total` is the count BEFORE either bound, which is the only number that
         # can tell the UI something was left out.
-        total = len(playbooks)
+        # Field caps apply here too (review finding): these copies used to be taken
+        # BEFORE `_bound_briefing_hints` ran, so up to 200 uncapped strings shipped
+        # per card per roster load — and skill `name` comes from agent-controlled
+        # YAML frontmatter, which also feeds what a pick inserts into the composer.
         searchable = [
-            PortalPlaybook(title=p.title, starter_prompt=p.starter_prompt)
+            PortalPlaybook(
+                title=(p.title or "")[:_MAX_HINT_TITLE_CHARS],
+                starter_prompt=(p.starter_prompt or "")[:_MAX_HINT_STARTER_CHARS],
+            )
             for p in playbooks[:_MAX_SEARCHABLE_PLAYBOOKS]
         ]
         return AgentBriefing(description, _bound_briefing_hints(playbooks),

@@ -998,8 +998,27 @@ export function playbookSearchSource(agent) {
   const searchable = agent?.searchable_playbooks
   // Fall back to the card list when the field is absent, so a client talking to
   // an older backend keeps working exactly as before rather than losing `/`.
-  if (Array.isArray(searchable) && searchable.length) return searchable
-  return Array.isArray(agent?.playbooks) ? agent.playbooks : []
+  if (!Array.isArray(searchable) || !searchable.length) {
+    return Array.isArray(agent?.playbooks) ? agent.playbooks : []
+  }
+  // Review finding: `searchable_playbooks` deliberately ships without descriptions
+  // (that is what keeps 200 entries cheap), and the popup renders
+  // `secondary: c.description || ''` — so EVERY row lost its subtitle, including on
+  // agents with fewer than 24 skills whose descriptions did ship on the card list.
+  // Merge them back by title: the cards are a prefix of the same set, so this
+  // restores the subtitle wherever one exists and leaves it blank only for the tail
+  // that genuinely has none.
+  const described = new Map(
+    (Array.isArray(agent?.playbooks) ? agent.playbooks : [])
+      .filter((p) => p && p.description)
+      .map((p) => [p.title, p.description]),
+  )
+  if (!described.size) return searchable
+  return searchable.map((p) => (
+    p && !p.description && described.has(p.title)
+      ? { ...p, description: described.get(p.title) }
+      : p
+  ))
 }
 
 // How many client-visible skills exist that the popup cannot even search. This is

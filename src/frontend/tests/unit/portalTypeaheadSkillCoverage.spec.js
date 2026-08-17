@@ -140,3 +140,47 @@ describe('#2213 the two omissions stay distinct', () => {
     expect(unreachable.items).toHaveLength(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Review findings (second round)
+// ---------------------------------------------------------------------------
+
+describe('#2213 the subtitle must survive the switch to the searchable set', () => {
+  // Round one pointed `/` at `searchable_playbooks`, which deliberately ships
+  // WITHOUT descriptions — and the popup renders `secondary: c.description || ''`.
+  // So every row lost its subtitle, including on agents with fewer than 24 skills
+  // whose descriptions did ship on the card list.
+  const agent = {
+    playbooks: [
+      { title: 'Weekly report', description: 'Summarise the week', starter_prompt: '/weekly ' },
+      { title: 'Invoice run', description: 'Bill everyone', starter_prompt: '/invoice ' },
+    ],
+    searchable_playbooks: [
+      { title: 'Weekly report', starter_prompt: '/weekly ' },
+      { title: 'Invoice run', starter_prompt: '/invoice ' },
+      { title: 'Deep archive', starter_prompt: '/archive ' },   // past the card bound
+    ],
+    playbooks_total: 3,
+  }
+
+  it('merges descriptions back by title', () => {
+    const byTitle = Object.fromEntries(playbookSearchSource(agent).map((p) => [p.title, p]))
+    expect(byTitle['Weekly report'].description).toBe('Summarise the week')
+    expect(byTitle['Invoice run'].description).toBe('Bill everyone')
+  })
+
+  it('leaves the tail blank rather than inventing a subtitle', () => {
+    const tail = playbookSearchSource(agent).find((p) => p.title === 'Deep archive')
+    expect(tail.description).toBeUndefined()
+  })
+
+  it('does not mutate the payload it was handed', () => {
+    playbookSearchSource(agent)
+    expect(agent.searchable_playbooks[0].description).toBeUndefined()
+  })
+
+  it('is a no-op when no card carries a description', () => {
+    const bare = { playbooks: [{ title: 'A' }], searchable_playbooks: [{ title: 'A' }] }
+    expect(playbookSearchSource(bare)).toBe(bare.searchable_playbooks)
+  })
+})
