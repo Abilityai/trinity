@@ -2310,6 +2310,17 @@
         "voice"
       ],
       "description": "Portal dictation gate (#2212). `stt_available` is a SEPARATE roster-card bit from `voice_available`: transcription needs only the platform ElevenLabs key, narration additionally needs an effective voice, so the single-bit design could not express \"can dictate, cannot narrate\" — which is why the mic rendered on a pure browser capability check and was a dead control on a provider-less instance. Asserts the truth table in both directions (key without voice → stt yes / tts no; no key → both no, failing closed like `voice_available`), that the model default is absent-not-present so an older payload hides the mic rather than rendering a dead one, and — the load-bearing one — that the card bit and `transcribe_portal_audio`'s own 404 gate are the SAME condition, since drift between what the client sees and what /stt will do IS the dead-control bug. Pure unit: no DB, no HTTP, no ElevenLabs."
+    },
+    {
+      "file": "unit/test_2247_calendar_rot_detector.py",
+      "feature": "#2247",
+      "added": "2026-08-17",
+      "categories": [
+        "ci",
+        "unit",
+        "reliability"
+      ],
+      "description": "Calendar-rot detector (#2247). Re-runs the calendar-sensitive test files in a subprocess under tests/clockshift.py with the clock +7 days and -365 days, so a fixture pinned to a literal date inside a RELATIVE window fails on the first run instead of on some future Tuesday — the failure mode that left five ent#96 tests red on dev for two days with no red check anywhere (invisible on PRs because base and head fail identically, invisible on pushes because the diff job does not run there). A subprocess because the shift must be installed before the module binds `from datetime import datetime`, which an autouse fixture cannot do. Also guards the detector's own no-op failure mode: it asserts the plugin exists AND that importing it actually moves `datetime.now()`, since a vanished plugin would make every shifted run pass by shifting nothing. Proven to detect: reverting the ent#96 fixture to its pre-#2243 state turns both directions red. ~37s, almost all pytest boot; the file list is short for that reason and excludes the ~176s test_1771c_schedules_analytics_edges."
     }
   ]
 }
