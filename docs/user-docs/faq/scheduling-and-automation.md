@@ -90,6 +90,15 @@ Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up
 
 A skill is a reusable capability packaged in the platform's skills library — one or more GitHub repositories synced to Trinity. Each skill is a folder built around a `SKILL.md` instruction file, optionally bundled with supporting scripts, templates, and resources. When a skill is assigned to an agent, it becomes a playbook: the agent's **Playbooks** tab lists assigned skills with a **Run** button that sends the skill as a task, and in the **Chat** tab you can type `/` to autocomplete a playbook command with ghost text showing the syntax and argument hints. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
+
+## How do I find out which agents already have a given skill?
+
+The **Library** page's Skills tab (`/library?tab=skills`) shows, for every skill, an *Assigned to N agents* line with chips linking straight to each agent's Skills tab. It's bounded — the first four agents, then **+N more**. Admins see the whole fleet; everyone else sees their own and shared agents, and the wording says which. Below the listing sits **Assigned but no longer in the library**: assignments whose skill was removed upstream. That list matters because revocation works by publishing a new version without the offending skill, and the package stays on each agent until it's unassigned there. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Can I assign a skill from the Library page?
+
+No — the Library is a browse-and-audit surface. Assignment stays a per-agent action on that agent's **Skills** tab, so there is exactly one place where the change is made. What the Library adds is the fleet-wide read: who holds each skill, and which assignments have outlived their skill. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
 ## Can a skill be a whole folder of files instead of a single markdown file?
 
 Yes. A skill is a full-directory package, not just one markdown file: alongside the `SKILL.md` instructions it can carry scripts, templates, and any resource files the capability needs. When the skill is assigned, Trinity injects the entire directory into the agent, versioned by the folder's content so re-syncs only push real changes. This lets a skill ship helper code and assets, not only prose. See [Skills and Playbooks](../automation/skills-and-playbooks.md).

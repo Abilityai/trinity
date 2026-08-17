@@ -35,7 +35,7 @@
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
 - [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
 - [Agent Chat](agents/agent-chat.md) — Chat interface, voice, streaming, history
-- [Agent Session](agents/agent-session.md) — Resumable Claude session with full context
+- [Continuous Conversations](agents/agent-session.md) — What resuming preserves, auto-compact, per-turn limits
 - [Agent Terminal](agents/agent-terminal.md) — Web terminal, SSH access, mode switching
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
@@ -82,7 +82,7 @@
 - [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
 - [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory
-- [Customer Portal](sharing-and-access/customer-portal.md) — Branded signed-in client chat app with history and file upload (enterprise)
+- [Workspace](sharing-and-access/workspace.md) — Signed-in chat app with continuous conversations, agent pages, rooms, and file upload
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
 
@@ -93,8 +93,8 @@
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 100+ MCP tools, API keys, dedicated per-agent tools
-- [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` discovery and inbound tasking for external orchestrators
+- [MCP Server](integrations/mcp-server.md) — 116 MCP tools, API keys, dedicated per-agent tools
+- [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, and outbound calls to external agents
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 
 ## CLI

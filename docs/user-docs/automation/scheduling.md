@@ -64,12 +64,14 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 | `/api/agents/{name}/schedules` | GET | List schedules |
 | `/api/agents/{name}/schedules` | POST | Create schedule |
 | `/api/agents/{name}/schedules/{id}` | GET/PUT/DELETE | CRUD operations |
-| `/api/agents/{name}/schedules/{id}/enable` | POST | Enable schedule |
-| `/api/agents/{name}/schedules/{id}/disable` | POST | Disable schedule |
-| `/api/agents/{name}/schedules/{id}/trigger` | POST | Manual trigger |
+| `/api/agents/{name}/schedules/{id}/enable` | POST | Enable schedule (owner/admin) |
+| `/api/agents/{name}/schedules/{id}/disable` | POST | Disable schedule (owner/admin) |
+| `/api/agents/{name}/schedules/{id}/trigger` | POST | Manual trigger (owner/admin) |
 | `/api/agents/{name}/schedules/{id}/executions` | GET | Execution history |
 | `/api/agents/{name}/schedules/{id}/analytics` | GET | Per-schedule analytics (see below) |
 | `/api/agents/{name}/schedules/analytics-summary` | GET | Per-schedule performance rollup for the whole agent (`?window=7d\|14d\|30d`) |
+
+Enabling, disabling, and manually triggering a schedule are **owner or admin** actions — someone the agent is merely shared with can read its schedules and their history but cannot start or stop them. The same applies to the `toggle_agent_schedule` and `trigger_agent_schedule` MCP tools.
 
 ## Per-Schedule Analytics
 
