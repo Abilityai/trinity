@@ -2310,6 +2310,17 @@
         "voice"
       ],
       "description": "Portal dictation gate (#2212). `stt_available` is a SEPARATE roster-card bit from `voice_available`: transcription needs only the platform ElevenLabs key, narration additionally needs an effective voice, so the single-bit design could not express \"can dictate, cannot narrate\" — which is why the mic rendered on a pure browser capability check and was a dead control on a provider-less instance. Asserts the truth table in both directions (key without voice → stt yes / tts no; no key → both no, failing closed like `voice_available`), that the model default is absent-not-present so an older payload hides the mic rather than rendering a dead one, and — the load-bearing one — that the card bit and `transcribe_portal_audio`'s own 404 gate are the SAME condition, since drift between what the client sees and what /stt will do IS the dead-control bug. Pure unit: no DB, no HTTP, no ElevenLabs."
+    },
+    {
+      "file": "unit/test_2241_magicmock_assert_guard.py",
+      "feature": "#2241",
+      "added": "2026-08-17",
+      "categories": [
+        "ci",
+        "unit",
+        "devex"
+      ],
+      "description": "MagicMock vs the #1310 assert_* auth-guard family (#2241). MagicMock raises AttributeError for any attribute starting with `assert` (its typo guard against mock.assert_called_once), and the imperative guards are named assert_admin / assert_agent_access / assert_agent_owner / assert_owns / assert_owns_or_admin — so a bare MagicMock() stub of `dependencies` fails at IMPORT time and every test in the file becomes a setup error, with a message pointing at mock internals rather than at the stub. That is how 14 api-tier tests were silently red from b2db1c87 onward. Static text scan, no imports: derives the exporter set from src/backend (never hardcoded, so a sixth guard is covered the day it lands) and flags sys.modules stubs of those modules built with a bare MagicMock, accepting unsafe=True / spec= / create_autospec / a real types.ModuleType. Guards its own vacuity (asserts the exporter scan still finds the family) and pins the upstream behaviour it depends on, so if mock ever drops the prefix check this file fails and can be deleted rather than maintained on faith. Verified to DETECT: reverting the one-line fix makes it report the offender by file:line."
     }
   ]
 }
