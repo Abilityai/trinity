@@ -348,6 +348,33 @@ class TestSyncBookkeeping:
         """Bookkeeping runs on the tail of a sync and is never load-bearing."""
         sources_db.record_sync("src_00000000", success=True, commit_sha="x")
 
+    def test_sync_with_no_sources_configured_fails_by_name(self, service):
+        """The "nothing configured" contract, deterministically (#2242).
+
+        This branch used to be covered only by
+        `tests/test_skills.py::TestSkillsLibrarySync::test_sync_requires_url_configured`,
+        an API test that gated itself on `status["url"]`. ent#237 replaced the
+        single `skills_library_url` setting with the `skill_sources` table, so that
+        key reads `None` on every modern install — including ones that DO have
+        sources. The guard therefore stopped skipping, the sync ran against a
+        migrated source, succeeded, and the test failed asserting 400 against a
+        200. The subject is a property of the service, not of whatever an instance
+        happens to be configured with, so it belongs here, where the configuration
+        is the fixture's to decide.
+
+        The error STRING is asserted because the router returns it verbatim as the
+        HTTP `detail` (`routers/skills.py::sync_library`) — it is operator-facing
+        text, not an internal label.
+        """
+        result = service.sync_library()
+
+        assert result["success"] is False
+        assert result["error"] == "No skill sources configured"
+        assert result["sources"] == []
+        # Not `busy`: the router maps busy → 409 (retryable contention) and
+        # everything else → 400, so an unconfigured library must not look busy.
+        assert not result.get("busy")
+
 
 class TestAssignmentProvenance:
     def test_assignment_records_its_source(self, sources_db, tmp_path, monkeypatch):

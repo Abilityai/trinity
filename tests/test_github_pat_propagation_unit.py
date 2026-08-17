@@ -40,6 +40,23 @@ if "utils.helpers" not in sys.modules:
 # (#211 sys.modules-pollution fix).
 _fake_database = types.ModuleType("database")
 _fake_database.db = MagicMock()
+# #2242: `_propagate_to_agent` lazily runs `from services import git_service`, and
+# git_service's module header is `from database import db, AgentGitConfig,
+# GitSyncResult`. A stub carrying only `db` therefore raised
+# `ImportError: cannot import name 'AgentGitConfig' from 'database'` — and because
+# it happened inside `asyncio.gather(..., return_exceptions=True)`, it surfaced not
+# as an import error but as every agent landing in `failed` with `updated` empty.
+# Four tests named after propagation outcomes were really asserting an import
+# failure.
+#
+# The REAL models, not more MagicMocks: they are plain pydantic classes with no
+# heavy imports, and stubbing them would re-mock the very shape these tests exist
+# to exercise. If the model gains a required field, this should notice.
+from db_models import AgentGitConfig as _RealAgentGitConfig  # noqa: E402
+from db_models import GitSyncResult as _RealGitSyncResult  # noqa: E402
+
+_fake_database.AgentGitConfig = _RealAgentGitConfig
+_fake_database.GitSyncResult = _RealGitSyncResult
 
 _fake_services_pkg = types.ModuleType("services")
 _fake_services_pkg.__path__ = [os.path.join(_backend_path, "services")]
@@ -49,6 +66,17 @@ _fake_docker_service.list_all_agents_fast = MagicMock(return_value=[])
 # #1264: github_pat_propagation_service now imports get_agent_container at module
 # top, so the stub must expose it for the fresh module load to succeed.
 _fake_docker_service.get_agent_container = MagicMock(return_value=None)
+# #2242: the second layer of the same drift. With `AgentGitConfig` restored above,
+# `from services import git_service` gets one import further and then dies on
+# git_service's own `from services.docker_service import get_agent_container,
+# execute_command_in_container`. Stubbing this one name lets the REAL git_service
+# load — which is the point: the propagation path calls
+# `git_service.update_remote_pat(...)`, so the alternative (stubbing git_service
+# itself) would have let that call's signature drift unnoticed, which is the exact
+# class of bug this issue is about.
+_fake_docker_service.execute_command_in_container = MagicMock(
+    return_value={"exit_code": 0, "output": ""}
+)
 
 _STUB_MODULES = {
     "database": _fake_database,
@@ -216,10 +244,24 @@ async def test_skips_agent_with_per_agent_pat(service):
 
 @pytest.mark.asyncio
 async def test_skips_agent_without_github_pat_in_env(service):
-    """Agents whose .env does not contain GITHUB_PAT are skipped (AC)."""
+    """An agent with NO git config and no GITHUB_PAT line is skipped (AC, #1967).
+
+    #2242: the skip is conditional now, and the mock was hiding which condition.
+    #1967 replaced "the `.env` already has a GITHUB_PAT line" with "Trinity
+    manages a repo for this agent" as the eligibility signal — a
+    template-provisioned agent has a git config from creation but no `.env` yet,
+    and that population is exactly what the old gate excluded. Since `db` is a
+    blanket MagicMock, `db.get_git_config(...).github_repo` was truthy, so this
+    test was silently exercising `add_if_missing=True` — the WRITE path — while
+    asserting the skip. It only looked like a skip because the propagation died on
+    an import error before reaching either.
+    """
     with patch.object(service, "list_all_agents_fast", return_value=[_agent("a1")]), \
          patch.object(service, "db") as mock_db:
         mock_db.has_agent_github_pat.return_value = False
+        # The condition under test, stated instead of inherited from MagicMock:
+        # no git config => conservative behaviour => never create the line.
+        mock_db.get_git_config.return_value = None
 
         client_cm, _ = _make_async_client(
             read_responses={"a1": {"files": {".env": 'OTHER="x"\n'}}},
@@ -232,6 +274,40 @@ async def test_skips_agent_without_github_pat_in_env(service):
     assert result.updated == []
     assert any(s.status == "skipped_no_pat" and s.agent_name == "a1"
                for s in result.skipped)
+
+
+@pytest.mark.asyncio
+async def test_agent_with_git_config_gets_the_line_written(service):
+    """The other side of #1967 — and the branch the stale mock was accidentally
+    running while the test above claimed to assert the skip (#2242).
+
+    An agent Trinity manages a repo for gets `GITHUB_PAT` WRITTEN even though its
+    `.env` has no such line. Without this, nothing covered the eligibility rule
+    that #1967 introduced: the skip test would have gone green again under a
+    re-mocked `get_git_config`, and the write path would have stayed untested.
+    """
+    with patch.object(service, "list_all_agents_fast", return_value=[_agent("a1")]), \
+         patch.object(service, "db") as mock_db:
+        mock_db.has_agent_github_pat.return_value = False
+        git_config = MagicMock()
+        git_config.github_repo = "Abilityai/agent-a1"
+        mock_db.get_git_config.return_value = git_config
+
+        client_cm, client = _make_async_client(
+            read_responses={"a1": {"files": {".env": 'OTHER="x"\n'}}},
+            inject_responses={"a1": {"status": "success", "files_written": [".env"]}},
+        )
+        with patch("services.github_pat_propagation_service.httpx.AsyncClient",
+                   return_value=client_cm):
+            result = await service.propagate_github_pat("ghp_new")
+
+    assert result.updated == ["a1"], result
+    assert not any(s.status == "skipped_no_pat" for s in result.skipped)
+    # The written payload carries the new token on the mirrors (#1574), which is
+    # what "the line was created" means at this seam.
+    written = client.post.call_args_list[-1].kwargs["json"]["files"][".env"]
+    assert 'GITHUB_PAT="ghp_new"' in written
+    assert 'OTHER="x"' in written, "the pre-existing content must survive"
 
 
 @pytest.mark.asyncio
@@ -283,7 +359,20 @@ async def test_non_running_agents_ignored(service):
     assert result.total_running == 1
     assert result.updated == ["a2"]
     # Stopped agent never hit the wire.
-    assert all("a1" not in str(c) for c in client.get.call_args_list)
+    # #2242: assert on the URL, not on `str(call)`. The old form searched the
+    # WHOLE call repr for "a1", and that repr now includes the #1159
+    # `X-Trinity-Agent-Token` — a 64-char HMAC hex which contains "a1" roughly
+    # half the time (observed: ...db83a1d7ab65a1a2239d...). It only looked stable
+    # because the stale stub meant no request was ever made, so the generator was
+    # vacuously true over an empty list: fixing the import above is what exposed
+    # it. A substring search across a repr that carries a credential digest is not
+    # a test of which host was contacted.
+    contacted = [
+        (call.args[0] if call.args else call.kwargs.get("url", ""))
+        for call in client.get.call_args_list
+    ]
+    assert contacted, "the running agent should have been read"
+    assert all("http://agent-a1:" not in url for url in contacted), contacted
 
 
 @pytest.mark.asyncio
