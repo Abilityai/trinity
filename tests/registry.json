@@ -2310,6 +2310,18 @@
         "voice"
       ],
       "description": "Portal dictation gate (#2212). `stt_available` is a SEPARATE roster-card bit from `voice_available`: transcription needs only the platform ElevenLabs key, narration additionally needs an effective voice, so the single-bit design could not express \"can dictate, cannot narrate\" — which is why the mic rendered on a pure browser capability check and was a dead control on a provider-less instance. Asserts the truth table in both directions (key without voice → stt yes / tts no; no key → both no, failing closed like `voice_available`), that the model default is absent-not-present so an older payload hides the mic rather than rendering a dead one, and — the load-bearing one — that the card bit and `transcribe_portal_audio`'s own 404 gate are the SAME condition, since drift between what the client sees and what /stt will do IS the dead-control bug. Pure unit: no DB, no HTTP, no ElevenLabs."
+    },
+    {
+      "file": "unit/test_2075_detect_git_dir.py",
+      "feature": "#2075, #2245",
+      "added": "2026-08-17",
+      "categories": [
+        "backend",
+        "unit",
+        "git",
+        "reliability"
+      ],
+      "description": "Repo-root detection for an agent container. #2075: the root was chosen by a CONTENT probe, so any non-empty /home/developer/workspace was declared a legacy repo root even when the repository was rooted at /home/developer — every path-based consumer (compatibility collector, .gitignore migration and its .git guard, compatibility fix endpoint) then read and wrote a subdirectory as if it were the root. Most cases run the REAL probe script the production code emits against real git repos in tmp_path, so the string under test is the shipped one. #2245 adds the filesystem-boundary half: git halts discovery at a mount point unless GIT_DISCOVERY_ACROSS_FILESYSTEM is set, so an agent whose workspace/ is its own mount made a home-rooted repo look absent (exit 128, 'Stopping at filesystem boundary') and fell back to the very heuristic #2075 removed. A unit test cannot create a mount, so the boundary itself was verified in a container and recorded in the file's comments; what is pinned here is the plumbing (a git shim on PATH reports the env var git ACTUALLY received — a static substring check would pass on a script where the assignment landed after a pipe or in the wrong quoting layer) and the containment guard that makes crossing safe (an answer outside the agent home is still refused, asserted over five paths a boundary-crossing walk could now produce)."
     }
   ]
 }
