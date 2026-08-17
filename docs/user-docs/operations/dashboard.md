@@ -11,6 +11,8 @@ The Dashboard is also where you create agents: **Create Agent** sits in the head
 | Term | Meaning |
 |------|---------|
 | **View mode** | Timeline, Grid, or List — three renderings of the same fleet. Switching modes never refetches or resets your filters. |
+| **Agent tile** | One agent's card on the Grid canvas — avatar, runtime badge, live chips, and inline Run/Autonomy toggles. |
+| **Info tile** | A fleet-level readout that shares the Grid canvas with agent tiles. It summarizes; it never operates an agent. |
 | **Department** | A visual grouping of agents on the Grid canvas, backed by a `dept-<name>` tag. |
 | **Reporting line** | An arrow between two tiles on the Grid, backed by a `reports-to-<agent>` tag on the reporting agent. |
 
@@ -20,7 +22,7 @@ The Dashboard is also where you create agents: **Create Agent** sits in the head
 
 Filters live in the Dashboard header and apply to every view mode:
 
-- **Type-to-filter** — Press `/` anywhere on the page and start typing to narrow the fleet by name. Matching is a case-insensitive substring over both the agent slug and its display name. Press `Esc` to clear. This filter is an accelerator, not a saved preference — it is never persisted and clears when you leave the page.
+- **Type-to-filter** — Press `/` anywhere on the page and start typing to narrow the fleet by name. Matching is a case-insensitive substring over both the agent slug and its display name. Press `Esc` to clear. This filter is an accelerator, not a saved preference — it is never persisted and clears when you leave the page. It narrows *agents* only: Grid info tiles are fleet-scope readouts and keep reporting on the whole fleet regardless of the query.
 - **Quick tag filter** — Narrow to one or more tags.
 - **Owner filter** — Narrow to agents owned by a particular user.
 - **Time range** — 1h, 6h, 24h, 7d, or custom (Timeline).
@@ -44,13 +46,38 @@ Agent-to-agent collaboration is surfaced here — via the Agent-Triggered trigge
 
 ![Trinity Dashboard — Grid view showing the fleet as a canvas of agent tiles with activity sparklines, success rates, cost, and inline Run/Auto toggles](../../screenshots/dashboard-grid.png)
 
-A magnetic tile canvas — the fleet as a grid of agent cards. Each agent is a five-zone tile showing its avatar, runtime badge, and inline **Running** and **Autonomy** toggles, plus live status chips (git sync health, pending operator-queue items).
+A magnetic tile canvas. It holds two kinds of occupant on one lattice: **agent tiles** (one per agent) and **info tiles** (fleet-level readouts). Each agent is a five-zone tile showing its avatar, runtime badge, and inline **Running** and **Autonomy** toggles, plus live status chips (git sync health, pending operator-queue items).
 
-1. Drag a tile to move it; drop it onto another tile to **swap** positions. The layout snaps to an unbounded lattice and is saved per user.
+1. Drag a tile to move it; drop it onto another tile to **swap** positions. The layout snaps to an unbounded lattice.
 2. **Tidy** re-packs the tiles into a compact arrangement without losing your ordering.
-3. **Reset** restores the default auto-generated layout.
+3. **Reset** restores the default auto-generated layout, then re-seeds your enabled info tiles above the fleet.
 4. Pan by dragging the background; zoom with the scroll wheel or pinch. Tiles are keyboard-navigable.
 5. Tile metrics hydrate lazily as they scroll into view, so large fleets stay responsive.
+
+Everything in that list applies to info tiles too — they drag, swap, tidy, and take keyboard focus exactly like agent tiles.
+
+**What persists, and where.** Two independent browser-local keys: tile positions in `localStorage['trinity-grid-layout-v2']` (migrated once from the older v1 layout, which is left intact), and which info tiles you show in `localStorage['trinity-grid-widgets-v1']`. Because they are separate, resetting your tile selection can never disturb your layout or the org-overlay toggles. Both are per browser, not per account — a different machine starts from the defaults.
+
+#### Info tiles
+
+Info tiles put fleet-level answers on the same canvas as the fleet. They are deliberately easy to tell apart from an agent: a **square** peg badge on the left edge instead of a round avatar, no Run or Autonomy toggles, and no connect port — an info tile can never join a department or terminate a reporting line.
+
+Two ship today, both on by default and visible to any user:
+
+| Tile | Shows | Opens |
+|------|-------|-------|
+| **Fleet summary** | Running (`n/total`), Autonomous, and Stopped counts, with the fleet size in the header | The fleet in List view |
+| **Recent failures** | The 4 newest failed executions across every agent you can access — agent, trigger, age, and the truncated error — plus the 24-hour failure total in the header | The Executions tab; each row opens that execution's detail page |
+
+**Showing and hiding them.** A **Tiles ▾** button sits on the Grid canvas itself, top-right, just below the org-overlay controls (Zones · Lines · Group by dept · New dept). It is Grid-only — you won't find it in the Dashboard header or the other two view modes. Tick a tile to show it, untick to hide it, and use **Reset to defaults** at the bottom to restore the default set. Close the menu with `Esc`, by clicking the button again, or by clicking anywhere else on the canvas.
+
+Because the show/hide store records only your explicit choices, a tile added in a later release appears automatically, while one you deliberately hid stays hidden.
+
+**How they refresh.** Info tiles ride the Grid's existing 60-second fleet poll — no extra load, and no request at all for a tile you have switched off. The poll pauses while the browser tab is hidden and refreshes immediately when you return to it, so a tab left open overnight never greets you with a stale all-clear. Enabling a tile fetches straight away rather than waiting for the next tick, and the header refresh button forces a round.
+
+**Failures are contained and claims are honest.** If one tile's data can't be read, only that tile shows an error — with a **Retry** button — and the rest of the board stays live. A failed *refresh* over data already on screen keeps the last good numbers rather than blanking them.
+
+The **Recent failures** tile treats "no failures" as a claim that needs evidence, so it shows the green **No failures in 24h ✓** only when it can positively confirm one. If the fleet list can't be enumerated, or the 24-hour total can't be read, it says exactly that instead of implying an all-clear. And when the 24-hour count is above zero while the latest page is empty — older failures, or legacy rows the list filters out — it explains the discrepancy rather than showing a checkmark beside a non-zero number.
 
 #### Org overlay — departments and reporting lines
 
@@ -100,6 +127,9 @@ The header carries live fleet telemetry (agent counts, running executions, cost)
 | `/api/agents/context-stats` | GET | Context and activity state for all agents |
 | `/api/agents/autonomy-status` | GET | Autonomy status for all agents |
 | `/api/activities/timeline` | GET | Cross-agent activity timeline (filterable) |
+| `/api/executions` | GET | Recent executions — the Recent-failures tile reads it with `status=failed&hours=24` |
+| `/api/executions/stats` | GET | Windowed fleet totals — the source of the tile's 24-hour failure count |
+| `/api/executions/timeline` | GET | Bucketed fleet rollups for building your own readouts — see [Executions](executions.md) |
 | `/api/agents/{name}/tags` | PUT | Set an agent's full tag list — including `dept-*` and `reports-to-*` org tags. Rejected for agent-scoped keys. |
 | `/api/telemetry/host` | GET | Host CPU/memory/disk |
 
@@ -110,6 +140,9 @@ The header carries live fleet telemetry (agent counts, running executions, cost)
 - The org overlay renders departments as hulls around wherever tiles already sit — it does not auto-arrange your fleet into an org tree (though **Tidy** groups by department when the overlay is active).
 - Reporting lines to an agent that is not currently placed on the canvas are skipped rather than drawn to an off-screen point.
 - The live agent-to-agent node graph was retired; collaboration is visible through the Timeline instead.
+- Info tiles come from a fixed catalog — there is no affordance for building a custom tile, and every tile occupies exactly one cell.
+- **Recent failures** shows at most four rows and never scrolls; use the Executions tab for the full list.
+- Grid layout and info-tile selection are stored in your browser, so they do not follow you to another machine.
 
 ## See Also
 

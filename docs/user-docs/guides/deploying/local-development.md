@@ -64,7 +64,7 @@ The frontend binds port `80` by default. If another process already holds `:80`,
 ./scripts/deploy/build-base-image.sh
 ```
 
-This builds `trinity-agent-base:latest` — the Docker image every agent container inherits. It includes Python 3.11, Node.js 20, Go 1.21, and Claude Code. **The platform can start without this, but you cannot create any agents until the image exists.**
+This builds `trinity-agent-base:latest` — the Docker image every agent container inherits. It includes Python 3.13, Node.js 20, Go 1.23, and Claude Code. **The platform can start without this, but you cannot create any agents until the image exists.**
 
 The image is tagged both `trinity-agent-base:latest` and `trinity-agent-base:<VERSION>` (read from the `VERSION` file). First build takes 5–10 minutes.
 

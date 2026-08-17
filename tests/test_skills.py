@@ -203,31 +203,49 @@ class TestSkillsLibrarySync:
 
     pytestmark = pytest.mark.smoke
 
-    def test_sync_requires_url_configured(self, api_client: TrinityApiClient):
-        """POST /api/skills/library/sync fails gracefully when URL not configured."""
-        # Check if URL is configured
-        status_response = api_client.get("/api/skills/library/status")
-        status = status_response.json()
+    def test_sync_never_500s_whatever_the_configuration(self, api_client: TrinityApiClient):
+        """Sync answers with a named error or a real result — never a 500 (#2242).
 
-        if status.get("url"):
-            pytest.skip("Skills library URL is configured - can't test unconfigured state")
+        Was `test_sync_requires_url_configured`, which asked
+        `if status.get("url"): skip`. ent#237 replaced the single
+        `skills_library_url` setting with the `skill_sources` table, so `url` reads
+        `None` on every modern install — including ones that DO have sources. The
+        skip stopped firing, the sync ran against the migrated source, succeeded,
+        and the test failed asserting 400 against 200 while its name still claimed
+        to be testing the unconfigured state.
 
+        Swapping the key does not repair it: an API test cannot dictate what the
+        target instance has configured (observed live — `/status` reported
+        `configured: false` moments before `/sync` found an enabled source and
+        cloned it). So the deterministic "no sources → 400, named" contract moved to
+        a unit test that owns its own configuration,
+        `tests/unit/test_ent237_skill_sources.py::TestSyncBookkeeping::test_sync_with_no_sources_configured_fails_by_name`,
+        and what stays here is the property that holds on ANY instance and is worth
+        an end-to-end check: the route degrades by name rather than crashing.
+        """
         response = api_client.post("/api/skills/library/sync")
 
-        # Should fail with informative error (not 500)
-        assert_status(response, 400)
+        assert response.status_code in (200, 400, 409), response.text
         data = response.json()
-        assert "detail" in data
-        assert "not configured" in data["detail"].lower() or "url" in data["detail"].lower()
+        if response.status_code == 200:
+            # Configured: a real result, in the multi-source shape ent#237 added.
+            assert data.get("success") is True, data
+            assert isinstance(data.get("sources"), list)
+        else:
+            # 400 unconfigured / bad source; 409 a sync already running.
+            assert "detail" in data
+            assert data["detail"], "an error status must name its reason"
 
     def test_sync_returns_structure_when_configured(self, api_client: TrinityApiClient):
         """POST /api/skills/library/sync returns expected structure when configured."""
-        # Check if URL is configured
+        # #2242: gate on `configured` (ent#237: "at least one source exists"), not
+        # the legacy `url`, which is None on every modern install — so this test
+        # was skipping unconditionally and had stopped asserting anything at all.
         status_response = api_client.get("/api/skills/library/status")
         status = status_response.json()
 
-        if not status.get("url"):
-            pytest.skip("Skills library URL not configured")
+        if not (status.get("configured") or status.get("sources")):
+            pytest.skip("No skills sources configured on this instance")
 
         response = api_client.post("/api/skills/library/sync")
 

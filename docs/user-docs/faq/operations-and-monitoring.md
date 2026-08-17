@@ -8,11 +8,19 @@ The main Dashboard at `/` monitors all agents and their activities in real time,
 
 ## What's the difference between the Timeline, Grid, and List dashboard views?
 
-Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row completion rate, cost, and slot count, a time-range filter, and live progress for running executions. Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items) — drag tiles to rearrange, or use Tidy and Reset. List is the former standalone Agents page: a sortable, filterable row list with inline toggles and bulk tag actions. Agent-to-agent collaboration is surfaced in the Timeline replay (via the Agent-Triggered trigger type) rather than as a live node graph — the former Graph view has been removed. See [Dashboard](../operations/dashboard.md).
+Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row completion rate, cost, and slot count, a time-range filter, and live progress for running executions. Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items) — drag tiles to rearrange, or use Tidy and Reset. The Grid canvas also carries fleet-level **info tiles** alongside the agent cards, shown or hidden from a **Tiles ▾** menu. List is the former standalone Agents page: a sortable, filterable row list with inline toggles and bulk tag actions. Agent-to-agent collaboration is surfaced in the Timeline replay (via the Agent-Triggered trigger type) rather than as a live node graph — the former Graph view has been removed. See [Dashboard](../operations/dashboard.md).
 
 ## Where did the Agents page go?
 
 It is now the Dashboard's **List** view mode, and `/agents` redirects there. The row list, filters, sorting, inline Run/Autonomy toggles, and bulk tag operations all came across; tag and owner filtering now use the shared Dashboard header controls, so they apply to the Timeline and Grid views too. See [Dashboard](../operations/dashboard.md).
+
+## Can I put fleet-level readouts on the Dashboard Grid?
+
+Yes. The Grid canvas carries *info tiles* beside the agent tiles. Two ship today: **Fleet summary** (running, autonomous, and stopped counts) and **Recent failures** (the newest failed executions across every agent you can access, plus a 24-hour failure total). Show or hide them from the **Tiles ▾** menu on the canvas top-right, under the Zones and Lines controls; **Reset to defaults** restores the default set. They drag, swap, and tidy exactly like agent tiles, and both their positions and your show/hide choices are saved per browser. They refresh on the Grid's existing 60-second poll, so they add no extra load. If one tile's data can't be read, only that tile shows an error and the rest of the board stays live. See [Dashboard](../operations/dashboard.md).
+
+## Why doesn't the Recent failures tile just say zero when there are no failures?
+
+Because "no failures" is a claim that needs evidence. The tile shows the green **No failures in 24h ✓** only when it can positively confirm one — both the failure list and the 24-hour total must have loaded, and the fleet must be enumerable. If the fleet list can't be read, or the 24-hour count can't be read, it says exactly that rather than implying an all-clear. It also explains the case where the 24-hour total is above zero but the latest page is empty, which happens with older failures or legacy rows the list filters out. See [Dashboard](../operations/dashboard.md).
 
 ## Can I show my fleet as an org chart?
 
@@ -64,7 +72,7 @@ The **Notifications** tab on the Operations page is the consolidated view: filte
 
 ## How do I see every task my agents have run?
 
-Open the **Executions** tab on the Operations page. It lists all executions across the fleet (admins see every agent; other users see only owned or shared agents) with filters for agent, status, trigger type, time range (1 hour to 30 days, or all time), and free-text search over task messages. Stat cards show Total, Success rate, and Cost for the selected window, while running and queued counts are always live. A status dot shows **Live** when WebSocket updates are connected or **Polling** as fallback, and the list loads 50 rows at a time with **Load more**. See [Executions](../operations/executions.md).
+Open the **Executions** tab on the Operations page. It lists all executions across the fleet (admins see every agent; other users see only owned or shared agents) with filters for agent, status, trigger type, time range (1 hour to 30 days, or all time), and free-text search over task messages. Stat cards show Total, Completion, and Cost for the selected window, while running and queued counts are always live. A status dot shows **Live** when WebSocket updates are connected or **Polling** as fallback, and the list loads 50 rows at a time with **Load more**. See [Executions](../operations/executions.md).
 
 ## Can I watch a running execution live?
 

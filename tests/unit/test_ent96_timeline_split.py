@@ -24,6 +24,7 @@ no Docker.
 from __future__ import annotations
 
 import types
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,6 +33,27 @@ from db.schedules.stats import _shape_execution_timeline
 from db.schedules.analytics import _BUCKET_ORDER
 
 pytestmark = pytest.mark.unit
+
+
+# `_gap_fill` builds a continuous UTC axis relative to `datetime.now(timezone.utc)`
+# and keys it with `strftime("%Y-%m-%dT%H")`, so a literal hour is a valid bucket
+# only for as long as it stays inside the window. These tests asserted against
+# `"2026-08-14T09"`, so they passed the day they were written and failed every day
+# after — `KeyError` where the axis no longer reaches, `StopIteration` from the
+# `next(...)` lookups (#2243).
+#
+# The key is now derived from the same clock the axis is, so the assertions hold
+# on any run date. The offset must stay strictly INSIDE the window under test: an
+# interior bucket survives an hour boundary ticking between this call and the
+# `now` inside `_gap_fill`, which is what makes the derivation flake-free rather
+# than merely correct today. The narrowest window here is 6h.
+_BUCKET_FMT = "%Y-%m-%dT%H"
+_INTERIOR_OFFSET_HOURS = 2
+
+
+def _hour_bucket(offset_hours: int = _INTERIOR_OFFSET_HOURS) -> str:
+    """The axis key `_gap_fill` emits for the hour `offset_hours` ago."""
+    return (datetime.now(timezone.utc) - timedelta(hours=offset_hours)).strftime(_BUCKET_FMT)
 
 
 def _row(bucket, split_key, total, failed=0, success=None):
@@ -51,63 +73,68 @@ def _row(bucket, split_key, total, failed=0, success=None):
 # ---------------------------------------------------------------------------
 
 def test_split_rows_fold_to_one_row_per_interval():
+    hour, next_hour = _hour_bucket(), _hour_bucket(1)
     rows = [
-        _row("2026-08-14T09", "schedule", 10),
-        _row("2026-08-14T09", "mcp", 4),
-        _row("2026-08-14T10", "schedule", 2),
+        _row(hour, "schedule", 10),
+        _row(hour, "mcp", 4),
+        _row(next_hour, "schedule", 2),
     ]
     out = _shape_execution_timeline(rows, group_by="hour", hours=24, split="trigger")
     by_bucket = {r["bucket"]: r for r in out}
-    assert by_bucket["2026-08-14T09"]["total"] == 14
-    assert by_bucket["2026-08-14T09"]["by_trigger"] == {
+    assert by_bucket[hour]["total"] == 14
+    assert by_bucket[hour]["by_trigger"] == {
         "Scheduled": {"total": 10, "failed": 0},
         "MCP": {"total": 4, "failed": 0},
     }
 
 
 def test_the_breakdown_always_sums_to_its_own_column():
+    hour = _hour_bucket()
     rows = [
-        _row("2026-08-14T09", "schedule", 10, failed=2),
-        _row("2026-08-14T09", "chat", 5, failed=1),
-        _row("2026-08-14T09", "telegram", 1),
+        _row(hour, "schedule", 10, failed=2),
+        _row(hour, "chat", 5, failed=1),
+        _row(hour, "telegram", 1),
     ]
     out = _shape_execution_timeline(rows, group_by="hour", hours=24, split="trigger")
-    hour = next(r for r in out if r["bucket"] == "2026-08-14T09")
-    assert sum(e["total"] for e in hour["by_trigger"].values()) == hour["total"] == 16
-    assert sum(e["failed"] for e in hour["by_trigger"].values()) == hour["failed"] == 3
+    col = next(r for r in out if r["bucket"] == hour)
+    assert sum(e["total"] for e in col["by_trigger"].values()) == col["total"] == 16
+    assert sum(e["failed"] for e in col["by_trigger"].values()) == col["failed"] == 3
 
 
 def test_failures_are_carried_per_label_not_only_in_the_column_total():
+    hour = _hour_bucket()
     rows = [
-        _row("2026-08-14T09", "schedule", 10, failed=2),
-        _row("2026-08-14T09", "mcp", 4, failed=0),
+        _row(hour, "schedule", 10, failed=2),
+        _row(hour, "mcp", 4, failed=0),
     ]
     out = _shape_execution_timeline(rows, group_by="hour", hours=24, split="trigger")
-    hour = next(r for r in out if r["bucket"] == "2026-08-14T09")
-    assert hour["by_trigger"]["Scheduled"]["failed"] == 2
-    assert hour["by_trigger"]["MCP"]["failed"] == 0
+    col = next(r for r in out if r["bucket"] == hour)
+    assert col["by_trigger"]["Scheduled"]["failed"] == 2
+    assert col["by_trigger"]["MCP"]["failed"] == 0
 
 
 def test_an_unmapped_trigger_lands_in_Other_rather_than_vanishing():
     """The reason the fold is Python and not a SQL CASE: a trigger added to the
     platform but not to `_TRIGGER_BUCKETS` must still be visible."""
-    rows = [_row("2026-08-14T09", "brand_new_trigger", 3)]
+    hour = _hour_bucket()
+    rows = [_row(hour, "brand_new_trigger", 3)]
     out = _shape_execution_timeline(rows, group_by="hour", hours=24, split="trigger")
-    hour = next(r for r in out if r["bucket"] == "2026-08-14T09")
-    assert hour["by_trigger"] == {"Other": {"total": 3, "failed": 0}}
-    assert hour["total"] == 3
+    col = next(r for r in out if r["bucket"] == hour)
+    assert col["by_trigger"] == {"Other": {"total": 3, "failed": 0}}
+    assert col["total"] == 3
 
 
 def test_two_raw_triggers_in_one_bucket_merge_into_that_bucket():
     """`manual` and `chat` are both `Chat/Tasks` — the fold must add, not
     overwrite, or half the column disappears."""
+    hour = _hour_bucket()
     rows = [
-        _row("2026-08-14T09", "manual", 3),
-        _row("2026-08-14T09", "chat", 4),
+        _row(hour, "manual", 3),
+        _row(hour, "chat", 4),
     ]
     out = _shape_execution_timeline(rows, group_by="hour", hours=24, split="trigger")
-    hour = next(r for r in out if r["bucket"] == "2026-08-14T09")
-    assert hour["by_trigger"]["Chat/Tasks"] == {"total": 7, "failed": 0}
+    col = next(r for r in out if r["bucket"] == hour)
+    assert col["by_trigger"]["Chat/Tasks"] == {"total": 7, "failed": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +142,7 @@ def test_two_raw_triggers_in_one_bucket_merge_into_that_bucket():
 # ---------------------------------------------------------------------------
 
 def test_gap_filled_intervals_carry_an_empty_breakdown_not_a_missing_key():
-    rows = [_row("2026-08-14T09", "schedule", 1)]
+    rows = [_row(_hour_bucket(), "schedule", 1)]
     out = _shape_execution_timeline(rows, group_by="hour", hours=6, split="trigger")
     assert len(out) >= 6
     for row in out:
@@ -137,7 +164,7 @@ def test_the_axis_is_still_continuous_under_a_split():
 # ---------------------------------------------------------------------------
 
 def test_without_a_split_no_by_trigger_key_appears():
-    rows = [{"bucket": "2026-08-14T09", "total": 3, "failed": 0, "success": 3,
+    rows = [{"bucket": _hour_bucket(), "total": 3, "failed": 0, "success": 3,
              "cost": 0.0, "context_used": 0}]
     out = _shape_execution_timeline(rows, group_by="hour", hours=6)
     assert all("by_trigger" not in r for r in out)

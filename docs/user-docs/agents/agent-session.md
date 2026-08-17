@@ -1,98 +1,55 @@
-# Agent Session
+# Continuous Conversations
 
-**Session mode** is the default surface of the unified **Chat** tab in Agent Detail (toggle at the top-right; the former separate Session tab merged into Chat). Each new message reattaches to the same Claude Code session, so the agent retains tool-result memory, mid-skill state, and reasoning state across turns — strictly more capable than classic chat's stateless text-replay model. Old `?tab=session` links open the Chat tab in session mode.
+Trinity has two conversation surfaces, and the difference is memory.
 
-> 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
+| Surface | Where | What the agent remembers |
+|---------|-------|--------------------------|
+| **Chat tab** on Agent Detail | `/agents/{name}?tab=chat` | Nothing. Each message starts fresh. |
+| **[Workspace](../sharing-and-access/workspace.md)** | `/workspace` | Everything — tool results, mid-task state, reasoning — carried across turns. |
+
+> **The Session tab is retired.** It was folded into the Chat tab as a mode, and that mode has now been removed in favour of the Workspace. Old `?tab=session` links redirect to `/workspace?agent=<name>`, and the Chat tab carries a **Continue in Workspace →** link. The underlying session API still exists (see [For Agents](#for-agents)); what went away is the second UI for it.
+
+This page covers the behavior of a resuming conversation — what carries over, what compaction does to it, and the limits a long task can hit. For the Workspace UI itself, see [Workspace](../sharing-and-access/workspace.md).
 
 ## Concepts
 
-- **Session** -- A conversation thread with a Claude Code working memory attached. The visible message log is stored separately from the working memory and survives Reset.
-- **Cached Claude session** -- A Claude Code session UUID stored on the session row. Each turn calls `claude --print --resume <uuid>` so working memory persists.
-- **Auto-compact** -- Built-in Claude Code behaviour. When the underlying conversation reaches ~85% of the model's context window (model-specific — 1M tokens for Sonnet 5 and other 1M-capable models, 200K for older Claude models), Claude Code summarizes most of that history into a ~10k summary mid-turn. Working memory survives in compressed form.
-- **Reset memory** -- Clear the cached Claude session UUID. The visible message log stays; the agent starts the next turn cold.
+**Resume** — Each turn reattaches to the same underlying agent session rather than replaying the transcript as text. That preserves strictly more than what was *said*: files the agent read, commands it ran, where it was in a multi-step skill, and its reasoning state.
 
-### Reset memory vs. New Session
+**Cold turn** — A turn with no session to resume: the first message in a chat, the first turn after working memory is cleared, or a recovery turn after the underlying session file is gone. A cold turn re-sends the visible history as text so the agent still has the thread of the conversation.
 
-Both buttons sit in the Session toolbar. They look similar; they aren't:
-
-| Action | Visible message log | Claude working memory | Cost tracking | When to use |
-|--------|--------------------|----------------------|---------------|-------------|
-| **Reset memory** | Kept | Cleared (next turn is cold) | Continues on the same session | You want a fresh line of thought but want to keep the conversation transcript with the agent |
-| **+ New Session** | New (empty) | New (cold) | New (zero) | You're starting a different conversation entirely — different topic, different cost bucket |
-
-## When to use Session mode vs classic chat
-
-| Use Session mode for... | Use classic chat for... |
-|---|---|
-| Long, multi-turn reasoning or planning | One-shot questions |
-| Multi-step skills where mid-skill state matters | Voice conversations |
-| Cases where you want the agent to remember tool outputs across turns | Quick file-bearing questions where memory across turns isn't important |
-
-The two surfaces share nothing — separate tables, separate sessions, separate cost tracking. Flipping the toggle does not transfer state.
-
-Session mode is unavailable (the toggle hides and classic chat is used) when the platform `session_tab_enabled` flag is off or the agent runs a runtime without `--resume` support (Codex).
+**Auto-compact** — Claude Code's own mid-turn summarization of its history when it approaches the model's context limit.
 
 ## How It Works
 
-1. Open an agent's detail page and click the **Chat** tab; make sure **Session mode** is on (the default).
-2. Click **+ New Session** or pick an existing session from the dropdown.
-3. Type a message and press Enter. The agent processes the message; subsequent turns reattach to the same Claude Code session UUID.
-4. Watch the session subtitle for `X% last cache` — the size of the most recent assistant turn's cache as a fraction of the model window.
-5. To start a clean line of thought, click **Reset memory**.
+### What resuming preserves
 
-### File Attachments
+A resumed turn keeps the agent's working memory. A stateless turn keeps only the words. That is why long, multi-step work belongs in the Workspace: an agent that read three files in turn two still has them in turn six, instead of re-reading them.
 
-Same as Chat — paperclip button or drag-and-drop on the input.
+Turns on one chat are **serialized**. Two simultaneous resumes of the same session could corrupt it, so a second message while one is in flight is refused rather than queued. Start another chat if you need parallel work against the same agent.
 
-**Supported types:** images (JPEG, PNG, GIF, WebP), plain text, CSV, JSON. Images are passed as vision content blocks. Text files are written to `/home/developer/uploads/` inside the agent container.
-
-**Unsupported:** PDF, ZIP, archives, video, audio.
-
-**Limits per message:**
-
-| | |
-|---|---|
-| Max files | 3 |
-| Max size per file | 5 MB |
-| Max total image size | 10 MB |
-
-### The "last cache" metric
-
-The `X% last cache` value in the session subtitle is the size of the **most recent assistant turn's cache** (cache_read + cache_creation tokens) as a fraction of the model's context window.
-
-It is **not** a session-wide memory pressure indicator. Claude Code auto-compacts mid-turn, which resets the cache to ~10k tokens — so this number bounces:
-
-- Heavy turn that doesn't compact → climbs (e.g. 65%).
-- Auto-compact mid-turn → next reading drops sharply (e.g. 28%).
-- Light prompt-generation turn after a compact → small (e.g. 6%).
-
-A high value tells you the last turn loaded a lot into Claude's cache, not that the session is "full."
+If the underlying session file has gone missing, the platform recovers automatically: it retries once as a cold turn, re-attaching the conversation history. You get an answer; the agent has the transcript but not its prior working state.
 
 ### Auto-compact
 
-When Claude Code's internal conversation history approaches ~85% of the model window, it automatically:
+When Claude Code's internal history approaches roughly 85% of the model's context window, it:
 
-1. Summarizes the conversation history into a ~10k-token summary.
-2. Replaces the in-memory history with the summary.
+1. Summarizes the history into a compact summary.
+2. Replaces its in-memory history with that summary.
 3. Continues the current turn.
 
-The context-window size is **model-specific**, not a flat 200K. Sonnet 5 (and other 1M-capable models) report a 1M-token window, while older Claude models report 200K — so the compaction point scales with the running model (e.g. ~85% of 1M for a 1M model, ~85% of 200K for a 200K model). The `% used` denominator you see adapts to whichever model the agent is running.
+The window is **model-specific**, not a flat 200K — a 1M-token model compacts at ~85% of 1M, a 200K model at ~85% of 200K.
 
-Effects users will notice:
-- The turn appears to take longer than expected (~2 minutes added per compact).
-- The `% last cache` reading drops sharply on the next turn.
-- The visible message log is **untouched**. Working memory survives in compressed form (the summary).
-- After several compacts in one session, response quality may diminish — the summary loses fidelity each time it's compressed further. Consider Reset memory and starting a fresh session.
+What you'll notice: the turn takes a couple of minutes longer than expected, the visible message log is untouched, and working memory survives in compressed form. After several compacts in one conversation the summary loses fidelity and answers get vaguer — that's the point to start a fresh chat.
 
 ### The 50-turn agentic-loop cap
 
-Each Session-tab turn can use up to 50 internal Claude agentic-loop iterations (read file, edit file, run tests, retry, etc.) before failing with:
+One turn can use up to 50 internal Claude agentic-loop iterations — read a file, edit it, run tests, retry — before failing with:
 
 > Task exceeded turn limit: Reached maximum number of turns (50). Consider increasing max_turns_task in guardrails or breaking into smaller subtasks.
 
-This is **not** the number of messages in your session. It's the per-turn iteration budget Claude Code uses internally for one user request. Heavy 12-step tasks with retries can blow past it.
+This is **not** the number of messages in your conversation. It is the per-turn iteration budget for a single request, and a heavy twelve-step task with retries can exhaust it.
 
-To raise it on a per-agent basis:
+To raise it for one agent:
 
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
@@ -105,57 +62,44 @@ curl -X PUT http://localhost:8000/api/agents/<agent-name>/guardrails \
   -d '{"max_turns_task": 200}'
 ```
 
-Default is 50. Allowed range is 1-500. Higher values reduce false-positive failures on heavy tasks but lengthen the worst-case execution time.
+Default is 50, allowed range 1–500. Higher values reduce false failures on heavy tasks and lengthen the worst-case execution time.
 
-### Reset memory
+### Clearing working memory
 
-The Reset memory button:
+Starting a new chat gives you a fresh conversation and a fresh cost bucket. Clearing an existing conversation's working memory — keeping the visible log while the agent starts cold — drops the cached session and best-effort deletes the underlying session file in the container; the next turn is a cold turn.
 
-1. Clears the session's `cached_claude_session_id`.
-2. Best-effort deletes the Claude Code JSONL file in the agent container.
-3. The visible message log in the database stays — you can see the prior conversation, but the agent will not.
+Reach for a clean slate when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated compaction has degraded its answers.
 
-The next turn becomes a "cold turn" — Claude Code creates a new session UUID and writes a fresh JSONL.
-
-When to reset:
-- You want to start a focused line of thought without the context of prior turns.
-- The session has auto-compacted enough times that response quality has degraded.
-- You're switching to a different topic and don't want bleed-over.
-
-### Session Management
-
-- Sessions persist across container restarts.
-- Cost tracking is cumulative across the conversation.
-- Per-user scope: owners cannot see other users' sessions on the same agent.
-- Delete a session: removes both the message log and the session row. Best-effort deletes the underlying JSONL.
+Conversations survive container restarts, cost tracking is cumulative across a conversation, and scope is per person: an agent's owner cannot read another user's conversations with it.
 
 ## Known limitations
 
 | Limitation | Detail |
 |---|---|
-| **Voice mic not wired into Session mode** | Voice writes to the classic chat tables, not the Session tables. The mic is hidden in session mode. Switch Session mode off for voice. |
-| **Agent restore from backup may force fresh sessions** | The platform backup covers SQLite (session rows + messages) but not the Docker volumes that hold Claude Code's JSONL files. After a DR restore, every session's first turn will trigger a memory-loss fallback (one cold turn under a new UUID). The visible message log is preserved. |
-| **Long turns survive a severed browser connection** | The turn endpoint is synchronous; if the browser tab is suspended mid-turn (laptop sleep, tab freeze), the UI reconciles against server state when it wakes instead of showing a false "failed to send" — the assistant message appears once the turn lands. Very long turns may still take a moment to reconcile after the tab resumes. |
-| **Stdout pipe race recovery is best-effort** | When a child subprocess inherits Claude Code's stdout, the final result event line can occasionally be lost. The system soft-recovers (treats accumulated assistant text as success), but cost and duration columns will be NULL for these recovered turns. The reply is correct; the metrics are missing. |
+| **Runtimes without resume fall back to replay** | Codex agents have no resume primitive, so every turn replays the visible history as text. Continuity of *conversation* is preserved; working memory is not. |
+| **Restore from backup forces one cold turn** | Platform backups cover the database (conversations and messages) but not the Docker volumes holding the agent's session files. After a restore, each conversation's first turn falls back to a cold turn. The visible log is preserved. |
+| **Long turns survive a severed connection** | If the browser sleeps mid-turn, the turn keeps running server-side and the reply appears when the tab reconnects — no false failure. Very long turns may take a moment to reconcile. |
+| **Recovered turns lose their metrics** | When a subprocess swallows the final result event, the platform recovers the reply but records no cost or duration for that turn. The answer is correct; the numbers are missing. |
 
 ## For Agents
 
-### API Endpoints
+The session API is unchanged and remains available; it simply has no dedicated UI any more. Workspace conversations run on the same engine.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/session` | POST | Create a new session row |
 | `/api/agents/{name}/sessions` | GET | List sessions (caller-scoped) |
 | `/api/agents/{name}/sessions/{id}` | GET | Get session with messages |
-| `/api/agents/{name}/sessions/{id}/message` | POST | Send a turn (the synchronous endpoint) |
-| `/api/agents/{name}/sessions/{id}/reset` | POST | Clear cached Claude session UUID |
+| `/api/agents/{name}/sessions/{id}/message` | POST | Send a turn (synchronous) |
+| `/api/agents/{name}/sessions/{id}/reset` | POST | Clear the cached session so the next turn is cold |
 | `/api/agents/{name}/sessions/{id}` | DELETE | Delete the session |
 | `/api/agents/{name}/guardrails` | GET / PUT | Read or change `max_turns_task`, `max_turns_chat`, `execution_timeout_sec` |
 
-All Session endpoints return 404 when the `session_tab_enabled` feature flag is off.
+All session endpoints return 404 when the `session_tab_enabled` feature flag is off. The Workspace does **not** consult that flag — it has its own chat surface.
 
 ## See Also
 
-- [Agent Chat](agent-chat.md) — the classic (stateless) surface of the same tab
+- [Workspace](../sharing-and-access/workspace.md) — the UI where continuous conversations live
+- [Agent Chat](agent-chat.md) — the stateless Chat tab on Agent Detail
+- [Agent Runtimes](agent-runtimes.md) — which runtimes support resume
 - [Agent Configuration](agent-configuration.md)
-- [Creating Agents](creating-agents.md)

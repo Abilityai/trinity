@@ -68,7 +68,7 @@
 
     <!-- Transcript -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <div class="max-w-3xl mx-auto space-y-4">
+      <div class="max-w-4xl mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
 
         <div v-for="m in messages" :key="m.seq">
@@ -80,14 +80,14 @@
           </p>
 
           <div v-else-if="isMine(m)" class="flex justify-end">
-            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm whitespace-pre-wrap bg-action-primary-600 text-white">{{ m.content }}</div>
+            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white">{{ m.content }}</div>
           </div>
 
           <div v-else class="flex items-start gap-2.5">
             <PortalAvatar :name="m.sender_identity" :size="28" class="mt-0.5" />
             <div class="max-w-[85%]">
               <div class="text-xs text-gray-500 dark:text-gray-400 mb-0.5">{{ m.sender_identity }}</div>
-              <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-2 text-sm prose-portal" v-html="render(m.content)"></div>
+              <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal" v-html="render(m.content)"></div>
             </div>
           </div>
         </div>
@@ -122,7 +122,7 @@
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
-      <div class="max-w-3xl mx-auto">
+      <div class="max-w-4xl mx-auto">
         <!-- A closed room is a dead end unless it SAYS so. Rooms end on their
              own (message budget, cost cap, TTL) — silence would read as the
              agents having stopped answering. -->
@@ -200,6 +200,7 @@ import PortalTypeahead from './PortalTypeahead.vue'
 import {
   applyTypeaheadInsert,
   boundCandidates,
+  resolveComposerGrowth,
   buildMentionToken,
   clampActiveIndex,
   detectTypeaheadTrigger,
@@ -387,7 +388,45 @@ function refreshTypeahead(el) {
   if (!typeaheadTrigger.value) activeIndex.value = -1
 }
 
+// #2211: the room composer had NO auto-grow at all — the issue assumed this file
+// carried a copy of `PortalConversation`'s `autoGrow()`, and it does not. So the
+// composer never grew past its single `rows="1"` line: a long message scrolled
+// inside a one-line box, which is a worse version of the symptom reported next
+// door. It gets the CORRECTED implementation rather than a copy of the buggy one.
+//
+// `scrollHeight` EXCLUDES the border under `box-sizing: border-box`, and this
+// textarea has a 1px border per side — assigning it directly leaves the field 2px
+// short of the line it must hold, which is what put a scrollbar in an EMPTY
+// composer. The border box is measured, not hardcoded, so a future `border-2`
+// cannot silently reintroduce it.
+const COMPOSER_MAX_PX = 160   // matches the `max-h-40` class on the textarea
+
+function autoGrow() {
+  const el = textarea.value
+  if (!el) return
+  el.style.height = 'auto'
+  const { height, overflowY } = resolveComposerGrowth(el, COMPOSER_MAX_PX)
+  el.style.height = height + 'px'
+  el.style.overflowY = overflowY
+}
+
+// Review finding: `autoGrow()` reads the DOM, but Vue patches `v-model` on the NEXT
+// microtask — so every call that follows a programmatic `input.value = ...` (send,
+// clear, restore-on-failure, dictation, typeahead pick) measured the OLD content.
+// Before this PR that only meant "did not resize"; now that `overflow-y` is managed
+// explicitly it also means a taller value can be left clipped AND unscrollable. So
+// programmatic mutations use this deferred form, and the direct `@input` path keeps
+// the synchronous one (the DOM is already current there).
+function autoGrowAfterUpdate() {
+  nextTick(autoGrow)
+}
+
+
 function onComposerInput(e) {
+  // Review finding: this must run BEFORE the paste/drop early-return. Pasting a long
+  // message otherwise left the box one line tall — and with `overflow-y` now managed,
+  // a prior keystroke's `hidden` would leave the pasted text clipped AND unscrollable.
+  autoGrow()
   if (e?.inputType === 'insertFromPaste' || e?.inputType === 'insertFromDrop') {
     closeTypeahead()
     return
@@ -436,6 +475,9 @@ function acceptActive(index) {
   nextTick(() => {
     const el = textarea.value
     if (el) { el.focus(); el.setSelectionRange(caret, caret) }
+    // Review finding: PortalConversation regrows here and this file did not, so a
+    // mention insert that wrapped to a second line left the field one line tall.
+    autoGrow()
   })
 }
 
@@ -481,6 +523,7 @@ async function send() {
   sending.value = true
   sendError.value = null
   input.value = ''
+  autoGrowAfterUpdate()   // deferred: Vue patches the textarea next tick
   resetTypeahead()
   try {
     await store.postRoomMessage(props.roomId, text)
@@ -541,11 +584,41 @@ watch(() => props.roomId, async () => {
 
 onMounted(async () => {
   document.addEventListener('click', onDocClick)
+  window.addEventListener('resize', onViewportResize)
   await load({ full: true })
   startPolling()
 })
+// Review finding: `overflow-y` is now pinned, so the height must be recomputed when
+// the box REWRAPS — narrowing the window (or opening a drawer) makes a fitting draft
+// taller, and a stale `hidden` would leave that text invisible and unscrollable
+// where it previously scrolled. Cheap: one listener, only while mounted.
+function onViewportResize() {
+  autoGrow()
+}
+
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick)
+  window.removeEventListener('resize', onViewportResize)
   stopPolling()
 })
 </script>
+
+<style scoped>
+/* Review finding: `prose-portal` was applied in this file's template but DEFINED
+   only in PortalConversation's scoped block, so it was inert here — room transcripts
+   got neither the #2211 paragraph rhythm nor the pre-existing overflow guard, and a
+   wide code block overflowed the bubble. Kept byte-identical to the conversation's
+   copy so the two surfaces cannot drift; a shared stylesheet is the follow-up, not a
+   change to smuggle into a readability fix. */
+.prose-portal :deep(p) { margin: 0.5rem 0; }
+.prose-portal :deep(p:first-child) { margin-top: 0; }
+.prose-portal :deep(p:last-child) { margin-bottom: 0; }
+.prose-portal :deep(pre) { overflow-x: auto; padding: 0.5rem; border-radius: 0.375rem; }
+/* Token-based tint rather than an `rgba()` literal: the design contract
+   forbids hardcoded colors, and the raw-color ratchet counts them. Applied
+   via @apply so light/dark both come from the gray scale. */
+.prose-portal :deep(pre) { @apply bg-gray-100 dark:bg-gray-800; }
+.prose-portal :deep(code) { font-size: 0.8em; }
+.prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
+.prose-portal :deep(a) { text-decoration: underline; }
+</style>
