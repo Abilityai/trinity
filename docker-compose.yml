@@ -365,6 +365,8 @@ services:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
       logs-init:
         condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
+      archives-init:
+        condition: service_completed_successfully  # #2205: same, for the archives volume
     networks:
       - trinity-platform   # Redis, scheduler, vector, OTel
       - trinity-agent      # Frontend, mcp-server, agent containers
@@ -633,6 +635,34 @@ services:
     command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
     volumes:
       - trinity-logs:/data/logs
+    restart: "no"
+    networks:
+      - trinity-platform
+
+  # #2205: the missed sibling of `logs-init`. `trinity-archives` is a NAMED volume,
+  # and Docker creates those root-owned — so the UID-1000 backend could not write
+  # `/data/archives` at all. `archive_storage.__init__` does
+  # `mkdir(parents=True, exist_ok=True)`, which silently no-ops on the existing
+  # root-owned directory, so nothing failed until the first WRITE: every archival
+  # run died with `[Errno 13] Permission denied`, archived originals were never
+  # unlinked, and `/data/logs` grew unbounded (measured on a real instance: 8.5 GB,
+  # a single 4.6 GB file, failing since 2026-06-23).
+  #
+  # Why it hid: the ERROR is written into the very log files that are not being
+  # pruned — symptom and diagnosis in the same unbounded file nobody tails. Same
+  # class as #1478 and #1871.
+  #
+  # This also REPAIRS existing installs rather than only fixing fresh ones: the
+  # one-shot runs on every `up`, and chowning the directory is idempotent.
+  # `chmod 775` (not 755) so a future root-writing sibling can share it, exactly as
+  # #1478 reasoned for the logs volume.
+  archives-init:
+    image: alpine:3.20
+    container_name: trinity-archives-init
+    logging: *default-logging
+    command: ["sh", "-c", "chown 1000:1000 /data/archives && chmod 775 /data/archives"]
+    volumes:
+      - trinity-archives:/data/archives
     restart: "no"
     networks:
       - trinity-platform
