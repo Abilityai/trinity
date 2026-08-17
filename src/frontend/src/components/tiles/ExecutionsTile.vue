@@ -54,8 +54,13 @@
           ></i>
         </span>
         <!-- The failure rail sits BELOW the stack on its own scale, so failures
-             are never hidden inside a column and never steal height from it. -->
-        <i class="ex-rail" :style="{ height: col.failPx + 'px' }"></i>
+             are never hidden inside a column and never steal height from it.
+             Rendered ONLY when there is something to draw: `.ex-col` spaces its
+             children with `gap`, and flex gap applies to a zero-height item too
+             — so an always-present empty rail lifted every failure-free stack
+             2px off the baseline while a real rail reached it, and the red read
+             as hanging below the chart. Every column now ends on one baseline. -->
+        <i v-if="col.failPx" class="ex-rail" :style="{ height: col.failPx + 'px' }"></i>
       </div>
     </div>
 
@@ -270,6 +275,9 @@ function retry() {
   justify-content: flex-end;
   align-items: stretch;
   height: 100%;
+  /* COL_GAP in utils/executionsTile.js. Only ever separates a stack from a
+     RENDERED rail — the rail is `v-if`'d, because gap does not care that an
+     item is 0px tall and would otherwise float every failure-free column. */
   gap: 2px;
 }
 .ex-stack {
