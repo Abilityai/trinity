@@ -36,13 +36,15 @@ See [Dashboard](../operations/dashboard.md) for the full reference.
 
 ## Library
 
-**Library** in the top nav (formerly Templates; `/templates` still redirects there) is one surface for everything you can install onto your fleet, in three stacked sections with jump anchors:
+**Library** in the top nav (formerly Templates; `/templates` still redirects there) is one surface for everything you can install onto your fleet, split across three tabs:
 
-- **Agent Templates** — Starter templates and GitHub templates; **Use Template** opens the create-agent flow.
-- **Systems** — Install a whole multi-agent system from a manifest (creator role and above).
-- **Skills** — Browse the shared skills library and see its sync state honestly, without opening an individual agent.
+- **Agent Templates** (`/library?tab=templates`) — Starter templates and GitHub templates; **Use Template** opens the create-agent flow.
+- **Systems** (`/library?tab=systems`) — Install a whole multi-agent system from a manifest. Requires the creator role or above; below that the tab is not shown at all.
+- **Skills** (`/library?tab=skills`) — Browse the shared skills library, see its sync state honestly, and see which agents already hold each skill — all without opening an individual agent.
 
-Each section loads independently, so a failure in one never blanks the others. Skills are *assigned* from an agent's own Skills tab — the Library is for browsing.
+The active tab lives in the URL, so a tab is linkable and survives a refresh. Switching tabs doesn't push browser history, so Back leaves the page rather than walking you through the tabs you visited. Each tab loads independently, so a failure in one never blanks the others.
+
+Skills are still *assigned* from an agent's own Skills tab. What the Library adds is the fleet-wide read: per skill, the agents that hold it, plus a list of assignments whose skill has since left the library.
 
 ## Agent Management
 

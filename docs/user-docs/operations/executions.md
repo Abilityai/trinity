@@ -13,15 +13,20 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `manual` | Tasks tab in agent detail |
 | `schedule` | Cron-based schedule |
 | `chat` | Chat tab in agent detail |
-| `session` | Session tab in agent detail |
+| `session` | A resumable conversation turn (the Workspace) |
 | `agent` | Agent-to-agent call |
 | `mcp` | MCP client call |
 | `public` | Public chat link |
 | `webhook` | Webhook trigger URL |
 | `fan_out` | Fan-out to multiple agents |
 | `loop` | Sequential agent loop iteration |
+| `reminder` | An agent's own deferred self-trigger |
+| `room` | A turn inside a shared multi-agent room |
+| `a2a` | A task sent in by an external A2A orchestrator |
 
-**Execution Status** -- Every execution moves through a lifecycle: `queued` -> `running` -> `success`, `failed`, `error`, `cancelled`, or `skipped`. A run you stop yourself terminates as `cancelled` — a distinct state, not a failure: it has its own filter option and badge in the Executions list, and renders neutral (not red) on the activity timeline.
+Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `paid`) are recorded too and are folded into the **Channels**, **Voice**, and **Public** groups on the analytics charts.
+
+**Execution Status** -- Every execution moves through a lifecycle: `queued` -> `running` -> `success`, `failed`, `cancelled`, or `skipped`, with `pending_retry` in between when a run is awaiting an automatic retry. A run you stop yourself terminates as `cancelled` — a distinct state, not a failure: it has its own filter option and badge in the Executions list, and renders neutral (not red) on the activity timeline. Some long-lived installs still carry historical rows with a legacy `error` status; the fleet stat cards count those alongside `failed`.
 
 **Parallel Capacity** -- Each agent has a configurable slot system (default: 3 concurrent slots). Slot TTL equals the agent timeout plus a 5-minute buffer. When all slots are occupied, new executions queue until a slot frees up.
 
@@ -90,6 +95,7 @@ Durations are always non-negative, and a run that ends through a recovery path (
 |----------|--------|-------------|
 | `/api/executions` | GET | Fleet execution list. Filters: `status`, `triggered_by`, `hours` (0 = all-time), `agent`, `search`; `limit` (max 200, default 50), `offset` |
 | `/api/executions/stats` | GET | Fleet stat cards: total, success/failed counts, total cost for the `hours` window; running and queued counts always live |
+| `/api/executions/timeline` | GET | Bucketed fleet rollups for charts. `group_by` = `hour`\|`day`\|`trigger`\|`agent` (default `day`); `hours` ∈ {0, 1, 6, 24, 168, 720} (default 168); optional `agent`. Each bucket carries total, success, failed, cost, and context use |
 | `/api/agents/{name}/executions` | GET | List executions for an agent |
 | `/api/agents/{name}/executions/{id}` | GET | Get execution details |
 | `/api/agents/{name}/task` | POST | Submit a new task |

@@ -60,6 +60,7 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 - Auto-switch depends on failure detection. If an agent does not surface 429 or auth-class errors through standard logging, auto-switch will not trigger.
 - Hot-reload applies the new token to the **next** Claude subprocess; turns already in flight finish on the previous token. On older agent base images that lack the hot-reload endpoint, the switch falls back to recreating the container (which drops in-flight executions).
 - Round-robin assignment considers only agent count, not agent activity or usage volume.
+- **An API key in `.env` will not override a subscription.** On a Claude-runtime agent authenticated by a subscription, Trinity strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the execution environment before each run. Claude prefers an API key over the subscription token, so a stale one left on the agent's workspace volume would silently authenticate every run — and its failures would be blamed on the subscription, marking healthy subscriptions unhealthy in turn. If you genuinely want an agent on an API key, clear its subscription rather than putting a key in `.env`. Agents on other runtimes are unaffected. `GET /api/credentials/status` reports which keys are being suppressed, by name.
 
 ## See Also
 

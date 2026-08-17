@@ -53,12 +53,22 @@ Two surfaces, deliberately different jobs:
 
 | Surface | Purpose |
 |---------|---------|
-| **Library** page → Skills section | Fleet-level browse. See every skill, its contract, its source, and the library's honest sync state — without opening an agent. Read-only. |
+| **Library** page → Skills tab (`/library?tab=skills`) | Fleet-level browse. See every skill, its contract, its source, the library's honest sync state, and **which agents already hold each skill** — without opening an agent. Read-only. |
 | Agent detail → **Skills** tab | Assignment. Pick skills from the library for this agent, save, and sync. |
 
 On the Skills tab you see two lists: **Assigned to this agent** (with each skill's version short-SHA, description, and the outcome of the last sync) and **Library** (everything available). Select, save, and — if the agent is running — click **Sync now** to copy the packages in immediately. If the agent is stopped, assignment still saves; the files arrive on next start.
 
 Per-skill outcomes are shown honestly. A skill that landed but is missing a declared binary or environment variable is flagged with a warning, not reported as a clean success.
+
+### Seeing who holds a skill
+
+The Library's Skills tab answers the fleet-wide question the per-agent tab cannot: **which agents already have this skill?** Each skill card carries an *Assigned to N agents* line with chips linking straight to `/agents/{name}?tab=skills`. The list is bounded — the first four agents, then **+N more** — so a widely-assigned skill doesn't swamp the card.
+
+The three states are kept distinct rather than collapsed into a zero. If the assignment data hasn't loaded yet you see a dash; if it couldn't be read you get an explicit failure with a **retry**; only a real, successful read reports "no agents yet". You also see only what you can access: an admin gets the whole fleet, everyone else gets their own and shared agents, and the empty wording says which.
+
+Below the library listing sits **Assigned but no longer in the library** — assignments whose skill has since been removed upstream. This matters because revocation works by cutting a new tag *without* the offending skill, after which a page keyed on the library listing would answer "who still has it?" with silence. The package stays on each agent until it is unassigned from that agent's own Skills tab.
+
+The Library gained a read, not a second write path: assignment is still a per-agent action.
 
 ### Skill injection
 
@@ -158,6 +168,7 @@ MCP tools for skills and playbooks:
 | `/api/skills/sources/{id}` | PUT/DELETE | Edit / remove a source (admin, human-only) |
 | `/api/skills/sources/{id}/sync` | POST | Sync one source (admin, human-only) |
 | `/api/settings/skills-library` | GET/PUT | Auto-sync and fleet re-inject configuration (admin) |
+| `/api/skills/assignments` | GET | Which agents hold each skill, batched. Human-only; admins see the fleet, others their accessible agents (the response says which via `scope`) |
 | `/api/agents/{name}/skills` | GET/PUT | Read / set an agent's assignments (owner) |
 | `/api/agents/{name}/skills/{skill}` | POST/DELETE | Assign / unassign one skill (owner) |
 | `/api/agents/{name}/skills/inject` | POST | Force re-inject into this agent (owner) |

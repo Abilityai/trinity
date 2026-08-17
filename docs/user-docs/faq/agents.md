@@ -28,7 +28,7 @@ Every template's `base_image` is validated against an allowlist, and blocked ima
 
 ## What's the difference between the Claude Code, Codex, and Gemini runtimes?
 
-The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses `OPENAI_API_KEY` and skips Claude-subscription auto-assignment; Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — Trinity mirrors the template's `CLAUDE.md` into it at startup), session resume (the Session tab is hidden for Codex agents, though Chat keeps full continuity), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
+The runtime is the CLI harness that executes the agent inside its container, chosen via `runtime.type` in `template.yaml`: `claude-code` (default), `codex` (OpenAI Codex), or `gemini-cli`. They differ in auth (Codex uses `OPENAI_API_KEY` and skips Claude-subscription auto-assignment; Gemini uses a Gemini API key), instruction file (Codex reads `AGENTS.md` — Trinity mirrors the template's `CLAUDE.md` into it at startup), session resume (a Codex agent cannot resume, so its Workspace turns replay the visible history as text rather than carrying working memory forward), and cost reporting (estimated for Codex, actual for the others). The runtime is fixed at creation: to change it, recreate the agent from a template that declares a different runtime. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I start and stop an agent?
 

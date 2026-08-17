@@ -128,6 +128,25 @@ def _restore_complete_stubs(monkeypatch):
 # Fix A: Circuit breaker fast-fail
 # ===========================================================================
 
+def _activity_double(*, activity_id=None):
+    """The activity-service seam, with EVERY awaited method awaitable.
+
+    #1804 added `close_execution_activity` to the terminal path
+    (`task_execution_service._write_terminal_and_gate`) — and this double was
+    inlined at SEVEN call sites, each wiring only `track_activity` and
+    `complete_activity`. So the new await got a plain `MagicMock` and three tests
+    died with "object MagicMock can't be used in 'await' expression": not noise,
+    but three fast-fail assertions that had quietly stopped running (#2242).
+
+    One factory, so the next seam change is one edit instead of seven silent
+    drifts. Anything the service awaits belongs here.
+    """
+    return MagicMock(
+        track_activity=AsyncMock(return_value=activity_id),
+        complete_activity=AsyncMock(),
+        close_execution_activity=AsyncMock(),
+    )
+
 class TestCircuitBreakerFastFail:
     """execute_task closes the execution record immediately when CB is open."""
 
@@ -183,9 +202,7 @@ class TestCircuitBreakerFastFail:
         mock_capacity.acquire = AsyncMock(return_value=admitted)
         mock_capacity.release = AsyncMock()
 
-        mock_activity_svc = MagicMock()
-        mock_activity_svc.track_activity = AsyncMock(return_value="act-001")
-        mock_activity_svc.complete_activity = AsyncMock()
+        mock_activity_svc = _activity_double(activity_id="act-001")
 
         mock_circuit = MagicMock()
         mock_circuit.allow_request.return_value = False
@@ -212,6 +229,17 @@ class TestCircuitBreakerFastFail:
         call_kwargs = mock_db.update_execution_status.call_args
         assert call_kwargs.kwargs.get("status") == TaskExecutionStatus.FAILED
 
+        # #2242: restoring the await is not the same as testing what the seam now
+        # does. #1804's rule is that the CAS winner OWNS the activity close — a
+        # fast-fail that writes FAILED and leaves the activity `started` is
+        # exactly the bug that issue fixed, and it would satisfy every assertion
+        # above. `update_execution_status` returns a truthy MagicMock here, so the
+        # CAS is won and the close must have happened in the terminal's own state.
+        mock_activity_svc.close_execution_activity.assert_awaited_once()
+        close_args = mock_activity_svc.close_execution_activity.await_args
+        assert close_args.args[0] == "exec-test-001"
+        assert close_args.args[1] == TaskExecutionStatus.FAILED
+
     @pytest.mark.asyncio
     async def test_cb_open_does_not_call_agent(self):
         """When CB is open, agent_post_with_retry is never called."""
@@ -236,10 +264,7 @@ class TestCircuitBreakerFastFail:
         with (
             patch("services.task_execution_service.db", mock_db),
             patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
-            patch("services.task_execution_service.activity_service", MagicMock(
-                track_activity=AsyncMock(return_value="act-001"),
-                complete_activity=AsyncMock(),
-            )),
+            patch("services.task_execution_service.activity_service", _activity_double(activity_id="act-001")),
             patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
             patch("services.task_execution_service.agent_post_with_retry", mock_post),
         ):
@@ -275,10 +300,7 @@ class TestCircuitBreakerFastFail:
         with (
             patch("services.task_execution_service.db", mock_db),
             patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
-            patch("services.task_execution_service.activity_service", MagicMock(
-                track_activity=AsyncMock(return_value=None),
-                complete_activity=AsyncMock(),
-            )),
+            patch("services.task_execution_service.activity_service", _activity_double()),
             patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
         ):
             svc = TaskExecutionService()
@@ -326,10 +348,7 @@ class TestCircuitBreakerFastFail:
         with (
             patch("services.task_execution_service.db", mock_db),
             patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
-            patch("services.task_execution_service.activity_service", MagicMock(
-                track_activity=AsyncMock(return_value="act-001"),
-                complete_activity=AsyncMock(),
-            )),
+            patch("services.task_execution_service.activity_service", _activity_double(activity_id="act-001")),
             patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
             patch("services.task_execution_service.agent_post_with_retry", mock_post),
         ):
@@ -393,10 +412,7 @@ class TestCancelledErrorInExecuteTask:
         with (
             patch("services.task_execution_service.db", mock_db),
             patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
-            patch("services.task_execution_service.activity_service", MagicMock(
-                track_activity=AsyncMock(return_value=None),
-                complete_activity=AsyncMock(),
-            )),
+            patch("services.task_execution_service.activity_service", _activity_double()),
             patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
             patch("services.task_execution_service.agent_post_with_retry", mock_post),
         ):
@@ -438,10 +454,7 @@ class TestCancelledErrorInExecuteTask:
         with (
             patch("services.task_execution_service.db", mock_db),
             patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
-            patch("services.task_execution_service.activity_service", MagicMock(
-                track_activity=AsyncMock(return_value=None),
-                complete_activity=AsyncMock(),
-            )),
+            patch("services.task_execution_service.activity_service", _activity_double()),
             patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
             patch("services.task_execution_service.agent_post_with_retry", mock_post),
         ):
@@ -478,10 +491,7 @@ class TestCancelledErrorInExecuteTask:
         with (
             patch("services.task_execution_service.db", mock_db),
             patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
-            patch("services.task_execution_service.activity_service", MagicMock(
-                track_activity=AsyncMock(return_value=None),
-                complete_activity=AsyncMock(),
-            )),
+            patch("services.task_execution_service.activity_service", _activity_double()),
             patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
             patch("services.task_execution_service.agent_post_with_retry", mock_post),
         ):

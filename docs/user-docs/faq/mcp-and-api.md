@@ -36,7 +36,7 @@ Once connected, Trinity's tools appear in your client's tool list. See [MCP Serv
 
 ## How many MCP tools are there, and what can they do?
 
-The MCP server exposes roughly 107 tools grouped into families: agent lifecycle and credentials (22 tools), chat and fan-out, schedules, execution queries, skills, tags, system manifests, subscriptions, fleet health monitoring, git operations, sequential loops, operator-queue reading and responses, plus single-purpose tools like `share_file`, `send_message`, and `report`. The largest family covers agent management — create, start/stop, rename, delete, credential injection, GitHub sync, and data export/import. See [MCP Server](../integrations/mcp-server.md).
+The MCP server exposes 116 tools grouped into families: agent lifecycle and credentials (22 tools), chat and fan-out, schedules, execution queries, skills, tags, system manifests, subscriptions, fleet health monitoring, git operations, sequential loops, shared rooms, outbound A2A calls, reminders, and operator-queue reading and responses, plus single-purpose tools like `share_file`, `send_message`, and `report`. The largest family covers agent management — create, start/stop, rename, delete, credential injection, GitHub sync, and data export/import. See [MCP Server](../integrations/mcp-server.md).
 
 ## Can I expose one of my agents as its own MCP tool?
 

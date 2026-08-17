@@ -34,6 +34,21 @@ Development tools for extending existing agents — skills, memory systems, git-
 | `/agent-dev:add-pipeline-stage` | Append a stage to an existing pipeline definition |
 | `/agent-dev:validate-pipeline` | Lint a pipeline.yaml — schema, DAG acyclicity, referenced skills |
 | `/agent-dev:add-orchestrator` | Make the agent a system-aware orchestrator — discover the fleet, compose systems, route and fan out work |
+| `/agent-dev:add-canon` | Give the agent a shared canonical-data layer — a fleet-wide git repo with publish, consume, reconcile, and doctor skills |
+| `/agent-dev:add-canon-lint` | Install deterministic (no-LLM) consistency linting into that canon repo, with a CI workflow |
+| `/agent-dev:add-project-management` | Install cross-actor project management — GitHub Issues as the source of truth, an approval-ready completion lattice, and a project steward |
+| `/agent-dev:agent-fleet-analysis` | Audit a directory of agents in any paradigm, score maturity and migration readiness, and emit a PDF report plus an agent-executable work order |
+| `/agent-dev:agent-fleet-migrate` | Execute that work order non-destructively into a verified Claude Code fleet, with a before/after maturity report |
+
+### Fleet-scale skills
+
+The last five are about a *set* of agents rather than one.
+
+**Canon** (`add-canon`, `add-canon-lint`) gives a fleet a shared, citable source of truth on plain git — no new platform primitive. Each agent owns a folder it publishes to and reads other agents' folders at a pinned ref; the lint pass keeps the claims structurally consistent and runs in CI.
+
+**Project management** (`add-project-management`) installs a cross-actor task model on GitHub Issues, with an `open → pending-verification → done` lattice so work isn't marked complete until it's been verified.
+
+**Fleet analysis and migration** (`agent-fleet-analysis`, `agent-fleet-migrate`) are a pair. The first scans agents written in *any* paradigm — Claude Code, n8n workflow exports, LangChain/CrewAI/AutoGen applications, hand-rolled loops — and produces both a human-readable report and a work order an agent can execute. The second carries out that work order into a fresh `fleet-migrated/` tree; your original sources are never mutated, and each migrated agent passes a review gate before the run reports success.
 
 ## Memory Systems
 

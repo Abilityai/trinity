@@ -10,19 +10,28 @@ regex substitution that writes a credential into a file another process parses,
 so the honest question is a round-trip one — **after patching, does the agent
 read back exactly the token we rotated to?**
 
-That is stated once as a Hypothesis property and pinned as explicit cases for
-the two inputs where it does not hold. The oracle is the agent's own `.env`
-reader, copied here from
-`docker/base-image/agent_server/services/execution_env.parse_env_file` — the
-same last-wins, one-quote-pair semantics, because "what the agent sees" is the
-only definition of success that matters for a credential rotation.
+That is stated once as a Hypothesis property and pinned as explicit cases,
+because "what the agent sees" is the only definition of success that matters for
+a credential rotation.
+
+The oracle is the agent's own `.env` decoder — the REAL
+`execution_env.unquote_env_value`, loaded from the base image by path (#2243).
+It used to be a hand-written replica that only stripped quotes, and that replica
+had drifted out from under two of the assertions below: #2023 made the encoding
+reversible (escape the escape character, then the quote, and unescape both on
+read), so a replica that never unescapes reports corruption the real agent never
+sees. A second copy of an encoding is exactly what #2023 removed from product
+code; keeping one in the test that judges it put the verdict back in the copy.
 
 Cases marked `xfail(strict=True)` are real defects; product code is unchanged
-per the skill's protocol.
+per the skill's protocol. When one is fixed the marker flips the test RED
+(XPASS(strict)) rather than going quietly green — which is the point, and is how
+the three retired below announced themselves.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -56,12 +65,36 @@ def svc():
 _ENV_LINE_KEYS = ("GITHUB_PAT", "GH_TOKEN", "GITHUB_TOKEN")
 
 
-def agent_reads(env_content: str) -> dict:
-    """Byte-faithful copy of the agent-server `.env` parser (last-wins).
+_READER_PATH = (
+    _REPO / "docker" / "base-image" / "agent_server" / "services" / "execution_env.py"
+)
 
-    Deliberately a copy and not an import: the agent server ships in its own
-    image and the backend cannot import from it. Kept small enough to audit
-    against the original by eye.
+
+def _real_reader():
+    """The agent's own decoder, loaded by path (the `test_2023_…` idiom).
+
+    Imported rather than reimplemented: the backend cannot import the agent-server
+    package (different image), but it CAN load the one module by path, and that is
+    the difference between judging the writer against the real inverse and judging
+    it against a replica that has to be kept in sync by hand (#2243).
+    """
+    spec = importlib.util.spec_from_file_location("_env_reader_pat_props", _READER_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ENV_READER = _real_reader()
+
+
+def agent_reads(env_content: str) -> dict:
+    """What the agent's `.env` reader sees: last-wins keys, real value decoding.
+
+    The line scan is here because the property under test is about DUPLICATE
+    lines (#2016) and last-wins is the semantics that makes a duplicate
+    dangerous. The value decoding — the part that has an encoding contract and
+    can therefore drift — is delegated to `execution_env.unquote_env_value`
+    rather than re-implemented as `.strip('"')`.
     """
     out = {}
     for line in env_content.splitlines():
@@ -72,7 +105,7 @@ def agent_reads(env_content: str) -> dict:
         key = key.strip()
         if not key:
             continue
-        out[key] = value.strip().strip('"').strip("'")
+        out[key] = _ENV_READER.unquote_env_value(value)
     return out
 
 
@@ -170,24 +203,42 @@ class TestKnownGaps:
         )
 
     @pytest.mark.parametrize("pat", [r"tok\1", r"tok\g<1>", r"tok\slash"])
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: the new line is used as an `re.sub` REPLACEMENT, so a "
-               "backslash in the token is parsed as a group reference and "
-               "raises re.error mid-rotation. See /edge-cases report "
-               "2026-08-05, finding 3.",
-    )
-    def test_a_backslash_in_the_token_does_not_raise(self, svc, pat):
-        svc._patch_env_github_pat('GITHUB_PAT="old"\n', pat)
+    def test_a_backslash_in_the_token_round_trips(self, svc, pat):
+        """Finding 3 — FIXED by #2017 (PR #2024), marker retired.
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Writer/reader asymmetry: `_format_pat_line` escapes `\"` but "
-               "the agent's .env parser never unescapes it. Belongs to the "
-               ".env parse contract, not to #1979. See /edge-cases report "
-               "2026-08-05, finding 4.",
-    )
+        The bug: the new line was passed to `re.sub` as a replacement STRING, so
+        a backslash in the token was parsed as a group reference — `\\1` and
+        `\\g<1>` raised `re.error: invalid group reference` and aborted that
+        agent's rotation with a message about regex syntax. `_patch_env_github_pat`
+        now substitutes with a callable (`lambda _match: new_line`), which is
+        inserted verbatim.
+
+        The marker did its job: once the fix landed these three reported
+        XPASS(strict) — a FAILURE — instead of quietly documenting a bug that no
+        longer existed (#2243). Retired to a plain regression test, and it asserts
+        the ROUND TRIP rather than merely "does not raise": not raising was the
+        crash symptom, while writing a backslash the agent decodes back to the
+        same token is the actual contract. The written line carries the doubled
+        `\\\\` of the #2023 encoding, and the real reader reverses it.
+        """
+        patched = svc._patch_env_github_pat('GITHUB_PAT="old"\n', pat)
+        assert agent_reads(patched)["GITHUB_PAT"] == pat
+
     def test_a_quote_in_the_token_round_trips(self, svc):
+        """Finding 4 — FIXED by #2023, marker retired (#2243).
+
+        This carried `xfail(strict=True)` for "the writer escapes `\"` but the
+        agent's .env parser never unescapes it". That was true of the writer/reader
+        pair as it stood, and #2023 fixed BOTH halves: the encoding escapes the
+        escape character first and `unquote_env_value` reverses it in one scan.
+
+        The marker nevertheless kept reporting XFAIL — green — because the oracle
+        in this file was a replica that only stripped quotes. So the test went on
+        asserting a defect that no longer existed, and only the replica made the
+        claim look true. That is the same class as the three above, reached from
+        the other side: a stale marker hidden by a stale copy rather than an
+        XPASS. Fixing the oracle is what exposed it (#2243).
+        """
         pat = 'ghp_a"b'
         patched = svc._patch_env_github_pat('GITHUB_PAT="old"\n', pat)
         assert agent_reads(patched)["GITHUB_PAT"] == pat
