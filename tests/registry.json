@@ -2369,6 +2369,17 @@
         "ui-ux"
       ],
       "description": "Workspace `/` typeahead skill coverage (#2213). Measured on a live instance with 30 probe skills planted in a real agent container: the agent-server reported 33 client-visible skills, the roster payload carried 24 (_MAX_BRIEFING_HINTS), and typing the 27th skill's name matched nothing with no indication anything was missing — the popup searches only what shipped. The card bound is right for the hint GRID it was written for (#2101) and wrong as the search corpus, so the two surfaces now have two bounds: `playbooks` (24, rich) for cards, `searchable_playbooks` (200, title+starter only — no descriptions is what keeps it cheap) for search, and `playbooks_total` so remaining truncation is sayable instead of silent. Pins the SEPARATION and the honesty rather than the numbers: searchable is never smaller than the card set at any size, total never under-reports, search entries carry exactly what a pick needs (starterFor reads starter_prompt), the exposure policy still bounds BOTH surfaces (an allow-list and user_invocable:false reach neither), and a failed or skipped briefing still returns the four-field shape — the last case caught a real defect during development, where the availability early-return still yielded a 2-tuple and would have raised on unpack for every stopped agent."
+    },
+    {
+      "file": "unit/test_2247_calendar_rot_detector.py",
+      "feature": "#2247",
+      "added": "2026-08-17",
+      "categories": [
+        "ci",
+        "unit",
+        "reliability"
+      ],
+      "description": "Calendar-rot detector (#2247). Re-runs the calendar-sensitive test files in a subprocess under tests/clockshift.py with the clock +7 days and -365 days, so a fixture pinned to a literal date inside a RELATIVE window fails on the first run instead of on some future Tuesday — the failure mode that left five ent#96 tests red on dev for two days with no red check anywhere (invisible on PRs because base and head fail identically, invisible on pushes because the diff job does not run there). A subprocess because the shift must be installed before the module binds `from datetime import datetime`, which an autouse fixture cannot do. Also guards the detector's own no-op failure mode: it asserts the plugin exists AND that importing it actually moves `datetime.now()`, since a vanished plugin would make every shifted run pass by shifting nothing. Proven to detect: reverting the ent#96 fixture to its pre-#2243 state turns both directions red. ~37s, almost all pytest boot; the file list is short for that reason and excludes the ~176s test_1771c_schedules_analytics_edges."
     }
   ]
 }

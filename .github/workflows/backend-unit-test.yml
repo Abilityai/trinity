@@ -114,9 +114,17 @@ jobs:
           git switch --detach FETCH_HEAD
 
       - name: Run unit suite
-        # || true: the existing 34 failures + 17 errors documented in #660
-        # produce a non-zero pytest exit. The diff job (`diff` below) is
-        # what fails this workflow on regression.
+        # || true: pytest exits non-zero while ANY test fails, and the base side has
+        # to keep running so there is something to diff against. The diff job
+        # (`diff` below) is what fails this workflow on regression.
+        #
+        # #2247: the "34 failures + 17 errors documented in #660" this comment used
+        # to cite is long stale — measured from this workflow's own JUnit artifacts,
+        # `dev` fails exactly 8 (the 5 ent#96 + 3 stale strict-xfails) and 0 once
+        # those are fixed. `|| true` still belongs here for the reason above, but it
+        # is also why a wholly-red suite is invisible on a PR: base and head fail
+        # identically, the diff is empty, the check is green. The `absolute` job
+        # below asks the other question, on the push side where it can be asked.
         #
         # --timeout (#2019): without it a single stalled test consumed the whole
         # 25-minute job budget, GitHub cancelled the job, the upload step below
@@ -205,3 +213,73 @@ jobs:
                    junit-head-67890.xml \
                    junit-head-99999.xml \
             --out "$GITHUB_STEP_SUMMARY"
+
+  absolute:
+    name: pytest (push, absolute failures)
+    # THE HOLE THIS FILLS (#2247). `test` and `diff` are both
+    # `if: github.event_name != 'push'`, because a base/head diff is meaningless
+    # without a base and a head. So on a push to dev/main nothing evaluates the
+    # suite at all — and on a PR the diff is empty whenever base and head fail the
+    # same way. A test can therefore rot into permanent red without a single red
+    # check anywhere, which is exactly what test_ent96_timeline_split did for two
+    # days before someone happened to run the suite locally.
+    #
+    # This job asks the absolute question — "is the suite red at all?" — in the one
+    # place the relative question cannot be asked.
+    #
+    # ONE run, default ordering, not the 3-seed matrix: the seeds exist to catch
+    # order-dependent regressions between two commits, which stays a PR-side
+    # property. Tripling the cost of every push to dev buys nothing here, and this
+    # job is meant to be cheap enough that nobody is tempted to delete it.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: tests/requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements-test.txt
+
+      - name: Checker self-test
+        # Same precedent as the diff script's self-test: prove the gate works
+        # before trusting its verdict. A silently-broken checker reports green.
+        run: python scripts/ci/check-failure-baseline.py --self-test
+
+      - name: Run unit suite
+        # || true so the checker below produces the report; pytest's own exit code
+        # is not the gate (a bare non-zero says nothing about WHICH tests failed,
+        # and the baseline is the part worth reviewing).
+        run: |
+          cd tests
+          python -m pytest unit/ -m "not slow" \
+            --timeout=300 --timeout-method=signal \
+            --junit-xml="$GITHUB_WORKSPACE/junit-push.xml" \
+            --tb=no -q || true
+
+      - name: Compare against the committed baseline
+        # Fail-closed on a missing/empty XML — see the script's docstring (#715).
+        run: |
+          python scripts/ci/check-failure-baseline.py \
+            --xml junit-push.xml \
+            --baseline tests/unit_failure_baseline.txt \
+            --out "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JUnit XML
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-push
+          path: junit-push.xml
+          if-no-files-found: warn
+          retention-days: 14

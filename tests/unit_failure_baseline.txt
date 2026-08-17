@@ -1,0 +1,8 @@
+# Tolerated unit-suite failures (#2247). One pytest id per line; `#` comments allowed.
+#
+# EMPTY ON PURPOSE. Real CI JUnit artifacts show the suite failing exactly 8 tests
+# on dev (the 5 ent#96 + 3 stale strict-xfails, #2243/#2247) and 0 with those fixed,
+# so "no failures at all" is an achievable bar rather than an aspiration. The
+# mechanism exists so a genuinely-expected failure can be tolerated deliberately —
+# but a tolerated-failure list is where debt hides, so every entry needs a reason
+# in review, and the gate reports entries that start passing so this file shrinks.
