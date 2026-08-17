@@ -14,8 +14,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   partitionStarred, unreadByAgent, totalUnread, rowAgents, groupThreadsByDate,
-  normalizeRoomRow, shouldMarkTurnRead,
-  REPLY_MAX_WAIT_MS_FALLBACK, PORTAL_ATTEMPT_CEILING_S, PORTAL_TURN_TIMEOUT_S,
+  normalizeRoomRow, shouldMarkTurnRead, mentionedAgents,
+  REPLY_MAX_WAIT_MS_FALLBACK, resolveWaitBudgetMs,
 } from '../../src/components/portal/portalUtils'
 
 const iso = (d) => new Date(d).toISOString()
@@ -166,21 +166,82 @@ describe('row avatars', () => {
   })
 })
 
-describe('#2133 — the client fallback budget', () => {
-  // The first version of these tests asserted literals declared inside the test
-  // and imported nothing from the component, so changing the real constant left
-  // them green — exactly the drift they claimed to catch. They read the real
-  // exports now.
-  it('covers two attempts, each of which can exceed the turn timeout', () => {
-    // One attempt is NOT bounded by `timeout_seconds`: dispatch adds HTTP slack
-    // and the #678 reader-race retry adds a whole second call on top.
-    expect(PORTAL_ATTEMPT_CEILING_S).toBeGreaterThan(PORTAL_TURN_TIMEOUT_S)
-    expect(REPLY_MAX_WAIT_MS_FALLBACK)
-      .toBeGreaterThanOrEqual(2 * PORTAL_ATTEMPT_CEILING_S * 1000)
+describe('ent#361 — @mention from a 1:1 becomes a group chat', () => {
+  const roster = [{ name: 'scribe' }, { name: 'recon' }, { name: 'ws-scout' }]
+
+  it('resolves a mentioned agent that is on the roster', () => {
+    expect(mentionedAgents('can @recon check this?', roster)).toEqual(['recon'])
   })
 
-  it('matches the server bound, which test_2133 pins on the other side', () => {
-    // Server: 2 * (300 + 10 + 300) + 60. If either side moves alone, this fails.
+  it('leaves an @name that is not a rostered agent as plain text', () => {
+    // The safety property: reporting "no such agent" would answer, for any
+    // string the user types, whether an agent by that name exists.
+    expect(mentionedAgents('email @nobody about it', roster)).toEqual([])
+  })
+
+  it('excludes the agent you are already talking to', () => {
+    // Otherwise a 1:1 with scribe escalates to a "group" of one.
+    expect(mentionedAgents('@scribe and @recon', roster, { exclude: ['scribe'] }))
+      .toEqual(['recon'])
+  })
+
+  it('dedupes a name mentioned twice', () => {
+    expect(mentionedAgents('@recon then @recon again', roster)).toEqual(['recon'])
+  })
+
+  it('collects several agents in one message, in order', () => {
+    expect(mentionedAgents('@ws-scout and @recon please', roster))
+      .toEqual(['ws-scout', 'recon'])
+  })
+
+  it('matches the rooms engine on names with hyphens and digits', () => {
+    // The pattern mirrors the engine's `_MENTION_RE`; a name it accepts and we
+    // reject would build a room around a handle the engine renders as text.
+    expect(mentionedAgents('@ws-scout', roster)).toEqual(['ws-scout'])
+    expect(mentionedAgents('@1recon', [{ name: '1recon' }])).toEqual(['1recon'])
+  })
+
+  it('does not treat an email address as a mention of its domain', () => {
+    expect(mentionedAgents('mail me at me@recon.com', [{ name: 'recon' }]))
+      .toEqual(['recon'])
+    // Documented consequence, not an accident: the engine's regex matches the
+    // same way, so both sides agree — which is the property that matters more
+    // than either being clever on its own.
+  })
+
+  it('tolerates empty input and a missing roster', () => {
+    expect(mentionedAgents('', roster)).toEqual([])
+    expect(mentionedAgents('@recon', undefined)).toEqual([])
+    expect(mentionedAgents(null, roster)).toEqual([])
+  })
+})
+
+describe('#2133/#2214 — the client wait budget', () => {
+  // The server owns the turn timeout — per-agent since #2214 — and sends the
+  // budget with every dispatch (202 `wait_budget_seconds`) and every reattach
+  // (`in_flight_wait_budget_seconds` on the history response). The client's
+  // only local number is the fallback below, and it is frozen on purpose.
+  it('the fallback is frozen at the pre-#2214 server bound', () => {
+    // (2 × (300 + 10 + 300) + 60)s was the real ceiling of every backend that
+    // predates the per-agent bound — which is this literal's ONLY remaining
+    // audience. It must never track the new server arithmetic: the server
+    // bound is per-agent now, so there is no one number to mirror, and
+    // re-sizing this to (say) the 3600-default arithmetic would make a client
+    // of an OLD backend wait ~2h for a turn that server killed at ~21min.
     expect(REPLY_MAX_WAIT_MS_FALLBACK).toBe((2 * (300 + 10 + 300) + 60) * 1000)
+  })
+
+  it('a positive server budget wins over the fallback', () => {
+    expect(resolveWaitBudgetMs(7880)).toBe(7880 * 1000)
+    expect(resolveWaitBudgetMs(42)).toBe(42 * 1000)
+  })
+
+  it('anything unusable falls back to the frozen literal', () => {
+    // 0/absent/NaN/negative — an old backend that sent nothing, or a budget
+    // field that failed to read. Under-waiting here degrades to the honest
+    // "lost track — check shortly" message with no Retry (never a re-bill).
+    for (const v of [0, undefined, null, NaN, -5, 'nope']) {
+      expect(resolveWaitBudgetMs(v)).toBe(REPLY_MAX_WAIT_MS_FALLBACK)
+    }
   })
 })

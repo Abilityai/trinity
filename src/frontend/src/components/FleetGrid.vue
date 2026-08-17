@@ -831,7 +831,17 @@ let panTX = 0
 let panTY = 0
 
 function onCanvasPointerDown(e) {
+  // The Tiles control is chrome, not canvas. Without this bail the pointerdown
+  // starts a pan and `setPointerCapture` retargets the resulting click at the
+  // canvas, so the button's own @click never fires and the menu cannot be
+  // opened at all — every other control in this cluster is already listed
+  // below, and ent#325 shipped without adding its own.
+  const inTilesCtl = !!e.target.closest('.gv-tilesctl')
+  // A pointer-down anywhere else dismisses the open menu, the way a menu
+  // should; the menu body itself stops propagation, so its own clicks are safe.
+  if (tilesMenuOpen.value && !inTilesCtl) tilesMenuOpen.value = false
   if (
+    inTilesCtl ||
     e.target.closest('.gv-tile') ||
     e.target.closest('.gv-zoomctl') ||
     e.target.closest('.gv-legend') ||
@@ -878,10 +888,11 @@ function tidyUp() {
   nextTick(fitView)
 }
 
-// Esc backs out of org modes (new-department popover, then assign mode).
+// Esc backs out of the open popover / org mode, innermost first.
 function onOrgKeydown(e) {
   if (e.key !== 'Escape') return
-  if (newDeptOpen.value) closeNewDept()
+  if (tilesMenuOpen.value) tilesMenuOpen.value = false
+  else if (newDeptOpen.value) closeNewDept()
   else if (assignMode.value) endAssignMode()
 }
 
@@ -986,6 +997,18 @@ onBeforeUnmount(() => {
   --gv-bk-sched: #6366f1;
   --gv-bk-man: #14b8a6;
   --gv-bk-ext: #ec4899;
+  /* ent#96 — the rest of the #1107 trigger vocabulary. AgentTile collapses the
+     ten buckets to three because a 60px sparkline cannot carry ten; the fleet
+     executions tile stacks all ten, so each needs its own hue in BOTH themes
+     (gridTokens.spec.js). Named for the bucket, not the hue, so a palette
+     change is one edit here rather than a rename across every consumer. */
+  --gv-bk-mcp: #0ea5e9;
+  --gv-bk-public: #f59e0b;
+  --gv-bk-loops: #8b5cf6;
+  --gv-bk-reminders: #d946ef;
+  --gv-bk-a2a: #0891b2;
+  --gv-bk-voice: #f97316;
+  --gv-bk-other: #94a3b8;
   --gv-dots: rgba(17, 24, 39, 0.12);
   /* ent#325 info-tile chassis. Defined in BOTH blocks: a token defined in one
      theme only is the same bug the tiles shipped with — a live fallback that
@@ -1070,6 +1093,15 @@ onBeforeUnmount(() => {
   --gv-bk-sched: #818cf8;
   --gv-bk-man: #2dd4bf;
   --gv-bk-ext: #f472b6;
+  /* ent#96 — dark half of the trigger vocabulary, lifted for contrast against
+     the dark card exactly as the three above are. */
+  --gv-bk-mcp: #38bdf8;
+  --gv-bk-public: #fbbf24;
+  --gv-bk-loops: #a78bfa;
+  --gv-bk-reminders: #e879f9;
+  --gv-bk-a2a: #22d3ee;
+  --gv-bk-voice: #fb923c;
+  --gv-bk-other: #cbd5e1;
   --gv-dots: rgba(249, 250, 251, 0.08);
   /* ent#325 info-tile chassis — dark half. The peg inverts (light chip on the
      dark card) so it reads as a raised marker in both themes rather than
@@ -1500,7 +1532,11 @@ onBeforeUnmount(() => {
 .gv-tilesctl > button:hover,
 .gv-tilesctl > button.on {
   background: var(--gv-btn-bg-hover);
-  color: var(--gv-fg);
+  /* --gv-btn-text, not --gv-fg: the latter is defined in NEITHER theme block,
+     so it resolved to guaranteed-invalid and the colour silently fell back to
+     whatever the page happened to inherit. This is the sibling .gv-orgctl
+     button's own token, which is what this control is styled after. */
+  color: var(--gv-btn-text);
 }
 .gv-tilesmenu {
   min-width: 190px;
@@ -1520,7 +1556,7 @@ onBeforeUnmount(() => {
   padding: 5px 6px;
   border-radius: 6px;
   font-size: 12px;
-  color: var(--gv-fg);
+  color: var(--gv-text);
   cursor: pointer;
 }
 .gv-tilesmenu label:hover {
@@ -1535,7 +1571,12 @@ onBeforeUnmount(() => {
 .gv-tilesmenu .reset {
   margin-top: 4px;
   border: 0;
-  border-top: 1px solid var(--gv-tile-border, rgba(0, 0, 0, 0.08));
+  /* --gv-border, not --gv-tile-border: the latter is another name ent#325's
+     token sweep renamed away and left live here, so this separator drew at a
+     permanently-live `rgba(0,0,0,.08)` — black at 8% on the dark panel, i.e.
+     invisible in exactly one theme. Fallback is the token's LIGHT value, per
+     the convention that pass established. */
+  border-top: 1px solid var(--gv-border, #e5e7eb);
   background: transparent;
   color: var(--gv-muted);
   font: inherit;
@@ -1545,7 +1586,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .gv-tilesmenu .reset:hover {
-  color: var(--gv-fg);
+  color: var(--gv-text);
 }
 /* The widget chassis reuses .gv-tile wholesale (drag physics, snap, focus
    ring). Only the drop shadow differs, so an info tile reads as board

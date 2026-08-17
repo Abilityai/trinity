@@ -637,6 +637,54 @@ Edited from the Sharing tab.
 - **FR-6 — Group chats**: applied to group channels too (group surfaces are
   public-facing).
 
+### 47.2 Selectable Model Catalog — Single Source of Truth (#2086)
+
+**Description**: The selectable Claude-model catalog was hand-maintained in three
+independent places (the #894 backend allow-list, the `ModelSelector.vue` picker,
+and the `Settings.vue` admin fleet-default dropdown) with no shared registry, so
+the copies drifted silently — worst asymmetrically, since the allow-list is a
+*validation* set (a shipping model missing there is rejected **422** on `PUT
+.../public-channel-model`, unselectable even via the API, while the frontend lists
+degrade quietly). #2086 centralizes it.
+
+- **FR-1 — Single source**: `src/backend/services/model_catalog.py` defines
+  `MODEL_CATALOG` (ordered `ModelEntry` list: `id`, `label`, `note`, and the
+  policy flags). It is a **stdlib-only leaf** (imports nothing from
+  `settings_service`/`database`) so codegen and the parity test load it DB-free.
+- **FR-2 — Two policy dimensions + a display marker**:
+  - `public_channel` — selectable as the #894 per-agent public-channel override
+    (`settings_service.PUBLIC_CHANNEL_MODELS` **re-exports** the derived set).
+  - `admin_default_selectable` — offered in the admin fleet-default dropdown.
+    Enforces the **#1080** posture: Haiku is public-channel-selectable but NOT
+    admin-default (an admin must not be able to default the whole fleet to the
+    cheap tier); the two legacy ids are picker-only (neither flag).
+  - `recommended` — drives the admin dropdown's "(recommended)" marker; exactly
+    one entry, **pinned to `PLATFORM_DEFAULT_MODEL_VALUE`** (#831, out of scope to
+    change) rather than the loaded value.
+- **FR-3 — Generated frontend mirror**: `scripts/gen_model_catalog.py` emits the
+  checked-in, do-not-edit `src/frontend/src/constants/modelCatalog.js` (Vite-bundled,
+  CSP-clean `'self'` asset). `ModelSelector.vue` derives its picker and `Settings.vue`
+  its admin dropdown from it. **No consumer keeps its own literal model list.**
+- **FR-4 — CI guard**: `tests/unit/test_2086_model_catalog_parity.py` (rides
+  `backend-unit-test.yml`, no `paths:` filter → every PR) **byte-matches** the
+  committed JS against `render_js()` AND **structurally validates** the parsed
+  records against the Python source (a wrong-but-fresh emitter fails too).
+- **FR-5 — Preserved behavior**: `db.get_public_channel_model` still degrades an
+  allow-list-absent stored value to the platform default (#1080); `ModelSelector.vue`
+  still accepts free-text ids (incl. the `[1m]` extended-context suffix).
+- **FR-6 — Adding a model is a single-file edit** (the human control the guard
+  can NOT provide): the guard catches consumer-vs-source drift, not
+  source-vs-reality staleness (Anthropic ships a model, nobody edits the catalog →
+  all lists stay green but the model is unselectable). **When Anthropic ships a
+  selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
+  `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
+  AC requires ("docs say where the file is").
+- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
+  its frontend twin `stores/observability.js::formatModelName` are display
+  prettifiers with no model list (a new id renders via their title-case fallback).
+  They are the same drift class but are **deliberately out of scope** for #2086 —
+  tracked as a follow-up, not silently folded into the centralized catalog.
+
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
 **Description**: Reworks outbound voice replies (ElevenLabs TTS) so that voice is
@@ -695,3 +743,57 @@ of the epic #24 voice-replies feature.
   (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
   only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
   flags + `effective_voice_id`; `GET/PUT /api/settings/elevenlabs`.
+
+### 48.2 Narrated Surfaces — the Workspace speaks, and agents know it (#2157)
+
+**Description**: The Workspace (Client Portal) reads an agent's reply aloud
+**client-side** — the browser posts the text to `POST .../client-portal/agents/{agent}/tts`
+and plays the MP3 when the client switches the speaker control on. The agent
+neither triggers it nor produces an artifact, so §48.1's `send_voice_reply` (an
+audio artifact, messaging channels only) correctly refuses there. Agents were
+told only that refusal, and generalized it into two false claims made to
+clients in their own voice: that the surface is *text-only*, and that a spoken
+reply requires Slack/Telegram/WhatsApp. Both are wrong; the client can be heard
+where they already are.
+
+- **FR-1 — Narrated-surface advertisement**: a portal turn's caller prompt carries
+  `platform_prompt_service.build_narrated_surface_prompt()` — the counterpart to
+  §48.1 FR-5, describing a **client-controlled surface affordance**, not an
+  agent-invocable tool. It states the surface narrates, that the switch belongs to
+  the client, and that the agent must point at the speaker control instead of
+  routing the client elsewhere.
+- **FR-2 — No over-correction**: the fragment must NOT imply the agent can deliver
+  audio in the portal (it cannot). Promising an audio message here replaces one
+  false claim with another; the fragment says so explicitly.
+- **FR-3 — Platform-set from the surface**: the fragment is composed by
+  `_build_portal_system_prompt` from the turn's own surface, never asserted by a
+  caller, and is unreachable from the channel path (channel turns unchanged).
+- **FR-4 — Truthful gating**: the fragment appears only when narration would
+  actually work for that agent — the same gate the speaker control renders on, so
+  it can never promise a control the client does not have.
+- **FR-5 — Portal-specific tool answer**: on a portal turn `send_voice_reply`
+  returns `reason: "portal_client_narrated"` (not `not_a_channel_turn`) plus a
+  plain-language `guidance` string, so an agent reasoning from the tool result
+  alone still answers correctly. The MCP tool surfaces `guidance` and instructs
+  the agent to act on it and never quote a `reason` code to a user. The portal
+  answer splits on the SAME gate the speaker control renders on (FR-6): with no
+  voice configured the reason is `portal_voice_not_configured` and the guidance
+  points at no control — telling a client to "switch the speaker on" when that
+  control does not exist would re-make this bug facing the other way.
+- **FR-6 — One voice gate for both surfaces**: narration availability =
+  platform TTS key **AND** agent-level `tts_voice_replies_enabled` **AND** an
+  effective voice (`tts_voice_id`, else the platform default) —
+  `tts_service.resolve_voice_id()` / `resolve_voice_from_config()`, shared by the
+  roster card's `voice_available`, the portal `/tts` endpoint, and the prompt
+  fragment. Per-channel flags stay with the channel path (the Workspace is not a
+  messaging channel). This is a **behaviour change in both directions**: an agent
+  riding the platform default voice now gets a speaker control (it had none), and
+  an agent whose operator turned voice off is no longer narrated (it was).
+- **FR-7 — Surface stamp**: portal executions carry
+  `schedule_executions.source_channel = "portal"` (`config.PORTAL_SOURCE_CHANNEL`),
+  written at both creation sites (the turn and the ent#286 pre-created streaming
+  row). `triggered_by="public"` is shared with public links and x402 chat and
+  cannot identify the surface. It is deliberately not a messaging channel: portal
+  rows carry no `source_channel_chat_id`, so channel consumers already ignore it.
+- **FR-8 — Sticky client choice**: the speaker toggle persists per client+agent in
+  `localStorage`, instead of resetting to off on every page load.

@@ -299,3 +299,49 @@ describe("#848 canAccess is enforced at call time, not just advertisement", () =
     });
   });
 });
+
+describe("#736 outbound A2A tools are operator-scope only", () => {
+  // These two tools place a CREDENTIALED outbound request to an
+  // operator-registered peer. A connector key is consumption-only and bound to
+  // one agent; an anonymous session holds no credential at all. Neither may
+  // ever see them — and because the allow-list is what decides, that holds for
+  // any scope added later without anyone remembering to think about A2A.
+  //
+  // The tools opt in purely by being an element of `toolGroups` in server.ts.
+  // There is no per-tool annotation, so this test pins the PREDICATE against
+  // the scopes rather than re-deriving the registration.
+  const operatorOnly = makeOperatorOnly(true);
+
+  it("advertises to user, agent and system scopes", () => {
+    for (const scope of ["user", "agent", "system"]) {
+      assert.equal(operatorOnly({ scope }), true, `${scope} should see call_a2a_agent`);
+    }
+  });
+
+  it("hides them from connector and anonymous sessions", () => {
+    for (const scope of ["connector", "anonymous"]) {
+      assert.equal(operatorOnly({ scope }), false, `${scope} must not see call_a2a_agent`);
+    }
+  });
+
+  it("hides them from a scope nobody has thought of yet", () => {
+    // The reason this is an ALLOW-list: a deny-check admits every scope it has
+    // not heard of, and `mcp_api_keys.scope` is free text with no CHECK
+    // constraint.
+    assert.equal(operatorOnly({ scope: "portal_delegate" }), false);
+    assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
+  });
+
+  it("registers the outbound tools in the operator group, not the connector one", async () => {
+    const { createA2ACallTools } = await import("./tools/a2a_call.js");
+    const tools = createA2ACallTools({ getBaseUrl: () => "http://x" } as any, false);
+    assert.deepEqual(Object.keys(tools).sort(), ["call_a2a_agent", "get_a2a_task"]);
+    const serverSrc = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
+    );
+    // Registration is by array membership; assert it is in toolGroups and NOT
+    // in the connector/auth groups, which are added with different predicates.
+    assert.match(serverSrc, /createA2ACallTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createA2ACallTools/);
+  });
+});

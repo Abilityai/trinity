@@ -246,7 +246,7 @@ from services.settings_service import get_anthropic_api_key  # Line 29 - central
 2. **Check existence** (line 87-88): Query Docker via `get_agent_by_name()` AND database via `db.get_agent_owner()`. Returns HTTP 409 if duplicate found.
 3. **Validate base image** (line 91): `validate_base_image(config.base_image)` checks against allowlist (SEC-172). Returns HTTP 403 if image not allowed.
 4. **Load template** (line 97-179): GitHub or local template processing, extract shared folder config
-4. **Auto-assign port** (line 180-181): Find next available SSH port (2289+) via `get_next_available_port()`
+4. **Auto-assign port**: Find next available SSH port via `get_next_available_port()`. **#2215:** the call now sits INSIDE the docker try-block immediately before the container run (inside the rollback fence — the allocator fails loud on a Docker listing fault, and a raise before the try would strand the `agent_git_config` working-branch reservation the template-resolution step already wrote for `github:` templates), and the returned port carries a transient Redis reservation (`port_alloc:{port}`, SETNX + 600s TTL) so two concurrent creations cannot be handed the same port; a bind conflict at `containers.run` is retried up to 3× with the failed ports excluded (`_run_agent_container_with_port_retry`)
 5. **Generate credential files** (line 188-200): Create empty template structure (CRED-002: no longer auto-injects credentials)
 6. **Create MCP API key** (line 260-271): Generate agent-scoped Trinity MCP access key
 7. **Build env vars** (line 273-344): `ANTHROPIC_API_KEY` via `get_anthropic_api_key()`, GitHub repo/PAT
@@ -636,7 +636,7 @@ async def get_agent_logs_endpoint(agent_name: AuthorizedAgentByName, request: Re
 | `list_all_agents()` | 86-98 | List all containers with full metadata (slower, uses `container.attrs`) |
 | `list_all_agents_fast()` | 101-159 | **Fast listing using labels only** - avoids slow Docker API calls (~50ms vs 2-3s) |
 | `get_agent_by_name()` | 162-167 | Get specific agent status |
-| `get_next_available_port()` | 182-205 | Find next SSH port (2222+) - uses `list_all_agents_fast()` |
+| `get_next_available_port(exclude=None)` | — | Find next SSH port (2222+) — **#2215:** strict label scan (`_existing_agent_ports_strict`, raises on a Docker listing fault instead of degrading to `[]`), `is_port_available` (netns-blind weak filter), then a per-port Redis SETNX reservation as the LAST gate; fail-open to unreserved when Redis is down (crud's bind-conflict retry converges) |
 
 > **Performance Note (2026-01-12)**: `list_all_agents_fast()` was added to optimize agent listing. It extracts data ONLY from container labels, avoiding expensive Docker operations like `container.attrs`, `container.image`, and `container.stats()`. This reduced `/api/agents` response time from ~2-3s to <50ms.
 

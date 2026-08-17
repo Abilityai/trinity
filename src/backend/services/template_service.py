@@ -29,6 +29,10 @@ from services.template_schedules import (
     normalize_declared_schedules,
     schedule_shape_errors,
 )
+from services.template_plugins import (
+    normalize_declared_plugins,
+    plugin_shape_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1140,6 +1144,25 @@ def _template_schedules(block, template_id: str) -> tuple:
     return normalize_declared_schedules(block), errors
 
 
+def _template_plugins(block, template_id: str) -> tuple:
+    """Normalized declared `plugins:` + named errors for a catalog entry (#1704).
+
+    Same contract as `_template_schedules`: one WARNING per malformed template
+    naming the id, the template still lists (a broken block costs it its plugin
+    metadata, not its catalog place), and the normalizer is total so this cannot
+    empty the catalog from a bare list comprehension in `get_all_templates()`.
+    """
+    errors = plugin_shape_errors(block)
+    if errors:
+        logger.warning(
+            "Template %s has a malformed `plugins:` block (%d problem(s)): %s",
+            _sanitize_for_warning(template_id),
+            len(errors),
+            "; ".join(errors),
+        )
+    return normalize_declared_plugins(block), errors
+
+
 def _catalog_credential_metadata(data, template_id: str, source_trust: str):
     """`(requirements, errors)` for one catalog entry. Cannot raise. (ent#128)
 
@@ -1245,6 +1268,9 @@ def _build_template(
     schedules, schedule_errors = _template_schedules(
         metadata.get("schedules"), f"github:{repo}"
     )
+    plugins, plugin_errors = _template_plugins(
+        metadata.get("plugins"), f"github:{repo}"
+    )
 
     # Computed BEFORE the dict literal, and through the non-raising wrapper: this
     # builder runs in bare list comprehensions in `get_all_templates()`, so a raise
@@ -1311,6 +1337,12 @@ def _build_template(
         # `fetch_template_metadata_for_create`).
         "schedules": schedules,
         "schedule_errors": schedule_errors,
+        # Declared `plugins:` (#1704), normalized. Surfaced by BOTH builders (as
+        # with `schedules`); creation reads its OWN fresh copy for the same
+        # reason schedules does — this catalog read uses the global PAT off the
+        # default branch.
+        "plugins": plugins,
+        "plugin_errors": plugin_errors,
         # trinity-enterprise#93: fork-to-own declaration. 'required' makes
         # creation demand a user-owned destination repo (crud enforces it —
         # the copy lands there and origin points at it). Also drives the
@@ -1460,6 +1492,9 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
     schedules, schedule_errors = _template_schedules(
         data.get("schedules"), f"local:{name}"
     )
+    plugins, plugin_errors = _template_plugins(
+        data.get("plugins"), f"local:{name}"
+    )
 
     # `bundled` only when this really is the curated catalog root. The deploy-local
     # writable store (#950) is operator-uploaded and must not inherit our own
@@ -1514,6 +1549,9 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
         # `_build_template` — both builders surface this, deliberately.
         "schedules": schedules,
         "schedule_errors": schedule_errors,
+        # Declared `plugins:` (#1704), normalized. Both builders surface it.
+        "plugins": plugins,
+        "plugin_errors": plugin_errors,
     }
 
 

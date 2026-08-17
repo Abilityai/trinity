@@ -64,6 +64,11 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+      # Opt-in, default OFF. The DB row (system_settings) is the primary leg, so a
+      # gap here cannot make the feature unreachable — but the env leg still has to
+      # be forwarded or an operator setting it in .env silently does nothing.
+      - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
       # container or the .env lever is inert (the #1056/#1039 packaging class).
@@ -117,6 +122,7 @@ services:
       - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
       - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
+      - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # First-run default system seed (trinity-enterprise#124): a path to an
@@ -157,6 +163,7 @@ services:
       # it must reach the backend here or the .env lever is inert (#1039 class).
       # Default (1800s) lives agent-side; 0/negative disables. Recreate to apply.
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
+      - AGENT_IDLE_FINALIZE_S=${AGENT_IDLE_FINALIZE_S:-}
       # OpenTelemetry Configuration (Optional)
       - OTEL_ENABLED=${OTEL_ENABLED:-0}
       - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}
@@ -182,6 +189,15 @@ services:
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       - LOG_ARCHIVE_PATH=/data/archives  # Local path for archived logs
+      # Automatic database backups (#2216) — daily job in the backend
+      # (services/db_backup_service.py), default ON, artifacts under
+      # /data/backups. This service uses an explicit environment list (no
+      # env_file), so an unforwarded var is INERT (#1486/#1488 class) —
+      # mirror any change into docker-compose.prod.yml.
+      - DB_BACKUP_ENABLED=${DB_BACKUP_ENABLED:-true}
+      - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
+      - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
+      - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
       - TRINITY_DB_PATH=/data/trinity.db
       # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
       # (default). Set to a postgresql:// URL (with the postgres profile up) to
@@ -527,6 +543,12 @@ services:
       # inline-auth path (request/verify/playbooks/chat). Functional via its
       # 15000ms default; wired so the lever is not inert.
       - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #736 ceiling for the mcp-server's own outbound-A2A fetches
+      # (call_a2a_agent / get_a2a_task). It must stay BELOW the MCP client's
+      # gateway abort so WE give up first and can return a pollable receipt
+      # instead of an opaque `fetch failed` over a call that completed anyway.
+      # Functional via its 40000ms default; wired so the lever is not inert.
+      - MCP_A2A_TIMEOUT_MS=${MCP_A2A_TIMEOUT_MS:-40000}
       # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
       # Empty = the public Cloud Function default baked into the client. Wired
       # through compose because an env var the container never receives is not

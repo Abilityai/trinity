@@ -20,6 +20,10 @@ from db.tables import (
 from utils.helpers import iso_cutoff, utc_now_iso
 
 
+# Max agents per SQL statement — see `list_portal_sessions_for_agents` (#2198).
+_AGENT_CHUNK = 500
+
+
 def get_setting(key: str, default: str = "") -> str:
     """Read an OSS ``system_settings`` value."""
     stmt = select(system_settings.c.value).where(system_settings.c.key == key)
@@ -42,18 +46,6 @@ def set_setting(key: str, value: str, now: str) -> None:
         conn.execute(stmt)
 
 
-def get_agent_tts_voice_id(agent_name: str) -> Optional[str]:
-    """The agent's configured ElevenLabs voice id (``agent_ownership.tts_voice_id``),
-    or None. Drives portal voice mode (#78) — reuses the same per-agent voice the
-    channel adapters speak with."""
-    stmt = select(agent_ownership.c.tts_voice_id).where(
-        agent_ownership.c.agent_name == agent_name
-    )
-    with get_engine().connect() as conn:
-        row = conn.execute(stmt).first()
-        return row[0] if row and row[0] else None
-
-
 def get_shared_roster(email: str) -> list[dict]:
     """Every agent shared with ``email`` — the client's "My Agents" roster.
 
@@ -71,6 +63,13 @@ def get_shared_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,          # portal voice (#78): drives voice_available
+            # #2157: the agent-level voice enable, so the speaker control obeys the
+            # same gate the channel path does instead of a voice id alone.
+            agent_ownership.c.tts_voice_replies_enabled,
+            # #2159: the human-facing name (ent#181/#1640). Selected HERE rather
+            # than resolved per agent — `get_display_label` is one query each,
+            # which would add an N+1 to fix a row that renders the wrong title.
+            agent_ownership.c.display_label,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -122,6 +121,8 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,
+            agent_ownership.c.tts_voice_replies_enabled,   # #2157
+            agent_ownership.c.display_label,        # #2159, same rationale as above
             users.c.username.label("owner"),
         )
         .select_from(
@@ -209,6 +210,71 @@ def list_portal_sessions(agent_name: str, client_email: str) -> list[dict]:
         return [dict(r) for r in conn.execute(stmt, {
             "agent": agent_name, "email": (client_email or "").lower(),
         }).mappings()]
+
+
+def list_portal_sessions_for_agents(client_email: str, agent_names: list[str]) -> list[dict]:
+    """Every thread this client has with ANY of ``agent_names``, most-recently-active
+    first — the batch form of :func:`list_portal_sessions` (#2198).
+
+    The Workspace sidebar renders one merged, cross-agent, recency-sorted list, so
+    it previously issued N of those calls (one per rostered agent) on bootstrap AND
+    on every thread open and every completed turn.
+
+    Three deliberate differences from the single-agent query:
+
+    * ``agent_name`` is SELECTed. The per-agent query omits it because the caller
+      already knows it; a flat batch list has to carry it per row.
+    * ``client_email = :email`` with the lowercasing done PYTHON-side at the bind,
+      as ``list_portal_sessions`` does — not ``lower(s.client_email) = :email``
+      like ``search_portal_sessions``, which puts a function on the column and is
+      non-sargable.
+    * ``ORDER BY ... , id DESC``. The tiebreaker is inert today (no LIMIT, and the
+      caller re-sorts) but makes the boundary row deterministic the moment anyone
+      adds one.
+
+    ``agent_name IN (:agents)`` is BOTH the tenant scope and the index path: the
+    only index on this table is ``(agent_name, client_email, last_message_at)``, so
+    this resolves as one index seek per agent with both leading columns on
+    equality — the same plan each of today's N separate queries already gets,
+    executed once instead of N times over HTTP. Deliberately NO ``LIMIT``: today's
+    per-agent query is unbounded and runs N times, so the batch's row volume is
+    already what crosses the wire, and adding a cap would be a new behaviour that
+    collides with the starred-chat pinning guarantee (requirements §5.10).
+    """
+    if not agent_names:
+        # An expanding bindparam raises on an empty list, and there is nothing to
+        # ask anyway. Same guard as `search_portal_sessions`.
+        return []
+    stmt = text(
+        "SELECT id, agent_name, title, created_at, last_message_at, message_count "
+        "FROM enterprise_portal_sessions "
+        "WHERE client_email = :email AND agent_name IN :agents "
+        "ORDER BY COALESCE(last_message_at, created_at) DESC, id DESC"
+    ).bindparams(bindparam("agents", expanding=True))
+
+    email = (client_email or "").lower()
+    rows: list[dict] = []
+    with get_engine().connect() as conn:
+        # Chunked because an expanding bindparam emits ONE placeholder per agent
+        # and SQLITE_MAX_VARIABLE_NUMBER is 999 on SQLite < 3.32. A platform
+        # principal with include_owned=True on a large fleet would otherwise turn
+        # today's always-working N single-agent queries into a hard 500 — on the
+        # Workspace bootstrap path.
+        for i in range(0, len(agent_names), _AGENT_CHUNK):
+            chunk = list(agent_names[i:i + _AGENT_CHUNK])
+            rows.extend(dict(r) for r in conn.execute(
+                stmt, {"email": email, "agents": chunk}
+            ).mappings())
+
+    if len(agent_names) > _AGENT_CHUNK:
+        # Each chunk is sorted independently, so concatenating them is NOT
+        # globally ordered — a recent thread from the last chunk would sit below
+        # an old one from the first. Re-sort on exactly the SQL key so the
+        # docstring's ordering contract holds for every roster size. Only
+        # reachable past the chunk threshold, so the common path pays nothing.
+        rows.sort(key=lambda r: (r.get("last_message_at") or r.get("created_at") or "",
+                                 r.get("id") or ""), reverse=True)
+    return rows
 
 
 def get_portal_session(session_id: str, agent_name: str, client_email: str) -> Optional[dict]:
@@ -511,11 +577,21 @@ def list_agent_share_emails(agent_name: str) -> list[str]:
 
 CHAT_KINDS = ("thread", "room")
 
-# A ceiling on rows one user can create. `star` and `read` both write a row, and
-# neither validates that the chat exists (see the router: a 404 for an unknown id
-# would be an enumeration oracle). Without a cap, that is an unbounded write
-# primitive for anyone holding a portal session.
+# Two ceilings, because one number cannot do both jobs.
+#
+# MAX_CHAT_STATE_ROWS bounds ABUSE: `star` and `read` both write a row and
+# neither validates that the chat exists (a 404 for an unknown id would be an
+# enumeration oracle), so without it a portal session is an unbounded write
+# primitive.
+#
+# MAX_STARRED_CHATS bounds the STARRED set, and it is the one a real user can
+# reach. It has to be separate: read cursors accumulate from ordinary use (one
+# per chat ever opened, rooms included), so a single total-row cap would be
+# consumed by activity the user cannot undo — every star click 409ing forever
+# with "unstar some first" while unstarring frees nothing. Counting only starred
+# rows makes that advice true.
 MAX_CHAT_STATE_ROWS = 1000
+MAX_STARRED_CHATS = 200
 
 
 def get_chat_state(client_email: str) -> list[dict]:
@@ -586,10 +662,53 @@ def _upsert_chat_state(client_email: str, chat_kind: str, chat_id: str,
 
 def set_chat_star(client_email: str, chat_kind: str, chat_id: str,
                   starred: bool, now: str) -> None:
-    """Star or unstar one chat for one user. Unstar keeps the row — it still
-    carries the read cursor, and dropping it would mark the chat unread again."""
+    """Star or unstar one chat for one user.
+
+    Unstar keeps the row when it still carries a read cursor — dropping that
+    would mark the chat unread again — but DELETES it when there is nothing
+    left to remember. Without that, a row could only ever be created: the star
+    cap below counts starred rows, but the table itself would grow forever from
+    ids that were starred once and unstarred.
+    """
+    if not starred and not _has_read_cursor(client_email, chat_kind, chat_id):
+        delete_chat_state(client_email, chat_kind, chat_id)
+        return
     _upsert_chat_state(client_email, chat_kind, chat_id, now,
                        starred_at=now if starred else None)
+
+
+def _has_read_cursor(client_email: str, chat_kind: str, chat_id: str) -> bool:
+    stmt = text(
+        "SELECT 1 FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id "
+        "  AND last_read_at IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first() is not None
+
+
+def delete_chat_state(client_email: str, chat_kind: str, chat_id: str) -> None:
+    stmt = text(
+        "DELETE FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        })
+
+
+def count_starred_rows(client_email: str) -> int:
+    """Starred rows only — what the star cap counts, so unstarring is genuinely
+    the way back under it."""
+    stmt = text(
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND starred_at IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
 
 
 def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:

@@ -186,6 +186,16 @@ def init_database():
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
+            # #2216: pre-migration safety copy (SQLite arm, BKUP-012). Runs
+            # INSIDE the lock window and BEFORE the first migration pass —
+            # a pending schema migration is the one moment the platform knows
+            # is risky. Fail-open by contract: any failure logs + returns and
+            # boot proceeds so this can never crash-loop startup; on a corrupt
+            # DB the run_all_migrations below still raises the exact incident
+            # fingerprint (pinned by test_2216_boot_pre_migration_backup.py).
+            from db.backup_primitives import maybe_backup_before_migrations
+            maybe_backup_before_migrations(cursor, conn, db_path=DB_PATH)
+
             # Run migrations first (upgrade existing DB; skips if tables don't exist yet)
             run_all_migrations(cursor, conn)
 
@@ -1271,6 +1281,9 @@ class DatabaseManager:
     def list_agent_schedules(self, agent_name: str):
         return self._schedule_ops.list_agent_schedules(agent_name)
 
+    def get_agent_schedule_names(self, agent_name: str):
+        return self._schedule_ops.get_agent_schedule_names(agent_name)
+
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
             agent_name, ceiling_seconds
@@ -1457,19 +1470,26 @@ class DatabaseManager:
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
 
-    def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int):
+    def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
+                                     split: str = None):
         """Bucketed fleet execution rollups — the time-series sibling of
-        :meth:`get_fleet_execution_stats` (ent#326)."""
+        :meth:`get_fleet_execution_stats` (ent#326). `split="trigger"` adds the
+        per-bucket trigger breakdown the executions tile stacks (ent#96)."""
         return self._schedule_ops.get_fleet_execution_timeline(
-            agent_names, group_by, hours
+            agent_names, group_by, hours, split=split
         )
 
-    def shape_execution_timeline(self, rows, *, group_by: str, hours: int):
+    def shape_execution_timeline(self, rows, *, group_by: str, hours: int,
+                                 split: str = None):
         """Fold/gap-fill the timeline rows (ent#326) — the domain transforms
         live beside the query, not in the router (Invariant #1)."""
         return self._schedule_ops.shape_execution_timeline(
-            rows, group_by=group_by, hours=hours
+            rows, group_by=group_by, hours=hours, split=split
         )
+
+    def trigger_bucket_order(self):
+        """Stack/legend order for trigger buckets (ent#96)."""
+        return self._schedule_ops.trigger_bucket_order()
 
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
@@ -2919,9 +2939,15 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.item_exists(agent_name, item_id)
 
-    def count_operator_queue_pending_for_agent(self, agent_name):
+    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None):
         # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
-        return self._operator_queue_ops.count_pending_for_agent(agent_name)
+        # #1677: optional item_type = the per-(agent, type) platform-alert
+        # budget read. The pass-through is load-bearing — a missed delegation
+        # plus the helper's swallow voids the budget while monkeypatched tests
+        # stay green (pinned by test_1677's real-facade test).
+        return self._operator_queue_ops.count_pending_for_agent(
+            agent_name, item_type=item_type
+        )
 
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001

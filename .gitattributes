@@ -1,0 +1,4 @@
+# Generated catalog mirror (#2086): the parity test byte-matches this file
+# against services.model_catalog.render_js(). Pin LF so an autocrlf contributor's
+# regen matches CI byte-for-byte.
+src/frontend/src/constants/modelCatalog.js text eol=lf

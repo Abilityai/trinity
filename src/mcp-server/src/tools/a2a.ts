@@ -18,6 +18,16 @@
  *  - outbound credentials are write-only: they are accepted on register but the
  *    backend never returns them (only `has_credentials`), so no tool echoes a
  *    secret back.
+ *
+ * Agent-to-agent gating on the two READS (#736 F8). The mutating tools need
+ * nothing here — `reject_agent_principal` at the backend refuses every agent
+ * principal outright. The reads do: the backend resolves an agent-scoped key to
+ * its OWNER and checks owner access, so on a single-owner install any agent
+ * could enumerate a SIBLING agent's registered outbound endpoint URLs — the
+ * targets an operator chose, and the shape of that fleet's integrations. That
+ * is a real leak rather than a cosmetic one, and requirements mcp.md §32.3
+ * already claimed this gate existed (it did not — the claim was drift, and #736
+ * corrects both halves).
  */
 
 import { z } from "zod";
@@ -54,6 +64,35 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
 
   const ok = (data: unknown): string => JSON.stringify({ success: true, ...(data as object) }, null, 2);
 
+  /**
+   * `{self} ∪ permitted` for agent-scoped keys (the `tools/git.ts` shape).
+   * system → allow; user-scoped → allow (the backend already scopes them to the
+   * owner's accessible agents); agent → self, or an explicitly permitted target.
+   *
+   * Applied to the two READS only — see the module header.
+   */
+  const checkAgentAccess = async (
+    apiClient: TrinityClient,
+    authContext: McpAuthContext | undefined,
+    targetAgent: string,
+  ): Promise<{ allowed: boolean; reason?: string }> => {
+    if (authContext?.scope === "system") return { allowed: true };
+    if (authContext?.scope !== "agent" || !authContext?.agentName) return { allowed: true };
+    const caller = authContext.agentName;
+    if (targetAgent === caller) return { allowed: true };
+    const permitted = await apiClient.getPermittedAgents(caller);
+    if (!permitted.includes(targetAgent)) {
+      return {
+        allowed: false,
+        reason: `Agent '${caller}' does not have permission to access '${targetAgent}'`,
+      };
+    }
+    return { allowed: true };
+  };
+
+  const denied = (reason?: string): string =>
+    JSON.stringify({ success: false, error: "Access denied", reason, not_authorized: true }, null, 2);
+
   return {
     // ========================================================================
     get_agent_a2a_config: {
@@ -67,8 +106,11 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
         agent_name: z.string().describe("The agent whose A2A config to read."),
       }),
       execute: async (params: { agent_name: string }, context?: { session?: McpAuthContext }) => {
+        const apiClient = getClient(context?.session);
+        const access = await checkAgentAccess(apiClient, context?.session, params.agent_name);
+        if (!access.allowed) return denied(access.reason);
         try {
-          return ok({ config: await getClient(context?.session).getA2AConfig(params.agent_name) });
+          return ok({ config: await apiClient.getA2AConfig(params.agent_name) });
         } catch (e) {
           return fail(e);
         }
@@ -190,8 +232,11 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
         agent_name: z.string().describe("The agent whose outbound endpoints to list."),
       }),
       execute: async (params: { agent_name: string }, context?: { session?: McpAuthContext }) => {
+        const apiClient = getClient(context?.session);
+        const access = await checkAgentAccess(apiClient, context?.session, params.agent_name);
+        if (!access.allowed) return denied(access.reason);
         try {
-          return ok({ endpoints: await getClient(context?.session).listA2AEndpoints(params.agent_name) });
+          return ok({ endpoints: await apiClient.listA2AEndpoints(params.agent_name) });
         } catch (e) {
           return fail(e);
         }

@@ -352,6 +352,36 @@
   plus a reattach poller, #1376/#759), so absorbing it into a non-streaming
   Workspace is not a regression. Workspace streaming is tracked separately in
   abilityai/trinity-enterprise#286 and is **not** a prerequisite of this change.
+- **Turn bound = the agent's own timeout (#2214, 2026-08-15)**: a Workspace turn
+  is bounded by the agent's `execution_timeout_seconds` (TIMEOUT-001, #665), not
+  a flat 300s constant. The engine owns the read —
+  `session_turn_service.resolve_turn_timeout(agent_name)`, beside
+  `resolve_lock_ttl` — read-side clamped to TIMEOUT-001's own range [60, 7200]
+  (the #506 stray-row pattern), fail-open to the platform default 3600 (the
+  *default*, deliberately not the lock's fallback-to-*cap*: an over-TTL lock is a
+  harmless auto-expiring key, an over-long turn is billable work).
+  `start_portal_turn` resolves **once per turn** and threads the same value to
+  the marker TTL, the 202 `wait_budget_seconds`, and the dispatch, so the three
+  cannot disagree; the derived bounds (`portal_attempt_ceiling_seconds` =
+  timeout + 10 + `_AUTO_RETRY_MAX_TIMEOUT_S` (imported, never copied);
+  `portal_max_turn_seconds` = 2 × ceiling + 60 — the cold retry re-runs the whole
+  turn) are pure functions of it, and the old module constants are deleted so a
+  missed consumer fails loudly at import. **No Workspace clamp below the agent
+  cap** — a clamp under 7200 re-introduces the silent-override bug for exactly
+  the upper half of the range TIMEOUT-001 sells; the accepted cost is a bigger
+  orphaned-marker window (hard-kill only — graceful shutdown clears the marker in
+  `finally`), absolute worst `portal_max_turn_seconds(7200)` = 15,080s, precedent
+  the Session surface's own ≤7230s in-flight sentinel. Operator recovery for an
+  orphaned marker: `DEL portal_inflight:{session}` (the same manual-DEL escape
+  the engine documents for its lock keys). A reloading client's wait budget rides
+  the history response (`in_flight_wait_budget_seconds` = the marker's remaining
+  TTL; fail-open to the full per-agent budget on an unreadable TTL), so reattach
+  respects the same bound. A turn that hits the bound 504s naming the agent's
+  limit. Configurability is by derivation: operators set the bound where they
+  already set the agent timeout (`PUT /api/agents/{name}/timeout`). Long-timeout
+  **headless** integrators should prefer the streaming route — the synchronous
+  `POST .../chat` holds a byte-silent HTTP response for the whole turn, which is
+  proxy read-timeout territory at hour scale.
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
 
 ### 5.10 Workspace sidebar IA — agents block, starred chats, unread badges
@@ -370,6 +400,25 @@
   - Agents block renders **first**, on its own surface (card + ring); each row
     carries avatar, name, description, and a count badge when that agent has
     replies the viewer has not read
+  - **A row may also carry an availability state (#2196).** Roster membership is
+    a DB fact (`agent_ownership` / `agent_sharing`); whether the agent's
+    container currently exists and runs is a Docker fact **projected onto** the
+    card as `availability` — `ready` | `stopped` | `unavailable` | `unknown` —
+    and is **never** a membership filter. `stopped` and `unavailable` render a
+    chip explaining the state and naming the next action ("ask *{owner}* to
+    start it"); `ready` and `unknown` render as before. Nothing is hidden and no
+    control is disabled: a client whose agents are all stopped must still get a
+    Workspace they can read, star and search. The field's footprint is reserved
+    so a row does not reflow as an agent starts or stops, and the roster is not
+    re-sorted by it (rows would jump)
+  - **`unknown` is the fail-open default, deliberately inverted** from the other
+    roster capability bits (`voice_available`, `multi_agent_chat_available`),
+    which fail closed. Those bits' bug is *promising an affordance that cannot
+    work*; this field's bug is *denying a working agent* — and at scale
+    *emptying a paying customer's roster over an infrastructure fault*, since
+    every Docker read in the platform collapses "no container" and "Docker could
+    not be asked" into the same falsy value. When Docker is unreadable every
+    card reads `unknown` and the roster renders exactly as it does today
   - The aggregate "waiting on you" count sits on the **wordmark**, since the
     agents block now occupies the top of a scrolling region
   - Starred chats are **lifted out of** the date groups, not copied above them —
@@ -392,11 +441,18 @@
   "never read" as "all unread" would have badged every historical conversation
   in every install the day this shipped. A cursor is written the first time the
   viewer opens or sends in a thread.
-- **Endpoints**: `GET /api/enterprise/client-portal/chat-state`,
+- **Endpoints**: `GET /api/enterprise/client-portal/sessions` (#2198 — the whole
+  sidebar list in ONE viewer-scoped call, replacing one per-agent call per rostered
+  agent; roster-scoped by the same set the per-agent gate enforces, no cap and no
+  `total`, rate-limited per viewer), `GET /api/enterprise/client-portal/chat-state`,
   `PUT|DELETE .../chat-state/{kind}/{id}/star`, `POST .../chat-state/{kind}/{id}/read`.
   No roster gate (every row is keyed by the caller's own email) and no existence
   check on the id — a 404 for an unknown chat would be an enumeration oracle
-  (invariant #8); a per-viewer row cap bounds the write instead.
+  (invariant #8); two per-viewer caps bound the write instead. A total-row cap
+  (abuse) and a separate **starred**-row cap: read cursors accrue from ordinary
+  use, so a single cap would be spent by activity the user cannot undo, making
+  the 409's "unstar some first" advice false. Unstarring a chat that carries no
+  read cursor deletes its row.
 - **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
   reconciling the two cursor models is follow-up work; stars work for both kinds.
 - **Not this issue**: opening an agent's own **page** (a destination with its own
@@ -424,26 +480,208 @@
   `alert`s) and never their `context` (free-form agent JSON, a known
   credential-leak surface); report reads are agent-scoped, since report ids are
   global and the roster gate only proves the caller may reach *this* agent.
+- **One field crosses deliberately (#2161)**: a row's **schedule name**. Without
+  it every scheduled row rendered the identical three words. It is a short label,
+  never the schedule's `message` — that is a prompt, and prompts are what this
+  page exists not to show. Resolved by one **projected** query (`SELECT id, name`
+  — the prompt is never loaded, so the exclusion is structural rather than a
+  review invariant) into a map built from *this* agent's schedules, so a foreign
+  id misses by construction; a failing read costs the labels, not the rows. It is
+  **not assumed to be human-written** — schedule creation is `AuthorizedAgent`, so
+  an agent-scoped key can author it — and is therefore capped and escaped.
+- **Reports are rendered, never dumped (#2162)**: the Reports tab drives the shared
+  `components/reports/` renderer set (`display_hint` → `report_type` prefix → shape check),
+  the same dispatch Agent Detail uses — reused, not forked, because those renderer keys are
+  CI-pinned as the canonical contract (`test_1535_report_prompt_guidance.py`). It shipped
+  dumping `JSON.stringify(payload)` at an external client, which is the *same* disclosure this
+  section already refuses for an ask's `context`: a typed renderer reads only the keys its hint
+  declares, so this strictly narrows what crosses. The one deliberate divergence from the
+  operator surfaces is the fallback: they keep the raw JSON viewer (useful when you are
+  debugging an agent's own output), while this surface passes `:fallback-component` and an
+  unrecognised payload gets a bounded, humanised key-value summary with credential-shaped tokens
+  redacted and no raw payload reachable behind it. Honest limit — a summary still names every top-level
+  key; it bounds and humanises the residual rather than removing it. A `table` payload is
+  fetched a window at a time (`rows_offset`/`rows_limit`) so a large report never transfers
+  whole, and the tab grows by an explicit "Load more" rather than a nested scroll region.
 - **Key Features**:
   - Header: avatar, name, description, health, last active
-  - Stats strip: activity chart, tasks in window, completed rate, first-try rate
+  - Stats strip: tasks in window, completed rate, first-try rate, window selector
+    (shown only on the tabs the window drives)
   - Tabs: Overview · Reports · Files · What it can do · Activity
-  - Overview leads with **open asks**, then recent work, then this user's chats
-  - Everything DB-sourced, so a **stopped** agent renders degraded, not empty:
-    health `unknown` (monitoring is default-OFF, so "unhealthy" would be a lie),
-    empty sections, and a failing data source degrades that section only
+  - Overview: an **unconditional 50/50 top row** — the activity chart (the shared
+    `StackedBarChart`, #1107 — bounded, not a full-bleed strip) on the left,
+    recent work on the right — then **open asks** full width below it, then this
+    user's chats. The row splits at `xl`, not `lg`, and stacks below that: with
+    the Workspace's 288px sidebar a 1024px viewport leaves each column 332px,
+    where a 30-day x-axis truncates to nothing (#2169). The column count is
+    independent of the data — both occupants own an empty state, so the split
+    never collapses; keying it off `asks.length` was the #2169 defect
+  - **#2161's "asks stay first in DOM order so the mobile stack keeps the
+    priority" is superseded by #2169**, deliberately and on instruction:
+    below `xl` asks are now third. Recorded rather than dropped, because the
+    rationale was real. The residual is bounded — the Overview tab's ask-count
+    badge sits in the header, outside the page scroller, so a narrow viewport
+    still shows the count at every scroll position; only the ask text moves
+    below the fold. What #2161 decided about the asks *card* is untouched:
+    they stay on the Overview (not a tab), contained in place, no nested scroll
+  - `PortalAvatar` carries a 1px `border-strong` edge in both themes (#2169), so
+    an image avatar with light edges does not bleed into the surface behind it.
+    One shared component, fourteen call sites; `box-sizing: border-box` keeps
+    every outer footprint unchanged
+  - Everything DB-sourced, so an agent that cannot currently run renders
+    degraded, not empty: health `unknown` (monitoring is default-OFF, so
+    "unhealthy" would be a lie), empty sections, and a failing data source
+    degrades that section only
+  - **The two non-running states are distinct and both render (#2196)**: (a) a
+    **stopped** agent — container exists, not running — and (b) an agent with
+    **no container at all**, which #1747 documents as a *routine* state (an
+    agent's identity lives in `agent_ownership`, not Docker; #834 Phase 1c
+    recovery reaches it by design, as does a `docker system prune` or a crash
+    mid-create). Neither is hidden from the roster or the page. The decision
+    recorded for #2196's AC #2: **the ownership row is authoritative for
+    membership; container state is projected onto the card**. The header renders
+    availability as its **own labelled fact beside health**, never folded into
+    the health dot — health is the last persisted `agent_health_checks` row and
+    is stale by design, availability is a live read, and one widget carrying two
+    freshness semantics tells the viewer neither
+  - This is also why the Workspace roster and `GET /api/agents` legitimately
+    disagree (#2196 AC #4): the fleet list iterates Docker and so omits these
+    agents entirely, while the roster lists them and says why. Making the two
+    agree literally would require rewriting `/api/agents`, which #1747 argues
+    against; the difference is documented rather than papered over
   - Endpoints: `GET /agents/{name}/page?window=`, `.../reports`,
-    `.../reports/{id}` under the client-portal prefix, all roster-gated
+    `.../reports/{id}` (optional `rows_offset`/`rows_limit` window a tabular payload,
+    #2162 — two query params on the existing route, not a second route) under the
+    client-portal prefix, all roster-gated
 - **Not met**: the AC's **rating tally**. There is no rating, thumbs or feedback
   mechanism anywhere in Trinity, so it has no data source and was omitted rather
   than invented — a number a user reads as "how well is this agent doing" has to
   come from something real. The **first-try rate** beside it IS real: successes
   with `retry_count` 0, distinct from the success rate (which counts a
   retried-then-succeeded execution as a success).
+- **Two of #2161's own ACs were deliberately overridden** — recorded so they are
+  not "fixed" back later. Its AC #3 asked for a **message summary** in recent
+  work: rejected, no prompt text reaches this surface; the schedule name answers
+  the same need for schedule-backed rows, and other rows keep trigger/duration/
+  time (AC #3 met for scheduled rows only). Its AC #4 asked for a **dedicated
+  asks tab**: rejected, since an agent reaching you when no chat is open is the
+  page's reason to exist and a tab is somewhere you must go — the defect was that
+  asks were unbounded, so they are contained in place (compact, clamped, first
+  five plus a counted toggle, no nested scroll per #2101).
+- **The stage escape is fail-closed (#2161)**: "Start a chat" did nothing because
+  the guard enumerated route params and `/workspace/a/:agentName` was added after
+  it was written — the third time that list went stale (#2128 was the second).
+  `shouldEscapeStage` tests route *shape*, so a future stage route cannot
+  silently re-break it.
 - **Supersedes**: ent#359's interim roster-click behaviour (a row with unread
   opened the unread chat). The page resolves that properly — its Overview lists
   the chats the agent belongs to, unread counts included.
 - **Flow**: `docs/memory/feature-flows/workspace-agent-page.md`
+
+### 5.12 Workspace multi-agent chats — @mention escalates a 1:1
+- **Status**: ✅ Implemented (2026-08-13)
+- **Requirement ID**: WORKSPACE_MENTION_TO_GROUP
+- **GitHub Issue**: abilityai/trinity-enterprise#361
+- **Description**: @mentioning another agent turns a conversation into a group
+  discussion — from a **1:1** (which creates a room containing both agents and
+  carries the message into it) and from **inside a room** (which adds the
+  mentioned agent as a participant).
+- **The AC was a feature request wearing a regression guard.** ent#361 AC#4 asks
+  that "@mention of a non-participant *still works* and adds them (existing path
+  preserved)", and its Context says a chat could already become multi-agent that
+  way. Neither was true: `resolve_mentions` matched only names already in the
+  room and documented that a mention "can never reach outside", and the portal
+  had no mention handling at all. There was nothing to preserve.
+- **Two halves, deliberately in different layers**:
+  - **In-room** is engine-side (`shared_sessions.post_message` →
+    `_join_mentioned_newcomers`), because agent replies flow through the engine
+    and membership is its concern.
+  - **1:1 → room** is a UI act: the Workspace resolves the mention against the
+    roster it already holds and uses the existing `POST /api/rooms` +
+    `POST /api/rooms/{id}/messages`. OSS must not import the private module, and
+    routing it through the rooms API keeps `create_room`'s per-agent ACL as the
+    single enforcement point rather than adding a second one.
+- **Safety properties** (both halves): an @name that is not an agent the caller
+  can reach stays **plain text and is never an error** — a "no such agent" reply
+  would answer, for any string typed, whether an agent by that name exists;
+  **only a human** may recruit (an agent that could pull agents into a room is a
+  spend amplifier and a prompt-injection lever); the participant cap is
+  re-checked per addition; a closed room admits nobody.
+- **Mirrored pattern**: the Workspace regex mirrors the engine's `_MENTION_RE`
+  so a handle that looks like a mention in the composer is one to the engine.
+  Pinned on the Workspace side by tests; drift would build a room around a name
+  the engine then renders as text.
+- **Gating**: escalation is gated on the same rooms capability as the picker
+  (#2128) — without it there is nowhere to escalate to, so an @mention stays
+  ordinary text.
+
+### 5.13 Workspace composer typeahead — `/` playbooks, `@` agents
+- **Status**: ✅ Implemented (2026-08-13)
+- **Requirement ID**: WORKSPACE_COMPOSER_TYPEAHEAD
+- **GitHub Issue**: abilityai/trinity-enterprise#392
+- **Description**: The composer's two invocation syntaxes become discoverable.
+  Typing `/` at a token boundary opens a bounded list of the active agent's
+  `playbooks[]` (title + description) and selecting one **splices its
+  `starter_prompt` into the composer without sending** — the §5.11 briefing-card
+  prefill contract, now reachable after turn 1, where the cards are gone.
+  Typing `@` opens a bounded list of reachable agents, filtered on **slug and
+  display label** (the roster shows labels; the parser keys on slugs), and
+  selecting one inserts a token `mentionedAgents()` resolves (§5.12).
+- **OSS-core by decision (ent#392): deliberately ungated** — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because CLAUDE.md's default for an enterprise-tracker feature is *gated unless
+  ruled otherwise*, so the ruling must never be inferred later from the mere
+  fact that it merged (the ent#326 / ent#384 discipline). Rationale: it extends
+  a surface that is already OSS-core (the Workspace, ent#356) over data the
+  client already holds — no new endpoint, no new table, no migration.
+- **The trigger rule is deliberately STRICTER than the parser.** §5.12's
+  `MENTION_RE` is unanchored, so `user@example.com` *parses* as `@example`; the
+  typeahead only fires on a trigger char at a token start (preceded by a
+  **non-word** char — not merely whitespace, or it cannot fire after CJK, an
+  emoji or punctuation). Asymmetric in the only safe direction: the popup can
+  never open on something the parser would not see, so `50/50`, `and/or` and an
+  email address are left alone, and no offered token can fail to resolve.
+- **Un-mentionable slugs are excluded, so a selected mention can never degrade
+  to plain text** (the AC's central property). `sanitize_agent_name` keeps `.`
+  and imposes no length cap, while the mention grammar allows neither — so
+  `data.scout` is an ordinary agent whose mention resolves to nothing. Nothing
+  offers such names today, which is why the failure is invisible; a list that
+  included them would *manufacture* it. The predicate is **derived by asking
+  `mentionedAgents` itself**, never a second copy of the grammar.
+- **No implicit selection.** The roving index starts at "nothing chosen", and a
+  plain Enter accepts **only** with an explicit selection — otherwise it sends.
+  Tab accepts the top row. The harm is asymmetric: an accidental accept destroys
+  typed work (a popup that merely happens to be open — a paste, or prose like
+  "check /status of the deploy" — would splice up to 500 characters over the
+  message), while an accidental send is what the user was reaching for. Esc
+  dismisses and keeps the popup shut while the same token is still being typed.
+- **`@` is hidden without the rooms capability** (#2128) — in the popup *and* in
+  the placeholder, since a placeholder promising a capability the build lacks is
+  the same dead end in text form. The placeholder is the only part of this that
+  reaches a user who does not already know the feature exists.
+- **Honest empty state.** A source with nothing in it shows one line; a query
+  that matches nothing **closes** the popup. The copy never claims what the
+  client cannot observe: `_agent_briefing` returns `[]` for a stopped or slow
+  agent exactly as it does for one with no playbooks, and the roster is fetched
+  once at mount — so "no playbooks exposed" would be a false claim about
+  operator configuration for the ordinary state of an idle fleet. "No peers" and
+  "peers exist but none is mentionable" are separate statements.
+- **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
+  scoped to the room's **agent participants**. That scope was established by
+  *observing the running server*, not by reading the private rooms engine:
+  `POST /api/rooms/{id}/messages` answered `woke: ["<participant>"]` for a
+  participant mention and `woke: []` for a non-participant one, so the list
+  offers only names a pick is known to wake — offering the roster would put
+  names in front of the user with no evidence that choosing one does anything.
+  It is deliberately **not** claimed that a non-participant mention has no
+  effect: §5.12 records an engine-side newcomer-join path from ent#361, and two
+  empty response fields do not disprove it. If that path is live, this list is
+  narrower than the engine allows, and recruiting stays with the explicit
+  "+ Add agent" control — the honest home for an action that spends money on
+  another agent. **`/` in a room is deferred**: a room has N participants and no
+  active agent, so "whose playbooks?" has no answer without inventing a picker
+  this issue does not specify.
+- **Flow**: [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md)
 
 ---
 
@@ -565,6 +803,18 @@
 - **AC deviation (named, not silent)**: the error-code taxonomy bullet is **not** met. `TaskExecutionErrorCode` is an in-memory enum on `TerminalEnvelope`; `schedule_executions` has no `error_code` column, so the code is discarded at the terminal write and `error_summary` is a 200-char truncation. The tile READS a `[code]` marker when the platform emitted one and renders `null` otherwise — it never guesses. A JS re-classifier was rejected: `services/failure_classifier.py` is a byte-identity-mirrored pair with `src/scheduler/failure_classifier.py` and a third, unenforced copy guessing at a truncated string would be worse than no label. Today the only writer of that marker is the dark pull path, so the chip is absent on every current install and the row spends its width on the real message. Persisting `error_code` is a follow-up; the chip then appears with zero UI churn.
 - **Chassis contract touched**: info tiles now receive the **unfiltered** roster (`orgAgents || agents`, the #305 seam) so the ent#261 type-to-filter cannot degrade a fleet tile's labels to raw slugs per keystroke; and the Grid's shared 1s tick is passed only to catalog entries declaring `wantsTick`, so a tile rendering no clock is not re-rendered every second. `InfoTile` sets `inheritAttrs: false`.
 - **Out of scope**: WS-driven early refresh (v1 rides the poll); the error-code column; the sibling **Next schedules** tile (trinity-enterprise#99), held.
+- **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Info tiles)
+
+### 9.13 Grid Info Tile — Executions (trinity-enterprise#96)
+- **Status**: ✅ Implemented (2026-08-14) · OSS-core (the epic's gating decision — the Grid ships OSS and these tiles summarize data the OSS operator already has)
+- **Description**: Fleet executions over the last 24h as 24 hourly columns stacked by trigger bucket, with a failure rail, headline totals, and live running/queued chips. Per-agent tiles already carry 14d activity; there was no fleet-level execution chart anywhere on the dashboard. Default-on; toggled in the Tiles ▾ menu like any other tile.
+- **One request, two dimensions (`split=trigger`, extends ent#326)**: the stack needs hour × trigger, and `GET /api/executions/timeline` grouped one dimension at a time — so the endpoint gained an optional `split=trigger` rather than the tile issuing one call per bucket name. Each bucket gains `by_trigger: {label: {total, failed}}` and the response carries `trigger_order`. **Per-bucket totals are re-summed from the split rows server-side**, so a column and its segments cannot disagree; gap-filled intervals carry `{}` rather than a missing key, so a chart never distinguishes "no runs" from "no field". `split` is a named 422 over a categorical `group_by` (splitting `trigger` by trigger is a tautology) — the ent#326 rule that an axis the caller did not ask for is a quietly wrong chart, applied to one they asked for and did not get.
+- **One vocabulary, one order (AC1)**: bucket names come from `_TRIGGER_BUCKETS` and their stack order is **served by the backend** (`trigger_order` ← `_BUCKET_ORDER`), so tile, legend and the #1107 Overview chart cannot name or order the same buckets differently. A bucket present in the data but absent from the order is **appended**, never dropped — otherwise it would count toward a column total while missing from its stack.
+- **Failures beside the stack, not inside it (AC2)**: failures render as a rail beneath each column on their own scale, not as a stack segment. A "Failed" segment would have to be subtracted from its trigger's segment to keep the column honest, which silently redefines every other segment as "succeeded"; the rail keeps the column equal to runs while making failures visible. Per-label `failed` still rides in the payload, so the hover breakdown names which trigger failed.
+- **Honest states**: `successRate` is terminal-based and reports `—` (not 0%) when nothing has terminated; "No executions in the last 24h" requires a successful read (the ent#100 manufactured-green rule); a failed background refresh keeps the last good chart with a `24h · stale` stamp; the running/queued chips degrade to absent rather than to zero, since a failed `/stats` is not evidence that nothing is running.
+- **No new timer, no new poll**: both GETs ride `stores/fleetGrid.js::refreshBatchData()`, gated on the tile being enabled. The tile never fetches on mount — viewport culling unmounts tiles, so a fetch there re-issues on every pan.
+- **Tokens**: seven new `--gv-bk-*` bucket colours defined in BOTH theme blocks (`gridTokens.spec.js`). `AgentTile` collapses ten buckets to three because a 60px sparkline cannot carry ten; the fleet tile stacks all ten, so each needs its own hue.
+- **Out of scope**: WS-driven early refresh (rides the poll); a window selector (24h fixed, as filed).
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Info tiles)
 
 ---

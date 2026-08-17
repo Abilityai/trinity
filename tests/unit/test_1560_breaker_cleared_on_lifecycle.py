@@ -299,12 +299,13 @@ def test_create_path_clears_breakers_before_the_container_exists():
     # a whole-file `src.index("await containers_run(")` no longer reflects the
     # create-path order. Assert the ordering WITHIN the orchestrator body
     # instead: the breaker clear precedes the container-create phase call
-    # (`_create_agent_container`, which wraps containers_run). The runtime order
-    # is additionally pinned by
+    # (`_run_agent_container_with_port_retry`, the #2215 bind-retry wrapper
+    # around `_create_agent_container`, which wraps containers_run). The
+    # runtime order is additionally pinned by
     # test_1484_create_agent_characterization.py::test_case6_* (order == clear→run).
     orch = src[src.index("async def create_agent_internal("):]
     assert orch.index("clear_agent_breakers(config.name)") < orch.index(
-        "await _create_agent_container("
+        "await _run_agent_container_with_port_retry("
     ), "clear_agent_breakers must run before the container-create phase"
 
 

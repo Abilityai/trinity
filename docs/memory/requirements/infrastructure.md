@@ -14,6 +14,31 @@
 - **Status**: ✅ Implemented
 - **Description**: Users, ownership, API keys, chat sessions via bind mount
 
+### 8.2a Automatic Database Backups (#2216)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #2216 (epic #1258 — First-run & self-host robustness)
+- **Description**: The platform database gets automatic recovery points on every install, both backends, with zero operator setup. Before this, `scripts/deploy/backup-database.sh` shipped but nothing invoked it — and it was a workstation-side GCP pull doing a naive live `cp` (no journal sidecars, no writer quiescing, no PG arm, no retention). A real instance lost its entire DB to a single stray write over the SQLite header with no recovery point; the file was `sqlite3 .recover`-able but there was nothing to restore. The backup gap turns an ordinary human slip into total data loss — no code hardening addresses that; only recovery points do.
+- **Requirements**:
+  - **BKUP-001** (automatic, both backends, zero setup): `services/db_backup_service.py` runs a daily job (default **03:30 UTC** — before the 04:15 audit prune and 04:30 VACUUM, so a backup captures more data, and after the 03:00 log archival which touches a different volume) from the backend lifespan, the `db_vacuum_service` shape. SQLite arm: stdlib `sqlite3.Connection.backup()` (one-shot — a consistent snapshot as of backup start, standalone `.db`, no sidecars; correct in both DELETE and WAL journal modes — the live platform DB runs SQLite's default **DELETE** mode, verified on a live instance). PG arm: `pg_dump -Fc` subprocess; `postgresql-client-17` (major-pinned, #1823 rationale — the base image's Debian codename floats) is baked into `docker/backend/Dockerfile`. Default **ON**.
+  - **BKUP-002** (never `cp` a live DB): the copy primitive is the online-backup API, never a file copy. A naive `cp` of a live SQLite file is the exact torn-page/hot-journal hazard the incident class rides on. The legacy scripts and the user-doc manual recipes are corrected to the safe primitive in the same change.
+  - **BKUP-003** (destination + scope, stated honestly): artifacts land in `/data/backups/` (derived as `<db dir>/backups`, created `0700`), day-keyed `trinity-backup-YYYYMMDD.db` / `.dump` and `pre-migration-YYYYMMDD-HHMMSS.db`. **Same-disk scope**: protects against the incident class (stray write, fat-fingered delete, bad migration) — NOT against disk loss. The scope is machine-readable (`scope: "same-disk"` in the status block); off-site is a flagged follow-up (the `ArchiveStorage` ABC is the ready seam). `.env`/`CREDENTIAL_ENCRYPTION_KEY`/Redis stay documented operator steps; agent workspaces are #1169's domain.
+  - **BKUP-004** (retention, both directions bounded — the #1638 fail-safe direction INVERTS here): `backup_retention_days` joins the ops-settings retention model (`OPS_SETTINGS_DEFAULTS` = 14, `OPS_SETTINGS_VALIDATION` bounds **1**–3650 — `0` is deliberately INVALID: in the existing model `0` means "disable the sweep", which for backups means keep-forever = the #1871 disk-fill trap; disabling backups is the separate explicit `DB_BACKUP_ENABLED=false`), `RETENTION_OPS_KEYS` membership (⇒ `/ops/reset` skips it, generic `PUT /api/settings/{key}` 422-blocks it, writes only via the validated `PUT /api/settings/ops/config`). NOT in `COMMUNITY_FRESH_INSTALL_SEED` (floor-seeding means *fewer* days = the destructive direction here).
+  - **BKUP-005** (floor — never zero recovery points): fixed `BACKUP_MIN_KEEP = 3`, a constant and deliberately NOT a knob (#1644: a control that must explain which way is safe is the wrong control). Prune never deletes the newest 3 artifacts regardless of age — a `backup_retention_days=1` slip keeps 3 recovery points. Pinned ≥ 2 by test.
+  - **BKUP-006** (prune runs on EVERY scheduled attempt — success, failure, or space-skip): prune-only-after-success is a disk-full Catch-22 (disk fills → preflight skips the backup → prune never runs → lowering the window frees nothing). Safety is carried by prune's own bounds: the MIN_KEEP floor, the retention window (never prune-to-make-room below it), and a pattern scope (`trinity-backup-*.db`, `trinity-backup-*.dump`, `pre-migration-*.db` — never arbitrary files). A failed copy never enters the artifact namespace (verify-before-`os.replace`), so it cannot displace anything.
+  - **BKUP-007** (inverted reader coercion): the generic ops-settings readers coerce garbage → `0` → "sweep disabled" — safe for row retention, catastrophic here (keep-forever). ONE shared reader (`effective_backup_retention_days()`) coerces unparseable/out-of-bounds → **default 14 + WARNING**; `GET /api/settings/retention` EXCLUDES the key from the generic `windows` map and reports it only inside the `backup` block via that reader, and the boot retention log special-cases it the same way — so no two surfaces can disagree about the effective value.
+  - **BKUP-008** (free-space preflight): before every write, destination free space must be ≥ 1.2× the source size (SQLite: file + sidecar bytes; PG: `pg_database_size(current_database())` — `-Fc` compresses, so this over-estimates, the safe direction). Short → skip + WARNING + alarm; never die, and never prune-to-make-room. An unavailable estimate proceeds (the write itself fails loudly on ENOSPC).
+  - **BKUP-009** (tmp hygiene): writes go to `<final>.tmp.<pid>` then atomic `os.replace`; a `finally:` unlinks the run's own tmp on any failure/timeout; each run sweeps `*.tmp.*` older than 24h (the SIGKILL-mid-copy crash window — an orphaned tmp is unbounded growth in a dir the pattern-scoped prune deliberately won't touch).
+  - **BKUP-010** (double-fire safety, `--workers 2`): two independent fail-safe guards — day-keyed idempotence (today's artifact exists → skip, works with Redis down) and a fail-open Redis SETNX lease (`db_backup:running`, own-token compare-and-delete release, TTL derived comment-linked from the pg_dump timeout). The lease is **duplicate-I/O suppression, never a correctness boundary** — correctness is pid-suffixed tmps + atomic replace + day-keyed names + pattern-scoped prune; the worst concurrent-duplicate outcome is one clean loud ENOSPC while the sibling completes.
+  - **BKUP-011** (PG conninfo handling): `pg_dump -Fc -d <conninfo>` receives the operator's `DATABASE_URL` with exactly two rewrites — the SQLAlchemy driver suffix normalized away (`postgresql+psycopg2://` → `postgresql://`) and the password stripped. Query params (`sslmode`, `sslrootcert`, `options`) pass through untouched — re-parsing into `-h/-p/-U` flags would silently drop the SSL params managed PG (RDS/Cloud SQL) mandates. Password travels ONLY via subprocess-env `PGPASSWORD`, never argv (world-readable /proc), never logged. Timeout → explicit `kill` → `wait()` reap → tmp unlink. A missing `pg_dump` binary (un-rebuilt image) fails loudly with a status + alarm naming the rebuild.
+  - **BKUP-012** (boot-time pre-migration backup, SQLite arm only): inside `init_database()`'s `migration_lock` window, BEFORE the first migration pass, `db/backup_primitives.maybe_backup_before_migrations()` takes a safety copy when migrations are actually pending (`migration_health`). Fresh install → **silent** skip (INFO — a first boot must not emit a scary ERROR); corrupt DB → ERROR + best-effort status row, and the subsequent migration run raises the SAME exception fingerprint as before this feature (the incident's uvicorn-dies-at-import signature is provably unchanged by test). **Fail-open, never crash-loops boot** (`init_database` runs at import — the #1638 seed contract). PG deliberately excluded in v1 (Alembic DDL is transactional; flagged follow-up).
+  - **BKUP-013** (failure is operator-visible, over TIME not just at the edge): (a) edge-triggered operator-queue alarm on the success→failure transition and on a no-space skip — one alarm per failure episode, re-armed by an intervening success; (b) a staleness re-alarm once `now − last_success` exceeds 3 days (≈3 missed dailies), re-fired at most weekly — silence over time is also a failure. Alarms are platform-created (direct `db.create_operator_queue_item`, bypassing the #1632 agent-ingestion caps by construction), hosted on sentinel `_db-backup` (uncreatable — `sanitize_agent_name` strips the leading `_`), id prefix `db-backup-` registered in `_RESERVED_ID_PREFIXES` (else an agent could pre-create and, via `on_conflict_do_nothing`, silence its own backup-failure alarm), and the sentinel excluded from canary L-03's orphan scan (sentinel tuple, service↔canary parity-tested). Alarm context carries status/paths/sizes only — never row data (canary G-04 rule).
+  - **BKUP-014** (status readable without shell): durable `system_settings` keys (`db_backup_last_status` ∈ `ok|failed|skipped_no_space` (a disabled job writes nothing — the status block's separate `enabled` field carries that), `db_backup_last_success_at`, `db_backup_last_error`, `db_backup_last_path`, `db_backup_last_size_bytes`, `db_backup_last_duration_ms`, `db_backup_last_trigger` ∈ `scheduled|boot_pre_migration`) written by the job and the boot hook (in-process state is invisible to the other uvicorn worker — ent#236 lesson). Surfaced as a `backup` block on the existing admin-only `GET /api/settings/retention` (no new endpoint, no new auth surface): last-run keys + live dir listing (count, total bytes, newest artifact age) + `enabled` + `retention_days` + `min_keep` + `stale` + `scope`.
+  - **BKUP-015** (restore documented AND exercised): `docs/user-docs/guides/deploying/backup-and-restore.md` rewritten (automatic backups, safe manual primitive, restore incl. stale `-wal`/`-shm`/`-journal` removal beside the restored file, PG `pg_restore -Fc` into an empty DB services-stopped, both writers — backend AND scheduler — stopped first); the incident is replayed by test: seed → backup → overwrite the source header with the literal `HTTP/1.1 200 OK` bytes → restore from the artifact → row counts equal.
+  - **BKUP-016** (default ON, documented disable): `DB_BACKUP_ENABLED` default `true` — read through ONE helper (`backup_primitives.backup_enabled_from_env`) by BOTH producers, so `false` disables the nightly job AND the boot pre-migration copy (the prune lives only in the job's tail; a boot hook that ignored the knob would write one un-pruned full-DB copy per upgrade forever — the #1871 class in the one configuration where the operator opted out); `DB_BACKUP_HOUR`/`DB_BACKUP_MINUTE`/`DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS` env-tunable. All forwarded in **BOTH** compose files (the #1486/#1488 inert-knob class — the backend service uses explicit env lists, no `env_file`) + documented in `.env.example`. Malformed hour/minute fall back to defaults with a WARNING instead of crashing at import.
+- **Explicit non-goals (flagged, not filed)**: off-site destinations (ArchiveStorage seam), PG boot-time backup, compression, manual backup-now endpoint, WAL migration, the pre-existing unforwarded `DB_VACUUM_*`/`AUDIT_RETENTION_*` env knobs.
+- **Tests**: `tests/unit/test_2216_backup_primitives.py`, `test_2216_db_backup_service.py`, `test_2216_boot_pre_migration_backup.py`, `test_2216_backup_restore_roundtrip.py`, `test_2216_backup_observability.py`
+- **Docs**: [database-backup.md](../feature-flows/database-backup.md); cross-ref §12.10 (retention model)
+
 ### 8.3 Redis for Secrets
 - **Status**: ✅ Implemented
 - **Description**: Credential storage, OAuth state with AOF persistence
@@ -544,6 +569,94 @@
   (catalog `E-06` is the unimplemented #129 check, while registry `E-06` is
   "no overdue `next_run_at`"), so a catalog-sourced name can confidently
   mislabel a live alert.
+
+### 31.2 Canary Run-State Observability (#2217)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #2217
+- **Problem**: nothing reported whether the harness is running. A disabled
+  canary emits zero violations — byte-for-byte identical to a clean fleet. This
+  is the **H-01 class one level up, applied to the detector itself**: H-01
+  catches a blind collector *while a cycle runs*; it structurally cannot catch
+  "no cycle is running at all" (a dead loop emits nothing). The harness had been
+  switched OFF on the dev instance on the belief its snapshot reader was
+  SQLite-only and would go blind on PostgreSQL — a constraint **retired by #1540**
+  (every SQL-tier collector now reads the configured backend through the
+  `get_engine()`/`DATABASE_URL` seam; `src/backend/canary/` has zero `sqlite3`
+  imports). Re-enabling is a pure ops toggle (`CANARY_ENABLED=1` in the instance
+  `.env` + redeploy) — the compose wiring shipped in #1876; this requirement adds
+  only the surface that makes the state observable.
+- **Primary surface**: `GET /api/canary/status` (admin-only, `require_admin`) →
+  `CanaryService.get_run_status()` (Invariant #1 — logic in the service, thin
+  router). Response `CanaryStatusResponse` (`models.py`, Invariant #14):
+  `enabled` (`CANARY_ENABLED == "1"`), `status`
+  (`disabled|healthy|stale|unknown`), `last_cycle_at`,
+  `seconds_since_last_cycle` (clamped `max(0, int(age))`), `interval_seconds`,
+  `stale_after_seconds`, `alert_sink_configured`, `redis_available`.
+- **The contract the surface answers**: it reports the **shared** Redis cursor
+  `canary:last_cycle_at` — written at cycle END with `snapshot.snapshot_time`,
+  the instant the leader's collection *started*. So it answers "the
+  collection-start instant of the last cycle the leader completed", and **lags
+  real completion by up to one cycle's duration**. It is NOT "is the loop alive"
+  and NOT literally "when a cycle finished". The **shared** cursor is read (never
+  the per-worker `self.last_run_at`/`cumulative_cycles`): with #1881's leader
+  lease only one worker cycles, so a non-leader answering the request has
+  stale/zero in-process counters.
+- **`status` derivation** (AC#3 — three states all distinct from
+  enabled+fresh+zero-violations):
+  - `disabled` — `enabled=False`. Clean, **never** an alarm; Redis is never read
+    (`redis_available=None`). Default-OFF is the normal state for most installs.
+  - `unknown` — enabled but no readable timestamp (cursor never written yet **or**
+    Redis raised **or** unparseable). **Fail-open**, never an alarm.
+  - `stale` — enabled, cursor readable, `age > stale_after_seconds`. The incident
+    case.
+  - `healthy` — enabled, cursor readable, `age ≤ stale_after_seconds`.
+- **Staleness threshold** `stale_after_seconds =
+  _max_failover_seconds() + _MAX_CYCLE_LEASE_SECONDS` (≈780 + 900 = **1680s** at
+  defaults), both terms the service's own constants so the threshold cannot drift
+  out of step with the timing it guards. It is **provably above BOTH** the
+  leader-failover window (~780s) AND a legitimately-slow-but-healthy cycle: a
+  cycle may run up to `_MAX_CYCLE_LEASE_SECONDS` (900s, R-01's `docker exec`
+  sweep wedge-yield ceiling) before it is deemed wedged, and because the cursor
+  carries the collection-start instant, a healthy leader's observed cursor age
+  reaches `interval + cycle_duration` (up to 1200s). Budgeting only
+  `_max_failover + interval` (1080s) would false-`stale` a working harness.
+- **`alert_sink_configured` is a deliberately separate field** (not folded into
+  `status`): liveness and can-it-alert are orthogonal facts, and an
+  enabled+cycling canary with no `CANARY_SLACK_WEBHOOK_URL` persists violations
+  but **pushes nothing** — a silent-green canary that must not read as an
+  unqualified `healthy`. Read on **every** path (including disabled — an operator
+  wiring up a canary wants the sink state before flipping it on).
+- **Secondary surface**: `canary_enabled` boolean on `GET /api/settings/feature-flags`
+  (any authed user, public-safe), beside `mcp_agent_chat_pull_enabled` /
+  `redelivery_governor_enabled` — the observability-only flag home. **Boolean
+  only**; last-cycle/stale/sink detail stays admin-only on `/status`. Backed by a
+  thin public `CanaryService.is_enabled()` wrapping `_is_enabled()` so "is the
+  canary enabled" has one source of truth; the handler imports `canary_service`
+  **function-locally** (a top-level import would pull the whole `canary` package
+  into the settings-router load).
+- **A manual `POST /api/canary/run-cycle` also advances the cursor**, so
+  `/status` reports last-cycle across scheduled AND on-demand cycles — it is not a
+  probe for scheduled-loop liveness specifically.
+- **Backend-agnostic since #1540** — safe to keep `CANARY_ENABLED=1` on
+  PostgreSQL. Stated in `docs/POSTGRESQL_SETUP.md` and
+  `docs/migrations/SQLITE_TO_POSTGRES.md` (AC#4) so the next operator does not
+  re-derive the retired SQLite-only constraint from the docs.
+- **Deferred (follow-up)**: an **active push** liveness alarm. A pull-only
+  `/status` is queryable-if-asked; the bug's narrative ("switched off during an
+  incident, silently never switched back on") is a push problem. The canary
+  cannot self-emit its own not-running (H-01 recursion), but a different
+  always-on process (`cleanup_service` / `src/scheduler/`) could read
+  `canary:last_cycle_at` + `_is_enabled()` and push via the existing Slack sink on
+  `enabled && stale`. Deferred because it needs its own default-OFF gating so it
+  never alarms an install that never opted in — the exact false-alarm risk the
+  issue warns against.
+- **Location**: `src/backend/services/canary_service.py`
+  (`get_run_status`, `is_enabled`, `_read_last_cycle_for_status`),
+  `src/backend/routers/canary.py` (`GET /status`),
+  `src/backend/models.py` (`CanaryStatusResponse`),
+  `src/backend/routers/settings.py` (`canary_enabled` flag).
+- **Guard**: `tests/unit/test_2217_canary_status.py` (the `tests/test_canary_*.py`
+  root suite runs in no CI workflow, #1880 — new guards go under `tests/unit/`).
 
 ---
 

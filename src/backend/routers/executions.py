@@ -39,6 +39,12 @@ _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 # have no continuum to fill.
 _VALID_GROUP_BY = {"hour", "day", "trigger", "agent"}
 _GAP_FILLED_GROUPINGS = {"hour", "day"}
+# ent#96: the optional SECOND dimension. Only over a time axis — splitting a
+# `trigger` grouping by trigger is a tautology and splitting `agent` by trigger
+# is a different chart nobody has asked for, so both are a named 422 rather
+# than a silently ignored parameter (the #326 rule: an axis the caller did not
+# request is a quietly wrong chart, and so is one they asked for and did not get).
+_VALID_SPLIT = {"trigger"}
 # All-time (`hours=0`) is refused for the gap-filled groupings: the x-axis would
 # start at the fleet's first-ever execution and emit one bucket per hour since,
 # which is a chart nobody asked for and a response nobody bounded. The scalar
@@ -64,6 +70,9 @@ async def get_fleet_execution_timeline(
     group_by: str = Query("day", description="hour | day | trigger | agent"),
     hours: int = Query(168, description="Rolling window in hours"),
     agent: Optional[str] = Query(None, description="Filter to a single agent"),
+    split: Optional[str] = Query(
+        None, description="Optional second dimension over a time axis: trigger"
+    ),
     current_user: User = Depends(get_current_user),
 ):
     """Bucketed fleet execution rollups for the grid's data tiles (ent#326).
@@ -98,6 +107,32 @@ async def get_fleet_execution_timeline(
                 f"Expected one of: {', '.join(str(h) for h in sorted(_VALID_HOURS))}."
             ),
         )
+    # `isinstance`, not `is not None`: called through FastAPI this is a `str |
+    # None`, but the route is also called DIRECTLY by unit tests, where an
+    # omitted parameter arrives as the `Query(...)` default OBJECT — truthy, and
+    # not a member of `_VALID_SPLIT`, so a bare `is not None` turned every
+    # direct call that did not mention `split` into a 422 (it broke ent#326's
+    # own suite). Anything that is not a string is "no split requested".
+    split = split if isinstance(split, str) else None
+    if split is not None:
+        if split not in _VALID_SPLIT:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Unsupported split '{split}'. "
+                    f"Expected one of: {', '.join(sorted(_VALID_SPLIT))}."
+                ),
+            )
+        if group_by not in _GAP_FILLED_GROUPINGS:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"split='{split}' needs a time grouping "
+                    f"({' or '.join(sorted(_GAP_FILLED_GROUPINGS))}); "
+                    f"group_by='{group_by}' is already categorical."
+                ),
+            )
+
     gap_filled = group_by in _GAP_FILLED_GROUPINGS
     if gap_filled and (hours == 0 or hours > _MAX_GAP_FILLED_HOURS):
         raise HTTPException(
@@ -110,19 +145,27 @@ async def get_fleet_execution_timeline(
         )
 
     agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
-    rows = db.get_fleet_execution_timeline(agent_names, group_by=group_by, hours=hours)
+    rows = db.get_fleet_execution_timeline(
+        agent_names, group_by=group_by, hours=hours, split=split
+    )
 
     # Folding and gap-filling live in the db layer beside the query
     # (Invariant #1, and the #1107 precedent): `_bucket_for_trigger` and
     # the continuous UTC axis already exist there, and a second copy in a
     # router is how the two drift.
-    rows = db.shape_execution_timeline(rows, group_by=group_by, hours=hours)
+    rows = db.shape_execution_timeline(
+        rows, group_by=group_by, hours=hours, split=split
+    )
 
     return ExecutionTimeline(
         group_by=group_by,
         hours=hours,
         gap_filled=gap_filled,
         buckets=[ExecutionTimelineBucket(**r) for r in rows],
+        split=split,
+        # Served from the db layer's own constant so the tile cannot hold a
+        # stale copy of the stack order (ent#96 AC1).
+        trigger_order=list(db.trigger_bucket_order()) if split == "trigger" else None,
     )
 
 

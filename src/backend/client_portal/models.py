@@ -1,7 +1,7 @@
 """Pydantic models for the enterprise client-portal exposure config (#79)."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,16 +42,51 @@ class PortalPlaybook(BaseModel):
 class PortalAgentCard(BaseModel):
     """One agent on the client's "My Agents" roster."""
     name: str
+    # #2159: the human-facing name the dashboard tiles render (ent#181/#1640).
+    # Optional so an older payload degrades to slug-only rendering rather than
+    # failing validation — the frontend falls back to `name`.
+    display_label: Optional[str] = None
     owner: Optional[str] = None
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
+    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate:
+    # an ElevenLabs key resolves. Deliberately a SEPARATE bit from
+    # `voice_available`: output additionally needs an effective voice to speak
+    # WITH, input does not, so collapsing the two would either hide a working mic
+    # or render a dead one. Fails CLOSED for the same reason `voice_available`
+    # does — the bug it guards against is promising an affordance that cannot
+    # work. The client uses it to prefer the server path (recorded audio → /stt,
+    # which answers with real statuses and real messages) over the browser Web
+    # Speech API, and to drop the mic entirely when neither path can work.
+    stt_available: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
     # exposed-playbook tier, else the template `use_cases` fallback.
     description: Optional[str] = None
     playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    # #2196 — whether this agent can currently run. Roster MEMBERSHIP is a DB
+    # fact (`agent_ownership` / `agent_sharing`); this is a Docker fact
+    # PROJECTED onto the card, and is never a membership filter. A live
+    # ownership row with no container is routine (#1747), so hiding those rows
+    # would make "not shared with me" indistinguishable from "shared but
+    # containerless" on the one surface a client has.
+    #
+    #   ready       container exists and runs        (renders as today)
+    #   stopped     container exists, not running    (chip)
+    #   unavailable no container at all — #2196      (chip)
+    #   unknown     Docker could not be asked        (renders as today)
+    #
+    # ⚠️ The default is fail-OPEN, which is the OPPOSITE of `voice_available`
+    # above and `PortalRoster.multi_agent_chat_available` below, and that
+    # inversion is deliberate — do not "tidy" it into consistency. Those bits
+    # fail closed because their bug is promising an affordance that cannot work.
+    # This one's bug is the mirror image: denying a working agent, and — since
+    # one unreadable Docker socket marks EVERY card at once — emptying a paying
+    # customer's roster over an infrastructure fault. When Docker is unreadable
+    # every card reads `unknown` and the roster renders exactly as it does today.
+    availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
 
 
 class PortalTtsRequest(BaseModel):
@@ -153,6 +188,26 @@ class PortalSessions(BaseModel):
     sessions: list[PortalSessionSummary]
 
 
+class PortalAllSessionsItem(PortalSessionSummary):
+    """One thread in the cross-agent sidebar list — the per-agent summary plus the
+    one field a flat list cannot infer from its position (#2198)."""
+    agent_name: str
+
+
+class PortalAllSessions(BaseModel):
+    """Every thread the caller has, across every agent on their roster (#2198).
+
+    Deliberately NO cap and NO `total`. Today's per-agent route is unbounded and
+    the sidebar calls it once per rostered agent, so this ships the same row
+    volume in one request — a cap would be a new behaviour, and it would collide
+    with the starred-chat pinning guarantee in requirements §5.10 (a pure recency
+    LIMIT can drop a starred-but-old thread out of the pinned section). That is a
+    real product question and it deserves its own issue, not a side effect of a
+    request-count fix.
+    """
+    sessions: list[PortalAllSessionsItem]
+
+
 class PortalAgentAsk(BaseModel):
     """One thing the agent is waiting on a person for (ent#360).
 
@@ -169,14 +224,22 @@ class PortalAgentAsk(BaseModel):
 
 
 class PortalAgentWork(BaseModel):
-    """One execution, shape only. No message, response, cost or model — the
-    viewer may be an external client, and AC #7 excludes costs outright."""
+    """One execution: shape, plus the name of the schedule behind it.
+
+    No message, response, cost or model — the viewer may be an external client,
+    and AC #7 excludes costs outright. `schedule_name` (#2161) is the one label
+    that crosses deliberately: never the schedule's own `message`, which is a
+    prompt. It is truncated at the service, and treated as untrusted — a
+    schedule can be created by an agent-scoped key, so its name is not
+    necessarily human-written.
+    """
     id: Optional[str] = None
     status: Optional[str] = None
     triggered_by: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     duration_ms: Optional[int] = None
+    schedule_name: Optional[str] = None
 
 
 class PortalFirstTry(BaseModel):
@@ -196,6 +259,10 @@ class PortalAgentStats(BaseModel):
     first_try: PortalFirstTry = Field(default_factory=PortalFirstTry)
     timeline: list = Field(default_factory=list)
     by_type: list = Field(default_factory=list)
+    # Canonical stack order for the chart, straight from the analytics accessor
+    # (#2161) — so the portal never re-derives an ordering that could drift from
+    # the operator surface's.
+    buckets: list[str] = Field(default_factory=list)
     unavailable: bool = False
 
 
@@ -210,6 +277,14 @@ class PortalAgentHeader(BaseModel):
     avatar_url: Optional[str] = None
     owner: Optional[str] = None
     health: PortalAgentHealth = Field(default_factory=PortalAgentHealth)
+    # #2196 — a projection of the roster card's field, NOT a second Docker read,
+    # and a SECOND FACT beside `health` rather than a replacement for it. The two
+    # differ in freshness by construction: `health` is the last persisted
+    # `agent_health_checks` row (stale by design, and `unknown` on most installs
+    # because monitoring is default-OFF), while this is read at request time.
+    # One widget carrying both freshness semantics would tell the viewer neither.
+    # Same fail-open default and rationale as `PortalAgentCard.availability`.
+    availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
     last_active: Optional[str] = None
 
 
@@ -330,6 +405,15 @@ class PortalHistory(BaseModel):
     # that reloaded mid-turn subscribes to this id to reattach to the live
     # stream instead of showing a thread that looks finished.
     in_flight_execution_id: Optional[str] = None
+    # #2214: how long the reattaching client may honestly keep waiting for that
+    # turn — the in-flight marker's REMAINING TTL in seconds, measured at this
+    # read (the budget was fixed at dispatch, so a fresh full budget here would
+    # over-wait by the turn's elapsed time). None when nothing is in flight or
+    # the TTL is unreadable; the client then falls back. Optional and additive —
+    # declared here because the route's `response_model` strips undeclared
+    # fields, so without this line the budget would silently never leave the
+    # server.
+    in_flight_wait_budget_seconds: Optional[int] = None
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

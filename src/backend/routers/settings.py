@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 from models import (
+    A2AOutboundEndpointUpsert,
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
     AgentQuotaUpdate,
@@ -173,6 +174,11 @@ async def get_public_feature_flags(
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
+    from services import a2a_outbound_service
+    # Function-local (#2217): a top-level import would pull the whole canary
+    # package into the settings-router load; the handler pattern here is
+    # function-local imports.
+    from services.canary_service import canary_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
@@ -223,10 +229,21 @@ async def get_public_feature_flags(
         # points. Lets an operator confirm via the API whether the correlated-
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
+        # Canary run-state (#2217) — observability-only boolean, beside the
+        # other observability flags; any authed user, public-safe. Whether
+        # the canary harness is enabled. Last-cycle/stale/sink detail stays
+        # admin-only on GET /api/canary/status.
+        "canary_enabled": canary_service.is_enabled(),
         # Outbound voice replies (ent#117) — true when an ElevenLabs key resolves
         # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
         # config UI + the send_voice_reply capability. Non-sensitive boolean.
         "tts_available": bool(settings_service.get_elevenlabs_api_key()),
+        # Outbound A2A (#736) — the kill switch on the platform's first
+        # backend-executed, credentialed, agent-triggerable outbound fetcher.
+        # Runtime-resolved (system_settings → A2A_OUTBOUND_ENABLED env → OFF);
+        # both call routes 404 when off. Observability + UI gating only — the
+        # routes enforce it themselves.
+        "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run wizard uses
@@ -514,6 +531,7 @@ async def get_retention_status(
          FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
     )
     pending_acknowledgements = []
+    blocked_sweeps = []
     for _key, _label, _floor, _count_fn in _ack_sweeps:
         _window = _ops_int(_key)
         if _window <= 0:
@@ -524,9 +542,10 @@ async def get_retention_status(
             floor=_floor,
         )
         # Only "over_threshold" is a genuine pending-approval. `count_failed` /
-        # `ack_lookup_failed` are fail-closed error states, not approvable, and
-        # an already-acked sweep returns allowed=True (so it drops off the list —
-        # the single-use, no-stale-state guarantee the panel needs).
+        # `count_uninterpretable` / `count_negative` / `ack_lookup_failed` are
+        # fail-closed error states, not approvable, and an already-acked sweep
+        # returns allowed=True (so it drops off the list — the single-use,
+        # no-stale-state guarantee the panel needs).
         if not _verdict.allowed and _verdict.reason == "over_threshold":
             pending_acknowledgements.append({
                 "key": _key,
@@ -534,6 +553,21 @@ async def get_retention_status(
                 "window_days": _window,
                 "candidate_count": _verdict.candidates,
                 "floor": _floor,
+            })
+        elif not _verdict.allowed:
+            # #1833: NOT approvable is not the same as NOT worth showing. Before
+            # #1833 an uninterpretable count raised out of `evaluate` and took
+            # this whole endpoint down with a 500 — ugly, but loud. Now it
+            # refuses, so without this the sweep is blocked forever in
+            # `cleanup_service` while the panel renders a clean "nothing
+            # pending" — the guard's own anti-pattern ("a guard that fails open
+            # manufactures confidence") relocated from the prune to the operator
+            # surface. Identifiers and reason codes ONLY, the same SECURITY rule
+            # as the alarm payload: no counts of row content, no sample rows.
+            blocked_sweeps.append({
+                "key": _key,
+                "window_days": _window,
+                "reason": _verdict.reason,
             })
 
     return {
@@ -559,16 +593,52 @@ async def get_retention_status(
         # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
         # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
         "pending_acknowledgements": pending_acknowledgements,
+        # #1833: sweeps the guard is refusing for a reason this panel cannot
+        # offer an approve control for (the count failed / could not be
+        # interpreted / was a negative error sentinel, or the ack lookup itself
+        # failed). Blocked, not pending. SCOPE: the same two ack-gated sweeps
+        # `_ack_sweeps` re-runs above — the other six windows are not evaluated
+        # here at all, so a refusal on those reaches an operator only through the
+        # durable operator-queue alarm `cleanup_service` raises.
+        "blocked_sweeps": blocked_sweeps,
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
             "log_archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
-            # Execution + health + soft-delete (OPS settings, 0 = disabled)
-            **{k: _ops_int(k) for k in RETENTION_OPS_KEYS},
+            # Execution + health + soft-delete (OPS settings, 0 = disabled).
+            # #2216: `backup_retention_days` is EXCLUDED here — _ops_int's
+            # garbage→0 coercion means "sweep disabled" for row windows but
+            # "keep backups forever" (the #1871 disk-fill trap) for backups,
+            # so on a malformed stored row this map and the backup service
+            # would disagree inside ONE response. The key is reported only in
+            # the `backup` block below, through the service's own inverted
+            # reader (garbage → 14). Pinned by
+            # tests/unit/test_2216_backup_observability.py.
+            **{
+                k: _ops_int(k)
+                for k in RETENTION_OPS_KEYS
+                if k != "backup_retention_days"
+            },
             # Audit log — exempt from the community floor (365-day integrity floor)
             "audit_log_retention_days": audit_days,
         },
+        # #2216: automatic database-backup status (BKUP-014) — durable
+        # system_settings keys + a live /data/backups listing, rendered by
+        # the one shared reader. `scope: "same-disk"` is the machine-readable
+        # boundary statement (protects against corruption/slips, not disk loss).
+        "backup": await _backup_block(),
     }
+
+
+async def _backup_block():
+    """Backup status for GET /retention — fail-soft: a broken block must not
+    take down the whole retention panel."""
+    try:
+        from services.db_backup_service import build_backup_status_block
+        return await build_backup_status_block()
+    except Exception as e:
+        logger.error(f"Could not build backup status block: {e}")
+        return {"error": "unavailable"}
 
 
 # ============================================================================
@@ -2540,6 +2610,141 @@ async def update_elevenlabs_settings(
     return {"success": True, **after}
 
 
+# ============================================================================
+# Outbound A2A endpoint registry (#736 §32.5 FR-2)
+# NOTE: These routes MUST be defined BEFORE the /{key} catch-all (Invariant #4).
+# ============================================================================
+#
+# The OSS target source for `call_a2a_agent`. It lives in `system_settings` as
+# one AES-256-GCM envelope rather than a new table — the shape Invariant #12
+# already blesses for `elevenlabs_api_key_encrypted` — which is why #736 ships
+# with no migration and no Alembic revision.
+#
+# Admin-only AND human-only. `assert_admin` rejects agent principals since
+# ent#293, and `reject_agent_principal` is kept explicitly beside it because
+# this is the GRANT half of the grant-vs-use line: registering an endpoint
+# decides where a credentialed server-side request may go, and an agent-scoped
+# key resolves to its owner carrying the owner's role. *Using* a registered
+# endpoint is agent-callable; *creating* one is not.
+
+
+@router.get("/a2a-endpoints")
+async def list_a2a_outbound_endpoints(
+    current_user: User = Depends(get_current_user)
+):
+    """List the registered outbound A2A endpoints (#736).
+
+    Credentials are never returned — each row reports `has_credentials` only,
+    matching the write-only property the A2A management tools already document.
+
+    Reads the OSS store directly rather than through the resolver seam: a
+    registered enterprise provider may legitimately answer a different question
+    ("what can THIS agent call?"), and an admin panel whose GET and PUT
+    addressed different stores would be worse than no panel.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound, a2a_outbound_service
+
+    return {
+        "endpoints": a2a_outbound.list_oss_endpoints(),
+        "enabled": a2a_outbound_service.is_outbound_enabled(),
+    }
+
+
+@router.put("/a2a-endpoints")
+async def upsert_a2a_outbound_endpoint(
+    body: A2AOutboundEndpointUpsert,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Register or update one outbound A2A endpoint by name (#736).
+
+    The URL is SSRF-validated here so an operator finds out immediately rather
+    than at first call — but that is a usability improvement, not the security
+    boundary: the call path re-validates every URL on every call regardless,
+    because a stored row is not trusted and a DNS record can move.
+
+    `credentials` is write-only. Omitting it on an update leaves any existing
+    secret in place; `clear_credentials` removes it. The audit row records
+    whether a credential was set or cleared, never its value.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound
+
+    credential = body.credentials.get_secret_value() if body.credentials else None
+    try:
+        record = a2a_outbound.upsert_endpoint(
+            body.name,
+            body.url,
+            credential,
+            clear_credential=body.clear_credentials,
+        )
+    except a2a_outbound.EndpointValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": "a2a_outbound_endpoints",
+            "action": "upsert",
+            "endpoint": record["name"],
+            "url": record["url"],
+            "credential_set": bool(credential),
+            "credential_cleared": bool(body.clear_credentials),
+        },
+    )
+    return {"success": True, "endpoint": record}
+
+
+@router.delete("/a2a-endpoints/{ref}")
+async def remove_a2a_outbound_endpoint(
+    ref: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove one registered outbound A2A endpoint by id or name (#736)."""
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound
+
+    removed = a2a_outbound.remove_endpoint(ref)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"A2A endpoint '{ref}' not found")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": "a2a_outbound_endpoints",
+            "action": "remove",
+            "endpoint": ref,
+        },
+    )
+    return {"success": True, "removed": ref}
+
+
 @router.get("/{key}")
 async def get_setting(
     key: str,
@@ -2715,6 +2920,25 @@ async def update_setting(
     # a source, not what the string looks like — so block the keys and point at
     # the route that carries the gate. ent#237 already removed the UI writer, so
     # nothing supported breaks.
+    # #736: the outbound A2A endpoint list is a TARGET grant carrying encrypted
+    # credentials — the value is an AES-256-GCM envelope, so a plaintext write
+    # here would both bypass the SSRF/shape validation and corrupt the store
+    # into something the reader refuses (fail-closed, but silently and with a
+    # confusing cause). It is also the answer to "where may a credentialed
+    # server-side request go?", which is exactly the class this catch-all keeps
+    # being a way around (#506 / #1609 / ent#12 / #1644 / ent#14 / ent#346).
+    from services.a2a_outbound import A2A_ENDPOINTS_SETTING
+
+    if key == A2A_ENDPOINTS_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} holds encrypted outbound A2A endpoints and must be set via "
+                "PUT /api/settings/a2a-endpoints (admin + human-only, SSRF-validated, "
+                "audit-logged)"
+            ),
+        )
+
     if key in LEGACY_SKILLS_LIBRARY_KEYS:
         raise HTTPException(
             status_code=422,

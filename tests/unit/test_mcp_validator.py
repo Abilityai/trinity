@@ -10,7 +10,9 @@ Module: src/backend/services/mcp_validator.py
 Issue:  https://github.com/abilityai/trinity/issues/598
 """
 
+import ipaddress
 import json
+import socket
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -22,11 +24,15 @@ _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+import services.mcp_validator as mcp_validator_module  # noqa: E402
 from services.mcp_validator import (  # noqa: E402
     McpValidationError,
     validate_mcp_config,
     MAX_CONTENT_BYTES,
     MAX_SERVER_COUNT,
+)
+from utils.url_validation import (  # noqa: E402
+    _is_internal_address as url_validation_is_internal,
 )
 
 
@@ -637,3 +643,266 @@ class TestRealisticConfigs:
                 "env": {"GOOGLE_TOKEN": "${GOOGLE_TOKEN}"},
             },
         }))
+
+
+# ---------------------------------------------------------------------------
+# CGNAT (RFC 6598) SSRF guard — trinity-enterprise#394
+# ---------------------------------------------------------------------------
+
+
+def _dns_records(*addresses):
+    """Build full getaddrinfo 5-tuples for the given address literals.
+
+    Full 5-tuples matter: the predicate indexes ``info[4]`` OUTSIDE its
+    try-block, so a short mock record would crash the validator instead of
+    exercising it.
+    """
+    out = []
+    for addr in addresses:
+        if ":" in addr:
+            out.append((socket.AF_INET6, socket.SOCK_STREAM, 6, "", (addr, 0, 0, 0)))
+        else:
+            out.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, 0)))
+    return out
+
+
+def _dns_patch(*addresses):
+    """Context-scoped patch of the validator's DNS resolution.
+
+    ``services.mcp_validator.socket`` resolves to the GLOBAL stdlib socket
+    module, so this patch is process-wide for its duration — it must stay
+    strictly context-scoped (``with`` / decorator; never a bare ``.start()``),
+    or pytest-randomly can leak a poisoned resolver into unrelated suites.
+    The ``with`` target is the Mock, so callers can assert it was consulted.
+    """
+    return patch(
+        "services.mcp_validator.socket.getaddrinfo",
+        return_value=_dns_records(*addresses),
+    )
+
+
+# NOTE for reviewers: TestHttpTransport's `_public_dns_patch` helper is BANNED
+# in the class below — it patches `_resolves_to_private_ip` itself
+# (return_value=False), so on the acceptance rows its misuse would pass
+# vacuously and the widening guard would prove nothing. Every row here
+# exercises the REAL predicate: numeric hosts resolve locally (deterministic,
+# offline), hostname rows control DNS via the getaddrinfo patch above.
+
+
+class TestCgnatSsrfGuard:
+    """RFC 6598 (100.64.0.0/10, CGNAT) refusal — trinity-enterprise#394.
+
+    Python's `ipaddress` reports CGNAT as NEITHER `is_private` NOR
+    `is_reserved` (trinity-enterprise#14 S3), so before the bespoke clause the
+    validator accepted CGNAT-hosted MCP servers in both plain-v4 and
+    IPv4-mapped (`::ffff:100.64.0.1`) forms — verified live pre-fix.
+
+    Non-vacuousness map (do NOT trim these rows as redundant): the
+    mapped-LITERAL refusal rows are best-effort — a platform resolver may
+    normalise a mapped literal to an AF_INET sockaddr (or, honoring
+    AI_ADDRCONFIG on an IPv6-less stack, fail it into fail-closed REFUSED),
+    in which case they would stay green even against a re-introduced
+    `ip.version == 4` gate (the ent#393 defect). What actually pins the
+    mapped form: the monkeypatched AF_INET6 rows
+    (`test_hostname_resolving_to_mapped_cgnat_refused` — the authoritative
+    AC2 pin — and the mapped-neighbour acceptance rows), which are
+    deterministic on every platform; and the mapped-literal ACCEPTANCE rows,
+    which fail loudly on any resolver quirk instead of silently pinning
+    nothing.
+    """
+
+    _HOSTNAME = "internal.corp.example.com"
+
+    @staticmethod
+    def _http_cfg(host: str) -> str:
+        return _wrap({"r": {"type": "http", "url": f"https://{host}/mcp"}})
+
+    # -- plain-v4 literals: AC1 floor + /10 ceiling ---------------------------
+
+    @pytest.mark.parametrize("host", [
+        "100.64.0.1",        # first usable address of the /10 (AC1)
+        "100.127.255.255",   # last address of the /10
+    ])
+    def test_cgnat_v4_literal_refused(self, host):
+        with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+            validate_mcp_config(self._http_cfg(host))
+
+    # -- mapped literals: AC2, best-effort (authoritative pin below) ----------
+
+    @pytest.mark.parametrize("host", [
+        "[::ffff:100.64.0.1]",
+        "[::ffff:100.127.255.255]",
+    ])
+    def test_cgnat_mapped_literal_refused(self, host):
+        """Best-effort AC2 row — the deterministic pin is
+        test_hostname_resolving_to_mapped_cgnat_refused (see class docstring)."""
+        with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+            validate_mcp_config(self._http_cfg(host))
+
+    # -- widening guards: AC3 — the clause is the /10, not 100.0.0.0/8 --------
+
+    @pytest.mark.parametrize("host", [
+        "100.63.255.255",           # last address below the /10
+        "100.128.0.0",              # the EXACT first address above the /10
+        "[::ffff:100.63.255.255]",  # mapped widening guard
+        "[::ffff:100.128.0.0]",     # mapped widening guard, exact boundary
+    ])
+    def test_addresses_either_side_of_the_slash10_accepted(self, host):
+        """Refusing every mapped/neighbouring address would be a strictly
+        worse bug than the leak the clause fixes (the C1b shape)."""
+        validate_mcp_config(self._http_cfg(host))
+
+    # -- public IPv6 literal: pins the `v4 is not None` None-branch -----------
+
+    def test_public_ipv6_literal_accepted(self):
+        """The v4-view line now runs for EVERY resolved v6 record;
+        `ipv4_mapped` is None for a non-mapped v6 address, and the
+        `is not None` guard is what keeps the membership check well-typed.
+        The suite had zero v6 acceptance rows before this."""
+        validate_mcp_config(self._http_cfg("[2606:4700:4700::1111]"))
+
+    # -- the DNS path: hostnames resolving INTO the /10 -----------------------
+
+    def test_hostname_resolving_to_cgnat_refused(self):
+        """AC1 via real DNS resolution (mocked), not just IP literals."""
+        with _dns_patch("100.64.0.1") as mocked:
+            with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+                validate_mcp_config(self._http_cfg(self._HOSTNAME))
+            mocked.assert_called()
+            assert mocked.call_args.args[0] == self._HOSTNAME
+
+    def test_hostname_resolving_to_mapped_cgnat_refused(self):
+        """AC2 — THE authoritative mapped-form pin. An AF_INET6 sockaddr
+        carrying `::ffff:100.64.0.1` is deterministic on every platform,
+        unlike the mapped-literal rows (see class docstring). A
+        re-introduced `ip.version == 4` gate turns exactly this row red."""
+        with _dns_patch("::ffff:100.64.0.1") as mocked:
+            with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+                validate_mcp_config(self._http_cfg(self._HOSTNAME))
+            mocked.assert_called()
+            assert mocked.call_args.args[0] == self._HOSTNAME
+
+    @pytest.mark.parametrize("addr", [
+        "::ffff:100.63.255.255",  # mapped, last below the /10
+        "::ffff:100.128.0.0",     # mapped, exact first above the /10
+    ])
+    def test_hostname_resolving_to_mapped_neighbours_accepted(self, addr):
+        """Deterministic mapped widening guards — cannot flake on a
+        resolver quirk the way the mapped-literal acceptance rows could."""
+        with _dns_patch(addr) as mocked:
+            validate_mcp_config(self._http_cfg(self._HOSTNAME))
+            mocked.assert_called()
+
+    def test_positive_control_public_v4_accepted(self):
+        """Proves the getaddrinfo patch ATTACHES. Without this control the
+        two refusal rows above could pass vacuously: the hostname is
+        NXDOMAIN in reality, so an unattached patch still yields REFUSED via
+        the fail-closed gaierror branch — green with the clause absent."""
+        with _dns_patch("93.184.216.34") as mocked:
+            validate_mcp_config(self._http_cfg(self._HOSTNAME))
+            mocked.assert_called()
+            assert mocked.call_args.args[0] == self._HOSTNAME
+
+    def test_mixed_resolution_any_match_refused(self):
+        """Any-match loop semantics: one public record does not launder a
+        CGNAT record later in the same resolution."""
+        with _dns_patch("93.184.216.34", "100.64.0.1"):
+            with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+                validate_mcp_config(self._http_cfg(self._HOSTNAME))
+
+    def test_unparseable_sockaddr_then_cgnat_refused(self):
+        """The `continue` tolerance (unparseable sockaddrs) still reaches
+        the CGNAT clause for later records."""
+        records = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ()),                # IndexError
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("not-an-ip", 0)),  # ValueError
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.64.0.1", 0)),
+        ]
+        with patch("services.mcp_validator.socket.getaddrinfo", return_value=records):
+            with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+                validate_mcp_config(self._http_cfg(self._HOSTNAME))
+
+    # -- interpreter pins (the #1891 class) -----------------------------------
+
+    @pytest.mark.parametrize("host", [
+        "[64:ff9b::6440:1]",  # NAT64 (RFC 6052) — carries 100.64.0.1
+        "[::100.64.0.1]",     # IPv4-compatible (RFC 4291)
+        "[2002:6440:1::1]",   # 6to4 (RFC 3056)
+    ])
+    def test_ipv6_transition_forms_refused_by_the_interpreter(self, host):
+        """These v4-in-v6 embeddings are refused by CPython's OWN tables
+        (`is_reserved`/`is_private` — verified on 3.13/3.14) and none of
+        them populates `ipv4_mapped`. Pinned so a CPython table change
+        cannot silently reopen them (the #1891 class)."""
+        with pytest.raises(McpValidationError, match="private/loopback/link-local"):
+            validate_mcp_config(self._http_cfg(host))
+
+
+# ---------------------------------------------------------------------------
+# Cross-validator agreement — the ent#394 drift-class retirement guard
+# ---------------------------------------------------------------------------
+
+
+_AGREEMENT_CORPUS = [
+    # v4 internal families
+    "127.0.0.1",         # loopback
+    "10.0.0.1",          # RFC 1918
+    "172.16.0.1",        # RFC 1918
+    "192.168.1.1",       # RFC 1918
+    "169.254.169.254",   # link-local (IMDS)
+    "224.0.0.1",         # multicast
+    "240.0.0.1",         # reserved
+    "0.0.0.0",           # unspecified
+    "198.18.0.1",        # benchmarking — is_private in the stdlib tables
+    # the CGNAT /10: both edges + publics either side
+    "100.64.0.0",
+    "100.64.0.1",
+    "100.127.255.255",
+    "100.63.255.255",
+    "100.128.0.0",
+    # mapped forms of the same edges
+    "::ffff:100.64.0.1",
+    "::ffff:100.127.255.255",
+    "::ffff:100.63.255.255",
+    "::ffff:100.128.0.0",
+    "::ffff:127.0.0.1",
+    "::ffff:10.0.0.1",
+    # v6 internal families
+    "::1",               # loopback
+    "fe80::1",           # link-local
+    "fd00::1",           # ULA (is_private)
+    "::",                # unspecified
+    # v4-in-v6 transition forms (interpreter tables)
+    "64:ff9b::6440:1",   # NAT64
+    "::100.64.0.1",      # IPv4-compatible
+    "2002:6440:1::1",    # 6to4
+    "2001::1",           # Teredo
+    # publics
+    "93.184.216.34",
+    "8.8.8.8",
+    "2606:4700:4700::1111",
+]
+
+
+class TestCrossValidatorAgreement:
+    """`mcp_validator` and `utils.url_validation` share ONE membership policy
+    (six stdlib checks + the CGNAT clause) behind deliberately different DNS
+    wrappers — fail-closed here, fail-open there — so the wrapper stays OUT
+    of this corpus. ent#394 existed because nothing fired when a range landed
+    in one stack only (ent#14 S3 added CGNAT to `url_validation`; this module
+    never got it), and ent#393 shows the drift risk is the clause IDIOM, not
+    the /10 literal. This test retires the class: a future range or
+    normalisation fix added to one module without the other turns it red.
+    """
+
+    @pytest.mark.parametrize("addr", _AGREEMENT_CORPUS)
+    def test_membership_policy_agrees(self, addr):
+        expected = url_validation_is_internal(ipaddress.ip_address(addr))
+        with _dns_patch(addr):
+            observed = mcp_validator_module._resolves_to_private_ip(
+                "agreement.example.com"
+            )
+        assert observed == expected, (
+            f"{addr}: mcp_validator says {observed}, url_validation says "
+            f"{expected} — the two SSRF stacks drifted (the ent#394 class)"
+        )

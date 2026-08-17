@@ -7,7 +7,7 @@ surfaces #1644's suite executes but never asserts:
 * exactly-at-threshold decisions (`<=` at `retention_guard.py:183`) — the existing
   suite only probes 12-vs-1000 and 1001-vs-1000, so the one comparison that decides
   whether a prune runs is never tested at its own boundary;
-* the `_last_refused` transition memo, the alarm's log LEVEL, its COUNT, and its
+* the refusal-episode transition memo, the alarm's log LEVEL, its COUNT, and its
   PAYLOAD — `announce_refusal`/`note_allowed`/`_alarm_id` all run today
   (`test_1644:177`, `test_cleanup_inner_sweeps:105`) but nothing asserts what they
   did, which is precisely the state in which a mutant survives;
@@ -101,17 +101,25 @@ class _DbDouble:
 
 
 @pytest.fixture(autouse=True)
-def _reset_transition_memo(monkeypatch):
-    """`retention_guard._last_refused` is module state that outlives every test.
+def _reset_transition_memo():
+    """`retention_guard._refusal_episodes` is module state that outlives every test.
 
-    `test_1644:177` already writes `_last_refused["execution_row_retention_days"]`
-    and `test_cleanup_inner_sweeps` pops keys via `note_allowed`. CI runs
+    `test_1644` already refuses on "execution_row_retention_days" and
+    `test_cleanup_inner_sweeps` pops keys via `note_allowed`. CI runs
     `pytest-randomly` under three seeds (backend-unit-test.yml:99,117), so without
     this reset a "first refusal fires ERROR + exactly one alarm" assertion silently
     degrades into the repeat-refusal case whenever another file ran first — a test
     that passes for the wrong reason.
+
+    #1834 renamed the state (`_last_refused` -> `_refusal_episodes`, now a record
+    per episode rather than a window int) and published `reset_transition_memo()`
+    precisely so the suites stop reaching for a private global by name. An episode
+    now carries a `_clock()` stamp, so a leaked one is no longer merely a wrong log
+    level — it can put a later test's first attempt on the escalation branch.
     """
-    monkeypatch.setattr(_RG, "_last_refused", {})
+    _RG.reset_transition_memo()
+    yield
+    _RG.reset_transition_memo()
 
 
 @pytest.fixture
@@ -221,12 +229,24 @@ class TestEvaluateBoundaries:
         _RG.evaluate("execution_row_retention_days", 90, counting, floor=7)
         assert seen == [8]
 
-    def test_negative_candidate_count_is_allowed_through(self, guard_db):
-        """A11: a negative return is `<= threshold`, so it proceeds. Documented so
-        the fail-safe direction is deliberate: `-1` is also the sentinel
-        `count_failed` uses, and only the REASON distinguishes them."""
-        v = _RG.evaluate("execution_row_retention_days", 90, lambda limit: -5)
-        assert (v.allowed, v.reason) == (True, "under_threshold")
+    @pytest.mark.parametrize("count", [-1, -5, -(10**9)])
+    def test_negative_candidate_count_refuses(self, count, guard_db):
+        """A11 — REWRITTEN BY #1833, deliberately and visibly.
+
+        This test used to pin `(True, "under_threshold")`: a negative return is
+        `<= threshold`, so it proceeded. Its own docstring named the hazard — "`-1`
+        is also the sentinel `count_failed` uses, and only the REASON
+        distinguishes them" — and pinned the behaviour as observed-not-endorsed so
+        that changing it would be a deliberate, visible edit. This is that edit.
+
+        It was a genuine fail-OPEN inside a fail-closed guard: a `count_fn` that
+        reported failure with this module's own "unknown" idiom AUTHORISED the
+        prune, and the count does not bound the delete (`prune_execution_logs`
+        takes no count and drains fully), so the result is #1638 replayed.
+        """
+        v = _RG.evaluate("execution_row_retention_days", 90, lambda limit: count)
+        assert (v.allowed, v.reason) == (False, "count_negative")
+        assert v.candidates == -1, "unknown is reported as the -1 sentinel"
 
     def test_nan_count_without_ack_refuses(self, guard_db):
         """A10: `nan <= threshold` is False, so a NaN count falls through to the
@@ -268,25 +288,28 @@ class TestEvaluateBoundaries:
 
 
 class TestEvaluateRaisesContract:
-    """`evaluate`'s docstring says 'NEVER raises. Fails CLOSED.' — one case
-    contradicts it. Recorded as OBSERVED behaviour, not endorsed as correct."""
+    """`evaluate` does not raise, and fails CLOSED. #1833 made that true of the
+    code rather than only of the docstring."""
 
-    def test_non_numeric_count_raises_out_of_evaluate(self, guard_db):
-        """A9 — OBSERVED, NOT CONTRACTUAL. `candidates <= threshold`
-        (retention_guard.py:183) sits OUTSIDE the try that wraps `count_fn`, so a
-        `count_fn` returning a non-number raises `TypeError` straight out of
-        `evaluate`, contradicting the ':153' docstring and the
-        `cleanup_service.py:219-221` comment that leans on it.
+    def test_non_numeric_count_refuses_instead_of_raising(self, guard_db):
+        """A9 — REWRITTEN BY #1833, deliberately and visibly.
 
-        Production-unreachable: all 8 `count_fn`s are `db.count_*` accessors that
-        return `int(...)`. Safety today therefore comes from each sweep's OUTER
-        try/except, not from the documented contract — which is exactly what
-        `test_cleanup_inner_sweeps.py:81-85` records ('a bare MagicMock ...
-        correctly fails closed'). Pinned here so any change to it is a deliberate,
-        visible edit; the docstring correction is a flagged follow-up (#1771).
+        This test used to pin `pytest.raises(TypeError)`: `candidates <= threshold`
+        sat OUTSIDE the try that wraps `count_fn`, so a `count_fn` returning a
+        non-number raised straight out of `evaluate`, contradicting its own
+        docstring and the `cleanup_service._guard_allows` comment that leans on it.
+        It was pinned as OBSERVED-not-endorsed so that changing it would be a
+        deliberate, visible edit. This is that edit.
+
+        The raise never caused a destructive pass (every call site invokes the
+        guard before its `db.prune_*` and inside a try) — it destroyed the SIGNAL:
+        `announce_refusal` was never reached, so there was no operator-queue alarm
+        and no "REFUSED" ERROR, only a nondescript "Error pruning ...". At the
+        second, UNWRAPPED caller (GET /api/settings/retention) it was a 500 on the
+        panel an operator uses to approve the very prune that refused.
         """
-        with pytest.raises(TypeError):
-            _RG.evaluate("execution_row_retention_days", 90, lambda limit: None)
+        v = _RG.evaluate("execution_row_retention_days", 90, lambda limit: None)
+        assert (v.allowed, v.reason) == (False, "count_uninterpretable")
 
     def test_numeric_returns_never_raise(self, guard_db):
         """The half of the contract that IS true, pinned as the real guarantee."""
@@ -330,7 +353,7 @@ class TestAckLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# C — announce_refusal / _last_refused / note_allowed / _alarm_id
+# C — announce_refusal / _refusal_episodes / note_allowed / _alarm_id
 # ---------------------------------------------------------------------------
 
 
@@ -1115,13 +1138,33 @@ class TestStructuralInvariants:
         assert len(guarded) == len(
             set(guarded)
         ), f"a retention window is guarded twice: {guarded}"
-        assert set(guarded) == set(RETENTION_OPS_KEYS), (
-            "every registered retention window must have exactly one "
+        # #2216: `backup_retention_days` is a retention window (it joins
+        # RETENTION_OPS_KEYS for the write-path protections) whose prune is
+        # deliberately NOT a #1644 count-threshold/ack-gated sweep. It prunes
+        # FILE artifacts from the backup service's own tail, and its
+        # bounded-destruction guarantee is structural — the fixed
+        # BACKUP_MIN_KEEP floor (never zero recovery points) — rather than a
+        # refusable count: an ack-gated refusal would fail in the INVERTED
+        # direction here (refused prune → backups fill the disk, #1871 class),
+        # so the prune must run unconditionally within its floor. That floor is
+        # pinned by tests/unit/test_2216_backup_primitives.py. The carve-out
+        # set lives in CODE beside RETENTION_OPS_KEYS (not test-locally), so
+        # the next file-artifact window is declared where the key is added.
+        from services.settings_service import NON_ROW_RETENTION_OPS_KEYS
+        assert NON_ROW_RETENTION_OPS_KEYS <= set(RETENTION_OPS_KEYS), (
+            "a non-row carve-out must itself be a registered retention window"
+        )
+        row_windows = set(RETENTION_OPS_KEYS) - NON_ROW_RETENTION_OPS_KEYS
+        assert set(guarded) == row_windows, (
+            "every registered ROW-retention window must have exactly one "
             "_guard_allows call site, and every guarded sweep must be a "
             "registered window.\n"
-            f"  unguarded windows: {set(RETENTION_OPS_KEYS) - set(guarded)}\n"
-            f"  guarded non-windows: {set(guarded) - set(RETENTION_OPS_KEYS)}"
+            f"  unguarded windows: {row_windows - set(guarded)}\n"
+            f"  guarded non-windows: {set(guarded) - row_windows}"
         )
+        # The carve-out is exactly the backup key and it does carry a floor.
+        from db.backup_primitives import BACKUP_MIN_KEEP
+        assert BACKUP_MIN_KEEP >= 2
 
     def test_the_prune_terminal_set_matches_the_platform_terminal_set(self):
         """A new terminal status must not fall silently out of BOTH the prune and

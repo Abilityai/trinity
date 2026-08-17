@@ -23,9 +23,18 @@
         :size="22"
         class="ring-2 ring-gray-50 dark:ring-gray-950 rounded-full"
       />
+      <!-- The +N chip is hand-rolled rather than a PortalAvatar, so it does not
+           inherit that component's edge (#2169). Without this line a 4-agent row
+           draws three hairlined circles and one bare blob — and in light theme
+           the chip's own gray-200 fill would otherwise sit flush against the
+           gray-50 ground. Same `border-strong` recipe, class-sized and
+           border-box, so it stays 22px and `-space-x-1.5` is unaffected. In dark
+           the border matches the gray-700 fill and reads as a solid disc, which
+           is correct: there the chip is already separated from the gray-950
+           ground by its fill, and one recipe beats a second per-component one. -->
       <span
         v-if="avatars.overflow"
-        class="w-[22px] h-[22px] rounded-full bg-gray-200 dark:bg-gray-700 text-[10px] font-semibold text-gray-600 dark:text-gray-300 flex items-center justify-center ring-2 ring-gray-50 dark:ring-gray-950"
+        class="w-[22px] h-[22px] rounded-full border border-gray-300 dark:border-gray-700 bg-gray-200 dark:bg-gray-700 text-[10px] font-semibold text-gray-600 dark:text-gray-300 flex items-center justify-center ring-2 ring-gray-50 dark:ring-gray-950"
         :title="allAgentNames"
       >+{{ avatars.overflow }}</span>
     </span>

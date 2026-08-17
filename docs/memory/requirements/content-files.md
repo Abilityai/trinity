@@ -235,3 +235,101 @@ eliminate the hook-vs-tar race), snapshot retention, and the rename/purge
 snapshot-dir cascade — all deferred to PR2. The pre-existing
 home/public/shared **volume leak-on-purge** + **strand-on-rename** is a separate
 fleet-wide bug filed independently.
+
+## 42. Agent Plugin Manifest — declared, committed, self-healing (#1704)
+
+### 42.1 Reframe — the real gap is git-reconstitution, not recreate
+
+Claude Code records installed marketplace plugins in `~/.claude.json` (identity)
+and copies each plugin's files into `~/.claude/plugins/cache/…` (the cache).
+Both are gitignored — `.claude.json` correctly (session state + secrets),
+`.claude/plugins/` by #1705 (repo bloat, the #1596 class). The literal issue
+premise ("a container recreate loses plugins") is **not reproducible**: HOME
+(`/home/developer`) IS the durable `agent-{name}-workspace` volume, no recreate
+path removes it, and startup.sh preserves untracked files — so a plain recreate
+keeps both manifest and cache. The genuinely-unprotected surface is a **git-based
+reconstitution** into a fresh/empty volume or a **new host** (the #1169
+"move an agent" model exports `data/` only; the #834/#1581 hard-purge removes the
+volume), where the gitignored files are exactly what a clone drops. #1705 removed
+the last incidental crutch (the cache used to be auto-committed, so a fresh clone
+accidentally restored plugins), so on that path plugin loss is now complete.
+
+The mechanism is therefore: make the plugin selection a **first-class, declared,
+committed, secret-free, self-healing** piece of agent config — which also
+trivially covers recreate/reset/move. This is the **agent-local half** of the
+incubating global plugin-management model (trinity-enterprise#192): the same
+normalized shape a future per-agent assignment surface materializes, reconciled
+on start. This PR ships the **template-declared** half; capturing plugins
+installed at **runtime** (a distill of Claude's own settings) is a deferred
+follow-up (fragile, couples to Claude's moving internal files, may be subsumed by
+#192).
+
+### 42.2 Functional requirements
+
+- **FR-1 — Declaration:** a template may declare a `plugins:` block in
+  `template.yaml`:
+  ```yaml
+  plugins:
+    marketplaces:
+      - name: abilityai
+        source: abilityai/abilities        # owner/repo shorthand or an https:// URL
+    installed:
+      - trinity@abilityai                    # plugin@marketplace
+    # enabledPlugins: { trinity@abilityai: true }   # Claude settings.json shape, also accepted
+  ```
+  The reader (`services/template_plugins.py`) is **total** — never raises,
+  degrades to named errors — mirroring the ent#89 `schedules:` reader; both
+  catalog builders surface normalized `plugins` + `plugin_errors`. Opt-in: an
+  absent/empty block is a full no-op.
+- **FR-2 — Materialization:** at creation the backend writes a nested
+  `~/.trinity/plugins.yaml` (`git_service.materialize_plugins`, the shared
+  injection-safe heredoc writer, `sort_keys=True`) from a `_TemplateResolution.
+  declared_plugins` carrier fed by all three resolver branches (github source
+  metadata, local `template_data`, copy snapshot). Ghost-skipped and non-fatal
+  (sits inside the creation rollback fence). **Deterministic** — a stable set
+  produces a byte-identical file, so the 15-min auto-sync loop never re-commits a
+  churning manifest.
+- **FR-3 — Committed (the portability divergence):** `.trinity/plugins.yaml` is
+  in `_TRINITY_AUTHORED_PATHS`, so it rides the #2070 contents-only `!`
+  re-include AND the `git rm --cached` exemption — it is COMMITTED (unlike the
+  volume-local `persistent-state.yaml` / `data-paths.yaml`), which is what lets it
+  survive a git-based reconstitution. `.claude.json` and `.claude/plugins/` stay
+  gitignored (#1705 intact — the manifest is a distilled, plugin-only,
+  secret-free declaration, never the cache or the raw manifest).
+- **FR-4 — Self-heal at boot:** startup.sh runs
+  `python3 -m agent_server.plugins_reinstall` (after credential injection — a
+  private marketplace needs a git credential at install time, resolved from the
+  agent's `GITHUB_PAT` env, never the manifest). It reads current state via
+  `claude plugin [marketplace] list --json`, adds missing marketplaces
+  (`marketplace add`) and installs missing plugins (`install --yes`), and runs
+  **zero** subprocesses when the declared set is already present (volume-persisting
+  restart). Non-fatal; each action logged (`installed`/`skipped`/`withheld:<reason>`).
+
+### 42.3 Security
+
+- The `plugins.yaml` on the agent-writable volume is **untrusted**: parsed with
+  the ent#314 hardened loader (size cap + `AliasPolicy.REJECT`) on the agent side
+  too, and every marketplace/plugin name AND the marketplace `source` are
+  charset-validated at both the backend boundary and the boot hook.
+- The marketplace `source` is the dangerous argument (it points where
+  `marketplace add` fetches from): it must be `owner/repo` or an `https://` URL
+  with **no `user:token@` userinfo** (refused, run through `redact_url_userinfo`),
+  no traversal, no leading `-` (argument injection). Names/sources are passed as
+  subprocess **arg lists**, never a shell string; every call is `timeout`-bounded
+  with `stdin=DEVNULL` so a no-TTY prompt cannot hang.
+
+### 42.4 Honest scope / known limitations
+
+- **Runtime-install distill deferred** — plugins installed after creation
+  (runtime `/plugin install`, not in the template) are not captured yet; that
+  needs an agent-side distill of Claude's own `known_marketplaces.json` +
+  `enabledPlugins`, whose shapes are undocumented and version-drifting.
+- **Cornelius / tokenless source-mode agents** cannot push a materialized
+  `.trinity/plugins.yaml` back to git, so the boot hook **falls back to reading
+  the `template.yaml plugins:` block** the re-cloned template carries (same
+  nested shape; BUDGET alias policy since template.yaml may legitimately anchor).
+  startup.sh's guard fires on the manifest OR a top-level `plugins:` key, so the
+  fallback is reachable; their plugins otherwise survive by volume + boot re-install.
+- **Supply chain:** `plugin@marketplace` pins identity, not a commit — a
+  re-install re-fetches the marketplace's current content (the #192
+  `auto_update: on` behaviour); a pinned mode is a documented follow-up.

@@ -67,6 +67,7 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :loading-roster="store.loading && !store.rosterLoaded"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
@@ -88,6 +89,7 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :loading-roster="store.loading && !store.rosterLoaded"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
@@ -184,6 +186,7 @@
           @sessions-changed="onConversationTurnDone"
           @open-files="filesOpen = true"
           @open-menu="mobileNav = true"
+          @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
         >
           <template #empty>
@@ -270,7 +273,7 @@ import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
-import { resolveAgentLanding, shouldMarkTurnRead } from '@/components/portal/portalUtils'
+import { resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -374,10 +377,23 @@ function leaveRoomRoute() {
   router.push('/workspace')
 }
 
-function startBlankChat() {
-  unreachableAgent.value = null
-  pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+// The one way to hand the stage back. #2158 reached the same conclusion
+// concurrently and inlined `route.path !== '/workspace'` at all three sites;
+// this keeps that rule and moves it behind a name, for two reasons the inline
+// form cannot cover:
+//
+//   * it is a PURE FUNCTION in portalUtils, so it is testable — this project has
+//     no component-mount harness, and an inline closure over `route` can only be
+//     pinned by scanning the source for a spelling;
+//   * the QUERY is part of the stage too. `?agent=` is the ent#358 landing spot,
+//     re-read by `bootstrap()` after every sign-in, so `/workspace?agent=X`
+//     satisfies the path check while still carrying X into the next session.
+//
+// `startBlankChat` used to live here and is deleted rather than converted: ent#361
+// (8e5157f1) renamed it out of the `@new-chat` binding and handed that event to
+// the picker, so it has had ZERO callers since — #2158 converted an orphan.
+function escapeStage() {
+  if (shouldEscapeStage(route.path, route.query)) router.push('/workspace')
 }
 
 async function onPickerConfirm(agentNames) {
@@ -416,6 +432,43 @@ async function onPickerConfirm(agentNames) {
 }
 
 const pickerError = ref(null)
+
+// ent#361: a 1:1 became a group discussion. Create the room with both agents,
+// carry the message that caused it, and move the user there.
+//
+// The message is posted AFTER navigation rather than before: posting first and
+// then navigating leaves the user staring at the old thread while the agents
+// they just summoned reply somewhere they cannot see. If the post fails the
+// room still exists and they are in it, which retyping recovers — whereas a
+// created-but-unreachable room does not.
+const escalating = ref(false)
+
+async function onEscalateToRoom({ agents, message } = {}) {
+  if (escalating.value || !agents?.length) return
+  escalating.value = true
+  try {
+    const room = await store.createRoom(agents, `Chat with ${agents.join(', ')}`)
+    const roomId = room.id || room.room_id
+    await refreshThreads()
+    openRoom(roomId)
+    if (message) {
+      try {
+        await store.postRoomMessage(roomId, message)
+      } catch { /* the room is open in front of them; retyping recovers */ }
+    }
+  } catch (err) {
+    // Escalation failed, so the user is still in the 1:1 with an emptied
+    // composer. Give the text back rather than losing what they typed.
+    prefill.value = ''
+    await nextTick()
+    prefill.value = message || ''
+    pickerError.value = err?.response?.data?.detail?.message
+      || err?.response?.data?.detail
+      || 'Could not start a group chat with those agents.'
+  } finally {
+    escalating.value = false
+  }
+}
 
 // #2128 — shared by the room-route refusal branch and the no-room empty state
 // below it, which are the same four states rendered in the same file. Local
@@ -483,10 +536,16 @@ function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  // #2128: `roomId` too — see leaveRoomRoute above. Without it, picking one
-  // agent from the picker while parked on a room URL leaves the room route (and
-  // so the refusal) on screen, and the chat the user asked for never appears.
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  // Leave ANY specific route, not an enumerated list of params.
+  //
+  // This condition was wrong twice for the same reason. #2128 added `roomId`
+  // after picking an agent while parked on a room URL left the room on screen;
+  // ent#360 then added `/workspace/a/:agentName` and did not extend the list, so
+  // "Start a chat" on the agent page set the state and navigated nowhere — the
+  // page kept rendering (it is the first branch of the stage chain) and the chat
+  // never appeared. #2158 fixed that by asking about route shape; `escapeStage`
+  // keeps that rule, names it, and extends it to the query.
+  escapeStage()
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
@@ -506,16 +565,17 @@ function onSessionAdopted(id) {
   // A thread you are actively talking in is by definition read. This is also
   // what gives a brand-new thread its read cursor, so the very next reply the
   // user does NOT see is the first thing that badges.
-  markRead('thread', id)
-  refreshThreads()
+  markRead('thread', id).then(refreshThreads)
 }
 function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value = text }) }
 
 // ent#359 — per-viewer star + unread state, merged onto the thread list.
 //
-// Kept out of `fetchAllSessions` on purpose: that call fans out over the roster
-// and degrades per agent, while this is one call for the whole viewer. Merging
-// here means a chat-state failure costs the stars and badges, never the list.
+// Kept a separate call from `fetchAllSessions` on purpose, so that a chat-state
+// failure costs the stars and badges, never the list. (#2198: the original
+// wording — "that call fans out over the roster and degrades per agent, while
+// this is one call for the whole viewer" — described the shape sessions should
+// have had; sessions is now one viewer-scoped call too.)
 const chatState = ref({})
 const chatKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
 
@@ -529,12 +589,20 @@ function decorate(list) {
 }
 
 async function refreshThreads() {
+  // #2198: both halves are caught. `fetchAllSessions` already returns its last
+  // good list rather than rejecting, but this is a belt on the load-bearing
+  // property: `bootstrap()` AWAITS this before `resolveAgentQuery()` and the
+  // deep-link `sessionId` branch, so an unhandled rejection here would not
+  // merely empty the sidebar — it would break Workspace deep-link landing
+  // outright, on the most client-visible surface in the product. Before the
+  // batch this was structurally impossible (each per-agent call had its own
+  // catch); with one request it is one 500 away, so it is made explicit.
   const [list, state] = await Promise.all([
-    store.fetchAllSessions(),
+    store.fetchAllSessions().catch(() => store.lastSessions),
     store.fetchChatState().catch(() => chatState.value),
   ])
   chatState.value = state || {}
-  threads.value = decorate(list)
+  threads.value = decorate(list || [])
 }
 
 // A turn finishing in the conversation the user is LOOKING AT is read by
@@ -548,8 +616,10 @@ function onConversationTurnDone(sessionId) {
   // arrives unseen. Marking read unconditionally cleared exactly the badge the
   // feature exists to show, and made it near-unreachable in normal use.
   const open = activeSessionId.value || pendingSession.value
-  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
-  return refreshThreads()
+  return (shouldMarkTurnRead(sessionId, open)
+    ? markRead('thread', sessionId)
+    : Promise.resolve()
+  ).then(refreshThreads)
 }
 
 // Optimistic: a star is a personal bookmark, and waiting on a round trip to
@@ -577,14 +647,18 @@ async function toggleStar(t) {
 
 // Opening a chat is what "reading" it means here. Clear the badge locally first
 // so the count does not linger for a round trip, then persist.
+// Returns the write promise. Callers that refresh afterwards MUST await it:
+// `GET /chat-state` racing the cursor UPSERT overwrites the optimistic zero
+// with a stale count, and the badge comes back on the conversation the user is
+// reading — possibly for minutes, until the next refresh.
 function markRead(kind, id) {
-  if (!id) return
+  if (!id) return Promise.resolve()
   const key = `${kind}:${id}`
   if (chatState.value[key]?.unread) {
     chatState.value = { ...chatState.value, [key]: { ...chatState.value[key], unread: 0 } }
     threads.value = decorate(threads.value)
   }
-  store.markChatRead(kind, id)
+  return store.markChatRead(kind, id)
 }
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------
@@ -611,6 +685,10 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (pendingSession.value === sid && activeAgentName.value) return
   const known = threads.value.find((t) => (t.id || t.session_id) === sid)
   if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
+  // Opening by ROUTE is an open. Back/forward, a bookmark and a reload all land
+  // here rather than in `openThread`, and it is the commonest way in — without
+  // this the sidebar badges the conversation on screen, through every reload.
+  markRead('thread', sid)
 })
 
 // ent#358: `/workspace?agent=<name>` opens that agent's conversation directly —
@@ -658,6 +736,7 @@ async function bootstrap() {
     if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
     else pendingSession.value = sid   // let the conversation resolve/load it
     convGen.value++
+    markRead('thread', sid)           // a deep-linked open is still an open
     return
   }
   resolveAgentQuery()
@@ -670,8 +749,11 @@ function onSignOut() {
   store.signOut()
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
-  // #2128: `roomId` too — otherwise a sign-out from a room URL carries that
-  // room id into the next session's address bar.
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  // Leave ANY specific route (rationale in newChatWithAgent) — otherwise a
+  // sign-out carries that room id (#2128) or agent name into the next session's
+  // address bar. The query matters most here: `?agent=X` survives the path
+  // check and is re-read by the next `bootstrap()`, so the next person to sign
+  // in on this browser lands on "You don't have access to X".
+  escapeStage()
 }
 </script>
