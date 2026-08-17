@@ -2357,6 +2357,18 @@
         "reliability"
       ],
       "description": "Unwritable-archive-directory alarm (#2205). LocalArchiveStorage.__init__ called mkdir(exist_ok=True), which SUCCEEDS on a pre-existing root-owned directory — so it logged 'initialized' while every write failed with Permission denied, and the ERROR went into the very log files archival exists to prune (8.5 GB observed, one 4.6 GB file). The constructor now probes writability and files one operator-queue alarm naming the ownership cause and the remedy. Pins: no alarm when writable (and the probe file is cleaned up), the alarm names UID 1000 + archives-init, a stable per-path-per-day id so a crash loop cannot flood the queue past the ON CONFLICT dedup, and — for a maintenance job — that neither a failed probe nor failed alarm plumbing can raise into startup. Plus the #1632/#2216 registry parity: the id prefix is reserved (else an agent could pre-create and silence it) and the sentinel host is canary-L-03-exempt and uncreatable as an agent name."
+    },
+    {
+      "file": "unit/test_2213_searchable_playbooks.py",
+      "feature": "#2213",
+      "added": "2026-08-17",
+      "categories": [
+        "backend",
+        "unit",
+        "client-portal",
+        "ui-ux"
+      ],
+      "description": "Workspace `/` typeahead skill coverage (#2213). Measured on a live instance with 30 probe skills planted in a real agent container: the agent-server reported 33 client-visible skills, the roster payload carried 24 (_MAX_BRIEFING_HINTS), and typing the 27th skill's name matched nothing with no indication anything was missing — the popup searches only what shipped. The card bound is right for the hint GRID it was written for (#2101) and wrong as the search corpus, so the two surfaces now have two bounds: `playbooks` (24, rich) for cards, `searchable_playbooks` (200, title+starter only — no descriptions is what keeps it cheap) for search, and `playbooks_total` so remaining truncation is sayable instead of silent. Pins the SEPARATION and the honesty rather than the numbers: searchable is never smaller than the card set at any size, total never under-reports, search entries carry exactly what a pick needs (starterFor reads starter_prompt), the exposure policy still bounds BOTH surfaces (an allow-list and user_invocable:false reach neither), and a failed or skipped briefing still returns the four-field shape — the last case caught a real defect during development, where the availability early-return still yielded a 2-tuple and would have raised on unpack for every stopped agent."
     }
   ]
 }
