@@ -8,7 +8,7 @@
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
-import { normalizeRoomRow } from '@/components/portal/portalUtils'
+import { normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 // #2162: the page size for a windowed report read. A dependency-free leaf
@@ -18,6 +18,10 @@ import { useAuthStore } from './auth'
 import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+// #2258: where a PLATFORM principal lands after signing out of the Workspace —
+// the platform login, because the session they just ended was the platform
+// one. Exported so the test pins the destination the view actually pushes.
+export const PLATFORM_LOGIN_ROUTE = '/login'
 // Mirrors `SESSION_ROTATION_HEADER` in client_portal/portal_auth.py (ent#375).
 // Lower-case: axios normalises response header names.
 const SESSION_ROTATION_HEADER = 'x-trinity-session-token'
@@ -171,6 +175,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // "signing out of the platform ends it" true by construction: there is no
     // second credential to revoke, so `authStore.logout()` ends the workspace
     // session in the same act.
+    //
+    // #2258: the SAME derivation runs the other way, and that is the trap.
+    // Signing out of the WORKSPACE has to end the platform session too when
+    // one exists — clearing only the portal token is precisely what activates
+    // this fallback, so a "Sign out" that stopped there re-entered the
+    // Workspace as the operator on the next refresh. See `signOutEverywhere`.
     isPlatformSession() {
       return !this.portalToken && !!useAuthStore().isAuthenticated
     },
@@ -232,6 +242,53 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.multiAgentChatAvailable = false
       this.rosterLoaded = false
       localStorage.removeItem(PORTAL_TOKEN_KEY)
+    },
+
+    // #2258 — the whole user-initiated sign-out, in one place, so the sequence
+    // is pinned by a unit test instead of trapped in a component this suite
+    // cannot mount (`vitest.config.js` is node-only, no plugin-vue).
+    //
+    // A platform session IS a workspace session (ent#357), so signing out of
+    // the Workspace while one exists has to end THAT. There is no portal
+    // credential to clear for a platform user; and for a client on a browser
+    // that also holds a platform login, clearing only the portal token is what
+    // ACTIVATES the platform fallback — the reported bug.
+    //
+    // A persisted "suppress the platform fallback" flag was the issue's own
+    // suggestion and was rejected on evidence: `auth.js` installs the platform
+    // JWT as an axios DEFAULT header, and per-request headers MERGE over
+    // defaults, so a flag hides the operator's roster on screen while every
+    // portal request still carries the operator's credential and the backend
+    // still answers as them (`get_portal_principal` scopes by whatever it is
+    // handed). Destroying the credential is the one design where the wire and
+    // the screen agree, and it needs no flag, no persistence, and leaves the
+    // 401-bounce predicate (`localStorage['token']`) correct by construction.
+    //
+    // ORDER is load-bearing. The platform credential goes FIRST, so there is
+    // no window in which `portalToken` is already gone while
+    // `isAuthenticated` is still true — that is exactly the state in which
+    // `authHeader` would hand an in-flight portal poll the operator's
+    // identity. `signOut()` stays the plain state-clearing primitive:
+    // `endSession({expired})` calls it, and an EXPIRED portal session must
+    // never end a platform session (expiry is not a user act, and would take
+    // an operator working in another tab with it).
+    //
+    // Known residual, stated rather than hidden: a CLIENT session that merely
+    // EXPIRES on a browser which later gained a platform login still falls
+    // back to that platform identity through `endSession` → `signOut`. It is
+    // the same class by a route the UI does not produce (the OTP form never
+    // renders while a platform JWT exists, so that ordering needs the platform
+    // login to arrive AFTER the client signed in) and is tracked as #2261.
+    //
+    // Returns where the caller should navigate: an operator to the platform
+    // login (they signed out of Trinity), a client to the workspace root (the
+    // OTP form). The `wasPlatform` read must happen before either clear.
+    async signOutEverywhere() {
+      const wasPlatform = this.isPlatformSession
+      const authStore = useAuthStore()
+      if (authStore.isAuthenticated) await authStore.logout()
+      this.signOut()
+      return wasPlatform ? PLATFORM_LOGIN_ROUTE : WORKSPACE_ROOT
     },
 
     // Chat one turn with a rostered agent over the portal session (the gated,

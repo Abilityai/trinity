@@ -332,6 +332,22 @@ export function shouldEscapeStage(path, query) {
   return STAGE_QUERY_KEYS.some((k) => query[k] !== undefined && query[k] !== null && query[k] !== '')
 }
 
+// #2258 — the accessible name of the sidebar's sign-out button, per principal.
+//
+// A platform user's workspace session IS their platform session (ent#357), so
+// for them the button ends the platform session and must SAY so: "Sign out"
+// promised less than it did, and "Leave workspace" (the alternative the issue
+// weighed) would promise navigation while leaving a live credential in a
+// browser the person just asked to leave — the reported bug with an honest
+// sign on it. A client's button ends only their portal session, and says so.
+// Pure so the label the view renders is the one the test pins.
+export const SIGN_OUT_LABEL_PLATFORM = 'Sign out of Trinity'
+export const SIGN_OUT_LABEL_CLIENT = 'Sign out'
+
+export function signOutLabelFor(isPlatformSession) {
+  return isPlatformSession ? SIGN_OUT_LABEL_PLATFORM : SIGN_OUT_LABEL_CLIENT
+}
+
 // #2161 — client-facing names for the activity chart's trigger buckets.
 //
 // The bucket names are the backend's internal vocabulary (`_BUCKET_ORDER`), and

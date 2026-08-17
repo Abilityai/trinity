@@ -1336,6 +1336,24 @@ through `client_portal/portal_auth.py::get_portal_principal`, which returns
 `(email, is_platform)`; the roster is every agent shared with that email, plus — for a
 platform session only — the agents they own.
 
+**Sign-out ends whichever credential is live — never a derivation of it (#2258).** The
+implicit entry above runs the other way too: `isPlatformSession = !portalToken &&
+isAuthenticated`, so clearing only the portal token is what *activates* the platform
+fallback, and the Workspace's "Sign out" used to re-enter as the operator on refresh (or
+re-authenticate a client as the co-resident operator). `stores/clientPortal.js::
+signOutEverywhere()` ends the platform session (`authStore.logout()`) **first**, then
+clears portal state, and routes by principal — operator → `/login`, client → the OTP
+form. A persisted suppression flag was rejected on evidence: the JWT is an axios
+**default** header and per-request headers merge over defaults, so a flag hides the
+disclosure while every portal request still carries the operator's credential.
+`auth.logout()` clears local state **before** the network revoke, because the global 401
+interceptors and the `/login → /` router guard both key on it. `endSession({expired})`
+deliberately does not end a platform session (expiry is not a user act). Residuals stated
+in [workspace-session-signout.md](feature-flows/workspace-session-signout.md): a client
+session that *expires* on a browser which later gained a platform login, and the portal
+token's server-side validity post-sign-out (no self-service revoke; ent#281's primitive
+is per-email).
+
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
 whether a container exists. A live ownership row with no container is a routine state

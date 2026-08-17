@@ -43,15 +43,22 @@ vi.hoisted(() => {
 vi.mock('@/stores/auth', async () => {
   const { ref } = await import('vue')
   const authed = ref(false)
+  // #2258: `logout()` models the real one — it ends the platform session. It is
+  // a spy so a test can assert WHETHER it ran (a portal-only sign-out must not
+  // touch a platform session that isn't there) and WHEN (before the portal
+  // state clears, never after).
+  const logout = vi.fn(async () => { authed.value = false })
   return {
     useAuthStore: () => ({
       get isAuthenticated() { return authed.value },
       get authHeader() { return authed.value ? { Authorization: 'Bearer platform-jwt' } : {} },
+      logout,
     }),
     // Test-only handle: mutation must go through the SAME ref the getters read,
     // or Vue never invalidates the computed and the sign-out case passes for
     // the wrong reason.
     __setAuthed: (v) => { authed.value = v },
+    __logout: logout,
   }
 })
 
@@ -78,8 +85,11 @@ vi.mock('axios', () => {
   }
 })
 
-import { useClientPortalStore } from '@/stores/clientPortal'
-import { __setAuthed } from '@/stores/auth'
+import { useClientPortalStore, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
+import { __setAuthed, __logout } from '@/stores/auth'
+import {
+  WORKSPACE_ROOT, signOutLabelFor, SIGN_OUT_LABEL_PLATFORM, SIGN_OUT_LABEL_CLIENT,
+} from '@/components/portal/portalUtils'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 
@@ -135,6 +145,143 @@ describe('workspace session', () => {
 
     expect(store.authHeader).toEqual({ Authorization: 'Bearer portal-token' })
     expect(store.isPlatformSession).toBe(false)
+  })
+})
+
+// #2258 — "Sign out" must produce a signed-out state, for BOTH ways of being
+// signed in. `signOut()` cleared only the portal token, and because a platform
+// session is an implicit workspace session (the block above), removing the
+// portal token is exactly what ACTIVATES the platform fallback: a refresh
+// re-entered the Workspace as the operator. The fix ends whichever credential
+// is live, in an order that never lets the operator identity be derived
+// mid-flight — the whole sequence lives in `signOutEverywhere()` so it can be
+// pinned here rather than trapped in a component this suite cannot mount.
+describe('signing out of the workspace signs out (#2258)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    __setAuthed(false)
+    __logout.mockClear()
+    setActivePinia(createPinia())
+  })
+
+  it('a platform user signing out ends the PLATFORM session and goes to the platform login (AC #1)', async () => {
+    __setAuthed(true)
+    const store = useClientPortalStore()
+    expect(store.isPlatformSession).toBe(true)
+
+    const target = await store.signOutEverywhere()
+
+    expect(__logout).toHaveBeenCalledTimes(1)
+    // No half-signed-out shell: NEITHER way of being signed in survives.
+    expect(store.isPlatformSession).toBe(false)
+    expect(store.isClientSignedIn).toBe(false)
+    expect(store.authHeader).toEqual({})
+    expect(target).toBe(PLATFORM_LOGIN_ROUTE)
+  })
+
+  it('a client signing out on a browser that also holds a platform login lands on the workspace sign-in, not the operator roster (AC #2)', async () => {
+    // The reported variant 2: portal token present AND a platform JWT present.
+    // Clearing the portal token alone would re-derive the platform identity.
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    __setAuthed(true)
+    const store = useClientPortalStore()
+    expect(store.isClientSignedIn).toBe(true)
+    expect(store.isPlatformSession).toBe(false)   // it was a CLIENT session
+
+    const target = await store.signOutEverywhere()
+
+    // The platform credential is gone too — the fallback has nothing to fall
+    // back to, on screen AND on the wire.
+    expect(__logout).toHaveBeenCalledTimes(1)
+    expect(store.isClientSignedIn).toBe(false)
+    expect(store.isPlatformSession).toBe(false)
+    expect(store.authHeader).toEqual({})
+    expect(localStorage.getItem(PORTAL_TOKEN_KEY)).toBeNull()
+    // …and they stay on the Workspace (the OTP form), never the operator /login.
+    expect(target).toBe(WORKSPACE_ROOT)
+  })
+
+  it('a client with NO platform login signs out without touching the platform (nothing to end)', async () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+
+    const target = await store.signOutEverywhere()
+
+    expect(__logout).not.toHaveBeenCalled()
+    expect(store.isClientSignedIn).toBe(false)
+    expect(target).toBe(WORKSPACE_ROOT)
+  })
+
+  it('the platform credential is ended BEFORE the portal state clears (no window where the operator identity is derived)', async () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    __setAuthed(true)
+    const store = useClientPortalStore()
+
+    // At the moment the platform logout runs, the portal token must still be
+    // held: `portalToken` gone + `isAuthenticated` still true is exactly the
+    // state in which `authHeader` would hand an in-flight poll the operator's
+    // credential.
+    let portalTokenDuringLogout = 'unset'
+    __logout.mockImplementationOnce(async () => {
+      portalTokenDuringLogout = store.portalToken
+      __setAuthed(false)
+    })
+
+    await store.signOutEverywhere()
+    expect(portalTokenDuringLogout).toBe('portal-token')
+  })
+
+  it('the signed-out state survives a reload — no reappearance on refresh (AC #1, #3)', async () => {
+    __setAuthed(true)
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    await useClientPortalStore().signOutEverywhere()
+
+    // "Reload": a fresh store hydrates from what persisted. Nothing did.
+    setActivePinia(createPinia())
+    const fresh = useClientPortalStore()
+    expect(fresh.isClientSignedIn).toBe(false)
+    expect(fresh.isPlatformSession).toBe(false)
+    expect(localStorage.getItem(PORTAL_TOKEN_KEY)).toBeNull()
+  })
+
+  it('an EXPIRED portal session does not end a platform session — expiry is not a sign-out', () => {
+    // `endSession({expired})` is the 401 path, reached with no user act. It
+    // must keep calling the plain state-clearing primitive, never the
+    // credential-ending one, or an operator working in another tab is logged
+    // out by a client's idle timeout.
+    __setAuthed(true)
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+
+    store.endSession({ expired: true, resumePath: '/workspace/c/abc' })
+
+    expect(__logout).not.toHaveBeenCalled()
+    expect(store.sessionExpired).toBe(true)
+  })
+
+  it('a user who never signed out keeps the implicit entry (AC #6: existing behaviour unchanged)', () => {
+    __setAuthed(true)
+    const store = useClientPortalStore()
+    expect(store.isClientSignedIn).toBe(true)
+    expect(store.isPlatformSession).toBe(true)
+    expect(__logout).not.toHaveBeenCalled()
+  })
+
+  it('the button says what it does for each principal (AC #5)', () => {
+    // A platform user's workspace session IS their platform session, so their
+    // button ends it and says so. A client's ends only theirs.
+    expect(signOutLabelFor(true)).toBe(SIGN_OUT_LABEL_PLATFORM)
+    expect(signOutLabelFor(false)).toBe(SIGN_OUT_LABEL_CLIENT)
+    expect(SIGN_OUT_LABEL_PLATFORM).toMatch(/Trinity/)
+    // Never "Leave" — that would promise navigation while leaving a live
+    // credential in a browser the person just asked to leave.
+    expect(SIGN_OUT_LABEL_PLATFORM).not.toMatch(/leave/i)
+    expect(SIGN_OUT_LABEL_CLIENT).not.toMatch(/leave/i)
   })
 })
 

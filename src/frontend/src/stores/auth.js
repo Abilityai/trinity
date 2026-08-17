@@ -398,15 +398,21 @@ export const useAuthStore = defineStore('auth', {
 
     // Logout
     async logout() {
-      // #187: revoke the token server-side first so an exfiltrated copy stops
-      // working immediately. Best-effort — never block local logout if the
-      // call fails (the Authorization header is still set at this point).
-      try {
-        await axios.post('/api/auth/logout')
-      } catch (e) {
-        // ignore — proceed to clear local state regardless
-      }
-
+      // #2258: the LOCAL record of the session is cleared BEFORE the network
+      // revoke, in the same synchronous tick the caller entered. Two readers
+      // depend on that ordering:
+      //   * the global 401 interceptors (main.js / api.js) decide whether to
+      //     bounce to /login from `localStorage['token']`. If the revoke below
+      //     answers 401 — an already-expired token — an interceptor that still
+      //     saw the token would call THIS method again and push /login, which
+      //     for a client on the Workspace is the operator login (the #138
+      //     bounce by a new route);
+      //   * `router/index.js` redirects /login → / while `isAuthenticated`, so
+      //     a caller that pushes /login right after calling this (NavBar has
+      //     done so, un-awaited, since #187) used to lose the race to the
+      //     dashboard.
+      // The revoke itself still carries the token: it rides the axios DEFAULT
+      // header, which is deleted only after the call.
       this.token = null
       this.user = null
       this.isAuthenticated = false
@@ -417,9 +423,18 @@ export const useAuthStore = defineStore('auth', {
       this.profileVerified = false
       this.authError = null
       this.mfaChallenge = null
-
       localStorage.removeItem('token')
       localStorage.removeItem('auth0_user')
+
+      // #187: revoke the token server-side so an exfiltrated copy stops
+      // working immediately. Best-effort — never block local logout if the
+      // call fails.
+      try {
+        await axios.post('/api/auth/logout')
+      } catch (e) {
+        // ignore — local state is already cleared
+      }
+
       delete axios.defaults.headers.common['Authorization']
 
       // Clear the token cookie
