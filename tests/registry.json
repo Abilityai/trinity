@@ -2335,6 +2335,30 @@
       "description": "MagicMock vs the #1310 assert_* auth-guard family (#2241). MagicMock raises AttributeError for any attribute starting with `assert` (its typo guard against mock.assert_called_once), and the imperative guards are named assert_admin / assert_agent_access / assert_agent_owner / assert_owns / assert_owns_or_admin — so a bare MagicMock() stub of `dependencies` fails at IMPORT time and every test in the file becomes a setup error, with a message pointing at mock internals rather than at the stub. That is how 14 api-tier tests were silently red from b2db1c87 onward. Static text scan, no imports: derives the exporter set from src/backend (never hardcoded, so a sixth guard is covered the day it lands) and flags sys.modules stubs of those modules built with a bare MagicMock, accepting unsafe=True / spec= / create_autospec / a real types.ModuleType. Guards its own vacuity (asserts the exporter scan still finds the family) and pins the upstream behaviour it depends on, so if mock ever drops the prefix check this file fails and can be deleted rather than maintained on faith. Verified to DETECT: reverting the one-line fix makes it report the offender by file:line."
     },
     {
+      "file": "unit/test_2205_volume_ownership.py",
+      "feature": "#2205",
+      "added": "2026-08-17",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "Named-volume ownership parity guard (#2205). Docker creates named volumes root-owned and the backend runs as UID 1000, so `trinity-archives` (mounted at the NESTED /data/archives, which the image never creates) was unwritable — while `trinity-data` works because the Dockerfile creates and chowns /data before USER trinity and Docker seeds an empty volume's ownership from the image. That distinction is the mechanism, and it is encoded: a volume is covered by an init one-shot that chowns it, OR by the image having prepared that exact path, OR by an explicit _EXEMPT entry with a reason. Also pins dev's archives-init + both depends_on gates, and that prod does NOT grow a trinity-archives volume (its /data/archives lives inside the start.sh-chowned bind mount) — scanned with comments stripped, since the mount's own explanatory comment names the volume. Proven to detect: it reconstructs the pre-fix compose by excising the one-shot and asserts the rule rejects it."
+    },
+    {
+      "file": "unit/test_2205_archive_preflight.py",
+      "feature": "#2205",
+      "added": "2026-08-17",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "reliability"
+      ],
+      "description": "Unwritable-archive-directory alarm (#2205). LocalArchiveStorage.__init__ called mkdir(exist_ok=True), which SUCCEEDS on a pre-existing root-owned directory — so it logged 'initialized' while every write failed with Permission denied, and the ERROR went into the very log files archival exists to prune (8.5 GB observed, one 4.6 GB file). The constructor now probes writability and files one operator-queue alarm naming the ownership cause and the remedy. Pins: no alarm when writable (and the probe file is cleaned up), the alarm names UID 1000 + archives-init, a stable per-path-per-day id so a crash loop cannot flood the queue past the ON CONFLICT dedup, and — for a maintenance job — that neither a failed probe nor failed alarm plumbing can raise into startup. Plus the #1632/#2216 registry parity: the id prefix is reserved (else an agent could pre-create and silence it) and the sentinel host is canary-L-03-exempt and uncreatable as an agent name."
+    },
+    {
       "file": "unit/test_2247_calendar_rot_detector.py",
       "feature": "#2247",
       "added": "2026-08-17",

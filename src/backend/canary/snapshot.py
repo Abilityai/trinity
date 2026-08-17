@@ -147,7 +147,12 @@ _DB_BACKUP_AGENT = "_db-backup"
 # this tuple). Each is uncreatable as a real agent — `sanitize_agent_name`
 # strips the leading `_` — so none can ever appear in agent_ownership, and
 # without the exclusion each would report a permanent, un-fixable orphan.
-_PLATFORM_ALARM_SENTINELS = (_RETENTION_GUARD_AGENT, _DB_BACKUP_AGENT)
+# #2205: the log-archive alarm host joins the same exemption — these sentinels are
+# platform alarm HOSTS, not ghost agents, so an orphan-reference check must not
+# read them as a failed delete cascade.
+_LOG_ARCHIVE_AGENT = "_log-archive"
+_PLATFORM_ALARM_SENTINELS = (_RETENTION_GUARD_AGENT, _DB_BACKUP_AGENT,
+                            _LOG_ARCHIVE_AGENT)
 _SENTINEL_SQL_LIST = ", ".join(f"'{name}'" for name in _PLATFORM_ALARM_SENTINELS)
 
 ORPHAN_SCAN_TABLES = [
