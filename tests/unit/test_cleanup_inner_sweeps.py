@@ -35,6 +35,25 @@ _CS = sys.modules[CleanupService.__module__]
 import services.retention_guard as _RG  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_retention_episodes():
+    """#1834: `retention_guard._refusal_episodes` outlives every test in the session.
+
+    This file BECAME a writer of that state under #1833: `_configure_db` used to
+    leave `count_agent_reminders_candidates` a bare MagicMock, which raised out of
+    the old `evaluate` and aborted the sweep before `announce_refusal` — so the
+    memo was never touched here. Now an uninterpretable count REFUSES, which
+    records an episode carrying a real `_clock()` stamp. Leaked across a
+    pytest-randomly session that is an order-dependent flake: a later test's first
+    alarm attempt would land on the escalation branch. (The count is now a real int
+    as well — see `_configure_db` — but the reset stays, because any future sweep
+    that refuses here writes the same state.)
+    """
+    _RG.reset_transition_memo()
+    yield
+    _RG.reset_transition_memo()
+
+
 def _make_service():
     """A CleanupService with the HTTP-bearing methods stubbed out."""
     svc = CleanupService(poll_interval=300)
@@ -80,8 +99,9 @@ def _configure_db(db):
     db.prune_operator_queue_terminal_items.return_value = 8  # #1142 operator_queue retention
     # #1644 blast-radius guard: every destructive sweep now counts its candidate
     # set before pruning and REFUSES if it's over threshold. These must be real
-    # ints — the guard is fail-closed, so a bare MagicMock (uncomparable to int)
-    # correctly aborts the prune, which is what this suite would otherwise see.
+    # ints — the guard is fail-closed, so a bare MagicMock is refused
+    # (`count_uninterpretable` since #1833; a raised TypeError before it), which
+    # aborts the prune and is what this suite would otherwise see.
     # Small values keep the happy path under the guard's threshold.
     db.count_execution_log_candidates.return_value = 5
     db.count_execution_row_candidates.return_value = 6
@@ -93,6 +113,14 @@ def _configure_db(db):
     # only allowed through here because an ack is present — see the guard's
     # get_setting_value side effect below.
     db.count_soft_deleted_agents_past_retention.return_value = 1
+    # #1296 agent_reminders. This accessor was MISSING until #1833, so the
+    # reminders count was a bare MagicMock, the guard aborted, and this file's
+    # "the happy path runs ALL sweeps" test had silently never reached
+    # `prune_agent_reminders`. `prune` returns 0 so the pinned `report.total`
+    # literal below stays correct — the restored coverage is that the prune is
+    # REACHED at all, which the happy-path test now asserts explicitly.
+    db.count_agent_reminders_candidates.return_value = 4
+    db.prune_agent_reminders.return_value = 0
 
 
 def _run(svc):
@@ -127,6 +155,10 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     assert report.idempotency_keys_purged == 11
     assert report.agent_reports_pruned == 3  # #918
     assert report.operator_queue_pruned == 8  # #1142
+    # #1833: the reminders sweep is REACHED (its count accessor was an
+    # unconfigured MagicMock until this PR, so the guard aborted before the
+    # prune and this "runs all sweeps" test quietly did not).
+    db.prune_agent_reminders.assert_called_once()
     assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3 + 8 + 12  # +12 #1449
     # retention reclaimed rows ⇒ WAL checkpoint fires
     wal.assert_called_once()

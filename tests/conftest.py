@@ -26,7 +26,16 @@ Configuration:
 """
 
 # Skip test files that require backend context (can't be run from test suite)
-collect_ignore = ["test_archive_security.py"]
+collect_ignore: list[str] = []  # test_archive_security relocated to tests/unit/ (#1895)
+
+# WHERE TESTS LIVE (#1895): the per-PR CI unit job collects ONLY tests/unit/, so a
+# self-contained test belongs there, not here. The live-in-root set (files that
+# genuinely need a running backend) is enforced by tests/lint_root_test_placement.py
+# + its ratcheted baseline — do NOT hand-maintain a list here. The two intentional
+# basename twins that STAY in root, test_1083_callback_endpoint.py (a
+# pytest.mark.smoke live layer) and test_websocket_auth.py (a real wss:// handshake),
+# are deliberate: their mocked/direct logic twins live under tests/unit/ and the two
+# layers legitimately coexist across the two collected islands (do not dedupe).
 
 # ---------------------------------------------------------------------------
 # Issue #589: backend config now raises at import-time if REDIS_URL lacks
@@ -201,15 +210,14 @@ def _preload_backend_models():
 def _preload_backend_routers_namespace():
     """Pre-register src/backend/routers/ as the `routers` namespace package.
 
-    test_inter_agent_timeout_unit.py runs at collection time and does:
-        if "routers" not in sys.modules:
-            sys.modules["routers"] = types.ModuleType("routers")  # plain module!
-    A plain module has no __path__, so `import routers.public` later in
-    test_ip_rate_limit_fix.py fails with "routers is not a package".
-
-    Pre-registering a proper namespace package here causes the
-    `if "routers" not in sys.modules:` guard to fire and prevents the
-    plain-module stub from being installed.
+    Historically test_inter_agent_timeout_unit.py installed a PLAIN `routers`
+    module stub at collection (`sys.modules["routers"] = types.ModuleType(...)`,
+    no __path__), which broke a later `import routers.public`
+    ("routers is not a package"). Since #1895 relocated that file to tests/unit/
+    (and migrated this preload into tests/unit/conftest.py), the root is left with
+    NO plain-stub installer, and `src/backend/routers/__init__.py` resolves as a
+    real package on sys.path anyway — so this preload is now harmless insurance
+    for the root island, not a hard dependency. Kept as a belt.
     """
     routers_dir = _BACKEND / "routers"
     if not routers_dir.exists():

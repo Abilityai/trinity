@@ -12,6 +12,8 @@
  * or the Overview chart (ent#96 AC1).
  */
 
+import { CELL_W } from './gridLayout'
+
 /** Bucket name -> the `--gv-bk-*` token that colours it. */
 export const BUCKET_TOKENS = {
   'Chat/Tasks': 'man',
@@ -69,6 +71,33 @@ export function presentBuckets(triggerOrder, buckets) {
     .map((name) => ({ name, total: totals.get(name), token: bucketToken(name) }))
 }
 
+/* -------------------------------------------------------------------------
+ * The tile's vertical budget (#2228)
+ *
+ * `.it-body` is `overflow: hidden` at a fixed `CELL_H`, so the head, the chart
+ * and the legend compete for one fixed number of pixels — measured at 134. The
+ * tile shipped needing ~138 of them, which is the SECOND clip behind #2228:
+ * even a legend that clamps to whole rows has its last row shaved off by the
+ * body if the column above it is too tall. Fixing the legend alone leaves the
+ * symptom on screen.
+ *
+ * So the chart states its budget here, in the same module the legend's does,
+ * and `.ex-chart`'s CSS height is exactly CHART_HEIGHT + COL_GAP + RAIL_HEIGHT
+ * + 2px padding — the tallest a column can be and nothing more. The container
+ * previously stood 4px above that, which was pure dead space paid for at the
+ * legend's expense. Pinned by executionsTile.spec.js, because a stylesheet and
+ * a JS constant cannot check each other.
+ * ------------------------------------------------------------------------- */
+
+/** Pixel budget for a column's stack. */
+export const CHART_HEIGHT = 60
+/** Pixel budget for the failure rail beneath it. */
+export const RAIL_HEIGHT = 6
+/** `.ex-col` gap between the stack and its rail. */
+export const COL_GAP = 2
+/** `.ex-chart` padding-bottom. */
+export const CHART_PAD = 2
+
 /**
  * One rendered column per bucket.
  *
@@ -81,7 +110,7 @@ export function presentBuckets(triggerOrder, buckets) {
  * floors at 1px: rounding a real execution to nothing would show an empty hour
  * that was not empty.
  */
-export function chartColumns(buckets, { triggerOrder = [], chartHeight = 64, railHeight = 6 } = {}) {
+export function chartColumns(buckets, { triggerOrder = [], chartHeight = CHART_HEIGHT, railHeight = RAIL_HEIGHT } = {}) {
   const rows = Array.isArray(buckets) ? buckets : []
   const order = stackOrder(triggerOrder, rows)
   const maxTotal = Math.max(1, ...rows.map((b) => b?.total || 0))
@@ -167,4 +196,139 @@ export function tileState({ loaded, error, buckets }) {
   if (!loaded) return 'loading'
   const total = headline(buckets).total
   return total ? 'ready' : 'empty'
+}
+
+/* -------------------------------------------------------------------------
+ * Legend fitting (#2228)
+ *
+ * The legend shipped as a wrapping flex row clamped by `max-height: 26px` with
+ * `overflow: hidden`. 26px is not a whole number of legend rows, so the clamp
+ * landed *inside* row two and sliced it through the glyphs — and whatever fell
+ * past it vanished with no indication, leaving colours in the chart with no
+ * decoder anywhere on the tile.
+ *
+ * Both halves are fixed here rather than in CSS alone, because CSS can clamp
+ * but cannot say WHAT it dropped. The clamp pins a whole number of rows; this
+ * packer decides which keys occupy them and hands the remainder to a `+N` chip.
+ *
+ * The width model is deliberately PESSIMISTIC, and the invariant it maintains
+ * is per KEY, not in aggregate: the estimate must be >= what the browser
+ * actually renders for every name. Only then is the packer's row assignment a
+ * subset of what the browser fits, so the browser can never need a row the
+ * packer did not plan for. An aggregate-only margin is not enough — greedy
+ * packing wastes space at the end of each row, so a model that is generous
+ * overall but tight on one name still lets a real third row form, which the
+ * clamp then eats silently. That is precisely the defect this removes.
+ *
+ * The two directions are not symmetric, which is why the bias is one-sided:
+ * over-reserving shows a `+N` that was not strictly necessary, under-reserving
+ * loses keys with no trace.
+ *
+ * Calibration, measured in the running app (Chromium, macOS system sans, 10px,
+ * 334px rows) rather than estimated: every label renders between 3.4 and 5.5
+ * px/char, so the model clears all eleven with 18-59% of headroom — enough to
+ * absorb a different platform font. Observed fleets sit around eight keys and
+ * fit with room to spare.
+ *
+ * The browser does in fact wrap the complete ten-bucket vocabulary plus
+ * `failed` into two rows; the model, being conservative, shows `+2` there. That
+ * gap is accepted rather than tuned away: closing it means calibrating to
+ * within a couple of percent of one browser's metrics on one platform, and the
+ * penalty for guessing low is a silently eaten row. The keys it gives up are
+ * the last in stack order — `Other` and `failed` — which is the right end to
+ * lose from: the headline already states the failure count in red just above,
+ * and the chip names both.
+ * ------------------------------------------------------------------------- */
+
+/** Rows the legend may occupy. The CSS clamp MUST agree; pinned by spec. */
+export const LEGEND_ROWS = 2
+
+/**
+ * Usable legend width in px.
+ *
+ * Derived from the lattice cell rather than hardcoded, so a change to CELL_W
+ * moves the packer with the tile it describes instead of leaving a stale
+ * literal behind.
+ *
+ * 50 = InfoTile's horizontal padding (30 left + 16 right) plus its 1px borders,
+ * rounded up. The padding alone gives 46, which measures 4px WIDER than the
+ * element really is — an error in the one direction the model must never take,
+ * since believing there is more room than exists is how a third row forms. The
+ * live tile reports a 334px content box, which is exactly CELL_W - 50.
+ */
+export const LEGEND_WIDTH = CELL_W - 50
+
+// Per-key geometry, matching the `.ex-key` rule in ExecutionsTile.vue.
+const DOT_W = 6 //     `.ex-dot` width
+const DOT_GAP = 3 //   `.ex-key` gap between dot and label
+const KEY_GAP = 8 //   `.ex-legend` column-gap
+const CHIP_W = 50 //   the `+N` chip at its widest (three dots + count + padding)
+const CHAR_PX = 5.7 // per-char estimate at font-size 10px
+const KEY_PAD = 4 //   flat per-key allowance, see below
+
+/**
+ * Estimated rendered width of one legend key at `font-size: 10px`.
+ *
+ * 5.7px/char sits above the measured per-char cost of every name in the
+ * vocabulary, which ranges from 3.4 (`failed`) to 5.5 (`MCP`). `KEY_PAD` covers
+ * the direction a flat per-char figure is weakest in: short all-caps names,
+ * where every glyph is a wide one and there are too few characters for the
+ * per-char margin to absorb the difference. Paying that as a constant is
+ * cheaper than inflating CHAR_PX, which would tax every long name for a problem
+ * only the short ones have.
+ *
+ * Zoom is a transform on the whole lattice, so the model is zoom-invariant.
+ */
+export function keyWidth(name) {
+  return DOT_W + DOT_GAP + KEY_PAD + String(name || '').length * CHAR_PX
+}
+
+/** The full legend key list: present buckets in stack order, then `failed`. */
+export function legendKeys(triggerOrder, buckets) {
+  const keys = presentBuckets(triggerOrder, buckets)
+  const failed = headline(buckets).failed
+  if (failed) keys.push({ name: 'failed', total: failed, token: null, fail: true })
+  return keys
+}
+
+function pack(keys, { width, rows, reserveChip }) {
+  const shown = []
+  let row = 0
+  let used = 0
+  let i = 0
+
+  while (i < keys.length) {
+    const key = keys[i]
+    const lastRow = row === rows - 1
+    // The chip shares the last row, so its width comes out of that budget only.
+    const budget = lastRow && reserveChip ? Math.max(0, width - KEY_GAP - CHIP_W) : width
+    const w = keyWidth(key.name)
+    const need = used ? used + KEY_GAP + w : w
+
+    // `used === 0` force-places a key wider than a whole row: CSS clips it, and
+    // a key that fits nowhere must never spin the packer.
+    if (need <= budget || used === 0) {
+      shown.push(key)
+      used = need
+      i += 1
+      continue
+    }
+    if (lastRow) return { shown, hidden: keys.slice(i) }
+    row += 1
+    used = 0
+  }
+  return { shown, hidden: [] }
+}
+
+/**
+ * Split the legend into what fits and what does not.
+ *
+ * Two passes on purpose: the chip only exists if something is hidden, so
+ * reserving room for it up front would truncate sets that fit without it.
+ */
+export function legendFit(keys, { width = LEGEND_WIDTH, rows = LEGEND_ROWS } = {}) {
+  const list = Array.isArray(keys) ? keys : []
+  const first = pack(list, { width, rows, reserveChip: false })
+  if (!first.hidden.length) return first
+  return pack(list, { width, rows, reserveChip: true })
 }

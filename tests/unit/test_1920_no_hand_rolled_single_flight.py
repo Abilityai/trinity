@@ -60,6 +60,14 @@ _ALLOWED = {
     "routers/git.py": "agent:bind_op / agent:bind_dest single-flight locks (ent#109) — pre-#1920, follow-up",
     "services/agent_mcp_key_service.py": "agent MCP-key regen lock (#1854) — pre-#1920, follow-up",
     "services/credential_requirements_service.py": "credential-requirements probe lock (ent#127) — pre-#1920, follow-up",
+    "services/db_backup_service.py": "db-backup duplicate-I/O lease (#2216, landed on dev while #1920 was open) — "
+    "already token + compare-and-delete, so NOT the #1919 bug class; consolidation only, tracked follow-up",
+    # --- genuine non-lock nx=True uses (continued) ---
+    "services/docker_service.py": "port_alloc:{port} SSH-port reservation (#2215) — an allocation over a keyspace of "
+    "many keys, not a mutex: no release, no token, TTL-expiry only, and it deliberately PROPAGATES Redis errors so the "
+    "caller decides. SingleFlightLock would be actively wrong here — its internal fail-open returns True on a Redis "
+    "error, which for a port reservation reads as 'reserved' and hands two agents the same SSH port, the exact "
+    "collision #2215 fixed",
     # --- genuine non-lock nx=True uses ---
     "adapters/transports/twilio_media_stream.py": "voip_saved:{call_id} single-fire transcript guard — a once-guard, not a mutex",
     "services/agent_service/ephemeral.py": "ephemeral:quota:{owner_id} counter seed — the discard LOCK now uses "

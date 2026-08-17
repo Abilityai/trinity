@@ -169,3 +169,36 @@ class TestConsentToggleIsHumanOnly:
             "the consent toggle lost its human-only guard — an agent could grant "
             "itself proactive-messaging consent"
         )
+
+    def test_toggle_rejects_agent_principal_at_runtime(self, monkeypatch):
+        """Runtime proof, not just source-grep (#1710): an agent-scoped principal
+        calling the toggle gets 403 + the human-only detail BEFORE the owner check
+        or any channel mutation. ``reject_agent_principal`` is the first statement,
+        so making every post-gate db call loud proves the ordering — and this is
+        what the AST wiring guard (a plain helper call) cannot see. The migration
+        onto ``assert_agent_owner`` must NOT drop this line: that helper is
+        agent-permissive, so without the standalone reject an agent could
+        self-grant proactive consent."""
+        import asyncio
+        from fastapi import HTTPException
+        from routers import slack as slack_router
+        from models import User, SlackChannelProactiveRequest
+
+        def _boom(*a, **k):
+            raise AssertionError("reached a db call past the human-only gate")
+
+        # The owner check and every mutation sit AFTER the reject — make them loud.
+        monkeypatch.setattr(slack_router.db, "can_user_share_agent", _boom, raising=False)
+        monkeypatch.setattr(slack_router.db, "get_slack_channels_for_agent", _boom, raising=False)
+        monkeypatch.setattr(slack_router.db, "set_slack_channel_allow_proactive", _boom, raising=False)
+
+        agent_key = User(id=1, username="owner", role="user", agent_name="analytics")
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(slack_router.set_slack_channel_proactive(
+                name="analytics", channel_id="C1",
+                request=SlackChannelProactiveRequest(allow_proactive=True),
+                current_user=agent_key))
+        assert ei.value.status_code == 403
+        assert ei.value.detail == (
+            "This operation is human-only; agent-scoped keys cannot perform it"
+        )

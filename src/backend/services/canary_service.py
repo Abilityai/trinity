@@ -67,6 +67,7 @@ from canary.snapshot import ViolationReport
 from database import db
 from redis_breaker_util import ScriptCache, get_breaker_redis
 from services.canary_alerts import AlertDelivery, CanaryAlerts
+from utils.helpers import parse_iso_timestamp
 
 
 @dataclass
@@ -483,6 +484,17 @@ class CanaryService:
     @staticmethod
     def _is_enabled() -> bool:
         return os.getenv("CANARY_ENABLED", "0") == "1"
+
+    @staticmethod
+    def is_enabled() -> bool:
+        """Public read of CANARY_ENABLED — the one source of truth for
+        "is the canary enabled", consumed by the feature-flags surface (#2217).
+
+        Wraps `_is_enabled()` so the live-getenv semantics (NOT an import-time
+        constant) are preserved: tests monkeypatch the env, and the surface
+        must follow it.
+        """
+        return CanaryService._is_enabled()
 
     # ------------------------------------------------------------------
     # Cross-worker leader lease (#1881)
@@ -1263,6 +1275,106 @@ class CanaryService:
             self._redis().set(REDIS_KEY_LAST_CYCLE, snapshot_time)
         except Exception:
             logger.exception("canary: failed to persist previous-cycle marker")
+
+    # ------------------------------------------------------------------
+    # Run-state observability (#2217)
+    # ------------------------------------------------------------------
+
+    def _read_last_cycle_for_status(self) -> "tuple[Optional[str], bool]":
+        """Read the shared `canary:last_cycle_at` cursor, distinguishing a
+        Redis ERROR from a MISSING value.
+
+        `_read_prev_cycle_at` deliberately collapses both to None (its consumer
+        wants "treat everything as a transition" on any failure). The status
+        surface needs them apart: a raised read is `redis_available=False`
+        (Redis down), a clean `None` is `redis_available=True` (just booted / no
+        cycle yet). Returns `(value, ok)`; `ok=False` ONLY on an exception.
+        """
+        try:
+            return self._redis().get(REDIS_KEY_LAST_CYCLE), True
+        except Exception:
+            logger.warning("canary: failed to read last-cycle cursor for status")
+            return None, False
+
+    def _stale_after_seconds(self) -> int:
+        """The staleness bound, derived from the file's OWN timing constants so
+        it cannot drift out of step with the timing it guards (#2217).
+
+        `_max_failover_seconds()` (~780s) covers a leader failover; a healthy
+        cycle can additionally run up to `_MAX_CYCLE_LEASE_SECONDS` (900s) before
+        it is deemed wedged, and because the cursor carries the collection-START
+        instant, a healthy leader's observed cursor age reaches
+        `interval + cycle_duration` (up to 1200s). Their sum is provably above
+        BOTH windows; `_max_failover + interval` (1080s) would false-`stale` a
+        legitimately-slow-but-healthy cycle.
+        """
+        return self._max_failover_seconds() + _MAX_CYCLE_LEASE_SECONDS
+
+    def get_run_status(self) -> dict:
+        """Run-state of the harness for `GET /api/canary/status` (#2217).
+
+        Answers three facts a disabled/stale canary otherwise hides behind a
+        zero-violation cycle: is it enabled, when did the last cycle collect, and
+        can it push an alert. Reads the SHARED Redis cursor — never the
+        per-worker counters, since with #1881's leader lease only one worker
+        cycles and a non-leader would answer with stale/zero in-process state.
+
+        Fail-open by construction: a disabled install is `disabled` (Redis is
+        NEVER read), and any read/parse failure is `unknown` — never `stale`.
+        Default-OFF must not read as an alarm.
+        """
+        enabled = self._is_enabled()
+        interval = int(self.interval)
+        stale_after = self._stale_after_seconds()
+        # Read on EVERY path (incl. disabled) — an operator wiring up a canary
+        # wants the sink state before flipping it on.
+        alert_sink_configured = self._alert_sink_configured()
+
+        if not enabled:
+            return {
+                "enabled": False,
+                "status": "disabled",
+                "last_cycle_at": None,
+                "seconds_since_last_cycle": None,
+                "interval_seconds": interval,
+                "stale_after_seconds": stale_after,
+                "alert_sink_configured": alert_sink_configured,
+                "redis_available": None,
+            }
+
+        last_cycle_at, redis_ok = self._read_last_cycle_for_status()
+
+        status = "unknown"
+        seconds_since: Optional[int] = None
+        if last_cycle_at is not None:
+            try:
+                parsed = parse_iso_timestamp(last_cycle_at)
+                age = (datetime.now(timezone.utc) - parsed).total_seconds()
+                # Clamp: cross-worker clock skew can make the cursor momentarily
+                # future-dated, and a negative "seconds since" is nonsense.
+                seconds_since = max(0, int(age))
+                status = "stale" if age > stale_after else "healthy"
+            except Exception:
+                # Unparseable / tz-mismatched cursor — fail-open to unknown,
+                # never raise, never alarm. Drop the garbage value.
+                logger.warning(
+                    "canary: unparseable last-cycle cursor %r for status",
+                    last_cycle_at,
+                )
+                last_cycle_at = None
+                seconds_since = None
+                status = "unknown"
+
+        return {
+            "enabled": True,
+            "status": status,
+            "last_cycle_at": last_cycle_at,
+            "seconds_since_last_cycle": seconds_since,
+            "interval_seconds": interval,
+            "stale_after_seconds": stale_after,
+            "alert_sink_configured": alert_sink_configured,
+            "redis_available": redis_ok,
+        }
 
     def _read_prev_cycle_red(self) -> Optional[set]:
         """Invariant ids that were red last cycle, or None if unknown.

@@ -556,9 +556,9 @@ OPS_SETTINGS_VALIDATION = {
     "ops_log_retention_days": ("int", 0, _DAYS_MAX),
     "ops_health_check_interval": ("int", 1, 86400),
     "ssh_access_enabled": ("bool", None, None),
-    # The eight retention windows (RETENTION_OPS_KEYS). `0` is a documented,
-    # meaningful value on every one — "disable this sweep" — so the lower bound
-    # is 0 and NOT the community floor. Clamping to the floor here would be
+    # The row-retention windows (RETENTION_OPS_KEYS, minus #2216's backup key
+    # below). `0` is a documented, meaningful value on every one of THESE —
+    # "disable this sweep" — so the lower bound is 0 and NOT the community floor. Clamping to the floor here would be
     # wrong twice over: it would silently rewrite an operator's explicit choice,
     # and the floor is a fresh-install SEED plus an enterprise entitlement
     # clamp, deliberately NOT an OSS hard limit (#1039/#1638).
@@ -570,6 +570,13 @@ OPS_SETTINGS_VALIDATION = {
     "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
     "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
     "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
+    # #2216: the backup window's fail-safe direction is INVERTED vs the rows
+    # above — for backups "never prune" fills the disk (#1871 class), so `0`
+    # ("disable the sweep" everywhere else = keep-forever here) is REJECTED.
+    # Disabling backups is the separate, explicit DB_BACKUP_ENABLED=false.
+    # The lower bound 1 plus the fixed BACKUP_MIN_KEEP=3 floor in
+    # db/backup_primitives.py carry the "small valid integer" (#1644) safety.
+    "backup_retention_days": ("int", 1, _DAYS_MAX),
 }
 
 

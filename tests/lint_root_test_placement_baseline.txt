@@ -1,0 +1,25 @@
+# Auto-generated baseline for tests/lint_root_test_placement.py (#1895).
+# Root test files grandfathered at adoption — they take no live *fixture*
+# parameter, so part 1 flags them, but they stay in tests/ root because:
+#   - they hit a live stack over raw httpx/ws (test_public_*, slack), or
+#   - they import a dependency the unit venv omits (trinity_cli), or
+#   - they are currently red-and-hidden: broken vs a product change while
+#     uncollected, so moving them would redden the per-PR gate. Fixing the
+#     drift and relocating each is a separate follow-up (see the batch
+#     commit messages: cb_probe #1804, github_pat AgentGitConfig,
+#     ip_rate_limit assert_owns #1310, audit_log_unit).
+# Ratcheted — never grow this list; a NEW self-contained root test must go
+# to tests/unit/ instead. Regenerate (only when intentionally accepting
+# more): python tests/lint_root_test_placement.py --regenerate-baseline
+
+tests/test_audit_log_unit.py
+tests/test_cb_probe_execution_close.py
+tests/test_cli_admin_login.py
+tests/test_cli_profiles.py
+tests/test_github_pat_propagation_unit.py
+tests/test_ip_rate_limit_fix.py
+tests/test_public_chat_history.py
+tests/test_public_links.py
+tests/test_public_user_memory.py
+tests/test_reset_preserve_state_integration.py
+tests/test_slack_integration.py

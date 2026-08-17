@@ -50,6 +50,16 @@ class PortalAgentCard(BaseModel):
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
+    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate:
+    # an ElevenLabs key resolves. Deliberately a SEPARATE bit from
+    # `voice_available`: output additionally needs an effective voice to speak
+    # WITH, input does not, so collapsing the two would either hide a working mic
+    # or render a dead one. Fails CLOSED for the same reason `voice_available`
+    # does — the bug it guards against is promising an affordance that cannot
+    # work. The client uses it to prefer the server path (recorded audio → /stt,
+    # which answers with real statuses and real messages) over the browser Web
+    # Speech API, and to drop the mic entirely when neither path can work.
+    stt_available: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
@@ -395,6 +405,15 @@ class PortalHistory(BaseModel):
     # that reloaded mid-turn subscribes to this id to reattach to the live
     # stream instead of showing a thread that looks finished.
     in_flight_execution_id: Optional[str] = None
+    # #2214: how long the reattaching client may honestly keep waiting for that
+    # turn — the in-flight marker's REMAINING TTL in seconds, measured at this
+    # read (the budget was fixed at dispatch, so a fresh full budget here would
+    # over-wait by the turn's elapsed time). None when nothing is in flight or
+    # the TTL is unreadable; the client then falls back. Optional and additive —
+    # declared here because the route's `response_model` strips undeclared
+    # fields, so without this line the budget would silently never leave the
+    # server.
+    in_flight_wait_budget_seconds: Optional[int] = None
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

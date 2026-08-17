@@ -259,6 +259,107 @@
   - `docker/base-image/agent_server/services/headless_executor.py` — `_try_recover_completed_turn`, `_RECOVERY_NOTICE`, the `execution_error` branch
   - `docker/base-image/agent_server/models.py` — `ExecutionMetadata.recovered_terminal`
 
+### 10.4.4 Telemetry + Transcript on a Failing `error_during_execution` / 504 Row (#1853)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #1853
+- **Description**: An execution that ends `error_during_execution` (Claude Code
+  reports `is_error` with a non-terminal last message — commonly a fan-out whose
+  `<task-notification>` lands after `stop_reason=end_turn` and interrupts the
+  follow-on turn) was written to `schedule_executions` with **status + error
+  string only**: no `claude_session_id`, no `cost`, no `execution_log`. Measured
+  on an ops instance: 26 `success` rows all carried log + session_id + cost; 6
+  `failed` rows carried none — the whole failure class was **undiagnosable after
+  the fact**. This is the observability substrate for the Aug-14 "system agent
+  identifies errors and proposes solutions" initiative (reliability lane; TOWARD
+  the #1401 recovery-trace target). Two siblings shipped adjacent and did **not**
+  touch this: #1944 (#1870) recovers only the *misclassified-completed* subclass
+  to SUCCESS; #1938 (#1849) fixed only the error *string*.
+- **Root cause (two structural gaps)**:
+  1. **Agent**: the `execution_error` 502 raise carried a bare `detail="Execution
+     error: <msg>"` — unlike the sibling 504 timeout path (`_timeout_504_detail`,
+     #1201) which carries `{message, termination_reason, metadata}`.
+     `ctx.metadata` (session_id, cost_usd, duration_ms, tokens, context_window)
+     and `ctx.raw_messages` (the full stream-json transcript) were in scope at the
+     raise but discarded.
+  2. **Backend**: `apply_result`'s FAILED branch never passed `execution_log` /
+     `claude_session_id` (the SUCCESS branch passes both, sanitized).
+     `cost` / `context` already salvaged from the body — null only because the
+     body was bare.
+- **Chosen approach — B (inline the sanitized transcript)**: the FAILED branch
+  **mirrors the SUCCESS branch** — it stores `execution_log =
+  sanitize_execution_log(json.dumps(raw_messages))`, a derived `tool_calls`
+  summary (#1741 — a summary, never a second transcript copy), `claude_session_id`
+  (UUID-validated agent-side), and the already-salvaged cost/context. The
+  transcript lives in the DB row, retrievable via the **same API as SUCCESS**,
+  surviving agent stop **and** delete, inheriting the 30-day
+  `execution_log_retention_days` window (#772). Chosen over a JSONL-survival-only
+  approach because SUCCESS already inlines the full sanitized transcript (avg 573
+  KB) on **every** run — failures are far rarer, so inlining on failure is
+  *strictly cheaper* than the hot path already pays — and it needs **no** reaper
+  keep-window, no new query, no reap race, and no retrieval endpoint. It also
+  captures **short-timeout runs** (`timeout ≤ 600s`, no JSONL persisted): the
+  transcript comes from in-memory `ctx.raw_messages`, not the on-disk JSONL, so it
+  is not gated on #678 persistence.
+- **Key Features**:
+  - **Agent — `_execution_error_502_detail(ctx, message)`** (beside
+    `_timeout_504_detail`): returns `{message, metadata, execution_log}` where
+    `metadata = sanitize_dict(ctx.metadata.model_dump())` with `session_id`
+    resolved as `metadata.session_id or ctx.claude_session_uuid` **and
+    UUID-shape-validated** via `_valid_session_id`, and `execution_log =
+    ctx.raw_messages`. The error `message` text is **byte-identical** to before
+    (preserves #1938's error-string fix and the backend's resume-not-found
+    self-heal, which reads `detail["message"]`).
+  - **Agent — `_valid_session_id(x)`**: persists the fallback session id only when
+    it matches the strict JSONL-filename UUID shape (mirrors the reaper's
+    `_UUID_RE`), else `None`. The fallback source `ctx.claude_session_uuid` can be
+    an untrusted `resume_session_id` (a log-forging vector — `sanitize_dict` does
+    not strip newlines), so the validation is a security gate, not cosmetics.
+  - **Agent — `_timeout_504_detail` gains the same** validated `session_id`
+    fallback + `execution_log = ctx.raw_messages`, so the 504 timeout path now
+    persists session_id + transcript **for real** (previously session_id was null
+    whenever the reader wedged, and it carried no transcript). Both 502 and 504
+    route through the same backend FAILED branch, so one backend change covers
+    both.
+  - **Backend — `_extract_agent_error` returns `(error_msg, metadata,
+    execution_log)`**; the `except httpx.HTTPError` handler threads the extracted
+    transcript + validated `session_id` onto the **existing**
+    `TerminalEnvelope.execution_log` / `.session_id` fields (previously unset on
+    failure).
+  - **Backend — FAILED branch of `apply_result` mirrors the SUCCESS branch**:
+    reuses the identical `sanitize_execution_log` + `extract_tool_calls`
+    (defense-in-depth redaction happens at the backend applier, exactly as
+    SUCCESS), and passes `execution_log` / `tool_calls` / `claude_session_id` into
+    the **existing** `db.update_execution_status` call. No schema change
+    (`execution_log` / `claude_session_id` / `cost` / `tool_calls` already exist
+    and `update_execution_status` already accepts all of them). `duration_ms` is
+    already computed inside `update_execution_status`.
+- **Invariants respected**: **single terminal applier (#1483)** — only the payload
+  of the *existing* FAILED branch is widened; **no** new CAS-writing path and
+  `_write_terminal_and_gate` is untouched. **CAS-won close/emit contracts
+  (#1578/#1804)** — every side-effect stays gated on the existing `won` bool; the
+  new columns are added to the SET clause *above* the `if won and activity_id:`
+  gate and **no predicate is widened**.
+- **⚠️ Named residuals (the Aug-14 initiative must NOT assume every FAILED row
+  carries telemetry)**: `_write_terminal_and_gate` terminals (backend-detected
+  timeout / budget / crash) still land bare — they carry no agent metadata, and
+  are out of the single-applier scope. The standalone-scheduler RETRY-001 FAILED
+  writes (`src/scheduler/`) are also outside this applier. Both are follow-ups.
+- **Graceful degrade / mixed-fleet**: `_extract_agent_error` already handles a
+  bare-string `detail` (old image) — new-backend + old-image sends a bare string
+  → `execution_log` / `session_id` stay null (= today's behaviour). Safe both
+  directions.
+- **Rollout**: the agent half is inside `trinity-agent-base`. A running fleet
+  keeps writing bare FAILED rows until `./scripts/deploy/build-base-image.sh` runs
+  **and each agent is cold-recreated** (a plain restart does not always adopt,
+  #1809). The backend half is live on backend deploy.
+- **Files**:
+  - `docker/base-image/agent_server/services/headless_executor.py` —
+    `_execution_error_502_detail`, `_valid_session_id`, the `execution_error`
+    branch, `_timeout_504_detail`, and the corrected auto-persist comment (real
+    behaviour is a 6h sweep / 1h age-guard = 1–7h effective, not "24h")
+  - `src/backend/services/task_execution_service.py` — `_extract_agent_error`
+    (3-tuple), the `except httpx.HTTPError` handler, `apply_result` FAILED branch
+
 ### 10.5 Model Selection for Tasks & Schedules (MODEL-001)
 - **Status**: ✅ Implemented (2026-03-02)
 - **Description**: Select which Claude model to use for task execution and scheduled runs
@@ -738,6 +839,54 @@ schedules:
 - **Flow**: `docs/memory/feature-flows/template-processing.md`,
   `docs/memory/feature-flows/scheduling.md`,
   `docs/memory/feature-flows/agent-compatibility-validation.md`
+
+### 10.17 Client-Side Cron Validation (#925)
+- **Status**: ✅ Implemented (2026-08-13)
+- **GitHub Issue**: #925
+- **Description**: The schedule form validated cron expressions only at save time — the backend's
+  400 was the first feedback — and a stored-invalid row (legacy croniter-era data, or rows created
+  before a validator tightening) sat in the list indistinguishable from a healthy one. The frontend
+  now pre-validates as the user types (design-system p17) and marks invalid stored rows.
+- **Requirement — mirror contract, not a second grammar**: the client validator
+  (`src/frontend/src/utils/cronValidation.js`, pure leaf, **zero npm deps**) is a hand-rolled
+  mirror of the backend's exact acceptance grammar —
+  `services/schedule_validation.py::validate_cron_expression` = strict 5-field split +
+  `_dow_to_apscheduler` translation (ported verbatim, branch order included) + APScheduler 3.11
+  field rules (`AllExpression`/`RangeExpression`/name-range prefix expressions, step-span rule,
+  Python-truthiness `last or MAX` fallback — deliberately `||` not `??` in JS). Cron libs
+  (`cron-parser`, `cronstrue`) were rejected: they implement a foreign grammar with ≥8 proven
+  verdict disagreements (`@daily`, 6-field, dow `0-6`, `last`, `7/2`, `L`/`#`, step-span,
+  `5/2`). This is the learnings.md #1472 lesson ("validate with the parser that registers")
+  applied one level up: the client validates with a pinned mirror of that parser.
+- **Drift alarm — shared fixture asserted by both suites**: the grammar contract is
+  `tests/fixtures/cron-grammar-cases.json` (~110 rows, **generated from a probe against the live
+  backend validator, never hand-typed**). `tests/unit/test_925_cron_grammar_fixture.py` re-proves
+  every row against `validate_cron_expression` in the backend CI env (an APScheduler bump that
+  changes the grammar fails there loudly); `src/frontend/tests/unit/cronValidation.spec.js`
+  asserts the client mirror agrees row-for-row. Quirk rows (prefix-matched names `MON/999` /
+  `jan/0` / `lastx`, comma-translation asymmetry `0-6,1` vs `0-6`, falsy-zero `0-0/2`) are
+  pinned and must NOT be "fixed" — parity outranks tidiness.
+- **Fail-open posture**: the validator is total (`String(expr ?? '')`) and a top-level catch
+  returns `{valid: true}` + `console.error` — an internal port bug must not brick the panel or
+  block saves. The backend 400 remains the enforcement authority; client validation is UX only.
+- **Form gating**: inline error in a reserved-footprint slot (the format-hint line doubles as the
+  error slot — no modal jump, p4/p6); submit disabled **only when non-empty AND invalid** — an
+  empty cron keeps the native `required` bubble path; while **editing**, an invalid (incl.
+  empty/whitespace) stored cron shows its error unconditionally so the disabled Update button is
+  never unexplained; while creating, errors appear only after first blur (no mid-typing flash).
+- **List surface**: each stored row with an invalid `cron_expression` renders a warning triangle
+  inside its cron chip, tooltip + aria-label exactly `Invalid cron expression` (shape + hue,
+  p24). Presets are sourced from the exported `CRON_PRESETS` so "presets never warn" is tested
+  against the shipped list.
+- **Documented divergence (client-stricter only)**: the client accepts ASCII digits only where
+  Python's `int()`/`\d` also accept Unicode digits / `+` signs / underscores — rejecting e.g.
+  `٥ * * * *` that the server accepts. Direction is client-stricter on absurd input; the
+  damaging direction (client-invalid/server-valid false warnings on real input) is guarded by
+  the quirk rows. The fixture marks such rows `divergence: "client-stricter"`.
+- **Out of scope**: no backend runtime change (400 contract byte-preserved); no server-side
+  migration/repair of stored invalid rows; no client timezone validation (the form select is a
+  fixed known-good list; cron field validity is timezone-independent).
+- **Flow**: `docs/memory/feature-flows/scheduling.md` (§ Client-side cron validation)
 
 ---
 

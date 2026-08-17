@@ -454,7 +454,7 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
    - **Backend (user-facing) — content layer** (#598, Layer 2 of AISEC-C2 closure) — `.mcp.json` content is structure-validated by `services.mcp_validator.validate_mcp_config` before forwarding to the agent. Validates:
      - Server names: `^[a-zA-Z0-9_-]{1,64}$`, `trinity` reserved (auto-injected entry — can't be clobbered)
      - Stdio transport: `command` ∈ allowlist `{npx, uvx, python, python3, node, bun, deno, docker}`, no path separators, ASCII-only; args without shell metacharacters; no inline-exec flags (`-c`/`--eval`/`-p`/`eval`) as first positional
-     - http/sse transport: HTTPS only, no userinfo, hostname must NOT resolve to private/loopback/link-local (SSRF guard mirroring #179); header names from a small allowlist
+     - http/sse transport: HTTPS only, no userinfo, hostname must NOT resolve to private/loopback/link-local/CGNAT (RFC 6598, plain + IPv4-mapped — trinity-enterprise#394) (SSRF guard mirroring #179); header names from a small allowlist
      - env values: `${VAR}` references with valid POSIX-shape names, NOT in `RESERVED_ENV_REFS` (PATH, LD_PRELOAD, PYTHONPATH, TRINITY_MCP_API_KEY, etc.); literal substrings checked for shell metachars and credential patterns from `guardrails-baseline.json`
      - Closed schema: only `command/args/env/url/headers/type` keys allowed; only `mcpServers` at the root
      - Bounded: 64KB content cap, 32 servers max, 64 args max, 4096-char env values

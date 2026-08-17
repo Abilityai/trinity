@@ -19,8 +19,11 @@ allow/filter branches (no raise), capability flags, and WebSocket ``close(4003)`
 dict handlers (they never ``raise HTTPException``).
 
 Escape hatches: a per-``(file, function)`` allowlist for the intentional
-consolidated-404 designs, and a line-level ``# noqa: inv8`` marker for the
-deferred ``slack.py`` sites — so NEW inline auth added to slack.py still trips.
+consolidated-404 designs, and a general line-level ``# noqa: inv8`` marker for a
+future, individually-reviewed exception. The ``slack.py`` sites that once used
+the marker were migrated onto the shared helpers (#1710), so no ``# noqa: inv8``
+marker remains in the tree — a re-introduced inline gate now trips unless it
+carries a freshly-added, reviewable marker.
 """
 
 from __future__ import annotations
@@ -158,8 +161,8 @@ def find_violations(source: str, filename: str) -> list[tuple[str, int, str]]:
 # --------------------------------------------------------------------------- #
 def test_no_inline_auth_gates_in_routers():
     """No router carries an inline agent/admin gate that a shared helper should
-    own — except the allowlisted intentional-404 designs and `# noqa: inv8`
-    lines (the deferred slack.py sites)."""
+    own — except the allowlisted intentional-404 designs and any individually
+    reviewed `# noqa: inv8`-marked line (none remain in-tree after #1710)."""
     offenders: dict[str, list[tuple[str, int, str]]] = {}
     for path in sorted(_ROUTERS.glob("*.py")):
         v = find_violations(path.read_text(), path.name)

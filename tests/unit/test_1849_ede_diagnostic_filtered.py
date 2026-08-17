@@ -157,15 +157,24 @@ def _make_ctx(*, error_message: str, error_type: str = "execution_error") -> Hea
 
 
 def _detail_for(errors) -> str:
-    """Full cross-surface drive: parser → _finalize_headless_result → 502 detail."""
+    """Full cross-surface drive: parser → _finalize_headless_result → the 502
+    body's ``message``.
+
+    #1853 changed the ``error_during_execution`` 502 body from a plain string to
+    a STRUCTURED body (message + metadata + execution_log). The resume marker the
+    backend's self-heal substring-matches now lives in ``detail["message"]``,
+    carried verbatim (#1938) — the same field ``_extract_agent_error`` derives
+    ``result.error`` from before it reaches ``_is_resume_not_found``. So this
+    helper returns that message, mirroring the real consumer.
+    """
     metadata = _execution_error(errors)
     ctx = _make_ctx(error_type=metadata.error_type, error_message=metadata.error_message)
     with pytest.raises(HTTPException) as exc_info:
         _finalize_headless_result(ctx)
     assert exc_info.value.status_code == 502
     detail = exc_info.value.detail
-    assert isinstance(detail, str), "execution_error detail is a plain string"
-    return detail
+    assert isinstance(detail, dict), "execution_error detail is a structured body (#1853)"
+    return detail["message"]
 
 
 _SESSIONS_CACHE: dict = {}

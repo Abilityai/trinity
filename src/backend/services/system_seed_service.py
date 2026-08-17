@@ -57,6 +57,7 @@ from models import User
 from services.docker_service import docker_client
 from services.cornelius_agent_service import cornelius_agent_service
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,27 @@ _FRESH_VERDICT_KEY = "first_run_fresh"
 # a slow multi-agent deploy + starts, longer than Cornelius's single create.
 _PROVISION_LOCK_KEY = "system_seed:provision"
 _PROVISION_LOCK_TTL = 600  # seconds
+
+# #2215 D3: pass-level lock over the WHOLE first-run seed pass (both seeders).
+# The two inner locks (`cornelius:provision` above / `system_seed:provision`)
+# serialise each seeder only against ITSELF across workers — the observed race
+# is worker A winning the Cornelius lock (slow anonymous github clone) while
+# worker B loses it, falls through, wins the system-seed lock, and deploys the
+# fleet concurrently. Ports are not the only cross-seeder hazard (SQLite BUSY
+# under concurrent boot writes, the observed 60s Docker read timeout), and any
+# transient during the burst produces a permanently-latched `partial` — so the
+# loser skips the ENTIRE pass without touching any flag (both seeders already
+# treat a skipped pass as retry-later), and the winner runs both seeders
+# sequentially. Unlike the inner locks (kept unchanged as belts) this one
+# carries #1919 token hygiene: unique token value + compare-and-delete release
+# — a blind DELETE after a TTL lapse would release a sibling's live lease.
+# Fail-open on Redis down/error (never blocks boot — the #1638/G4 contract);
+# TTL 900s covers the Cornelius clone + the multi-agent deploy (inner TTLs are
+# 300/600). Keyspace: deliberately NOT `agent:*` — the #1560 registry governs
+# agent-NAME-keyed state; this key is global and self-expiring, with no
+# lifecycle event that should clear it.
+_PASS_LOCK_KEY = "first_run_seed:provision"
+_PASS_LOCK_TTL = 900  # seconds
 
 # Manifest resolution. The bundled path is relative to the backend CWD (/app
 # in-container): baked into the image by the Dockerfile COPY AND bind-mounted
@@ -110,25 +132,99 @@ def _resolve_first_run_verdict() -> Optional[bool]:
         return None
 
 
+def _acquire_pass_lock():
+    """Take the #2215 pass lock via the shared ownership-checked primitive
+    (#1920). Returns a held ``SingleFlightLock`` when this pass may run, or
+    ``None`` when another worker holds it.
+
+    Fail-open: no Redis / a Redis error means proceed as sole worker — seeding
+    never blocks boot (G4/#1638), and the inner locks + existence backstop
+    remain the degraded-mode belts. Same token + compare-and-delete release
+    #2215 hand-rolled, now via the one primitive, so the two locks in this
+    module cannot drift apart. The lock is LOCAL to the pass (never module
+    state), so its release can only ever delete its own token."""
+    lock = SingleFlightLock(
+        _PASS_LOCK_KEY, _PASS_LOCK_TTL, client=get_breaker_redis()
+    )
+    return lock if lock.acquire() else None
+
+
+def _notify_cornelius_failure(message) -> None:
+    """#2215 AC#3: a failed Cornelius creation was log-only — the partial/failed
+    system-seed alerts cover only the manifest deploy. Deterministic id under
+    the reserved `system-seed-` prefix (#1632: an agent can't pre-create-and-
+    silence it). Dedup semantics: `create_item` is ON CONFLICT DO NOTHING, so
+    while any prior row exists — even resolved — later distinct failures are
+    swallowed until the retention delete; correct for an ALARM (#1644: the
+    queue item is never load-bearing — the unset seed flag's next-boot retry
+    is the actual recovery mechanism). Context carries the seeder's message +
+    a logs pointer, identifiers only (crud flattens the underlying cause to a
+    generic 500 string, so the alert names THAT seeding failed and where to
+    look for WHY). The message is credential-sanitized and URL-userinfo-
+    redacted at THIS exit point — the same rule `system_service._failure_reason`
+    applies to the deploy report: the seeder's `create_failed` text is
+    `str(exc)` from a `github:` create that resolves the platform PAT when one
+    is configured, and git/GitHub errors can embed PAT-bearing remote URLs
+    (learnings 2026-07-14); the operator queue is a durable, UI-rendered
+    surface. Best-effort: `_notify_operator` swallows internally, never
+    raises."""
+    safe_message = sanitize_text(redact_url_userinfo(str(message or "")))[:500]
+    SystemSeedService._notify_operator(
+        "cornelius-failed",
+        "Cornelius seed failed",
+        "The default Cornelius agent could not be created during first-run "
+        "seeding. See the backend logs for the underlying create error. The "
+        "seed flag is left unset, so the next boot retries automatically.",
+        {"agent": "cornelius", "message": safe_message},
+    )
+
+
 async def ensure_first_run_seeded() -> dict:
     """Single first-run seeding pass — the entry point both call sites use
     (setup-completion background task in `routers/setup.py`; lifespan
     safety-net in `main.py`).
 
+    #2215 D3: the whole pass runs under ONE cross-worker lock
+    (`first_run_seed:provision`), so the two seeders can never run concurrently
+    ACROSS workers — the loser skips the ENTIRE pass (not just one seeder,
+    which is how the observed port race arose) without touching any flag, and
+    retries on the next trigger (setup completion / next boot). A deferred
+    pass (pre-setup, no admin yet) writes no flags and releases promptly in
+    the `finally`, so the setup-completion trigger is not starved.
+
     Resolves the persisted freshness verdict FIRST, then runs the Cornelius
     seeder and the default-system seeder under that one decision. Never raises.
     """
-    fresh = _resolve_first_run_verdict()
+    pass_lock = _acquire_pass_lock()
+    if pass_lock is None:
+        logger.info(
+            "First-run seed: another worker holds the pass lock — skipping this pass"
+        )
+        return {"system": None, "action": "skipped_locked", "status": "skipped",
+                "message": "Another worker is running the first-run seed pass"}
     try:
-        await cornelius_agent_service.ensure_seeded(fresh=fresh)
-    except Exception as e:  # belt: the service already never-raises
-        logger.error("Cornelius seed pass failed unexpectedly: %s", e)
-    try:
-        return await system_seed_service.ensure_seeded(fresh=fresh)
-    except Exception as e:  # belt: keeps the entry point's never-raises contract
-        logger.error("Default-system seed pass failed unexpectedly: %s", e)
-        return {"system": None, "action": "create_failed", "status": "error",
-                "message": f"seed pass failed: {e}"}
+        fresh = _resolve_first_run_verdict()
+        cornelius_result = None
+        try:
+            cornelius_result = await cornelius_agent_service.ensure_seeded(fresh=fresh)
+        except Exception as e:  # belt: the service already never-raises
+            logger.error("Cornelius seed pass failed unexpectedly: %s", e)
+            # #2215 AC#3 belt: a raise despite never-raises would bypass the
+            # action check below.
+            _notify_cornelius_failure(f"Cornelius seed pass raised: {e}")
+        if isinstance(cornelius_result, dict) and cornelius_result.get("action") in (
+            "create_failed",
+            "create_blocked",
+        ):
+            _notify_cornelius_failure(cornelius_result.get("message"))
+        try:
+            return await system_seed_service.ensure_seeded(fresh=fresh)
+        except Exception as e:  # belt: keeps the entry point's never-raises contract
+            logger.error("Default-system seed pass failed unexpectedly: %s", e)
+            return {"system": None, "action": "create_failed", "status": "error",
+                    "message": f"seed pass failed: {e}"}
+    finally:
+        pass_lock.release_if_owned()
 
 
 class SystemSeedService:

@@ -144,6 +144,7 @@ from services.log_archive_service import log_archive_service
 # Import audit retention service (#552)
 from services.audit_retention_service import audit_retention_service
 from services.db_vacuum_service import db_vacuum_service
+from services.db_backup_service import db_backup_service  # #2216
 
 # Import operator queue sync service
 from services.operator_queue_service import operator_queue_service, set_websocket_manager as set_opqueue_sync_ws_manager
@@ -467,6 +468,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error starting DB vacuum service: {e}")
 
+    # Initialize DB backup service (#2216) — daily 03:30 UTC, both backends
+    try:
+        db_backup_service.start()
+        logger.info("DB backup service started")
+    except Exception as e:
+        logger.error(f"Error starting DB backup service: {e}")
+
     # PERF-269: Stagger background services to reduce SQLite write contention
     # Start operator queue sync service (OPS-001) — polls every 5s
     try:
@@ -768,6 +776,13 @@ async def lifespan(app: FastAPI):
         logger.info("DB vacuum service stopped")
     except Exception as e:
         logger.error(f"Error stopping DB vacuum service: {e}")
+
+    # Shutdown DB backup service (#2216)
+    try:
+        db_backup_service.stop()
+        logger.info("DB backup service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping DB backup service: {e}")
 
     # Shutdown cleanup service
     try:
