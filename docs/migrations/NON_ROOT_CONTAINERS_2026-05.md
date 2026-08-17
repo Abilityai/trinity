@@ -34,6 +34,26 @@ predate this change:
   Docker named volume `trinity-data` in dev. Contains `trinity.db` + WAL.
 - `/agent-configs` — Docker named volume `agent-configs`. Contains uploaded
   agent templates.
+- `/data/logs` — Docker named volume `trinity-logs`, shared with Vector. Owned
+  by the `logs-init` one-shot (#1478).
+- `/data/archives` — Docker named volume `trinity-archives` in dev; **inside the
+  `/data` bind mount in prod**. Compressed log archives. Owned by the
+  `archives-init` one-shot in dev (#2205).
+
+**Nested mounts do not inherit the image's `chown`, and that is the trap.** The
+Dockerfile creates and chowns `/data`, so a volume mounted *at* `/data` inherits
+UID 1000 on first creation. `trinity-logs` and `trinity-archives` mount at paths
+*below* it that the image never creates — there is nothing for Docker to copy
+ownership from, so they are created root-owned and need an explicit one-shot.
+`trinity-archives` shipped without one: `archive_storage` called
+`mkdir(parents=True, exist_ok=True)`, which no-ops on an existing root-owned
+directory, so nothing failed until the first write. Every archival run then died
+with `Permission denied`, archived originals were never unlinked, and `/data/logs`
+grew unbounded — 8.5 GB on the instance where it was found, one file at 4.6 GB,
+with the error written into the very logs that were not being pruned (#2205).
+
+`tests/unit/test_2205_volume_ownership.py` now fails if a named volume is mounted
+into a UID-1000 service without one of these stories.
 
 Docker only applies the image's `chown` to a named volume on first creation.
 A volume that already exists from a previous root-running container keeps
