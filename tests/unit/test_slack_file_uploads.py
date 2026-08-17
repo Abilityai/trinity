@@ -13,6 +13,8 @@ import os
 import re
 import sys
 import types
+
+import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -48,9 +50,43 @@ def _install_stubs():
     sys.modules.setdefault("services.docker_utils", _du)
 
 
+# These stubs are installed at IMPORT time — they have to be in place before the
+# `from services.upload_service import ...` below, which `monkeypatch` cannot
+# reach because no fixture has run yet. So the snapshot is taken here, before
+# the install, and unwound by the module-scoped fixture underneath: nothing this
+# file stubs leaks into other files in the same pytest session
+# (tests/lint_sys_modules.py, issue #762).
+_STUBBED_MODULE_NAMES = [
+    "services.platform_audit_service",
+    "services.docker_utils",
+]
+
+_MODULES_BEFORE_STUBS = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+
 _install_stubs()
 
 from services.upload_service import UNSUPPORTED_MIMES  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_sys_modules():
+    """Put sys.modules back the way this file found it, once its tests finish.
+
+    Module-scoped and paired with a module-level snapshot on purpose: the stubs
+    go in during import, so a function-scoped fixture would snapshot the
+    already-stubbed state and restore nothing. A name absent before the install
+    is removed again; one that was already present is restored to that exact
+    object, so running after `test_web_file_upload.py` is a no-op rather than a
+    clobber.
+    """
+    try:
+        yield
+    finally:
+        for name, module in _MODULES_BEFORE_STUBS.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 # ---------------------------------------------------------------------------
