@@ -20,14 +20,17 @@ chokepoints:
   * ``scrub_obj`` walks dict/list string leaves, leaves non-strings alone, and
     returns a NEW structure (input never mutated).
 
-Deliberately DEFERRED to the chokepoint-wiring change (the 8 sites are not wired
-on this branch yet, so these would test nothing that exists):
-  * the terminal-applier / idempotency-snapshot chokepoint scrubs;
-  * ``tests/unit/test_ent279_scrub_parity.py`` — the drift guard that anchors on
-    every function persisting agent text (its allowlist only makes sense once the
-    wired set exists);
-  * cross-worker propagation through a real sibling Redis (the store-is-global
-    property is proven here single-client; two-client propagation needs :6390).
+Now WIRED (added below in this same chokepoint-wiring change):
+  * the terminal-applier / idempotency-snapshot chokepoint scrubs — every wired
+    site, driven with mocked db + activity/capacity and the REAL scrub functions
+    (incl. the escaping-evasion test and the transitive routers/sessions.py check);
+  * cross-worker propagation through a real sibling Redis :6390 (the
+    store-is-global property, which the single-client tests above cannot show;
+    skips when :6390 is absent).
+
+The DRIFT GUARD lives in its OWN file — ``tests/unit/test_ent279_scrub_parity.py``
+— because it is a pure-AST scan with no heavy imports, and its allowlist is only
+meaningful against the now-wired set.
 
 Loaded standalone via importlib against a fake Redis + fake reversible enc
 service, mirroring tests/unit/test_1085_correlated_pause.py — real AES is
@@ -320,3 +323,607 @@ def test_clear_staged_wipes_both_keys(scrub):
     m.clear_staged()
     assert fake.hlen(m._STAGED_HASH) == 0
     assert fake.zcard(m._STAGED_ZSET) == 0
+# ===========================================================================
+# Chokepoint scrubs (ent#279 PR-2) — the wired-set behaviour, end to end.
+#
+# These exercise the REAL scrub functions (services.runtime_secret_scrub's
+# scrub_text/scrub_obj) but patch each chokepoint module's `get_staged_values`
+# to a fixed staged set, so no Redis/crypto is involved — the applier is driven
+# with mocked db/activity/capacity and we assert what reaches each durable sink.
+#
+# Heavy modules are imported lazily INSIDE the tests (mirrors
+# test_1083_apply_result.py) and patched IN PLACE (never reimported), so the
+# importlib-standalone `scrub` fixture above and these coexist without polluting
+# `services.runtime_secret_scrub`.
+# ===========================================================================
+
+MARK = "***REDACTED***"
+
+# A staged secret with a JSON quote, a backslash, and a non-ASCII glyph — the
+# escaping-evasion payload. >= 8 chars so the stage-side floor never skips it.
+EVIL = 'p@ss"w\\orld✓-vault-9f3a'
+# A plain prefixless secret the pattern-based sanitizer would MISS (no sk-/ghp-).
+PLAIN = "customer-db-Passw0rd-2f8e"
+
+
+def _await(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _dumps(obj):
+    return json.dumps(obj)
+
+
+# ---------------------------------------------------------------------------
+# apply_result — the single terminal applier (success + failure branches)
+# ---------------------------------------------------------------------------
+class TestApplyResultChokepoint:
+    def _run(self, envelope, staged):
+        from services.task_execution_service import TaskExecutionService
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mdb = MagicMock()
+        mdb.update_execution_status.return_value = True
+        mdb.get_execution.return_value = MagicMock(status="cancelled")
+
+        with (
+            patch("services.task_execution_service.db", mdb),
+            patch(
+                "services.task_execution_service.get_capacity_manager",
+                return_value=MagicMock(release=AsyncMock()),
+            ),
+            patch(
+                "services.task_execution_service.activity_service",
+                MagicMock(complete_activity=AsyncMock()),
+            ),
+            patch(
+                "services.task_execution_service._record_dispatch_terminal",
+                AsyncMock(),
+            ),
+            patch(
+                "services.task_execution_service.event_dispatch_service", MagicMock()
+            ),
+            patch(
+                "services.task_execution_service.channel_completion_report", MagicMock()
+            ),
+            patch("services.task_execution_service._spawn_bg", lambda *_a, **_k: None),
+            patch(
+                "services.task_execution_service._maybe_discard_exhausted_ephemeral",
+                MagicMock(return_value=None),
+            ),
+            patch("services.task_execution_service.get_staged_values", lambda: staged),
+        ):
+            svc = TaskExecutionService()
+            result = _await(
+                svc.apply_result(
+                    "agent-x", envelope, activity_id="a", release_slot=False
+                )
+            )
+        return result, mdb
+
+    def _success_envelope(self, **over):
+        from services.task_execution_service import (
+            TerminalEnvelope,
+            TaskExecutionStatus,
+        )
+
+        base = dict(
+            execution_id="exec-279",
+            status=TaskExecutionStatus.SUCCESS,
+            response=f"connected using {PLAIN}",
+            execution_log=[
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "tool_result", "content": f"psql {PLAIN} ok"},
+            ],
+            metadata={"cost_usd": 0.01, "context_window": 200000},
+            session_id="11111111-1111-1111-1111-111111111111",
+            execution_time_ms=10,
+            raw_response={
+                "response": f"connected using {PLAIN}",
+                "execution_log_simplified": f"ran psql {PLAIN}",
+                "cost": 0.01,
+            },
+        )
+        base.update(over)
+        return TerminalEnvelope(**base)
+
+    def test_success_scrubs_response_execution_log_tool_calls_and_raw_response(self):
+        result, mdb = self._run(self._success_envelope(), [PLAIN])
+        kw = mdb.update_execution_status.call_args.kwargs
+        # The three agent-free-text columns on schedule_executions.
+        assert PLAIN not in (kw["response"] or "")
+        assert PLAIN not in (kw["execution_log"] or "")
+        assert PLAIN not in (kw["tool_calls"] or "")
+        assert MARK in kw["response"]
+        # The returned result — what routers/sessions.py & the /task snapshot read.
+        assert PLAIN not in (result.response or "")
+        assert PLAIN not in (result.execution_log or "")
+        assert PLAIN not in _dumps(result.raw_response)
+        assert MARK in _dumps(result.raw_response)
+
+    def test_failure_scrubs_error_column_and_returned_error(self):
+        from services.task_execution_service import (
+            TerminalEnvelope,
+            TaskExecutionStatus,
+        )
+
+        env = TerminalEnvelope(
+            execution_id="exec-279",
+            status=TaskExecutionStatus.FAILED,
+            error=f"agent aborted after leaking {PLAIN}",
+            error_code=None,
+            metadata={"cost_usd": 0.0},
+        )
+        result, mdb = self._run(env, [PLAIN])
+        assert PLAIN not in mdb.update_execution_status.call_args.kwargs["error"]
+        assert PLAIN not in (result.error or "")
+        assert MARK in result.error
+
+    def test_no_staged_values_is_a_noop(self):
+        # Behaviour-neutral for OSS: nothing staged -> the secret text is untouched.
+        result, mdb = self._run(self._success_envelope(), [])
+        assert result.response == f"connected using {PLAIN}"
+        assert PLAIN in mdb.update_execution_status.call_args.kwargs["response"]
+
+    def test_escaping_evasion_json_escaped_value_is_redacted(self):
+        # THE feature's headline test: a quote/backslash/non-ASCII secret in a
+        # tool result appears in the persisted execution_log ONLY json-escaped.
+        # Because scrub_obj redacts the raw list element BEFORE json.dumps, the
+        # persisted JSON must contain neither the raw nor the escaped rendition.
+        env = self._success_envelope(
+            response=f"done {EVIL}",
+            execution_log=[{"type": "tool_result", "content": f"secret is {EVIL}"}],
+            raw_response={
+                "response": f"done {EVIL}",
+                "execution_log_simplified": f"secret is {EVIL}",
+            },
+        )
+        result, mdb = self._run(env, [EVIL])
+        kw = mdb.update_execution_status.call_args.kwargs
+        escaped = json.dumps(EVIL)[1:-1]
+        for blob in (
+            kw["response"],
+            kw["execution_log"],
+            kw["tool_calls"],
+            _dumps(result.raw_response),
+        ):
+            assert EVIL not in (blob or "")
+            assert escaped not in (blob or "")
+
+    def test_task_sync_idempotency_snapshot_scrubbed_transitively(self):
+        # The /task sync path persists `result.raw_response` into
+        # idempotency_keys.response_snapshot (chat_execution_service :1445/:1510),
+        # replayed to duplicate-key callers for 24h. It is scrubbed transitively
+        # because apply_result scrubs envelope.raw_response — assert exactly the
+        # value that becomes that snapshot carries no secret.
+        result, _ = self._run(self._success_envelope(), [PLAIN])
+        snapshot = dict(result.raw_response)  # what _dispatch_sync_immediate passes
+        snapshot["task_execution_id"] = "exec-279"
+        assert PLAIN not in _dumps(snapshot)
+
+
+# ---------------------------------------------------------------------------
+# _write_terminal_and_gate — the timeout/capacity/breaker/shutdown terminal
+# ---------------------------------------------------------------------------
+class TestWriteTerminalAndGate:
+    def test_scrubs_error_before_write(self):
+        from services.task_execution_service import (
+            _write_terminal_and_gate,
+            TaskExecutionStatus,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mdb = MagicMock()
+        mdb.update_execution_status.return_value = True
+        with (
+            patch("services.task_execution_service.db", mdb),
+            patch(
+                "services.task_execution_service.activity_service",
+                MagicMock(close_execution_activity=AsyncMock()),
+            ),
+            patch(
+                "services.task_execution_service.event_dispatch_service", MagicMock()
+            ),
+            patch(
+                "services.task_execution_service.channel_completion_report", MagicMock()
+            ),
+            patch("services.task_execution_service.get_staged_values", lambda: [PLAIN]),
+        ):
+            _await(
+                _write_terminal_and_gate(
+                    "exec-279",
+                    "act-1",
+                    status=TaskExecutionStatus.FAILED,
+                    error=f"unexpected {PLAIN}",
+                    agent_name="agent-x",
+                )
+            )
+        assert PLAIN not in mdb.update_execution_status.call_args.kwargs["error"]
+
+
+# ---------------------------------------------------------------------------
+# chat_execution_service — the three chat terminals + the inline idempotency
+# snapshot (#425)
+# ---------------------------------------------------------------------------
+class TestChatExecutionChokepoints:
+    def test_finalize_chat_success_scrubs_writes_and_snapshot(self):
+        from services import chat_execution_service as ces
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from datetime import datetime
+
+        response_data = {
+            "response": f"here you go {PLAIN}",
+            "execution_log": [{"type": "tool_result", "content": f"db {PLAIN}"}],
+            "execution_log_simplified": [
+                {"type": "tool", "tool": "Bash", "input": f"psql {PLAIN}"}
+            ],
+            "metadata": {"cost_usd": 0.02, "output_tokens": 5},
+            "session": {"context_tokens": 100, "context_window": 200000},
+            "session_id": "22222222-2222-2222-2222-222222222222",
+        }
+        resp = MagicMock()
+        resp.json.return_value = response_data
+
+        mdb = MagicMock()
+        mdb.add_chat_message.return_value = MagicMock(id="msg-1")
+        captured = {}
+
+        def _complete(idem, exec_id, snapshot):
+            captured["snapshot"] = snapshot
+
+        with (
+            patch.object(ces, "db", mdb),
+            patch.object(ces, "get_staged_values", lambda: [PLAIN]),
+            patch.object(
+                ces, "activity_service", MagicMock(complete_activity=AsyncMock())
+            ),
+            patch.object(ces.idempotency_service, "complete", side_effect=_complete),
+        ):
+            _await(
+                ces._finalize_chat_success(
+                    name="agent-x",
+                    response=resp,
+                    start_time=datetime.utcnow(),
+                    session=MagicMock(id="sess-1"),
+                    current_user=MagicMock(id=1, email="u@x.io", username="u"),
+                    chat_activity_id="ca",
+                    collaboration_activity_id=None,
+                    task_execution_id="exec-279",
+                    _chat_subscription_id=None,
+                    execution=MagicMock(id="q-1"),
+                    queue_result="done",
+                    is_queued=False,
+                    idem="idem-1",
+                )
+            )
+        # assistant message content scrubbed
+        assert PLAIN not in mdb.add_chat_message.call_args.kwargs["content"]
+        # terminal row response/execution_log/tool_calls scrubbed
+        kw = mdb.update_execution_status.call_args.kwargs
+        assert PLAIN not in (kw["response"] or "")
+        assert PLAIN not in (kw["execution_log"] or "")
+        assert PLAIN not in (kw["tool_calls"] or "")
+        # idempotency snapshot #1 (the inline /chat replay blob) scrubbed
+        assert PLAIN not in _dumps(captured["snapshot"])
+        assert MARK in _dumps(captured["snapshot"])
+
+    def test_finalize_budget_exhausted_scrubs_error(self):
+        from services import chat_execution_service as ces
+        from services.chat_signals import ChatDispatchError
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mdb = MagicMock()
+        mdb.get_execution.return_value = None
+        with (
+            patch.object(ces, "db", mdb),
+            patch.object(ces, "get_staged_values", lambda: [PLAIN]),
+            patch.object(
+                ces, "activity_service", MagicMock(complete_activity=AsyncMock())
+            ),
+            pytest.raises(ChatDispatchError) as exc,
+        ):
+            _await(
+                ces._finalize_budget_exhausted(
+                    budget_exc=Exception(f"budget blown near {PLAIN}"),
+                    task_execution_id="exec-279",
+                    chat_activity_id="ca",
+                    collaboration_activity_id=None,
+                )
+            )
+        assert PLAIN not in mdb.update_execution_status.call_args.kwargs["error"]
+        assert PLAIN not in str(exc.value.detail)
+
+    def test_parse_agent_http_error_scrubs_before_log_and_persist(self):
+        from services import chat_execution_service as ces
+        from unittest.mock import MagicMock, patch
+
+        e = MagicMock()
+        e.response = MagicMock()
+        e.response.status_code = 503
+        e.response.json.return_value = {"detail": {"message": f"auth failed: {PLAIN}"}}
+        with patch.object(ces, "get_staged_values", lambda: [PLAIN]):
+            error_msg, status_code, _meta = ces._parse_agent_http_error(e, "agent-x")
+        assert PLAIN not in error_msg
+        assert MARK in error_msg
+        assert status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# pull_coordination_service.apply_task_result — the (dark) pull sink, sync
+# ---------------------------------------------------------------------------
+class TestPullSinkChokepoint:
+    def _run(self, *, status, content, execution_log, error_code=None):
+        from services import pull_coordination_service as pcs
+        from unittest.mock import MagicMock, patch
+
+        mdb = MagicMock()
+        mdb.get_execution.return_value = MagicMock(
+            status="running", agent_name="agent-x"
+        )
+        mdb.update_execution_status.return_value = True
+        with (
+            patch.object(pcs, "db", mdb),
+            patch.object(pcs, "get_staged_values", lambda: [PLAIN]),
+            patch.object(pcs, "event_dispatch_service", MagicMock()),
+            patch.object(pcs, "activity_service", MagicMock()),
+        ):
+            pcs.apply_task_result(
+                "exec-279",
+                "tok",
+                status=status,
+                content=content,
+                error_code=error_code,
+                execution_log=execution_log,
+            )
+        return mdb
+
+    def test_success_scrubs_content_and_log(self):
+        mdb = self._run(
+            status="success",
+            content=f"result: {PLAIN}",
+            execution_log=[{"type": "tool_result", "content": f"psql {PLAIN}"}],
+        )
+        kw = mdb.update_execution_status.call_args.kwargs
+        assert PLAIN not in (kw["response"] or "")
+        assert PLAIN not in (kw["execution_log"] or "")
+
+    def test_failure_scrubs_folded_error_text(self):
+        mdb = self._run(
+            status="failed",
+            content=f"blew up on {PLAIN}",
+            execution_log=None,
+            error_code="agent_error",
+        )
+        kw = mdb.update_execution_status.call_args.kwargs
+        assert PLAIN not in (kw["error"] or "")
+        assert PLAIN not in (kw["response"] or "")
+
+
+# ---------------------------------------------------------------------------
+# proactive_message_service.send_message — scrub BEFORE delivery AND persist
+# ---------------------------------------------------------------------------
+class TestProactiveChokepoint:
+    def test_send_message_scrubs_before_inner_delivery(self):
+        from services import proactive_message_service as pms
+        from unittest.mock import patch
+
+        class _Guard:
+            replay = False
+            snapshot = None
+
+        class _CM:
+            async def __aenter__(self):
+                return _Guard()
+
+            async def __aexit__(self, *a):
+                return False
+
+        captured = {}
+
+        async def _inner(self, agent_name, recipient, text, channel, reply):
+            captured["text"] = text
+            return pms.DeliveryResult(success=True, channel="web", message_id="m1")
+
+        svc = pms.ProactiveMessageService()
+        with (
+            patch.object(pms, "get_staged_values", lambda: [PLAIN]),
+            patch.object(
+                pms.idempotency_service, "effect_guard", lambda *a, **k: _CM()
+            ),
+            patch.object(pms.ProactiveMessageService, "_send_message_inner", _inner),
+        ):
+            _await(
+                svc.send_message(
+                    agent_name="agent-x",
+                    recipient_email="U@X.io",
+                    text=f"psst the key is {PLAIN}",
+                    channel="web",
+                )
+            )
+        assert PLAIN not in captured["text"]
+        assert MARK in captured["text"]
+
+
+# ---------------------------------------------------------------------------
+# channel_history.persist_outbound_group_message — group broadcast history
+# ---------------------------------------------------------------------------
+class TestChannelHistoryChokepoint:
+    def test_persist_scrubs_broadcast_body(self):
+        from services import channel_history as ch
+        from unittest.mock import MagicMock, patch
+
+        mdb = MagicMock()
+        mdb.get_or_create_public_chat_session.return_value = MagicMock(id="sess-1")
+        with (
+            patch.object(ch, "db", mdb),
+            patch.object(ch, "get_staged_values", lambda: [PLAIN]),
+        ):
+            ch.persist_outbound_group_message(
+                "agent-x", "slack", "team:chan:ts", f"broadcast: {PLAIN}"
+            )
+        # add_public_chat_message(session_id, "assistant", text, ...) — text is 3rd positional
+        args = mdb.add_public_chat_message.call_args.args
+        assert PLAIN not in args[2]
+        assert MARK in args[2]
+
+
+# ---------------------------------------------------------------------------
+# routers/voice._save_transcript — voice transcript into chat_messages
+# ---------------------------------------------------------------------------
+class TestVoiceTranscriptChokepoint:
+    def test_save_transcript_scrubs_each_entry(self):
+        from routers import voice
+        from unittest.mock import MagicMock, patch
+
+        session = MagicMock()
+        session.chat_session_id = "cs"
+        session.agent_name = "agent-x"
+        session.user_id = 1
+        session.user_email = "u@x.io"
+        session.session_id = "vs"
+        session.transcript = [
+            MagicMock(role="assistant", text=f"the token is {PLAIN}"),
+            MagicMock(role="user", text="what token"),
+        ]
+        mdb = MagicMock()
+        with (
+            patch.object(voice, "db", mdb),
+            patch.object(voice, "get_staged_values", lambda: [PLAIN]),
+        ):
+            saved = voice._save_transcript(session)
+        assert saved == 2
+        contents = [c.kwargs["content"] for c in mdb.add_chat_message.call_args_list]
+        assert all(PLAIN not in c for c in contents)
+        assert any(MARK in c for c in contents)
+
+
+# ---------------------------------------------------------------------------
+# routers/sessions.py — transitively covered (NO direct wiring): the assistant
+# write persists result.response/result.execution_log, which ARE the applier's
+# scrubbed outputs. Prove the value it would write carries no secret.
+# ---------------------------------------------------------------------------
+class TestSessionsTransitiveCoverage:
+    def test_session_assistant_write_reads_scrubbed_applier_output(self):
+        # sessions.py:439 writes content=result.response, tool_calls=
+        # result.execution_log. Both come from apply_result, which scrubs. Drive
+        # apply_result and confirm those exact fields are already clean.
+        from services.task_execution_service import (
+            TaskExecutionService,
+            TerminalEnvelope,
+            TaskExecutionStatus,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        env = TerminalEnvelope(
+            execution_id="exec-279",
+            status=TaskExecutionStatus.SUCCESS,
+            response=f"answer {PLAIN}",
+            execution_log=[{"type": "tool_result", "content": f"x {PLAIN}"}],
+            metadata={"context_window": 200000},
+            raw_response={"response": f"answer {PLAIN}", "metadata": {}},
+        )
+        mdb = MagicMock()
+        mdb.update_execution_status.return_value = True
+        with (
+            patch("services.task_execution_service.db", mdb),
+            patch(
+                "services.task_execution_service.get_capacity_manager",
+                return_value=MagicMock(release=AsyncMock()),
+            ),
+            patch(
+                "services.task_execution_service.activity_service",
+                MagicMock(complete_activity=AsyncMock()),
+            ),
+            patch(
+                "services.task_execution_service._record_dispatch_terminal", AsyncMock()
+            ),
+            patch(
+                "services.task_execution_service.event_dispatch_service", MagicMock()
+            ),
+            patch(
+                "services.task_execution_service.channel_completion_report", MagicMock()
+            ),
+            patch("services.task_execution_service._spawn_bg", lambda *_a, **_k: None),
+            patch(
+                "services.task_execution_service._maybe_discard_exhausted_ephemeral",
+                MagicMock(return_value=None),
+            ),
+            patch("services.task_execution_service.get_staged_values", lambda: [PLAIN]),
+        ):
+            result = _await(
+                TaskExecutionService().apply_result("agent-x", env, activity_id="a")
+            )
+        assert PLAIN not in (result.response or "")  # sessions.py content=
+        assert PLAIN not in (result.execution_log or "")  # sessions.py tool_calls=
+
+
+# ---------------------------------------------------------------------------
+# Cross-worker propagation — the store is GLOBAL: a value staged by "worker A"
+# (one Redis client) is scrubbed by "worker B" (a separate client on the SAME
+# sibling redis :6390). Proves the store-is-global property across processes,
+# which the single-client seam tests above cannot. Skips when :6390 is absent.
+# ---------------------------------------------------------------------------
+def _sibling_redis():
+    """A real redis client on the sibling test instance (:6390), or None."""
+    try:
+        import redis
+
+        client = redis.StrictRedis(
+            host="localhost",
+            port=6390,
+            db=0,
+            decode_responses=True,
+            socket_connect_timeout=1,
+        )
+        client.ping()
+        return client
+    except Exception:
+        return None
+
+
+def _load_seam_bound_to(redis_client, monkeypatch, tag):
+    """Fresh seam module instance whose Redis + enc are bound to the given real
+    client + the reversible fake enc (isolating the store-propagation property
+    from real crypto). Distinct module identity per call = a distinct 'worker'.
+    Registered via monkeypatch.setitem so it is auto-removed on teardown (the
+    sys.modules lint requires this, not a bare assignment/del)."""
+    spec = importlib.util.spec_from_file_location(
+        f"_scrub_worker_{tag}",
+        str(_BACKEND / "services" / "runtime_secret_scrub.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "get_breaker_redis", lambda: redis_client)
+    monkeypatch.setattr(module, "_enc_svc", lambda: _FakeEnc())
+    return module
+
+
+class TestCrossWorkerPropagation:
+    def test_value_staged_by_one_worker_is_scrubbed_by_another(self, monkeypatch):
+        client_a = _sibling_redis()
+        client_b = _sibling_redis()
+        if client_a is None or client_b is None:
+            pytest.skip("sibling redis :6390 unavailable")
+        worker_a = _load_seam_bound_to(client_a, monkeypatch, "a")
+        worker_b = _load_seam_bound_to(client_b, monkeypatch, "b")
+        secret = "cross-worker-Passw0rd-7d21"
+        try:
+            worker_a.clear_staged()
+            # Worker A stages; worker B (separate client, separate module) reads.
+            worker_a.stage_secret("agent-a", secret)
+            staged_seen_by_b = worker_b.get_staged_values()
+            assert secret in staged_seen_by_b
+            out = worker_b.scrub_text(
+                staged_seen_by_b, f"B persisting turn that echoes {secret}!"
+            )
+            assert secret not in out
+            assert MARK in out
+        finally:
+            worker_a.clear_staged()

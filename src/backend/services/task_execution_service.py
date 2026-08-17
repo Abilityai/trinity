@@ -51,6 +51,7 @@ from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
 # capacity stack at import time (its own reference to this module is lazy).
 from services.pull_pilot import note_unreachable_pull_trigger
@@ -796,6 +797,14 @@ async def _write_terminal_and_gate(
     actually stands (this writer's on a win, the persisted row's on a loss), so
     the activity can never disagree with the row.
     """
+    # ent#279: scrub the error BEFORE the terminal write and its downstream
+    # activity/event/channel-report fan-out. The 4 call sites pass mostly-static
+    # strings today (timeout/capacity/breaker/shutdown), but an unexpected
+    # `str(e)` can carry foreign text -- scrub for defense-in-depth and so a
+    # future agent-text caller of this helper is covered.
+    _staged = get_staged_values()
+    if _staged:
+        error = scrub_text(_staged, error)
     won = True
     if execution_id:
         won = db.update_execution_status(
@@ -1861,8 +1870,26 @@ class TaskExecutionService:
         eid = envelope.execution_id
         metadata = envelope.metadata or {}
 
+        # ent#279: read the staged-secret set ONCE per applier invocation. Empty
+        # for every OSS install / turn that staged nothing -> `[]`, so the scrubs
+        # below are no-ops (the seam's own falsy guards short-circuit). Both
+        # branches reuse it -- apply_result runs exactly one of them.
+        _staged = get_staged_values()
+
         if envelope.status == TaskExecutionStatus.SUCCESS:
             # ---- Success-style derivation (moved from execute_task step 5/6) ----
+            # ent#279: identity-scrub the RAW agent fields BEFORE the sanitize/
+            # dumps trio below, before truncation, before the CAS write, and
+            # before the returned `raw_response` -- which the `/task` sync paths
+            # persist into `idempotency_keys.response_snapshot` and replay to
+            # duplicate-key callers for 24h. The pattern-based `sanitize_*` cannot
+            # catch a prefixless value (a customer DB password). `execution_log`
+            # is scrubbed here so the derived `tool_calls` (extract_tool_calls)
+            # inherit the redaction too.
+            if _staged:
+                envelope.response = scrub_text(_staged, envelope.response)
+                envelope.execution_log = scrub_obj(_staged, envelope.execution_log)
+                envelope.raw_response = scrub_obj(_staged, envelope.raw_response)
             tool_calls_json = None
             execution_log_json = None
             exec_log = envelope.execution_log
@@ -2035,6 +2062,13 @@ class TaskExecutionService:
             )
 
         # ---- Failure-style derivation (moved from execute_task httpx branch) ----
+        # ent#279: scrub the failure message at the TOP of the branch, before it
+        # is persisted (the CAS write below), fanned out to the activity, the
+        # #1578 completion event, and the ent#265 channel report, and returned in
+        # the TaskExecutionResult -- an agent-reported error can embed a fetched
+        # secret.
+        if _staged:
+            envelope.error = scrub_text(_staged, envelope.error)
         # #678 salvage: surface what telemetry the agent captured before it
         # wedged. Sanitize the partial metadata as defense-in-depth.
         partial_metadata = sanitize_dict(metadata) if metadata else {}
