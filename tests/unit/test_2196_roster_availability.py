@@ -104,7 +104,7 @@ def _quiet_briefing(monkeypatch):
     real = svc._agent_briefing
 
     async def _briefing(name, availability="ready"):
-        return (None, [])
+        return svc.AgentBriefing()   # #2213: the real return shape
 
     monkeypatch.setattr(svc, "_agent_briefing", _briefing)
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
@@ -634,7 +634,11 @@ def test_the_briefing_is_skipped_only_for_states_that_cannot_answer(_quiet_brief
         ("ready", True), ("unknown", True), ("stopped", False), ("unavailable", False),
     ):
         attempted.clear()
-        assert _run(briefing("scout", availability)) == (None, [])
+        # #2213: the briefing is an AgentBriefing NamedTuple (4 fields) —
+        # the skip still costs nothing and still yields nothing.
+        result = _run(briefing("scout", availability))
+        assert result.description is None and not result.playbooks
+        assert not result.searchable_playbooks and result.playbooks_total == 0
         assert bool(attempted) is should_attempt, availability
 
 

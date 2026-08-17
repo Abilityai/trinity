@@ -28,6 +28,7 @@ import os
 import re
 import shlex
 import tarfile
+from typing import NamedTuple, Optional
 import time
 import uuid
 from datetime import datetime, timezone
@@ -484,7 +485,7 @@ async def get_agent_card(email: str | None, agent_name: str,
                         availability=availability)
     briefing = await _agent_briefing(agent_name, availability)   # exactly one, not N
     if isinstance(briefing, tuple):
-        card.description, card.playbooks = briefing
+        _apply_briefing(card, briefing)
     return card
 
 
@@ -541,7 +542,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     )
     for card, b in zip(cards, briefings):
         if isinstance(b, tuple):
-            card.description, card.playbooks = b
+            _apply_briefing(card, b)
 
     return PortalRoster(
         client_email=(email or None),
@@ -580,7 +581,35 @@ _MAX_USE_CASE_CHARS = 200
 # Field caps too — every hint field is agent-author-controlled, and 24 multi-MB
 # descriptions would defeat a count-only belt (title cap aligns with the
 # ent#380 use-case hint cap; the UI clamps descriptions to two lines anyway).
+class AgentBriefing(NamedTuple):
+    """What `_agent_briefing` resolves for one agent (#2213).
+
+    `playbooks` feeds the hint-card grid (bounded for layout, #2101);
+    `searchable_playbooks` feeds the composer's `/` search (its own, larger bound,
+    no descriptions); `playbooks_total` is the count before either bound, so a
+    truncated list can say so instead of looking complete.
+    """
+    description: Optional[str] = None
+    playbooks: list = []
+    searchable_playbooks: list = []
+    playbooks_total: int = 0
+
+
 _MAX_BRIEFING_HINTS = 24
+# #2213: the SEARCH bound, deliberately separate from the card bound above.
+#
+# `_MAX_BRIEFING_HINTS` exists for the hint-card GRID (#2101) — a card surface has
+# a layout limit and cards carry descriptions, so 24 is right for it. But the same
+# payload feeds the composer's `/` typeahead, which searches only what shipped: on
+# an agent with 33 client-visible skills the roster carried 24 and typing the name
+# of the 27th matched NOTHING, with no indication that anything was missing
+# (measured — see `searchable_playbooks` below).
+#
+# So search gets its own list at its own bound, carrying title + starter only (no
+# descriptions, which is what makes 200 entries cheap: ~40 chars each rather than
+# ~540). `playbooks_total` reports the true count so even this bound is honest
+# rather than silent.
+_MAX_SEARCHABLE_PLAYBOOKS = 200
 _MAX_HINT_TITLE_CHARS = 200
 _MAX_HINT_DESCRIPTION_CHARS = 300
 _MAX_HINT_STARTER_CHARS = 500
@@ -627,6 +656,22 @@ def _use_case_hints(use_cases) -> list[PortalPlaybook]:
     return hints
 
 
+def _apply_briefing(card, briefing) -> None:
+    """Copy a briefing onto a card, tolerating the pre-#2213 2-tuple shape.
+
+    Positional-tolerant on purpose: `_agent_briefing` is monkeypatched by several
+    test modules, and a 4-field unpack against a 2-tuple stub raises ValueError
+    inside the roster build — turning a stale double into a 500 rather than a
+    failed assertion (the #2242 class). Missing fields keep their card defaults.
+    """
+    card.description = briefing[0] if len(briefing) > 0 else None
+    card.playbooks = briefing[1] if len(briefing) > 1 else []
+    if len(briefing) > 2:
+        card.searchable_playbooks = briefing[2]
+    if len(briefing) > 3:
+        card.playbooks_total = briefing[3]
+
+
 async def _agent_briefing(agent_name: str, availability: str = "ready"):
     """Best-effort ``(description, hints)`` for the #138 new-chat briefing.
 
@@ -663,7 +708,11 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
 
     try:
         if availability not in ("ready", "unknown"):
-            return None, []
+            # Four-tuple like every other exit (#2213): both call sites unpack all
+            # four, so a 2-tuple here would raise ValueError for every stopped or
+            # unavailable agent — i.e. it would break the roster on exactly the
+            # agents this early return exists to serve cheaply.
+            return AgentBriefing()
 
         base = f"http://agent-{agent_name}:8000"
         description, use_cases, live = None, [], []
@@ -711,9 +760,20 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
         # exposed playbooks advertises its template's "What You Can Ask".
         if not playbooks:
             playbooks = _use_case_hints(use_cases)
-        return description, _bound_briefing_hints(playbooks)
+        # #2213: the search surface is built from the SAME client-visible set (so
+        # the two can never disagree about what is offered) but bounded and
+        # trimmed for its own purpose — no descriptions, and a much higher count.
+        # `total` is the count BEFORE either bound, which is the only number that
+        # can tell the UI something was left out.
+        total = len(playbooks)
+        searchable = [
+            PortalPlaybook(title=p.title, starter_prompt=p.starter_prompt)
+            for p in playbooks[:_MAX_SEARCHABLE_PLAYBOOKS]
+        ]
+        return AgentBriefing(description, _bound_briefing_hints(playbooks),
+                             searchable, total)
     except Exception:  # noqa: BLE001 — never let enrichment break the roster
-        return None, []
+        return AgentBriefing()
 
 
 async def synthesize_portal_tts(agent_name: str, email: str, text: str,

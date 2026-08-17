@@ -199,6 +199,7 @@
               :rows="typeaheadRows"
               :active-index="activeIndex"
               :overflow="typeaheadBound.overflow"
+              :hidden-count="typeaheadHidden"
               :empty-message="typeaheadEmpty || ''"
               @pick="acceptActive"
               @hover="activeIndex = $event"
@@ -251,6 +252,8 @@ import {
   dismissAfterInsert,
   filterAgentCandidates,
   filterPlaybookCandidates,
+  hiddenPlaybookCount,
+  playbookSearchSource,
   isSuppressed,
   nextActiveIndex,
   nextDismissState,
@@ -444,7 +447,14 @@ const typeaheadResult = computed(() => {
   const t = typeaheadTrigger.value
   if (!t) return null
   if (t.kind === '/') {
-    return { kind: '/', enabled: true, ...filterPlaybookCandidates(props.agent?.playbooks, t.query) }
+    // #2213: search the SEARCHABLE set, not the card-bounded `playbooks` — the
+    // latter stops at 24 (the hint-grid bound), which made every skill past it
+    // unmatchable by name with nothing on screen saying so.
+    return {
+      kind: '/',
+      enabled: true,
+      ...filterPlaybookCandidates(playbookSearchSource(props.agent), t.query),
+    }
   }
   return {
     kind: '@',
@@ -459,6 +469,14 @@ const typeaheadResult = computed(() => {
 })
 
 const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+// #2213: rows the popup could not RENDER are `typeaheadBound.overflow`; skills that
+// never reached the client at all are this. Two different omissions, so the popup
+// is told about them separately rather than adding them into one misleading number.
+const typeaheadHidden = computed(() => (
+  typeaheadResult.value?.kind === '/'
+    ? hiddenPlaybookCount(props.agent, playbookSearchSource(props.agent).length)
+    : 0
+))
 
 // The two empty conditions are NOT the same: a source with nothing in it shows
 // one honest line, while a query that matches nothing CLOSES the popup (AC#6 —

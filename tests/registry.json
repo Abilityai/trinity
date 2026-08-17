@@ -2310,6 +2310,18 @@
         "voice"
       ],
       "description": "Portal dictation gate (#2212). `stt_available` is a SEPARATE roster-card bit from `voice_available`: transcription needs only the platform ElevenLabs key, narration additionally needs an effective voice, so the single-bit design could not express \"can dictate, cannot narrate\" — which is why the mic rendered on a pure browser capability check and was a dead control on a provider-less instance. Asserts the truth table in both directions (key without voice → stt yes / tts no; no key → both no, failing closed like `voice_available`), that the model default is absent-not-present so an older payload hides the mic rather than rendering a dead one, and — the load-bearing one — that the card bit and `transcribe_portal_audio`'s own 404 gate are the SAME condition, since drift between what the client sees and what /stt will do IS the dead-control bug. Pure unit: no DB, no HTTP, no ElevenLabs."
+    },
+    {
+      "file": "unit/test_2213_searchable_playbooks.py",
+      "feature": "#2213",
+      "added": "2026-08-17",
+      "categories": [
+        "backend",
+        "unit",
+        "client-portal",
+        "ui-ux"
+      ],
+      "description": "Workspace `/` typeahead skill coverage (#2213). Measured on a live instance with 30 probe skills planted in a real agent container: the agent-server reported 33 client-visible skills, the roster payload carried 24 (_MAX_BRIEFING_HINTS), and typing the 27th skill's name matched nothing with no indication anything was missing — the popup searches only what shipped. The card bound is right for the hint GRID it was written for (#2101) and wrong as the search corpus, so the two surfaces now have two bounds: `playbooks` (24, rich) for cards, `searchable_playbooks` (200, title+starter only — no descriptions is what keeps it cheap) for search, and `playbooks_total` so remaining truncation is sayable instead of silent. Pins the SEPARATION and the honesty rather than the numbers: searchable is never smaller than the card set at any size, total never under-reports, search entries carry exactly what a pick needs (starterFor reads starter_prompt), the exposure policy still bounds BOTH surfaces (an allow-list and user_invocable:false reach neither), and a failed or skipped briefing still returns the four-field shape — the last case caught a real defect during development, where the availability early-return still yielded a 2-tuple and would have raised on unpack for every stopped agent."
     }
   ]
 }

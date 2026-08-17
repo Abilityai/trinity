@@ -399,7 +399,8 @@ def test_briefing_reads_template_info_and_falls_back_to_use_cases(monkeypatch):
         "/api/skills": _FakeResp(200, {"skills": []}),
     })
 
-    description, hints = _run(service._agent_briefing("atlas"))
+    briefing = _run(service._agent_briefing("atlas"))
+    description, hints = briefing.description, briefing.playbooks
     assert description == "Atlas does research."
     assert [h.starter_prompt for h in hints] == [
         "Summarize this week", "Draft the client email",
@@ -424,7 +425,7 @@ def test_briefing_exposed_playbooks_win_over_use_cases(monkeypatch):
         ]}),
     })
 
-    _, hints = _run(service._agent_briefing("atlas"))
+    hints = _run(service._agent_briefing("atlas")).playbooks
     assert [h.starter_prompt for h in hints] == ["/weekly-report "]
 
 
@@ -446,7 +447,7 @@ def test_briefing_policy_filtered_playbooks_still_fall_back(monkeypatch):
         connector_cfg={"enabled": True, "exposed_playbooks": []},  # operator exposed none
     )
 
-    _, hints = _run(service._agent_briefing("atlas"))
+    hints = _run(service._agent_briefing("atlas")).playbooks
     assert [h.starter_prompt for h in hints] == ["Ask me about your data"]
 
 
@@ -462,7 +463,8 @@ def test_briefing_metadata_failure_still_yields_playbooks(monkeypatch):
         ]}),
     })
 
-    description, hints = _run(service._agent_briefing("atlas"))
+    briefing = _run(service._agent_briefing("atlas"))
+    description, hints = briefing.description, briefing.playbooks
     assert description is None
     assert [h.starter_prompt for h in hints] == ["/weekly-report "]
 
