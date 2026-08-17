@@ -373,6 +373,14 @@ services:
       - ./config/process-docs:/app/config/process-docs:ro
       - ./config/manifests:/app/config/manifests:ro  # Bundled system manifests (first-run seed, ent#124)
       - agent-configs:/agent-configs
+      # #2205: `/data/archives` lives INSIDE this bind mount in prod — there is no
+      # `trinity-archives` named volume here, which is why prod needs no
+      # `archives-init` while dev does. `scripts/deploy/start.sh` chowns
+      # `$TRINITY_DATA_PATH` to 1000:1000 recursively (Linux) before `up`, so the
+      # directory the app creates under it is already writable by UID 1000.
+      # Adding a named volume for archives here without an ownership one-shot
+      # would reintroduce the dev bug — `tests/unit/test_2205_volume_ownership.py`
+      # fails loudly if that happens.
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
       # Read-only access to Vector's logs so log_archive_service.py (reads
       # /data/logs) can run in prod. Mirrors docker-compose.yml; without it the

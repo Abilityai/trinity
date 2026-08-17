@@ -150,6 +150,7 @@ _RESERVED_ID_PREFIXES = (
                          # bucketed id — reservation is what keeps the DB
                          # on-conflict dedup from being agent-pre-suppressible)
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
+    "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
