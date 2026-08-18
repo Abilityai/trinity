@@ -223,14 +223,11 @@ def _resolve_telegram(
     # the binding agent's bot but a DIFFERENT agent did the work, the head line
     # names the worker.
     attribution = executing_agent if binding_agent != executing_agent else None
-    # D5 rendering: pre-escape &/</> BEFORE markdown→HTML — _markdown_to_html
-    # escapes nothing, and failure errors routinely carry `<class 'ValueError'>`
-    # / tracebacks; unescaped they trip "can't parse entities" and the adapter's
-    # strip-HTML fallback then DELETES the `<...>` substrings. Pre-escaping
-    # keeps literals intact while backticks still render as <code>.
+    # D5 rendering: _markdown_to_html is escape-first (#2277) — `<class
+    # 'ValueError'>` / traceback literals survive as text on their own; a
+    # pre-escape here would double-escape into visible &amp;lt; artifacts.
     text = adapter.format_response(
-        html.escape(_summarize(status, summary_or_error, executing_agent=attribution),
-                    quote=False)
+        _summarize(status, summary_or_error, executing_agent=attribution)
     )
     # D5 cap: entity expansion can exceed Telegram's 4096 hard cap; "message too
     # long" is a 400 the parse-fallback does not catch → silent loss. A cap cut

@@ -14,6 +14,7 @@ Supports:
 """
 
 import asyncio
+import html
 import logging
 import re
 from datetime import datetime, timezone
@@ -1139,36 +1140,110 @@ class TelegramAdapter(ChannelAdapter):
         """Convert standard markdown to Telegram HTML format."""
         return self._markdown_to_html(text)
 
+    # Fenced code: optional language becomes <pre><code class="language-X">
+    # (Telegram renders syntax highlighting for it). Issue #2277.
+    _MD_FENCE_RE = re.compile(r"```(\w*)[ \t]*\n?(.*?)```", re.DOTALL)
+    # Tags this converter emits — consumed by the entity-safe splitter.
+    _HTML_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^<>]*)?)>")
+
     @staticmethod
     def _markdown_to_html(text: str) -> str:
-        """Convert common Markdown to Telegram HTML. Plain text fallback on failure."""
+        """Convert common Markdown to Telegram HTML, escape-first (#2277).
+
+        Code spans are stashed before everything else so their content is
+        escaped exactly once and never styled; all remaining text is
+        HTML-escaped BEFORE conversion so raw <, >, & survive parse_mode=HTML
+        instead of tripping "can't parse entities" (which used to strip all
+        formatting from precisely the messages that contain code).
+        """
+        original = text
         try:
-            # Bold: **text** or __text__
-            text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-            text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
-            # Italic: *text* or _text_ (but not inside words like file_name)
-            text = re.sub(r'(?<!\w)\*([^*]+?)\*(?!\w)', r'<i>\1</i>', text)
-            # Code blocks: ```text```
-            text = re.sub(r'```(\w*)\n?(.*?)```', r'<pre>\2</pre>', text, flags=re.DOTALL)
+            stash = []
+
+            def _hold(fragment):
+                stash.append(fragment)
+                return f"\x00{len(stash) - 1}\x00"
+
+            def _fence(m):
+                lang = m.group(1)
+                cls = f' class="language-{lang}"' if lang else ""
+                body = html.escape(m.group(2), quote=False)
+                return _hold(f"<pre><code{cls}>{body}</code></pre>")
+
+            text = TelegramAdapter._MD_FENCE_RE.sub(_fence, text)
             # Inline code: `text`
-            text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+            text = re.sub(
+                r"`([^`\n]+)`",
+                lambda m: _hold(f"<code>{html.escape(m.group(1), quote=False)}</code>"),
+                text,
+            )
+
+            text = html.escape(text, quote=False)
+
+            # Tables are readable only in monospace; stashed pre-styling so
+            # cells never carry nested tags into <pre> (invalid in Telegram).
+            text = re.sub(
+                r"(?m)^(?:\|.*\|[ \t]*\n?){2,}",
+                lambda m: _hold(f"<pre>{m.group(0).rstrip()}</pre>") + "\n",
+                text,
+            )
+
+            # Links: [text](url)
+            text = re.sub(
+                r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', text
+            )
+            # Headers: #/## emphasized, ###+ plain bold
+            text = re.sub(r"(?m)^#{1,2}[ \t]+(.+?)[ \t]*#*[ \t]*$", r"<b><u>\1</u></b>", text)
+            text = re.sub(r"(?m)^#{3,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", r"<b>\1</b>", text)
+            # Horizontal rules (before bold/italic so *** and ___ don't pair up)
+            text = re.sub(r"(?m)^(?:---+|\*\*\*+|___+)[ \t]*$", "———", text)
+            # Bullets (before italic so a leading * is never an emphasis opener)
+            text = re.sub(r"(?m)^([ \t]*)[-*][ \t]+", r"\1• ", text)
+            # Bold: **text** or __text__
+            text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+            text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+            # Italic: *text* (but not inside words like file_name)
+            text = re.sub(r"(?<!\w)\*([^*\n]+?)\*(?!\w)", r"<i>\1</i>", text)
             # Strikethrough: ~~text~~
-            text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
-            return text
+            text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+            # Spoiler: ||text||
+            text = re.sub(r"\|\|(.+?)\|\|", r"<tg-spoiler>\1</tg-spoiler>", text)
+
+            # "> " runs → <blockquote>; long runs collapse client-side.
+            def _quote(m):
+                lines = [
+                    re.sub(r"^&gt;[ \t]?", "", ln)
+                    for ln in m.group(0).rstrip("\n").split("\n")
+                ]
+                body = "\n".join(lines)
+                attr = " expandable" if len(lines) > 5 or len(body) > 400 else ""
+                return f"<blockquote{attr}>{body}</blockquote>\n"
+
+            text = re.sub(r"(?m)^(?:&gt;[ \t]?.*\n?)+", _quote, text)
+
+            return re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], text)
         except Exception:
-            return text
+            logger.warning("Telegram markdown→HTML conversion failed", exc_info=True)
+            return html.escape(original, quote=False)
 
     @staticmethod
     def _strip_html(text: str) -> str:
-        """Strip HTML tags for plain text fallback."""
-        return re.sub(r'<[^>]+>', '', text)
+        """Strip HTML tags and unescape entities for plain text fallback."""
+        return html.unescape(re.sub(r"<[^>]+>", "", text))
 
     @staticmethod
     def _split_message(text: str) -> list:
-        """Split text into chunks respecting Telegram's 4096 char limit."""
+        """Split text into chunks respecting Telegram's 4096 char limit.
+
+        Entity-safe (#2277): never cuts inside a <tag>, and tags still open at
+        a cut are closed there and reopened in the next chunk — otherwise the
+        continuation fails HTML parse and falls back to unformatted text.
+        """
         if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
             return [text]
 
+        # Reserve room for the closing tags a cut can append.
+        limit = TELEGRAM_MAX_MESSAGE_LENGTH - 100
         chunks = []
         while text:
             if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
@@ -1176,15 +1251,36 @@ class TelegramAdapter(ChannelAdapter):
                 break
 
             # Find a good split point — paragraph, then sentence, then hard cut
-            split_at = TELEGRAM_MAX_MESSAGE_LENGTH
+            split_at = limit
             for sep in ["\n\n", "\n", ". ", " "]:
-                idx = text.rfind(sep, 0, TELEGRAM_MAX_MESSAGE_LENGTH)
-                if idx > TELEGRAM_MAX_MESSAGE_LENGTH // 2:
+                idx = text.rfind(sep, 0, limit)
+                if idx > limit // 2:
                     split_at = idx + len(sep)
                     break
 
-            chunks.append(text[:split_at])
-            text = text[split_at:]
+            head = text[:split_at]
+            if head.rfind("<") > head.rfind(">"):
+                # Cut landed inside a tag — back up to its opening bracket.
+                split_at = head.rfind("<")
+                if split_at <= 0:
+                    split_at = limit
+                head = text[:split_at]
+
+            open_tags = []
+            for m in TelegramAdapter._HTML_TAG_RE.finditer(head):
+                if m.group(1):
+                    if open_tags and open_tags[-1][0] == m.group(2).lower():
+                        open_tags.pop()
+                else:
+                    open_tags.append((m.group(2).lower(), m.group(3) or ""))
+
+            chunks.append(
+                head + "".join(f"</{name}>" for name, _ in reversed(open_tags))
+            )
+            text = (
+                "".join(f"<{name}{attrs}>" for name, attrs in open_tags)
+                + text[split_at:]
+            )
 
         return chunks
 
