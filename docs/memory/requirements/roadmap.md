@@ -56,6 +56,16 @@
 - **Fail-open**: the seeder never raises and never blocks boot or setup completion.
 - **Flow**: `docs/memory/feature-flows/system-manifest.md` (seed section)
 
+#### 16.5.1a First-Run Front Desk (trinity-enterprise#319)
+- **Status**: ✅ Implemented (2026-08-18)
+- **Problem**: seeding (§16.5.1) made the onboarding wizard's own freshness test permanently false. `Dashboard.vue::maybeAutoOpenOnboarding` fires only when there are **zero non-system agents**; since a fresh install now comes up with Cornelius plus the bundled fleet already running, the ent#52 "one question → a tailored agent" wizard stopped auto-opening on exactly the install it was written for. The user meets a running fleet they did not choose and no route into anything.
+- **Surface**: `components/onboarding/FrontDeskPanel.vue` + `stores/firstRun.js` — a dismissible, non-gating card on the Dashboard offering the three doors: **Show me** (opens the seeded demonstrator's chat — zero commitment), **Make me one** (emits to the existing wizard), and **Bring mine**, deliberately a de-emphasised secondary link rather than a peer button (fleet migration is the strongest capability and the worst first impression). It is a **surface, not an agent** — the issue's original "seed nothing, ship a front-desk agent" premise was reversed when trinity-enterprise#322 was closed not-planned; what a fresh install contains belongs to trinity-enterprise#137.
+- **Predicate** (`GET /api/onboarding/first-run` → `services/onboarding_service.py`): `first_run` is true while every agent the caller can see is one Trinity seeded. The seed is deployed **under the admin account**, so it is indistinguishable from a human admin's own work in `audit_log` — an actor-based test cannot answer this. The seeded set is instead derived at read time from the seeder's own naming contract: `system_seed_service.seeded_agent_names()` (`{system}-{short}` from the manifest actually in force, honoring `TRINITY_DEFAULT_SYSTEM_MANIFEST` and its disable sentinels) plus `CORNELIUS_AGENT_NAME`. Read-time derivation, so no new persisted state, no migration, and an operator seeding their own manifest gets their own names.
+- **DB-only read**: visibility comes from `db.get_all_agent_metadata` (owner/shared/is_system), NOT the Docker-backed `get_accessible_agents` — the question is about ownership rows, so the card renders truthfully when a container is down.
+- **Two surfaces never stack**: the card requires `seeded_agents` to be non-empty, so a genuinely empty install (seeding disabled) still gets the wizard's auto-open, unchanged. Dismissal is per-browser `localStorage` (`trinity_front_desk_dismissed`), matching the wizard's existing key.
+- **Fails toward silence**: any read failure resolves to `first_run: false`. A missed nudge is a non-event; a first-run card over a mature fleet is noise no user can dismiss on the install's behalf.
+- **Gating**: OSS-core, un-gated — this is the open install's front door.
+
 #### 16.5.2 UI Manifest Install (trinity-enterprise#126)
 - **Status**: ✅ Implemented (2026-07-30)
 - **Description**: Install a whole multi-agent system from the web UI — pick a bundled manifest, upload a file, or paste YAML; preview it; deploy it. Exposes the already-shipped `POST /api/systems/deploy` capability, which was previously reachable only via curl or the MCP `deploy_system` tool.

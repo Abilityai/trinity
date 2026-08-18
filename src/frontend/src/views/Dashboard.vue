@@ -220,6 +220,15 @@
           </div>
         </div>
 
+        <!-- First-run front desk (ent#319). Shows only on a seed-only install:
+             the fleet is running and none of it is the user's, which is the
+             exact case the wizard's auto-open cannot see since ent#124. -->
+        <FrontDeskPanel @make-one="openOnboarding" />
+        <!-- Getting-started checklist (ent#238). Renders nothing unless the
+             enterprise onboarding module is entitled AND the user still has an
+             undone step — never a gate, always dismissible. -->
+        <ActivationChecklist />
+
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
       <!-- Loading skeleton (#1266): immediate feedback while fleet/timeline data loads -->
@@ -473,6 +482,8 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import FrontDeskPanel from '@/components/onboarding/FrontDeskPanel.vue'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
@@ -535,6 +546,12 @@ function maybeAutoOpenOnboarding() {
   // Count only user-created agents — `trinity-system` exists on every install,
   // so counting it would mean a fresh fleet is never "empty" and auto-open
   // would never fire.
+  //
+  // ent#319: since ent#124 seeds a fleet on first run, this predicate is false
+  // on an out-of-the-box install and the wizard no longer auto-opens there.
+  // That case is now served by the front-desk panel (which shows only when
+  // something WAS seeded), so this stays exactly as it is: it still fires on a
+  // genuinely empty install, and the two surfaces never appear together.
   if (agents.value.filter(a => !a.is_system).length > 0) return
   if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
   showOnboarding.value = true

@@ -24,3 +24,17 @@ persistent_state:
   - .mcp.json
   - .claude.json
   - .claude/.credentials.json
+
+# Declared schedules (ent#89) — reconciled onto the instance at create/sync.
+# `enabled` must be a literal YAML `true`; anything else lands disabled.
+schedules:
+  - name: Dashboard refresh
+    cron: "0 */6 * * *"
+    message: "/update-dashboard"
+    enabled: true
+    timezone: UTC
+  - name: Weekly Code Health
+    cron: "0 9 * * 1"
+    message: "Run /code-health — weekly technical-debt dashboard scan (P-16): hotspot score = churn × complexity for src/backend/, trends vs baseline, then commit docs/metrics/code-health-baseline.json + docs/metrics/code-health-latest.md. Dashboard-only: file NO GitHub issues — /groom's Debt Health section consumes the committed report."
+    enabled: true
+    timezone: UTC

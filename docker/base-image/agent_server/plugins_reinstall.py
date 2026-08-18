@@ -15,6 +15,17 @@ credential injection (a private marketplace needs a git credential at install
 time; it is resolved from the agent's `GITHUB_PAT` env here, NEVER from the
 manifest). Mirrors `mcp_template.py`.
 
+## Platform defaults (ent#411)
+
+Beyond the declared manifest, this module ensures the **platform's own plugin**
+(`trinity@abilityai`) on every boot, because the agent that most needs it — a
+bare GitHub repo with no `template.yaml` — declares nothing by definition. The
+base image pre-installs it, so the common case still runs zero subprocesses; this
+is the self-healing path for an existing volume that predates the image, an
+air-gapped build, or a failed install. It is **additive, never subtractive**: a
+`plugins:` block that omits it does not uninstall it. Operators opt out with
+`TRINITY_PLATFORM_PLUGINS=0`.
+
 ## Contracts
 
 * **Zero subprocesses when satisfied.** Current state is read via
@@ -64,6 +75,38 @@ TEMPLATE_FILE = AGENT_HOME / "template.yaml"
 
 # The manifest is agent-writable; cap the read.
 _MAX_BYTES = 256 * 1024
+
+# --- Platform-provided defaults (ent#411) ---------------------------------
+#
+# The Trinity plugin is what lets a deployed agent make ITSELF Trinity-compatible
+# (`/trinity:onboard` in place). Reading the plugin set only from the manifest is
+# chicken-and-egg for the agent that needs it most: a bare GitHub repo has no
+# `template.yaml`, so it declares nothing, so nothing is installed, so the plugin
+# that would write `template.yaml` is absent. The escape used to be a prose
+# instruction to the agent — the exact prose-dispatch the playbook-call rule
+# exists to remove.
+#
+# So this set is ensured on every boot regardless of what is declared. The base
+# image pre-installs it (see `docker/base-image/Dockerfile`), which makes the
+# common case zero subprocesses: `_read_installed()` already sees it.
+#
+# ADDITIVE, NEVER SUBTRACTIVE: a `template.yaml plugins:` block that omits
+# `trinity@abilityai` does NOT uninstall it. Nothing here ever removes a plugin —
+# reconcile means "install what is missing", not "make the set match".
+PLATFORM_MARKETPLACES: Dict[str, str] = {"abilityai": "abilityai/abilities"}
+PLATFORM_PLUGINS: Tuple[str, ...] = ("trinity@abilityai",)
+
+# Operator opt-out, for an air-gapped instance or an operator who does not want
+# the platform reaching a marketplace at all. Any of these values disables the
+# defaults; the declared manifest is still honoured.
+_OPT_OUT_VALUES = {"0", "off", "false", "no"}
+PLATFORM_PLUGINS_ENV = "TRINITY_PLATFORM_PLUGINS"
+
+# Where the last reconcile is recorded, so an operator can tell a bootstrap
+# FAILURE from a plugin that was never wanted (ent#411). Read by the #668
+# compatibility collector; agent-writable, so every consumer treats it as
+# agent-supplied.
+STATE_FILE = AGENT_HOME / ".trinity" / "plugins-state.json"
 
 # Hard per-subprocess timeout. A no-TTY prompt hangs, so this is a correctness
 # bound, not a nicety. `list` reads are quick; `add`/`install` fetch over the
@@ -200,6 +243,67 @@ def load_manifest(
     return {"marketplaces": marketplaces, "installed": installed}
 
 
+def platform_defaults_enabled() -> bool:
+    """Whether the platform-provided plugin set applies to this container."""
+    return os.environ.get(PLATFORM_PLUGINS_ENV, "").strip().lower() not in _OPT_OUT_VALUES
+
+
+def merge_platform_defaults(manifest: Dict[str, object]) -> Dict[str, object]:
+    """Union the platform set into a (possibly empty) declared manifest.
+
+    The platform's own marketplace NAME is pinned to the platform's source: the
+    manifest lives on the agent-writable volume, so letting a declaration
+    re-point `abilityai` at another repo would turn a self-healing boot step into
+    an arbitrary-code-fetch primitive. A manifest may add marketplaces and
+    plugins freely; it may not redefine this one.
+    """
+    if not platform_defaults_enabled():
+        return manifest
+
+    marketplaces: Dict[str, str] = dict(manifest.get("marketplaces") or {})
+    installed: List[str] = list(manifest.get("installed") or [])
+
+    for name, source in PLATFORM_MARKETPLACES.items():
+        if marketplaces.get(name) not in (None, source):
+            _log(
+                f"platform marketplace {name!r} is declared with a different "
+                f"source in the manifest; using the platform source"
+            )
+        marketplaces[name] = source
+    for ref in PLATFORM_PLUGINS:
+        if ref not in installed:
+            installed.append(ref)
+
+    return {"marketplaces": marketplaces, "installed": installed}
+
+
+def write_state(summary: Dict[str, object]) -> None:
+    """Record the last reconcile beside the manifest. Never raises.
+
+    This is the honest-status surface (ent#411): `withheld` names WHY a plugin is
+    absent, so "the marketplace was unreachable" is distinguishable from "the
+    operator turned platform plugins off" — which a bare presence check cannot
+    tell apart.
+    """
+    payload = {
+        "schema": 1,
+        "status": summary.get("status"),
+        "platform_defaults_enabled": platform_defaults_enabled(),
+        "platform_plugins": list(PLATFORM_PLUGINS),
+        "installed": sorted(summary.get("installed") or []),
+        "skipped": sorted(summary.get("skipped") or []),
+        "added_marketplaces": sorted(summary.get("added_marketplaces") or []),
+        "withheld": dict(summary.get("withheld") or {}),
+    }
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        _log(f"could not write {STATE_FILE.name}: {e}")
+
+
 def _run(args: List[str], *, timeout: int) -> Tuple[int, str, str]:
     """Run `args` (arg list, never a shell string). Returns `(rc, stdout, stderr)`.
 
@@ -327,9 +431,15 @@ def reinstall(manifest: Optional[Dict[str, object]] = None) -> Dict[str, object]
     }
     if manifest is None:
         manifest = load_manifest()
+    declared = bool(manifest)
+    manifest = merge_platform_defaults(manifest or {})
     if not manifest:
+        # No declaration AND the platform set is switched off — nothing to do,
+        # but still record it: "off by choice" and "failed" must not look alike.
         result["status"] = "no_manifest"
+        write_state(result)
         return result
+    result["status"] = "ok" if declared else "platform_defaults_only"
 
     marketplaces: Dict[str, str] = manifest.get("marketplaces") or {}
     installed_decl: List[str] = manifest.get("installed") or []
@@ -390,6 +500,7 @@ def reinstall(manifest: Optional[Dict[str, object]] = None) -> Dict[str, object]
         f"{len(installed_done)} plugin(s), skipped {len(skipped)} present, "
         f"withheld {len(withheld)}"
     )
+    write_state(result)
     return result
 
 

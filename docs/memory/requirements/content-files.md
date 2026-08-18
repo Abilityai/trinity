@@ -333,3 +333,49 @@ follow-up (fragile, couples to Claude's moving internal files, may be subsumed b
 - **Supply chain:** `plugin@marketplace` pins identity, not a commit — a
   re-install re-fetches the marketplace's current content (the #192
   `auto_update: on` behaviour); a pinned mode is a documented follow-up.
+
+### 42.5 Platform-provided plugin set — deploy-as-is, onboard-in-place (ent#411)
+
+- **Status**: ✅ Implemented (2026-08-18)
+- **Problem**: §42 reads the plugin set from a declaration, which is chicken-and-egg
+  for the agent that most needs it. A bare `github:owner/repo` with no
+  `template.yaml` declares nothing → nothing installs → `trinity@abilityai`, whose
+  `/trinity:onboard` would *write* that `template.yaml`, is absent. The only escape
+  was a prose instruction telling the agent to run the CLI itself — the
+  prose-dispatch anti-pattern the playbook-call rule exists to remove. `create_agent`
+  already tolerates a missing `template.yaml`, so *deploy-as-is* worked and only
+  *onboard-in-place* was blocked.
+- **Pre-install**: `docker/base-image/Dockerfile` registers the `abilityai`
+  marketplace and installs `trinity@abilityai` at build (`ARG
+  TRINITY_PREINSTALL_PLUGINS=1`). Never fatal — an unreachable marketplace at build
+  time logs and the image still builds, because the boot hook is the reconciler.
+  Docker populates an empty named volume from the image on first mount, so a NEW
+  agent inherits the pre-install and boots with **zero subprocesses**; an agent whose
+  volume predates the image self-heals through the hook instead.
+- **Ensured every boot**: `plugins_reinstall.merge_platform_defaults` unions the
+  platform set into whatever is declared, so an undeclared agent still gets it
+  (`status: platform_defaults_only`).
+- **Additive, never subtractive**: a `plugins:` block that omits `trinity@abilityai`
+  does not uninstall it. Nothing in this module ever uninstalls anything — reconcile
+  means "install what is missing", not "make the set match".
+- **The platform marketplace name is pinned to its source**: the manifest is on the
+  agent-writable volume, so a declaration that re-points `abilityai` at another repo
+  is ignored (with a log). A redefinable platform marketplace would turn a
+  self-healing boot step into an arbitrary-code-fetch primitive.
+- **Operator opt-out**: `TRINITY_PLATFORM_PLUGINS=0` at runtime (status stays
+  `no_manifest`, distinct from a failure) and `--build-arg TRINITY_PREINSTALL_PLUGINS=0`
+  for an air-gapped build.
+- **Honest status**: each reconcile is recorded to `~/.trinity/plugins-state.json`
+  (`status`, `platform_defaults_enabled`, installed / skipped / withheld-with-reason),
+  surfaced by compatibility check **I-006** (INFO). "The marketplace was unreachable"
+  and "the operator never wanted it" are different facts, and a bare presence flag
+  cannot separate them. The file is agent-writable, so I-006 cross-checks the claim
+  against the recorded lists rather than trusting a free-text status, and a missing
+  file is a SKIP (image/boot predates the mechanism), not a failure.
+- **Ordering caveat**: an agent on a base image built before this change lacks the
+  pre-install and pays one install at next boot — the same caveat as #1704's hook.
+- **Out of scope here** (owned by the marketplace, `abilityai/abilities`):
+  `/trinity:onboard`'s in-place mode itself — detect-in-container, write the files,
+  push back or emit a patch, verify via `get_agent_compatibility_report`.
+- **Guide**: `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` → "Deploy as-is, then onboard
+  in place".

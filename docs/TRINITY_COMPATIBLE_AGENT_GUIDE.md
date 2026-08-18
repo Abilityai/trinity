@@ -388,6 +388,62 @@ Rules and why:
 
 ---
 
+## Deploy as-is, then onboard in place — ent#411
+
+Everything above assumes you build the agent *first* and deploy it second. The
+opposite order also works, and it is the shortest path for a repo that already
+exists: **deploy the repo as-is, then let the agent make itself compatible.**
+
+`create_agent(template: github:owner/repo)` already tolerates a repo with **no
+`template.yaml`** — it creates exactly as it always has. What used to be missing
+was the other half: the deployed agent had no way to *become* compatible without a
+human cloning the repo locally, running the wizard, and opening a PR against a
+repo they may not even own.
+
+So the Trinity plugin is **pre-installed in the agent base image** and ensured on
+every boot, whether or not anything is declared. A bare repo has no
+`template.yaml` to declare it in — which is exactly why declaring it cannot be the
+condition for having it.
+
+```
+create_agent(template: "github:owner/bare-repo")   # no template.yaml, no plugins:
+  → agent starts, trinity@abilityai already present
+  → /trinity:onboard  (in place, inside the container)
+      writes template.yaml (incl. plugins:), .env.example,
+             .gitignore, .mcp.json.template
+      commits + pushes back with the agent's own PAT
+  → get_agent_compatibility_report → 0 HARD findings
+```
+
+What to know:
+
+- **Additive, never subtractive.** A `template.yaml plugins:` block that omits
+  `trinity@abilityai` does **not** uninstall it. Reconcile means "install what is
+  missing", never "make the installed set match the declaration".
+- **The platform's marketplace name is pinned.** A manifest may add marketplaces
+  freely, but it cannot re-point `abilityai` at another source — the manifest is
+  on the agent-writable volume, and a redefinable platform marketplace would be an
+  arbitrary-code-fetch primitive rather than a self-healing boot step.
+- **Source mode is pull-only.** Files the agent writes inside its container are
+  container-local until pushed. In-place onboarding therefore ends in a push (or,
+  for a tokenless agent, an honest report that the result is local plus the patch)
+  — otherwise the work is lost on the next reset.
+- **Opt out with `TRINITY_PLATFORM_PLUGINS=0`** (runtime) or build the image with
+  `--build-arg TRINITY_PREINSTALL_PLUGINS=0` (air-gapped builds). Neither is fatal
+  on its own: the build still succeeds if the marketplace is unreachable, and the
+  boot hook retries.
+- **Base-image ordering caveat.** An agent running an image built before this
+  change silently lacks the pre-install; its next start installs the plugin
+  through the boot hook instead (same caveat as #1704's hook). Rebuild the base
+  image (`./scripts/deploy/build-base-image.sh`) to get the zero-subprocess path.
+- **How to tell what happened.** The boot reconciler writes
+  `~/.trinity/plugins-state.json`, and compatibility check **I-006** reports it:
+  installed, withheld *with the reason*, or switched off. "The marketplace was
+  unreachable" and "the operator never wanted it" are different facts, and a bare
+  presence flag cannot tell them apart.
+
+---
+
 ## template.yaml Schema
 
 Complete schema with all available fields:

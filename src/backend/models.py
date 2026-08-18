@@ -3838,3 +3838,18 @@ class A2AOutboundEndpointUpsert(BaseModel):
                 "the token again without surrounding whitespace."
             )
         return SecretStr(raw)
+
+
+class FirstRunState(BaseModel):
+    """First-run state for the front-desk surface (ent#319, epic ent#54).
+
+    `first_run` stays true while every agent the caller can see is one Trinity
+    seeded on their behalf — seeding (ent#124) made "zero agents" permanently
+    false, so the surface it used to gate needed a predicate that survives it.
+    `demo_agent` is the seeded agent the "Show me" door opens, or None when the
+    install seeded nothing (seeding disabled) and there is nothing to show yet.
+    """
+    first_run: bool
+    seeded_agents: List[str] = []
+    own_agent_count: int = 0
+    demo_agent: Optional[str] = None

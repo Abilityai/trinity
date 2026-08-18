@@ -98,7 +98,37 @@ jobs:
             # actually syncs it, and (b) judge success by the populated
             # marker file, never the exit code.
             git config submodule.src/backend/enterprise.update checkout
-            git submodule update --init --recursive src/backend/enterprise || true
+
+            # #2246 — transport, not just authorization. `.gitmodules` uses SSH
+            # for this submodule (and HTTPS for `.claude`), so this is the only
+            # one that can die at `Host key verification failed` — which is
+            # exactly what it had been doing on every retained run since
+            # 2026-07-29, one layer BEFORE any credential was offered.
+            #
+            # When ENT_SUBMODULE_PAT is configured, rewrite the SSH URL to HTTPS for
+            # the duration of this one command. `-c` exports GIT_CONFIG_PARAMETERS,
+            # which child processes inherit — so the submodule's own clone picks it
+            # up while the token NEVER lands in .git/config on the VM disk. That
+            # clears the host-key layer and the authorization layer together, which
+            # a known_hosts entry alone does not (docs/ENTERPRISE.md).
+            #
+            # Absent the secret this is byte-identical to the previous behaviour,
+            # so the VM-side fix documented in docs/ENTERPRISE.md remains valid.
+            ENT_PAT="${{ secrets.ENT_SUBMODULE_PAT }}"
+            ENT_LOG=$(mktemp)
+            if [ -n "$ENT_PAT" ]; then
+              echo "ENTERPRISE: using HTTPS transport (ENT_SUBMODULE_PAT configured)"
+              git -c "url.https://x-access-token:${ENT_PAT}@github.com/.insteadOf=git@github.com:" \
+                  -c "url.https://x-access-token:${ENT_PAT}@github.com/.insteadOf=https://github.com/" \
+                  submodule update --init --recursive src/backend/enterprise >"$ENT_LOG" 2>&1 || true
+            else
+              git submodule update --init --recursive src/backend/enterprise >"$ENT_LOG" 2>&1 || true
+            fi
+            # Echo what happened either way — the previous version discarded the
+            # clone's own output, which is why the cause had to be reconstructed
+            # from a single unexpired run's logs.
+            sed 's/^/ENTERPRISE| /' "$ENT_LOG" || true
+
             if [ -f src/backend/enterprise/backend/__init__.py ]; then
               ENT_SHA=$(git -C src/backend/enterprise rev-parse --short HEAD 2>/dev/null || echo "unknown")
               echo "ENTERPRISE: initialized at ${ENT_SHA}"
@@ -114,9 +144,16 @@ jobs:
               fi
             else
               echo "::warning::Enterprise submodule init failed — deploying in OSS-only mode"
-              echo "ENTERPRISE: confirm the dev VM has read access to Abilityai/trinity-enterprise"
-              echo "ENTERPRISE: (deploy key, PAT in a credential helper, or org membership all work)"
+              # #2246 — classify the cause instead of asserting one. The previous
+              # two lines named an AUTHORIZATION remedy unconditionally, while the
+              # clone was actually failing host-key verification; following that
+              # hint installs a deploy key and changes nothing. The classifier
+              # prints the remedy that matches the observed output, and says
+              # "unknown" rather than guessing.
+              bash scripts/ci/classify-submodule-failure.sh "$ENT_LOG" \
+                | sed 's/^/ENTERPRISE: /' || true
             fi
+            rm -f "$ENT_LOG"
 
             # Compose file list: base prod + enterprise overlay. The
             # overlay bind-mounts ./src/backend/enterprise into
@@ -265,9 +302,12 @@ jobs:
             # existing error check below would have PRINTED this and moved on,
             # because it ends in `|| echo "No errors"`.
             #
-            # Guarded on the populated marker file, so a deploy where the
-            # submodule genuinely failed to init falls through to the
-            # ::warning:: path above. An OSS-only deploy is NEVER failed here.
+            # Guarded on the populated marker file — which is precisely the blind
+            # spot #2246 found. These assertions catch "mounted but not
+            # registered"; they structurally CANNOT fire on "not mounted at all",
+            # which is the state the dev VM was actually in for weeks. The loud
+            # check guarded the louder failure while the quiet one shipped. The
+            # else-branch below closes that.
             if [ -f src/backend/enterprise/backend/__init__.py ]; then
               if printf '%s\n' "$BOOT_LOG" | grep -q 'Trinity Enterprise registration FAILED'; then
                 echo "::error::Enterprise registration FAILED — the submodule is mounted but this instance is running OSS-only (every entitled route will 403). See trinity#2068."
@@ -287,6 +327,42 @@ jobs:
               if printf '%s\n' "$BOOT_LOG" | grep -q 'FAILED module(s)'; then
                 echo "::warning::Enterprise registration completed with FAILED module(s) — some entitled features are unavailable on this instance"
                 printf '%s\n' "$BOOT_LOG" | grep 'FAILED module(s)' | head -5
+              fi
+            else
+              # #2246 — an unentitled dev instance is a FAILED deploy, not a
+              # degraded one, and this is the deliberate decision the issue asked
+              # for. Reasoning, so a future reader can disagree on the record:
+              #
+              #  * dev exists to exercise what prod will run. With the submodule
+              #    unmounted, `enterprise_features` is empty, every
+              #    `requires_entitlement` route 403s, and gated Vue stays hidden —
+              #    so the recorded gitlink is never exercised anywhere before prod.
+              #    That is a release-time pointer surprise waiting to happen, and
+              #    it silently voids dev as a validation surface for every
+              #    enterprise-tracker issue.
+              #  * it hid for weeks BECAUSE it was only a ::warning::. Warnings do
+              #    not change a run's conclusion, and nobody reads a green run's
+              #    log. 200 consecutive runs carried it.
+              #  * #847's rule — a private submodule must never break OSS — is
+              #    about the OSS *build*, and it still holds: it is enforced by
+              #    build-without-submodule.yml and by the conditional import in
+              #    main.py. This workflow deploys the core team's dev VM, where
+              #    the submodule is expected; asserting that here does not weaken
+              #    the OSS guarantee anywhere.
+              #
+              # It fails at the END, deliberately, not at the submodule step: the
+              # pull has already happened, so aborting early would leave the VM
+              # half-updated and fix nothing. The instance comes up, gets health-
+              # checked, and THEN the run goes red with an accurate reason.
+              #
+              # Escape hatch without editing this file: set the repo variable
+              # DEPLOY_ALLOW_OSS_ONLY=true to demote this back to a warning (for a
+              # VM that legitimately has no enterprise access).
+              if [ "${{ vars.DEPLOY_ALLOW_OSS_ONLY }}" = "true" ]; then
+                echo "::warning::Deployed in OSS-only mode — enterprise submodule not mounted (allowed by DEPLOY_ALLOW_OSS_ONLY)"
+              else
+                echo "::error::Deployed in OSS-only mode — the enterprise submodule is NOT mounted, so this instance runs unentitled: enterprise_features is empty and every requires_entitlement route 403s. See the ENTERPRISE: lines above for the classified cause, and trinity#2246."
+                exit 1
               fi
             fi
 
