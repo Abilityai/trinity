@@ -110,7 +110,8 @@ class TestSpecConsistency:
     def test_catalog_size(self):
         # #2137: 101 -> 88. 17 retired (dead-field, legacy-layout, duplicate)
         # + 4 DP checks implemented. Retired ids are never reissued.
-        assert len(spec.CHECKS) == 88, f"expected 88 checks, found {len(spec.CHECKS)}"
+        # ent#411: +1 (I-006, Trinity plugin presence) -> 89.
+        assert len(spec.CHECKS) == 89, f"expected 89 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
         """#2137: persisted `checks_json` rows predate the retirement.

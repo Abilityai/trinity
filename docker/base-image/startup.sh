@@ -586,7 +586,21 @@ fi
 # materialized still re-clones its `template.yaml`, and the module falls back to
 # that block. The `grep` is a cheap top-level-key pre-check; the module does the
 # real hardened parse and no-ops when nothing is declared.
-if [ -f "/home/developer/.trinity/plugins.yaml" ] || \
+#
+# ent#411: it ALSO fires when neither exists, because that is precisely the agent
+# the platform plugin is for — a bare `github:owner/repo` with no `template.yaml`
+# declares nothing, and gating the hook on a declaration would mean the agent that
+# needs `/trinity:onboard` is the one agent that never gets it. The cost is two
+# quick `list` reads per boot on an undeclared agent (the module still installs
+# nothing when everything is present); `TRINITY_PLATFORM_PLUGINS=0` turns the
+# platform set off, and then an undeclared agent skips the hook exactly as before.
+_trinity_platform_plugins="$(printf '%s' "${TRINITY_PLATFORM_PLUGINS:-1}" | tr '[:upper:]' '[:lower:]')"
+case "$_trinity_platform_plugins" in
+    0|off|false|no) _trinity_platform_default_on=0 ;;
+    *)              _trinity_platform_default_on=1 ;;
+esac
+if [ "$_trinity_platform_default_on" = "1" ] || \
+   [ -f "/home/developer/.trinity/plugins.yaml" ] || \
    grep -qE '^plugins:' /home/developer/template.yaml 2>/dev/null; then
     echo "Restoring declared Claude Code plugins..."
     (cd /app && python3 -m agent_server.plugins_reinstall) || \

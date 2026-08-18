@@ -16,6 +16,7 @@ Secret-bearing values are NEVER echoed: S-003 / S-009 / K-004 report the file an
 line and a pattern label, never the matched secret.
 """
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -1319,6 +1320,65 @@ def c_dp004(snap):
     return _with_template(snap, f)
 
 
+PLATFORM_PLUGIN_REF = "trinity@abilityai"
+
+
+def c_i006(snap):
+    """INFO: is the Trinity plugin present, and if not, why (ent#411).
+
+    The plugin is what lets a deployed agent make ITSELF compatible
+    (`/trinity:onboard` in place), so its absence is the difference between an
+    agent that can fix its own findings and one that needs a human with a local
+    checkout. INFO, never a defect tier: an operator may legitimately switch the
+    platform set off, and a bare repo is not at fault for what the platform
+    failed to install.
+
+    Reads `.trinity/plugins-state.json`, written by the boot reconciler. That
+    file is on the agent-writable volume, so every field is treated as
+    agent-supplied: only known keys are read, the presence claim is cross-checked
+    against the recorded lists rather than a free-text status, and a withheld
+    REASON is reported as the reconciler's own string, truncated.
+
+    A missing file is not a failure — it means an image or a boot that predates
+    this mechanism, which is a different statement from "the install failed".
+    """
+    raw = _content(snap, ".trinity/plugins-state.json")
+    if raw is None:
+        return _skip("plugin state not reported",
+                     "no .trinity/plugins-state.json — base image or boot predates ent#411")
+    try:
+        state = json.loads(raw)
+    except (ValueError, TypeError):
+        return _fail("plugin state file is present but unreadable",
+                     {"path": ".trinity/plugins-state.json"})
+    if not isinstance(state, dict):
+        return _fail("plugin state file is not an object",
+                     {"path": ".trinity/plugins-state.json"})
+
+    present = {str(x) for x in (state.get("installed") or []) if isinstance(x, str)}
+    # `skipped` entries are recorded as "plugin:<ref>" / "marketplace:<name>".
+    present |= {
+        str(x).split(":", 1)[1]
+        for x in (state.get("skipped") or [])
+        if isinstance(x, str) and x.startswith("plugin:")
+    }
+    if PLATFORM_PLUGIN_REF in present:
+        return _ok(f"{PLATFORM_PLUGIN_REF} is installed — this agent can onboard itself in place")
+
+    withheld = state.get("withheld") if isinstance(state.get("withheld"), dict) else {}
+    reason = withheld.get(f"plugin:{PLATFORM_PLUGIN_REF}") or withheld.get(
+        "marketplace:abilityai"
+    )
+    if isinstance(reason, str) and reason.strip():
+        return _fail(f"{PLATFORM_PLUGIN_REF} could not be installed",
+                     {"withheld": reason.strip()[:200]})
+    if state.get("platform_defaults_enabled") is False:
+        return _skip("platform plugins are switched off for this agent",
+                     "TRINITY_PLATFORM_PLUGINS is disabled — the plugin was never wanted")
+    return _fail(f"{PLATFORM_PLUGIN_REF} is not installed",
+                 {"reported_status": str(state.get("status"))[:80]})
+
+
 STATIC_CHECKS = {
     "F-001": c_f001, "F-002": c_f002, "F-003": c_f003, "F-004": c_f004,
     "F-005": c_f005, "F-006": c_f006, "F-007": c_f007,
@@ -1337,6 +1397,7 @@ STATIC_CHECKS = {
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
     "D-005": c_d005, "D-008": c_d008,
     "X-003": c_x003, "X-004": c_x004, "X-007": c_x007,
+    "I-006": c_i006,
     "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,
     "DP-004": c_dp004,
 }
