@@ -94,6 +94,60 @@ The URL override lives only in your clone's `.git/config` — never commit a
 token anywhere. Prefer a credential helper over embedding the token in the URL
 where possible.
 
+> **Option A fails one layer earlier than you expect (#2246).** SSH verifies the
+> *server's* identity before it offers your key, so a host with no `github.com`
+> entry in its `~/.ssh/known_hosts` dies at:
+>
+> ```
+> Host key verification failed.
+> fatal: Could not read from remote repository.
+> ```
+>
+> That message is **not** about access — authentication was never attempted — but
+> git helpfully appends "Please make sure you have the correct access rights",
+> which sends most people after credentials they already have. It is also
+> asymmetric: `.gitmodules` uses HTTPS for `.claude` and SSH only for
+> `src/backend/enterprise`, so this is the one submodule that can fail this way.
+> The dev VM shipped OSS-only for weeks on exactly this. Either trust the key:
+>
+> ```bash
+> ssh-keyscan github.com >> ~/.ssh/known_hosts
+> ```
+>
+> …or take **Option B**, which needs no `known_hosts` entry and clears the
+> authorization layer in the same step. On an unattended host, prefer B.
+
+### Unattended hosts: dev VM / CI (#2246)
+
+A deploy host is the case where "it silently degraded" costs the most, because
+nobody is watching the log. Two things make it durable:
+
+**Pin the transport in the host's clone, once.** Option B's `git config` above
+survives pulls, rebuilds of the containers, and every future
+`git submodule update` — but **not** a rebuild of the VM itself. Re-applying it
+belongs in whatever provisions the host, next to the checkout step; otherwise the
+next rebuild silently reintroduces the OSS-only deploy.
+
+**Or hand the token to the workflow instead of the host.** `deploy-dev.yml` reads
+an optional `ENT_SUBMODULE_PAT` repo secret and, when present, rewrites the SSH URL
+to HTTPS **for the duration of that one command**:
+
+```bash
+git -c "url.https://x-access-token:${PAT}@github.com/.insteadOf=git@github.com:" \
+    submodule update --init --recursive src/backend/enterprise
+```
+
+`git -c` exports `GIT_CONFIG_PARAMETERS`, which the submodule's own clone process
+inherits (verified — with the rewrite in place the child clones the rewritten
+URL), so the token never lands in the host's `.git/config`. With the secret
+unset the command is byte-identical to the plain form, so this is additive: the
+host-side override above remains a valid, independent fix.
+
+Whichever route you take, the deploy now **fails** rather than warning when the
+submodule is not mounted — an unentitled dev instance means the recorded gitlink
+is never exercised before prod. Set the repo variable `DEPLOY_ALLOW_OSS_ONLY=true`
+if a particular host legitimately has no enterprise access.
+
 ### 3. Get the code into the container
 
 The enterprise tree reaches the backend via a **bind-mount**, never the image —
