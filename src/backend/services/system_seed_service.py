@@ -592,3 +592,33 @@ class SystemSeedService:
 
 # Global service instance
 system_seed_service = SystemSeedService()
+
+
+def seeded_agent_names() -> set:
+    """The `{system}-{short}` names a fresh install deploys from the manifest.
+
+    Read-only derivation of this module's own naming contract, exposed so
+    readers (ent#319's first-run surface) don't have to re-derive it — or reach
+    into the private helpers — and drift from what the seeder actually creates.
+    Honors the `TRINITY_DEFAULT_SYSTEM_MANIFEST` override and its disable
+    sentinels, so an operator seeding their own fleet gets their own names.
+
+    Never raises: an unreadable, disabled or unparseable manifest yields an
+    empty set. Does NOT include Cornelius — that name belongs to
+    `cornelius_agent_service`, which seeds it independently.
+    """
+    override_raw = (os.getenv(MANIFEST_ENV_VAR) or "").strip()
+    if override_raw.lower() in _DISABLE_SENTINELS:
+        return set()
+    try:
+        manifest_yaml, _source, error = system_seed_service._resolve_manifest(override_raw)
+        if error or not manifest_yaml:
+            return set()
+        system_name, short_names = system_seed_service._manifest_agent_names(manifest_yaml)
+        if not system_name:
+            return set()
+        return {f"{system_name}-{short}" for short in short_names}
+    except Exception:
+        logger.debug("Seeded-name derivation failed (non-fatal)", exc_info=True)
+        return set()
+
