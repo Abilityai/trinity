@@ -191,6 +191,14 @@
             <PortalSessionPolicyPanel />
           </div>
 
+          <!-- Room budgets (ent#387) — beside the session policy for the same
+               reason: both bound what a client engagement consumes, and this is
+               the only surface that sets them since ent#381 retired the Sessions
+               page. Self-hiding when the rooms module is not entitled. -->
+          <div v-if="activeTab === 'retention'" class="mb-6">
+            <RoomBudgetDefaultsPanel />
+          </div>
+
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
                real email so they can sign in with email + password, matching
@@ -2379,6 +2387,7 @@ import SsoPanel from '../components/settings/SsoPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
+import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
