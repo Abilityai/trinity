@@ -33,3 +33,8 @@ schedules:
     message: "/update-dashboard"
     enabled: true
     timezone: UTC
+  - name: Weekly Code Health
+    cron: "0 9 * * 1"
+    message: "Run /code-health — weekly technical-debt dashboard scan (P-16): hotspot score = churn × complexity for src/backend/, trends vs baseline, then commit docs/metrics/code-health-baseline.json + docs/metrics/code-health-latest.md. Dashboard-only: file NO GitHub issues — /groom's Debt Health section consumes the committed report."
+    enabled: true
+    timezone: UTC
