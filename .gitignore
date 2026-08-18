@@ -178,6 +178,9 @@ config/agent-templates/**/metrics.json
 .trinity/
 content/
 session-files/
+# Agent dashboard snapshot — regenerated in place by /update-dashboard on the
+# dev agent (Trinity reads it from the agent home, not from git)
+/dashboard.yaml
 
 # Local-only working artifacts (never push)
 saved-conversations/

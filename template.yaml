@@ -24,3 +24,12 @@ persistent_state:
   - .mcp.json
   - .claude.json
   - .claude/.credentials.json
+
+# Declared schedules (ent#89) — reconciled onto the instance at create/sync.
+# `enabled` must be a literal YAML `true`; anything else lands disabled.
+schedules:
+  - name: Dashboard refresh
+    cron: "0 */6 * * *"
+    message: "/update-dashboard"
+    enabled: true
+    timezone: UTC
