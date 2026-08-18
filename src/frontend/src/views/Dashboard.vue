@@ -224,6 +224,10 @@
              the fleet is running and none of it is the user's, which is the
              exact case the wizard's auto-open cannot see since ent#124. -->
         <FrontDeskPanel @make-one="openOnboarding" />
+        <!-- Getting-started checklist (ent#238). Renders nothing unless the
+             enterprise onboarding module is entitled AND the user still has an
+             undone step — never a gate, always dismissible. -->
+        <ActivationChecklist />
 
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
@@ -479,6 +483,7 @@ import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import FrontDeskPanel from '@/components/onboarding/FrontDeskPanel.vue'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
