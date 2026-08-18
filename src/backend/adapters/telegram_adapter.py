@@ -1226,7 +1226,7 @@ class TelegramAdapter(ChannelAdapter):
                     return f"<b><u>{body}</u></b>"
                 return f"<b>{body}</b>"
 
-            text = re.sub(r"(?m)^(#{1,6})[ \t]+(.+)$", _header, text)
+            text = re.sub(r"(?m)^(#{1,6})[ \t]+(\S.*)$", _header, text)
             # Horizontal rules (before bold/italic so *** and ___ don't pair up)
             text = re.sub(r"(?m)^(?:---+|\*\*\*+|___+)[ \t]*$", "———", text)
             # Bullets (before italic so a leading * is never an emphasis opener)
