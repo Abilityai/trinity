@@ -142,6 +142,35 @@ COPY --chown=developer:developer ./hooks/claude-settings.json /home/developer/.c
 RUN chmod 0644 /home/developer/.claude/settings.json
 USER developer
 
+# --- Trinity plugin pre-install (ent#411) ---------------------------------
+# Bake the platform's own Claude Code plugin into the image so an agent created
+# from a BARE GitHub repo — no template.yaml, no plugins: block — can run
+# `/trinity:onboard` in its first session and make itself Trinity-compatible.
+# Reading the plugin set only from a declaration is chicken-and-egg for exactly
+# that agent: it declares nothing, so nothing installs, so the plugin that would
+# write template.yaml is missing.
+#
+# This lands under /home/developer, which is a named volume at runtime. Docker
+# populates an EMPTY named volume from the image on first mount, so a new agent
+# gets it; an agent whose volume predates this image does not, and for those the
+# #1704 boot hook (agent_server.plugins_reinstall) installs it on next start.
+# Same ordering caveat as #1704: an old base image silently lacks the pre-install.
+#
+# Never fatal. An air-gapped or rate-limited build must still produce an image —
+# the boot hook is the reconciler, so a missed pre-install costs subprocesses at
+# first start, not correctness. Set TRINITY_PREINSTALL_PLUGINS=0 to skip it
+# deliberately (and TRINITY_PLATFORM_PLUGINS=0 at runtime to keep the boot hook
+# from installing it either).
+ARG TRINITY_PREINSTALL_PLUGINS=1
+RUN if [ "$TRINITY_PREINSTALL_PLUGINS" = "1" ]; then \
+        (claude plugin marketplace add abilityai/abilities \
+            && claude plugin install trinity@abilityai --yes \
+            && echo "[base-image] pre-installed trinity@abilityai") \
+        || echo "[base-image] withheld trinity@abilityai: marketplace unreachable at build time — the boot hook will retry"; \
+    else \
+        echo "[base-image] trinity@abilityai pre-install skipped (TRINITY_PREINSTALL_PLUGINS=$TRINITY_PREINSTALL_PLUGINS)"; \
+    fi
+
 # Copy agent server code to /app (outside persistent volume)
 # This ensures code updates reach agents without volume conflicts
 USER root

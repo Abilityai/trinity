@@ -213,7 +213,17 @@ def test_missing_claude_cli_is_non_fatal(mod, monkeypatch):
     assert res["status"] == "ok"
 
 
-def test_no_manifest_status(mod, monkeypatch):
+def test_no_manifest_still_installs_the_platform_set(mod, monkeypatch):
+    """ent#411: an agent that declares nothing is exactly the one that needs the
+    Trinity plugin — a bare repo has no template.yaml to declare it in."""
+    _patch_claude(monkeypatch, mod, _FakeClaude())
+    res = mod.reinstall({})
+    assert res["status"] == "platform_defaults_only"
+    assert "trinity@abilityai" in res["installed"]
+
+
+def test_no_manifest_status_when_platform_set_is_off(mod, monkeypatch):
+    monkeypatch.setenv("TRINITY_PLATFORM_PLUGINS", "0")
     _patch_claude(monkeypatch, mod, _FakeClaude())
     assert mod.reinstall({})["status"] == "no_manifest"
 
