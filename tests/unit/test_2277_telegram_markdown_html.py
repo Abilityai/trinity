@@ -208,3 +208,22 @@ def test_realistic_agent_report_parses_clean():
     assert '<a href="https://docs.ability.ai/guides">runbook</a>' in out
     assert 'class="language-bash"' in out
     assert "&lt;org disabled&gt;" in out
+
+
+# ------------------------------------------------------- pathological inputs ---
+
+
+def test_pathological_inputs_stay_correct():
+    # The input shapes CodeQL flagged for superlinear backtracking (#2295):
+    # unclosed fence + tab runs, bracket runs, header + tab runs, '<' runs.
+    out = md("```" + "\t" * 5000)  # unclosed fence stays literal text
+    assert "```" in out and _balanced(out)
+    assert md("[" * 3000) == "[" * 3000
+    assert _balanced(md("#" + "\t" * 4000))
+    assert strip("<" * 4000) == "<" * 4000
+
+
+def test_unclosed_fence_is_literal():
+    out = md("before\n```python\nno closer here")
+    assert "<pre>" not in out
+    assert "```" in out

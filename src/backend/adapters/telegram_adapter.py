@@ -1141,10 +1141,39 @@ class TelegramAdapter(ChannelAdapter):
         return self._markdown_to_html(text)
 
     # Fenced code: optional language becomes <pre><code class="language-X">
-    # (Telegram renders syntax highlighting for it). Issue #2277.
-    _MD_FENCE_RE = re.compile(r"```(\w*)[ \t]*\n?(.*?)```", re.DOTALL)
+    # (Telegram renders syntax highlighting for it). Fences are parsed by a
+    # linear split on the ``` delimiter — one regex over the whole (agent- and
+    # user-length) text is superlinear here (py/polynomial-redos). Issue #2277.
+    _MD_FENCE_LANG_RE = re.compile(r"\w{0,32}[ \t]*")
     # Tags this converter emits — consumed by the entity-safe splitter.
     _HTML_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^<>]*)?)>")
+
+    @staticmethod
+    def _stash_fenced_code(text: str, hold) -> str:
+        """Replace each closed ``` fence with a stashed <pre><code> block.
+
+        Linear scan via str.split — every fence body is visited exactly once,
+        and a trailing unclosed fence stays literal text.
+        """
+        parts = text.split("```")
+        if len(parts) < 3:
+            return text
+        out = [parts[0]]
+        i = 1
+        while i + 1 < len(parts):
+            block = parts[i]
+            first, sep, rest = block.partition("\n")
+            if sep and TelegramAdapter._MD_FENCE_LANG_RE.fullmatch(first):
+                lang, code = first.strip(), rest
+            else:
+                lang, code = "", block
+            cls = f' class="language-{lang}"' if lang else ""
+            out.append(hold(f"<pre><code{cls}>{html.escape(code, quote=False)}</code></pre>"))
+            out.append(parts[i + 1])
+            i += 2
+        if i < len(parts):
+            out.append("```" + parts[i])
+        return "".join(out)
 
     @staticmethod
     def _markdown_to_html(text: str) -> str:
@@ -1164,13 +1193,7 @@ class TelegramAdapter(ChannelAdapter):
                 stash.append(fragment)
                 return f"\x00{len(stash) - 1}\x00"
 
-            def _fence(m):
-                lang = m.group(1)
-                cls = f' class="language-{lang}"' if lang else ""
-                body = html.escape(m.group(2), quote=False)
-                return _hold(f"<pre><code{cls}>{body}</code></pre>")
-
-            text = TelegramAdapter._MD_FENCE_RE.sub(_fence, text)
+            text = TelegramAdapter._stash_fenced_code(text, _hold)
             # Inline code: `text`
             text = re.sub(
                 r"`([^`\n]+)`",
@@ -1190,11 +1213,20 @@ class TelegramAdapter(ChannelAdapter):
 
             # Links: [text](url)
             text = re.sub(
-                r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', text
+                r"\[([^\]\n]{1,256})\]\((https?://[^)\s]{1,1024})\)", r'<a href="\2">\1</a>', text
             )
-            # Headers: #/## emphasized, ###+ plain bold
-            text = re.sub(r"(?m)^#{1,2}[ \t]+(.+?)[ \t]*#*[ \t]*$", r"<b><u>\1</u></b>", text)
-            text = re.sub(r"(?m)^#{3,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", r"<b>\1</b>", text)
+            # Headers: #/## emphasized, ###+ plain bold. Trailing #/space
+            # trimming happens in code — expressing it in-pattern needs
+            # ambiguous adjacent quantifiers (py/polynomial-redos).
+            def _header(m):
+                body = m.group(2).rstrip().rstrip("#").rstrip()
+                if not body:
+                    return m.group(0)
+                if len(m.group(1)) <= 2:
+                    return f"<b><u>{body}</u></b>"
+                return f"<b>{body}</b>"
+
+            text = re.sub(r"(?m)^(#{1,6})[ \t]+(.+)$", _header, text)
             # Horizontal rules (before bold/italic so *** and ___ don't pair up)
             text = re.sub(r"(?m)^(?:---+|\*\*\*+|___+)[ \t]*$", "———", text)
             # Bullets (before italic so a leading * is never an emphasis opener)
@@ -1229,7 +1261,7 @@ class TelegramAdapter(ChannelAdapter):
     @staticmethod
     def _strip_html(text: str) -> str:
         """Strip HTML tags and unescape entities for plain text fallback."""
-        return html.unescape(re.sub(r"<[^>]+>", "", text))
+        return html.unescape(re.sub(r"<[^<>]*>", "", text))
 
     @staticmethod
     def _split_message(text: str) -> list:
