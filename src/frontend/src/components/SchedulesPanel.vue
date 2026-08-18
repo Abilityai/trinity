@@ -326,7 +326,17 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
       <p class="mt-2 text-gray-500 dark:text-gray-400">No schedules configured</p>
-      <p class="text-sm text-gray-400 dark:text-gray-500">Create a schedule to automate agent tasks</p>
+      <p class="text-sm text-gray-400 dark:text-gray-500">A schedule is what makes this agent autonomous — it runs without you.</p>
+      <!-- ent#238: an empty view with no way out is a dead end. The primary
+           action is the same one the header carries, so the user never has to
+           go hunting for it from the state that needs it most. -->
+      <button
+        @click="showCreateForm = true"
+        data-testid="schedules-empty-create"
+        class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700"
+      >
+        Create a schedule
+      </button>
     </div>
 
     <div v-else class="space-y-4">

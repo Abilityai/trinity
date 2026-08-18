@@ -220,6 +220,11 @@
           </div>
         </div>
 
+        <!-- Getting-started checklist (ent#238). Renders nothing unless the
+             enterprise onboarding module is entitled AND the user still has an
+             undone step — never a gate, always dismissible. -->
+        <ActivationChecklist />
+
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
       <!-- Loading skeleton (#1266): immediate feedback while fleet/timeline data loads -->
@@ -473,6 +478,7 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
