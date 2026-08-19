@@ -107,14 +107,68 @@ in lockstep, `authHeader` divergence, an escape hatch for an operator dead-ended
 the OTP form, storage-write failure, cross-tab staleness). Credential destruction
 carries none, and leaves the 401 predicate correct **by construction**.
 
+
+## The expiry path (#2261)
+
+Expiry still cannot end the platform credential — an operator working in another
+tab must not be logged out because a client's idle window lapsed — so the fix
+breaks the *derivation* instead, for the tab where the client's session died.
+
+**Two halves, and neither works alone.**
+
+1. **The wire.** Every workspace call moved onto a dedicated axios instance
+   (`portalHttp`), whose request interceptor **discards any `Authorization` on the
+   config and rebuilds it from the store** — so the store is the only source, and
+   `authHeader` returning `{}` while suppressed means nothing goes out.
+
+   Two things worth stating precisely, because the first version of this got the
+   second one wrong. *(a)* Verified against axios 1.19.0: an instance created
+   before `auth.js` mutates `axios.defaults.headers.common` does **not** inherit
+   that mutation, so moving onto the instance is what actually closes the
+   disclosure (pinned by `tests/unit/axiosInstanceIsolation.spec.js` against real
+   axios, so a version bump that changes it is visible). *(b)* The interceptor
+   originally *preserved* whatever `Authorization` it found, which cannot tell
+   "the store decided this" from "axios inherited this" — it would have kept an
+   inherited JWT rather than stripping it. It is now unconditional, so the
+   property does not rest on merge behaviour we neither control nor test. This is the half that answers the objection above: with
+   it, "the workspace is signed out" is a statement about the wire, not only the
+   screen. (`streamPortalExecution` uses bare `fetch` with `authHeader` only, so it
+   was already honest and stays so.)
+2. **The screen.** `platformFallbackSuppressed` — set when a client session
+   EXPIRES here, cleared by `signOut()`, by a client signing in again, and by the
+   operator's explicit "Continue as <email>". `isPlatformSession` returns false
+   while it is set. Stored in **sessionStorage**: it must survive a refresh of this
+   tab and nothing wider, which is also what keeps an operator's other tab
+   untouched.
+
+**The escape hatch is mandatory, not a nicety.** The suppression fails closed, so
+it necessarily catches the operator when the browser is genuinely theirs. One
+explicit click (`continueAsPlatform`) is the way back; re-deriving automatically is
+the bug.
+
+**The 401 bounce moved with the transport, and onto a better question.** The global
+`axios` interceptor in `main.js` decided with `onWorkspace && localStorage['token']`.
+Workspace calls no longer pass through it, so the operator bounce is re-registered
+via `setPlatformSessionLostHandler` and fires only when `isPlatformSession` — which
+is false in exactly the case that predicate got wrong: a client at the OTP form on a
+browser holding an operator's JWT, where one mistyped digit would have 401'd, bounced
+them to `/login` and destroyed the operator's session (objection 3 above).
+
+**`resumePath` is finally read.** `endSession` has recorded where the client was
+since ent#375 and nothing consumed it, so the expired notice's "pick up where you
+left off" was a promise the app did not keep; the sign-in that consumes the expiry
+now navigates there. The expired notice itself was also unrendered until #2261 — the
+form simply reappeared, indistinguishable from "you were never signed in".
+
+**Degradation:** if `sessionStorage` is unavailable (private mode), the marker reads
+as absent — pre-#2261 behaviour, rather than a workspace nobody can enter.
+
 ## Stated residuals (not hidden)
 
-- **Client-session expiry with a later platform login** still falls back to the
-  platform identity via `endSession → signOut`. Same class by an ordering the UI
-  does not produce (the OTP form never renders while a JWT exists, so it needs the
-  platform login to arrive *after* the client signed in). Not fixable with credential
-  destruction — expiry is not a user act — and the flag alternative is unsound.
-  Tracked as #2261.
+- ~~**Client-session expiry with a later platform login** still falls back to the
+  platform identity.~~ **Fixed in #2261** — see below. The flag alternative was
+  unsound *because of the axios-default leak*; removing that leak is what made a
+  suppression honest, so the fix is both halves together, never the flag alone.
 - **A client's portal token stays server-side valid** after "Sign out" (idle 7d /
   absolute 30d by default): the sign-out is client-side disposal; there is no
   self-service `POST /auth/logout`. The primitive exists
