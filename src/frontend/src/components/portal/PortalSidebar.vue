@@ -6,9 +6,20 @@
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
       <svg class="w-6 h-6 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
       <span class="font-semibold">Workspace</span>
+      <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
+           on you to decide, the other on you to read — so it gets its own badge
+           rather than being summed into that one. Amber, before the unread count,
+           because a blocked agent outranks unread chatter. -->
+      <span
+        v-if="askCount"
+        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-amber-500 text-white text-[11px] font-semibold flex items-center justify-center"
+        data-testid="sidebar-ask-count"
+        :title="`${askCount} ${askCount === 1 ? 'agent is' : 'agents are'} waiting on your answer`"
+      >{{ askCount > 99 ? '99+' : askCount }}</span>
       <span
         v-if="totalWaiting"
-        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
+        class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
+        :class="askCount ? 'ml-1.5' : 'ml-auto'"
         :title="`${totalWaiting} ${totalWaiting === 1 ? 'reply' : 'replies'} you haven't read`"
       >{{ totalWaiting > 99 ? '99+' : totalWaiting }}</span>
     </div>
@@ -216,6 +227,7 @@ import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
+import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
   signOutLabelFor,
@@ -251,6 +263,11 @@ const grouped = computed(() => groupThreadsByDate(split.value.rest))
 const waiting = computed(() => unreadByAgent(props.threads))
 const waitingFor = (name) => waiting.value[name] || 0
 const totalWaiting = computed(() => totalUnread(props.threads))
+// ent#364: read from the store rather than taken as a prop, because the count and
+// the two ask renderings must come from ONE list — a prop threaded from the view
+// would be a second path to the same fact, free to disagree with it.
+const asksStore = useClientPortalStore()
+const askCount = computed(() => asksStore.askCount)
 
 // A row key has to include the kind: thread ids and room ids are independent
 // spaces, so two chats of different kinds could collide on a bare id.

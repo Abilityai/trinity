@@ -223,6 +223,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // browser that was a client's does not silently become the operator's; the
     // operator's own session is untouched (see `continueAsPlatform`).
     platformFallbackSuppressed: readSuppressed(),
+    // ent#364 — agent-initiated asks addressed to this user. ONE list, read by all
+    // three surfaces (sidebar count, agent page, inline in chat), because the
+    // underlying row is one row: answering anywhere clears it everywhere with no
+    // sync step, and three separate queries is how that stops being true.
+    asks: [],
+    asksAvailable: false,   // false when the module is absent/unentitled (404/403)
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -324,6 +330,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
     isClientSignedIn() {
       return !!this.portalToken || this.isPlatformSession
+    },
+    // ent#364: only PENDING asks are actionable. An expired one still renders (see
+    // `asks`), but it is not something the badge should nag about — the person did
+    // not fail to answer something they can still answer.
+    openAsks: (state) => state.asks.filter((a) => a.status === 'pending'),
+    askCount() {
+      return this.openAsks.length
+    },
+    asksForAgent() {
+      return (agentName) => this.asks.filter((a) => a.agent_name === agentName)
     },
   },
 
@@ -1125,6 +1141,49 @@ export const useClientPortalStore = defineStore('clientPortal', {
         )
       }
       return kept
+    },
+
+    // ent#364 — the ONE read all three surfaces use.
+    //
+    // Runs on `portalHttp` like every other workspace call: #2261 moved the
+    // store onto a dedicated instance so a workspace request can never inherit
+    // the platform JWT from `axios.defaults`.
+    //
+    // Degrades to silence: the module is enterprise-gated, so an OSS or unentitled
+    // build answers 404/403 and there is nothing to render. That is not an error
+    // worth showing a client — `asksAvailable` stays false and every surface
+    // renders nothing, which is how this ships in the OSS bundle at all.
+    async fetchAsks(agentName = null) {
+      if (!this.isClientSignedIn) return []
+      try {
+        const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+          headers: this.authHeader,
+          params: agentName ? { agent_name: agentName } : {},
+        })
+        this.asks = Array.isArray(data) ? data : []
+        this.asksAvailable = true
+        return this.asks
+      } catch (err) {
+        this.asksAvailable = false
+        if (![403, 404].includes(err.response?.status)) {
+          console.warn('[workspace] asks unavailable:', err?.message || err)
+        }
+        this.asks = []
+        return []
+      }
+    },
+
+    // Answer one ask. The row is removed from local state on success rather than
+    // patched: the server's answer is authoritative, and a client that keeps a
+    // stale "pending" copy would offer to answer it twice.
+    async answerAsk(askId, { response = null, responseText = null } = {}) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/asks/${askId}/answer`,
+        { response, response_text: responseText },
+        { headers: this.authHeader },
+      )
+      this.asks = this.asks.filter((a) => a.id !== askId)
+      return data
     },
 
     async fetchRoster() {
