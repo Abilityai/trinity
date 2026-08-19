@@ -34,6 +34,7 @@ derivation (2h event predicate OR fresh provider verdict) — every surface
 consumes it; no second definition (#2157 one-gate lesson).
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 # Cheapest Claude model; the probe never reads the body, only the headers.
 PROBE_MODEL = "claude-haiku-4-5-20251001"
 PROBE_URL = "https://api.anthropic.com/v1/messages"
-PROBE_TIMEOUT_SECONDS = 30.0
+PROBE_TIMEOUT_SECONDS = 15.0
 
 # Ambient refresh cadence (demand-driven — an unwatched instance probes nothing).
 REFRESH_SECONDS = int(os.getenv("SUBSCRIPTION_HEADROOM_REFRESH_SECONDS", "900"))
@@ -192,15 +193,26 @@ async def _probe(subscription_id: str) -> Optional[dict]:
     return snapshot
 
 
-def _read_snapshot(subscription_id: str) -> Optional[dict]:
+def _read_snapshot(subscription_id: str) -> tuple:
+    """Returns ``(redis_ok, snapshot)``. The two falsy cases MUST stay
+    distinct: "Redis answered: no snapshot" may ambient-probe; "Redis could
+    not be asked" must NOT — a client OBJECT existing proves nothing about the
+    server, and collapsing the two re-opens the probe-per-poll storm the
+    fail-closed rule exists to prevent (the #2196 tri-state lesson applied to
+    a cache)."""
     r = get_breaker_redis()
     if r is None:
-        return None
+        return False, None
     try:
         raw = r.get(_SNAPSHOT_KEY.format(sid=subscription_id))
-        return json.loads(raw) if raw else None
+        return True, (json.loads(raw) if raw else None)
     except Exception:
-        return None
+        return False, None
+
+
+# Self-cleaning: a deleted subscription's snapshot dies with the TTL even when
+# the best-effort DEL at delete time was missed (Redis down at that moment).
+_SNAPSHOT_TTL_SECONDS = 7 * 24 * 3600
 
 
 def _store_snapshot(subscription_id: str, snapshot: dict) -> None:
@@ -208,7 +220,11 @@ def _store_snapshot(subscription_id: str, snapshot: dict) -> None:
     if r is None:
         return
     try:
-        r.set(_SNAPSHOT_KEY.format(sid=subscription_id), json.dumps(snapshot))
+        r.set(
+            _SNAPSHOT_KEY.format(sid=subscription_id),
+            json.dumps(snapshot),
+            ex=_SNAPSHOT_TTL_SECONDS,
+        )
     except Exception:
         pass
 
@@ -266,42 +282,73 @@ def _to_model(snapshot: Optional[dict]) -> Optional[SubscriptionHeadroom]:
     )
 
 
+# Strong refs for background refreshes — an asyncio.Task held only by the event
+# loop can be GC'd mid-flight (the #1083 footgun the architecture documents).
+_bg_refreshes: set = set()
+
+
+async def _probe_and_store(subscription_id: str) -> Optional[dict]:
+    _last_probe_at[subscription_id] = time.monotonic()
+    fresh = await _probe(subscription_id)
+    if fresh is not None:
+        _store_snapshot(subscription_id, fresh)
+    return fresh
+
+
+async def _locked_probe(subscription_id: str) -> Optional[dict]:
+    lock = SingleFlightLock(
+        _LOCK_KEY.format(sid=subscription_id),
+        ttl_seconds=int(PROBE_TIMEOUT_SECONDS) + 30,
+        client=get_breaker_redis(),
+    )
+    if not lock.acquire():
+        return None  # a sibling is probing — its result lands in the cache
+    try:
+        return await _probe_and_store(subscription_id)
+    finally:
+        lock.release_if_owned()
+
+
 async def get_headroom(
-    subscription_id: str, *, force: bool = False
+    subscription_id: str, *, force: bool = False, wait: bool = True
 ) -> Optional[SubscriptionHeadroom]:
-    """The one read path. ``force`` = operator click (probe allowed Redis-down,
-    floored); ambient refresh requires the toggle ON, a stale-or-absent cached
-    snapshot, AND a reachable Redis (fail-closed — see module docstring)."""
-    redis_up = get_breaker_redis() is not None
-    snapshot = _read_snapshot(subscription_id)
+    """The one read path.
+
+    ``force`` = operator click: probe now (floored at MIN_PROBE_INTERVAL;
+    works Redis-down via the in-process floor, result served uncached).
+    Ambient refresh (``force=False``) requires the toggle ON, a
+    stale-or-absent cached snapshot, AND a Redis that ANSWERED the cache read
+    (fail-closed — an unreachable Redis must not read as "no snapshot", see
+    ``_read_snapshot``).
+
+    ``wait=False`` (the dashboard batch path) runs an ambient refresh as a
+    background task and serves the stale snapshot immediately — a hung
+    provider must never wedge the 60s chassis poll behind N × probe-timeout.
+    """
+    redis_ok, snapshot = _read_snapshot(subscription_id)
     age = _snapshot_age_seconds(snapshot) if snapshot else None
 
-    should_probe = False
     if force:
-        should_probe = _probe_floor_ok(subscription_id, snapshot)
+        if _probe_floor_ok(subscription_id, snapshot):
+            fresh = await _locked_probe(subscription_id)
+            if fresh is not None:
+                snapshot = fresh
     elif (
-        redis_up
+        redis_ok
         and is_auto_refresh_enabled()
         and (snapshot is None or age is None or age > REFRESH_SECONDS)
+        and _probe_floor_ok(subscription_id, snapshot)
     ):
-        should_probe = _probe_floor_ok(subscription_id, snapshot)
-
-    if should_probe:
-        lock = SingleFlightLock(
-            _LOCK_KEY.format(sid=subscription_id),
-            ttl_seconds=int(PROBE_TIMEOUT_SECONDS) + 30,
-            client=get_breaker_redis(),
-        )
-        if lock.acquire():
-            try:
-                _last_probe_at[subscription_id] = time.monotonic()
-                fresh = await _probe(subscription_id)
-                if fresh is not None:
-                    _store_snapshot(subscription_id, fresh)
-                    snapshot = fresh
-            finally:
-                lock.release_if_owned()
-        # Lost the single-flight: serve whatever is cached (a sibling is probing).
+        if wait:
+            fresh = await _locked_probe(subscription_id)
+            if fresh is not None:
+                snapshot = fresh
+        else:
+            task = asyncio.create_task(_locked_probe(subscription_id))
+            _bg_refreshes.add(task)
+            task.add_done_callback(_bg_refreshes.discard)
+            # Serve the stale/absent snapshot now; the refresh lands in the
+            # cache for the next poll.
 
     return _to_model(snapshot)
 
@@ -346,7 +393,9 @@ async def pressure_states(
     counts_24h = db.get_failure_event_counts_by_subscription(hours=24)
     out: Dict[str, Dict[str, Any]] = {}
     for sid in subscription_ids:
-        headroom = await get_headroom(sid)
+        # wait=False: the dashboard's 60s poll is the DEMAND signal for a
+        # refresh, never a caller that blocks on one.
+        headroom = await get_headroom(sid, wait=False)
         limited = db.is_subscription_rate_limited(sid) or _headroom_indicates_limited(headroom)
         out[sid] = {
             "failure_events_24h": int(counts_24h.get(sid, 0)),

@@ -399,7 +399,7 @@
       <!-- Today's cost -->
       <div class="flex items-center space-x-1">
         <span class="text-gray-400 dark:text-gray-500">Today</span>
-        <span class="font-mono text-gray-700 dark:text-gray-300">{{ costPrefix }}{{ formatCost(tokenStats.cost_24h) }}</span>
+        <span class="font-mono text-gray-700 dark:text-gray-300" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.cost_24h) }}</span>
       </div>
       <!-- Trend vs 7d average -->
       <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
@@ -424,7 +424,7 @@
       <!-- Lifetime cost -->
       <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
         <span>Lifetime</span>
-        <span class="font-mono text-gray-600 dark:text-gray-400">{{ costPrefix }}{{ formatCost(tokenStats.lifetime_cost) }}</span>
+        <span class="font-mono text-gray-600 dark:text-gray-400" :title="costUnreported ? 'Cost is not reported under this auth — token-based tracking only' : null">{{ costUnreported ? '—' : costPrefix + formatCost(tokenStats.lifetime_cost) }}</span>
         <span class="text-gray-300 dark:text-gray-600">·</span>
         <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
       </div>
@@ -780,6 +780,15 @@ const { formatBytes, formatUptime, formatRelativeTime, formatCost } = useFormatt
 // mode; when it's a subscription, cost figures render as ≈API-equivalent.
 const isSubscriptionFunded = computed(() => props.authStatus?.auth_mode === 'subscription')
 const costPrefix = computed(() => (isSubscriptionFunded.value ? '≈' : ''))
+// The operator's Step-0 fork: if cost is NEVER populated under this auth
+// (lifetime 0 across real runs), `≈$0.00` would assert a meaningless number —
+// show an honest dash instead. A zero *day* on a cost-reporting agent still
+// renders normally (lifetime > 0 proves the channel works).
+const costUnreported = computed(() =>
+  isSubscriptionFunded.value
+  && (props.tokenStats?.lifetime_executions || 0) > 0
+  && !(props.tokenStats?.lifetime_cost > 0)
+)
 
 // Token stats helpers (issue #250)
 const tokenCostSparkline = computed(() => {

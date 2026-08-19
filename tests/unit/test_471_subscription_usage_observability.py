@@ -478,6 +478,68 @@ class TestHeadroomParsing:
 
 
 # =============================================================================
+# 7b. Fail-closed ambient probing (review fixes C1/C2)
+# =============================================================================
+
+class TestAmbientProbeFailClosed:
+    def test_unreachable_redis_never_ambient_probes(self, monkeypatch, tmp_db):
+        """A Redis CLIENT existing proves nothing about the SERVER. When the
+        cache read raises, the ambient path must not probe (fail-closed) —
+        collapsing 'Redis down' into 'no snapshot' re-opens the
+        probe-per-poll storm."""
+        import services.subscription_headroom_service as hs
+
+        broken = MagicMock()
+        broken.get.side_effect = ConnectionError("redis down")
+        monkeypatch.setattr(hs, "get_breaker_redis", lambda: broken)
+        monkeypatch.setattr(hs, "is_auto_refresh_enabled", lambda: True)
+
+        probe_spy = MagicMock()
+
+        async def _no_probe(sid):
+            probe_spy(sid)
+            return {"fetched_at": "2026-08-19T00:00:00Z", "status": "ok"}
+
+        monkeypatch.setattr(hs, "_probe", _no_probe)
+
+        result = asyncio.run(hs.get_headroom("sub-a"))
+        assert result is None
+        probe_spy.assert_not_called()
+
+    def test_wait_false_serves_stale_without_blocking(self, monkeypatch, tmp_db):
+        """The dashboard batch path (wait=False) must return the cached
+        snapshot immediately; the refresh happens in a background task."""
+        import services.subscription_headroom_service as hs
+
+        stale = {
+            "fetched_at": "2020-01-01T00:00:00Z",  # ancient — refresh due
+            "status": "ok",
+            "five_hour": {"utilization_pct": 10.0, "resets_at": None, "status": "allowed"},
+        }
+        monkeypatch.setattr(hs, "_read_snapshot", lambda sid: (True, dict(stale)))
+        monkeypatch.setattr(hs, "is_auto_refresh_enabled", lambda: True)
+        monkeypatch.setattr(hs, "_probe_floor_ok", lambda sid, snap: True)
+
+        started = MagicMock()
+
+        async def _slow_probe(sid):
+            started(sid)
+            await asyncio.sleep(30)  # a hung provider must not block the caller
+
+        monkeypatch.setattr(hs, "_locked_probe", _slow_probe)
+
+        async def scenario():
+            return await asyncio.wait_for(
+                hs.get_headroom("sub-a", wait=False), timeout=2.0
+            )
+
+        result = asyncio.run(scenario())
+        assert result is not None
+        assert result.five_hour.utilization_pct == 10.0  # the STALE reading, served now
+        started.assert_called_once()  # refresh was spawned, not awaited
+
+
+# =============================================================================
 # 8. Static pins: route order (Invariant #4) + admin gates
 # =============================================================================
 
