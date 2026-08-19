@@ -37,6 +37,12 @@
         >Start a chat</button>
       </div>
 
+      <!-- ent#364: asks this agent raised for you, at the top of its page where a
+           pending decision belongs. Renders nothing when there are none. -->
+      <div v-if="store.asksForAgent(agentName).length" class="px-3 sm:px-6 pt-3">
+        <PortalAsks :agent-name="agentName" />
+      </div>
+
       <!-- Stats strip -->
       <div class="px-3 sm:px-6 pt-4">
         <div class="flex flex-wrap items-end gap-x-8 gap-y-3">
@@ -375,6 +381,7 @@ import InlineError from '@/components/InlineError.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
+import PortalAsks from '@/components/portal/PortalAsks.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import { PORTAL_BUCKET_LABELS, availabilityChip } from './portalUtils'
 

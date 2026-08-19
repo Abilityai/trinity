@@ -128,6 +128,16 @@
       </div>
     </div>
 
+    <!-- ent#364: asks this agent raised, immediately above the composer — the
+         third rendering of the SAME row the sidebar counts and the agent page
+         shows, so answering here clears it in both. Directly above the input
+         because it is a turn that is waiting on the person about to type. -->
+    <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
+      <div class="max-w-4xl mx-auto">
+        <PortalAsks :agent-name="agent" />
+      </div>
+    </div>
+
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
       <div class="max-w-4xl mx-auto">
@@ -257,6 +267,7 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalAsks from './PortalAsks.vue'
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -306,6 +317,8 @@ const props = defineProps({
 const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room'])
 
 const store = useClientPortalStore()
+// ent#364: one list, filtered — never a second fetch for this surface.
+const agentAsks = computed(() => store.asksForAgent(props.agent))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 const loadingHistory = ref(false)

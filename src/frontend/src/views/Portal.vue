@@ -737,9 +737,35 @@ function resolveAgentQuery() {
   return true
 }
 
+// ent#364 — one poll feeds all three ask renderings.
+//
+// The Workspace has no WebSocket (`operator_queue_new` is broadcast on the platform
+// `/ws`, which a portal client is not on), and it already polls elsewhere, so a
+// second live channel for this would be new transport for one badge. 20s: an ask is
+// a human-latency decision, not a stream.
+const ASKS_POLL_MS = 20000
+let asksTimer = null
+
+function startAsksPoll() {
+  stopAsksPoll()
+  if (!store.isClientSignedIn) return
+  store.fetchAsks()
+  asksTimer = setInterval(() => {
+    // Visibility-aware: a backgrounded tab polls nothing. The next foreground
+    // tick catches up, and an ask that arrived meanwhile is not lost — it is a
+    // row, not an event.
+    if (document.visibilityState === 'visible') store.fetchAsks()
+  }, ASKS_POLL_MS)
+}
+
+function stopAsksPoll() {
+  if (asksTimer) { clearInterval(asksTimer); asksTimer = null }
+}
+
 async function bootstrap() {
   await store.fetchRoster()
   await refreshThreads()
+  startAsksPoll()
   const sid = route.params.sessionId
   if (sid) {
     const known = threads.value.find((t) => (t.id || t.session_id) === sid)
@@ -753,7 +779,11 @@ async function bootstrap() {
 }
 
 onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })
-onBeforeUnmount(() => { clearInterval(resendTimer); clearTimeout(searchTimer) })
+onBeforeUnmount(() => {
+  stopAsksPoll()          // ent#364 — the poll must not outlive the view
+  clearInterval(resendTimer)
+  clearTimeout(searchTimer)
+})
 
 // #2258: true from the click until the credential is gone and the route has
 // moved. Gates the template's first branch so neither principal sees a state

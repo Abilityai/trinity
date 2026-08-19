@@ -1094,6 +1094,10 @@ operator_queue = Table(
     Column("responded_at", Text),
     Column("acknowledged_at", Text),
     Column("cleared_at", Text),  # #1017 — Clear All hide flag
+    # ent#364: the human this item is addressed to. NULL = an operator ask
+    # (every pre-ent#364 row). Validated at ingestion against the agent's
+    # roster — never trusted from the agent-authored payload.
+    Column("addressed_to_email", Text),
 )
 
 nevermined_agent_config = Table(
