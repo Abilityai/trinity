@@ -13,7 +13,7 @@ every return shape is preserved exactly.
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from sqlalchemy import select, insert, update, delete, func, and_
@@ -550,12 +550,17 @@ class SubscriptionOperations:
         self,
         agent_name: str,
         subscription_id: str,
-        error_message: str = ""
+        error_message: str = "",
+        failure_kind: str = "rate_limit",
     ) -> int:
         """
-        Record a rate-limit event for an (agent, subscription) pair.
+        Record a subscription-failure event for an (agent, subscription) pair.
 
-        Returns the count of consecutive rate-limit events for this pair
+        #471: ``failure_kind`` ("rate_limit" | "auth") is now PERSISTED — the
+        caller has carried it since #441/#792 but the table conflated the two,
+        and every observability consumer reads this stream as "429 pressure".
+
+        Returns the count of consecutive events for this pair
         (events within the last 2 hours, no successful execution in between).
         """
         now = utc_now_iso()
@@ -568,6 +573,7 @@ class SubscriptionOperations:
                     agent_name=agent_name,
                     subscription_id=subscription_id,
                     error_message=error_message,
+                    failure_kind=failure_kind,
                     occurred_at=now,
                 )
             )
@@ -620,6 +626,164 @@ class SubscriptionOperations:
         )
         with get_engine().begin() as conn:
             return conn.execute(stmt).rowcount
+
+    def get_failure_event_counts(
+        self, subscription_id: str, hours: int = 24
+    ) -> Dict[str, Any]:
+        """#471 — failure events on record for one subscription within a window.
+
+        Returns ``{"total": int, "by_kind": {kind: int}}``. A NULL
+        ``failure_kind`` (pre-#471 row) buckets under ``"unknown"``. The table
+        is bounded by the 24h sweep, so this is a cheap grouped read.
+        """
+        stmt = (
+            select(
+                subscription_rate_limit_events.c.failure_kind,
+                func.count().label("cnt"),
+            )
+            .where(
+                and_(
+                    subscription_rate_limit_events.c.subscription_id == subscription_id,
+                    subscription_rate_limit_events.c.occurred_at > iso_cutoff(hours),
+                )
+            )
+            .group_by(subscription_rate_limit_events.c.failure_kind)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        by_kind: Dict[str, int] = {}
+        for kind, cnt in rows:
+            by_kind[kind or "unknown"] = int(cnt)
+        return {"total": sum(by_kind.values()), "by_kind": by_kind}
+
+    def get_failure_event_counts_by_subscription(
+        self, hours: int = 24
+    ) -> Dict[str, int]:
+        """#471 — one grouped read: {subscription_id: event count within window}.
+
+        Feeds the fleet pressure endpoint; bounded by the 24h sweep.
+        """
+        stmt = (
+            select(
+                subscription_rate_limit_events.c.subscription_id,
+                func.count().label("cnt"),
+            )
+            .where(subscription_rate_limit_events.c.occurred_at > iso_cutoff(hours))
+            .group_by(subscription_rate_limit_events.c.subscription_id)
+        )
+        with get_engine().connect() as conn:
+            return {sid: int(cnt) for sid, cnt in conn.execute(stmt).all()}
+
+    def get_agent_subscription_map(
+        self, agent_names: Optional[List[str]] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """#471 — batch: each (live) agent's subscription binding + API-key flag.
+
+        Pure-DB (never Docker), one query. ``agent_names=None`` = the whole
+        fleet (admin); otherwise scoped to the given names. The auth-mode enum
+        derivation from these fields lives in
+        ``subscription_service.derive_auth_mode`` — reuse it, never re-derive.
+        """
+        stmt = (
+            select(
+                agent_ownership.c.agent_name,
+                agent_ownership.c.subscription_id,
+                agent_ownership.c.use_platform_api_key,
+                subscription_credentials.c.name.label("subscription_name"),
+            )
+            .select_from(
+                agent_ownership.outerjoin(
+                    subscription_credentials,
+                    agent_ownership.c.subscription_id == subscription_credentials.c.id,
+                )
+            )
+            .where(agent_ownership.c.deleted_at.is_(None))
+        )
+        if agent_names is not None:
+            names = list(agent_names)
+            if not names:
+                return {}
+            stmt = stmt.where(agent_ownership.c.agent_name.in_(names))
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return {
+            r["agent_name"]: {
+                "subscription_id": r["subscription_id"],
+                "subscription_name": r["subscription_name"],
+                "use_platform_api_key": bool(r["use_platform_api_key"]),
+            }
+            for r in rows
+        }
+
+    def get_subscription_usage_breakdown(self, subscription_id: str):
+        """#471 Tier 2 — per-agent consumption for both windows, ranked by cost.
+
+        GROUP BY agent_name over chat_messages + schedule_executions (the same
+        two sources SUB-004 aggregates), merged per agent, ordered by
+        ``cost_usd`` desc — cost is model-weighted by construction, so it is
+        the honest "who burns the quota" ranking on a mixed-model subscription.
+        Uses idx_chat_messages_subscription / idx_executions_subscription.
+        """
+        from db_models import SubscriptionUsageBreakdown, SubscriptionUsageBreakdownRow
+
+        def _window_rows(conn, cutoff: str):
+            # Same dedup rule as get_subscription_usage's _query_window (#471):
+            # executions = sole source for cost/context/turns; chat side
+            # contributes output_tokens only (a /chat or persisted-/task turn
+            # writes cost into BOTH tables — summing both double-counts it).
+            chat_rows = conn.execute(
+                select(
+                    chat_messages.c.agent_name,
+                    func.coalesce(func.sum(chat_messages.c.output_tokens), 0).label("output_tokens"),
+                )
+                .where(
+                    and_(
+                        chat_messages.c.subscription_id == subscription_id,
+                        chat_messages.c.role == "assistant",
+                        chat_messages.c.timestamp >= cutoff,
+                    )
+                )
+                .group_by(chat_messages.c.agent_name)
+            ).mappings().all()
+            exec_rows = conn.execute(
+                select(
+                    schedule_executions.c.agent_name,
+                    func.coalesce(func.sum(schedule_executions.c.context_used), 0).label("input_tokens"),
+                    func.coalesce(func.sum(schedule_executions.c.cost), 0.0).label("cost_usd"),
+                    func.count().label("exec_count"),
+                )
+                .where(
+                    and_(
+                        schedule_executions.c.subscription_id == subscription_id,
+                        schedule_executions.c.started_at >= cutoff,
+                        schedule_executions.c.status.notin_(["running", "pending"]),
+                    )
+                )
+                .group_by(schedule_executions.c.agent_name)
+            ).mappings().all()
+
+            merged: Dict[str, SubscriptionUsageBreakdownRow] = {}
+            for r in exec_rows:
+                merged[r["agent_name"]] = SubscriptionUsageBreakdownRow(
+                    agent_name=r["agent_name"],
+                    input_tokens=int(r["input_tokens"] or 0),
+                    cost_usd=float(r["cost_usd"] or 0.0),
+                    message_count=int(r["exec_count"] or 0),
+                )
+            for r in chat_rows:
+                row = merged.setdefault(
+                    r["agent_name"],
+                    SubscriptionUsageBreakdownRow(agent_name=r["agent_name"]),
+                )
+                row.output_tokens += int(r["output_tokens"] or 0)
+            return sorted(merged.values(), key=lambda r: r.cost_usd, reverse=True)
+
+        with get_engine().connect() as conn:
+            return SubscriptionUsageBreakdown(
+                subscription_id=subscription_id,
+                window_5h=_window_rows(conn, iso_cutoff(5)),
+                window_7d=_window_rows(conn, iso_cutoff(168)),
+            )
 
     def get_least_used_subscription(self) -> Optional[SubscriptionCredential]:
         """
@@ -713,20 +877,28 @@ class SubscriptionOperations:
         Returns:
             SubscriptionUsage with two windows and list of currently-assigned agents
         """
-        now = datetime.utcnow()
-        cutoff_5h = (now - timedelta(hours=5)).isoformat()
-        cutoff_7d = (now - timedelta(hours=168)).isoformat()
+        # #471 boil-lake: iso_cutoff() per Invariant #16 — the naive
+        # datetime.utcnow().isoformat() cutoffs compared a Z-less string
+        # against Z-suffixed stored timestamps (sub-second edge only, but
+        # the wrong idiom to copy).
+        cutoff_5h = iso_cutoff(5)
+        cutoff_7d = iso_cutoff(168)
 
         with get_engine().connect() as conn:
 
             def _query_window(cutoff: str) -> SubscriptionUsageWindow:
-                # Chat messages: input tokens stored in context_used, output in output_tokens
+                # #471 dedup: a modern turn writes BOTH a schedule_executions
+                # row AND (for /chat + persisted /task) a cost-bearing
+                # chat_messages row — verified live: one sync-chat turn counted
+                # its cost twice under the old chat+exec SUM. Executions are
+                # the canonical run record (status-as-projection #1082), so
+                # they are the SOLE source for cost / context-est. / turn
+                # count; chat_messages contributes ONLY output_tokens, which
+                # executions do not carry. (Pre-#1483 chat rows without a
+                # paired execution fall outside any rolling window by now.)
                 chat_row = conn.execute(
                     select(
-                        func.coalesce(func.sum(chat_messages.c.context_used), 0).label("input_tokens"),
                         func.coalesce(func.sum(chat_messages.c.output_tokens), 0).label("output_tokens"),
-                        func.coalesce(func.sum(chat_messages.c.cost), 0.0).label("cost_usd"),
-                        func.count().label("message_count"),
                     ).where(
                         and_(
                             chat_messages.c.subscription_id == subscription_id,
@@ -736,7 +908,6 @@ class SubscriptionOperations:
                     )
                 ).mappings().first()
 
-                # Schedule executions: input tokens in context_used (no separate output_tokens)
                 exec_row = conn.execute(
                     select(
                         func.coalesce(func.sum(schedule_executions.c.context_used), 0).label("input_tokens"),
@@ -752,10 +923,10 @@ class SubscriptionOperations:
                 ).mappings().first()
 
                 return SubscriptionUsageWindow(
-                    input_tokens=int(chat_row["input_tokens"] or 0) + int(exec_row["input_tokens"] or 0),
+                    input_tokens=int(exec_row["input_tokens"] or 0),
                     output_tokens=int(chat_row["output_tokens"] or 0),
-                    cost_usd=float(chat_row["cost_usd"] or 0.0) + float(exec_row["cost_usd"] or 0.0),
-                    message_count=int(chat_row["message_count"] or 0) + int(exec_row["exec_count"] or 0),
+                    cost_usd=float(exec_row["cost_usd"] or 0.0),
+                    message_count=int(exec_row["exec_count"] or 0),
                 )
 
             window_5h = _query_window(cutoff_5h)
@@ -772,9 +943,18 @@ class SubscriptionOperations:
             ).mappings().all()
             agents = [row["agent_name"] for row in agent_rows]
 
+        # #471: failure-event counters + the DB half of `rate_limited_now`
+        # (the 2h predicate SUB-003's own machinery uses). The headroom
+        # service may OR-in a fresh provider verdict and attach `headroom`/
+        # `source` — see subscription_headroom_service.decorate_usage, the
+        # ONE place the final derivation lives.
+        counts = self.get_failure_event_counts(subscription_id, hours=24)
         return SubscriptionUsage(
             subscription_id=subscription_id,
             window_5h=window_5h,
             window_7d=window_7d,
             agents=agents,
+            failure_events_24h=counts["total"],
+            failure_events_by_kind=counts["by_kind"],
+            rate_limited_now=self.is_subscription_rate_limited(subscription_id),
         )

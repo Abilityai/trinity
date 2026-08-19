@@ -312,6 +312,27 @@ class AgentStatus(BaseModel):
         }
 
 
+class AgentSubscriptionPressure(BaseModel):
+    """One agent's subscription-pressure row for the Dashboard batch endpoint
+    (#471). `auth_mode` reuses the `AgentAuthStatus` vocabulary verbatim
+    ("subscription" | "api_key" | "not_configured") — never a third enum.
+    An explicit response_model allow-list (ent#334): the payload is
+    disclosure-bearing (subscription names to shared accessors, matching the
+    per-agent `AgentAuthStatus` gate), so nothing extra may ride along."""
+    agent_name: str
+    auth_mode: str
+    subscription_name: Optional[str] = None
+    failure_events_24h: int = 0
+    rate_limited_now: bool = False
+    utilization_5h_pct: Optional[float] = None  # provider-truth when fresh, else None
+    headroom_source: str = "observed"           # "anthropic" | "observed"
+
+
+class SubscriptionPressureResponse(BaseModel):
+    """Batch payload for `GET /api/agents/subscription-pressure` (#471)."""
+    agents: List[AgentSubscriptionPressure] = []
+
+
 class User(BaseModel):
     """Authenticated user."""
     id: int

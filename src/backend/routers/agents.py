@@ -21,6 +21,8 @@ from fastapi.responses import JSONResponse
 from models import (
     AgentConfig,
     AgentStatus,
+    AgentSubscriptionPressure,
+    SubscriptionPressureResponse,
     CircuitBreakerConfigUpdate,
     DeployLocalRequest,
     ExecutionResultEnvelope,
@@ -288,6 +290,57 @@ async def get_all_sync_health(
             "git_dir_bytes": (row or {}).get("git_dir_bytes"),  # #1596 bloat curve
         })
     return {"agents": entries}
+
+
+@router.get("/subscription-pressure", response_model=SubscriptionPressureResponse)
+async def get_subscription_pressure(
+    current_user: User = Depends(get_current_user)
+):
+    """Dashboard batch endpoint for subscription-pressure badges (#471).
+
+    One row per accessible agent: auth mode (the `AgentAuthStatus` vocabulary),
+    the funding subscription's name, its 24h failure-event count, the one-gate
+    `rate_limited_now`, and — when a fresh provider snapshot exists — the 5h
+    utilization %. Access is the pure-DB visible set (`visible_agent_names`,
+    ent#384 — never the Docker-faulting path), mirroring `/sync-health`'s
+    accessible-only scope; subscription-name disclosure to shared accessors
+    matches the existing per-agent `AgentAuthStatus` gate. Registered BEFORE
+    `/{agent_name}` (Invariant #4).
+    """
+    from services.agent_service.helpers import visible_agent_names
+    from services.subscription_service import derive_auth_mode
+    from services.subscription_headroom_service import pressure_states
+
+    names = visible_agent_names(current_user)  # None = admin (no filter)
+    sub_map = db.get_agent_subscription_map(
+        list(names) if names is not None else None
+    )
+    sub_ids = sorted({
+        m["subscription_id"] for m in sub_map.values() if m["subscription_id"]
+    })
+    states = await pressure_states(sub_ids)
+
+    rows = []
+    for agent_name in sorted(sub_map):
+        m = sub_map[agent_name]
+        sid = m["subscription_id"]
+        state = states.get(sid, {}) if sid else {}
+        headroom = state.get("headroom")
+        util_5h = None
+        source = "observed"
+        if headroom is not None and headroom.status == "ok" and headroom.five_hour:
+            util_5h = headroom.five_hour.utilization_pct
+            source = "anthropic"
+        rows.append(AgentSubscriptionPressure(
+            agent_name=agent_name,
+            auth_mode=derive_auth_mode(bool(sid), m["use_platform_api_key"]),
+            subscription_name=m["subscription_name"],
+            failure_events_24h=int(state.get("failure_events_24h", 0)),
+            rate_limited_now=bool(state.get("rate_limited_now", False)),
+            utilization_5h_pct=util_5h,
+            headroom_source=source,
+        ))
+    return SubscriptionPressureResponse(agents=rows)
 
 
 @router.get("/slots")

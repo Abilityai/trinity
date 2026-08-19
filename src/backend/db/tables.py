@@ -1068,6 +1068,7 @@ subscription_rate_limit_events = Table(
     Column("agent_name", Text),
     Column("subscription_id", Text),
     Column("error_message", Text),
+    Column("failure_kind", Text),  # #471 — "rate_limit" | "auth"; NULL = pre-#471 row (kind unknown)
     Column("occurred_at", Text),
 )
 

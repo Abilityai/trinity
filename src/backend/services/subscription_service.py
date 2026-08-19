@@ -17,6 +17,18 @@ from db_models import AgentAuthStatus
 logger = logging.getLogger(__name__)
 
 
+def derive_auth_mode(has_subscription: bool, has_api_key: bool) -> str:
+    """The ONE auth-mode enum derivation (#471) — shared by the per-agent
+    `AgentAuthStatus` resolver below and the fleet subscription-pressure batch
+    endpoint, so the two surfaces use one vocabulary by construction
+    ("subscription" | "api_key" | "not_configured")."""
+    if has_subscription:
+        return "subscription"
+    if has_api_key:
+        return "api_key"
+    return "not_configured"
+
+
 async def get_agent_auth_mode(agent_name: str) -> AgentAuthStatus:
     """
     Detect the authentication mode for an agent.
@@ -39,13 +51,8 @@ async def get_agent_auth_mode(agent_name: str) -> AgentAuthStatus:
     # Check for platform API key setting
     has_api_key = db.get_use_platform_api_key(agent_name) or False
 
-    # Determine auth mode
-    if has_subscription:
-        auth_mode = "subscription"
-    elif has_api_key:
-        auth_mode = "api_key"
-    else:
-        auth_mode = "not_configured"
+    # Determine auth mode (shared derivation, #471)
+    auth_mode = derive_auth_mode(has_subscription, has_api_key)
 
     return AgentAuthStatus(
         agent_name=agent_name,

@@ -1152,299 +1152,10 @@
             </div>
           </div>
 
-          <!-- Claude Subscriptions Section (SUB-001) -->
-          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
-            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-              <h2 class="text-lg font-medium text-gray-900 dark:text-white">Claude Subscriptions</h2>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Manage Claude Max/Pro subscription credentials. Register once, assign to multiple agents.
-              </p>
-            </div>
-
-            <div class="px-6 py-4">
-              <div class="space-y-4">
-                <!-- Encryption Not Configured Warning -->
-                <div v-if="!encryptionConfigured" class="bg-status-warning-50 dark:bg-status-warning-900/30 border border-status-warning-200 dark:border-status-warning-800 rounded-lg p-4">
-                  <div class="flex">
-                    <div class="flex-shrink-0">
-                      <svg class="h-5 w-5 text-status-warning-400" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                      </svg>
-                    </div>
-                    <div class="ml-3">
-                      <h3 class="text-sm font-medium text-status-warning-800 dark:text-status-warning-300">Encryption not configured</h3>
-                      <p class="mt-1 text-sm text-status-warning-700 dark:text-status-warning-400">
-                        Subscription storage requires <code class="px-1 py-0.5 bg-status-warning-100 dark:bg-status-warning-900 rounded text-xs">CREDENTIAL_ENCRYPTION_KEY</code> in your <code class="px-1 py-0.5 bg-status-warning-100 dark:bg-status-warning-900 rounded text-xs">.env</code> file.
-                        Generate with: <code class="px-1 py-0.5 bg-status-warning-100 dark:bg-status-warning-900 rounded text-xs">openssl rand -hex 32</code> and restart the backend.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Add Subscription Form -->
-                <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-                  <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Add Subscription</h3>
-
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <!-- Name Input -->
-                    <div>
-                      <label for="subscription-name" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                        Name
-                      </label>
-                      <input
-                        type="text"
-                        id="subscription-name"
-                        v-model="newSubscription.name"
-                        placeholder="e.g., eugene-max"
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-                        :disabled="addingSubscription"
-                      />
-                    </div>
-
-                    <!-- Type Input -->
-                    <div>
-                      <label for="subscription-type" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                        Type
-                      </label>
-                      <select
-                        id="subscription-type"
-                        v-model="newSubscription.type"
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-                        :disabled="addingSubscription"
-                      >
-                        <option value="max">Claude Max</option>
-                        <option value="pro">Claude Pro</option>
-                        <option value="">Unknown</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <!-- Token Input (SUB-002) -->
-                  <div class="mt-4">
-                    <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                      Token (from <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">claude setup-token</code>)
-                    </label>
-                    <input
-                      type="password"
-                      v-model="newSubscription.token"
-                      placeholder="sk-ant-oat01-..."
-                      :disabled="addingSubscription"
-                      class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-action-primary-500 focus:border-action-primary-500"
-                      :class="{ 'border-status-danger-400 dark:border-status-danger-500': newSubscription.token && !newSubscription.token.startsWith('sk-ant-oat01-') }"
-                    />
-                    <p v-if="newSubscription.token && !newSubscription.token.startsWith('sk-ant-oat01-')" class="mt-1 text-xs text-status-danger-500">
-                      Token must start with sk-ant-oat01-
-                    </p>
-                    <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                      Run <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">claude setup-token</code> locally to generate a long-lived token (~1 year)
-                    </p>
-                  </div>
-
-                  <!-- Add Button -->
-                  <div class="mt-4 flex justify-end">
-                    <button
-                      @click="clearNewSubscription"
-                      v-if="newSubscription.name || newSubscription.token"
-                      class="mr-3 inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 shadow-sm text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      @click="addSubscription"
-                      :disabled="!newSubscription.name || !newSubscription.token.startsWith('sk-ant-oat01-') || addingSubscription || !encryptionConfigured"
-                      class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <svg v-if="addingSubscription" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Register Subscription
-                    </button>
-                  </div>
-                </div>
-
-                <!-- Subscriptions Table -->
-                <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-                  <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                    <thead class="bg-gray-50 dark:bg-gray-700">
-                      <tr>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Name
-                        </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Type
-                        </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Agents
-                        </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Created
-                        </th>
-                        <th scope="col" class="relative px-6 py-3">
-                          <span class="sr-only">Actions</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                      <tr v-if="loadingSubscriptions">
-                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
-                        </td>
-                      </tr>
-                      <tr v-else-if="subscriptions.length === 0">
-                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          No subscriptions registered. Add one above using your Claude credentials.
-                        </td>
-                      </tr>
-                      <template v-else v-for="sub in subscriptions" :key="sub.id">
-                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer" @click="toggleSubscriptionDetails(sub.id)">
-                          <td class="px-6 py-4 whitespace-nowrap">
-                            <div class="flex items-center">
-                              <svg class="h-4 w-4 text-gray-400 mr-2 transform transition-transform" :class="{ 'rotate-90': expandedSubscriptions.has(sub.id) }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                              </svg>
-                              <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ sub.name }}</span>
-                            </div>
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap">
-                            <span v-if="sub.subscription_type" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
-                                  :class="sub.subscription_type === 'max' ? 'bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900 dark:text-accent-purple-200' : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'">
-                              {{ sub.subscription_type === 'max' ? 'Max' : sub.subscription_type === 'pro' ? 'Pro' : sub.subscription_type }}
-                            </span>
-                            <span v-else class="text-sm text-gray-500 dark:text-gray-400">—</span>
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap">
-                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
-                              {{ sub.agent_count || 0 }} agent{{ (sub.agent_count || 0) === 1 ? '' : 's' }}
-                            </span>
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                            {{ formatDate(sub.created_at) }}
-                          </td>
-                          <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                            <button
-                              @click.stop="deleteSubscription(sub)"
-                              :disabled="deletingSubscription === sub.id"
-                              class="text-status-danger-600 hover:text-status-danger-900 dark:text-status-danger-400 dark:hover:text-status-danger-300 disabled:opacity-50"
-                            >
-                              {{ deletingSubscription === sub.id ? 'Deleting...' : 'Delete' }}
-                            </button>
-                          </td>
-                        </tr>
-                        <!-- Expanded Details Row -->
-                        <tr v-if="expandedSubscriptions.has(sub.id)" class="bg-gray-50 dark:bg-gray-700/50">
-                          <td colspan="5" class="px-6 py-4">
-                            <div class="text-sm">
-                              <div class="mb-2 text-gray-600 dark:text-gray-400">
-                                <strong>Owner:</strong> {{ sub.owner_email || 'Unknown' }}
-                              </div>
-                              <div v-if="sub.rate_limit_tier" class="mb-2 text-gray-600 dark:text-gray-400">
-                                <strong>Rate Limit Tier:</strong> {{ sub.rate_limit_tier }}
-                              </div>
-                              <div>
-                                <strong class="text-gray-600 dark:text-gray-400">Assigned Agents:</strong>
-                                <div v-if="sub.agents && sub.agents.length > 0" class="mt-2 flex flex-wrap gap-2">
-                                  <span v-for="agent in sub.agents" :key="agent"
-                                        class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-action-primary-100 text-action-primary-800 dark:bg-action-primary-900 dark:text-action-primary-200">
-                                    <svg class="mr-1 h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                      <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                                      <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clip-rule="evenodd" />
-                                    </svg>
-                                    {{ agent }}
-                                    <button
-                                      @click.stop="unassignAgentFromSubscription(agent)"
-                                      :disabled="unassigningAgent === agent"
-                                      class="ml-1.5 inline-flex items-center justify-center h-4 w-4 rounded-full hover:bg-action-primary-200 dark:hover:bg-action-primary-800 text-action-primary-600 dark:text-action-primary-300 disabled:opacity-50"
-                                      title="Remove agent from subscription"
-                                    >
-                                      <svg v-if="unassigningAgent === agent" class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24">
-                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                      </svg>
-                                      <svg v-else class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                      </svg>
-                                    </button>
-                                  </span>
-                                </div>
-                                <p v-else class="mt-1 text-gray-500 dark:text-gray-400 italic">
-                                  No agents assigned yet.
-                                </p>
-                                <!-- Assign Agent Dropdown -->
-                                <div class="mt-3 flex items-center gap-2">
-                                  <select
-                                    v-model="selectedAgentToAssign[sub.id]"
-                                    :disabled="assigningAgent || loadingAgents"
-                                    class="flex-1 max-w-xs px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white"
-                                    @click.stop
-                                  >
-                                    <option value="" disabled selected>{{ loadingAgents ? 'Loading agents...' : 'Select agent...' }}</option>
-                                    <option
-                                      v-for="agent in getAvailableAgents(sub.id)"
-                                      :key="agent.name"
-                                      :value="agent.name"
-                                    >
-                                      {{ agentOptionLabel(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
-                                    </option>
-                                  </select>
-                                  <button
-                                    @click.stop="assignAgentToSubscription(sub.name, selectedAgentToAssign[sub.id])"
-                                    :disabled="!selectedAgentToAssign[sub.id] || assigningAgent"
-                                    class="inline-flex items-center px-3 py-1.5 border border-transparent rounded-md shadow-sm text-xs font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                                  >
-                                    <svg v-if="assigningAgent" class="animate-spin -ml-0.5 mr-1.5 h-3 w-3" fill="none" viewBox="0 0 24 24">
-                                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                    </svg>
-                                    Assign
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      </template>
-                    </tbody>
-                  </table>
-                </div>
-
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  Expand a subscription row to assign or remove agents. Running agents will restart automatically.
-                </p>
-
-                <!-- Auto-Switch Toggle (SUB-003) -->
-                <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
-                  <div class="flex items-center justify-between">
-                    <div class="flex-1 mr-4">
-                      <label for="auto-switch-toggle" class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                        Automatically switch subscriptions when usage limits are reached
-                      </label>
-                      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        When enabled, agents will automatically try a different subscription after 2 consecutive rate-limit errors. Requires at least 2 registered subscriptions.
-                      </p>
-                    </div>
-                    <button
-                      id="auto-switch-toggle"
-                      type="button"
-                      :class="[
-                        autoSwitchEnabled ? 'bg-action-primary-600' : 'bg-gray-200 dark:bg-gray-600',
-                        'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2'
-                      ]"
-                      :disabled="savingAutoSwitch"
-                      @click="toggleAutoSwitch"
-                    >
-                      <span
-                        :class="[
-                          autoSwitchEnabled ? 'translate-x-5' : 'translate-x-0',
-                          'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
-                        ]"
-                      />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <!-- Claude Subscriptions (SUB-001/002; #471 usage observability) —
+               extracted to components/settings/SubscriptionsPanel.vue (partial
+               paydown of #717/#1030; the section owns its own data loads). -->
+          <SubscriptionsPanel v-if="activeTab === 'integrations'" />
 
           <!-- Trinity Prompt Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -2371,14 +2082,13 @@ import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
-import { useAgentsStore } from '../stores/agents'
-import { agentDisplayName, agentOptionLabel } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
@@ -2396,7 +2106,6 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
-const agentsStore = useAgentsStore()
 const settingsStore = useSettingsStore()
 // trinity-enterprise#85: refreshed after a Brain Orb flag change so the
 // admin's own Brain tab / route gating updates without a page reload.
@@ -2875,8 +2584,7 @@ const agentQuotaLegacy = ref(null)
 const savingQuotas = ref(false)
 
 // Auto-Switch Subscriptions state (SUB-003)
-const autoSwitchEnabled = ref(false)
-const savingAutoSwitch = ref(false)
+// (SUB-003 auto-switch + subscription state moved to SubscriptionsPanel.vue, #471)
 
 // Skills Library state now lives in SkillSourcesPanel / stores/skillSources
 // (ent#237): the single skills_library_url setting became a list of sources.
@@ -2898,37 +2606,7 @@ const skillsAutomation = ref({
 const generatingDefaultAvatars = ref(false)
 const defaultAvatarResult = ref(null)
 
-// Subscriptions state (SUB-002)
-const subscriptions = ref([])
-const loadingSubscriptions = ref(false)
-const addingSubscription = ref(false)
-const deletingSubscription = ref(null)
-const expandedSubscriptions = ref(new Set())
-const encryptionConfigured = ref(true)
-const newSubscription = ref({
-  name: '',
-  type: 'max',
-  token: ''
-})
-
-// Agent assignment state (for subscription expanded rows)
-const allAgents = ref([])
-const loadingAgents = ref(false)
-const assigningAgent = ref(null)
-const unassigningAgent = ref(null)
-const selectedAgentToAssign = ref({})
-
-const agentSubscriptionMap = computed(() => {
-  const map = {}
-  for (const sub of subscriptions.value) {
-    if (sub.agents) {
-      for (const agentName of sub.agents) {
-        map[agentName] = sub.name
-      }
-    }
-  }
-  return map
-})
+// Subscriptions state moved to components/settings/SubscriptionsPanel.vue (#471).
 
 const hasChanges = computed(() => {
   return trinityPrompt.value !== originalPrompt.value
@@ -3883,39 +3561,7 @@ async function toggleSshAccess() {
   }
 }
 
-// Auto-Switch Subscriptions methods (SUB-003)
-async function loadAutoSwitchSetting() {
-  try {
-    const response = await axios.get('/api/subscriptions/settings/auto-switch', {
-      headers: authStore.authHeader
-    })
-    autoSwitchEnabled.value = response.data.enabled
-  } catch (e) {
-    console.error('Failed to load auto-switch setting:', e)
-  }
-}
-
-async function toggleAutoSwitch() {
-  savingAutoSwitch.value = true
-  error.value = null
-
-  try {
-    const newValue = !autoSwitchEnabled.value
-    await axios.put(`/api/subscriptions/settings/auto-switch?enabled=${newValue}`, null, {
-      headers: authStore.authHeader
-    })
-
-    autoSwitchEnabled.value = newValue
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to update auto-switch setting'
-  } finally {
-    savingAutoSwitch.value = false
-  }
-}
+// Auto-Switch methods (SUB-003) moved to SubscriptionsPanel.vue (#471).
 
 // Skills library automation (ent#236). ent#237 removed the URL/branch writes
 // that used to live here — those settings no longer exist; sources are managed
@@ -3973,174 +3619,7 @@ async function generateDefaultAvatars() {
   }
 }
 
-// Subscription methods (SUB-001)
-async function loadSubscriptions() {
-  loadingSubscriptions.value = true
-  try {
-    // Check encryption status first
-    try {
-      const statusResponse = await axios.get('/api/subscriptions/encryption-status', {
-        headers: authStore.authHeader
-      })
-      encryptionConfigured.value = statusResponse.data?.configured ?? true
-    } catch {
-      // Endpoint may not exist on older backends - assume configured
-      encryptionConfigured.value = true
-    }
-
-    const response = await axios.get('/api/subscriptions', {
-      headers: authStore.authHeader
-    })
-    subscriptions.value = response.data || []
-  } catch (e) {
-    console.error('Failed to load subscriptions:', e)
-    // Non-admin users will get 403 - that's ok, just hide the section
-    if (e.response?.status !== 403) {
-      error.value = e.response?.data?.detail || 'Failed to load subscriptions'
-    }
-  } finally {
-    loadingSubscriptions.value = false
-  }
-}
-
-function clearNewSubscription() {
-  newSubscription.value = {
-    name: '',
-    type: 'max',
-    token: ''
-  }
-}
-
-async function addSubscription() {
-  if (!newSubscription.value.name || !newSubscription.value.token.startsWith('sk-ant-oat01-')) return
-
-  addingSubscription.value = true
-  error.value = null
-
-  try {
-    await axios.post('/api/subscriptions', {
-      name: newSubscription.value.name,
-      token: newSubscription.value.token,
-      subscription_type: newSubscription.value.type || null
-    }, {
-      headers: authStore.authHeader
-    })
-
-    // Clear form and reload list
-    clearNewSubscription()
-    await loadSubscriptions()
-
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to register subscription'
-  } finally {
-    addingSubscription.value = false
-  }
-}
-
-async function deleteSubscription(subscription) {
-  if (!confirm(`Delete subscription "${subscription.name}"?\n\nThis will clear the subscription from all ${subscription.agent_count || 0} assigned agent(s).`)) {
-    return
-  }
-
-  deletingSubscription.value = subscription.id
-  error.value = null
-
-  try {
-    await axios.delete(`/api/subscriptions/${subscription.id}`, {
-      headers: authStore.authHeader
-    })
-
-    // Remove from expanded set if it was expanded
-    expandedSubscriptions.value.delete(subscription.id)
-
-    // Reload list
-    await loadSubscriptions()
-
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to delete subscription'
-  } finally {
-    deletingSubscription.value = null
-  }
-}
-
-function toggleSubscriptionDetails(subscriptionId) {
-  if (expandedSubscriptions.value.has(subscriptionId)) {
-    expandedSubscriptions.value.delete(subscriptionId)
-  } else {
-    expandedSubscriptions.value.add(subscriptionId)
-    fetchAgentList()
-  }
-  // Force reactivity update
-  expandedSubscriptions.value = new Set(expandedSubscriptions.value)
-}
-
-async function fetchAgentList() {
-  if (allAgents.value.length > 0 || loadingAgents.value) return
-  loadingAgents.value = true
-  try {
-    const response = await axios.get('/api/agents', {
-      headers: authStore.authHeader
-    })
-    allAgents.value = response.data || []
-  } catch (e) {
-    console.error('Failed to fetch agent list:', e)
-  } finally {
-    loadingAgents.value = false
-  }
-}
-
-function getAvailableAgents(subId) {
-  const sub = subscriptions.value.find(s => s.id === subId)
-  const assignedHere = sub?.agents || []
-  return allAgents.value
-    .filter(a => !assignedHere.includes(a.name))
-    .sort((a, b) => {
-      const aOnOther = agentSubscriptionMap.value[a.name] ? 1 : 0
-      const bOnOther = agentSubscriptionMap.value[b.name] ? 1 : 0
-      return aOnOther - bOnOther || a.name.localeCompare(b.name)
-    })
-}
-
-async function assignAgentToSubscription(subName, agentName) {
-  assigningAgent.value = agentName
-  error.value = null
-  try {
-    await axios.put(`/api/subscriptions/agents/${encodeURIComponent(agentName)}?subscription_name=${encodeURIComponent(subName)}`, {}, {
-      headers: authStore.authHeader
-    })
-    await loadSubscriptions()
-    // Clear dropdown selection for all subs
-    selectedAgentToAssign.value = {}
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to assign agent'
-  } finally {
-    assigningAgent.value = null
-  }
-}
-
-async function unassignAgentFromSubscription(agentName) {
-  if (!confirm(`Remove "${agentsStore.displayNameForSlug(agentName)}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
-  unassigningAgent.value = agentName
-  error.value = null
-  try {
-    await axios.delete(`/api/subscriptions/agents/${encodeURIComponent(agentName)}`, {
-      headers: authStore.authHeader
-    })
-    await loadSubscriptions()
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to unassign agent'
-  } finally {
-    unassigningAgent.value = null
-  }
-}
+// Subscription methods (SUB-001/002) moved to SubscriptionsPanel.vue (#471).
 
 // (#302) Settings is now visible to non-admin users for the MCP Keys tab.
 // Admin-only data fetches MUST be skipped when the user is not admin —
@@ -4157,8 +3636,6 @@ function loadAdminOnlySettings() {
   loadGithubTemplates()
   loadOpsSettings()
   loadAgentQuotas()
-  loadSubscriptions()
-  loadAutoSwitchSetting()
   // ent#236 automation config. Admin-only endpoint, so it belongs here rather
   // than in the unconditional mount path — SkillSourcesPanel loads the source
   // list itself.

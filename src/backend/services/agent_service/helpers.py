@@ -203,6 +203,40 @@ async def agent_http_request(
     raise last_error or httpx.ConnectError(f"Failed to connect to agent {agent_name}")
 
 
+def visible_agent_names(current_user: User) -> Optional[set]:
+    """The agents this caller may see named, resolved from the DB (ent#384).
+
+    Returns None for an admin (no filter), else the set of agent names the
+    caller owns or has been shared. Extracted from `routers/skills.py` in #471
+    (second consumer: the subscription-pressure batch endpoint) so the pure-DB
+    visible-set rule has ONE home.
+
+    **Deliberately not `accessible_agent_names` below**, which resolves
+    through `get_accessible_agents` → `list_all_agents_fast()`, i.e. a Docker
+    `containers.list()` that returns `[]` when the daemon is unreachable or
+    the socket is denied — logged only as a throttled WARNING (#1131). Routed
+    through it, a Docker fault would answer a batch read with an empty set for
+    every non-admin — a confident wrong zero arriving through the *access*
+    layer, where a store-level "a failed fetch is not an empty result" rule
+    structurally cannot catch it (changing `DOCKER_GID` is enough to trigger
+    it). `db.get_all_agent_metadata()` is one pure-DB batch query already
+    carrying `owner_username`, `is_shared_with_user` and `WHERE ao.deleted_at
+    IS NULL`. Access semantics are identical — admin ⇒ all, else owned ∪
+    shared — except the DB set also contains the caller's OWN agents that
+    currently have no container (#1747 documents that state as routine). It
+    never contains somebody else's agent.
+    """
+    if current_user.role == "admin":
+        return None
+    metadata = db.get_all_agent_metadata(current_user.email or "")
+    return {
+        name
+        for name, meta in metadata.items()
+        if meta.get("owner_username") == current_user.username
+        or meta.get("is_shared_with_user")
+    }
+
+
 def get_accessible_agents(current_user: User) -> list:
     """
     Get list of all agents accessible to the current user.

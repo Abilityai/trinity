@@ -99,6 +99,7 @@ def tmp_db(tmp_path, monkeypatch):
             agent_name TEXT NOT NULL,
             subscription_id TEXT NOT NULL,
             error_message TEXT,
+            failure_kind TEXT,
             occurred_at TEXT NOT NULL
         )
         """
@@ -515,7 +516,11 @@ class TestSingleEventThreshold:
     @pytest.mark.asyncio
     async def test_setting_disabled_blocks_switch(self, svc):
         """Operators who explicitly opted out keep their choice — when the
-        setting is "false", short-circuit before recording any event."""
+        setting is "false", no switch is attempted. #471 flipped the RECORDING
+        half of the old pin: the failure event IS recorded before the enabled
+        gate now, because gating the recording on auto-switch left opted-out
+        operators — exactly the population depending on manual visibility —
+        with a permanently-zero pressure count. Switch suppression unchanged."""
         svc._stub_db.get_setting_value.return_value = "false"
 
         result = await svc.handle_subscription_failure(
@@ -525,8 +530,13 @@ class TestSingleEventThreshold:
         )
         assert result is None
         assert svc._spy_calls == []
-        # Also verify we short-circuited before recording the event
-        svc._stub_db.record_rate_limit_event.assert_not_called()
+        # #471: the event is on record even though the switch was suppressed.
+        svc._stub_db.record_rate_limit_event.assert_called_once_with(
+            agent_name="agent-x",
+            subscription_id="sub-a",
+            error_message="429",
+            failure_kind="rate_limit",
+        )
 
     @pytest.mark.asyncio
     async def test_no_switch_when_agent_has_no_subscription(self, svc):
