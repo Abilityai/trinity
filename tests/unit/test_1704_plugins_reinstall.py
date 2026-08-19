@@ -8,8 +8,11 @@ subprocesses.
 
 Pinned properties (autoplan security + engineering phases):
   1. an already-present set runs no install subprocesses;
-  2. a fresh volume adds the marketplace then installs the plugin with `--yes`,
-     as an ARG LIST (never a shell string);
+  2. a fresh volume adds the marketplace then installs the plugin as an ARG
+     LIST (never a shell string), passing `--yes` ONLY when the CLI's own
+     `plugin install --help` advertises it (#2305 — 2.1.227 rejects the flag,
+     2.1.235+ requires it for non-TTY command-installs, so it is
+     feature-detected, never unconditional);
   3. the untrusted manifest is hardened-parsed and re-charset-validated — a
      `user:token@` source, a traversal/flag/metachar name, and an undeclared
      marketplace are all dropped BEFORE any subprocess;
@@ -27,6 +30,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -67,6 +72,7 @@ class _FakeClaude:
         list_rc=0,
         raise_exc=None,
         timeout=False,
+        help_yes=False,
     ):
         self.marketplaces = marketplaces if marketplaces is not None else []
         self.plugins = plugins if plugins is not None else []
@@ -75,6 +81,10 @@ class _FakeClaude:
         self.list_rc = list_rc
         self.raise_exc = raise_exc
         self.timeout = timeout
+        # Whether this fake CLI's `plugin install --help` advertises `--yes`
+        # (#2305). Default False — models 2.1.227, the version the bug shipped
+        # against.
+        self.help_yes = help_yes
         self.calls: list[list[str]] = []
         self.kwargs: list[dict] = []
 
@@ -88,6 +98,13 @@ class _FakeClaude:
         if self.raise_exc:
             raise self.raise_exc
         tail = args[1:] if args and args[0] == "claude" else args
+        if tail[:3] == ["plugin", "install", "--help"]:
+            text = (
+                "Options:\n  -y, --yes   accept without the confirmation prompt\n"
+                if self.help_yes
+                else "Options:\n  --config <key=value>\n  -s, --scope <scope>\n"
+            )
+            return types.SimpleNamespace(returncode=0, stdout=text, stderr="")
         if tail[:3] == ["plugin", "marketplace", "list"]:
             return types.SimpleNamespace(
                 returncode=self.list_rc,
@@ -113,10 +130,17 @@ class _FakeClaude:
         return types.SimpleNamespace(returncode=1, stdout="", stderr="unknown")
 
     def install_calls(self):
-        return [c for c in self.calls if c[1:3] == ["plugin", "install"]]
+        return [
+            c
+            for c in self.calls
+            if c[1:3] == ["plugin", "install"] and "--help" not in c
+        ]
 
     def add_calls(self):
         return [c for c in self.calls if c[1:4] == ["plugin", "marketplace", "add"]]
+
+    def help_probes(self):
+        return [c for c in self.calls if c[1:4] == ["plugin", "install", "--help"]]
 
 
 def _patch_claude(monkeypatch, mod, fake):
@@ -145,21 +169,72 @@ def test_all_present_runs_zero_installs(mod, monkeypatch):
     assert res["added_marketplaces"] == []
     assert fake.install_calls() == []
     assert fake.add_calls() == []
+    # …including the #2305 feature-detect probe: a satisfied boot stays at
+    # zero non-read subprocesses.
+    assert fake.help_probes() == []
     assert "marketplace:abilityai" in res["skipped"]
 
 
-def test_fresh_volume_adds_marketplace_then_installs_with_yes(mod, monkeypatch):
-    fake = _FakeClaude(marketplaces=[], plugins=[])
+def test_fresh_volume_installs_without_unadvertised_yes(mod, monkeypatch):
+    """#2305 regression pin: a CLI whose `plugin install --help` does NOT
+    advertise `--yes` (2.1.227) must get a bare install — the unconditional
+    flag withheld EVERY install fleet-wide with `error: unknown option`."""
+    fake = _FakeClaude(marketplaces=[], plugins=[], help_yes=False)
     _patch_claude(monkeypatch, mod, fake)
     res = mod.reinstall(dict(_MANIFEST))
     assert res["added_marketplaces"] == ["abilityai"]
     assert res["installed"] == ["trinity@abilityai"]
     # marketplace add before install (order matters — install needs the source)
-    assert fake.calls[-2][1:4] == ["plugin", "marketplace", "add"]
+    add_idx = fake.calls.index(fake.add_calls()[0])
     install = fake.install_calls()[0]
-    assert install == ["claude", "plugin", "install", "trinity@abilityai", "--yes"]
+    assert add_idx < fake.calls.index(install)
+    assert install == ["claude", "plugin", "install", "trinity@abilityai"]
     # arg list, never a shell string
     assert isinstance(install, list)
+
+
+def test_install_passes_yes_only_when_the_cli_advertises_it(mod, monkeypatch):
+    """The other half of #2305: 2.1.235+ REQUIRES `--yes` for a non-TTY
+    command-install, so an advertising CLI must still receive it."""
+    fake = _FakeClaude(marketplaces=[], plugins=[], help_yes=True)
+    _patch_claude(monkeypatch, mod, fake)
+    res = mod.reinstall(dict(_MANIFEST))
+    assert res["installed"] == ["trinity@abilityai"]
+    install = fake.install_calls()[0]
+    assert install == ["claude", "plugin", "install", "trinity@abilityai", "--yes"]
+
+
+def test_feature_detect_probes_at_most_once(mod, monkeypatch):
+    """The `--help` probe is one subprocess per reconcile, not one per plugin."""
+    fake = _FakeClaude(marketplaces=[], plugins=[])
+    _patch_claude(monkeypatch, mod, fake)
+    manifest = {
+        "marketplaces": {"abilityai": "abilityai/abilities", "other": "o/r"},
+        "installed": ["trinity@abilityai", "thing@other"],
+    }
+    res = mod.reinstall(manifest)
+    assert len(res["installed"]) == 2
+    assert len(fake.help_probes()) == 1
+
+
+def test_feature_detection_agrees_with_the_real_cli(mod):
+    """#2305 pinned against the REAL binary, where one is on PATH: the module
+    passes `--yes` exactly when this CLI advertises it. The mocked suite could
+    never catch the flag drift (the bug shipped green); this one asks the
+    installed CLI itself, so the next bump that renames/removes the flag fails
+    here instead of fleet-wide at boot."""
+    if shutil.which("claude") is None:
+        pytest.skip("real claude CLI not on PATH")
+    proc = subprocess.run(
+        ["claude", "plugin", "install", "--help"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    advertised = proc.returncode == 0 and "--yes" in f"{proc.stdout}\n{proc.stderr}"
+    assert mod._install_supports_yes() is advertised
 
 
 def test_subprocess_is_timeout_bounded_with_devnull_stdin(mod, monkeypatch):
