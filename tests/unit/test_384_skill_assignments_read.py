@@ -205,14 +205,32 @@ def test_access_set_is_db_derived_not_docker_derived(router_mod):
         "fault; using it here reintroduces the fleet-wide false-empty"
     )
 
-    # The alias must bind the ONE shared helper (a local re-implementation
-    # would dodge both asserts above the moment the helper moved), and the
-    # router itself must never touch the Docker-derived access helper.
-    from services.agent_service import helpers as _helpers
-
-    assert router_mod._visible_agent_names is _helpers.visible_agent_names, (
+    # The alias must resolve to the ONE shared helper (a local
+    # re-implementation would dodge both asserts above the moment the helper
+    # moved), and the router itself must never touch the Docker-derived access
+    # helper.
+    #
+    # Pinned by ORIGIN (`__module__`/`__qualname__`), deliberately NOT by
+    # object identity against a freshly-imported `helpers`. `router_mod` is the
+    # module object bound at ITS import, while a `from services.agent_service
+    # import helpers` inside this test resolves at call time — and the suite
+    # contains tests that purge `sys.modules` (the reason CI carries a
+    # dedicated sys.modules-pollution lint). After such a purge the module is
+    # re-imported from the same path under the same key, so `is` compares two
+    # distinct function objects and fails for a reason that says nothing about
+    # the property under test: the assert passed alone and failed on all three
+    # full-suite seed orders. `__module__` still defeats what identity was
+    # there to defeat — a router-local `def _visible_agent_names` would read
+    # `routers.skills`.
+    assert (
+        router_mod._visible_agent_names.__module__
+        == "services.agent_service.helpers"
+        and router_mod._visible_agent_names.__qualname__ == "visible_agent_names"
+    ), (
         "the router must bind services.agent_service.helpers.visible_agent_names "
-        "— the pure-DB visible-set rule has ONE home (#471)"
+        "— the pure-DB visible-set rule has ONE home (#471); got "
+        f"{router_mod._visible_agent_names.__module__}."
+        f"{router_mod._visible_agent_names.__qualname__}"
     )
     router_src = inspect.getsource(router_mod)
     assert "accessible_agent_names" not in router_src
