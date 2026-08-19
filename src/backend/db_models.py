@@ -908,12 +908,64 @@ class SubscriptionUsageWindow(BaseModel):
     message_count: int = 0
 
 
+class HeadroomWindow(BaseModel):
+    """One rolling-limit window from the anthropic-ratelimit-unified-* headers (#471)."""
+    utilization_pct: Optional[float] = None  # 0..100
+    resets_at: Optional[str] = None          # ISO-Z
+    status: Optional[str] = None             # provider's per-window status (e.g. "allowed")
+
+
+class SubscriptionHeadroom(BaseModel):
+    """Provider-truth headroom snapshot for one subscription (#471).
+
+    Sourced from a minimal probe's response headers. Absent windows mean the
+    provider did not report them — never fabricated.
+    """
+    five_hour: Optional[HeadroomWindow] = None
+    seven_day: Optional[HeadroomWindow] = None
+    representative_claim: Optional[str] = None  # which window binds ("five_hour"/"seven_day")
+    overage_status: Optional[str] = None
+    fetched_at: Optional[str] = None            # ISO-Z of the probe
+    snapshot_age_seconds: Optional[int] = None
+    status: str = "ok"                          # ok | invalid_token | rate_limited | error
+
+
 class SubscriptionUsage(BaseModel):
-    """Per-subscription usage across rolling time windows. (SUB-004)"""
+    """Per-subscription usage across rolling time windows. (SUB-004; extended #471)
+
+    #471 fields default so pre-#471 constructors and stored snapshots survive:
+    `source` says where the *headroom* reading came from — "anthropic" (probe
+    headers, `headroom` populated) or "observed" (DB-derived only). The
+    windows/counters below are ALWAYS DB-derived and always populated (the
+    load-bearing arm — see the #2170 lesson).
+    """
     subscription_id: str
     window_5h: SubscriptionUsageWindow
     window_7d: SubscriptionUsageWindow
     agents: List[str] = []  # agents currently assigned to this subscription
+    failure_events_24h: int = 0                 # #471: SUB-003 failure events on record (24h)
+    failure_events_by_kind: Dict[str, int] = Field(default_factory=dict)  # {"rate_limit": n, "auth": n, "unknown": n}
+    rate_limited_now: bool = False              # #471: ONE derivation (2h predicate OR fresh provider status)
+    source: str = "observed"                    # #471: "anthropic" | "observed"
+    headroom: Optional[SubscriptionHeadroom] = None  # #471: provider snapshot when available
+
+
+class SubscriptionUsageBreakdownRow(BaseModel):
+    """Per-agent consumption within one window (#471 Tier 2). Ranked by cost_usd
+    desc at the query — cost is model-weighted by construction (API prices ≈
+    limit-burn rates), the honest ranking on a mixed-model subscription."""
+    agent_name: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    message_count: int = 0
+
+
+class SubscriptionUsageBreakdown(BaseModel):
+    """Per-agent breakdown for a subscription, both windows (#471 Tier 2)."""
+    subscription_id: str
+    window_5h: List[SubscriptionUsageBreakdownRow] = []
+    window_7d: List[SubscriptionUsageBreakdownRow] = []
 
 
 # =========================================================================

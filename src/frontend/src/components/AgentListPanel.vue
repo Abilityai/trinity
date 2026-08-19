@@ -312,6 +312,17 @@
               >
                 Shared
               </span>
+              <!-- #471: subscription-pressure badge (shared predicate) -->
+              <span
+                v-if="pressureBadgeFor(agent.name)"
+                class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
+                :class="pressureBadgeFor(agent.name).level === 'crit'
+                  ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
+                  : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
+                :title="pressureBadgeFor(agent.name).title"
+              >
+                {{ pressureBadgeFor(agent.name).text }}
+              </span>
             </div>
 
             <!-- Activity label -->
@@ -564,7 +575,7 @@
                 <span class="font-medium text-gray-700 dark:text-gray-300">{{ getExecutionStats(agent.name).taskCount }} tasks</span>
                 <template v-if="getExecutionStats(agent.name).totalCost > 0">
                   <span class="text-gray-300 dark:text-gray-600">·</span>
-                  <span class="font-medium text-gray-700 dark:text-gray-300">{{ formatCostCompact(getExecutionStats(agent.name).totalCost) }}</span>
+                  <span class="font-medium text-gray-700 dark:text-gray-300" :title="costIsApproximate(agent.name) ? 'API-price equivalent of subscription usage — not a bill' : null">{{ costIsApproximate(agent.name) ? '≈' : '' }}{{ formatCostCompact(getExecutionStats(agent.name).totalCost) }}</span>
                 </template>
               </template>
               <span v-else class="text-gray-400 dark:text-gray-500">--</span>
@@ -702,6 +713,7 @@ import CapacityMeter from './CapacityMeter.vue'
 import { ServerIcon } from '@heroicons/vue/24/outline'
 import axios from 'axios'
 import { syncHealthColor, syncHealthLabel as syncHealthLabelFn } from '../utils/syncHealth'
+import { pressureBadge, isSubscriptionFunded } from '../utils/subscriptionPressure'
 
 const props = defineProps({
   // The chassis-visible fleet (networkStore.visibleAgents — server-side tag
@@ -841,9 +853,11 @@ const { notification, showNotification, dismissNotification } = useNotification(
 let syncHealthInterval = null
 onMounted(() => {
   agentsStore.fetchSyncHealth()
+  agentsStore.fetchSubscriptionPressure()  // #471: same poll discipline
   syncHealthInterval = setInterval(() => {
     if (document.hidden) return
     agentsStore.fetchSyncHealth()
+    agentsStore.fetchSubscriptionPressure()
   }, 60000)
 })
 
@@ -857,9 +871,20 @@ onUnmounted(() => {
 // Chassis refresh hook (Dashboard refreshAll → list branch). Fleet + tags
 // refresh are chassis-side; sync health is the panel's only own fetch.
 function refresh() {
-  return agentsStore.fetchSyncHealth()
+  return Promise.allSettled([
+    agentsStore.fetchSyncHealth(),
+    agentsStore.fetchSubscriptionPressure(),  // #471
+  ])
 }
 defineExpose({ refresh })
+
+// #471: badge + Tier 0 ≈ helpers (shared predicate — utils/subscriptionPressure.js)
+function pressureBadgeFor(agentName) {
+  return pressureBadge(agentsStore.subscriptionPressure[agentName])
+}
+function costIsApproximate(agentName) {
+  return isSubscriptionFunded(agentsStore.subscriptionPressure[agentName])
+}
 
 // #389 Sync health helpers
 const syncHealthEntry = (agentName) => agentsStore.syncHealth[agentName] || null

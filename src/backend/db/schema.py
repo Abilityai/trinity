@@ -1231,6 +1231,7 @@ TABLES = {
             agent_name TEXT NOT NULL,
             subscription_id TEXT NOT NULL,
             error_message TEXT,
+            failure_kind TEXT,
             occurred_at TEXT NOT NULL,
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id) ON DELETE CASCADE
         )

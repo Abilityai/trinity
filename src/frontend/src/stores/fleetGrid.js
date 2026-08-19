@@ -323,6 +323,28 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
   }
 
+  // #471 — subscription-pressure chip data (batch, pure-DB backend). Mirrors
+  // the sync-health discipline: fetched on the same visibility-aware batch
+  // poll, last-known-good kept on error (a failed fetch is never "no
+  // pressure"). The 60s poll is also the demand driver for the backend's
+  // ambient headroom refresh (server-side floored at ~15 min/subscription).
+  const subscriptionPressure = ref({}) // agent → pressure row
+
+  async function fetchSubscriptionPressure() {
+    try {
+      const res = await axios.get('/api/agents/subscription-pressure', {
+        headers: authStore.authHeader,
+      })
+      const map = {}
+      for (const entry of res.data.agents || []) {
+        map[entry.agent_name] = entry
+      }
+      subscriptionPressure.value = map
+    } catch {
+      // chip data is non-critical — keep last known state
+    }
+  }
+
   async function fetchOpQueuePending() {
     try {
       const res = await axios.get('/api/operator-queue', {
@@ -499,7 +521,7 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   let _visibilityHandler = null
 
   function refreshBatchData() {
-    const tasks = [fetchSyncHealth(), fetchOpQueuePending(), fetchSkillRunnerStatus()]
+    const tasks = [fetchSyncHealth(), fetchOpQueuePending(), fetchSkillRunnerStatus(), fetchSubscriptionPressure()]
     // Don't pay for a tile that is switched OFF. This reads `activeWidgetKeys`,
     // which resolves through `GRID_WIDGETS` — a registry populated by
     // `components/tiles/catalog.js`'s SIDE-EFFECT import from `FleetGrid.vue`.
@@ -574,6 +596,8 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     hydrate,
     syncHealth,
     opQueuePending,
+    subscriptionPressure,
+    fetchSubscriptionPressure,
     skillRunnerStatus,
     recentFailures,
     execTimeline,

@@ -106,17 +106,35 @@ async def handle_subscription_failure(
     Returns:
         dict with switch details if auto-switch occurred, None otherwise.
     """
-    # 1. Check if auto-switch is enabled (default: on, #441). Cheap, lock-free —
-    # a disabled platform never contends for the per-agent lock.
-    enabled = db.get_setting_value("auto_switch_subscriptions", default="true") == "true"
-    if not enabled:
-        return None
-
-    # 2. Snapshot the agent's subscription BEFORE acquiring the lock. This is the
+    # 1. Snapshot the agent's subscription BEFORE anything else. This is the
     # subscription our failure was (approximately) about. If a concurrent failure
     # switches the agent off it while we wait for the lock, our failure is stale.
     sub_at_entry = db.get_agent_subscription_id(agent_name)
     if not sub_at_entry:
+        return None
+
+    # 2. Record the failure event UNCONDITIONALLY — before the enabled gate
+    # (#471). The event stream feeds the observability surfaces (Settings
+    # usage cards, Dashboard pressure badges), and gating the *recording* on
+    # auto-switch left operators who disabled automatic remediation — exactly
+    # the population depending on manual visibility — with a permanently-zero
+    # count. Attribution to the pre-lock snapshot is deliberate and MORE
+    # correct than the old under-lock re-read: the failure genuinely happened
+    # on `sub_at_entry`, and a stale failure (agent already switched) used to
+    # record nothing at all. Recording is a single INSERT — it does not need
+    # the #799 lock, which protects the read→decide→assign window.
+    consecutive_count = db.record_rate_limit_event(
+        agent_name=agent_name,
+        subscription_id=sub_at_entry,
+        error_message=error_message,
+        failure_kind=failure_kind,
+    )
+
+    # 3. Check if auto-switch is enabled (default: on, #441). Cheap, lock-free —
+    # a disabled platform never contends for the per-agent lock. The event
+    # above is already on record either way.
+    enabled = db.get_setting_value("auto_switch_subscriptions", default="true") == "true"
+    if not enabled:
         return None
 
     # #799: serialize the read→decide→assign→restart window per agent so two
@@ -136,18 +154,13 @@ async def handle_subscription_failure(
             )
             return None
 
-        # 3. Record the failure event in the rate-limit table. Auth-class events
-        # share the same table — the table tracks "subscription failure events"
-        # generically; `is_subscription_rate_limited` treats any event in the 2h
-        # window as a reason to skip the subscription as a candidate, which is the
-        # behavior we want for both kinds of failure.
-        consecutive_count = db.record_rate_limit_event(
-            agent_name=agent_name,
-            subscription_id=current_sub_id,
-            error_message=error_message,
-        )
-
-        # 4. Find a viable alternative subscription
+        # 4. Find a viable alternative subscription. (The failure event was
+        # already recorded at step 2, pre-gate, against `sub_at_entry` — which
+        # equals `current_sub_id` on this non-stale path. Auth-class events
+        # share the same table with `failure_kind` persisted since #471;
+        # `is_subscription_rate_limited` treats any event in the 2h window as
+        # a reason to skip the subscription as a candidate, which is the
+        # behavior we want for both kinds of failure.)
         alternative = db.select_best_alternative_subscription(current_sub_id)
         if not alternative:
             logger.warning(

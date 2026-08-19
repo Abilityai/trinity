@@ -25,7 +25,8 @@ export const useAgentsStore = defineStore('agents', {
     // Running toggle loading state per agent
     runningToggleLoading: {},  // Map of agent name -> boolean
     // #389 Sync health per agent (populated by fetchSyncHealth)
-    syncHealth: {}  // Map of agent name -> { last_sync_status, consecutive_failures, behind_working, ... }
+    syncHealth: {},  // Map of agent name -> { last_sync_status, consecutive_failures, behind_working, ... }
+    subscriptionPressure: {}  // #471: agent name -> { auth_mode, subscription_name, failure_events_24h, rate_limited_now, ... }
   }),
 
   getters: {
@@ -97,6 +98,27 @@ export const useAgentsStore = defineStore('agents', {
       } catch (error) {
         // Silent — sync health is advisory; don't block the dashboard.
         console.warn('Failed to fetch sync health:', error.message)
+      }
+    },
+
+    async fetchSubscriptionPressure() {
+      // #471: batch endpoint for subscription-pressure badges. Mirrors the
+      // sync-health discipline (AgentListPanel reads THIS store; the grid's
+      // fleetGrid store carries its own copy — two stores, one endpoint, the
+      // established chassis pattern). Last-known-good kept on error: a failed
+      // fetch is never "no pressure".
+      try {
+        const authStore = useAuthStore()
+        const response = await axios.get('/api/agents/subscription-pressure', {
+          headers: authStore.authHeader
+        })
+        const map = {}
+        for (const entry of response.data.agents || []) {
+          map[entry.agent_name] = entry
+        }
+        this.subscriptionPressure = map
+      } catch (error) {
+        console.warn('Failed to fetch subscription pressure:', error.message)
       }
     },
 
