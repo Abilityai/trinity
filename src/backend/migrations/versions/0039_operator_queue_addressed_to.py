@@ -25,9 +25,24 @@ branch_labels = None
 depends_on = None
 
 
+def _has_column(bind, table: str, column: str) -> bool:
+    return column in {c["name"] for c in sa.inspect(bind).get_columns(table)}
+
+
 def upgrade() -> None:
-    op.add_column("operator_queue", sa.Column("addressed_to_email", sa.Text(), nullable=True))
+    # Guarded because a FRESH PostgreSQL database already carries this column:
+    # 0001_baseline builds the table from the live `db/tables.py` metadata, which
+    # declares it. Without the guard the revision aborts boot with DuplicateColumn
+    # on every new install. The SQLite track hides this — `_safe_add_column` guards
+    # for us there — so the guard has to be explicit here (0031 does the same).
+    bind = op.get_bind()
+    if not _has_column(bind, "operator_queue", "addressed_to_email"):
+        op.add_column(
+            "operator_queue", sa.Column("addressed_to_email", sa.Text(), nullable=True)
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("operator_queue", "addressed_to_email")
+    bind = op.get_bind()
+    if _has_column(bind, "operator_queue", "addressed_to_email"):
+        op.drop_column("operator_queue", "addressed_to_email")
