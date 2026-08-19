@@ -103,6 +103,10 @@ agent_ownership = Table(
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
+    # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
+    # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
+    # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
+    Column("operator_resume_enabled", Integer),
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag

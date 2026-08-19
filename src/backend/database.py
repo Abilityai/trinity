@@ -978,6 +978,14 @@ class DatabaseManager:
     def set_mcp_exposed(self, agent_name: str, enabled: bool) -> bool:
         return self._agent_ops.set_mcp_exposed(agent_name, enabled)
 
+    # --- respond→resume opt-in (ent#329) ---
+
+    def get_operator_resume_enabled(self, agent_name: str) -> bool:
+        return self._agent_ops.get_operator_resume_enabled(agent_name)
+
+    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
