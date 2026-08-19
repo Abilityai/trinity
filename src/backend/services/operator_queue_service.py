@@ -83,6 +83,9 @@ OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYT
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
 OPERATOR_QUEUE_ID_MAX = int(os.getenv("OPERATOR_QUEUE_ID_MAX", "256"))
 OPERATOR_QUEUE_EXECUTION_ID_MAX = int(os.getenv("OPERATOR_QUEUE_EXECUTION_ID_MAX", "128"))
+# ent#364: RFC 5321 caps an address at 320 chars; anything longer is not an
+# email and never matches a roster row, so it is refused before the DB read.
+OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
 # Flood alert: one per episode, un-guessable id, in-memory cooldown.
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
@@ -189,7 +192,50 @@ def _truncate_with_marker(text: str, max_len: int) -> str:
     return text[:keep] + _TRUNC_MARKER
 
 
-def _clamp_ingested_item(req: dict) -> dict:
+def _validated_addressee(agent_name: str, raw) -> Optional[str]:
+    """The email an ask is addressed to, or None (ent#364).
+
+    This is the one field on an agent-authored item that is an AUTHORIZATION
+    decision: it determines who may answer the ask and whose Workspace sidebar it
+    appears in. So it is validated here, at the same boundary that clamps every
+    other agent-supplied field, against the agent's own roster — an agent may
+    address only someone it was already shared with.
+
+    `include_owned=False` is the rule, not a default (see `agent_on_roster`'s
+    docstring): an external client's scope is exactly what was shared with them,
+    and the owned-agents branch would hand a client agents nobody gave them.
+
+    Fails CLOSED: a malformed value, an off-roster address, or a roster lookup that
+    raises all yield None — an operator ask — because addressing an ask we could
+    not validate is worse than not addressing it. Never raises, per this module's
+    #1632 contract.
+    """
+    if not isinstance(raw, str):
+        return None
+    email = raw.strip().lower()
+    if not email or len(email) > OPERATOR_QUEUE_EMAIL_MAX or "@" not in email:
+        return None
+    try:
+        from client_portal.service import agent_on_roster
+
+        if agent_on_roster(agent_name, email, include_owned=False):
+            return email
+        logger.info(
+            "[OperatorQueue] %s addressed an item to an off-roster email; "
+            "treating it as an operator ask (ent#364)",
+            agent_name,
+        )
+    except Exception:  # noqa: BLE001 — a roster read must never break ingestion
+        logger.warning(
+            "[OperatorQueue] could not validate the addressee for %s; "
+            "treating it as an operator ask (ent#364)",
+            agent_name,
+            exc_info=True,
+        )
+    return None
+
+
+def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """#1632: total field-hygiene clamp for an agent-authored queue item.
 
     Called INSIDE the create try/except so any failure is quarantined by #1525
@@ -245,6 +291,10 @@ def _clamp_ingested_item(req: dict) -> dict:
 
     if out.get("priority") not in _VALID_PRIORITIES:
         out["priority"] = "medium"
+
+    # ent#364: the addressee is an authorization decision, so it is resolved here
+    # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
+    out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
 
     # Ignore the agent-supplied created_at (a future date pins the item atop the
     # `created_at DESC` sort, C4). expires_at is honored as authored.
@@ -767,7 +817,7 @@ class OperatorQueueSyncService:
             # New item — clamp then create. The clamp runs INSIDE the try so any
             # clamp/create failure is quarantined by #1525 rather than hot-looping.
             try:
-                clamped = _clamp_ingested_item(req)
+                clamped = _clamp_ingested_item(req, agent_name)
                 db.create_operator_queue_item(agent_name, clamped)
                 admitted += 1
                 new_items.append(clamped)

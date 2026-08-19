@@ -94,6 +94,7 @@ class OperatorQueueOperations:
             "responded_at": row["responded_at"],
             "acknowledged_at": row["acknowledged_at"],
             "cleared_at": row["cleared_at"],  # #1017
+            "addressed_to_email": row["addressed_to_email"],  # ent#364
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -118,6 +119,7 @@ class OperatorQueueOperations:
         operator_queue.c.responded_at,
         operator_queue.c.acknowledged_at,
         operator_queue.c.cleared_at,  # #1017 — Clear All hide flag
+        operator_queue.c.addressed_to_email,  # ent#364 — the human it is for
     )
 
     def create_item(self, agent_name: str, item: Dict) -> str:
@@ -206,6 +208,11 @@ class OperatorQueueOperations:
             execution_id=context_execution_id,
             created_at=item.get("created_at") or utc_now_iso(),
             expires_at=item.get("expires_at"),
+            # ent#364: already validated against the agent's roster by
+            # `operator_queue_service._validated_addressee`. This layer stores it;
+            # it does not decide it, and it must never derive it from `context`
+            # (which is agent-authored).
+            addressed_to_email=item.get("addressed_to_email"),
         ).on_conflict_do_nothing(index_elements=["agent_name", "request_id"])
 
         # Insert + re-read in one transaction: on conflict the insert is a no-op

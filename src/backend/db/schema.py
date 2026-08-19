@@ -1262,6 +1262,7 @@ TABLES = {
             responded_at TEXT,
             acknowledged_at TEXT,
             cleared_at TEXT,
+            addressed_to_email TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

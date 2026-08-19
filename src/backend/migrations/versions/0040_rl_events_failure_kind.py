@@ -7,15 +7,15 @@ so the table conflated broken-token auth failures with genuine quota 429s. NULL
 Mirrors the SQLite ``rate_limit_events_failure_kind`` migration +
 ``db/schema.py`` / ``db/tables.py``.
 
-Revision ID: 0039_rl_events_failure_kind
-Revises: 0038_portal_chat_state
+Revision ID: 0040_rl_events_failure_kind
+Revises: 0039_operator_queue_addressed_to
 Create Date: 2026-08-19
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0039_rl_events_failure_kind"
-down_revision = "0038_portal_chat_state"
+revision = "0040_rl_events_failure_kind"
+down_revision = "0039_operator_queue_addressed_to"
 branch_labels = None
 depends_on = None
 
