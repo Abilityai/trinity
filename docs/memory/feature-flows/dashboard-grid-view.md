@@ -1,6 +1,6 @@
 # Feature Flow: Dashboard Grid View (magnetic tile canvas)
 
-> **Last Updated**: 2026-08-12 (info tiles: Recent failures, ent#100)
+> **Last Updated**: 2026-08-19 (info tiles: Subscription pressure, ent#259)
 > **Status**: Implemented — third dashboard mode, not default
 > **Issue**: trinity-enterprise#47 (design of record embedded in the issue)
 > **Requirements**: `docs/memory/requirements/core-agent.md` §9.8, §9.12 (info tiles)
@@ -296,6 +296,83 @@ on every current install and the freed width goes to the real message. Persistin
 
 `error_summary` is agent/LLM-authored, prompt-injectable text: rendered as text
 interpolation and bound attributes only, never `v-html`.
+
+### Subscription pressure (ent#259) — the first admin-only tile
+
+"How much is left on any of my subscriptions?" answered from the board. The
+**inverse unit** of #471's per-agent pressure chip: that chip says whether *this
+agent's* funding is strained and structurally cannot say *which subscription* is
+the bottleneck, because agents share a subscription and burn one 5h window
+between them — reading it off the board otherwise means grouping every agent
+chip into buckets by eye.
+
+```
+components/tiles/SubscriptionPressureTile.vue     (adminOnly, default-on, wantsTick: false)
+  ├─ components/InfoTile.vue                      shell
+  ├─ components/tiles/parts/TileRowList.vue       one row per subscription
+  ├─ utils/subscriptionPressureTile.js            ALL decisions (pure, node-env testable)
+  └─ stores/subscriptions.js::fetchPressureData   roster + usage on the 60s batch poll
+```
+
+**Zero backend change**, per the operator ruling on ent#259 (2026-08-19): "a
+small build on `GET /api/agents/subscription-pressure` + the extended
+`GET /api/subscriptions/{id}/usage` once #471 merges". The roster comes from
+`GET /api/subscriptions` and each row's figures from `/{id}/usage` — a fan-out
+of one request per subscription, which at the real fleet size (one per Claude
+account) is fewer requests than `fetchOpQueuePending` already makes on the same
+poll. A batched endpoint was designed and **rejected**: it optimizes ~0.5 q/s,
+and `assert_admin` rejects agent principals (#1890) so it would not even be
+reusable by ent#351's agent-facing tools.
+
+**First `adminOnly: true` tile, and not a style choice** — every endpoint it
+reads is admin-gated (the payload carries per-subscription spend) and its footer
+link goes to Settings, whose route is `requiresAdmin`. The flag also does the
+gating for free: the widget key is absent for non-admins, so the batch fetch
+never fires and there is no 403 loop. Because `isAdmin` is only confirmed once
+`fetchUserProfile()` lands, the store also **watches the key appearing** and
+re-polls — otherwise a cold load skips the fetch and the tile sits blank until
+the next 60s tick. `fetchSubscriptionPressure()` (the per-agent chip feed) stays
+**ungated**: chips and list badges must keep working while this tile is off.
+
+**What the row may claim** — the honesty rules, all pinned in the pure module:
+
+| Shown | Rule |
+|---|---|
+| `5h 97%  7d 88%` | **Both** rolling limits, each coloured by its own band — green < 60, amber < 85, red ≥ 85 (`utilizationLevel`). Two windows rather than one because either can be the wall you hit: a subscription routinely sits at 20% of its 5h while its weekly is nearly gone, and one number cannot say which. Rendered ONLY when `source=anthropic` and the snapshot is ≤30 min old (`headroomIsFresh`); #471 established the number is real (`anthropic-ratelimit-unified-*` headers), so ent#259's "never a fake-precise X% left" is about FRAMING — utilization *consumed*, source-labelled — not about hiding a genuine reading. Labelled `5h`/`7d`, never "daily"/"weekly": they are rolling windows with a visible `resets_at`, and the calendar words would misdescribe when quota returns. An absent window is omitted rather than shown as `0%` |
+| `near` chip | A window in the **red** band raises severity to `warn` even with a spotless failure history — it is the only signal that exists *before* the first 429. Without it a subscription at 93% of its weekly ranks below one whose usage read merely failed, and gets pushed into the overflow. The chip distinguishes `429s` (already happened) from `near` (has not yet) |
+| `3× 429` | the `rate_limit` **kind only**, never `failure_events_24h`, which also counts `auth` and pre-#471 `unknown` rows. Migration 0040 split them at the data layer; reporting the total under a "429" label would undo that fix in the UI |
+| `rate-limited` | the backend's one-gate `rate_limited_now` only — a 24h count alone never claims "limited now" |
+| `≈$3.12 · 1.2k out` | output tokens and cost are real. **`input_tokens` is deliberately absent from the row face**: it is `SUM(schedule_executions.context_used)` — context-window *occupancy* per run, not tokens consumed — the same ruling architecture.md already made for the sibling ent#101 tile against `/executions/timeline`. It appears in the tooltip, labelled an estimate |
+| `unavailable` | a failed per-subscription usage read renders as unavailable — never zeroes, never a healthy-looking row |
+
+Cost is always `≈`: a subscription is a flat fee, so the figure is
+API-equivalent, not a bill. The tooltip states that 7d *contains* the 5h window
+so the two are never read as additive, and surfaces
+`headroom.status == "invalid_token"` — the most actionable state the payload
+carries and otherwise indistinguishable from "no provider data".
+
+**Empty vs failed vs stale**, the three states this surface must not blur: the
+empty branch requires a fetch that SUCCEEDED and returned zero (`listLoaded &&
+!listError`), never `rows.length === 0`; a wrong-shaped 200 is a FAULT, not an
+empty fleet (`stores/subscriptions.js` guards `Array.isArray`, mirroring the
+ent#100 fetchers) — laundering it would tell an operator their subscriptions are
+*not configured*, a different and much worse claim than "could not read them";
+and a poll that fails *after* a good one keeps its rows and marks the stamp
+`stale` rather than replacing real data with an error panel.
+
+**Overflow is disclosed, not clipped.** Past the fixed track count a row is
+clipped by `InfoTile`'s `overflow: hidden` with no scroll or ellipsis, so the
+pure function returns `visibleRows`/`totalRows`, the last track becomes a
+`+N more` link, and the stamp reads `3 of 9`. Sort is a **total** order
+(severity → 429 volume → utilization → name) so equal rows cannot reshuffle
+between polls, and the utilization term uses the **fullest** window — ranking on
+the 5h alone buries a subscription whose weekly is the one about to run out.
+
+Reading the dashboard drives #471's ambient headroom refresh — floored
+server-side at one probe per 15 min per subscription. That is the intended
+demand-driven design (an unwatched instance probes nothing); an open dashboard
+keeping headroom warm is the point of the tile. The trend line is **ent#433's**
+(headroom history): this tile ships point-in-time only, by explicit coordination.
 
 ### Chassis rules a list tile must honour
 

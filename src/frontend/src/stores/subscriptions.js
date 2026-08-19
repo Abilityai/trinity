@@ -21,6 +21,12 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
     breakdownLoading: {},  // subscription_id -> bool
     refreshingHeadroom: {},// subscription_id -> bool (click probe in flight)
     headroomAutoRefresh: { enabled: true, refresh_seconds: 900, loaded: false },
+    // ent#259 — the roster the Dashboard pressure tile renders. Settings fetches
+    // the same list with a raw axios call it owns; this is the store-side read
+    // the tile uses, so the Grid never reaches into a view's local state.
+    subscriptions: [],
+    listLoaded: false,     // latches true on first success, never back
+    listError: false,      // this cycle only
   }),
 
   actions: {
@@ -42,6 +48,50 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
     // (one 404/500 never blanks the section).
     async fetchUsageForAll(subscriptionIds) {
       await Promise.allSettled(subscriptionIds.map((id) => this.fetchUsage(id)))
+    },
+
+    /**
+     * ent#259 — roster + usage for the Dashboard "Subscription pressure" tile.
+     *
+     * The operator-prescribed shape (ent#259, 2026-08-19): a small build on the
+     * endpoints #471 already ships, rather than a third batched route. At the
+     * real fleet size (one subscription per Claude account) the fan-out is a
+     * handful of requests per poll — fewer than `fetchOpQueuePending`, which
+     * already rides the same batch.
+     *
+     * Honest status, three distinguishable outcomes:
+     *  - the LIST fetch fails      → `listError`, last-good roster kept
+     *  - the list returns a body of the wrong shape → also a FAULT, never
+     *    laundered into "no subscriptions" (the manufactured-empty class: a
+     *    200 whose body changed shape would otherwise render as an empty state
+     *    that reads "none configured")
+     *  - a per-subscription usage fetch fails → `usageBySub[id] = {error:true}`,
+     *    and that ROW renders unavailable while its siblings render normally
+     *
+     * Note this drives #471's ambient headroom refresh from the dashboard: a
+     * read is the demand signal, floored server-side at one probe per 15 min
+     * per subscription. That is the intended design (an unwatched instance
+     * probes nothing) — but it does mean an open dashboard keeps headroom warm,
+     * which is the point of the tile.
+     */
+    async fetchPressureData() {
+      let ids = []
+      try {
+        const { data } = await api.get('/api/subscriptions')
+        if (!Array.isArray(data)) {
+          this.listError = true
+          return
+        }
+        this.subscriptions = data
+        this.listError = false
+        this.listLoaded = true
+        ids = data.map((s) => s.id).filter(Boolean)
+      } catch (e) {
+        // Keep the last-known roster: a failed poll is not "no subscriptions".
+        this.listError = true
+        return
+      }
+      if (ids.length) await this.fetchUsageForAll(ids)
     },
 
     async fetchBreakdown(subscriptionId) {
