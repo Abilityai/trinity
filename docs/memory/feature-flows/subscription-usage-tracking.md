@@ -1,14 +1,31 @@
 # Feature: Subscription Usage Tracking
 
 ## Overview
-Per-subscription rolling token and cost usage across two time windows (5h and 7d), covering both chat messages and scheduled task executions.
+Per-subscription rolling token and cost usage across two time windows (5h and 7d), plus — since #471 — failure-event counters and **live provider headroom** (actual 5h/7d utilization % + reset times). **Dedup rule (#471, verified live):** a modern turn writes BOTH a `schedule_executions` row and (for `/chat` + persisted `/task`) a cost-bearing `chat_messages` row, so `schedule_executions` is the SOLE source for cost / context-estimate / turn count; `chat_messages` contributes only `output_tokens` (which executions don't carry). Summing both — the pre-#471 behavior — counted every chat turn's cost twice.
 
 ## User Story
-As a platform admin, I want to see aggregate token usage per Claude Max/Pro subscription so that I can understand load distribution across shared subscriptions and detect overuse.
+As a platform admin, I want to see aggregate usage, live headroom, and failure pressure per Claude Max/Pro subscription so that I can understand load distribution, spot which agent burns the quota, and see how much is left before limits hit.
 
 ## Entry Points
-- **API**: `GET /api/subscriptions/{subscription_id}/usage`
-- No direct UI entry point — intended for admin inspection and future dashboard integration. Accepts subscription UUID or name as the path parameter.
+- **UI**: Settings → Integrations → Claude Subscriptions (`components/settings/SubscriptionsPanel.vue`, extracted from Settings.vue in #471) — Pressure column per row; expanded row shows the usage/headroom block, per-agent breakdown (lazy), and the Refresh (probe) button. Dashboard pressure badges: `GET /api/agents/subscription-pressure` (see below).
+- **API**: `GET /api/subscriptions/{subscription_id}/usage` (extended), `GET /{id}/usage/breakdown`, `POST /{id}/usage/refresh`, `GET|PUT /api/subscriptions/settings/headroom-auto-refresh`. Accepts subscription UUID or name as the path parameter.
+
+## #471 — Live headroom (provider truth)
+
+**Facts established 2026-08-19 against a real stored `sk-ant-oat01-` setup token:**
+- `GET https://api.anthropic.com/api/oauth/usage` → **403 `permission_error` (missing `user:profile` scope)** — that endpoint requires an interactive-login token and is DEAD for the tokens Trinity stores (the mechanism behind closed PR #2170). Do not resurrect it.
+- `POST /v1/messages` under the same token returns the full `anthropic-ratelimit-unified-*` header set: `{5h,7d}-utilization` (fraction 0..1), `-reset` (unix), per-window `-status`, `representative-claim`, overage status.
+
+**`services/subscription_headroom_service.py`** reads those headers via a **micro-ping probe** (`max_tokens=1` Haiku message, ~a dozen tokens of the subscription's own quota, visible in the Anthropic console — release-noted):
+- **Click** (`POST /{id}/usage/refresh`, admin): one probe, floored ≥60s apart per subscription; works Redis-down via a per-worker in-process floor.
+- **Ambient** (default ON, `subscription_headroom_auto_refresh` system setting): refresh when the cached snapshot is older than `SUBSCRIPTION_HEADROOM_REFRESH_SECONDS` (900), demand-driven by reads — an unwatched instance probes nothing. **Fail-CLOSED when Redis is unreachable**: `_read_snapshot` returns `(redis_ok, snapshot)` and ambient probing requires an ANSWERED cache read — a client object existing proves nothing about the server (learnings 2026-08-19).
+- **Batch path never blocks**: `get_headroom(wait=False)` (used by `pressure_states` behind the dashboard poll) spawns the refresh as a strong-ref background task and serves the stale snapshot with its honest age.
+- Snapshot in Redis `subscription:headroom:{id}` (7d TTL, best-effort DEL on subscription delete); probe single-flighted (`SingleFlightLock` #1920). A probe 429 updates the snapshot's `status` only — never `subscription_rate_limit_events` (platform-caused, not agent work). 401/403 → `status: invalid_token`. Missing header family on a 200 → throttled WARNING (provider drift is loud) + degrade to observed.
+- **Contract (the #2170 inversion)**: every `/usage` response carries `source: "anthropic"|"observed"` + `headroom.snapshot_age_seconds`; the DB-derived windows/counters are ALWAYS populated — the observed arm is load-bearing, provider data is enrichment. `rate_limited_now` has ONE derivation (`decorate_usage`): the 2h `is_subscription_rate_limited` predicate OR a fresh (≤2× refresh interval) provider verdict.
+
+**Failure counters (#471)**: `failure_events_24h` + `failure_events_by_kind` (`rate_limit` | `auth` | `unknown` for pre-#471 NULL rows) from `subscription_rate_limit_events`, which now persists `failure_kind` (dual-track migration `rate_limit_events_failure_kind` / Alembic `0039`). Events are recorded BEFORE the auto-switch enabled gate (see subscription-auto-switch.md) so opted-out operators keep observability.
+
+**Fleet pressure**: `GET /api/agents/subscription-pressure` (registered before `/{agent_name}`, Invariant #4) — per accessible agent (`visible_agent_names`, the shared pure-DB ent#384 helper): `auth_mode` (the `AgentAuthStatus` vocabulary via the shared `derive_auth_mode`), `subscription_name`, `failure_events_24h`, `rate_limited_now`, `utilization_5h_pct` + `headroom_source`. Explicit `response_model` (ent#334). Feeds the AgentTile chip + AgentListPanel badge via the sync-health two-store poll discipline (`fleetGrid.js` + `agents.js`); shared badge predicate in `utils/subscriptionPressure.js` (vitest-covered).
 
 ## Backend Layer
 
