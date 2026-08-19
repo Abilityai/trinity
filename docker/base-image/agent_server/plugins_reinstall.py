@@ -39,7 +39,9 @@ air-gapped build, or a failed install. It is **additive, never subtractive**: a
   are passed as subprocess **arg lists** — never a shell string — and a
   `source`/ref beginning with `-` (argument injection) is refused.
 * **Never hangs, never fatal.** A no-TTY prompt hangs, so every subprocess has a
-  hard `timeout` and `stdin=DEVNULL`, and `install` passes `--yes`. Any failure
+  hard `timeout` and `stdin=DEVNULL`; `install` passes `--yes` only when the
+  CLI advertises it (feature-detected via `--help` — the flag does not exist in
+  every CLI version, #2305). Any failure
   is logged as `withheld:<reason>` (the #1929 "withhold with a reason, don't
   blank" contract) and startup continues.
 
@@ -334,6 +336,25 @@ def _run(args: List[str], *, timeout: int) -> Tuple[int, str, str]:
         return 1, "", f"{type(e).__name__}: {e}"
 
 
+def _install_supports_yes() -> bool:
+    """Whether this CLI's `plugin install` accepts `--yes` (#2305).
+
+    The flag drifted across CLI releases: 2.1.227 rejects it outright
+    (`error: unknown option '--yes'` — which withheld EVERY install, breaking
+    both #1704 self-healing and the ent#411 platform default), while 2.1.235+
+    advertises it and REQUIRES it for a plugin installed by running a
+    marketplace-declared command when stdin is not a TTY. So neither passing it
+    unconditionally nor dropping it unconditionally is safe across versions —
+    ask the binary itself. Fail-closed to a bare install: that works for normal
+    plugins on every version, and a confirmation prompt still cannot hang us
+    (`stdin=DEVNULL` + hard timeout ⇒ withheld with a reason).
+    """
+    rc, out, err = _run(
+        ["claude", "plugin", "install", "--help"], timeout=_READ_TIMEOUT
+    )
+    return rc == 0 and "--yes" in f"{out}\n{err}"
+
+
 def _extract_strings(data: object, keys: Tuple[str, ...]) -> Set[str]:
     """Best-effort: pull identifiers out of a `--json` payload of unknown shape.
 
@@ -467,6 +488,9 @@ def reinstall(manifest: Optional[Dict[str, object]] = None) -> Dict[str, object]
         else:
             withheld[f"marketplace:{name}"] = err.strip()[:200] or f"rc={rc}"
 
+    # Feature-detected lazily, once, and only when an install is actually
+    # needed — an already-satisfied boot must keep running ZERO subprocesses.
+    install_flags: Optional[List[str]] = None
     for ref in sorted(installed_decl):
         if plugins_ok and ref in known_plugins:
             skipped.append(f"plugin:{ref}")
@@ -476,8 +500,10 @@ def reinstall(manifest: Optional[Dict[str, object]] = None) -> Dict[str, object]
             # Its marketplace could not be added — installing would prompt/fail.
             withheld[f"plugin:{ref}"] = f"marketplace '{marketplace}' unavailable"
             continue
+        if install_flags is None:
+            install_flags = ["--yes"] if _install_supports_yes() else []
         rc, _out, err = _run(
-            ["claude", "plugin", "install", ref, "--yes"],
+            ["claude", "plugin", "install", ref, *install_flags],
             timeout=_INSTALL_TIMEOUT,
         )
         if rc == 0:
