@@ -50,8 +50,9 @@ vi.mock('axios', () => {
   }
 })
 
-import axios from 'axios'
-import { useClientPortalStore } from '@/stores/clientPortal'
+// #2261: workspace calls run on `portalHttp` now, so the stubs go there —
+// stubbing the global `axios.get` would silently no longer be the code path.
+import { useClientPortalStore, portalHttp } from '@/stores/clientPortal'
 
 const ask = (id, over = {}) => ({
   id, agent_name: 'scout', kind: 'question', priority: 'medium',
@@ -73,34 +74,34 @@ beforeEach(() => {
 
 describe('one list, three renderings', () => {
   it('the count, the agent filter and the full list all come from one fetch', async () => {
-    axios.get.mockResolvedValueOnce({
+    portalHttp.get.mockResolvedValueOnce({
       data: [ask('a1'), ask('a2', { agent_name: 'sage' })],
     })
 
     await store.fetchAsks()
 
-    expect(axios.get).toHaveBeenCalledTimes(1)
+    expect(portalHttp.get).toHaveBeenCalledTimes(1)
     expect(store.askCount).toBe(2)                       // sidebar
     expect(store.asksForAgent('scout').map((a) => a.id)).toEqual(['a1'])  // agent page
     expect(store.asks).toHaveLength(2)                   // inline / global
   })
 
   it('answering removes the row, so every surface clears with no second call', async () => {
-    axios.get.mockResolvedValueOnce({ data: [ask('a1'), ask('a2')] })
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1'), ask('a2')] })
     await store.fetchAsks()
 
-    axios.post.mockResolvedValueOnce({ data: { ...ask('a1'), status: 'responded' } })
+    portalHttp.post.mockResolvedValueOnce({ data: { ...ask('a1'), status: 'responded' } })
     await store.answerAsk('a1', { response: 'yes' })
 
     expect(store.askCount).toBe(1)
     expect(store.asksForAgent('scout').map((a) => a.id)).toEqual(['a2'])
-    expect(axios.get).toHaveBeenCalledTimes(1)      // no refetch needed
+    expect(portalHttp.get).toHaveBeenCalledTimes(1)      // no refetch needed
   })
 
   it('an expired ask still renders but is not counted', async () => {
     // #1142 deletes terminal rows, so expiry must be VISIBLE while it exists — but
     // it is not something to nag about: the person cannot answer it any more.
-    axios.get.mockResolvedValueOnce({
+    portalHttp.get.mockResolvedValueOnce({
       data: [ask('a1'), ask('a2', { status: 'expired' })],
     })
 
@@ -112,10 +113,10 @@ describe('one list, three renderings', () => {
   })
 
   it('narrows server-side when an agent is named', async () => {
-    axios.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
     await store.fetchAsks('scout')
 
-    const [, config] = axios.get.mock.calls[0]
+    const [, config] = portalHttp.get.mock.calls[0]
     expect(config.params).toEqual({ agent_name: 'scout' })
   })
 })
@@ -123,7 +124,7 @@ describe('one list, three renderings', () => {
 describe('an unentitled build says nothing', () => {
   it('404 leaves the feature unavailable and logs nothing', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    axios.get.mockRejectedValueOnce({ response: { status: 404 } })
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 404 } })
 
     await store.fetchAsks()
 
@@ -135,7 +136,7 @@ describe('an unentitled build says nothing', () => {
 
   it('403 is equally silent — the module is present but not entitled', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    axios.get.mockRejectedValueOnce({ response: { status: 403 } })
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 403 } })
 
     await store.fetchAsks()
 
@@ -146,10 +147,10 @@ describe('an unentitled build says nothing', () => {
 
   it('a real failure is reported once, and clears the list rather than showing stale asks', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    axios.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
     await store.fetchAsks()
 
-    axios.get.mockRejectedValueOnce({ response: { status: 500 } })
+    portalHttp.get.mockRejectedValueOnce({ response: { status: 500 } })
     await store.fetchAsks()
 
     expect(warn).toHaveBeenCalledTimes(1)
@@ -165,16 +166,16 @@ describe('an unentitled build says nothing', () => {
 
     await anon.fetchAsks()
 
-    expect(axios.get).not.toHaveBeenCalled()
+    expect(portalHttp.get).not.toHaveBeenCalled()
   })
 })
 
 describe('answering surfaces the backend refusal', () => {
   it('propagates the error and keeps the ask, so nothing looks resolved that is not', async () => {
-    axios.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
     await store.fetchAsks()
 
-    axios.post.mockRejectedValueOnce({
+    portalHttp.post.mockRejectedValueOnce({
       response: { status: 409, data: { detail: { code: 'expired', message: 'This ask expired before it was answered.' } } },
     })
 

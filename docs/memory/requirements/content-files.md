@@ -301,7 +301,8 @@ follow-up (fragile, couples to Claude's moving internal files, may be subsumed b
   private marketplace needs a git credential at install time, resolved from the
   agent's `GITHUB_PAT` env, never the manifest). It reads current state via
   `claude plugin [marketplace] list --json`, adds missing marketplaces
-  (`marketplace add`) and installs missing plugins (`install --yes`), and runs
+  (`marketplace add`) and installs missing plugins (`install`, with `--yes`
+  passed only when the CLI's `--help` advertises it — #2305), and runs
   **zero** subprocesses when the declared set is already present (volume-persisting
   restart). Non-fatal; each action logged (`installed`/`skipped`/`withheld:<reason>`).
 

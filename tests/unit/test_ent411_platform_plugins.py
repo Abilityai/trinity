@@ -61,6 +61,11 @@ class _FakeClaude:
     def __call__(self, args, **kwargs):
         self.calls.append(list(args))
         tail = args[1:] if args and args[0] == "claude" else args
+        if tail[:3] == ["plugin", "install", "--help"]:
+            # A 2.1.227-shaped CLI: no `--yes` advertised (#2305).
+            return types.SimpleNamespace(
+                returncode=0, stdout="Options:\n  --config\n  -s, --scope\n", stderr=""
+            )
         if tail[:3] == ["plugin", "marketplace", "list"]:
             return types.SimpleNamespace(
                 returncode=0,
@@ -78,7 +83,11 @@ class _FakeClaude:
         return types.SimpleNamespace(returncode=1, stdout="", stderr="unknown")
 
     def installs(self):
-        return [c for c in self.calls if c[1:3] == ["plugin", "install"]]
+        return [
+            c
+            for c in self.calls
+            if c[1:3] == ["plugin", "install"] and "--help" not in c
+        ]
 
     def adds(self):
         return [c for c in self.calls if c[1:4] == ["plugin", "marketplace", "add"]]
