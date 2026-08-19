@@ -325,7 +325,7 @@
 - **Status**: ✅ Implemented (#140)
 - **Requirement ID**: GUARD-002
 - **Priority**: HIGH
-- **Description**: Pre-configure Claude Code hooks in the base image (`~/.claude/settings.json`) that all agents inherit. Hooks fire deterministically on every tool call — including in `--dangerously-skip-permissions` mode.
+- **Description**: Pre-configure Claude Code hooks in the base image (`/etc/claude-code/managed-settings.json` — root-owned; see 28.2.1) that all agents inherit. Hooks fire deterministically on every tool call — including in `--dangerously-skip-permissions` mode.
 - **Key Features**:
   - `PreToolUse` hooks on `Bash` tool: deny-list of destructive patterns (`rm -rf /`, `rm -rf ~`, `chmod 777`, `curl | sh`, `git push --force`, production domain access)
   - `PreToolUse` hooks on `Edit`/`Write` tools: block writes to credential files (`.env`, `.mcp.json`, `~/.ssh/`, `~/.aws/`)
@@ -334,7 +334,7 @@
   - Configurable per-agent overrides via `agent-config.yaml` (operator can relax rules for specific agents that need broader access)
   - All blocked actions logged to Vector pipeline with reason and tool input
 - **Architecture**:
-  - Base image writes `~/.claude/settings.json` with default hooks during build
+  - Base image writes `/etc/claude-code/managed-settings.json` with default hooks during build (ent#345 — was `~/.claude/settings.json`)
   - `startup.sh` merges agent-specific hook overrides from `/config/agent-config.yaml`
   - Hook scripts receive JSON on stdin, return `permissionDecision: deny` to block
   - Exit code 2 = block action, exit code 0 = allow
@@ -342,7 +342,57 @@
   - `/opt/trinity/hooks/bash-guardrail.sh` — Deny-list pattern matching on bash commands
   - `/opt/trinity/hooks/file-guardrail.sh` — Block credential file modifications
   - `/opt/trinity/hooks/output-scanner.sh` — Post-execution credential leak detection
-  - `~/.claude/settings.json` — Hook registration (baked into Dockerfile)
+  - `/etc/claude-code/managed-settings.json` — Hook registration (baked into Dockerfile, root:root 0444 in a root-owned 0755 dir)
+
+#### 28.2.1 Registration is out of the agent's write reach (ent#345)
+- **Status**: ✅ Implemented (2026-08-19)
+- **The defect**: the hooks were always root-owned in `/opt/trinity/hooks/`, but their
+  REGISTRATION shipped to `/home/developer/.claude/settings.json` — owned by
+  `developer`, mode 0644, **inside the git-synced working tree** (HOME is the repo
+  root) and read live by Claude Code. The guarded agent could therefore edit the file
+  that decides whether it is guarded: one `Edit` disables the bash deny-list, file
+  guard, read-only guard and credential output-scanner for every subsequent tool
+  call, with no privilege escalation. Observed in the wild — an agent edited this
+  file autonomously and committed it through git sync during the #2036
+  investigation. Being synced also made it settable from OUTSIDE, by a push to the
+  agent's repo. "Agents cannot opt out" (28.1's design principle) was therefore not
+  true of the mechanism that enforces it.
+- **Fix**: register in `/etc/claude-code/managed-settings.json` — Claude Code's
+  admin-controlled managed-settings path, which takes precedence over user and
+  project settings and sits outside the synced tree, closing the self-edit and
+  inbound-git vectors together. Root-owned `0444` inside a root-owned `0755`
+  directory: the file cannot be rewritten and the directory cannot be used to
+  replace it or shadow it with a `managed-settings.d` drop-in. No platform-owned
+  `settings.json` is shipped into `~/.claude` at all any more, so there is nothing
+  there to edit away.
+- **Fail-open is the risk this creates, and it is handled**: if the registration is
+  missing or writable, Claude Code simply runs no hooks — silently. `startup.sh`
+  asserts both properties on every boot and logs `GUARDRAILS: ERROR …` (Vector
+  captures it); it reports and continues rather than refusing to boot, so a
+  registration problem cannot become a fleet outage. An operator-visible signal on
+  `/health` (the `clone_status` pattern, #1439) is the tracked follow-up.
+- **Interaction checked**: read-only mode (#887) no longer registers a hook of its
+  own — it writes `~/.trinity/read-only-config.json`, which the baked
+  `read-only-guard.py` reads — so there is exactly one live registration and the
+  managed file cannot clobber a runtime-written one.
+  `read_only._remove_legacy_settings_hook` still cleans up pre-#887 leftovers.
+- **Both paths stay in the three write-deny lists**
+  (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
+  `EDIT_PROTECTED_PATHS`) as defence in depth, not as the primary control. Note
+  `bash-guardrail.py` does **not** consult `path_deny`, so before this change the
+  Bash route to the registration was open even though the Edit route was denied.
+- **Legacy in-tree copy**: `~/.claude/settings.json` sits on the **durable home
+  volume**, so rebuilding the image does not remove it from an existing agent —
+  leaving a second registration (precedence-dependent) and a live #2036 leak
+  candidate. `startup.sh` deletes it **only on an exact `cmp -s` match** against the
+  managed copy; an agent-authored or operator-edited settings file differs and is
+  left alone. The #2036 ignore rule therefore stays load-bearing, for the legacy and
+  agent-authored copies rather than for a platform-baked one — premise restated in
+  `test_2036_claude_settings_leak.py`, whose own docstring asked for exactly that
+  re-argument if the hooks ever moved out of the synced tree.
+- **Tests**: `tests/unit/test_ent345_guardrail_registration.py` (Dockerfile +
+  startup assertions; CI does not build the base image, so the shipped artifact is
+  what is pinned).
 
 ### 28.3 CLI Budget & Scope Controls (GUARD-003)
 - **Status**: 🚧 Partially Implemented — `--max-turns` + `--disallowedTools` shipped in #140; chat-mode wall-clock timeout tracked in #313
