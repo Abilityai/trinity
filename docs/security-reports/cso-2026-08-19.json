@@ -1,0 +1,46 @@
+{
+  "version": "1.1",
+  "date": "2026-08-19",
+  "mode": "daily",
+  "scope": "--diff (feature/471-subscription-usage vs dev merge-base)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    6,
+    7,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_admin_endpoints": 5,
+    "new_authed_scoped_endpoints": 1,
+    "new_outbound_integrations": 1,
+    "new_redis_keyspaces": 2,
+    "dependency_changes": 0,
+    "workflow_changes": 0
+  },
+  "findings": [],
+  "notes_below_gate": [
+    "generic settings PUT can write headroom toggle unvalidated \u2014 garbage reads as OFF (safe direction)",
+    "probe User-Agent mimics claude-code (operational choice, documented)",
+    "failure-event error_message unexposed by new surfaces (G-04 discipline holds)"
+  ],
+  "supply_chain_summary": "no dependency/workflow/Dockerfile changes in diff",
+  "filter_stats": {
+    "raw_candidates": 9,
+    "surviving_gate": 0,
+    "fixed_pre_audit_in_review": 2
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "first cso-json report in current naming; prior ad-hoc analyses 2026-02/03"
+}
