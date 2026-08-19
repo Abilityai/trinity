@@ -509,20 +509,37 @@ describe('an expired client session does not become the operator (#2261)', () =>
     expect(store.authHeader).toEqual({})
   })
 
-  it('strips a platform JWT merged in from axios defaults — the implicit half (AC #3)', () => {
+  it('discards any credential on the config and rebuilds from the store — the implicit half (AC #3)', () => {
     // The reason #2258 rejected a suppression flag: `auth.js` installs the
-    // platform JWT as `axios.defaults.headers.common.Authorization`, and
-    // per-request headers MERGE over defaults, so sending `{}` is not the same
-    // as sending nothing. `portalHttp`'s interceptor is what closes that.
+    // platform JWT as `axios.defaults.headers.common.Authorization`. This
+    // interceptor's job is that the store is the ONLY source — so a header
+    // already on the config, whatever put it there, must not survive when the
+    // store's answer is "no credential".
+    //
+    // The first version preserved whatever it found, which cannot tell
+    // store-decided from inherited. It is now unconditional: delete, then set
+    // from the store.
+    expireOnAPlatformBrowser()
     const handler = portalHttp.interceptors.request.use.mock.calls[0][0]
 
-    const outgoing = handler({ headers: { Authorization: 'Bearer platform-jwt-from-defaults' } })
-    // A header the STORE decided survives; one inherited from defaults cannot be
-    // told apart at this layer, so the rule is "the store decides, nothing else" —
-    // and with the session suppressed the store decides `{}`.
-    const withNothingDecided = handler({ headers: {} })
-    expect(withNothingDecided.headers.Authorization).toBeUndefined()
-    expect(outgoing.headers.Authorization).toBe('Bearer platform-jwt-from-defaults')
+    const withInherited = handler({ headers: { Authorization: 'Bearer platform-jwt-from-defaults' } })
+    const withNothing = handler({ headers: {} })
+
+    expect(withInherited.headers.Authorization).toBeUndefined()
+    expect(withNothing.headers.Authorization).toBeUndefined()
+  })
+
+  it('rebuilds the credential the store DOES decide (the fix must not break auth)', () => {
+    // Fail-closed is only correct when there is nothing to send. A live client
+    // session must still authenticate — otherwise the interceptor would trade a
+    // disclosure for a workspace nobody can use.
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    useClientPortalStore()
+    const handler = portalHttp.interceptors.request.use.mock.calls[0][0]
+
+    const out = handler({ headers: { Authorization: 'Bearer something-stale' } })
+    expect(out.headers.Authorization).toBe('Bearer portal-token')
   })
 
   it('a platform session that never expired here still authenticates (ent#357 unchanged)', () => {

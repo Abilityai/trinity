@@ -84,11 +84,33 @@ export function setPlatformSessionLostHandler(fn) {
 }
 
 portalHttp.interceptors.request.use((config) => {
+  // The store is the ONLY source of a workspace credential. Whatever arrived on
+  // the config — a caller's `headers: this.authHeader`, or anything axios merged
+  // in from defaults — is discarded and replaced by the current decision.
+  //
+  // Rebuilding from the store rather than preserving what was there is the whole
+  // point, and the first version of this got it wrong: it kept any `Authorization`
+  // it found, which cannot tell "the store decided this" from "axios inherited
+  // this", so it would have PRESERVED an inherited platform JWT rather than
+  // stripping it. That mattered less than it looked (verified: axios 1.19.0 does
+  // not propagate later `axios.defaults.headers.common` mutations into an instance
+  // created earlier, so nothing is inherited today) — but the property this
+  // interceptor exists to guarantee cannot rest on a merge behaviour we do not
+  // control and do not test. Now it holds by construction.
+  //
+  // Fail-closed if the store is unreachable (Pinia not active): send no credential
+  // rather than a stale one. Every workspace call originates from a component or
+  // action with Pinia active; the two that do not (`requestCode`/`verifyCode`)
+  // need no credential anyway.
   const headers = config.headers || {}
-  const decided = headers.Authorization || headers.authorization
   delete headers.Authorization
   delete headers.authorization
-  if (decided) headers.Authorization = decided
+  try {
+    const decided = useClientPortalStore().authHeader?.Authorization
+    if (decided) headers.Authorization = decided
+  } catch {
+    /* no store, no credential */
+  }
   config.headers = headers
   return config
 })

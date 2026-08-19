@@ -117,9 +117,20 @@ breaks the *derivation* instead, for the tab where the client's session died.
 **Two halves, and neither works alone.**
 
 1. **The wire.** Every workspace call moved onto a dedicated axios instance
-   (`portalHttp`), whose request interceptor decides the credential and strips
-   whatever `axios.defaults` merged in. `authHeader` returns `{}` while the
-   fallback is suppressed. This is the half that answers the objection above: with
+   (`portalHttp`), whose request interceptor **discards any `Authorization` on the
+   config and rebuilds it from the store** — so the store is the only source, and
+   `authHeader` returning `{}` while suppressed means nothing goes out.
+
+   Two things worth stating precisely, because the first version of this got the
+   second one wrong. *(a)* Verified against axios 1.19.0: an instance created
+   before `auth.js` mutates `axios.defaults.headers.common` does **not** inherit
+   that mutation, so moving onto the instance is what actually closes the
+   disclosure (pinned by `tests/unit/axiosInstanceIsolation.spec.js` against real
+   axios, so a version bump that changes it is visible). *(b)* The interceptor
+   originally *preserved* whatever `Authorization` it found, which cannot tell
+   "the store decided this" from "axios inherited this" — it would have kept an
+   inherited JWT rather than stripping it. It is now unconditional, so the
+   property does not rest on merge behaviour we neither control nor test. This is the half that answers the objection above: with
    it, "the workspace is signed out" is a statement about the wire, not only the
    screen. (`streamPortalExecution` uses bare `fetch` with `authHeader` only, so it
    was already honest and stays so.)
