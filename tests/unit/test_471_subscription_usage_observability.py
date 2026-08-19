@@ -162,9 +162,10 @@ def tmp_db(tmp_path, monkeypatch):
     conn.close()
 
     # Force re-import so the module-level DB path picks up our env var
-    # (mirrors test_subscription_auto_switch_pingpong.py verbatim).
+    # (same intent as test_subscription_auto_switch_pingpong.py, but via
+    # monkeypatch so the original modules are restored at teardown).
     for mod in ("db.connection", "db.subscriptions"):
-        sys.modules.pop(mod, None)
+        monkeypatch.delitem(sys.modules, mod, raising=False)
 
     yield db_path
 
