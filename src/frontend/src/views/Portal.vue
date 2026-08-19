@@ -18,6 +18,38 @@
           <span class="font-semibold text-lg">Workspace</span>
         </div>
 
+        <!-- #2261 — the store has set `sessionExpired` since ent#375 and nothing
+             ever rendered it, so an idle-out was indistinguishable from "you
+             were never signed in": the form just reappeared. Say which it was. -->
+        <div
+          v-if="store.sessionExpired"
+          data-testid="workspace-session-expired"
+          class="mb-5 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/25 px-3 py-2"
+        >
+          <p class="text-sm text-amber-800 dark:text-amber-200">
+            Your session timed out. Sign in again to pick up where you left off.
+          </p>
+        </div>
+
+        <!-- #2261 — the operator's way back in. The suppression that stops a
+             client's expiry from silently becoming the operator's session has to
+             fail closed, which also catches the operator when the browser is
+             genuinely theirs. One explicit click, never an automatic re-derive. -->
+        <div
+          v-if="canContinueAsOperator"
+          data-testid="workspace-continue-as-operator"
+          class="mb-5 rounded-md border border-gray-200 dark:border-gray-700 px-3 py-3"
+        >
+          <p class="text-sm text-gray-600 dark:text-gray-300">
+            You're signed in to Trinity as <span class="font-medium">{{ operatorEmail }}</span> in this browser.
+          </p>
+          <button
+            type="button"
+            class="mt-2 text-sm font-medium text-action-primary-600 hover:text-action-primary-700 underline"
+            @click="continueAsOperator"
+          >Continue as {{ operatorEmail }}</button>
+        </div>
+
         <template v-if="step === 'email'">
           <h1 class="text-xl font-semibold mb-1">Sign in to your agents</h1>
           <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
@@ -275,6 +307,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
+import { useAuthStore } from '@/stores/auth'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
@@ -286,6 +319,25 @@ import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
 import { resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
+const authStore = useAuthStore()
+
+// #2261 — shown only when this tab suppressed the platform fallback (a client
+// session expired here) AND a platform session actually exists to continue as.
+// Both terms matter: without the first, every operator would be asked to
+// re-confirm on a normal visit; without the second, the button would offer an
+// identity that isn't there.
+const canContinueAsOperator = computed(
+  () => store.platformFallbackSuppressed && authStore.isAuthenticated
+)
+const operatorEmail = computed(() => authStore.userEmail || 'your Trinity account')
+
+function continueAsOperator() {
+  store.continueAsPlatform()
+  // The roster is fetched by the same bootstrap the implicit-entry path uses;
+  // clearing the suppression flips `isClientSignedIn`, and the watcher below
+  // takes it from there.
+  bootstrap()
+}
 const route = useRoute()
 const router = useRouter()
 
@@ -323,8 +375,18 @@ async function onVerify() {
   if (code.value.length < 6 || busy.value) return
   busy.value = true; error.value = null
   try {
+    // #2261 — read the resume target BEFORE the roster load, since the sign-in
+    // that consumed the expiry is what makes it spendable. `endSession` recorded
+    // where the client was when their session lapsed, and until now nothing ever
+    // read it back: the expired notice promises "pick up where you left off", so
+    // it has to actually land there rather than on the roster root.
+    const resumeTo = store.resumePath
     await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
     await bootstrap()
+    if (resumeTo && resumeTo !== route.fullPath) {
+      store.resumePath = null
+      router.push(resumeTo)
+    }
   } catch (err) {
     error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
     code.value = ''
