@@ -265,17 +265,39 @@ class TestUsageExtension:
 
 class TestBreakdown:
     def _seed_consumption(self, db_path):
+        """Realistic seeds: a modern turn writes BOTH an execution row and (for
+        /chat + persisted /task) a cost-bearing chat message — verified live on
+        2026-08-19 (one sync-chat turn: chat_messages cost 0.0687 AND a
+        triggered_by='chat' execution cost 0.0687)."""
         now = datetime.now(timezone.utc)
         recent = _iso(now - timedelta(hours=1))
         conn = sqlite3.connect(str(db_path))
+        # agent-x turn 1: chat turn — BOTH rows carry the same cost (the pair)
         conn.execute(
             "INSERT INTO chat_messages (id, agent_name, subscription_id, role, timestamp, context_used, output_tokens, cost) "
             "VALUES ('m1', 'agent-x', 'sub-a', 'assistant', ?, 1000, 200, 0.10)",
             (recent,),
         )
         conn.execute(
+            "INSERT INTO schedule_executions (id, agent_name, subscription_id, status, started_at, context_used, cost) "
+            "VALUES ('e1', 'agent-x', 'sub-a', 'success', ?, 1000, 0.10)",
+            (recent,),
+        )
+        # agent-x turn 2: schedule run (execution only, no chat row)
+        conn.execute(
+            "INSERT INTO schedule_executions (id, agent_name, subscription_id, status, started_at, context_used, cost) "
+            "VALUES ('e2', 'agent-x', 'sub-a', 'success', ?, 2000, 0.20)",
+            (recent,),
+        )
+        # agent-y: one chat turn (paired rows)
+        conn.execute(
             "INSERT INTO chat_messages (id, agent_name, subscription_id, role, timestamp, context_used, output_tokens, cost) "
             "VALUES ('m2', 'agent-y', 'sub-a', 'assistant', ?, 500, 100, 0.50)",
+            (recent,),
+        )
+        conn.execute(
+            "INSERT INTO schedule_executions (id, agent_name, subscription_id, status, started_at, context_used, cost) "
+            "VALUES ('e3', 'agent-y', 'sub-a', 'success', ?, 500, 0.50)",
             (recent,),
         )
         # user-role row must NOT count
@@ -284,29 +306,36 @@ class TestBreakdown:
             "VALUES ('m3', 'agent-x', 'sub-a', 'user', ?, 999, 999, 9.99)",
             (recent,),
         )
-        conn.execute(
-            "INSERT INTO schedule_executions (id, agent_name, subscription_id, status, started_at, context_used, cost) "
-            "VALUES ('e1', 'agent-x', 'sub-a', 'success', ?, 2000, 0.20)",
-            (recent,),
-        )
         # running row must NOT count
         conn.execute(
             "INSERT INTO schedule_executions (id, agent_name, subscription_id, status, started_at, context_used, cost) "
-            "VALUES ('e2', 'agent-x', 'sub-a', 'running', ?, 5000, 5.00)",
+            "VALUES ('e4', 'agent-x', 'sub-a', 'running', ?, 5000, 5.00)",
             (recent,),
         )
         conn.commit()
         conn.close()
 
-    def test_merged_and_ranked_by_cost(self, sub_ops, tmp_db):
+    def test_chat_turn_cost_counted_once(self, sub_ops, tmp_db):
+        """THE dedup pin: a chat turn present in both tables contributes its
+        cost exactly once (executions are the sole cost source)."""
+        self._seed_consumption(tmp_db)
+        usage = sub_ops.get_subscription_usage("sub-a")
+        # exec side only: 0.10 + 0.20 + 0.50 — NOT + the chat copies (0.60 more)
+        assert usage.window_7d.cost_usd == pytest.approx(0.80)
+        assert usage.window_7d.message_count == 3          # terminal executions
+        assert usage.window_7d.input_tokens == 3500        # exec context sums
+        assert usage.window_7d.output_tokens == 300        # chat-side only source
+
+    def test_breakdown_ranked_by_cost_and_deduped(self, sub_ops, tmp_db):
         self._seed_consumption(tmp_db)
         bd = sub_ops.get_subscription_usage_breakdown("sub-a")
         rows = {r.agent_name: r for r in bd.window_7d}
-        assert rows["agent-x"].input_tokens == 3000  # chat 1000 + exec 2000
+        assert rows["agent-x"].cost_usd == pytest.approx(0.30)   # 0.10 + 0.20, chat copy NOT re-added
+        assert rows["agent-x"].input_tokens == 3000              # exec ctx 1000 + 2000
         assert rows["agent-x"].output_tokens == 200
-        assert rows["agent-x"].cost_usd == pytest.approx(0.30)
         assert rows["agent-x"].message_count == 2
         assert rows["agent-y"].cost_usd == pytest.approx(0.50)
+        assert rows["agent-y"].output_tokens == 100
         # Ranked by cost desc: agent-y (0.50) before agent-x (0.30)
         assert [r.agent_name for r in bd.window_7d] == ["agent-y", "agent-x"]
 

@@ -727,13 +727,14 @@ class SubscriptionOperations:
         from db_models import SubscriptionUsageBreakdown, SubscriptionUsageBreakdownRow
 
         def _window_rows(conn, cutoff: str):
+            # Same dedup rule as get_subscription_usage's _query_window (#471):
+            # executions = sole source for cost/context/turns; chat side
+            # contributes output_tokens only (a /chat or persisted-/task turn
+            # writes cost into BOTH tables — summing both double-counts it).
             chat_rows = conn.execute(
                 select(
                     chat_messages.c.agent_name,
-                    func.coalesce(func.sum(chat_messages.c.context_used), 0).label("input_tokens"),
                     func.coalesce(func.sum(chat_messages.c.output_tokens), 0).label("output_tokens"),
-                    func.coalesce(func.sum(chat_messages.c.cost), 0.0).label("cost_usd"),
-                    func.count().label("message_count"),
                 )
                 .where(
                     and_(
@@ -762,22 +763,19 @@ class SubscriptionOperations:
             ).mappings().all()
 
             merged: Dict[str, SubscriptionUsageBreakdownRow] = {}
-            for r in chat_rows:
+            for r in exec_rows:
                 merged[r["agent_name"]] = SubscriptionUsageBreakdownRow(
                     agent_name=r["agent_name"],
                     input_tokens=int(r["input_tokens"] or 0),
-                    output_tokens=int(r["output_tokens"] or 0),
                     cost_usd=float(r["cost_usd"] or 0.0),
-                    message_count=int(r["message_count"] or 0),
+                    message_count=int(r["exec_count"] or 0),
                 )
-            for r in exec_rows:
+            for r in chat_rows:
                 row = merged.setdefault(
                     r["agent_name"],
                     SubscriptionUsageBreakdownRow(agent_name=r["agent_name"]),
                 )
-                row.input_tokens += int(r["input_tokens"] or 0)
-                row.cost_usd += float(r["cost_usd"] or 0.0)
-                row.message_count += int(r["exec_count"] or 0)
+                row.output_tokens += int(r["output_tokens"] or 0)
             return sorted(merged.values(), key=lambda r: r.cost_usd, reverse=True)
 
         with get_engine().connect() as conn:
@@ -889,13 +887,18 @@ class SubscriptionOperations:
         with get_engine().connect() as conn:
 
             def _query_window(cutoff: str) -> SubscriptionUsageWindow:
-                # Chat messages: input tokens stored in context_used, output in output_tokens
+                # #471 dedup: a modern turn writes BOTH a schedule_executions
+                # row AND (for /chat + persisted /task) a cost-bearing
+                # chat_messages row — verified live: one sync-chat turn counted
+                # its cost twice under the old chat+exec SUM. Executions are
+                # the canonical run record (status-as-projection #1082), so
+                # they are the SOLE source for cost / context-est. / turn
+                # count; chat_messages contributes ONLY output_tokens, which
+                # executions do not carry. (Pre-#1483 chat rows without a
+                # paired execution fall outside any rolling window by now.)
                 chat_row = conn.execute(
                     select(
-                        func.coalesce(func.sum(chat_messages.c.context_used), 0).label("input_tokens"),
                         func.coalesce(func.sum(chat_messages.c.output_tokens), 0).label("output_tokens"),
-                        func.coalesce(func.sum(chat_messages.c.cost), 0.0).label("cost_usd"),
-                        func.count().label("message_count"),
                     ).where(
                         and_(
                             chat_messages.c.subscription_id == subscription_id,
@@ -905,7 +908,6 @@ class SubscriptionOperations:
                     )
                 ).mappings().first()
 
-                # Schedule executions: input tokens in context_used (no separate output_tokens)
                 exec_row = conn.execute(
                     select(
                         func.coalesce(func.sum(schedule_executions.c.context_used), 0).label("input_tokens"),
@@ -921,10 +923,10 @@ class SubscriptionOperations:
                 ).mappings().first()
 
                 return SubscriptionUsageWindow(
-                    input_tokens=int(chat_row["input_tokens"] or 0) + int(exec_row["input_tokens"] or 0),
+                    input_tokens=int(exec_row["input_tokens"] or 0),
                     output_tokens=int(chat_row["output_tokens"] or 0),
-                    cost_usd=float(chat_row["cost_usd"] or 0.0) + float(exec_row["cost_usd"] or 0.0),
-                    message_count=int(chat_row["message_count"] or 0) + int(exec_row["exec_count"] or 0),
+                    cost_usd=float(exec_row["cost_usd"] or 0.0),
+                    message_count=int(exec_row["exec_count"] or 0),
                 )
 
             window_5h = _query_window(cutoff_5h)
