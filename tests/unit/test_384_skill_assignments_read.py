@@ -183,11 +183,16 @@ def test_access_set_is_db_derived_not_docker_derived(router_mod):
     changing DOCKER_GID would tell every non-admin operator that no agent holds
     any skill, fleet-wide, with no error state anywhere.
 
-    Asserted STRUCTURALLY rather than by monkeypatching a Docker sentinel: the
-    router never imports `services.agent_service.helpers`, so a sentinel there
-    can't fire and its "Docker was not consulted" claim would be vacuous — the
-    behavioural half is already covered by the owned-and-shared test above,
-    which passes with a DB-derived set and no Docker at all.
+    Asserted STRUCTURALLY rather than by monkeypatching a Docker sentinel —
+    the behavioural half is already covered by the owned-and-shared test
+    above, which passes with a DB-derived set and no Docker at all. #471
+    extracted the pure-DB helper to `services.agent_service.helpers.
+    visible_agent_names` (ONE home; second consumer: the subscription-pressure
+    batch endpoint), so the router now legitimately imports that module and
+    the guard pins the *property* rather than the module edge: the router's
+    alias IS the shared helper, the helper reads the DB batch, and neither the
+    helper nor the router references the Docker-derived
+    `accessible_agent_names`.
     """
     import inspect
 
@@ -200,12 +205,17 @@ def test_access_set_is_db_derived_not_docker_derived(router_mod):
         "fault; using it here reintroduces the fleet-wide false-empty"
     )
 
-    # And no import edge to the Docker-backed helper module anywhere in the router.
+    # The alias must bind the ONE shared helper (a local re-implementation
+    # would dodge both asserts above the moment the helper moved), and the
+    # router itself must never touch the Docker-derived access helper.
+    from services.agent_service import helpers as _helpers
+
+    assert router_mod._visible_agent_names is _helpers.visible_agent_names, (
+        "the router must bind services.agent_service.helpers.visible_agent_names "
+        "— the pure-DB visible-set rule has ONE home (#471)"
+    )
     router_src = inspect.getsource(router_mod)
-    assert "from services.agent_service.helpers import" not in router_src
-    assert "agent_service.helpers" not in router_src.replace(
-        "`services.agent_service.helpers.accessible_agent_names`", ""
-    ).replace("`accessible_agent_names`", "")
+    assert "accessible_agent_names" not in router_src
 
 
 def test_a_skill_with_no_holders_is_absent_not_empty(router_mod, monkeypatch):
