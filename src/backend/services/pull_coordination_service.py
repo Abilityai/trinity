@@ -155,6 +155,27 @@ class ResultApplyOutcome:
 
 
 # ---------------------------------------------------------------------------
+# Per-task settings carried on the claim envelope (#2317)
+# ---------------------------------------------------------------------------
+# `backlog_service.enqueue` persists a queued row's per-task settings as FLAT
+# keys inside `backlog_metadata`, and the PUSH drain (`_spawn_drain`) reads them
+# flat. The pull envelope must consume the SAME keys or a pulled turn silently
+# loses them. These are the keys that reach the RUNTIME (they map 1:1 onto
+# `execute_headless` kwargs the pull worker passes); the remaining metadata keys
+# are backend-side concerns (chat-session persistence + provenance) that neither
+# path sends to the agent. `tests/unit/test_2317_pull_envelope_parity.py` pins
+# that split against the producer itself, so a key added to `enqueue` cannot
+# silently belong to neither set.
+_TASK_OVERRIDE_KEYS = (
+    "model",           # --model            (push: ParallelTaskRequest.model)
+    "allowed_tools",   # --allowedTools     (push: ParallelTaskRequest.allowed_tools)
+    "max_turns",       # --max-turns        (push: ParallelTaskRequest.max_turns)
+    "timeout_seconds", # turn budget        (push: ParallelTaskRequest.timeout_seconds)
+    "system_prompt",   # --append-system-prompt; recomposed below (#1629)
+)
+
+
+# ---------------------------------------------------------------------------
 # Claim (GET /api/internal/next-task) — §3.1 / §3.2
 # ---------------------------------------------------------------------------
 
@@ -212,7 +233,17 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {
         "message": row.get("message"),
-        "session_id": meta.get("session_id"),
+        # #2317: session identity comes from the key the PRODUCER writes.
+        # `backlog_service.enqueue` records `resume_session_id` (the Claude Code
+        # session the caller asked to resume — EXEC-023) and `chat_session_id`
+        # (a Trinity chat-session row id, a BACKEND-side persistence concern the
+        # pull sink does not own). The envelope's `session_id` is the Claude Code
+        # session UUID (§2 shared payload fields) and the worker feeds it straight
+        # to `execute_headless(resume_session_id=...)`, so ONLY `resume_session_id`
+        # may source it — `chat_session_id` here would hand the runtime a Trinity
+        # row id and resume the wrong (or no) session. `session_id` is still read
+        # first for forward-compat with the §2 producer shape nothing writes yet.
+        "session_id": meta.get("session_id") or meta.get("resume_session_id"),
     }
     if meta.get("file_ids") is not None:
         payload["file_ids"] = meta.get("file_ids")
@@ -221,7 +252,22 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     # hand it to the worker via task_overrides.system_prompt — the field the pull
     # worker reads (`execute_headless(system_prompt=overrides.get("system_prompt"))`).
     # Fold in any caller override; fail-open leaves the caller prompt (or None).
-    overrides: Dict[str, Any] = dict(meta.get("task_overrides") or {})
+    #
+    # #2317: the per-task settings are sourced from the FLAT metadata keys the
+    # producer actually writes (see _TASK_OVERRIDE_KEYS above). This block used to
+    # read a nested `task_overrides` object alone — a key no producer has ever
+    # written — so `overrides` was always `{}` and every pulled turn silently ran
+    # with agent/global defaults instead of the row's model, tool allow-list, turn
+    # cap and timeout. The nested object is still honoured as an OVERLAY (the
+    # §2.2 quarantine shape a future producer may write) so it wins when present.
+    overrides: Dict[str, Any] = {
+        key: meta[key]
+        for key in _TASK_OVERRIDE_KEYS
+        if meta.get(key) is not None
+    }
+    nested = meta.get("task_overrides")
+    if isinstance(nested, dict):
+        overrides.update({k: v for k, v in nested.items() if v is not None})
     # ent#243: a caller override is what the worker will actually run, so it wins
     # over the row's recorded model_used; either may be absent → VERBOSE.
     overrides["system_prompt"] = _compose_pull_system_prompt(
