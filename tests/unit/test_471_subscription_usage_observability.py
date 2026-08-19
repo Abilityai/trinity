@@ -436,6 +436,21 @@ class TestHeadroomParsing:
         assert snap["representative_claim"] == "five_hour"
         assert snap["overage_status"] == "rejected"
 
+    def test_snapshot_age_parses_microsecond_timestamps(self, tmp_db):
+        """utc_now_iso() emits microseconds; a seconds-only strptime made every
+        age None — 'refresh due' on every poll AND 'never fresh' for the
+        gauge/limited verdict. Caught live on the first deployed probe."""
+        from services.subscription_headroom_service import _snapshot_age_seconds
+        from utils.helpers import utc_now_iso
+
+        age = _snapshot_age_seconds({"fetched_at": utc_now_iso()})
+        assert age is not None and 0 <= age <= 5
+        age2 = _snapshot_age_seconds({"fetched_at": "2026-08-19T13:13:16.356984Z"})
+        assert age2 is not None
+        assert _snapshot_age_seconds({"fetched_at": "2026-08-19T13:13:16Z"}) is not None
+        assert _snapshot_age_seconds({"fetched_at": "garbage"}) is None
+        assert _snapshot_age_seconds({}) is None
+
     def test_absent_family_returns_none(self, tmp_db):
         from services.subscription_headroom_service import parse_unified_headers
 

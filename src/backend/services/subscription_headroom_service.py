@@ -245,7 +245,14 @@ def _snapshot_age_seconds(snapshot: dict) -> Optional[int]:
     if not fetched:
         return None
     try:
-        dt = datetime.strptime(fetched, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        # fromisoformat, not a fixed strptime format: utc_now_iso() emits
+        # microseconds, and a seconds-only format made every age None — which
+        # read as "refresh due" on every poll (only the 60s in-process floor
+        # held) AND as "never fresh" for the limited-verdict/gauge. Caught
+        # live on the first deployed probe.
+        dt = datetime.fromisoformat(str(fetched).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return max(0, int(datetime.now(timezone.utc).timestamp() - dt.timestamp()))
     except (ValueError, TypeError):
         return None
