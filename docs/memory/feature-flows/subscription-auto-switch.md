@@ -174,7 +174,8 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 
 ## 2h Window Correctness (Issue #476)
 
-The "last 2 hours" filter in `is_subscription_rate_limited()` and
+The "last 2 hours" filter in `has_recent_subscription_failures()` (pre-#2352:
+`is_subscription_rate_limited()`) and
 `record_rate_limit_event()` now uses `iso_cutoff(2)` passed as a bound
 parameter — not SQLite's `datetime('now', '-2 hours')`. The two functions
 produce different string formats (`T` separator + `Z` suffix vs. space
@@ -199,9 +200,9 @@ anyway, so the omission was silent.
 
 ## Edge Cases
 
-- **All subscriptions exhausted**: No switch, error surfaces as normal 429/503. `_perform_auto_switch` does **not** clear rate-limit events for the old subscription — those events are the signal that keeps `is_subscription_rate_limited()` truthful, so the just-drained sub is not offered as a candidate on the next cycle (issue #444).
+- **All subscriptions exhausted**: No switch, error surfaces as normal 429/503. `_perform_auto_switch` does **not** clear rate-limit events for the old subscription — those events are the signal that keeps `has_recent_subscription_failures()` truthful, so the just-drained sub is not offered as a candidate on the next cycle (issue #444).
 - **API key agents**: Auto-switch only applies to subscription-based agents
-- **Flip-flopping** (#441 update): the 2h skip-list (`is_subscription_rate_limited` ∧ `select_best_alternative_subscription`) is now the only thrash guard. Pre-#441 the threshold also required 2 consecutive 429s before switching, but that gated user-visible failures unnecessarily — the skip-list alone is sufficient because a just-drained sub stays flagged for 2h post-switch.
+- **Flip-flopping** (#441 update): the 2h skip-list (`has_recent_subscription_failures` ∧ `select_best_alternative_subscription`) is now the only thrash guard. Pre-#441 the threshold also required 2 consecutive 429s before switching, but that gated user-visible failures unnecessarily — the skip-list alone is sufficient because a just-drained sub stays flagged for 2h post-switch.
 - **Concurrent switches** (#799/#1089): a per-agent `agent_switch_lock` serializes the assign+apply window so a manual `PUT /api/subscriptions/agents/{name}` reassignment can't interleave with a concurrent auto-switch. The `old_sub_id` snapshot is taken **inside** that lock, immediately before the DB assign — a concurrent switch therefore can't change the agent's subscription between the read and the assign (TOCTOU). Without this, a sub→sub swap could be mis-classified as an auth-mode change (or vice-versa) and routed into a needless container recreate instead of a hot-reload.
 - **Cleanup**: Records older than 24h are pruned hourly by `CleanupService` (phase 6, #476); the 2h "is rate-limited" window drives candidate filtering independently of cleanup
 - **`.env`-resident `ANTHROPIC_API_KEY` on a subscription agent (#2114)**: suppressed from every spawn (see Shadow-proofing above). A *funded* key that was silently billing instead of the subscription flips to subscription auth after the base-image rebuild — matches the declared assignment; the managed path to API-key auth remains clear-subscription (which recreates). Known residual, deliberately unfixed: a stale `.env` `CLAUDE_CODE_OAUTH_TOKEN` still beats the rotated baseline token after a restart (different fix shape — precedence, not unset; pinned by `test_2114_subscription_shadow_guard.py::TestKnownResidual`)
@@ -214,3 +215,27 @@ Two producer changes in `handle_subscription_failure`:
 2. **`failure_kind` ("rate_limit" | "auth") is now PERSISTED** on `subscription_rate_limit_events` (the writer carried the param since #441/#792 but the table conflated broken-token auth failures with genuine quota 429s — and five observability consumers read this stream as "429 pressure"). NULL = pre-#471 row, bucketed as `unknown`; the 24h sweep retires those within a day. Dual-track migration: SQLite `rate_limit_events_failure_kind` + Alembic `0040_rl_events_failure_kind`.
 
 `is_subscription_rate_limited` (2h) is unchanged and remains the machinery's own skip-list predicate — #471's `rate_limited_now` reuses it rather than defining a second window (the #2157 one-gate rule).
+
+## #2352 (2026-08-20) — the skip-list predicate got its own name
+
+Reusing one predicate for both jobs was the defect. `is_subscription_rate_limited` served the *display*
+question ("is this throttled right now") and the *candidate-skip* question ("did this fail recently for
+any reason"), and those want different answers about an auth failure: the badge must not call a dead
+token a rate limit, while auto-switch must absolutely still refuse to move an agent onto it.
+
+So the predicate SPLIT rather than narrowed:
+
+| Predicate | Counts | Consumers |
+|---|---|---|
+| `is_subscription_rate_limited` | `failure_kind = 'rate_limit'` only (NULL excluded) | `decorate_usage`, `pressure_states`, `get_subscription_usage` — every badge/tile |
+| `has_recent_subscription_failures` | every kind, NULL included | `select_best_alternative_subscription`, `select_subscription_for_new_agent` |
+
+The kind-blind half is byte-for-byte the pre-split behaviour, so **nothing about switch safety changed**.
+Narrowing the shared predicate in place would have passed every display assertion and quietly started
+offering auth-failing subscriptions as switch candidates — an outage dressed as a remedy, and the #444
+class by a new route. `tests/unit/test_2352_subscription_failure_kind_predicates.py` pins both halves and
+the disagreement between them.
+
+`_perform_auto_switch` still does not clear the old subscription's events — the note below now reads
+against `has_recent_subscription_failures`, which is the predicate that keeps the just-drained (or
+just-rejected) sub off the candidate list.

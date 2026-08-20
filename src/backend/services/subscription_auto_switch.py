@@ -15,7 +15,10 @@ Threshold note (#441): pre-#441 we required 2+ consecutive 429s before
 switching. That guaranteed at least one user-visible failure on long-running
 schedules and never fired on auth-class breakage at all. The 2h skip-list on
 alternative selection (`select_best_alternative_subscription` +
-`is_subscription_rate_limited`) is what prevents thrashing — see
+`has_recent_subscription_failures` — kind-BLIND, and renamed from
+`is_subscription_rate_limited` by #2352 precisely so this caller keeps counting
+auth failures while the display surfaces stopped calling them rate limits) is
+what prevents thrashing — see
 `tests/unit/test_subscription_auto_switch_pingpong.py` for the regression
 tests pinning that contract.
 """
@@ -158,9 +161,11 @@ async def handle_subscription_failure(
         # already recorded at step 2, pre-gate, against `sub_at_entry` — which
         # equals `current_sub_id` on this non-stale path. Auth-class events
         # share the same table with `failure_kind` persisted since #471;
-        # `is_subscription_rate_limited` treats any event in the 2h window as
-        # a reason to skip the subscription as a candidate, which is the
-        # behavior we want for both kinds of failure.)
+        # `has_recent_subscription_failures` treats any event in the 2h window
+        # as a reason to skip the subscription as a candidate, which is the
+        # behavior we want for both kinds of failure. #2352 gave that predicate
+        # its own name: `is_subscription_rate_limited` now means real 429s only,
+        # for the badges, and MUST NOT be substituted back in here.)
         alternative = db.select_best_alternative_subscription(current_sub_id)
         if not alternative:
             logger.warning(
@@ -229,9 +234,10 @@ async def _perform_auto_switch(
     db.assign_subscription_to_agent(agent_name, new_subscription.id)
 
     # NOTE: Do NOT clear rate-limit events for the old subscription here. The
-    # events are the signal that the old subscription is still rate-limited —
-    # `is_subscription_rate_limited()` counts them over a 2h window, and
-    # `select_best_alternative_subscription()` uses that to filter candidates.
+    # events are the signal that the old subscription just failed —
+    # `has_recent_subscription_failures()` counts them over a 2h window
+    # regardless of kind (#2352), and `select_best_alternative_subscription()`
+    # uses that to filter candidates.
     # Clearing here causes a ping-pong between exhausted subscriptions because
     # the old sub looks viable on the next cycle (issue #444). Events age out
     # naturally via the 2h query window (enforced by iso_cutoff — see

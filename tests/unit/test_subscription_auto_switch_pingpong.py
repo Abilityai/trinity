@@ -242,8 +242,21 @@ class TestRateLimitAging:
     """
 
     @staticmethod
-    def _seed_event(tmp_db_path, subscription_id: str, occurred_at: str) -> None:
-        """Insert a rate-limit event with a specific occurred_at timestamp."""
+    def _seed_event(
+        tmp_db_path,
+        subscription_id: str,
+        occurred_at: str,
+        failure_kind: str = "rate_limit",
+    ) -> None:
+        """Insert a rate-limit event with a specific occurred_at timestamp.
+
+        #2352: `failure_kind` is now written explicitly. It was omitted here —
+        leaving every seeded row NULL — which no longer matches what the
+        production writer emits (`record_rate_limit_event` defaults the kind to
+        "rate_limit") and, since the display predicate is now scoped to real
+        429s, would have made these window-aging tests assert against a row
+        shape the platform does not produce.
+        """
         import sqlite3
         import uuid as _uuid
 
@@ -251,9 +264,16 @@ class TestRateLimitAging:
         try:
             conn.execute(
                 "INSERT INTO subscription_rate_limit_events "
-                "(id, agent_name, subscription_id, error_message, occurred_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (str(_uuid.uuid4()), "agent-x", subscription_id, "429", occurred_at),
+                "(id, agent_name, subscription_id, error_message, failure_kind, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(_uuid.uuid4()),
+                    "agent-x",
+                    subscription_id,
+                    "429",
+                    failure_kind,
+                    occurred_at,
+                ),
             )
             conn.commit()
         finally:

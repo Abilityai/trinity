@@ -14,7 +14,7 @@ every return shape is preserved exactly.
 
 import uuid
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from sqlalchemy import select, insert, update, delete, func, and_
 
@@ -634,19 +634,81 @@ class SubscriptionOperations:
             return cnt
 
     def is_subscription_rate_limited(self, subscription_id: str) -> bool:
-        """Check if a subscription has been rate-limited in the last 2 hours."""
+        """Has this subscription been RATE-LIMITED (429) in the last 2 hours?
+
+        #2352: this predicate answers the DISPLAY question — "is this
+        subscription being throttled right now" — and is therefore scoped to
+        ``failure_kind = 'rate_limit'``. It used to count every row in the
+        window regardless of kind, so an auth failure (401/403 — a dead,
+        expired, or `.env`-shadowed token) set ``rate_limited_now`` and every
+        surface reported a credential problem as quota exhaustion, pointing the
+        operator at the wrong remedy. That is the conflation #471's
+        ``failure_kind`` column exists to end; the display layer already honours
+        it (``rateLimitEventCount`` reads the ``rate_limit`` kind only) — the
+        predicate was the layer that had not caught up.
+
+        ``failure_kind IS NULL`` (pre-#471 rows) is deliberately EXCLUDED:
+        unknown is not promoted to "429", the same rule the frontend applies by
+        never folding ``unknown`` into ``rate_limit``. It is close to
+        unreachable in practice — the writer has always passed a kind, the
+        table is swept at 24h, and this window is 2h — but the direction of the
+        choice matters: a false "rate-limited" sends the operator to wait out a
+        window that was never full.
+
+        NOT the predicate for "should auto-switch avoid this subscription" —
+        that one wants ANY recent failure and lives in
+        ``has_recent_subscription_failures()``. Keep them apart: collapsing
+        them back into one is exactly how this bug happened.
+        """
+        return self._failure_event_count(subscription_id, kinds=("rate_limit",)) > 0
+
+    def has_recent_subscription_failures(
+        self, subscription_id: str, hours: int = 2
+    ) -> bool:
+        """Has this subscription failed for ANY reason in the window?
+
+        #2352: the kind-BLIND predicate — deliberately the pre-split behaviour
+        of ``is_subscription_rate_limited()``, preserved verbatim under a name
+        that says what it means. Auto-switch and new-agent assignment use it to
+        skip a subscription that recently failed, and they must keep counting
+        auth failures: a subscription with a dead token is the *last* place to
+        move an agent to, and #444's ping-pong is what happens when candidate
+        filtering forgets a recent failure.
+
+        ``failure_kind IS NULL`` COUNTS here — an unclassified failure is still
+        a failure, and this predicate's job is caution, not attribution.
+        """
+        return self._failure_event_count(subscription_id, hours=hours) > 0
+
+    def _failure_event_count(
+        self,
+        subscription_id: str,
+        *,
+        hours: int = 2,
+        kinds: Optional[Tuple[str, ...]] = None,
+    ) -> int:
+        """Rows in ``subscription_rate_limit_events`` for one subscription.
+
+        ``kinds=None`` counts every kind (incl. NULL); a tuple restricts to
+        those kinds and thereby EXCLUDES NULL, since ``IN`` never matches NULL
+        in SQL — the exclusion documented on the two callers above is a
+        property of this one comparison, not a second rule applied elsewhere.
+        """
+        conditions = [
+            subscription_rate_limit_events.c.subscription_id == subscription_id,
+            # #476: iso_cutoff, not datetime('now', ...) — the format has to
+            # match how occurred_at was written.
+            subscription_rate_limit_events.c.occurred_at > iso_cutoff(hours),
+        ]
+        if kinds is not None:
+            conditions.append(subscription_rate_limit_events.c.failure_kind.in_(kinds))
         stmt = (
             select(func.count().label("cnt"))
             .select_from(subscription_rate_limit_events)
-            .where(
-                and_(
-                    subscription_rate_limit_events.c.subscription_id == subscription_id,
-                    subscription_rate_limit_events.c.occurred_at > iso_cutoff(2),
-                )
-            )
+            .where(and_(*conditions))
         )
         with get_engine().connect() as conn:
-            return conn.execute(stmt).scalar_one() > 0
+            return int(conn.execute(stmt).scalar_one())
 
     def clear_rate_limit_events(self, agent_name: str, subscription_id: str) -> None:
         """Clear rate-limit events for an (agent, subscription) pair after successful switch."""
@@ -735,21 +797,39 @@ class SubscriptionOperations:
 
     def get_failure_event_counts_by_subscription(
         self, hours: int = 24
-    ) -> Dict[str, int]:
-        """#471 — one grouped read: {subscription_id: event count within window}.
+    ) -> Dict[str, Dict[str, Any]]:
+        """#471 — one grouped read, per subscription, within the window.
 
-        Feeds the fleet pressure endpoint; bounded by the 24h sweep.
+        Returns ``{subscription_id: {"total": int, "by_kind": {kind: int}}}`` —
+        the SAME shape as the single-subscription ``get_failure_event_counts``,
+        so the two cannot be read differently. #2352 widened it from a bare
+        total: the fleet pressure endpoint has to tell a 429 from an auth
+        failure, and a total structurally cannot. A NULL ``failure_kind``
+        (pre-#471 row) buckets under ``"unknown"`` and is never folded into
+        another kind.
+
+        One query, still — the extra dimension is a second GROUP BY column, not
+        a second read. Bounded by the 24h sweep.
         """
         stmt = (
             select(
                 subscription_rate_limit_events.c.subscription_id,
+                subscription_rate_limit_events.c.failure_kind,
                 func.count().label("cnt"),
             )
             .where(subscription_rate_limit_events.c.occurred_at > iso_cutoff(hours))
-            .group_by(subscription_rate_limit_events.c.subscription_id)
+            .group_by(
+                subscription_rate_limit_events.c.subscription_id,
+                subscription_rate_limit_events.c.failure_kind,
+            )
         )
+        out: Dict[str, Dict[str, Any]] = {}
         with get_engine().connect() as conn:
-            return {sid: int(cnt) for sid, cnt in conn.execute(stmt).all()}
+            for sid, kind, cnt in conn.execute(stmt).all():
+                entry = out.setdefault(sid, {"total": 0, "by_kind": {}})
+                entry["by_kind"][kind or "unknown"] = int(cnt)
+                entry["total"] += int(cnt)
+        return out
 
     # =========================================================================
     # Subscription headroom history (ent#433)
@@ -1081,7 +1161,7 @@ class SubscriptionOperations:
         Get subscription with fewest assigned agents (round-robin).
 
         Tie-break: alphabetical by name.
-        Skips subscriptions that are currently rate-limited or have invalid tokens.
+        Skips subscriptions that failed recently (any kind) or have invalid tokens.
         Used for auto-assignment on agent creation (#74).
 
         Returns:
@@ -1102,8 +1182,11 @@ class SubscriptionOperations:
 
         for row in rows:
             sub = self._row_to_subscription(row)
-            # Skip rate-limited subscriptions
-            if self.is_subscription_rate_limited(sub.id):
+            # Skip any subscription that failed recently — for ANY reason
+            # (#2352). Kind-blind on purpose: assigning a new agent to a
+            # subscription whose token just got rejected is worse than assigning
+            # it to a busy one.
+            if self.has_recent_subscription_failures(sub.id):
                 continue
             # Skip subscriptions with invalid/legacy tokens (#340)
             token = self.get_subscription_token(sub.id)
@@ -1121,7 +1204,7 @@ class SubscriptionOperations:
 
         Strategy:
         - Exclude the current subscription
-        - Skip subscriptions rate-limited in the last 2 hours
+        - Skip subscriptions that failed in the last 2 hours (rate-limit OR auth)
         - Prefer subscriptions with fewer assigned agents (load-balance)
 
         Returns:
@@ -1144,8 +1227,14 @@ class SubscriptionOperations:
 
         for row in rows:
             sub = self._row_to_subscription(row)
-            # Skip if rate-limited in the last 2 hours
-            if not self.is_subscription_rate_limited(sub.id):
+            # Skip anything that failed in the last 2 hours, rate-limit or auth
+            # (#2352 — kind-BLIND by design). The display predicate
+            # `is_subscription_rate_limited` was narrowed to real 429s so a dead
+            # token stops reading as quota exhaustion; candidate selection must
+            # NOT inherit that narrowing, or auto-switch would start moving
+            # agents onto subscriptions it has just watched fail to
+            # authenticate. See #444 for what a forgetful candidate filter does.
+            if not self.has_recent_subscription_failures(sub.id):
                 return sub
 
         return None
