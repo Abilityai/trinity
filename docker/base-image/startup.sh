@@ -12,6 +12,48 @@ if [ -f /opt/trinity/hooks/write-runtime-config.py ]; then
         echo "Warning: failed to render guardrails-runtime.json (hooks will fall back to baseline)"
 fi
 
+# === Guardrails: assert the registration is where the agent cannot reach (ent#345) ===
+# The hooks are registered in root-owned /etc/claude-code/managed-settings.json,
+# outside the agent's HOME and outside the git-synced tree. This checks the two
+# properties that make that true, because the failure mode is SILENT: if the file
+# is missing or writable, Claude Code simply runs no hooks and every tool call
+# proceeds unguarded, with nothing in the log to say so.
+#
+# It reports and continues rather than refusing to boot: a registration problem
+# must not become a fleet outage, and an operator who can see the line can fix it.
+# An operator-visible signal on /health is the tracked follow-up — this is the
+# loud-in-the-log half, which Vector captures.
+GUARDRAIL_SETTINGS=/etc/claude-code/managed-settings.json
+if [ ! -f "$GUARDRAIL_SETTINGS" ]; then
+    echo "GUARDRAILS: ERROR — $GUARDRAIL_SETTINGS is MISSING; Claude Code will run NO guardrail hooks (ent#345). Rebuild the base image."
+elif [ -w "$GUARDRAIL_SETTINGS" ]; then
+    # `-w` runs as `developer`, so this is exactly the question that matters:
+    # can the guarded agent rewrite its own guardrail registration?
+    echo "GUARDRAILS: ERROR — $GUARDRAIL_SETTINGS is WRITABLE by the agent user; the registration is not a boundary (ent#345)."
+else
+    echo "GUARDRAILS: registration verified — root-owned, read-only, outside the synced tree"
+fi
+
+# Retire the legacy in-tree copy (ent#345 × #2036).
+#
+# The old registration lived at ~/.claude/settings.json, which is on the DURABLE
+# home volume — so rebuilding the image does not remove it from an agent that
+# already exists. Left there it is two problems: a second hook registration whose
+# interaction with the managed one depends on precedence semantics we do not
+# control, and a live #2036 leak candidate (it registers absolute /opt/trinity
+# paths, so a clone made outside the container has every Bash/Edit refused).
+#
+# Removed ONLY on an exact content match against the file we now ship. An
+# agent-authored settings.json — or one an operator edited on purpose — differs and
+# is left completely alone. `cmp -s` is the whole gate: no parsing, no heuristics,
+# no "looks like ours".
+LEGACY_SETTINGS=/home/developer/.claude/settings.json
+if [ -f "$LEGACY_SETTINGS" ] && [ -f "$GUARDRAIL_SETTINGS" ] \
+   && cmp -s "$LEGACY_SETTINGS" "$GUARDRAIL_SETTINGS"; then
+    rm -f "$LEGACY_SETTINGS" && \
+        echo "GUARDRAILS: removed the legacy in-tree registration at $LEGACY_SETTINGS (identical to the managed copy; ent#345)"
+fi
+
 # === Scratch space: ensure TMPDIR exists on the home volume (#1098) ===
 # /tmp is a 100 MB RAM tmpfs mounted noexec,nosuid — too small and non-exec for
 # pip/npm/build scratch (ML wheels hit "No space left on device"). The backend

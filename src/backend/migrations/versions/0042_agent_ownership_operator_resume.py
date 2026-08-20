@@ -9,15 +9,15 @@ Per-AGENT and default OFF on purpose: a dispatch spends money, so it is never
 unconditional, and a per-request flag the agent itself sets would let any agent
 turn any answer — including a Workspace client's — into spend (ent#430 AC #3).
 
-Revision ID: 0041_agent_ownership_operator_resume
-Revises: 0040_rl_events_failure_kind
+Revision ID: 0042_agent_ownership_operator_resume
+Revises: 0041_secret_settings_encryption
 Create Date: 2026-08-19
 """
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0041_agent_ownership_operator_resume"
-down_revision = "0040_rl_events_failure_kind"
+revision = "0042_agent_ownership_operator_resume"
+down_revision = "0041_secret_settings_encryption"
 branch_labels = None
 depends_on = None
 

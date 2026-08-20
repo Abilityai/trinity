@@ -285,7 +285,7 @@ if __name__ == "__main__":
 
 2. **Hook Persistence**: Hooks are injected on container start. If container restarts mid-session without going through `start_agent_internal()`, hooks might not be present. Mitigation: Store hooks in persistent volume.
 
-3. **Hook Bypass**: User could potentially delete `.claude/settings.local.json` via terminal. Mitigation:
+3. **Hook Bypass**: User could potentially delete `.claude/settings.local.json` via terminal. **Superseded by #887 + ent#345** — the read-only hook is no longer registered there (it is baked into the root-owned `/etc/claude-code/managed-settings.json`, and read-only mode writes only a *config* file the hook reads), so deleting a user settings file disables nothing. Original mitigation:
    - Make hooks file read-only via file permissions
    - Claude Code warns users and requires review in `/hooks` menu before external changes apply
    - Consider using managed policy settings for stricter enforcement

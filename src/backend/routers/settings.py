@@ -49,6 +49,9 @@ from services.settings_service import (
     get_github_pat,
     get_google_api_key,
     get_ops_setting,
+    set_secret_setting,
+    clear_secret_setting,
+    has_secret_setting,
     settings_service,
     OPS_SETTINGS_DEFAULTS,
     OPS_SETTINGS_DESCRIPTIONS,
@@ -664,12 +667,12 @@ async def get_api_keys_status(
         anthropic_configured = bool(anthropic_key)
 
         # Check if it's from settings or env
-        key_from_settings = bool(db.get_setting_value('anthropic_api_key', None))
+        key_from_settings = has_secret_setting('anthropic_api_key')
 
         # Get GitHub PAT
         github_pat = get_github_pat()
         github_configured = bool(github_pat)
-        github_from_settings = bool(db.get_setting_value('github_pat', None))
+        github_from_settings = has_secret_setting('github_pat')
 
         return {
             "anthropic": {
@@ -709,8 +712,8 @@ async def update_anthropic_key(
                 detail="Invalid API key format. Anthropic keys start with 'sk-ant-'"
             )
 
-        # Store in settings
-        db.set_setting('anthropic_api_key', key)
+        # Store in settings — AES-256-GCM encrypted at rest (ent#435)
+        set_secret_setting('anthropic_api_key', key)
 
         # SEC-001: audit API key change
         await platform_audit_service.log(
@@ -747,7 +750,7 @@ async def delete_anthropic_key(
     assert_admin(current_user)
 
     try:
-        deleted = db.delete_setting('anthropic_api_key')
+        deleted = clear_secret_setting('anthropic_api_key')
 
         # SEC-001: audit API key deletion
         if deleted:
@@ -858,7 +861,7 @@ async def update_github_pat(
             )
 
         # Store in settings
-        db.set_setting('github_pat', key)
+        set_secret_setting('github_pat', key)
 
         # Auto-propagate to running agents (#211). Never block the PAT save on
         # propagation failures — the token is already persisted.
@@ -906,7 +909,7 @@ async def delete_github_pat(
     assert_admin(current_user)
 
     try:
-        deleted = db.delete_setting('github_pat')
+        deleted = clear_secret_setting('github_pat')
 
         # SEC-001: audit GitHub PAT deletion
         if deleted:
@@ -1062,8 +1065,8 @@ async def get_slack_settings_status(
 
         # Check sources
         client_id_from_settings = bool(db.get_setting_value('slack_client_id', None))
-        client_secret_from_settings = bool(db.get_setting_value('slack_client_secret', None))
-        signing_secret_from_settings = bool(db.get_setting_value('slack_signing_secret', None))
+        client_secret_from_settings = has_secret_setting('slack_client_secret')
+        signing_secret_from_settings = has_secret_setting('slack_signing_secret')
 
         return {
             "configured": bool(client_id and client_secret and signing_secret),
@@ -1108,11 +1111,11 @@ async def update_slack_settings(
             updated.append('client_id')
 
         if body.client_secret is not None:
-            db.set_setting('slack_client_secret', body.client_secret.strip())
+            set_secret_setting('slack_client_secret', body.client_secret)
             updated.append('client_secret')
 
         if body.signing_secret is not None:
-            db.set_setting('slack_signing_secret', body.signing_secret.strip())
+            set_secret_setting('slack_signing_secret', body.signing_secret)
             updated.append('signing_secret')
 
         return {
@@ -1137,8 +1140,12 @@ async def delete_slack_settings(
 
     try:
         deleted = []
-        for key in ['slack_client_id', 'slack_client_secret', 'slack_signing_secret']:
-            if db.delete_setting(key):
+        # client_id is a public identifier (plain row); the two secrets are
+        # encrypted, so clearing them must remove BOTH forms (ent#435).
+        if db.delete_setting('slack_client_id'):
+            deleted.append('slack_client_id')
+        for key in ['slack_client_secret', 'slack_signing_secret']:
+            if clear_secret_setting(key):
                 deleted.append(key)
 
         # Check env var fallbacks
@@ -1221,7 +1228,7 @@ async def connect_slack_transport(
 
     # Save settings to DB
     if body.app_token is not None:
-        db.set_setting("slack_app_token", body.app_token.strip())
+        set_secret_setting("slack_app_token", body.app_token)
     if body.transport_mode is not None:
         if body.transport_mode.strip() not in ("socket", "webhook"):
             raise HTTPException(status_code=400, detail="transport_mode must be 'socket' or 'webhook'")
@@ -2950,6 +2957,36 @@ async def update_setting(
             ),
         )
 
+    # ent#435: this catch-all is the reason a route-level block is not enough —
+    # it can write ANY key, so it could put a live Anthropic/GitHub/Slack
+    # credential straight back into cleartext after the migration removed it.
+    # The authoritative refusal is the sink guard in `db.set_setting`
+    # (`SecretSettingWriteError`, caught below); this arm exists only to answer
+    # BEFORE the write with the same message the sink would give. Writing the
+    # ENCRYPTED key here is refused too: the value must be an envelope this
+    # platform produced, and a hand-pasted string would land as a row every
+    # reader then fails to decrypt — fail-closed, but silently and confusingly
+    # (the #736 A2A-endpoints rationale, exactly).
+    from services.secret_settings import (
+        ENCRYPTED_SETTING_KEYS,
+        SecretSettingWriteError,
+        assert_plaintext_write_allowed,
+    )
+
+    if key in ENCRYPTED_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} holds an AES-256-GCM envelope and cannot be written as a "
+                "raw value. Set the credential through its own settings route, "
+                "which encrypts on the way in (ent#435)."
+            ),
+        )
+    try:
+        assert_plaintext_write_allowed(key)
+    except SecretSettingWriteError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     try:
         setting = db.set_setting(key, body.value)
 
@@ -2986,6 +3023,11 @@ async def update_setting(
                 logger.warning(f"WhatsApp webhook URL back-fill skipped: {e}")
 
         return setting
+    except SecretSettingWriteError as e:
+        # Belt for the pre-check above: if the guard ever grows a case the
+        # pre-check does not mirror, the caller still gets 422-with-a-pointer
+        # rather than a 500 that reads like a platform fault.
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
 
