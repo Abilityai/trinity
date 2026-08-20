@@ -3517,9 +3517,17 @@ def _migrate_secret_settings_encryption(cursor, conn):
     always has one.
 
     Idempotent at row level (an existing envelope is skipped) and at migration
-    level (``schema_migrations``). Order is write-then-delete per row, so a crash
-    mid-sweep leaves cleartext intact and re-running converges — never a lost
-    credential.
+    level (``schema_migrations``).
+
+    **The whole sweep is ONE transaction** — a single ``conn.commit()`` after the
+    loop, not a commit per row. That is the stronger property and it is
+    deliberate: a crash mid-sweep rolls back every row, so the install is never
+    left with three of six credentials migrated and the runner never records the
+    migration as applied. Do not "fix" this into a per-row commit; that would
+    trade all-or-nothing for a partially-converted state whose only recovery is
+    the read-path lazy migration. Either way no credential is ever lost — the
+    encrypted row is written before the cleartext row is deleted — but rollback
+    is cleaner than convergence.
 
     NOTE for operators: this protects the DB going forward. Historical backups
     still contain the plaintext, so the affected tokens should be ROTATED —

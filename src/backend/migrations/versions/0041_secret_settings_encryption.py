@@ -21,8 +21,13 @@ made for the Slack sweep. Refusing to boot is correct here: the alternative is
 booting with the credentials still in cleartext, which is the defect.
 
 Idempotent: an already-encrypted row is skipped, so a re-run or a half-applied
-sweep converges. Write-then-delete per row, so a crash mid-sweep leaves
-cleartext intact rather than losing a credential.
+sweep converges.
+
+The whole sweep runs inside Alembic's own migration transaction — all-or-nothing
+across every row, matching the single-commit SQLite track. A crash mid-sweep
+rolls back rather than leaving three of six credentials converted, and the
+encrypted row is written before the cleartext row is deleted, so no credential
+is lost on any path.
 
 ``downgrade`` is deliberately a no-op — see the note on the function.
 

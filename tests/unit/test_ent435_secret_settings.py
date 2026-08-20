@@ -469,6 +469,61 @@ def test_sqlite_sweep_refuses_rather_than_leaving_cleartext(tmp_path, monkeypatc
     assert _dump(conn)["github_pat"] == "ghp_live"
 
 
+def test_sqlite_sweep_is_atomic_across_rows(tmp_path, monkeypatch):
+    """The sweep is ONE transaction, not a commit per row.
+
+    Documented in the migration and worth pinning: a crash partway must roll
+    back every row rather than leave an install with three of six credentials
+    converted. Simulated by failing the DELETE of the second row — the first
+    row's already-executed INSERT must not survive.
+    """
+    import sqlite3
+
+    from db.migrations import _migrate_secret_settings_encryption
+
+    conn = _sqlite_settings_db(tmp_path, [
+        ("anthropic_api_key", "sk-ant-one"),
+        ("github_pat", "ghp_two"),
+        ("google_api_key", "AIza-three"),
+    ])
+    real_cursor = conn.cursor()
+
+    class _FailingCursor:
+        """Passes everything through, then raises on the 2nd DELETE."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._deletes = 0
+
+        def execute(self, sql, *a, **kw):
+            if sql.lstrip().upper().startswith("DELETE"):
+                self._deletes += 1
+                if self._deletes == 2:
+                    raise sqlite3.OperationalError("simulated crash mid-sweep")
+            return self._inner.execute(sql, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    with pytest.raises(sqlite3.OperationalError):
+        _migrate_secret_settings_encryption(_FailingCursor(real_cursor), conn)
+
+    conn.rollback()
+    after = _dump(conn)
+
+    # Nothing converted: all three cleartext rows intact, no encrypted rows.
+    assert after["anthropic_api_key"] == "sk-ant-one"
+    assert after["github_pat"] == "ghp_two"
+    assert after["google_api_key"] == "AIza-three"
+    assert [k for k in after if k.endswith("_encrypted")] == []
+
+    # And a clean re-run converges completely — no credential was lost.
+    _sweep(conn)
+    final = _dump(conn)
+    assert [k for k in final if not k.endswith("_encrypted")] == []
+    assert len([k for k in final if k.endswith("_encrypted")]) == 3
+
+
 def test_sqlite_sweep_is_registered_in_the_runner():
     from db.migrations import MIGRATIONS
 
