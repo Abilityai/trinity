@@ -1549,9 +1549,20 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   live transcripts under those names, so renaming them would be exactly the data
   migration the move forbids. DDL in `db/schema.py`, versioned on the OSS two-track
   runner (`db/migrations.py::shared_sessions_tables_to_oss` + Alembic
-  `0039_shared_sessions_oss`), both `CREATE TABLE IF NOT EXISTS` so adoption is a no-op
+  `0044_shared_sessions_oss`), both `CREATE TABLE IF NOT EXISTS` so adoption is a no-op
   on an install that already has them. The enterprise Alembic `0011_shared_sessions`
   stays on its own line — deleting it would break that chain — and is idempotent.
+  The revision chains off **`0038_portal_chat_state`, `main`'s head** — this landed as a
+  hotfix onto `main`, and 0039-0043 exist only on `dev`, so pointing at `dev`'s head
+  would name an absent revision and fail boot on the line it ships to. That forks the
+  two lines at 0038 by construction; the fork surfaces as two heads at the main→dev
+  back-merge, where `check_alembic_heads` fails loudly until an `alembic merge` revision
+  (`down_revision = ("0043_subscription_headroom_history", "0044_shared_sessions_oss")`)
+  collapses it — the fix is that merge revision, never renumbering a revision already
+  applied wherever the hotfix went. The file is numbered 0044 rather than 0039 so its
+  prefix does not collide with `dev`'s `0039_operator_queue_addressed_to` after the
+  back-merge (ids are strings, but the numeric prefix is the graph's only human ordering
+  cue); `test_ent443_rooms_oss_core.py` pins both the parent and prefix-uniqueness.
 - **Agent-identity columns are POLYMORPHIC and registered kind-scoped** (ent#443):
   `participants.identity` and `messages.sender_identity` hold an agent name, a platform
   user id, or a workspace client's verified email depending on the sibling `kind` /

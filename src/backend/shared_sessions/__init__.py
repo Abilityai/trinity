@@ -23,7 +23,7 @@ migration, no lost rooms" is an acceptance criterion of the move. The prefix is
 historical provenance, not a statement about licensing.
 
 The DDL lives in ``db/schema.py`` and is versioned on the OSS two-track runner
-(``db/migrations.py`` for SQLite, Alembic ``0039_shared_sessions_oss`` for
+(``db/migrations.py`` for SQLite, Alembic ``0044_shared_sessions_oss`` for
 PostgreSQL) — NOT the ``enterprise_schema_migrations`` track it used to use.
 Both tracks are ``CREATE TABLE IF NOT EXISTS``, so an install that already has
 these tables from the enterprise runner is a no-op.

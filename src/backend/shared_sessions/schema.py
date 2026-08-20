@@ -2,7 +2,7 @@
 
 The DDL itself lives in ``db/schema.py`` with every other OSS table, and is
 versioned on the two-track runner (``db/migrations.py`` +
-Alembic ``0039_shared_sessions_oss``) — Invariant #3. This module owns no DDL;
+Alembic ``0044_shared_sessions_oss``) — Invariant #3. This module owns no DDL;
 it only applies the canonical statements to the connected database.
 
 It exists because callers (tests, and any bootstrap that wants the tables

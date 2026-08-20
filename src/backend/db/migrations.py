@@ -3466,7 +3466,7 @@ def _migrate_shared_sessions_tables_to_oss(cursor, conn):
     The enterprise Alembic revision `0011_shared_sessions` stays in place on its
     own line — deleting it would break that chain — and is likewise idempotent.
 
-    Mirrored by Alembic `0039_shared_sessions_oss` and the DDL in `db/schema.py`.
+    Mirrored by Alembic `0044_shared_sessions_oss` and the DDL in `db/schema.py`.
     """
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS enterprise_rooms (

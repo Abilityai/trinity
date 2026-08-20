@@ -246,7 +246,7 @@ def test_sqlite_track_has_the_adoption_migration():
 
 def test_postgres_track_has_the_adoption_revision():
     versions = _BACKEND / "migrations" / "versions"
-    revision = versions / "0039_shared_sessions_oss.py"
+    revision = versions / "0044_shared_sessions_oss.py"
     assert revision.exists(), "no OSS Alembic revision for the room tables"
 
     body = revision.read_text()
@@ -257,6 +257,35 @@ def test_postgres_track_has_the_adoption_revision():
         "downgrade must not drop tables this revision only ADOPTED — that is "
         "the one outcome the move promised could not happen"
     )
+
+
+def test_the_room_revision_chains_off_the_hotfix_line_and_numbers_uniquely():
+    """This ships as a hotfix onto `main`, whose Alembic head is
+    `0038_portal_chat_state` — so the revision chains off 0038 and `main` stays
+    single-head. It CANNOT chain off `dev`'s head: 0039-0043 do not exist on
+    `main`, and a `down_revision` naming an absent revision is a boot failure on
+    the very line this ships to.
+
+    The consequence is a deliberate fork at 0038 that becomes two heads at the
+    back-merge, which `check_alembic_heads` fails loudly until an `alembic merge`
+    revision collapses it. The right fix there is the merge revision — NOT
+    renumbering this one, which is already applied wherever the hotfix went.
+
+    The file is numbered 0044 rather than 0039 so it does not collide with
+    `dev`'s `0039_operator_queue_addressed_to` after that back-merge: revision
+    ids are strings, but the numeric prefix is the graph's only human ordering
+    cue, and a duplicated one would be the first in the repo.
+    """
+    versions = _BACKEND / "migrations" / "versions"
+    body = (versions / "0044_shared_sessions_oss.py").read_text()
+    assert 'down_revision = "0038_portal_chat_state"' in body, (
+        "the room revision must chain off `main`'s head; pointing it at a "
+        "revision that only exists on `dev` breaks boot on the hotfix line"
+    )
+
+    prefixes = [f.name.split("_", 1)[0] for f in versions.glob("[0-9]*.py")]
+    duplicates = {p for p in prefixes if prefixes.count(p) > 1}
+    assert not duplicates, f"duplicated Alembic numeric prefixes: {sorted(duplicates)}"
 
 
 def test_the_bootstrap_helper_owns_no_ddl():
