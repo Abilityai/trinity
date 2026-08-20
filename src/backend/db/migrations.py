@@ -3490,6 +3490,98 @@ def _migrate_portal_chat_state(cursor, conn):
     conn.commit()
 
 
+def _migrate_secret_settings_encryption(cursor, conn):
+    """Encrypt the cleartext credential rows in ``system_settings`` (ent#435).
+
+    Six settings held LIVE third-party credentials in cleartext — every DB dump,
+    backup, replica and snapshot carried usable tokens, and any read path to the
+    DB yielded them without needing ``CREDENTIAL_ENCRYPTION_KEY`` (CWE-312). This
+    is the one-shot sweep: each value moves to an AES-256-GCM envelope under
+    ``<key>_encrypted`` and the cleartext row is DELETED.
+
+    The key NAME moves deliberately. Leaving the value encrypted in place under
+    the original name would make "is this install encrypted?" unanswerable
+    without decrypting every row; with the rename, the reporter's own
+    verification query — ``SELECT key FROM system_settings WHERE key IN (...)``
+    returning nothing — is the proof, and the ``set_setting`` guard keeps it true.
+
+    Policy (which keys, envelope shape, skip rules) is shared verbatim with the
+    PostgreSQL track via ``services.secret_settings.plan_migration``; only the
+    SQL plumbing differs, because that track holds a SQLAlchemy Connection and
+    this one a raw ``sqlite3`` cursor (Invariant #9).
+
+    Hard-fails on a missing ``CREDENTIAL_ENCRYPTION_KEY``, matching the #453
+    Slack sweep and every Invariant #12 helper: the backend refuses to start
+    rather than leave the credentials in cleartext. ``scripts/deploy/start.sh``
+    auto-generates the key (``ensure_hex32_secret``), so a supported deployment
+    always has one.
+
+    Idempotent at row level (an existing envelope is skipped) and at migration
+    level (``schema_migrations``).
+
+    **The whole sweep is ONE transaction** — a single ``conn.commit()`` after the
+    loop, not a commit per row. That is the stronger property and it is
+    deliberate: a crash mid-sweep rolls back every row, so the install is never
+    left with three of six credentials migrated and the runner never records the
+    migration as applied. Do not "fix" this into a per-row commit; that would
+    trade all-or-nothing for a partially-converted state whose only recovery is
+    the read-path lazy migration. Either way no credential is ever lost — the
+    encrypted row is written before the cleartext row is deleted — but rollback
+    is cleaner than convergence.
+
+    NOTE for operators: this protects the DB going forward. Historical backups
+    still contain the plaintext, so the affected tokens should be ROTATED —
+    see docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md.
+    """
+    from services.secret_settings import SECRET_SETTING_KEYS, plan_migration
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='system_settings'"
+    )
+    if not cursor.fetchone():
+        logger.info("ent#435 migration: system_settings absent, skipping")
+        return
+
+    placeholders = ",".join("?" for _ in SECRET_SETTING_KEYS)
+    keys = sorted(SECRET_SETTING_KEYS)
+    cursor.execute(
+        f"SELECT key, value FROM system_settings WHERE key IN ({placeholders})", keys
+    )
+    rows = cursor.fetchall()
+
+    # Raises ValueError if CREDENTIAL_ENCRYPTION_KEY is unset — but only once we
+    # know there is something to encrypt, so a fresh install with no credential
+    # rows is never blocked from booting by a key it does not yet need.
+    plan = plan_migration(rows) if rows else []
+
+    now = utc_now_iso()
+    for legacy_key, encrypted_key, envelope in plan:
+        cursor.execute(
+            "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (encrypted_key, envelope, now),
+        )
+        cursor.execute("DELETE FROM system_settings WHERE key = ?", (legacy_key,))
+    conn.commit()
+
+    if plan:
+        # Names only — never values (the G-04 rule: a violation record must not
+        # become a second copy of the secret).
+        logger.warning(
+            "ent#435 migration: encrypted %d cleartext credential setting(s): %s. "
+            "ROTATE these credentials — historical backups still hold the plaintext.",
+            len(plan),
+            ", ".join(sorted(k for k, _, _ in plan)),
+        )
+    else:
+        logger.info(
+            "ent#435 migration: no cleartext credential settings found (%d row(s) "
+            "already encrypted or empty)",
+            len(rows),
+        )
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3602,4 +3694,5 @@ MIGRATIONS = [
     ("portal_chat_state", _migrate_portal_chat_state),
     ("operator_queue_addressed_to", _migrate_operator_queue_addressed_to),
     ("rate_limit_events_failure_kind", _migrate_rate_limit_events_failure_kind),
+    ("secret_settings_encryption", _migrate_secret_settings_encryption),
 ]

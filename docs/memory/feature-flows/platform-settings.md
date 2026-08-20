@@ -262,20 +262,30 @@ Defined in `src/backend/services/settings_service.py` (lines 23-33):
 | `get_github_pat()` | 71-76 | Get GitHub PAT (DB or env var) |
 | `get_ops_setting(key, as_type)` | 85-100 | Get ops setting with type conversion |
 
-**Hierarchy for API Keys**:
-1. Database setting (if exists)
-2. Environment variable fallback
-3. Empty string (not configured)
+**Hierarchy for API Keys** (ent#435):
+1. Encrypted database setting `<key>_encrypted` (AES-256-GCM envelope)
+2. Legacy cleartext row `<key>` — **encrypted and deleted on sight**, then returned
+3. Environment variable fallback
+4. Empty string (not configured)
 
 ```python
-# settings_service.py lines 71-76
+# settings_service.py — every credential getter is a thin call on this
 def get_github_pat(self) -> str:
-    """Get GitHub PAT from settings, fallback to env var."""
-    key = self.get_setting('github_pat')
-    if key:
-        return key
-    return os.getenv('GITHUB_PAT', '')
+    return self._resolve_secret_setting('github_pat', 'GITHUB_PAT')
 ```
+
+Step 2 is not dead code that the one-shot migration made unreachable. A restored
+pre-fix backup, a rollback-then-roll-forward, or a direct DB write can all put a
+cleartext row back, and the read path is the only thing that would notice — so it
+re-encrypts and DELETEs on sight, which makes cleartext *transient by
+construction* rather than merely absent at this instant. Steady state pays
+nothing: while the encrypted row exists the legacy key is never read.
+
+An unreadable envelope (rotated key, corrupt row) degrades to the **env var**,
+not to a legacy cleartext row — falling through to a stale plaintext value would
+resurrect a credential the operator had replaced. Reads never raise (a 500 here
+would break agent start); writes fail closed (no encryption key ⇒ refuse, never
+silently store cleartext).
 
 ---
 
@@ -301,7 +311,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 |--------|-------|-------------|
 | `get_setting(key)` | 31-47 | Get setting by key |
 | `get_setting_value(key, default)` | 49-58 | Get just the value |
-| `set_setting(key, value)` | 60-83 | Upsert setting |
+| `set_setting(key, value)` | 60-83 | Upsert setting — **refuses a cleartext credential write** (ent#435): raises `SecretSettingWriteError` for a registered secret key or any credential-*shaped* key (`*_api_key`/`*_token`/`*_secret`/`*_pat`/`*_password`/`*_credentials`). The guard sits here, not only on the routes, because the generic `PUT /api/settings/{key}` catch-all can address any key and because `system_settings` has more than one writer (`client_portal/db.py` and two enterprise modules each carry their own upsert) |
 | `delete_setting(key)` | 85-98 | Delete setting |
 | `get_all_settings()` | 100-114 | List all settings |
 | `get_settings_dict()` | 116-123 | Get as key-value dict |
@@ -324,6 +334,8 @@ VALUES (?, ?, ?)
 | GitHub API error | 200 | `{"valid": false, "error": "GitHub API returned status {code}"}` |
 | Request timeout | 200 | `{"valid": false, "error": "Request timed out. Please try again."}` |
 | Invalid ops setting key | Ignored | Key ignored in update, returned in `ignored` array |
+| Cleartext write to a credential key | 422 | "'{key}' holds a live credential and may not be stored in cleartext (ent#435, CWE-312)…" — names the `<key>_encrypted` destination and the route that writes it |
+| Raw write to a `*_encrypted` key | 422 | The value must be an envelope this platform produced; a hand-pasted string would land as a row every reader then fails to decrypt (the #736 A2A-endpoints rationale) |
 
 ---
 
@@ -333,8 +345,38 @@ VALUES (?, ?, ?)
 2. **API Key Masking**: Stored keys displayed as `...{last4chars}` via `mask_api_key()`
 3. **Key Validation**: PAT format validated before storage (prefix check)
 4. **No Key Logging**: API key values never appear in logs
-5. **Secure Storage**: Keys stored in SQLite, not Redis (persistent, encrypted at rest if filesystem supports it)
-6. **Environment Fallback**: Can use env vars instead of DB storage for sensitive deployments
+5. **Encrypted at Rest** (ent#435): credential-bearing settings are persisted as
+   AES-256-GCM envelopes under `<key>_encrypted` via
+   `services/credential_encryption.py`, and the cleartext row is deleted —
+   `anthropic_api_key`, `github_pat`, `google_api_key`, `slack_app_token`,
+   `slack_client_secret`, `slack_signing_secret`.
+
+   **This bullet used to read "stored in SQLite, not Redis (persistent, encrypted
+   at rest if filesystem supports it)", which was the defect stated as a
+   feature.** Filesystem-level encryption protects a powered-off disk and nothing
+   else: every DB dump, backup, replica and snapshot still carried live
+   third-party tokens in the clear — and backups are exactly the artifact most
+   likely to travel — while any read path to the database (psql access, a future
+   SQLi, a misconfigured BI or monitoring hook) yielded working credentials
+   **without** needing `CREDENTIAL_ENCRYPTION_KEY` (CWE-312, ent#435).
+   Application-level envelopes are what make the claim true.
+
+   `slack_client_id` is deliberately excluded: an OAuth client_id is a public
+   identifier that `slack_service.get_oauth_url` puts verbatim into the
+   browser-visible authorize URL. It is a *reviewed* exemption recorded in
+   `secret_settings.PUBLIC_CREDENTIAL_SHAPED_KEYS`, not an oversight.
+
+   Encryption protects the database **going forward only** — historical backups
+   still hold the plaintext, so upgrading installs must **rotate** the affected
+   tokens: [`docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md`](../../migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md).
+6. **Cleartext writes are refused at the sink** (ent#435), so a new credential
+   cannot re-enter through the generic `PUT /api/settings/{key}` catch-all — the
+   same door #506, #1609, ent#12, #1644, ent#14 and ent#346 each found open. The
+   heuristic half also catches the *next* credential-shaped key nobody has
+   registered yet. Guarded against recurrence by
+   `tests/unit/test_ent435_settings_sink_guard.py` (AST: every `system_settings`
+   writer is gated or listed with the reason it cannot carry a credential).
+7. **Environment Fallback**: Can use env vars instead of DB storage for sensitive deployments
 
 ---
 

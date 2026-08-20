@@ -15,7 +15,13 @@ rotation runbook (docs/migrations/CREDENTIAL_KEY_ROTATION.md).
     python scripts/deploy/rotate-credential-key.py --apply
     # 4. remove CREDENTIAL_ENCRYPTION_KEY_SECONDARY, restart
 
-Scope: the eight AES-256-GCM-wrapped DB token columns (Invariant #12). Agent
+Scope: the AES-256-GCM-wrapped DB token columns (Invariant #12) PLUS the
+credential-bearing ``system_settings`` rows, whose secrets live in a *value*
+rather than a dedicated column and so are invisible to the column sweep
+(ent#435). That gap predates ent#435: ``elevenlabs_api_key_encrypted`` (ent#117)
+and ``a2a_outbound_endpoints_encrypted`` (#736) were already envelope-in-a-row
+and already missed, meaning a completed rotation left them readable only via the
+secondary key — and unreadable the moment it was removed. Agent
 ``.credentials.enc`` files live inside agent containers and re-encrypt onto the
 primary key on their next credential operation (or `inject`/`export`); they keep
 opening via the secondary key until then, so they are intentionally out of this
@@ -55,6 +61,25 @@ ENCRYPTED_COLUMNS = [
     ("whatsapp_bindings", "id", "auth_token_encrypted"),
     ("voip_bindings", "id", "auth_token_encrypted"),
 ]
+
+# ent#435: envelope-bearing ``system_settings`` rows. Keyed by row, not column —
+# only these keys hold envelopes; every other settings row is plain config and
+# must not be touched. Membership is DERIVED from the policy module for the
+# ent#435 keys so a newly-registered credential setting joins the rotation
+# automatically; the two pre-existing rows are named explicitly because they
+# predate that registry.
+_STANDALONE_ENVELOPE_SETTINGS = (
+    "elevenlabs_api_key_encrypted",  # ent#117
+    "a2a_outbound_endpoints_encrypted",  # #736
+)
+
+
+def _envelope_setting_keys() -> list:
+    try:
+        from services.secret_settings import ENCRYPTED_SETTING_KEYS
+    except Exception:  # pragma: no cover — pre-ent#435 checkout
+        ENCRYPTED_SETTING_KEYS = frozenset()
+    return sorted(set(ENCRYPTED_SETTING_KEYS) | set(_STANDALONE_ENVELOPE_SETTINGS))
 
 
 def _table_exists(conn, table: str) -> bool:
@@ -105,6 +130,35 @@ def rotate(apply: bool) -> int:
             total_migrated += migrated
             total_skipped += skipped
             print(f"  {table:28} {migrated:4} re-encrypted, {skipped} skipped")
+
+        # ent#435: the row-keyed settings pass.
+        if _table_exists(conn, "system_settings"):
+            keys = _envelope_setting_keys()
+            migrated = skipped = 0
+            for key in keys:
+                row = conn.execute(
+                    text("SELECT value FROM system_settings WHERE key = :k"),
+                    {"k": key},
+                ).first()
+                if not row or not row[0]:
+                    continue
+                try:
+                    rewrapped = svc.rewrap(row[0])
+                except Exception as e:
+                    skipped += 1
+                    print(f"    [skip] system_settings[{key}]: not a readable envelope ({e})")
+                    continue
+                if apply:
+                    conn.execute(
+                        text("UPDATE system_settings SET value = :v WHERE key = :k"),
+                        {"v": rewrapped, "k": key},
+                    )
+                migrated += 1
+            total_migrated += migrated
+            total_skipped += skipped
+            print(f"  {'system_settings (rows)':28} {migrated:4} re-encrypted, {skipped} skipped")
+        else:
+            print(f"  {'system_settings (rows)':28} — absent, skipped")
 
         if not apply:
             # Roll the (no-op) transaction back explicitly for clarity in dry-run.
