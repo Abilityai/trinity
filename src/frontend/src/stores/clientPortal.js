@@ -18,6 +18,102 @@ import { useAuthStore } from './auth'
 import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+// #2261 — per-TAB, so an operator working in another tab is untouched by a
+// client's idle timeout (that is the whole reason expiry may not end the
+// platform session). sessionStorage, not localStorage: it must survive a
+// refresh of THIS tab and nothing wider.
+const FALLBACK_SUPPRESSED_KEY = 'trinity.workspaceFallbackSuppressed'
+
+function readSuppressed() {
+  try {
+    return sessionStorage.getItem(FALLBACK_SUPPRESSED_KEY) === '1'
+  } catch {
+    // Private mode / storage disabled: fail to NOT-suppressed, which is the
+    // pre-#2261 behaviour rather than a workspace nobody can enter.
+    return false
+  }
+}
+
+function writeSuppressed(on) {
+  try {
+    if (on) sessionStorage.setItem(FALLBACK_SUPPRESSED_KEY, '1')
+    else sessionStorage.removeItem(FALLBACK_SUPPRESSED_KEY)
+  } catch {
+    /* state still holds for this page-life; the refresh case degrades, loudly enough */
+  }
+}
+
+// #2261 — every workspace request goes through THIS instance, and its
+// interceptor is the single place a workspace credential is decided.
+//
+// Why an instance at all: `auth.js` installs the platform JWT as
+// `axios.defaults.headers.common.Authorization`, and per-request headers MERGE
+// over defaults. So on the bare `axios` export, a workspace call that passes no
+// Authorization still sends the operator's — which is why #2258 rejected a
+// "suppress the fallback" flag as dishonest: it hid the operator's roster on
+// screen while the wire kept carrying the operator's credential.
+//
+// The interceptor DELETES whatever was inherited and then sets exactly what the
+// store decided, so "the workspace is signed out" is a statement about the wire
+// and not only about the screen. That is what makes the suppression above
+// honest, and it is asserted directly (a request built with a platform JWT in
+// `axios.defaults` and a suppressed session must carry no Authorization).
+export const portalHttp = axios.create()
+
+// #2261 — what to do when a workspace request 401s while the workspace session
+// IS the platform session (ent#357's operator case).
+//
+// The global `axios` 401 interceptor in `main.js` used to catch these, and it
+// decided with `onWorkspace && localStorage['token']`. Two things changed. Moving
+// workspace calls onto `portalHttp` took them out of that interceptor's reach, so
+// the operator bounce had to be re-established here or an operator whose JWT
+// expired would sit on "Failed to load your agents" forever. And that predicate
+// was already the wrong one: on the browser this issue is about, a CLIENT is
+// signed in while `localStorage['token']` is an operator's — so one mistyped
+// digit on the OTP form would 401 and throw the client onto /login while
+// destroying the operator's session (the hazard `workspace-session-signout.md`
+// lists as objection 3 to a suppression flag). `isPlatformSession` is the
+// question actually being asked, and it answers false in exactly that case.
+//
+// A callback rather than a router import: the store is imported BY the views the
+// router loads, so importing the router here is a cycle.
+let _onPlatformSessionLost = null
+
+export function setPlatformSessionLostHandler(fn) {
+  _onPlatformSessionLost = fn
+}
+
+portalHttp.interceptors.request.use((config) => {
+  // The store is the ONLY source of a workspace credential. Whatever arrived on
+  // the config — a caller's `headers: this.authHeader`, or anything axios merged
+  // in from defaults — is discarded and replaced by the current decision.
+  //
+  // Rebuilding from the store rather than preserving what was there is the whole
+  // point, and the first version of this got it wrong: it kept any `Authorization`
+  // it found, which cannot tell "the store decided this" from "axios inherited
+  // this", so it would have PRESERVED an inherited platform JWT rather than
+  // stripping it. That mattered less than it looked (verified: axios 1.19.0 does
+  // not propagate later `axios.defaults.headers.common` mutations into an instance
+  // created earlier, so nothing is inherited today) — but the property this
+  // interceptor exists to guarantee cannot rest on a merge behaviour we do not
+  // control and do not test. Now it holds by construction.
+  //
+  // Fail-closed if the store is unreachable (Pinia not active): send no credential
+  // rather than a stale one. Every workspace call originates from a component or
+  // action with Pinia active; the two that do not (`requestCode`/`verifyCode`)
+  // need no credential anyway.
+  const headers = config.headers || {}
+  delete headers.Authorization
+  delete headers.authorization
+  try {
+    const decided = useClientPortalStore().authHeader?.Authorization
+    if (decided) headers.Authorization = decided
+  } catch {
+    /* no store, no credential */
+  }
+  config.headers = headers
+  return config
+})
 // #2258: where a PLATFORM principal lands after signing out of the Workspace —
 // the platform login, because the session they just ended was the platform
 // one. Exported so the test pins the destination the view actually pushes.
@@ -53,7 +149,13 @@ let _rotationInterceptorInstalled = false
 function installRotationInterceptor() {
   if (_rotationInterceptorInstalled) return
   _rotationInterceptorInstalled = true
-  axios.interceptors.response.use((response) => {
+  // #2261: registered on `portalHttp`, not the bare `axios` export — every
+  // workspace call moved onto the instance, and a response interceptor on the
+  // global would no longer see any of them. Missing that is exactly the silent
+  // failure this interceptor's own comment warns about: the session simply stops
+  // sliding and the client is back to re-authenticating.
+  portalHttp.interceptors.response.use(
+    (response) => {
     const fresh = response?.headers?.[SESSION_ROTATION_HEADER]
     if (fresh) {
       const url = response?.config?.url || ''
@@ -73,7 +175,24 @@ function installRotationInterceptor() {
       }
     }
     return response
-  })
+    },
+    (error) => {
+      // ent#357's operator bounce, re-homed onto the instance the workspace now
+      // uses — and asked with the right discriminator (see the note beside
+      // `setPlatformSessionLostHandler`). A CLIENT's 401 (wrong code, expired
+      // token) must never reach it: their tab may well hold an operator's JWT,
+      // and bouncing would destroy a session that did nothing wrong.
+      if (error?.response?.status === 401) {
+        try {
+          if (useClientPortalStore().isPlatformSession) _onPlatformSessionLost?.()
+        } catch {
+          // Pinia not active (module-scope request, or teardown): no session to
+          // reason about, so there is nothing to bounce.
+        }
+      }
+      return Promise.reject(error)
+    },
+  )
 }
 
 // Live from import, so a session restored from localStorage rotates too — not
@@ -99,6 +218,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // re-appearing, which is indistinguishable from "you were never signed in"
     // and reads as the app having lost the thread.
     sessionExpired: false,
+    // #2261 — while true, a platform session does NOT re-derive a workspace
+    // session in this tab. Set when a CLIENT session expires here, so the
+    // browser that was a client's does not silently become the operator's; the
+    // operator's own session is untouched (see `continueAsPlatform`).
+    platformFallbackSuppressed: readSuppressed(),
+    // ent#364 — agent-initiated asks addressed to this user. ONE list, read by all
+    // three surfaces (sidebar count, agent page, inline in chat), because the
+    // underlying row is one row: answering anywhere clears it everywhere with no
+    // sync step, and three separate queries is how that stops being true.
+    asks: [],
+    asksAvailable: false,   // false when the module is absent/unentitled (404/403)
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -158,6 +288,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Portal-session token wins; otherwise the platform session.
     authHeader() {
       if (this.portalToken) return { Authorization: `Bearer ${this.portalToken}` }
+      // #2261 — the suppression has to reach the WIRE, not just the screen. This
+      // getter is the explicit half (it stops handing the platform header to a
+      // tab whose client session expired); `portalHttp`'s interceptor is the
+      // implicit half (it strips the same header when axios merges it in from
+      // `axios.defaults`). Either alone leaves the operator's credential going
+      // out under a signed-out UI — which is the exact objection that sank the
+      // suppression flag in #2258.
+      if (this.platformFallbackSuppressed) return {}
       const authStore = useAuthStore()
       return authStore.authHeader
     },
@@ -181,11 +319,27 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // one exists — clearing only the portal token is precisely what activates
     // this fallback, so a "Sign out" that stopped there re-entered the
     // Workspace as the operator on the next refresh. See `signOutEverywhere`.
+    // #2261: `platformFallbackSuppressed` is the third term, and it is the whole
+    // fix. Expiry cannot end the platform credential (that would log out an
+    // operator in another tab over a client's idle timeout), so the only place
+    // left to break the derivation is the derivation itself — for this tab, until
+    // someone says otherwise.
     isPlatformSession() {
+      if (this.platformFallbackSuppressed) return false
       return !this.portalToken && !!useAuthStore().isAuthenticated
     },
     isClientSignedIn() {
       return !!this.portalToken || this.isPlatformSession
+    },
+    // ent#364: only PENDING asks are actionable. An expired one still renders (see
+    // `asks`), but it is not something the badge should nag about — the person did
+    // not fail to answer something they can still answer.
+    openAsks: (state) => state.asks.filter((a) => a.status === 'pending'),
+    askCount() {
+      return this.openAsks.length
+    },
+    asksForAgent() {
+      return (agentName) => this.asks.filter((a) => a.agent_name === agentName)
     },
   },
 
@@ -193,14 +347,21 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Step 1 — request a 6-digit code. Always resolves (generic response); the
     // backend reveals nothing about whether the email has access.
     async requestCode(email) {
-      await axios.post('/api/enterprise/client-portal/auth/request', { email })
+      await portalHttp.post('/api/enterprise/client-portal/auth/request', { email })
     },
 
     // Step 2 — verify the code → portal session token (persisted).
     async verifyCode(email, code) {
-      const { data } = await axios.post('/api/enterprise/client-portal/auth/verify', { email, code })
+      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code })
       this.portalToken = data.token
       this.clientEmail = data.email
+      // #2261 — a successful client sign-in is a new session in this tab, so the
+      // expiry marker is spent. Leaving it would cost an operator who later
+      // works in this tab a needless "Continue as" click, and a marker that
+      // outlives what it described is how the next reader stops trusting it.
+      this.platformFallbackSuppressed = false
+      writeSuppressed(false)
+      this.sessionExpired = false
       localStorage.setItem(PORTAL_TOKEN_KEY, data.token)
       return data
     },
@@ -227,6 +388,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.signOut()
       this.sessionExpired = expired
       this.resumePath = expired ? resumePath : null
+      // #2261 — ONLY on expiry, and only after `signOut()` (which clears it).
+      // A user-initiated sign-out destroys the platform credential outright
+      // (`signOutEverywhere`), so suppressing there would leave a stale marker
+      // that greets the next legitimate platform login in this tab with a
+      // needless "Continue as" step.
+      if (expired) {
+        this.platformFallbackSuppressed = true
+        writeSuppressed(true)
+      }
     },
 
     signOut() {
@@ -241,7 +411,28 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
       this.rosterLoaded = false
+      // #2261: the primitive clears the suppression; `endSession({expired})`
+      // re-arms it immediately afterwards. Keeping the clear HERE is what stops
+      // a marker from outliving the session it was about.
+      this.platformFallbackSuppressed = false
+      writeSuppressed(false)
       localStorage.removeItem(PORTAL_TOKEN_KEY)
+    },
+
+    // #2261 — the operator's escape from the suppression above.
+    //
+    // The suppression has to fail CLOSED (a tab that was a client's shows the
+    // sign-in form), which necessarily catches the case where the operator is
+    // the person sitting there. This is their one explicit click back in, and it
+    // is explicit on purpose: re-deriving the platform identity automatically is
+    // the bug. Nothing here mints or reads a credential — the platform JWT was
+    // always live; what changes is whether this tab treats it as a workspace
+    // session.
+    continueAsPlatform() {
+      this.platformFallbackSuppressed = false
+      writeSuppressed(false)
+      this.sessionExpired = false
+      this.resumePath = null
     },
 
     // #2258 — the whole user-initiated sign-out, in one place, so the sequence
@@ -296,7 +487,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Returns `{response, cost, session_id}` — the echoed session_id lets the
     // caller adopt the thread a first (session-less) turn landed in.
     async sendPortalChat(agentName, message, sessionId = null) {
-      const { data } = await axios.post(
+      const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
         { message, session_id: sessionId },
         { headers: this.authHeader }
@@ -310,7 +501,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null) {
-      const { data } = await axios.post(
+      const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         { message, session_id: sessionId },
         { headers: this.authHeader }
@@ -429,7 +620,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async createRoom(agentNames, name) {
       this._requireRooms()
       try {
-        const { data } = await axios.post(
+        const { data } = await portalHttp.post(
           '/api/rooms',
           { name: name || 'New chat', agents: agentNames },
           { headers: this.authHeader }
@@ -446,7 +637,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // early removes a guaranteed-4xx round-trip per refresh.
       if (!this.multiAgentChatAvailable) return []
       try {
-        const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
+        const { data } = await portalHttp.get('/api/rooms', { headers: this.authHeader })
         return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
       } catch (err) {
         throw this._noteRoomsRefusal(err)
@@ -456,7 +647,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // ent#360 — the agent page. One call for the whole page: it is one screen,
     // and fetching header/stats/asks/work separately renders it in pieces.
     async fetchAgentPage(agentName, window = '7d') {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/page`,
         { headers: this.authHeader, params: { window } },
       )
@@ -464,7 +655,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     async fetchAgentReports(agentName) {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/reports`,
         { headers: this.authHeader },
       )
@@ -482,7 +673,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         params.rows_limit = rowsLimit
         params.rows_offset = rowsOffset || 0
       }
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/reports/${encodeURIComponent(reportId)}`,
         { headers: this.authHeader, params },
       )
@@ -655,7 +846,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
     // is not a key.
     async fetchChatState() {
-      const { data } = await axios.get('/api/enterprise/client-portal/chat-state', {
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/chat-state', {
         headers: this.authHeader,
       })
       const out = {}
@@ -668,8 +859,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async setChatStar(kind, chatId, starred) {
       const url = `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/star`
       const cfg = { headers: this.authHeader }
-      if (starred) await axios.put(url, null, cfg)
-      else await axios.delete(url, cfg)
+      if (starred) await portalHttp.put(url, null, cfg)
+      else await portalHttp.delete(url, cfg)
     },
 
     // Fire-and-forget by design: a failed read marker leaves a stale badge,
@@ -677,7 +868,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // corrects it.
     async markChatRead(kind, chatId) {
       try {
-        await axios.post(
+        await portalHttp.post(
           `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
           null,
           { headers: this.authHeader },
@@ -690,7 +881,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchRoom(roomId, since = 0) {
       this._requireRooms()
       try {
-        const { data } = await axios.get(`/api/rooms/${roomId}`, {
+        const { data } = await portalHttp.get(`/api/rooms/${roomId}`, {
           headers: this.authHeader, params: { since },
         })
         return data
@@ -702,7 +893,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async postRoomMessage(roomId, content) {
       this._requireRooms()
       try {
-        const { data } = await axios.post(
+        const { data } = await portalHttp.post(
           `/api/rooms/${roomId}/messages`, { content },
           { headers: this.authHeader }
         )
@@ -715,7 +906,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async addRoomParticipant(roomId, agentName) {
       this._requireRooms()
       try {
-        const { data } = await axios.post(
+        const { data } = await portalHttp.post(
           `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
           { headers: this.authHeader }
         )
@@ -728,7 +919,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
     async fetchSessions(agentName) {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
         { headers: this.authHeader }
       )
@@ -737,7 +928,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Open a fresh conversation thread ("New chat"). Returns the empty session.
     async createSession(agentName) {
-      const { data } = await axios.post(
+      const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
         {},
         { headers: this.authHeader }
@@ -750,7 +941,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // is unavailable / synthesis failed / over the cost cap (caller stays text).
     async synthesizeTts(agentName, text) {
       try {
-        const { data } = await axios.post(
+        const { data } = await portalHttp.post(
           `/api/enterprise/client-portal/agents/${agentName}/tts`,
           { text },
           { headers: this.authHeader, responseType: 'blob' }
@@ -767,7 +958,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       const form = new FormData()
       const ext = blob.type.includes('ogg') ? 'ogg' : blob.type.includes('webm') ? 'webm' : blob.type.includes('mp4') ? 'mp4' : 'dat'
       form.append('file', blob, `voice.${ext}`)
-      const { data } = await axios.post(
+      const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/stt`,
         form,
         { headers: this.authHeader }
@@ -779,7 +970,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // thread title or message content. Returns [{agent_name, session_id, title,
     // snippet, last_message_at}] newest-active first.
     async searchChats(query) {
-      const { data } = await axios.get('/api/enterprise/client-portal/search', {
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/search', {
         headers: this.authHeader,
         params: { q: query },
       })
@@ -789,7 +980,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Files a rostered agent has shared (FILES-001), each with a download URL
     // (`?sig=` token is the credential — the download route is public).
     async fetchDocuments(agentName) {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
         { headers: this.authHeader }
       )
@@ -801,7 +992,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // without, the most-recent. Returns `{ session_id, messages }` so the caller
     // can adopt the resolved thread when it didn't specify one.
     async fetchHistory(agentName, sessionId = null) {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/history`,
         { headers: this.authHeader, params: sessionId ? { session_id: sessionId } : {} }
       )
@@ -821,7 +1012,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Files the client has sent to an agent (their inbox) — lets them review
     // what they uploaded.
     async fetchUploads(agentName) {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/uploads`,
         { headers: this.authHeader }
       )
@@ -833,7 +1024,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async uploadDocument(agentName, file) {
       const form = new FormData()
       form.append('file', file)
-      const { data } = await axios.post(
+      const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
         form,
         { headers: this.authHeader }
@@ -935,7 +1126,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // keeps the sidebar correct whatever #2196 decides about hiding
     // container-less agents from the displayed roster.
     async fetchSessionsBatch() {
-      const { data } = await axios.get(
+      const { data } = await portalHttp.get(
         '/api/enterprise/client-portal/sessions',
         { headers: this.authHeader }
       )
@@ -952,6 +1143,49 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return kept
     },
 
+    // ent#364 — the ONE read all three surfaces use.
+    //
+    // Runs on `portalHttp` like every other workspace call: #2261 moved the
+    // store onto a dedicated instance so a workspace request can never inherit
+    // the platform JWT from `axios.defaults`.
+    //
+    // Degrades to silence: the module is enterprise-gated, so an OSS or unentitled
+    // build answers 404/403 and there is nothing to render. That is not an error
+    // worth showing a client — `asksAvailable` stays false and every surface
+    // renders nothing, which is how this ships in the OSS bundle at all.
+    async fetchAsks(agentName = null) {
+      if (!this.isClientSignedIn) return []
+      try {
+        const { data } = await portalHttp.get('/api/enterprise/client-portal/asks', {
+          headers: this.authHeader,
+          params: agentName ? { agent_name: agentName } : {},
+        })
+        this.asks = Array.isArray(data) ? data : []
+        this.asksAvailable = true
+        return this.asks
+      } catch (err) {
+        this.asksAvailable = false
+        if (![403, 404].includes(err.response?.status)) {
+          console.warn('[workspace] asks unavailable:', err?.message || err)
+        }
+        this.asks = []
+        return []
+      }
+    },
+
+    // Answer one ask. The row is removed from local state on success rather than
+    // patched: the server's answer is authoritative, and a client that keeps a
+    // stale "pending" copy would offer to answer it twice.
+    async answerAsk(askId, { response = null, responseText = null } = {}) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/asks/${askId}/answer`,
+        { response, response_text: responseText },
+        { headers: this.authHeader },
+      )
+      this.asks = this.asks.filter((a) => a.id !== askId)
+      return data
+    },
+
     async fetchRoster() {
       this.loading = true
       this.error = null
@@ -961,7 +1195,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // for that state makes the stale case one click away.
       this.unavailable = false
       try {
-        const { data } = await axios.get('/api/enterprise/client-portal/my-agents', {
+        const { data } = await portalHttp.get('/api/enterprise/client-portal/my-agents', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null

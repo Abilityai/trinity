@@ -21,6 +21,7 @@ from db_models import (
     SubscriptionCredentialCreate,
     SubscriptionCredential,
     SubscriptionUsage,
+    SubscriptionUsageBreakdown,
     SubscriptionWithAgents,
     AgentAuthStatus,
 )
@@ -154,6 +155,13 @@ async def get_subscription_usage(
     - window_7d: last 7 days
 
     Covers both chat messages and schedule executions attributed to this subscription.
+
+    #471: additionally carries failure-event counts (24h, per-kind), the
+    one-gate `rate_limited_now`, and — when available — the provider-truth
+    `headroom` block (`source: "anthropic"`); the DB-derived windows are always
+    populated regardless (`source: "observed"` fallback). The ambient probe
+    behind `headroom` is governed by `subscription_headroom_auto_refresh`
+    (default ON) and fail-closed rules — see subscription_headroom_service.
     """
     assert_admin(current_user)
 
@@ -166,10 +174,68 @@ async def get_subscription_usage(
         raise HTTPException(status_code=404, detail="Subscription not found")
 
     try:
-        return db.get_subscription_usage(subscription.id)
+        from services.subscription_headroom_service import decorate_usage
+        usage = db.get_subscription_usage(subscription.id)
+        return await decorate_usage(usage)
     except Exception as e:
         logger.error(f"Failed to get usage for subscription {subscription_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve usage data")
+
+
+@router.get("/{subscription_id}/usage/breakdown", response_model=SubscriptionUsageBreakdown)
+async def get_subscription_usage_breakdown(
+    subscription_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Per-agent consumption breakdown for a subscription, 5h + 7d windows (#471
+    Tier 2). Rows are ranked by `cost_usd` desc — cost is model-weighted by
+    construction, the honest "who burns the quota" ordering on a mixed-model
+    subscription. Admin-only (mirrors `/usage`; revisited when ent#351's
+    agent-facing tools land).
+    """
+    assert_admin(current_user)
+
+    subscription = db.get_subscription(subscription_id)
+    if not subscription:
+        subscription = db.get_subscription_by_name(subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    try:
+        return db.get_subscription_usage_breakdown(subscription.id)
+    except Exception as e:
+        logger.error(f"Failed to get usage breakdown for subscription {subscription_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve usage breakdown")
+
+
+@router.post("/{subscription_id}/usage/refresh", response_model=SubscriptionUsage)
+async def refresh_subscription_headroom(
+    subscription_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Click-to-refresh the provider headroom snapshot (#471): fires ONE probe for
+    this subscription (floored at 60s apart — a re-click inside the floor
+    serves the cached snapshot with its honest age) and returns the decorated
+    usage. Admin-only. The probe consumes ~a dozen Haiku tokens of the
+    subscription's own quota and appears in the Anthropic console.
+    """
+    assert_admin(current_user)
+
+    subscription = db.get_subscription(subscription_id)
+    if not subscription:
+        subscription = db.get_subscription_by_name(subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    try:
+        from services.subscription_headroom_service import decorate_usage
+        usage = db.get_subscription_usage(subscription.id)
+        return await decorate_usage(usage, force=True)
+    except Exception as e:
+        logger.error(f"Headroom refresh failed for subscription {subscription_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to refresh headroom")
 
 
 @router.get("/{subscription_id}", response_model=SubscriptionWithAgents)
@@ -226,6 +292,13 @@ async def delete_subscription(
     affected_agents = db.get_agents_by_subscription(subscription.id)
 
     deleted = db.delete_subscription(subscription.id)
+
+    # #471: best-effort headroom-snapshot cleanup (transient Redis telemetry)
+    try:
+        from services.subscription_headroom_service import clear_snapshot
+        clear_snapshot(subscription.id)
+    except Exception:
+        pass
 
     if deleted:
         logger.info(
@@ -446,4 +519,46 @@ async def set_auto_switch_setting(
     assert_admin(current_user)
     db.set_setting("auto_switch_subscriptions", "true" if enabled else "false")
     logger.info(f"Auto-switch subscriptions {'enabled' if enabled else 'disabled'} by {current_user.username}")
+    return {"enabled": enabled}
+
+
+# =========================================================================
+# Headroom Auto-Refresh Setting (#471)
+# =========================================================================
+
+@router.get("/settings/headroom-auto-refresh")
+async def get_headroom_auto_refresh_setting(
+    current_user: User = Depends(get_current_user)
+):
+    """Whether the platform ambiently refreshes provider headroom snapshots
+    (#471). Default ON (operator ruling at the build gate); must match the
+    default in `subscription_headroom_service.is_auto_refresh_enabled` so the
+    UI toggle and the runtime gate read the same value on a clean install."""
+    assert_admin(current_user)
+    from services.subscription_headroom_service import (
+        is_auto_refresh_enabled,
+        REFRESH_SECONDS,
+    )
+    return {
+        "enabled": is_auto_refresh_enabled(),
+        "refresh_seconds": REFRESH_SECONDS,
+    }
+
+
+@router.put("/settings/headroom-auto-refresh")
+async def set_headroom_auto_refresh_setting(
+    enabled: bool,
+    current_user: User = Depends(get_current_user)
+):
+    """Enable/disable ambient headroom probing. Each ambient refresh sends one
+    minimal (~a dozen tokens) message on the subscription's own token, at most
+    every 15 minutes per subscription and only while a dashboard is watching;
+    click-to-refresh in Settings works regardless of this toggle."""
+    assert_admin(current_user)
+    from services.subscription_headroom_service import AUTO_REFRESH_SETTING
+    db.set_setting(AUTO_REFRESH_SETTING, "true" if enabled else "false")
+    logger.info(
+        f"Subscription headroom auto-refresh {'enabled' if enabled else 'disabled'} "
+        f"by {current_user.username}"
+    )
     return {"enabled": enabled}

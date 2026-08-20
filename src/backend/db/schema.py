@@ -1231,6 +1231,7 @@ TABLES = {
             agent_name TEXT NOT NULL,
             subscription_id TEXT NOT NULL,
             error_message TEXT,
+            failure_kind TEXT,
             occurred_at TEXT NOT NULL,
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id) ON DELETE CASCADE
         )
@@ -1261,6 +1262,7 @@ TABLES = {
             responded_at TEXT,
             acknowledged_at TEXT,
             cleared_at TEXT,
+            addressed_to_email TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

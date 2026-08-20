@@ -2831,6 +2831,27 @@ def _migrate_agent_ownership_mcp_exposed(cursor, conn):
     conn.commit()
 
 
+def _migrate_rate_limit_events_failure_kind(cursor, conn):
+    """#471 — split 429s from auth-class failures in the subscription failure stream.
+
+    Adds ``failure_kind TEXT`` (nullable) to ``subscription_rate_limit_events``.
+    The writer (``handle_subscription_failure``) has carried a ``failure_kind``
+    param ("rate_limit" | "auth") since #441/#792 but never persisted it, so
+    the table conflated broken-token auth failures with genuine quota 429s —
+    and five downstream consumers (#471 badges, ent#259 tile, ent#351,
+    ent#98/#101, ent#166) read this stream believing "count = 429s". NULL =
+    pre-#471 row (kind unknown; the 24h sweep retires these within a day).
+    Mirrored by Alembic revision 0040_rl_events_failure_kind for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "subscription_rate_limit_events",
+        "failure_kind",
+        "ALTER TABLE subscription_rate_limit_events ADD COLUMN failure_kind TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     """ent#157 — per-agent A2A inbound-server exposure toggle.
 
@@ -3419,6 +3440,29 @@ def _migrate_portal_session_resume(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_addressed_to(cursor, conn):
+    """Address an operator-queue item to a specific human (ent#364).
+
+    `agent_name` says WHICH AGENT an item belongs to; nothing said which person
+    should answer it. Workspace asks need that, and it has to be a column rather
+    than a key inside `context`: `context` is agent-authored free-form JSON, so
+    burying the addressee there would let an agent decide who may answer and whose
+    sidebar an ask appears in. The value is validated at the ingestion boundary
+    (`operator_queue_service`) against the agent's roster.
+
+    Nullable with no default, so every existing row keeps meaning exactly what it
+    meant: an ask for the operator.
+    """
+    _safe_add_column(
+        cursor,
+        "operator_queue",
+        "addressed_to_email",
+        "ALTER TABLE operator_queue ADD COLUMN addressed_to_email TEXT",
+        log_msg="Adding addressed_to_email to operator_queue for workspace asks (ent#364)",
+    )
+    conn.commit()
+
+
 def _migrate_portal_chat_state(cursor, conn):
     """Per-user star + read cursor for Workspace chats (ent#359).
 
@@ -3556,4 +3600,6 @@ MIGRATIONS = [
     ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
     ("portal_session_resume", _migrate_portal_session_resume),
     ("portal_chat_state", _migrate_portal_chat_state),
+    ("operator_queue_addressed_to", _migrate_operator_queue_addressed_to),
+    ("rate_limit_events_failure_kind", _migrate_rate_limit_events_failure_kind),
 ]

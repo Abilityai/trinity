@@ -112,7 +112,9 @@ Self-heal (container boot — startup.sh, AFTER credential injection)
     _read_marketplaces()  ← claude plugin marketplace list --json
     _read_installed()     ← claude plugin list --json
     for each declared-but-missing marketplace → claude plugin marketplace add <source>
-    for each declared-but-missing plugin      → claude plugin install <plugin>@<mkt> --yes
+    for each declared-but-missing plugin      → claude plugin install <plugin>@<mkt> [--yes]
+    (`--yes` feature-detected once via `claude plugin install --help` — #2305: 2.1.227
+     rejects the flag, 2.1.235+ requires it for non-TTY command-installs)
     (zero subprocesses when all present; GH_TOKEN seeded from GITHUB_PAT env; timeout + stdin=DEVNULL; non-fatal)
 ```
 
@@ -139,7 +141,9 @@ Self-heal (container boot — startup.sh, AFTER credential injection)
   `GITHUB_PAT` env at hook time (seeded as `GH_TOKEN`), never the manifest. The
   hook runs AFTER credential injection in startup.sh for exactly this reason.
 - **Never hangs / never fatal.** Every subprocess is `timeout`-bounded with
-  `stdin=DEVNULL` (a no-TTY prompt hangs), `install` passes `--yes`, and any
+  `stdin=DEVNULL` (a no-TTY prompt hangs), `install` passes `--yes` only when
+  the CLI's own `--help` advertises it (#2305 — the flag does not exist in
+  every CLI version, and an unadvertised flag withheld EVERY install), and any
   failure is `withheld:<reason>` (the #1929 contract), startup continues.
 
 ## Determinism (a correctness property)

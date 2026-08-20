@@ -192,12 +192,24 @@ USER developer
 # first start, not correctness. Set TRINITY_PREINSTALL_PLUGINS=0 to skip it
 # deliberately (and TRINITY_PLATFORM_PLUGINS=0 at runtime to keep the boot hook
 # from installing it either).
+#
+# `--yes` is feature-detected, never unconditional (#2305): CLI 2.1.227 rejects
+# it (`error: unknown option`), 2.1.235+ advertises it and requires it for a
+# command-install plugin when stdin is not a TTY — mirrors
+# `agent_server/plugins_reinstall.py::_install_supports_yes`. The fallback names
+# WHICH step failed: a flag/exit error must not be reported as network
+# unreachability (the #2305 mislabel that hid the broken flag).
 ARG TRINITY_PREINSTALL_PLUGINS=1
 RUN if [ "$TRINITY_PREINSTALL_PLUGINS" = "1" ]; then \
-        (claude plugin marketplace add abilityai/abilities \
-            && claude plugin install trinity@abilityai --yes \
-            && echo "[base-image] pre-installed trinity@abilityai") \
-        || echo "[base-image] withheld trinity@abilityai: marketplace unreachable at build time — the boot hook will retry"; \
+        yes_flag=""; \
+        claude plugin install --help 2>&1 | grep -q -- '--yes' && yes_flag="--yes"; \
+        if ! claude plugin marketplace add abilityai/abilities; then \
+            echo "[base-image] withheld trinity@abilityai: marketplace add failed — the boot hook will retry"; \
+        elif ! claude plugin install trinity@abilityai $yes_flag; then \
+            echo "[base-image] withheld trinity@abilityai: plugin install failed — the boot hook will retry"; \
+        else \
+            echo "[base-image] pre-installed trinity@abilityai"; \
+        fi; \
     else \
         echo "[base-image] trinity@abilityai pre-install skipped (TRINITY_PREINSTALL_PLUGINS=$TRINITY_PREINSTALL_PLUGINS)"; \
     fi

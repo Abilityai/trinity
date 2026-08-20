@@ -478,12 +478,17 @@ class ProactiveMessageService:
         try:
             # The chat_link contains telegram_user_id which is the chat_id for DMs
             chat_id = chat_link["telegram_user_id"]
-            result = await adapter._send_message(
-                bot_token=bot_token,
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-            )
+            # #2277: proactive sends must go through the same markdown→HTML
+            # converter and entity-safe splitter as send_response — raw agent
+            # markdown under parse_mode=HTML loses all formatting on any `<`.
+            result = None
+            for chunk in adapter._split_message(adapter.format_response(text)):
+                result = await adapter._send_message(
+                    bot_token=bot_token,
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="HTML",
+                )
             if result:
                 message_id = result.get("message_id")
                 # #1600: resolve the recipient's session key through the adapter

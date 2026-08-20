@@ -2138,6 +2138,9 @@ class DatabaseManager:
     def get_all_skill_assignments(self):
         return self._skills_ops.get_all_skill_assignments()
 
+    def get_assignable_agents(self, owner_username):
+        return self._skills_ops.get_assignable_agents(owner_username)
+
     # =========================================================================
     # Skill Sources (delegated to db/skill_sources.py) — ent#237 multi-source
     # =========================================================================
@@ -2389,8 +2392,8 @@ class DatabaseManager:
 
     # --- SUB-003: Rate-Limit Tracking ---
 
-    def record_rate_limit_event(self, agent_name: str, subscription_id: str, error_message: str = ""):
-        return self._subscription_ops.record_rate_limit_event(agent_name, subscription_id, error_message)
+    def record_rate_limit_event(self, agent_name: str, subscription_id: str, error_message: str = "", failure_kind: str = "rate_limit"):
+        return self._subscription_ops.record_rate_limit_event(agent_name, subscription_id, error_message, failure_kind)
 
     def is_subscription_rate_limited(self, subscription_id: str):
         return self._subscription_ops.is_subscription_rate_limited(subscription_id)
@@ -2407,6 +2410,20 @@ class DatabaseManager:
     def get_subscription_usage(self, subscription_id: str):
         """Return rolling usage totals for a subscription (SUB-004)."""
         return self._subscription_ops.get_subscription_usage(subscription_id)
+
+    # --- #471: Usage observability ---
+
+    def get_failure_event_counts(self, subscription_id: str, hours: int = 24):
+        return self._subscription_ops.get_failure_event_counts(subscription_id, hours)
+
+    def get_failure_event_counts_by_subscription(self, hours: int = 24):
+        return self._subscription_ops.get_failure_event_counts_by_subscription(hours)
+
+    def get_agent_subscription_map(self, agent_names=None):
+        return self._subscription_ops.get_agent_subscription_map(agent_names)
+
+    def get_subscription_usage_breakdown(self, subscription_id: str):
+        return self._subscription_ops.get_subscription_usage_breakdown(subscription_id)
 
     # =========================================================================
     # Agent Monitoring (delegated to db/monitoring.py) - MON-001

@@ -41,6 +41,17 @@ vi.mock('@/stores/executions', () => ({
   useExecutionsStore: () => ({ fetchAgentAnalytics: vi.fn() }),
 }))
 
+// Same reason as the two mocks above, with one extra tooth (ent#259): the real
+// `stores/subscriptions` imports `src/api.js`, which REPLACES `.get` on the
+// axios instance to add request dedup (PERF-269). The mock below returns one
+// shared object from `create()`, so merely importing the real store would
+// overwrite the `vi.fn()` this file drives — every assertion then dies on
+// `axios.get.mockImplementation is not a function`, pointing at the harness
+// rather than at anything under test.
+vi.mock('@/stores/subscriptions', () => ({
+  useSubscriptionsStore: () => ({ fetchPressureData: vi.fn() }),
+}))
+
 vi.mock('axios', () => {
   const inst = {
     get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(),

@@ -265,44 +265,12 @@ async def sync_library(admin_user: User = Depends(require_admin)):
 # Agent Skills Assignment Endpoints
 # ============================================================================
 
-def _visible_agent_names(current_user: User) -> Optional[set]:
-    """The agents this caller may see named, resolved from the DB (ent#384).
-
-    Returns None for an admin (no filter), else the set of agent names the
-    caller owns or has been shared.
-
-    **Deliberately not `services.agent_service.helpers.accessible_agent_names`,
-    which is the helper the issue named.** That one resolves through
-    `get_accessible_agents` → `list_all_agents_fast()`, i.e. a Docker
-    `containers.list()` that returns `[]` when the daemon is unreachable or the
-    socket is denied — logged only as a throttled WARNING (#1131). Routed
-    through it, a Docker fault would answer this endpoint with an empty set for
-    every non-admin, which the UI can only render as "no agent holds any
-    skill", fleet-wide, with no error anywhere. That is a confident wrong zero
-    arriving through the *access* layer, where a store-level "a failed fetch is
-    not an empty result" rule structurally cannot catch it, and changing
-    `DOCKER_GID` is enough to trigger it.
-
-    `db.get_all_agent_metadata()` is one pure-DB batch query that already
-    carries `owner_username`, `is_shared_with_user` and `WHERE ao.deleted_at IS
-    NULL`. Access semantics are identical — admin ⇒ all, else owned ∪ shared —
-    so this narrows nothing and widens nothing except that the DB set also
-    contains the caller's OWN agents that currently have no container (#1747
-    documents that state as routine: soft-delete recovery, a pruned daemon, a
-    crash mid-create). It never contains somebody else's agent.
-
-    Email drives only the sharing join and comes from the same `users` row both
-    auth paths already read, so it is as reliable here as in the helper.
-    """
-    if current_user.role == "admin":
-        return None
-    metadata = db.get_all_agent_metadata(current_user.email or "")
-    return {
-        name
-        for name, meta in metadata.items()
-        if meta.get("owner_username") == current_user.username
-        or meta.get("is_shared_with_user")
-    }
+# #471: the pure-DB visible-set rule moved to ONE home —
+# `services.agent_service.helpers.visible_agent_names` (its docstring carries
+# the ent#384 Docker-fault rationale) — now that the subscription-pressure
+# batch endpoint is a second consumer. Aliased to keep this module's call
+# sites unchanged.
+from services.agent_service.helpers import visible_agent_names as _visible_agent_names
 
 
 @router.get("/skills/assignments", response_model=SkillAssignmentsResponse)
@@ -371,9 +339,25 @@ async def get_skill_assignments(current_user: User = Depends(get_current_user)):
             )
         )
 
+    # ent#386 — the assign targets ride along on the read the Library already
+    # does, so the write half costs no extra round-trip and no N+1 per block.
+    # `None` username = admin ⇒ unfiltered, the same admin convention as
+    # `visible` above; passing the username for an admin would silently narrow
+    # the list to the agents that admin personally owns.
+    assignable = [
+        SkillAssignmentAgent(
+            name=row["agent_name"],
+            display_label=row.get("display_label"),
+        )
+        for row in db.get_assignable_agents(
+            None if current_user.role == "admin" else current_user.username
+        )
+    ]
+
     return SkillAssignmentsResponse(
         assignments=assignments,
         scope="all" if visible is None else "accessible",
+        assignable_agents=assignable,
     )
 
 

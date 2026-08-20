@@ -131,7 +131,7 @@
       </span>
       <span v-if="hasTasks" class="t-stats">
         <b>{{ stats.taskCount }}</b> tasks <span class="dim">·</span>
-        <b>{{ formatCostCompact(stats.totalCost || 0) }}</b> <span class="dim">·</span>
+        <b :title="costIsApproximate ? 'API-price equivalent of subscription usage — not a bill' : null">{{ costIsApproximate ? '≈' : '' }}{{ formatCostCompact(stats.totalCost || 0) }}</b> <span class="dim">·</span>
         {{ lastExecutionDisplay }}
       </span>
       <span v-else class="t-stats empty">No tasks (24h)</span>
@@ -179,6 +179,7 @@ import { formatCostCompact } from '../composables/useFormatters'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import { pressureBadge, isSubscriptionFunded } from '../utils/subscriptionPressure'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
 import ScanlineReveal from './ScanlineReveal.vue'
@@ -296,6 +297,11 @@ function fmtTimer(iso) {
 
 const stats = computed(() => networkStore.executionStats[name.value] || null)
 
+// #471 Tier 0: subscription-funded agents show cost as ≈API-equivalent.
+const costIsApproximate = computed(() =>
+  isSubscriptionFunded(gridStore.subscriptionPressure[name.value])
+)
+
 const chips = computed(() => {
   const out = []
   const circuit = networkStore.circuitBreakers[name.value]
@@ -319,6 +325,11 @@ const chips = computed(() => {
   const sh = gridStore.syncHealth[name.value]
   if (sh && sh.last_sync_status === 'failed' && sh.consecutive_failures > 0) {
     out.push({ kind: 'warn', icon: '⟳', text: `sync failing ×${sh.consecutive_failures}`, title: sh.last_error_summary || 'Git sync failing' })
+  }
+  // #471: subscription-pressure chip (one shared predicate — utils/subscriptionPressure.js)
+  const sp = pressureBadge(gridStore.subscriptionPressure[name.value])
+  if (sp) {
+    out.push({ kind: sp.level, icon: '◔', text: sp.text, title: sp.title })
   }
   // ent#139: the runner's defining fact is how much it exposes. Reported by the
   // status the store already holds — no per-tile request.
