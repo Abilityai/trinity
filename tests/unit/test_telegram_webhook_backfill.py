@@ -124,6 +124,12 @@ def _load_settings_module():
         get_github_pat=MagicMock(),
         get_google_api_key=MagicMock(),
         get_ops_setting=MagicMock(),
+        # ent#435: the credential-bearing settings are written through these
+        # three helpers so they land AES-256-GCM encrypted; settings.py imports
+        # them at module level alongside the getters above.
+        set_secret_setting=MagicMock(),
+        clear_secret_setting=MagicMock(return_value=True),
+        has_secret_setting=MagicMock(return_value=False),
         settings_service=MagicMock(),
         OPS_SETTINGS_DEFAULTS={},
         OPS_SETTINGS_DESCRIPTIONS={},
