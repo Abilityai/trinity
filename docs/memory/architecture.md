@@ -1519,6 +1519,67 @@ stub degrades to `unknown` rather than silently inverting the default inside the
 meant to prove it; `_availability_map` also narrows its result to the requested names,
 because the underlying call sees **every** agent container on the host.
 
+### Multi-Agent Rooms (ent#169; OSS core since ent#443)
+
+`src/backend/shared_sessions/` — the substrate behind a Workspace chat that holds
+more than one agent. **One idea:** *a room is a shared persistent RECORD, never a
+shared CONTEXT.* Each agent keeps its own isolated Claude session and, before it
+speaks, is handed only the transcript it has not seen (`participants.last_read_seq`);
+that is why a room does not cost N× tokens and why no LLM has to decide who talks
+next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
+
+- **Two routers, mounted unconditionally in `main.py`**: `/api/rooms` (membership-scoped;
+  any authenticated principal, and a Workspace client via the `get_room_principal`
+  fallback, ent#362) and `/api/enterprise/room-budget-defaults` (admin-only operator
+  defaults, ent#387). The second is deliberately NOT under `/api/rooms` — a
+  `/budget-defaults` path there would sit beside `/{room_id}`, one ordering slip from
+  being read as a room id (Invariant #4) on the one surface whose reader must never be
+  a client.
+- **Turn engine** (`service.py::post_message` → `_wake_agent`): mentions resolve against
+  participants; each woken agent runs an **ordinary** `execute_task(triggered_by="room")`,
+  so slots, the circuit breaker, cost and observability come for free, and its reply is
+  auto-posted back. An agent never re-wakes itself; only a **human** mention recruits a
+  non-participant (an agent that could pull agents in is a spend amplifier and a
+  prompt-injection lever). Chain depth, a per-participant wake cap, and the ent#220
+  cancellation shield bound the cascade; the ent#218 rule keeps an in-flight reply that
+  was already billed from being discarded by a budget trip.
+- **Three tables** — `enterprise_rooms`, `enterprise_room_participants`,
+  `enterprise_room_messages`. The `enterprise_` prefix is **retained history, not a
+  licensing claim** (the ent#356 portal precedent): every entitled install already holds
+  live transcripts under those names, so renaming them would be exactly the data
+  migration the move forbids. DDL in `db/schema.py`, versioned on the OSS two-track
+  runner (`db/migrations.py::shared_sessions_tables_to_oss` + Alembic
+  `0039_shared_sessions_oss`), both `CREATE TABLE IF NOT EXISTS` so adoption is a no-op
+  on an install that already has them. The enterprise Alembic `0011_shared_sessions`
+  stays on its own line — deleting it would break that chain — and is idempotent.
+- **Agent-identity columns are POLYMORPHIC and registered kind-scoped** (ent#443):
+  `participants.identity` and `messages.sender_identity` hold an agent name, a platform
+  user id, or a workspace client's verified email depending on the sibling `kind` /
+  `sender_kind`. Both are in `AGENT_REFS` with an `extra_filter` (`kind = 'agent'`), so
+  rename re-keys and purge cascades **only** the agent rows; an unscoped ref would
+  rewrite — and on purge delete — a human participant whose id or email happened to
+  equal the agent's name. The forward parity regex cannot see either column
+  (`identity` is too generic to add to `_AGENT_ID_COLUMNS`), so
+  `tests/unit/test_ent443_rooms_oss_core.py` pins them explicitly and
+  `test_agent_cleanup_parity.py` carries a documented `_POLYMORPHIC_AGENT_COLUMNS` set
+  for the backward direction.
+- **Why OSS.** It was the entitled `shared_sessions` module, 404ing in community builds
+  — while the frontend that drives it (`components/rooms/`, `stores/rooms.js`, the ent#392
+  composer typeahead) and the MCP tools (`src/mcp-server/src/tools/rooms.ts`) shipped in
+  **every** build and self-disabled. Three of four surfaces were already public, so gating
+  only the backend left an OSS install rendering an affordance it then refused. Workspace
+  itself moved for the same adoption reason (ent#356), and rooms are the half that makes
+  it the place people work with agents rather than a second 1:1 chat.
+- **`PortalRoster.multi_agent_chat_available` stays on the payload** and is now
+  unconditionally true. It is the portal's ONLY capability channel (#2128) — a portal
+  principal cannot read `/api/settings/feature-flags` — and the shipped bundle gates the
+  picker, five room store actions and `/workspace/r/:roomId` on it, so deleting the field
+  would make all of them read `undefined` and hide the feature this move exposes.
+- **Transition ordering (load-bearing):** the OSS routers are included in `main.py`
+  **before** `register_enterprise(app)`, so on an install whose submodule has not yet been
+  bumped both routers mount and the **ungated OSS one wins** the match order. Pinned by
+  `test_ent443_rooms_oss_core.py`.
+
 ### Enterprise Modules (#847)
 
 Open-core seam (generic mechanism only). The public backend exposes an extension point: `main.py` conditionally `register_enterprise(app)` (no-op `ImportError` in OSS-only builds); each registered module calls `entitlement_service.register_module("<id>")`, and the registry drives `feature-flags → enterprise_features`, which the OSS Vue bundle reads to show/hide gated surfaces. `requires_entitlement("<id>")` in `dependencies.py` gates an entitled endpoint (403 unentitled; 404 when the submodule is absent). `TRINITY_OSS_ONLY=1` hard-empties the registry. Private enterprise tables migrate via the separate two-track runner (Invariant #3).

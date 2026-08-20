@@ -1,26 +1,32 @@
 """The Workspace roster tells the client whether a chat may hold MORE THAN ONE
-agent (#2128).
+agent (#2128) — and since ent#443 the answer is unconditionally yes.
 
 `PortalAgentPicker` lets a Workspace client select several agents, captioned
 "they will share this conversation". Two or more routes to `POST /api/rooms`,
-which a community build does not serve at all — so the affordance was always
-offered and could never work, dead-ending in a generic "Could not start that
-chat."
+which a community build did not serve at all — so the affordance was offered and
+could never work. #2128 fixed that by making the roster carry a capability bit
+derived from the `shared_sessions` entitlement; ent#443 moved that module into
+OSS core, so the bit is now true on every build and the entitlement read is gone.
 
-The signal cannot come from the existing frontend entitlement store: that reads
+The signal still cannot come from the frontend entitlement store: that reads
 `GET /api/settings/feature-flags`, which is platform-JWT gated, while the whole
 point of the Workspace is that an external client reaches it on an email-OTP
-session with no platform account. So the roster carries the bit.
+session with no platform account. So the roster keeps carrying the bit — the
+field is the portal's only capability channel, and the shipped bundle gates the
+picker, five room store actions and `/workspace/r/:roomId` on it.
 
-What these tests pin, in order of how badly each would fail:
+What these tests pin now, in order of how badly each would fail:
 
-  1. the bit is derived from the ROOMS feature id specifically, not from
-     "is anything enterprise registered" — a different module must not turn it on;
-  2. it fails CLOSED on every unreadable state, because the error direction that
-     matters is "offer less";
-  3. it reads the LIVE singleton, so the supported test seam is observed — a
-     module-scope import would freeze the boot-time instance;
-  4. the field is additive: nothing else on the roster moves.
+  1. an OSS build with NOTHING registered reports the capability available —
+     the exact inversion of the pre-ent#443 behaviour, and the regression that
+     would silently undo the move;
+  2. `TRINITY_OSS_ONLY=1` does not hide it either, since it is no longer an
+     entitled module;
+  3. the helper does not consult the entitlement registry at all — a registry
+     that raises must not change the answer;
+  4. the client-side model default stays False, so an OLDER backend that omits
+     the field still fails closed on a newer bundle;
+  5. the field is additive: nothing else on the roster moves.
 
 Runs against a throwaway sqlite seeded with the OSS tables the roster joins over
 (the `test_ent357_workspace_owned_roster.py` harness).
@@ -157,14 +163,23 @@ def _seed(engine, *, email="client@example.com"):
 
 
 # ---------------------------------------------------------------------------
-# B1-B4 — the bit is derived from the ROOMS id, and only from it
+# B1-B3 — the capability is unconditional since ent#443
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_registered_rooms_module_reports_available(roster_db, entitlements, monkeypatch):
-    """B1 — an entitled instance offers multi-agent chat."""
+async def test_oss_build_with_nothing_registered_reports_available(
+    roster_db, entitlements, monkeypatch
+):
+    """B1 — THE regression test for ent#443.
+
+    Before the move this exact arrangement (no module registered — a community
+    build) reported `False`, and the Workspace picker was single-select. Rooms
+    are OSS core now, so an install with an empty entitlement registry must
+    offer multi-agent chat. A change that reintroduces an entitlement read here
+    silently un-ships the move.
+    """
     monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
-    _install(entitlements, ROOMS_FEATURE_ID)
+    _install(entitlements)
     email = _seed(roster_db)
 
     from client_portal import service
@@ -173,52 +188,23 @@ async def test_registered_rooms_module_reports_available(roster_db, entitlements
 
 
 @pytest.mark.asyncio
-async def test_empty_registry_reports_unavailable(roster_db, entitlements, monkeypatch):
-    """B2 — a community build: nothing registered, so nothing is offered."""
-    monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
-    _install(entitlements)
-    email = _seed(roster_db)
-
-    from client_portal import service
-    roster = await service.get_roster(email)
-    assert roster.multi_agent_chat_available is False
-
-
-@pytest.mark.asyncio
-async def test_a_different_module_does_not_turn_it_on(roster_db, entitlements, monkeypatch):
-    """B3 — id-specific, not "is anything enterprise present".
-
-    The frontend's own gate is `hasAnyEnterprise` in places; copying that shape
-    here would advertise rooms on any instance carrying any other paid module.
-    """
-    monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
-    _install(entitlements, "a2a")
-    email = _seed(roster_db)
-
-    from client_portal import service
-    roster = await service.get_roster(email)
-    assert roster.multi_agent_chat_available is False
-
-
-@pytest.mark.asyncio
-async def test_oss_only_lockdown_reports_unavailable(roster_db, entitlements, monkeypatch):
-    """B4 — `TRINITY_OSS_ONLY=1` wins over a registered module.
+async def test_oss_only_lockdown_does_not_hide_rooms(
+    roster_db, entitlements, monkeypatch
+):
+    """B2 — `TRINITY_OSS_ONLY=1` hard-empties the entitlement registry, and that
+    must no longer touch rooms.
 
     The service is constructed AFTER `setenv` on purpose: `_oss_only` is read
     once in `__init__`, so setting the variable against the live singleton is
     inert and the test would pass without proving anything.
     """
-    _install(entitlements, ROOMS_FEATURE_ID, oss_only=True, monkeypatch=monkeypatch)
+    _install(entitlements, oss_only=True, monkeypatch=monkeypatch)
     email = _seed(roster_db)
 
     from client_portal import service
     roster = await service.get_roster(email)
-    assert roster.multi_agent_chat_available is False
+    assert roster.multi_agent_chat_available is True
 
-
-# ---------------------------------------------------------------------------
-# B5 — fail closed, and never at the roster's expense
-# ---------------------------------------------------------------------------
 
 class _Raises:
     def __init__(self, exc):
@@ -238,13 +224,15 @@ class _NoSuchMethod:
     (_NoSuchMethod(), "attribute missing"),
 ])
 @pytest.mark.asyncio
-async def test_an_unreadable_registry_fails_closed(
+async def test_the_registry_is_not_consulted_at_all(
     roster_db, entitlements, monkeypatch, broken, label
 ):
-    """B5a/B5b — unreadable is not "available", and the roster still loads.
+    """B3 — a registry that cannot answer must not change the answer.
 
-    Fail-open here would reintroduce the exact bug: a picker offering an
-    affordance that dead-ends.
+    This is the behavioural half of "the entitlement read is gone": under the
+    pre-ent#443 helper both of these shapes produced `False` (fail-closed, which
+    was correct then). If either one flips the bit now, something is reading the
+    registry again — the read this move deleted.
     """
     monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
     entitlements._set_for_testing(broken)
@@ -252,10 +240,27 @@ async def test_an_unreadable_registry_fails_closed(
 
     from client_portal import service
     roster = await service.get_roster(email)
-    assert roster.multi_agent_chat_available is False, label
+    assert roster.multi_agent_chat_available is True, label
     assert sorted(a.name for a in roster.agents) == ["sage", "scout"], (
-        "a capability read failure emptied the roster"
+        "a capability read emptied the roster"
     )
+
+
+def test_the_helper_holds_no_entitlement_read():
+    """B3c — the source guard behind B3.
+
+    `_multi_agent_chat_available` used to resolve the singleton function-locally
+    so the test seam was observed. Now it must resolve nothing: a re-introduced
+    `is_entitled` call would be invisible to the behavioural tests above the
+    moment someone also re-adds a fail-open default.
+    """
+    import inspect
+
+    from client_portal import service
+
+    src = inspect.getsource(service._multi_agent_chat_available)
+    assert "is_entitled" not in src
+    assert "entitlement_service" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -290,39 +295,20 @@ async def test_the_rest_of_the_roster_is_unchanged(
 
 
 # ---------------------------------------------------------------------------
-# B8-B9 — the seam really is observed
+# B8 — the fixture harness itself is honest
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_get_roster_observes_a_singleton_swapped_after_import(
-    roster_db, entitlements, monkeypatch
-):
-    """B8 — the helper reads the LIVE singleton.
-
-    `_set_for_testing` rebinds a MODULE GLOBAL. A module-scope
-    `from services.entitlement_service import entitlement_service` would bind the
-    boot-time instance once and never see the swap — so this test is what makes
-    the function-local import load-bearing rather than stylistic. It swaps twice
-    against one already-imported `client_portal.service` so a cached binding
-    cannot satisfy both halves.
-    """
-    monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
-    email = _seed(roster_db)
-    from client_portal import service
-
-    _install(entitlements, ROOMS_FEATURE_ID)
-    assert (await service.get_roster(email)).multi_agent_chat_available is True
-
-    _install(entitlements)
-    assert (await service.get_roster(email)).multi_agent_chat_available is False
-
-
 def test_the_registry_module_under_test_is_the_real_one(entitlements):
-    """B9 — identity check, not a bare import.
+    """B8 — identity check, not a bare import.
 
-    If a leaked `MagicMock` were sitting in `sys.modules` for this key, every
-    assertion above would be measuring the mock. Assert the module is real
-    before trusting any of them.
+    If a leaked `MagicMock` were sitting in `sys.modules` for this key, the
+    "registry is not consulted" tests above would be measuring the mock rather
+    than the real registry, and would pass for the wrong reason. Assert the
+    module is real before trusting any of them.
+
+    Kept after ent#443 even though the helper no longer reads the registry:
+    these tests prove a NEGATIVE (nothing consults it), and a negative measured
+    against a stub proves nothing at all.
     """
     from unittest.mock import Mock
 

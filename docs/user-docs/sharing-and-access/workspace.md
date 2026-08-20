@@ -61,7 +61,7 @@ Mention another agent from an existing 1:1 — type `@` and its name — and Wor
 
 An `@name` that isn't one of your agents stays ordinary text. Rooms carry participant avatars, a star, **+ Add agent**, and a budget warning as the conversation approaches its cap.
 
-Multi-agent chat is a capability an instance may not have. Where it's absent the picker is single-select, `@mentions` stay plain text, and a link to a room says so instead of failing obscurely.
+Multi-agent chat ships in every Trinity build. (It used to be an optional capability an instance might not have; where it is somehow absent — an older backend behind a newer interface — the picker falls back to single-select, `@mentions` stay plain text, and a link to a room says so instead of failing obscurely.)
 
 ### The agent page
 
@@ -112,7 +112,7 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 
 - **Shared agents only.** A client sees an agent only if it is shared with their verified email.
 - **No admin access.** Clients can chat, upload files, star chats, and read reports — never configure, create, or manage agents.
-- **Multi-agent chat is a per-instance capability.** Where it is absent, rooms and `@mention` escalation are unavailable and Workspace says so.
+- **Multi-agent chat is available in every build.** Against an older backend that does not serve rooms, `@mention` escalation is unavailable and Workspace says so rather than failing obscurely.
 - **Rooms show no unread count.** Stars work for rooms; unread badges currently count 1:1 chats only.
 - **Room settings are not editable here.** Name, topic, budget, and scribe are set through the API, not the Workspace UI.
 - **One file at a time.** Uploads are sent one file per drop or pick.
