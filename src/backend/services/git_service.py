@@ -1456,12 +1456,22 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # merely bloating them. The rest are runtime state observed leaking in the
     # same commit (`backups/` alone was ~3,000 lines).
     #
+    # ent#345 UPDATE: the platform no longer bakes this file — the guardrail
+    # registration moved to root-owned `/etc/claude-code/managed-settings.json`,
+    # out of the agent's write reach and out of the synced tree. The rule STAYS
+    # load-bearing, for the two copies that can still exist: a legacy one on a
+    # volume that predates ent#345 (removed by `startup.sh` only on an exact
+    # content match, so an agent that never restarts still has it) and an
+    # agent-authored one. Either still registers absolute `/opt/trinity` paths, so
+    # committing either still bricks a foreign clone — the damage above, unchanged.
+    #
     # Trade-off, stated: `.claude/settings.json` doubles as Claude Code's
-    # PROJECT-level settings file, so a template can no longer commit one. That
-    # is the right default — the baked file always exists and would collide —
-    # and an agent that genuinely needs it keeps the #1596 escape hatch: negate
-    # in its own `.gitignore` (`!.claude/settings.json`). `settings.local.json`
-    # is already covered by the `*.local.json` rule below.
+    # PROJECT-level settings file, so a template can no longer commit one. The
+    # original justification ("the baked file always exists and would collide") no
+    # longer holds — nothing bakes it — but the rule survives on the leak argument
+    # alone, and an agent that genuinely needs it keeps the #1596 escape hatch:
+    # negate in its own `.gitignore` (`!.claude/settings.json`).
+    # `settings.local.json` is already covered by the `*.local.json` rule below.
     ".claude/settings.json",
     ".claude/remote-settings.json",
     ".claude/policy-limits.json",
