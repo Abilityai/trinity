@@ -322,7 +322,18 @@ class SettingsService:
                 f"'{key}' is not a registered credential setting; add it to "
                 f"services.secret_settings.SECRET_SETTING_KEYS first"
             )
-        db.set_setting(encrypted_key_for(key), encrypt_secret_setting(key, value.strip()))
+        cleaned = value.strip()
+        if not cleaned:
+            # A blank write means "unset", not "store an envelope of nothing".
+            # Pre-ent#435 this stored `''`, which every reader treated as falsy
+            # and fell through to the env var — so clearing preserves the
+            # resolution exactly while keeping `has_secret_setting` (and the
+            # `source: settings|env` field it backs) honest: an envelope of an
+            # empty string would report "configured in settings" for a
+            # credential that resolves from the environment.
+            self.clear_secret_setting(key)
+            return
+        db.set_setting(encrypted_key_for(key), encrypt_secret_setting(key, cleaned))
         db.delete_setting(key)
 
     def clear_secret_setting(self, key: str) -> bool:

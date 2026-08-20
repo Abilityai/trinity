@@ -211,6 +211,22 @@ def test_has_secret_setting_sees_either_form():
     assert settings_service.has_secret_setting("github_pat") is True
 
 
+def test_blank_write_unsets_rather_than_storing_an_empty_envelope():
+    """Pre-ent#435 a blank write stored `''`, which every reader treated as
+    falsy and fell through to the env var. Storing an envelope OF an empty
+    string would resolve the same way but make `has_secret_setting` — and the
+    `source: settings|env` field it backs — claim the credential is configured
+    in settings when it actually comes from the environment."""
+    settings_service.set_secret_setting("github_pat", "ghp_real")
+    assert settings_service.has_secret_setting("github_pat") is True
+
+    settings_service.set_secret_setting("github_pat", "   ")
+
+    assert db.get_setting_value(encrypted_key_for("github_pat"), None) is None
+    assert db.get_setting_value("github_pat", None) is None
+    assert settings_service.has_secret_setting("github_pat") is False
+
+
 def test_set_secret_setting_rejects_an_unregistered_key():
     with pytest.raises(ValueError):
         settings_service.set_secret_setting("not_a_registered_key", "x")
