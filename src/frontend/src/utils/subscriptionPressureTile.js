@@ -27,8 +27,15 @@ import {
  */
 export const SUBSCRIPTION_TILE_MAX_ROWS = 4
 
-/** Severity rank for sorting — higher sorts first. */
-const RANK = { crit: 3, warn: 2, unknown: 1, ok: 0 }
+/**
+ * Severity rank for sorting — higher sorts first.
+ *
+ * `auth` outranks `crit` (#2353): a rate limit resets itself on a clock the row
+ * already shows, while a rejected token blocks every agent on that subscription
+ * until a human re-registers it. The row that needs a person sorts above the row
+ * that needs a wait.
+ */
+const RANK = { auth: 4, crit: 3, warn: 2, unknown: 1, ok: 0 }
 
 /**
  * Colour bands for "how much of this limit is spent".
@@ -104,6 +111,35 @@ function isUnavailable(usage) {
 }
 
 /**
+ * The provider probe's own verdict, or `null` when no snapshot exists.
+ *
+ * Set by the backend probe (`subscription_headroom_service._probe`):
+ * `ok` · `invalid_token` (401/403) · `rate_limited` (429) · `error` (transport
+ * failure, non-200, or a 200 carrying no unified rate-limit headers).
+ *
+ * Read UNCONDITIONALLY of freshness, unlike `windowReadings`. That asymmetry is
+ * deliberate: a *number* decays (a 40-minute-old 62% may be 90% by now), but
+ * "this token was rejected" does not become false by sitting still — nothing
+ * re-validates a credential except another probe, and every probe since has
+ * either confirmed it or replaced the snapshot outright.
+ */
+export function headroomStatus(usage) {
+  if (isUnavailable(usage)) return null
+  return usage.headroom?.status || null
+}
+
+/** The probe could not authenticate — a credential problem, not a quota one. */
+export function isTokenRejected(usage) {
+  return headroomStatus(usage) === 'invalid_token'
+}
+
+/** Auth-class failures on record in the last 24h (never the total, #2352). */
+export function authFailureCount(usage) {
+  if (isUnavailable(usage)) return 0
+  return Number(usage.failure_events_by_kind?.auth || 0)
+}
+
+/**
  * 429s in the last 24h — the `rate_limit` kind ONLY.
  *
  * NOT `failure_events_24h`, which also counts `auth` failures and pre-#471
@@ -121,14 +157,17 @@ export function rateLimitEventCount(usage) {
 /**
  * One subscription's pressure severity.
  *
- * `crit` comes ONLY from the backend's one-gate `rate_limited_now` (its 2h
- * predicate OR a fresh provider verdict) — a 24h failure count alone never
- * claims "limited now", the same rule `pressureBadge` pins for the per-agent
- * chip. `unknown` is a real state, distinct from `ok`: a usage fetch that
- * failed must never render as a healthy subscription.
+ * `auth` outranks `crit` (#2353) and is checked FIRST: a probe that could not
+ * authenticate has produced no evidence about the quota at all, so it must not
+ * be reported as a limit. `crit` comes ONLY from the backend's one-gate
+ * `rate_limited_now` (its 2h predicate OR a fresh provider verdict) — a 24h
+ * failure count alone never claims "limited now", the same rule `pressureBadge`
+ * pins for the per-agent chip. `unknown` is a real state, distinct from `ok`: a
+ * usage fetch that failed must never render as a healthy subscription.
  */
 export function subscriptionSeverity(usage) {
   if (isUnavailable(usage)) return 'unknown'
+  if (isTokenRejected(usage)) return 'auth'
   if (usage.rate_limited_now) return 'crit'
   if ((usage.failure_events_24h || 0) > 0) return 'warn'
   // A window in the HIGH band is pressure even with a clean failure history —
@@ -143,11 +182,29 @@ export function subscriptionSeverity(usage) {
 
 /**
  * Why a row is `warn` — the chip has room for one word and they mean different
- * things: 429s already happened, `near` has not happened yet.
+ * things: 429s already happened, `auth` is a credential the provider refused,
+ * `near` has not happened yet.
+ *
+ * `auth` is checked before `events` (#2352) because `failure_events_24h` is the
+ * TOTAL and would otherwise label an auth-only history "429s" — after the
+ * backend predicate split, an auth-failing subscription is no longer
+ * `rate_limited_now`, so this warn tier is exactly where it lands and the word
+ * has to be right. It is a distinct state from the `auth` SEVERITY above: that
+ * one is a live "the probe was just rejected", this one is "the provider
+ * refused this credential at some point in the last 24h" with no current
+ * verdict to confirm it.
  */
 export function warnReason(usage) {
   if (isUnavailable(usage) || !usage) return null
-  if ((usage.failure_events_24h || 0) > 0) return 'events'
+  const total = usage.failure_events_24h || 0
+  const auth = authFailureCount(usage)
+  // Strict equality, not "no 429s among them": the per-agent chip
+  // (`pressureBadge`) receives a total and an auth count and CANNOT ask a
+  // looser question, so anything looser here would make the two surfaces
+  // disagree about the same subscription. An unclassified row in the mix
+  // therefore falls through to the generic word rather than reading as auth.
+  if (auth > 0 && auth === total) return 'auth'
+  if (total > 0) return 'events'
   const windows = windowReadings(usage)
   if (windows && windows.some((w) => w.level === 'high')) return 'utilization'
   return null
@@ -183,13 +240,31 @@ export function formatApproxCost(n) {
  * runs when no fresh provider snapshot backs them. It deliberately shows no
  * number: the DB-derived arm records consumption but carries no denominator, so
  * any percentage synthesized here would be the fake precision the AC forbids.
+ *
+ * Precedence (#2353), and every step of it is load-bearing:
+ *
+ *  1. `unavailable` — the usage read itself failed; nothing below is known.
+ *  2. `token invalid` — the probe was REJECTED. This outranks `rate-limited`
+ *     because a probe that could not authenticate learned nothing about the
+ *     quota, so a limit claim here is not merely less useful, it is unfounded.
+ *     It is also the only state on this list a person can act on immediately,
+ *     and it used to be reachable ONLY by hovering the row.
+ *  3. `rate-limited` / `N× 429` — real throttling.
+ *  4. `failures` — failures on record, kind unresolved.
+ *  5. `no provider data` — the probe ran and errored (transport, non-200, or a
+ *     200 with no unified headers). Ranked below the failure states, since a
+ *     failed probe says nothing about the subscription, but ABOVE `ok`, which
+ *     would assert health this row has no evidence for.
+ *  6. `ok`.
  */
 export function pressureHeadline(usage) {
   if (isUnavailable(usage)) return 'unavailable'
+  if (isTokenRejected(usage)) return 'token invalid'
   if (usage.rate_limited_now) return 'rate-limited'
   const events = rateLimitEventCount(usage)
   if (events > 0) return `${events}× 429`
   if ((usage.failure_events_24h || 0) > 0) return 'failures'
+  if (headroomStatus(usage) === 'error') return 'no provider data'
   return 'ok'
 }
 
@@ -262,6 +337,11 @@ export function rowTooltip(sub, usage) {
   // indistinguishable from "no provider data" on the row face.
   if (usage.headroom?.status === 'invalid_token') {
     lines.push('Provider token rejected — re-register this subscription in Settings.')
+  } else if (usage.headroom?.status === 'error') {
+    // Says why the percentages are missing. Without it "no provider data" on
+    // the row face is a dead end — the reader cannot tell a transient blip from
+    // something that needs looking at.
+    lines.push('The last provider check failed, so no live limit reading is available.')
   }
 
   const agents = (usage.agents || []).length

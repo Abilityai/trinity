@@ -72,12 +72,12 @@ Admin's Machine                  Trinity Backend                    Agent Contai
 
 ### Auto-Assign on Agent Creation (#74)
 
-New agents are automatically assigned the subscription with fewest agents (round-robin). Rate-limited subscriptions are skipped. Falls back to platform API key if no viable subscription exists.
+New agents are automatically assigned the subscription with fewest agents (round-robin). Subscriptions that failed within the last 2h — rate-limit OR auth (#2352) — are skipped. Falls back to platform API key if no viable subscription exists.
 
 ```
 create_agent_internal()
   ├── db.get_least_used_subscription()       ← SQL: COUNT + ORDER BY agent_count ASC, name ASC
-  │     └── skip rate-limited (is_subscription_rate_limited)
+  │     └── skip recently-failed, any kind (has_recent_subscription_failures)
   ├── db.get_subscription_token(id)          ← AES-256 decrypt
   ├── env_vars['CLAUDE_CODE_OAUTH_TOKEN'] = token
   ├── env_vars.pop('ANTHROPIC_API_KEY')

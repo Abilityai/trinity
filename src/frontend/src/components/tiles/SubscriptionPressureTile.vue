@@ -25,10 +25,16 @@
     <TileRowList :rows="rows" :track-count="SUBSCRIPTION_TILE_MAX_ROWS">
       <template #lead="{ row }">
         <span v-if="row.overflow" class="sp-chip sp-more">···</span>
+        <!-- "auth" before "limit": the provider refused the credential, so it
+             never got far enough to say anything about the quota. Different
+             chrome as well as a different word — a red LIMIT chip in front of a
+             dead token is what #2353 was filed for. -->
+        <span v-else-if="row.severity === 'auth'" class="sp-chip sp-auth">auth</span>
         <span v-else-if="row.severity === 'crit'" class="sp-chip sp-crit">limit</span>
-        <!-- "429s" already happened; "near" has not — different actions. -->
+        <!-- "429s" already happened; "auth" is a refused credential; "near" has
+             not happened yet — three different actions. -->
         <span v-else-if="row.severity === 'warn'" class="sp-chip sp-warn">
-          {{ row.warnReason === 'events' ? '429s' : 'near' }}
+          {{ WARN_CHIP[row.warnReason] || 'near' }}
         </span>
         <span v-else-if="row.severity === 'unknown'" class="sp-chip sp-unknown">?</span>
         <span v-else class="sp-dot" aria-hidden="true"></span>
@@ -123,6 +129,10 @@ defineProps({
   agents: { type: Array, default: () => [] },
 })
 
+/** `warnReason` → chip word. A map, not a ternary: the reasons are now three
+ *  and a chained ternary silently makes the last one the default. */
+const WARN_CHIP = { events: '429s', auth: 'auth', utilization: 'near' }
+
 const subsStore = useSubscriptionsStore()
 
 const model = computed(() =>
@@ -190,6 +200,13 @@ function retry() {
   text-transform: uppercase;
 }
 .sp-crit {
+  background: var(--gv-badge-fail-bg);
+  color: var(--gv-badge-fail-tx);
+}
+/* A rejected token is as blocking as a full window, so it shares the fail
+   palette — the WORD is what separates them, because the remedy differs: one
+   needs a person, the other needs a wait. */
+.sp-auth {
   background: var(--gv-badge-fail-bg);
   color: var(--gv-badge-fail-tx);
 }

@@ -323,7 +323,18 @@ class AgentSubscriptionPressure(BaseModel):
     auth_mode: str
     subscription_name: Optional[str] = None
     failure_events_24h: int = 0
+    # #2352: the auth-kind slice of the total above. `failure_events_24h` cannot
+    # tell a 429 from a rejected token, and since the display predicate was
+    # narrowed to real 429s, a dead-token subscription is no longer
+    # `rate_limited_now` — without this field the badge would just swap one
+    # wrong word for another.
+    auth_failures_24h: int = 0
     rate_limited_now: bool = False
+    # #2352: the provider probe's own verdict — "ok" | "invalid_token" |
+    # "rate_limited" | "error", or None when no snapshot exists at all. A
+    # rejected token is the most actionable state this payload can carry and is
+    # otherwise indistinguishable from "no provider data".
+    token_status: Optional[str] = None
     utilization_5h_pct: Optional[float] = None  # provider-truth when fresh, else None
     headroom_source: str = "observed"           # "anthropic" | "observed"
 
