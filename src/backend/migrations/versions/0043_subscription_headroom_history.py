@@ -23,14 +23,14 @@ the 0033_agent_evaluations precedent:
   sqlite→PG DDL translator makes exactly these substitutions for the fresh-install
   path, and this revision states them directly.
 
-Revision ID: 0041_subscription_headroom_history
-Revises: 0040_rl_events_failure_kind
+Revision ID: 0043_subscription_headroom_history
+Revises: 0042_agent_ownership_operator_resume
 Create Date: 2026-08-20
 """
 from alembic import op
 
-revision = "0041_subscription_headroom_history"
-down_revision = "0040_rl_events_failure_kind"
+revision = "0043_subscription_headroom_history"
+down_revision = "0042_agent_ownership_operator_resume"
 branch_labels = None
 depends_on = None
 

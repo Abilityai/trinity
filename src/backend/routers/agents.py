@@ -29,6 +29,7 @@ from models import (
     HeartbeatPayload,
     AgentLabelUpdate,
     McpExposedUpdate,
+    OperatorResumeUpdate,
     VoiceRepliesUpdate,
     VoiceReplyRequest,
     TaskExecutionStatus,
@@ -1206,6 +1207,54 @@ async def set_mcp_exposed_endpoint(
         "enabled": body.enabled,
         "tool_name": resolve_tool_name(agent_name, exposed_names),
     }
+
+
+# ============================================================================
+# Respond → resume opt-in (ent#329)
+# ============================================================================
+
+
+@router.get("/{agent_name}/operator-resume")
+async def get_operator_resume_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Whether an operator answer re-triggers this agent (ent#329).
+
+    Default OFF. When off, an answer still reaches the agent's queue file — it is
+    simply processed at the agent's next turn, which is the behaviour every agent
+    had before this flag existed.
+    """
+    return {
+        "agent_name": agent_name,
+        "enabled": db.get_operator_resume_enabled(agent_name),
+    }
+
+
+@router.put("/{agent_name}/operator-resume")
+async def set_operator_resume_endpoint(
+    agent_name: OwnedAgentByName,
+    body: OperatorResumeUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable respond→resume for this agent (ent#329). Owner-only.
+
+    Owner-only rather than accessible-to-sharers because flipping it on means
+    "answers to this agent may now spend money", and the bill lands on the owner.
+    """
+    if not db.set_operator_resume_enabled(agent_name, body.enabled):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="operator_resume_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled},
+    )
+    return {"agent_name": agent_name, "enabled": body.enabled}
 
 
 # ============================================================================

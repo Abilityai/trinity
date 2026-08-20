@@ -224,7 +224,7 @@ not belong there.
 | Layer | File |
 |-------|------|
 | Schema | `db/schema.py`, `db/tables.py` |
-| Migrations | `db/migrations.py` (`subscription_headroom_history_table`), `migrations/versions/0041_subscription_headroom_history.py` |
+| Migrations | `db/migrations.py` (`subscription_headroom_history_table`), `migrations/versions/0043_subscription_headroom_history.py` |
 | DB | `db/subscriptions.py` (insert / bucketed read / two candidate counts / two chunked prunes / two shared predicates / cascade) |
 | Facade | `database.py` (5 hand-written delegations — no `__getattr__`) |
 | Service | `services/subscription_headroom_service.py` (`_history_row`, `_record_history`, `HISTORY_WINDOWS`, `get_history`) |
