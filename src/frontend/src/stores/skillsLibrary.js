@@ -33,6 +33,11 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   const assignmentsError = ref(null)
   const assignmentsLoaded = ref(false)
   const assignmentsFetching = ref(false)
+  // ent#386 — agents this caller may assign TO, from the same read. A strictly
+  // different set from the holders: holders are owned ∪ shared, assign targets
+  // are owner-or-admin, so a shared agent shows as a holder and is not offered
+  // as a target. Server-computed; the client never re-derives that predicate.
+  const assignableAgents = ref([])
 
   // `fetching` is "a request is in flight"; `loading` is "there is nothing to
   // show yet". They were one flag, which is wrong for the ScanlineReveal
@@ -135,11 +140,16 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       if (mine !== assignmentsGeneration) return
       assignments.value = res.data?.assignments || {}
       assignmentsScope.value = res.data?.scope || null
+      assignableAgents.value = res.data?.assignable_agents || []
       assignmentsLoaded.value = true
     } catch (e) {
       if (mine !== assignmentsGeneration) return
       assignments.value = {}
       assignmentsScope.value = null
+      // Cleared with the rest: offering assign targets from a read that failed
+      // invites a write against a stale set, and the block is showing
+      // "unavailable" anyway.
+      assignableAgents.value = []
       assignmentsLoaded.value = false
       assignmentsError.value =
         e?.response?.data?.detail || 'Could not load skill assignments'
@@ -209,11 +219,83 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
     }
   }
 
+  /**
+   * Agents this caller may still assign `skillName` to (ent#386).
+   *
+   * The dropdown is `assignable − holders`: offering an agent that already has
+   * the skill produces a write whose honest answer is "already assigned", i.e.
+   * a control that looks like it does something and does not.
+   */
+  function assignableFor(skillName) {
+    const held = new Set((assignments.value[skillName] || []).map((a) => a.name))
+    return assignableAgents.value
+      .filter((a) => !held.has(a.name))
+      .sort((a, b) =>
+        (a.display_label || a.name).localeCompare(b.display_label || b.name)
+      )
+  }
+
+  /** True when the caller may UNassign this holder — holders ⊋ assign targets. */
+  function canModify(agentName) {
+    return assignableAgents.value.some((a) => a.name === agentName)
+  }
+
+  /**
+   * Assign/unassign through the EXISTING per-agent write routes (ent#386).
+   *
+   * No skill-keyed writer: `POST/DELETE /api/agents/{name}/skills/{skill}`
+   * already carry the owner gate, and a second write path is a second place
+   * for that gate to drift.
+   *
+   * The local map is patched instead of refetched so the page does not reset
+   * scroll position or tab state mid-interaction (AC 3). A refetch would also
+   * re-run a fleet-wide O(agents × skills) read for a one-row change.
+   *
+   * Both return an error STRING rather than throwing: every caller renders it
+   * inline next to the control that caused it, and a rejected promise here
+   * would surface as an unhandled rejection in the component.
+   */
+  async function assignSkill(skillName, agentName) {
+    try {
+      await api.post(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`)
+      const label = assignableAgents.value.find((a) => a.name === agentName)
+      const next = [...(assignments.value[skillName] || [])]
+      if (!next.some((a) => a.name === agentName)) {
+        next.push({ name: agentName, display_label: label?.display_label ?? null })
+      }
+      assignments.value = { ...assignments.value, [skillName]: next }
+      return null
+    } catch (e) {
+      // The server's own reason, verbatim — "Skill 'x' not found in library"
+      // and "Agent not found" are the named failures AC 4 asks for, and
+      // inventing our own wording here would drift from them.
+      return e?.response?.data?.detail || 'Could not assign the skill'
+    }
+  }
+
+  async function unassignSkill(skillName, agentName) {
+    try {
+      await api.delete(`/api/agents/${encodeURIComponent(agentName)}/skills/${encodeURIComponent(skillName)}`)
+      const next = (assignments.value[skillName] || []).filter((a) => a.name !== agentName)
+      // Drop the key entirely at zero: `agentsFor` treats a missing key and an
+      // empty array identically, but the orphaned-assignments view keys off
+      // presence, so leaving an empty array behind invents a phantom holder set.
+      const map = { ...assignments.value }
+      if (next.length) map[skillName] = next
+      else delete map[skillName]
+      assignments.value = map
+      return null
+    } catch (e) {
+      return e?.response?.data?.detail || 'Could not unassign the skill'
+    }
+  }
+
   return {
     library, status, loading, fetching, hasLoaded, error, syncing, syncError,
     assignments, assignmentsScope, assignmentsError, assignmentsLoaded,
-    assignmentsFetching,
+    assignmentsFetching, assignableAgents,
     emptyReason, orphanedAssignments,
     load, loadAssignments, agentsFor, sync,
+    assignableFor, canModify, assignSkill, unassignSkill,
   }
 })

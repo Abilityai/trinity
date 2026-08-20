@@ -3750,6 +3750,14 @@ class SkillAssignmentsResponse(BaseModel):
     """
     assignments: Dict[str, List[SkillAssignmentAgent]] = Field(default_factory=dict)
     scope: str = "accessible"
+    # ent#386 — the agents this caller may assign TO, which is a strictly
+    # different set from the holders above: holders are owned ∪ shared, while
+    # the skill write routes are owner-or-admin. A shared agent therefore shows
+    # as a holder and is correctly absent here. Server-computed rather than
+    # derived client-side, because deriving it client-side means a second copy
+    # of an authorization predicate, free to drift from the one the write route
+    # enforces. Ghosts excluded, exactly as in `assignments`.
+    assignable_agents: List[SkillAssignmentAgent] = Field(default_factory=list)
 
 
 # ============================================================================

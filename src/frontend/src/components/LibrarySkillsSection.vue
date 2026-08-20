@@ -126,15 +126,13 @@
               <!-- ent#384: who already holds this skill. -->
               <AssignedAgents :skill-name="s.name" class="mt-3" />
 
-              <!-- Kept on EVERY card, not only the zero-holder one: the chips
-                   above point at existing holders, which is the wrong
-                   direction for "give this to another agent". -->
-              <router-link
-                to="/agents"
-                class="mt-3 text-[11px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
-              >
-                Assign via an agent's Skills tab →
-              </router-link>
+              <!-- ent#386 replaced the "assign via an agent's Skills tab →"
+                   link-out that stood here. The block above now carries the
+                   assign control itself, so the page that tells you a skill is
+                   unused is also the page that can fix it. The link-out is not
+                   kept as a fallback: two routes to the same write is the
+                   parallel-mechanism problem ent#182 closed, and the agent's
+                   Skills tab remains reachable from every holder chip. -->
             </BaseCard>
           </li>
         </ul>
