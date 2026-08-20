@@ -395,8 +395,15 @@ async def decorate_usage(usage: SubscriptionUsage, *, force: bool = False) -> Su
 async def pressure_states(
     subscription_ids: List[str],
 ) -> Dict[str, Dict[str, Any]]:
-    """Per-subscription pressure for the fleet batch endpoint: 24h event count
-    + the same one-gate `rate_limited_now` derivation + headroom summary."""
+    """Per-subscription pressure for the fleet batch endpoint: 24h event counts
+    (total AND the auth split) + the same one-gate `rate_limited_now`
+    derivation + headroom summary.
+
+    #2352: ``auth_failures_24h`` rides alongside the total because the total
+    cannot distinguish them, and after the predicate split a subscription whose
+    token is dead is no longer `rate_limited_now` — without the split the badge
+    would simply trade one wrong word ("limit") for another ("429s").
+    """
     counts_24h = db.get_failure_event_counts_by_subscription(hours=24)
     out: Dict[str, Dict[str, Any]] = {}
     for sid in subscription_ids:
@@ -404,8 +411,11 @@ async def pressure_states(
         # refresh, never a caller that blocks on one.
         headroom = await get_headroom(sid, wait=False)
         limited = db.is_subscription_rate_limited(sid) or _headroom_indicates_limited(headroom)
+        entry = counts_24h.get(sid) or {}
+        by_kind = entry.get("by_kind") or {}
         out[sid] = {
-            "failure_events_24h": int(counts_24h.get(sid, 0)),
+            "failure_events_24h": int(entry.get("total", 0)),
+            "auth_failures_24h": int(by_kind.get("auth", 0)),
             "rate_limited_now": bool(limited),
             "headroom": headroom,
         }

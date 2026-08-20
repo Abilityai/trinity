@@ -299,9 +299,10 @@ async def get_subscription_pressure(
     """Dashboard batch endpoint for subscription-pressure badges (#471).
 
     One row per accessible agent: auth mode (the `AgentAuthStatus` vocabulary),
-    the funding subscription's name, its 24h failure-event count, the one-gate
-    `rate_limited_now`, and — when a fresh provider snapshot exists — the 5h
-    utilization %. Access is the pure-DB visible set (`visible_agent_names`,
+    the funding subscription's name, its 24h failure-event count (plus the
+    auth-kind slice of it, #2352), the one-gate `rate_limited_now`, the
+    provider probe's own `token_status`, and — when a fresh provider snapshot
+    exists — the 5h utilization %. Access is the pure-DB visible set (`visible_agent_names`,
     ent#384 — never the Docker-faulting path), mirroring `/sync-health`'s
     accessible-only scope; subscription-name disclosure to shared accessors
     matches the existing per-agent `AgentAuthStatus` gate. Registered BEFORE
@@ -336,7 +337,11 @@ async def get_subscription_pressure(
             auth_mode=derive_auth_mode(bool(sid), m["use_platform_api_key"]),
             subscription_name=m["subscription_name"],
             failure_events_24h=int(state.get("failure_events_24h", 0)),
+            auth_failures_24h=int(state.get("auth_failures_24h", 0)),
             rate_limited_now=bool(state.get("rate_limited_now", False)),
+            # #2352: pass the probe's verdict through so the chip can say
+            # "auth" instead of claiming a limit it has no evidence for.
+            token_status=(headroom.status if headroom is not None else None),
             utilization_5h_pct=util_5h,
             headroom_source=source,
         ))

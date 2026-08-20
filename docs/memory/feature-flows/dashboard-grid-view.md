@@ -1,6 +1,6 @@
 # Feature Flow: Dashboard Grid View (magnetic tile canvas)
 
-> **Last Updated**: 2026-08-19 (info tiles: Subscription pressure, ent#259)
+> **Last Updated**: 2026-08-20 (#2352/#2353: a rejected token is not a rate limit)
 > **Status**: Implemented — third dashboard mode, not default
 > **Issue**: trinity-enterprise#47 (design of record embedded in the issue)
 > **Requirements**: `docs/memory/requirements/core-agent.md` §9.8, §9.12 (info tiles)
@@ -341,15 +341,22 @@ the next 60s tick. `fetchSubscriptionPressure()` (the per-agent chip feed) stays
 | `5h ▰▰▰ 97%   7d ▰▰ 88%` | **Both** rolling limits, each as a small 30×4px bar **plus** the number, coloured by its own band — green < 60, amber < 85, red ≥ 85 (`utilizationLevel`). The bar is a second glanceable channel, never the only one: colour also rides the number, the row carries a severity chip, and each window is `role="img"` with an `aria-label` spelling the reading out. Fill width is `fill` (clamped 0–100 by `barWidthPct`), NOT `pct` — an overage plan reports >100% and an unclamped `width: 137%` overruns its track and shoves the row out of a body that is `overflow: hidden`; the *number* stays unclamped so the overage is still reported. Track width is fixed so the two windows align into columns down the tile. Two windows rather than one because either can be the wall you hit: a subscription routinely sits at 20% of its 5h while its weekly is nearly gone, and one number cannot say which. Rendered ONLY when `source=anthropic` and the snapshot is ≤30 min old (`headroomIsFresh`); #471 established the number is real (`anthropic-ratelimit-unified-*` headers), so ent#259's "never a fake-precise X% left" is about FRAMING — utilization *consumed*, source-labelled — not about hiding a genuine reading. Labelled `5h`/`7d`, never "daily"/"weekly": they are rolling windows with a visible `resets_at`, and the calendar words would misdescribe when quota returns. An absent window is omitted rather than shown as `0%` |
 | `near` chip | A window in the **red** band raises severity to `warn` even with a spotless failure history — it is the only signal that exists *before* the first 429. Without it a subscription at 93% of its weekly ranks below one whose usage read merely failed, and gets pushed into the overflow. The chip distinguishes `429s` (already happened) from `near` (has not yet) |
 | `3× 429` | the `rate_limit` **kind only**, never `failure_events_24h`, which also counts `auth` and pre-#471 `unknown` rows. Migration 0040 split them at the data layer; reporting the total under a "429" label would undo that fix in the UI |
-| `rate-limited` | the backend's one-gate `rate_limited_now` only — a 24h count alone never claims "limited now" |
+| `rate-limited` | the backend's one-gate `rate_limited_now` only — a 24h count alone never claims "limited now". **Since #2352 that flag means real 429s**: its event half is scoped to `failure_kind = 'rate_limit'`, so an auth failure no longer renders here (it used to, via a kind-blind 2h predicate — a dead token read as quota exhaustion on every surface) |
+| `token invalid` | `headroom.status == "invalid_token"` — the provider REFUSED the credential. It outranks `rate-limited` (#2353): a probe that could not authenticate learned nothing about the quota, so a limit claim there is unfounded, not merely less useful. It is also the only state on this list a person can act on immediately, and before #2353 it was reachable only by hovering. Read regardless of snapshot age — the deliberate inverse of the freshness gate above, because a *number* decays and "this credential was refused" does not |
+| `auth` chip | a rejected token gets its OWN severity, ranked ABOVE `crit` in the row sort: the row needing a person sorts above the row needing a wait. The warn tier gains the same word for an auth-only 24h history (`warnReason: "auth"`, strict equality against the total so the per-agent chip — which sees only a total and an auth count — cannot disagree) — without it, an auth-only history would land in `warn` after the predicate split and render as `429s`, trading one wrong label for another |
+| `no provider data` | `headroom.status == "error"` (transport failure, non-200, or a 200 carrying no unified headers). Ranked below the failure states — a failed probe says nothing — but ABOVE `ok`, which would assert health on no evidence |
 | `≈$3.12 · 1.2k out` | output tokens and cost are real. **`input_tokens` is deliberately absent from the row face**: it is `SUM(schedule_executions.context_used)` — context-window *occupancy* per run, not tokens consumed — the same ruling architecture.md already made for the sibling ent#101 tile against `/executions/timeline`. It appears in the tooltip, labelled an estimate |
 | `unavailable` | a failed per-subscription usage read renders as unavailable — never zeroes, never a healthy-looking row |
 
 Cost is always `≈`: a subscription is a flat fee, so the figure is
 API-equivalent, not a bill. The tooltip states that 7d *contains* the 5h window
 so the two are never read as additive, and surfaces
-`headroom.status == "invalid_token"` — the most actionable state the payload
-carries and otherwise indistinguishable from "no provider data".
+`headroom.status == "error"` as the reason the percentages are missing.
+`invalid_token` was in this tooltip from the start — described as "the most
+actionable state the payload carries and otherwise indistinguishable from 'no
+provider data'" — and #2353 is that observation cashed out: it was ALSO
+indistinguishable from real throttling, which is worse, so the state now leads
+the row face and the tooltip keeps the remedy.
 
 **Empty vs failed vs stale**, the three states this surface must not blur: the
 empty branch requires a fetch that SUCCEEDED and returned zero (`listLoaded &&

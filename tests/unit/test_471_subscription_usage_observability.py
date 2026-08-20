@@ -220,7 +220,11 @@ class TestFailureKindCounters:
         _insert_event(tmp_db, "sub-a", _iso(now - timedelta(hours=2)))
         _insert_event(tmp_db, "sub-other", _iso(now - timedelta(hours=1)))
         by_sub = sub_ops.get_failure_event_counts_by_subscription(hours=24)
-        assert by_sub == {"sub-a": 2, "sub-other": 1}
+        # #2352 widened the shape to match its single-subscription sibling —
+        # the fleet endpoint has to tell a 429 from an auth failure.
+        assert by_sub["sub-a"]["total"] == 2
+        assert by_sub["sub-other"]["total"] == 1
+        assert by_sub["sub-a"]["by_kind"] == {"rate_limit": 2}
 
 
 # =============================================================================
@@ -234,7 +238,13 @@ class TestUsageExtension:
         usage = sub_ops.get_subscription_usage("sub-a")
         assert usage.failure_events_24h == 1
         assert usage.failure_events_by_kind == {"auth": 1}
-        assert usage.rate_limited_now is True  # event inside the 2h window
+        # #2352: an AUTH failure is visible in the counters but no longer claims
+        # "rate-limited". This assertion used to read `is True` — it was the bug
+        # pinned as behaviour. A rejected token is a credential problem; saying
+        # "rate-limited" sends the operator to wait out a window that was never
+        # full. A rate_limit-kind event in the same window still returns True
+        # (see test_2352_subscription_failure_kind_predicates.py).
+        assert usage.rate_limited_now is False
         assert usage.source == "observed"
         assert usage.headroom is None
 

@@ -6,21 +6,45 @@
 /**
  * Badge decision for one agent's pressure entry (the batch endpoint row).
  * Returns null (no badge) or { level: 'crit'|'warn', text, title }.
+ *
  * AC rule: badge renders on 1+ failure events in 24h; severity upgrades to
  * 'crit' only on the one-gate `rate_limited_now` (2h machinery predicate OR
  * fresh provider verdict) — the 24h count alone never claims "limited now".
+ *
+ * #2352 — the badge distinguishes a CREDENTIAL problem from a QUOTA one:
+ *
+ *  - `token_status === 'invalid_token'` is a live provider verdict: the probe
+ *    was rejected. It outranks everything, including `rate_limited_now`, since
+ *    a probe that could not authenticate learned nothing about the quota.
+ *  - Otherwise, "sub 429s" is claimed only when the failures are NOT purely
+ *    auth-kind. `failure_events_24h` is the total and counts auth failures too,
+ *    so labelling an auth-only history "429s" would trade the old wrong word
+ *    ("limit", from the kind-blind predicate this release narrowed) for a new
+ *    one. `auth_failures_24h` is the slice that makes the distinction possible.
+ *
+ * Both new fields default to absent-safe values, so an older payload (or a
+ * cached response mid-deploy) degrades to exactly the pre-#2352 wording rather
+ * than to a wrong one.
  */
 export function pressureBadge(entry) {
   if (!entry || entry.auth_mode !== 'subscription') return null
   const events = entry.failure_events_24h || 0
+  const authEvents = entry.auth_failures_24h || 0
+  const tokenRejected = entry.token_status === 'invalid_token'
   const limitedNow = !!entry.rate_limited_now
-  if (!events && !limitedNow) return null
+  if (!events && !limitedNow && !tokenRejected) return null
   const sub = entry.subscription_name || 'subscription'
-  const level = limitedNow ? 'crit' : 'warn'
-  const text = limitedNow ? 'sub limit' : 'sub 429s'
+
+  // Auth-only: every recorded failure was the provider refusing the credential.
+  const authOnly = authEvents > 0 && authEvents === events
+  const level = tokenRejected || limitedNow ? 'crit' : 'warn'
+  const text = tokenRejected || authOnly ? 'sub auth' : (limitedNow ? 'sub limit' : 'sub 429s')
+
   const parts = [`${sub}:`]
-  if (limitedNow) parts.push('rate-limited now,')
+  if (tokenRejected) parts.push('provider token rejected — re-register it in Settings,')
+  else if (limitedNow) parts.push('rate-limited now,')
   parts.push(`${events} failure event${events === 1 ? '' : 's'} in 24h`)
+  if (authEvents > 0) parts.push(`(${authEvents} auth)`)
   if (entry.utilization_5h_pct != null) parts.push(`· 5h window ${entry.utilization_5h_pct}% used`)
   return { level, text, title: parts.join(' ') }
 }

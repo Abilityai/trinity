@@ -2396,7 +2396,16 @@ class DatabaseManager:
         return self._subscription_ops.record_rate_limit_event(agent_name, subscription_id, error_message, failure_kind)
 
     def is_subscription_rate_limited(self, subscription_id: str):
+        """Throttled (429) in the last 2h — the DISPLAY predicate (#2352)."""
         return self._subscription_ops.is_subscription_rate_limited(subscription_id)
+
+    def has_recent_subscription_failures(self, subscription_id: str, hours: int = 2):
+        """Failed for ANY reason in the window — the CANDIDATE-SKIP predicate
+        used by auto-switch and assignment (#2352). Not interchangeable with
+        `is_subscription_rate_limited`."""
+        return self._subscription_ops.has_recent_subscription_failures(
+            subscription_id, hours
+        )
 
     def clear_rate_limit_events(self, agent_name: str, subscription_id: str):
         return self._subscription_ops.clear_rate_limit_events(agent_name, subscription_id)
