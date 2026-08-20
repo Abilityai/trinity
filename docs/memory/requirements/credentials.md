@@ -89,3 +89,55 @@
 - **Flow**: [`feature-flows/guided-credential-setup.md`](../feature-flows/guided-credential-setup.md)
 
 ---
+
+### 3.7 Platform Credential Settings Encrypted at Rest (ent#435)
+- **Status**: ✅ Implemented
+- **Description**: The six `system_settings` rows that hold live third-party
+  credentials — `anthropic_api_key`, `github_pat`, `google_api_key`,
+  `slack_app_token`, `slack_client_secret`, `slack_signing_secret` — are
+  persisted as AES-256-GCM envelopes under `<key>_encrypted`, never in cleartext
+  (CWE-312). Closes the gap where Architectural Invariant #12's own table read as
+  though everything was covered while these six were readable by any DB dump,
+  backup, replica or snapshot **without** `CREDENTIAL_ENCRYPTION_KEY`.
+- **The key NAME moves, not only the value**: the cleartext row is DELETED. A
+  same-named key that may hold either form leaves "is this install encrypted?"
+  unanswerable by inspection, which is the reported defect rather than a
+  cosmetic detail; with the rename, `SELECT key FROM system_settings WHERE key
+  IN (…)` returning nothing is itself the verification.
+- **Sink guard**: `db.set_setting` raises `SecretSettingWriteError` (mapped to
+  422) for a registered secret key **or** any merely credential-*shaped* key
+  (`*_api_key` / `*_token` / `*_secret` / `*_pat` / `*_password` /
+  `*_credentials`). It lives at the sink because the generic
+  `PUT /api/settings/{key}` catch-all can address any key — the door #506,
+  #1609, ent#12, #1644, ent#14 and ent#346 each found open — and because
+  `system_settings` has more than one writer.
+- **Lazy migration on read**: resolution is encrypted → legacy-cleartext
+  (encrypted-and-deleted on sight) → env → `''`. A one-shot migration converts
+  what is on disk once; the read path is what makes cleartext *transient* rather
+  than merely absent, since a restored pre-fix backup or a direct DB write can
+  put it back. Steady state costs one read and zero writes.
+- **Fail direction is asymmetric on purpose**: fail-OPEN on read (an unreadable
+  envelope degrades to the env var, never a 500 on the agent-start path) but
+  never down to a stale legacy row, which would resurrect a replaced credential;
+  fail-CLOSED on write (no encryption key ⇒ refuse, never silently store
+  cleartext).
+- **Documented exemption**: `slack_client_id` stays a plain row — an OAuth
+  client_id is a public identifier emitted verbatim in the browser-visible
+  authorize URL (the `whatsapp_bindings.account_sid` "(public)" precedent). It is
+  recorded with its reason in `PUBLIC_CREDENTIAL_SHAPED_KEYS` so a later reader
+  can tell *reviewed* from *overlooked*.
+- **Dual-track** (Invariant #9): `secret_settings_encryption` (SQLite) + Alembic
+  `0041_secret_settings_encryption` (PostgreSQL — the backend the defect was
+  reported on). Both call one `plan_migration`, because the two drivers cannot
+  share SQL but must not disagree on policy. Hard-fails on a missing encryption
+  key only when there is something to encrypt, so a fresh install still boots.
+  `downgrade()` is a deliberate no-op: the honest inverse is "write these live
+  credentials back in cleartext".
+- **Rotation**: `scripts/deploy/rotate-credential-key.py` gains a row-keyed
+  `system_settings` pass, which also closes the pre-existing gap that left
+  `elevenlabs_api_key_encrypted` / `a2a_outbound_endpoints_encrypted` out of
+  every key rotation (an envelope-in-a-row is invisible to a column sweep).
+- **Operator follow-up**: encryption protects the DB going forward only —
+  historical backups still hold the plaintext, so the affected tokens must be
+  rotated. Runbook:
+  [`docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md`](../../migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md).

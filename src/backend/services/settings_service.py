@@ -222,26 +222,140 @@ class SettingsService:
         value = db.get_setting_value(key, None)
         return value if value is not None else default
 
+    # =========================================================================
+    # Credential-bearing settings — encrypted at rest (trinity-enterprise#435)
+    # =========================================================================
+    #
+    # These rows hold LIVE third-party credentials and used to sit in cleartext
+    # (CWE-312). They now resolve encrypted-row → legacy-row-with-lazy-migration
+    # → env → '', with the policy in ``services/secret_settings.py``.
+    #
+    # Resolution order matters twice over. Encrypted-first means the steady state
+    # never touches the legacy key at all — one read, same cost as before. The
+    # legacy leg is not dead code that the migration made unreachable: a
+    # pre-fix backup restore, a rollback-then-roll-forward, or a direct DB write
+    # can all put cleartext back, and the read path is the only thing that
+    # notices. So it re-encrypts and DELETEs on sight, which makes cleartext
+    # transient by construction rather than merely absent right now.
+    #
+    # Fail-open on READ (an unreadable envelope degrades to env, never a 500 —
+    # ``get_elevenlabs_api_key``'s rule) and fail-CLOSED on WRITE (no encryption
+    # key ⇒ refuse, never silently store cleartext, which is the whole defect).
+
+    def _resolve_secret_setting(self, key: str, env_var: str) -> str:
+        """Encrypted row → legacy cleartext row (migrated on sight) → env → ''."""
+        from services.secret_settings import (
+            decrypt_secret_setting,
+            encrypted_key_for,
+            looks_like_envelope,
+        )
+
+        envelope = self.get_setting(encrypted_key_for(key))
+        if envelope:
+            value = decrypt_secret_setting(key, envelope)
+            if value:
+                return value
+            # Unreadable envelope (wrong/rotated key, corrupt row). Fall through
+            # to env rather than raising — but do NOT fall through to the legacy
+            # row: a stale cleartext value silently outranking the current
+            # encrypted one is worse than being unconfigured.
+            return os.getenv(env_var, '')
+
+        legacy = self.get_setting(key)
+        if legacy and legacy.strip():
+            if looks_like_envelope(legacy):
+                # Legacy key already holds an envelope — a half-applied older
+                # in-place scheme, or a hand-written row. Decrypt it, and let the
+                # migration below normalise it onto the encrypted key name.
+                decrypted = decrypt_secret_setting(key, legacy)
+                if decrypted:
+                    self._migrate_legacy_secret_setting(key, decrypted)
+                    return decrypted
+                return os.getenv(env_var, '')
+            self._migrate_legacy_secret_setting(key, legacy)
+            return legacy
+
+        return os.getenv(env_var, '')
+
+    def _migrate_legacy_secret_setting(self, key: str, value: str) -> None:
+        """Encrypt ``value`` onto the encrypted key and drop the cleartext row.
+
+        Best-effort: this runs on a READ path, so a failure must return the
+        credential the caller asked for rather than break agent startup. The
+        one-shot migration and the next read both retry it.
+
+        ``--workers 2``-safe without a lock: two workers racing produce two
+        different envelopes of the SAME plaintext, the upsert is last-write-wins,
+        and both DELETEs of the legacy row are idempotent. Order is
+        encrypt-then-write-then-delete, so a crash between steps leaves the
+        cleartext row intact and the next read retries — never a lost credential.
+        """
+        from services.secret_settings import encrypt_secret_setting, encrypted_key_for
+
+        try:
+            db.set_setting(encrypted_key_for(key), encrypt_secret_setting(key, value))
+            db.delete_setting(key)
+            logger.warning(
+                f"Migrated cleartext credential setting '{key}' to "
+                f"'{encrypted_key_for(key)}' on read (ent#435). Rotate this "
+                f"credential: historical backups still contain the plaintext."
+            )
+        except Exception as e:  # noqa: BLE001 — read path must not break
+            logger.error(f"Failed to encrypt legacy credential setting '{key}': {e}")
+
+    def set_secret_setting(self, key: str, value: str) -> None:
+        """Persist a credential-bearing setting AES-256-GCM encrypted.
+
+        The ONLY supported writer for the keys in ``SECRET_SETTING_KEYS`` — the
+        cleartext row is refused at the sink. Also clears any legacy cleartext
+        row, so re-setting a credential on a not-yet-migrated install is itself a
+        migration.
+        """
+        from services.secret_settings import (
+            SECRET_SETTING_KEYS,
+            encrypt_secret_setting,
+            encrypted_key_for,
+        )
+
+        if key not in SECRET_SETTING_KEYS:
+            raise ValueError(
+                f"'{key}' is not a registered credential setting; add it to "
+                f"services.secret_settings.SECRET_SETTING_KEYS first"
+            )
+        db.set_setting(encrypted_key_for(key), encrypt_secret_setting(key, value.strip()))
+        db.delete_setting(key)
+
+    def clear_secret_setting(self, key: str) -> bool:
+        """Remove a credential setting (both forms). True if anything was removed."""
+        from services.secret_settings import encrypted_key_for
+
+        removed_encrypted = db.delete_setting(encrypted_key_for(key))
+        removed_legacy = db.delete_setting(key)
+        return removed_encrypted or removed_legacy
+
+    def has_secret_setting(self, key: str) -> bool:
+        """Whether the credential is configured via settings (either form).
+
+        Backs the ``source: "settings" | "env"`` fields on the admin status
+        endpoints. Deliberately presence-only — it never decrypts, so a row
+        written under a rotated key still reports "settings", which is the
+        honest answer to *where is this configured*.
+        """
+        from services.secret_settings import encrypted_key_for
+
+        return bool(self.get_setting(encrypted_key_for(key)) or self.get_setting(key))
+
     def get_anthropic_api_key(self) -> str:
-        """Get Anthropic API key from settings, fallback to env var."""
-        key = self.get_setting('anthropic_api_key')
-        if key:
-            return key
-        return os.getenv('ANTHROPIC_API_KEY', '')
+        """Get Anthropic API key: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('anthropic_api_key', 'ANTHROPIC_API_KEY')
 
     def get_github_pat(self) -> str:
-        """Get GitHub PAT from settings, fallback to env var."""
-        key = self.get_setting('github_pat')
-        if key:
-            return key
-        return os.getenv('GITHUB_PAT', '')
+        """Get GitHub PAT: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('github_pat', 'GITHUB_PAT')
 
     def get_google_api_key(self) -> str:
-        """Get Google API key from settings, fallback to env var."""
-        key = self.get_setting('google_api_key')
-        if key:
-            return key
-        return os.getenv('GOOGLE_API_KEY', '')
+        """Get Google API key: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('google_api_key', 'GOOGLE_API_KEY')
 
     # =========================================================================
     # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
@@ -306,25 +420,25 @@ class SettingsService:
     # =========================================================================
 
     def get_slack_client_id(self) -> str:
-        """Get Slack Client ID from settings, fallback to env var."""
+        """Get Slack Client ID from settings, fallback to env var.
+
+        Deliberately NOT encrypted (ent#435): an OAuth client_id is a public
+        identifier — ``slack_service.get_oauth_url`` puts it verbatim in the
+        browser-visible authorize URL. Recorded as a reviewed exemption in
+        ``secret_settings.PUBLIC_CREDENTIAL_SHAPED_KEYS``.
+        """
         key = self.get_setting('slack_client_id')
         if key:
             return key
         return os.getenv('SLACK_CLIENT_ID', '')
 
     def get_slack_client_secret(self) -> str:
-        """Get Slack Client Secret from settings, fallback to env var."""
-        key = self.get_setting('slack_client_secret')
-        if key:
-            return key
-        return os.getenv('SLACK_CLIENT_SECRET', '')
+        """Get Slack Client Secret: encrypted setting → legacy → env (ent#435)."""
+        return self._resolve_secret_setting('slack_client_secret', 'SLACK_CLIENT_SECRET')
 
     def get_slack_signing_secret(self) -> str:
-        """Get Slack Signing Secret from settings, fallback to env var."""
-        key = self.get_setting('slack_signing_secret')
-        if key:
-            return key
-        return os.getenv('SLACK_SIGNING_SECRET', '')
+        """Get Slack Signing Secret: encrypted setting → legacy → env (ent#435)."""
+        return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
     def get_public_chat_url(self) -> str:
         """Get Public Chat URL from settings, fallback to env var."""
@@ -341,11 +455,8 @@ class SettingsService:
         return os.getenv('SLACK_TRANSPORT_MODE', 'socket')
 
     def get_slack_app_token(self) -> str:
-        """Get Slack App-Level Token (xapp-...) for Socket Mode."""
-        token = self.get_setting('slack_app_token')
-        if token:
-            return token
-        return os.getenv('SLACK_APP_TOKEN', '')
+        """Slack App-Level Token (xapp-…) for Socket Mode: encrypted → legacy → env."""
+        return self._resolve_secret_setting('slack_app_token', 'SLACK_APP_TOKEN')
 
     # =========================================================================
     # Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)
@@ -820,6 +931,23 @@ def get_slack_transport_mode() -> str:
 def get_slack_app_token() -> str:
     """Get Slack App-Level Token for Socket Mode."""
     return settings_service.get_slack_app_token()
+
+
+# --- Credential-bearing settings (ent#435) ---------------------------------
+
+def set_secret_setting(key: str, value: str) -> None:
+    """Persist a credential-bearing setting AES-256-GCM encrypted."""
+    settings_service.set_secret_setting(key, value)
+
+
+def clear_secret_setting(key: str) -> bool:
+    """Remove a credential-bearing setting (encrypted + any legacy row)."""
+    return settings_service.clear_secret_setting(key)
+
+
+def has_secret_setting(key: str) -> bool:
+    """Whether a credential-bearing setting is configured in the DB."""
+    return settings_service.has_secret_setting(key)
 
 
 def is_session_tab_enabled() -> bool:

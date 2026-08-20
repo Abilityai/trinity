@@ -33,7 +33,18 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_setting(key: str, value: str, now: str) -> None:
-    """Upsert an OSS ``system_settings`` value. Mirrors ``db/settings.py:set_setting``."""
+    """Upsert an OSS ``system_settings`` value. Mirrors ``db/settings.py:set_setting``.
+
+    Including the ent#435 cleartext-credential guard, because "mirrors" has to
+    mean the policy too: this function is a second writer into the same table, so
+    a guard installed only on the canonical sink would be one import away from
+    being bypassed. It writes only portal config keys today — the guard is
+    inert for those and exists so the NEXT key added here cannot be a secret.
+    """
+    from services.secret_settings import assert_plaintext_write_allowed
+
+    assert_plaintext_write_allowed(key)
+
     stmt = (
         make_insert(system_settings)
         .values(key=key, value=value, updated_at=now)
