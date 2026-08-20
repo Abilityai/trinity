@@ -2418,8 +2418,36 @@ class DatabaseManager:
     def clear_rate_limit_events(self, agent_name: str, subscription_id: str):
         return self._subscription_ops.clear_rate_limit_events(agent_name, subscription_id)
 
-    def cleanup_old_rate_limit_events(self):
-        return self._subscription_ops.cleanup_old_rate_limit_events()
+    def cleanup_old_rate_limit_events(self, retention_days: int = 30, chunk_size: int = 1000):
+        return self._subscription_ops.cleanup_old_rate_limit_events(
+            retention_days, chunk_size
+        )
+
+    # ent#433 — subscription headroom history + failure-event retention.
+    # These delegations are hand-written because DatabaseManager has NO
+    # __getattr__ fallback; a missing one raises AttributeError on the first
+    # real request while every suite that mocks the `database` module stays
+    # green (docs/memory/learnings.md, 2026-07-06).
+    def insert_headroom_history(self, subscription_id: str, snapshot: dict):
+        return self._subscription_ops.insert_headroom_history(subscription_id, snapshot)
+
+    def get_headroom_history(self, subscription_id: str, *, hours: int, bucket: str):
+        return self._subscription_ops.get_headroom_history(
+            subscription_id, hours=hours, bucket=bucket
+        )
+
+    def count_headroom_history_candidates(self, retention_days: int, limit: int):
+        return self._subscription_ops.count_headroom_history_candidates(
+            retention_days, limit
+        )
+
+    def prune_headroom_history(self, retention_days: int = 30, chunk_size: int = 1000):
+        return self._subscription_ops.prune_headroom_history(retention_days, chunk_size)
+
+    def count_rate_limit_event_candidates(self, retention_days: int, limit: int):
+        return self._subscription_ops.count_rate_limit_event_candidates(
+            retention_days, limit
+        )
 
     def select_best_alternative_subscription(self, current_subscription_id: str):
         return self._subscription_ops.select_best_alternative_subscription(current_subscription_id)

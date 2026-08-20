@@ -14,7 +14,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, List
 
-from models import User
+from models import SubscriptionHeadroomHistory, User
 from database import db
 from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
 from db_models import (
@@ -180,6 +180,69 @@ async def get_subscription_usage(
     except Exception as e:
         logger.error(f"Failed to get usage for subscription {subscription_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve usage data")
+
+
+@router.get(
+    "/{subscription_id}/headroom/history",
+    response_model=SubscriptionHeadroomHistory,
+)
+async def get_subscription_headroom_history(
+    subscription_id: str,
+    window: str = "7d",
+    current_user: User = Depends(get_current_user)
+):
+    """Windowed headroom utilization series for a subscription (ent#433).
+
+    Answers "how close did we run to the 5h wall this week", which the #471
+    live snapshot structurally cannot: it keeps exactly one reading per
+    subscription and overwrites it on every probe.
+
+    Read-only — this never probes, so viewing a trend costs no subscription
+    quota. Admin-only, mirroring `/usage` (`assert_admin` also rejects agent
+    principals, #1890), and resolves by id OR name for parity with it: an
+    operator who just used a name on `/usage` must not find it rejected here,
+    and a typo must 404 rather than returning an empty series that reads as
+    "no data yet".
+
+    Each bucket carries the LAST probe in it, plus BOTH its logical
+    `bucket_start` and the real `fetched_at` — the pair is what makes a gap
+    distinguishable from sample jitter. Absent buckets are absent; nothing is
+    interpolated or zero-filled.
+    """
+    assert_admin(current_user)
+
+    from services.subscription_headroom_service import HISTORY_WINDOWS, get_history
+
+    if window not in HISTORY_WINDOWS:
+        # Named validation, never a generic 500 — and deliberately a hard
+        # reject rather than a silent fall back to the default: this parameter
+        # is the chart's AXIS, and quietly redrawing a window the caller never
+        # asked for is the wrong kind of forgiving.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid window '{window}'. "
+                f"Expected one of: {', '.join(sorted(HISTORY_WINDOWS))}"
+            ),
+        )
+
+    # Resolve by ID or name (parity with /usage)
+    subscription = db.get_subscription(subscription_id)
+    if not subscription:
+        subscription = db.get_subscription_by_name(subscription_id)
+
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    try:
+        return get_history(subscription.id, window)
+    except Exception as e:
+        logger.error(
+            f"Failed to get headroom history for subscription {subscription_id}: {e}"
+        )
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve headroom history"
+        )
 
 
 @router.get("/{subscription_id}/usage/breakdown", response_model=SubscriptionUsageBreakdown)

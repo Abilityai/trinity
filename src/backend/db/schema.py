@@ -1239,6 +1239,46 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Subscription Headroom History (ent#433, extends #471)
+    # -------------------------------------------------------------------------
+    # One row per PROBE. #471 keeps a single last-known-good Redis snapshot per
+    # subscription (overwritten every probe), so utilization TRENDS were
+    # unanswerable; this is the durable half.
+    #
+    # Every non-skipped probe outcome is persisted, failures included as
+    # status-only rows — otherwise a three-day dead token is byte-identical to
+    # nobody-watching, and the "honest gaps" contract collapses.
+    #
+    # `utilization_pct` is nullable ON PURPOSE and independently of `status`: a
+    # 429 legitimately reports `*_status='rate_limited'` with no utilization
+    # figure. Readers must therefore never treat a NULL utilization as 0 — the
+    # most important sample in the series is exactly the one most likely to
+    # carry NULL (ent#433 read-surface contract).
+    #
+    # The FOREIGN KEY is DOCUMENTATION ONLY. `PRAGMA foreign_keys` is off
+    # platform-wide, and `_PG_TABLE_SUBS` regex-strips every FK clause before
+    # this DDL reaches PostgreSQL — the platform has zero enforced FKs. Cascade
+    # is performed explicitly inside `delete_subscription`'s transaction.
+    "subscription_headroom_history": """
+        CREATE TABLE IF NOT EXISTS subscription_headroom_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subscription_id TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            five_hour_utilization_pct REAL,
+            five_hour_resets_at TEXT,
+            five_hour_status TEXT,
+            seven_day_utilization_pct REAL,
+            seven_day_resets_at TEXT,
+            seven_day_status TEXT,
+            representative_claim TEXT,
+            overage_status TEXT,
+            unified_status TEXT,
+            FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id) ON DELETE CASCADE
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Operator Queue Tables (OPS-001)
     # -------------------------------------------------------------------------
     "operator_queue": """
@@ -1677,6 +1717,15 @@ INDEXES = [
     "ON subscription_rate_limit_events(agent_name, subscription_id, occurred_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_rate_limit_sub "
     "ON subscription_rate_limit_events(subscription_id, occurred_at DESC)",
+
+    # Subscription headroom history indexes (ent#433)
+    # First serves the windowed read (one subscription, a time range, newest
+    # first). Second serves the retention sweep, which is subscription-agnostic
+    # and would otherwise full-scan.
+    "CREATE INDEX IF NOT EXISTS idx_headroom_history_sub_fetched "
+    "ON subscription_headroom_history(subscription_id, fetched_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_headroom_history_fetched "
+    "ON subscription_headroom_history(fetched_at)",
 
     # Multi-agent Slack indexes (SLACK-002)
     "CREATE INDEX IF NOT EXISTS idx_slack_channel_agents_team ON slack_channel_agents(team_id)",

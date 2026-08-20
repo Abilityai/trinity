@@ -97,6 +97,11 @@ def _configure_db(db):
     db.prune_agent_reports.return_value = 3  # #918 agent_reports retention
     db.find_expired_leases.return_value = []  # #1081 Phase 3 lease reaper — inert by default
     db.prune_operator_queue_terminal_items.return_value = 8  # #1142 operator_queue retention
+    # ent#433 — both new retention sweeps. Their counts feed `report.total` and
+    # the WAL-checkpoint sum, so a MagicMock here raises on the first `> 0`.
+    db.prune_headroom_history.return_value = 0
+    db.count_headroom_history_candidates.return_value = 0
+    db.count_rate_limit_event_candidates.return_value = 0
     # #1644 blast-radius guard: every destructive sweep now counts its candidate
     # set before pruning and REFUSES if it's over threshold. These must be real
     # ints — the guard is fail-closed, so a bare MagicMock is refused
@@ -196,7 +201,15 @@ def test_rate_limit_prune_is_cycle_gated():
         with patch.object(_CS, "db") as db, \
              patch.object(_CS, "get_capacity_manager", return_value=capacity), \
              patch.object(_CS, "_read_retention_settings", return_value=(0, 0, 0, 0)), \
+             patch.object(_CS, "_read_retention_setting", return_value=30), \
+             patch.object(_CS, "_guard_allows", return_value=True), \
              patch.object(_CS, "_wal_checkpoint_truncate"):
+            # ent#433: the sweep now reads a real retention window instead of a
+            # hardcoded 24h. Against a wholesale-mocked `db`, the real reader
+            # gets a MagicMock, fails closed to 0, and the sweep returns before
+            # the prune — which would make this cycle-gate test read as "never
+            # runs" for the wrong reason. Pin the window and the guard so the
+            # test still measures ONLY the 12-cycle gate.
             _configure_db(db)
             _run(svc)
             return db.cleanup_old_rate_limit_events.called

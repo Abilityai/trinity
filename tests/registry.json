@@ -2403,6 +2403,18 @@
         "database"
       ],
       "description": "Subscription usage observability (#471): failure_kind persisted + 24h/kind counters (NULL\u2192unknown, 24h boundary, per-sub grouping); get_subscription_usage carries counters + 2h rate_limited_now + model defaults keep old constructors valid; per-agent breakdown merged across chat/exec ranked by cost desc; batch agent\u2192subscription map (soft-delete excluded, scoped/empty); derive_auth_mode truth table; record-before-gate (event recorded with auto-switch disabled, kind threaded); headroom unified-header parsing against the 2026-08-19 spike payload + freshness-gated limited verdict; static pins (pressure route before /{agent_name}, assert_admin on new endpoints). sqlite3 temp DB + attribute monkeypatching (no sys.modules stubs)."
+    },
+    {
+      "file": "unit/test_433_headroom_history.py",
+      "feature": "ent#433",
+      "added": "2026-08-20",
+      "categories": [
+        "backend",
+        "db",
+        "retention",
+        "subscriptions"
+      ],
+      "description": "Subscription headroom history (ent#433): live round-trip of all 13 columns against a migrated DB (the ONLY test exercising db/tables.py \u2014 schema-parity never imports it); DatabaseManager delegations (no __getattr__); last-per-bucket selection, not max (observer-effect bias, two-peak ambiguity, NULL-utilization 429s); bucket_start vs fetched_at so gaps are decidable from jitter; PostgreSQL dialect compilation pinning ROW_NUMBER over a bare-column GROUP BY; probe-path invariants (Redis-before-DB ordering, to_thread off the event loop, failure never changes the probe result, no row when the probe never ran); no_windows classification; both retention windows registered, range-validated, guard-gated, and absent from the community seed; explicit cascade on subscription delete; coverage_pct reporting a thin series as thin."
     }
   ]
 }

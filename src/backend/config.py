@@ -570,6 +570,10 @@ OPS_SETTINGS_VALIDATION = {
     "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
     "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
     "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
+    # ent#433 — the two subscription-telemetry windows. `0` means "disable this
+    # sweep" on both, same as the row windows above.
+    "subscription_headroom_retention_days": ("int", 0, _DAYS_MAX),
+    "subscription_failure_event_retention_days": ("int", 0, _DAYS_MAX),
     # #2216: the backup window's fail-safe direction is INVERTED vs the rows
     # above — for backups "never prune" fills the disk (#1871 class), so `0`
     # ("disable the sweep" everywhere else = keep-forever here) is REJECTED.

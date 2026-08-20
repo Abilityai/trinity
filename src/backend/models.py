@@ -344,6 +344,60 @@ class SubscriptionPressureResponse(BaseModel):
     agents: List[AgentSubscriptionPressure] = []
 
 
+class HeadroomHistoryWindow(BaseModel):
+    """One rolling-limit window inside a history bucket (ent#433).
+
+    `utilization_pct` is nullable INDEPENDENTLY of `status`: a 429 reports
+    `status='rate_limited'` with no figure. A consumer must render that as an
+    outage, never as 0% — coercing the NULL inverts the single most important
+    sample in the series.
+    """
+    utilization_pct: Optional[float] = None
+    resets_at: Optional[str] = None
+    status: Optional[str] = None
+
+
+class HeadroomHistoryBucket(BaseModel):
+    """The LAST probe in one time bucket (ent#433).
+
+    `last`, not `max`: probes are demand-driven, so a max is biased by how often
+    anyone looked; the 5h and 7d windows peak at different instants so a
+    two-column max has no single owning row; and a max over `utilization_pct`
+    silently drops rate-limited samples that carry no figure.
+
+    BOTH timestamps are load-bearing and neither substitutes for the other:
+    `bucket_start` is the logical slot (what makes a gap detectable — a real
+    timestamp alone cannot distinguish sample jitter from a missing bucket), and
+    `fetched_at` is when the provider was actually asked. Buckets with no sample
+    are simply absent; consumers render gaps as gaps and never interpolate.
+    """
+    bucket_start: str
+    fetched_at: str
+    status: str
+    samples: int = 0
+    five_hour: HeadroomHistoryWindow = Field(default_factory=HeadroomHistoryWindow)
+    seven_day: HeadroomHistoryWindow = Field(default_factory=HeadroomHistoryWindow)
+    representative_claim: Optional[str] = None
+    overage_status: Optional[str] = None
+    unified_status: Optional[str] = None
+
+
+class SubscriptionHeadroomHistory(BaseModel):
+    """Windowed headroom series for one subscription (ent#433).
+
+    `coverage_pct` states how much of the window was actually observed
+    (buckets holding a sample ÷ buckets elapsed). It exists so a thin series
+    REPORTS ITSELF as thin rather than rendering as a confident flat line —
+    the structural form of the honest-gaps rule, and the reason a sparse chart
+    must never become an argument for probing more often.
+    """
+    subscription_id: str
+    window: str          # "24h" | "7d" | "30d"
+    bucket: str          # "hour" | "day"
+    buckets: List[HeadroomHistoryBucket] = []
+    coverage_pct: float = 0.0
+
+
 class User(BaseModel):
     """Authenticated user."""
     id: int

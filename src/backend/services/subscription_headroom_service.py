@@ -294,11 +294,69 @@ def _to_model(snapshot: Optional[dict]) -> Optional[SubscriptionHeadroom]:
 _bg_refreshes: set = set()
 
 
+def _history_row(snapshot: dict) -> dict:
+    """Shape a probe snapshot for persistence, classifying the one ambiguous case.
+
+    `parse_unified_headers` returns a non-None result when the bare top-level
+    `status` header is present even if NEITHER window is, so `status='ok'` with
+    both windows None is reachable. Persisting that verbatim yields a row whose
+    every utilization column is NULL under an "ok" status — indistinguishable
+    from a botched write, and permanently so once it is in the table. Recording
+    it as `no_windows` makes the row explain itself.
+
+    Deliberately history-LOCAL: the live #471 snapshot keeps its own status
+    vocabulary untouched. Both readers of that field already treat this case
+    correctly by inspecting the windows (`decorate_usage` requires a truthy
+    window before claiming `source='anthropic'`; `_headroom_indicates_limited`
+    iterates them), so there is nothing to fix upstream and no reason to perturb
+    a just-merged surface.
+    """
+    row = dict(snapshot)
+    if row.get("status") == "ok" and not row.get("five_hour") and not row.get("seven_day"):
+        row["status"] = "no_windows"
+    return row
+
+
+async def _record_history(subscription_id: str, snapshot: dict) -> None:
+    """Persist one probe result as a durable row (ent#433). Enrichment only.
+
+    Two properties are load-bearing and neither is optional:
+
+    1. **Off the event loop.** `db.*` is synchronous SQLAlchemy, the platform DB
+       is DELETE-journal with a 30s busy timeout, and this coroutine runs inside
+       a fire-and-forget task on the dashboard-poll path. A sync write landing
+       during the 03:30 backup (which holds a read transaction for its whole
+       duration) or the 04:30 VACUUM (exclusive, minutes) would block the ENTIRE
+       loop — /health, the WS dispatcher, every in-flight request — for up to
+       30s. `try/except` handles errors, not blocking; `to_thread` handles both.
+    2. **`except Exception`, never `BaseException`.** Backend shutdown cancels
+       this await, and `CancelledError` is not an `Exception` — it must keep
+       propagating so the loop can actually stop.
+
+    Never raises: the probe's own result and the Redis snapshot are already
+    committed by the time this runs, and history is worth strictly less than
+    either (the issue's one hard constraint).
+    """
+    try:
+        await asyncio.to_thread(
+            db.insert_headroom_history, subscription_id, _history_row(snapshot)
+        )
+    except Exception as e:  # noqa: BLE001 — enrichment must never break the probe
+        logger.warning(
+            "[ent#433] headroom history write failed for subscription %s: %s",
+            subscription_id, type(e).__name__,
+        )
+
+
 async def _probe_and_store(subscription_id: str) -> Optional[dict]:
     _last_probe_at[subscription_id] = time.monotonic()
     fresh = await _probe(subscription_id)
     if fresh is not None:
+        # ORDER IS LOAD-BEARING (pinned by test): the Redis snapshot is what
+        # every live surface reads, so it is written FIRST and can never be
+        # delayed by a slow or contended history write. ent#433.
         _store_snapshot(subscription_id, fresh)
+        await _record_history(subscription_id, fresh)
     return fresh
 
 
@@ -390,6 +448,47 @@ async def decorate_usage(usage: SubscriptionUsage, *, force: bool = False) -> Su
         usage.rate_limited_now or _headroom_indicates_limited(headroom)
     )
     return usage
+
+
+# ent#433 — the ONE window→granularity policy. Hour buckets past 7 days would
+# return up to 720 rows for a chart nobody reads at that resolution, so 30d
+# steps down to days. `expected_buckets` is the denominator for coverage.
+HISTORY_WINDOWS = {
+    "24h": {"hours": 24, "bucket": "hour", "expected_buckets": 24},
+    "7d": {"hours": 168, "bucket": "hour", "expected_buckets": 168},
+    "30d": {"hours": 720, "bucket": "day", "expected_buckets": 30},
+}
+
+
+def get_history(subscription_id: str, window: str) -> dict:
+    """Bounded headroom series for one subscription (ent#433).
+
+    Read-only and synchronous — this touches no provider and spawns no probe.
+    That is deliberate and must stay true: history records what already
+    happened, so viewing a trend can never cost subscription quota, and a
+    sparse chart must never become a reason to probe more often.
+
+    `coverage_pct` is buckets-observed ÷ buckets-elapsed. It is what lets a
+    consumer say "we watched 12% of this week" instead of drawing a confident
+    line through near-total darkness.
+
+    Raises KeyError for an unknown window; the router validates first.
+    """
+    spec = HISTORY_WINDOWS[window]
+    buckets = db.get_headroom_history(
+        subscription_id, hours=spec["hours"], bucket=spec["bucket"]
+    )
+    expected = spec["expected_buckets"]
+    coverage = round(100.0 * len(buckets) / expected, 1) if expected else 0.0
+    return {
+        "subscription_id": subscription_id,
+        "window": window,
+        "bucket": spec["bucket"],
+        "buckets": buckets,
+        # A burst of probes can leave more distinct buckets than the nominal
+        # count only if clocks disagree; clamp so the figure is never absurd.
+        "coverage_pct": min(coverage, 100.0),
+    }
 
 
 async def pressure_states(

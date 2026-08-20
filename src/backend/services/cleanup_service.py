@@ -186,6 +186,29 @@ def _read_retention_settings() -> tuple[int, int, int, int]:
     )
 
 
+def _read_retention_setting(key: str) -> int:
+    """Read ONE retention window, with the same coercion as the 4-tuple reader.
+
+    Sweeps added after `_read_retention_settings` was written read their own key
+    rather than growing that tuple (the #1296 precedent). This is that read,
+    factored out so a third and fourth caller don't re-inline it.
+
+    Fail-safe in the #1638 direction: anything unparseable, negative, or
+    unreadable becomes `0`, which DISABLES the sweep. A malformed setting must
+    never enable an unbounded prune.
+    """
+    from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+    try:
+        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return 0
+    except Exception as e:  # noqa: BLE001 — an unreadable setting disables, never enables
+        logger.error(f"[Cleanup] Could not read retention setting {key}: {e}")
+        return 0
+
+
 def _log_prune(pruned: int, message: str) -> None:
     """Log a completed prune, escalating a chunk-capped sweep to WARNING (#1638).
 
@@ -372,6 +395,11 @@ class CleanupReport:
     ssh_credentials_expired: int = 0
     # Issue #1296: terminal agent_reminders rows deleted past their retention window
     agent_reminders_pruned: int = 0
+    # ent#433: subscription headroom probe history pruned past its window, and
+    # subscription rate-limit/auth failure events pruned past theirs (the latter
+    # replaces a hardcoded 24h sweep that had no window and no guard).
+    headroom_history_pruned: int = 0
+    rate_limit_events_pruned: int = 0
     # Issue #1804: dispatch activities closed by a recovery path that won the
     # terminal CAS (watchdog, startup recovery, the bulk sweeps). Post-merge
     # signal: `stale_activities` should trend to ~0 while this picks up the
@@ -393,7 +421,8 @@ class CleanupReport:
                 self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
                 self.operator_queue_pruned + self.ssh_credentials_expired +
-                self.agent_reminders_pruned)
+                self.agent_reminders_pruned +
+                self.headroom_history_pruned + self.rate_limit_events_pruned)
     # NOTE (#1804): activities_closed_on_recovery is deliberately NOT summed
     # into `total` — it is an observability counter over work already counted
     # by the sweep that closed the execution, not additional cleanup work.
@@ -426,6 +455,8 @@ class CleanupReport:
             "operator_queue_pruned": self.operator_queue_pruned,
             "ssh_credentials_expired": self.ssh_credentials_expired,
             "agent_reminders_pruned": self.agent_reminders_pruned,
+            "headroom_history_pruned": self.headroom_history_pruned,
+            "rate_limit_events_pruned": self.rate_limit_events_pruned,
             "activities_closed_on_recovery": self.activities_closed_on_recovery,
             "total": self.total,
         }
@@ -520,11 +551,12 @@ class CleanupService:
         # reclaims — so within a single cycle the duration fabricator could beat
         # a real closer and permanently record a 15-minute run as a 2-hour one.
         self._sweep_stale_activities(report)
-        self._sweep_rate_limit_events()
+        self._sweep_rate_limit_events(report)
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
         self._sweep_operator_queue_retention(report)
         self._sweep_agent_reminders_retention(report)
+        self._sweep_headroom_history(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -865,21 +897,81 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error cleaning stale slots: {e}")
 
-    def _sweep_rate_limit_events(self) -> None:
-        """4. Hourly maintenance: prune rate-limit events older than 24h (#476).
+    def _sweep_rate_limit_events(self, report: CleanupReport) -> None:
+        """4. Hourly maintenance: prune rate-limit events past their window.
 
         Runs every 12th cycle (60 min at 5-min interval) plus the first cycle
         after startup so we don't wait an hour on boot. The gate reads
         `_cycle_count` before the orchestrator increments it.
+
+        ent#433: the window used to be a hardcoded 24 hours inside the db
+        accessor — this table held the platform's only durable record of real
+        agent work hitting a provider rate limit (timestamped, attributed to
+        the causing agent) and destroyed it daily, with no operator-visible
+        window, no #1644 blast-radius guard, and no `GET /api/settings/retention`
+        entry, while every sibling table had all three. It is now a real
+        retention window like the others, and goes through the same guard.
         """
         if self._cycle_count % 12 != 0:
             return
+        days = _read_retention_setting("subscription_failure_event_retention_days")
+        if days <= 0:
+            return
         try:
-            pruned = db.cleanup_old_rate_limit_events()
-            if pruned > 0:
-                logger.info(f"[Cleanup] Pruned {pruned} rate-limit events (>24h old)")
+            if _guard_allows(
+                "subscription_failure_event_retention_days",
+                "subscription_rate_limit_events", days,
+                lambda limit: db.count_rate_limit_event_candidates(days, limit),
+            ):
+                pruned = db.cleanup_old_rate_limit_events(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.rate_limit_events_pruned = pruned
+                _after_guarded_prune("subscription_failure_event_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Pruned {pruned} subscription rate-limit events "
+                        f"older than {days} days (ent#433)",
+                    )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning rate-limit events: {e}")
+
+    def _sweep_headroom_history(self, report: CleanupReport) -> None:
+        """Prune subscription headroom probe history past its window (ent#433).
+
+        Steady state is a trickle: #471's own floors bound probing to <=1
+        ambient probe per 15 minutes per subscription (demand-driven — an
+        unwatched instance probes nothing), so a 5-minute cycle's candidate set
+        is single digits, three orders of magnitude under the guard threshold.
+        The guard therefore only ever fires if an operator NARROWS the window,
+        which is exactly the #1644 case it exists for — do not "optimize" it
+        away on the grounds that it never trips.
+        """
+        days = _read_retention_setting("subscription_headroom_retention_days")
+        if days <= 0:
+            return
+        try:
+            if _guard_allows(
+                "subscription_headroom_retention_days",
+                "subscription_headroom_history", days,
+                lambda limit: db.count_headroom_history_candidates(days, limit),
+            ):
+                pruned = db.prune_headroom_history(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.headroom_history_pruned = pruned
+                _after_guarded_prune("subscription_headroom_retention_days")
+                if pruned > 0:
+                    _log_prune(
+                        pruned,
+                        f"[Cleanup] Deleted {pruned} subscription_headroom_history "
+                        f"rows older than {days} days (ent#433)",
+                    )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning headroom history: {e}")
 
     def _sweep_shared_files(self, report: CleanupReport) -> None:
         """4b. Purge expired / old-revoked shared files (C4 / FILES-001).
@@ -1662,7 +1754,10 @@ class CleanupService:
                            + report.soft_deleted_schedules_purged
                            + report.idempotency_keys_purged
                            + report.agent_reports_pruned
-                           + report.operator_queue_pruned)  # #1142
+                           + report.operator_queue_pruned  # #1142
+                           + report.agent_reminders_pruned  # #1296 — was omitted
+                           + report.headroom_history_pruned      # ent#433
+                           + report.rate_limit_events_pruned)    # ent#433
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()
