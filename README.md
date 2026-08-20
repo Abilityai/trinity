@@ -24,14 +24,14 @@
 </p>
 
 > [!NOTE]
-> **📦 Just released — [v0.9.0](docs/releases/0.9.0.md)** (August 17, 2026): **Workspace** — the client-facing surface, now in every build — plus fresh-install provisioning (remote template registry, GitHub import wizard, manifest install UI, guided credentials), the multi-source skills library and Library page, bidirectional A2A, dashboard List view + grid data tiles, automatic database backups, and a large reliability & security sweep. [Read the full release notes →](docs/releases/0.9.0.md)
+> **📦 Just released — [v0.9.0](docs/releases/0.9.0.md)** (August 17, 2026): **Workspace** — the client-facing surface, now in every build — plus fresh-install provisioning (remote template registry, GitHub import wizard, manifest install UI, guided credentials), the multi-source skills library and Library page, bidirectional A2A, dashboard List view + grid data tiles, automatic database backups, and a large reliability & security sweep. [Watch the release review →](https://youtu.be/fia2qa4YcLg) · [What's new overview →](https://docs.ability.ai/whats-new/v0.9.0) · [Full release notes →](docs/releases/0.9.0.md)
 
 <p align="center">
-  <a href="https://youtu.be/XDLOq1crF9w">
-    <img src="https://img.youtube.com/vi/XDLOq1crF9w/maxresdefault.jpg" alt="Trinity Architecture Explained — animated explainer video" width="640" />
+  <a href="https://youtu.be/fia2qa4YcLg">
+    <img src="https://img.youtube.com/vi/fia2qa4YcLg/maxresdefault.jpg" alt="Trinity v0.9.0 release review — live workshop video" width="640" />
   </a>
   <br/>
-  <em>🎬 <a href="https://youtu.be/XDLOq1crF9w">Trinity Architecture Explained</a> — a 4:44 animated explainer: one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery.</em>
+  <em>🎬 <a href="https://youtu.be/fia2qa4YcLg">Trinity v0.9.0 — release review</a> — a live walkthrough of everything new in v0.9.0, from the "How to Build a Second Brain for Your AI Agents" workshop.</em>
 </p>
 
 ---
@@ -85,6 +85,7 @@ A short teaser of the live interface — the full, zoomable detail is in [the sc
 
 **Watch more:**
 
+- [Trinity v0.9.0 Release Review](https://youtu.be/fia2qa4YcLg) — everything new in v0.9.0, reviewed live in the "How to Build a Second Brain for Your AI Agents" workshop
 - [Trinity Demo](https://youtu.be/ivljtZqsxeo) — full platform walkthrough
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) — animated explainer (4:44): one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery
 - [Trinity v0.8.0 Release Tour](https://youtu.be/wxCC6QGtLMA) — agents that speak, the Brain Orb, and the Grid dashboard

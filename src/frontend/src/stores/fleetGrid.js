@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 import { useExecutionsStore } from './executions'
+import { useSubscriptionsStore } from './subscriptions'
 import {
   defaultLayout,
   normalizeLayout,
@@ -323,6 +324,28 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
   }
 
+  // #471 — subscription-pressure chip data (batch, pure-DB backend). Mirrors
+  // the sync-health discipline: fetched on the same visibility-aware batch
+  // poll, last-known-good kept on error (a failed fetch is never "no
+  // pressure"). The 60s poll is also the demand driver for the backend's
+  // ambient headroom refresh (server-side floored at ~15 min/subscription).
+  const subscriptionPressure = ref({}) // agent → pressure row
+
+  async function fetchSubscriptionPressure() {
+    try {
+      const res = await axios.get('/api/agents/subscription-pressure', {
+        headers: authStore.authHeader,
+      })
+      const map = {}
+      for (const entry of res.data.agents || []) {
+        map[entry.agent_name] = entry
+      }
+      subscriptionPressure.value = map
+    } catch {
+      // chip data is non-critical — keep last known state
+    }
+  }
+
   async function fetchOpQueuePending() {
     try {
       const res = await axios.get('/api/operator-queue', {
@@ -499,7 +522,7 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   let _visibilityHandler = null
 
   function refreshBatchData() {
-    const tasks = [fetchSyncHealth(), fetchOpQueuePending(), fetchSkillRunnerStatus()]
+    const tasks = [fetchSyncHealth(), fetchOpQueuePending(), fetchSkillRunnerStatus(), fetchSubscriptionPressure()]
     // Don't pay for a tile that is switched OFF. This reads `activeWidgetKeys`,
     // which resolves through `GRID_WIDGETS` — a registry populated by
     // `components/tiles/catalog.js`'s SIDE-EFFECT import from `FleetGrid.vue`.
@@ -513,8 +536,30 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     if (activeWidgetKeys.value.includes(widgetKey('executions'))) {
       tasks.push(fetchExecutionsTimeline(), fetchExecutionsLive())
     }
+    // ent#259. Note this is the FIRST adminOnly tile, so the key is absent for
+    // non-admins and the admin-gated fetch simply never fires — no 403 every
+    // 60s, and no second role check to keep in step with the registry's.
+    // Deliberately NOT folded into `fetchSubscriptionPressure()` above, which
+    // stays UNGATED: it feeds the AgentTile chips and AgentListPanel badges,
+    // which must keep working while this tile is switched off.
+    if (activeWidgetKeys.value.includes(widgetKey('subscription-pressure'))) {
+      tasks.push(useSubscriptionsStore().fetchPressureData())
+    }
     return Promise.allSettled(tasks)
   }
+
+  // The gate above reads `isAdmin`, which comes from the locally-restored user
+  // and is only confirmed once `fetchUserProfile()` lands. On a cold load the
+  // first `refreshBatchData()` can therefore run before the role is known, skip
+  // the fetch, and leave the tile blank until the next 60s tick. Re-poll when
+  // the key APPEARS (role confirmed, or the operator switches the tile on) so
+  // it fills immediately instead of waiting out the interval.
+  watch(
+    () => activeWidgetKeys.value.includes(widgetKey('subscription-pressure')),
+    (on, was) => {
+      if (on && !was) useSubscriptionsStore().fetchPressureData()
+    },
+  )
 
   /** Visibility-aware slow poll; active only while the Grid view is mounted. */
   function startPolling() {
@@ -574,6 +619,8 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     hydrate,
     syncHealth,
     opQueuePending,
+    subscriptionPressure,
+    fetchSubscriptionPressure,
     skillRunnerStatus,
     recentFailures,
     execTimeline,
