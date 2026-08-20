@@ -204,9 +204,12 @@ def test_generic_put_routes_retention_windows_to_the_validated_endpoint():
     )
     # And the refusal must point somewhere real.
     assert "PUT /api/settings/ops/config" in src
-    # 8 row-retention windows + #2216's backup_retention_days (a file-artifact
+    # 10 row-retention windows + #2216's backup_retention_days (a file-artifact
     # window that joins the tuple for the write-path protections).
-    assert len(RETENTION_OPS_KEYS) == 9
+    # ent#433 added two: subscription_headroom_retention_days (new probe-history
+    # table) and subscription_failure_event_retention_days (which converted a
+    # hardcoded 24h sweep into a real window).
+    assert len(RETENTION_OPS_KEYS) == 11
 
 
 def test_the_validated_endpoint_checks_before_it_writes():

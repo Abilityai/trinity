@@ -2537,6 +2537,50 @@ def _migrate_agent_evaluations_table(cursor, conn):
     )
 
 
+def _migrate_subscription_headroom_history_table(cursor, conn):
+    """Create the subscription_headroom_history table + indexes (ent#433).
+
+    One row per #471 headroom probe, so utilization trends survive the single
+    last-known-good Redis snapshot that overwrites itself on every probe. Also
+    defined in db/schema.py for fresh installs; this handles existing installs.
+    Idempotent. Mirrored by Alembic 0041_subscription_headroom_history for
+    PostgreSQL (#1183 dual-track).
+
+    The FOREIGN KEY is documentation only — `PRAGMA foreign_keys` is off
+    platform-wide and the PG DDL path strips FK clauses outright, so the
+    cascade is performed explicitly in `delete_subscription`.
+    """
+    cursor.execute("PRAGMA table_info(subscription_headroom_history)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subscription_headroom_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subscription_id TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            five_hour_utilization_pct REAL,
+            five_hour_resets_at TEXT,
+            five_hour_status TEXT,
+            seven_day_utilization_pct REAL,
+            seven_day_resets_at TEXT,
+            seven_day_status TEXT,
+            representative_claim TEXT,
+            overage_status TEXT,
+            unified_status TEXT,
+            FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id) ON DELETE CASCADE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_headroom_history_sub_fetched "
+        "ON subscription_headroom_history(subscription_id, fetched_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_headroom_history_fetched "
+        "ON subscription_headroom_history(fetched_at)"
+    )
+
+
 def _migrate_agent_reminders_table(cursor, conn):
     """Create the agent_reminders table + indexes (#1296).
 
@@ -3602,4 +3646,5 @@ MIGRATIONS = [
     ("portal_chat_state", _migrate_portal_chat_state),
     ("operator_queue_addressed_to", _migrate_operator_queue_addressed_to),
     ("rate_limit_events_failure_kind", _migrate_rate_limit_events_failure_kind),
+    ("subscription_headroom_history_table", _migrate_subscription_headroom_history_table),
 ]

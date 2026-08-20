@@ -77,6 +77,17 @@ RETENTION_OPS_KEYS = (
     # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
     # window (surfaced/logged/reset-protected), NOT a community-floor key.
     "agent_reminders_retention_days",
+    # ent#433: the two subscription-telemetry windows.
+    #   - subscription_headroom_retention_days is the new probe-history table.
+    #   - subscription_failure_event_retention_days CONVERTS what used to be a
+    #     hardcoded 24h sweep of subscription_rate_limit_events — the platform's
+    #     only durable record of real agent work hitting a provider rate limit,
+    #     previously destroyed daily with no window, no #1644 guard, and no
+    #     GET /api/settings/retention entry while every sibling had all three.
+    # Neither is a community-floor key (that set is COMMUNITY_FRESH_INSTALL_SEED):
+    # the 5-day floor would silently truncate the 7-day default read window.
+    "subscription_headroom_retention_days",
+    "subscription_failure_event_retention_days",
     # #2216: database-backup artifacts under /data/backups. Membership here
     # buys the write-path protections (validated /ops/config only, generic
     # PUT 422-blocked, /ops/reset skips) — but its READ is special-cased:
@@ -154,6 +165,17 @@ OPS_SETTINGS_DEFAULTS = {
     # failed). Rows older than this many days are deleted; pending/firing never
     # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
     "agent_reminders_retention_days": "90",
+    # ent#433: subscription headroom probe history. Volume is bounded by #471's
+    # own floors (ambient <=1 probe/15min/subscription, demand-driven; the click
+    # path is floored at 60s), so 30 days is a few thousand rows per
+    # subscription. "0" disables the sweep. Wide/safe per the #1638 floor rule.
+    "subscription_headroom_retention_days": "30",
+    # ent#433: subscription_rate_limit_events. This table was swept at a
+    # HARDCODED 24 hours before ent#433 — widening to 30 is the #1638-SAFE
+    # direction (no install loses data) and changes no existing answer, because
+    # every consumer already filters by time itself (hours=24 at the pressure
+    # call site, a 2h predicate for rate_limited_now). Do not lower it.
+    "subscription_failure_event_retention_days": "30",
     # Issue #2216: retention for database-backup artifacts. The #1638 "widest
     # value" rule applies in spirit but the direction INVERTS: raising this
     # default costs disk on every un-configured install (#1871 class), while
@@ -183,6 +205,8 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
+    "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
 }
 

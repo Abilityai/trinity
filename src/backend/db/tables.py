@@ -1072,6 +1072,28 @@ subscription_rate_limit_events = Table(
     Column("occurred_at", Text),
 )
 
+# ent#433 — one row per headroom probe (see db/schema.py for the contract).
+# `*_utilization_pct` are Float and NULLABLE independently of `status`: a 429
+# reports `*_status='rate_limited'` with no utilization figure, and a reader
+# that coerces that NULL to 0 inverts the signal it most needs.
+subscription_headroom_history = Table(
+    "subscription_headroom_history",
+    metadata,
+    Column("id", _Integer, primary_key=True, autoincrement=True),
+    Column("subscription_id", Text),
+    Column("fetched_at", Text),
+    Column("status", Text),
+    Column("five_hour_utilization_pct", Float),
+    Column("five_hour_resets_at", Text),
+    Column("five_hour_status", Text),
+    Column("seven_day_utilization_pct", Float),
+    Column("seven_day_resets_at", Text),
+    Column("seven_day_status", Text),
+    Column("representative_claim", Text),
+    Column("overage_status", Text),
+    Column("unified_status", Text),
+)
+
 operator_queue = Table(
     "operator_queue",
     metadata,

@@ -21,6 +21,7 @@ from sqlalchemy import select, insert, update, delete, func, and_
 from .engine import get_engine
 from .tables import (
     subscription_credentials,
+    subscription_headroom_history,
     subscription_rate_limit_events,
     agent_ownership,
     chat_messages,
@@ -29,6 +30,26 @@ from .tables import (
 )
 from db_models import SubscriptionCredential, SubscriptionUsage, SubscriptionUsageWindow, SubscriptionWithAgents
 from utils.helpers import iso_cutoff, utc_now_iso
+
+
+def _headroom_history_prune_predicate(cutoff: str):
+    """The ONE predicate the ent#433 headroom-history retention sweep deletes by.
+
+    Shared verbatim by `count_headroom_history_candidates` (which feeds the
+    #1644 blast-radius guard) and `prune_headroom_history` (which does the
+    deleting). Kept as a module-level function precisely so the two cannot
+    drift: a guard that counts a different row set than the prune removes is a
+    guard over nothing (see `retention_guard.evaluate`).
+    """
+    return subscription_headroom_history.c.fetched_at < cutoff
+
+
+def _rate_limit_event_prune_predicate(cutoff: str):
+    """The ONE predicate the ent#433 failure-event retention sweep deletes by.
+
+    Same count/prune-parity contract as the headroom predicate above.
+    """
+    return subscription_rate_limit_events.c.occurred_at < cutoff
 
 
 class SubscriptionOperations:
@@ -394,6 +415,25 @@ class SubscriptionOperations:
                 .values(subscription_id=None)
             ).rowcount
 
+            # ent#433: cascade the headroom history explicitly. The DDL's
+            # ON DELETE CASCADE is decorative — `PRAGMA foreign_keys` is off
+            # platform-wide and the PG DDL path strips FK clauses — so without
+            # this the rows would linger for the full retention window with no
+            # subscription to belong to. In-transaction rather than a
+            # best-effort call at the router (where `clear_snapshot` lives), so
+            # a second caller of this accessor cannot miss it.
+            #
+            # Known, accepted residual: `get_headroom(wait=False)` spawns a
+            # background probe that can still be in flight here and land its
+            # INSERT after this commits. That orphan is reaped by the retention
+            # sweep. It is NOT worth a pre-INSERT existence check, which would
+            # add a read to every probe to close a window measured in seconds.
+            conn.execute(
+                delete(subscription_headroom_history).where(
+                    subscription_headroom_history.c.subscription_id == subscription_id
+                )
+            )
+
             # Then delete the subscription
             deleted = conn.execute(
                 delete(subscription_credentials).where(
@@ -619,13 +659,50 @@ class SubscriptionOperations:
         with get_engine().begin() as conn:
             conn.execute(stmt)
 
-    def cleanup_old_rate_limit_events(self) -> int:
-        """Remove rate-limit tracking records older than 24 hours. Returns count deleted."""
-        stmt = delete(subscription_rate_limit_events).where(
-            subscription_rate_limit_events.c.occurred_at < iso_cutoff(24)
-        )
-        with get_engine().begin() as conn:
-            return conn.execute(stmt).rowcount
+    def cleanup_old_rate_limit_events(
+        self, retention_days: int = 30, chunk_size: int = 1000
+    ) -> int:
+        """Prune rate-limit events past ``retention_days`` (ent#433; was 24h).
+
+        This table is the platform's only durable record of REAL AGENT WORK
+        hitting a provider rate limit — timestamped and attributed to the
+        agent that caused it. It used to be swept at a hardcoded 24 hours with
+        no operator-visible window, no #1644 blast-radius guard, and no entry
+        on `GET /api/settings/retention`, while every sibling table had all
+        three. ent#433 gives it a real window.
+
+        Widening the default from 1 day to 30 is the #1638-safe direction — no
+        install loses data — and cannot change any existing answer, because
+        every consumer already filters by time itself (`hours=24` at the
+        pressure call site, a 2h predicate for `rate_limited_now`).
+
+        Chunked like the other retention prunes so a first sweep on a busy
+        install doesn't hold the write lock for the whole purge. `0` disables.
+        """
+        if retention_days <= 0 or chunk_size <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        total = 0
+        while True:
+            with get_engine().begin() as conn:
+                ids = [
+                    row["id"]
+                    for row in conn.execute(
+                        select(subscription_rate_limit_events.c.id)
+                        .where(_rate_limit_event_prune_predicate(cutoff))
+                        .limit(chunk_size)
+                    ).mappings()
+                ]
+                if not ids:
+                    break
+                total += conn.execute(
+                    delete(subscription_rate_limit_events).where(
+                        subscription_rate_limit_events.c.id.in_(ids)
+                    )
+                ).rowcount
+            if len(ids) < chunk_size:
+                break
+        return total
 
     def get_failure_event_counts(
         self, subscription_id: str, hours: int = 24
@@ -673,6 +750,220 @@ class SubscriptionOperations:
         )
         with get_engine().connect() as conn:
             return {sid: int(cnt) for sid, cnt in conn.execute(stmt).all()}
+
+    # =========================================================================
+    # Subscription headroom history (ent#433)
+    # =========================================================================
+
+    def insert_headroom_history(
+        self, subscription_id: str, snapshot: Dict[str, Any]
+    ) -> None:
+        """Persist ONE #471 probe result (ent#433).
+
+        Called from `subscription_headroom_service._record_history`, which runs
+        this **off the event loop** via `asyncio.to_thread` and swallows any
+        raise — history is enrichment and must never affect probe availability.
+
+        Every non-skipped probe outcome lands here, failures included, because a
+        three-day dead token must not be byte-identical to nobody-watching.
+        `utilization_pct` stays NULL wherever the provider did not report one —
+        notably on a 429, which reports a window status with no figure.
+        """
+        def _win(key: str) -> Dict[str, Any]:
+            w = snapshot.get(key) or {}
+            return w if isinstance(w, dict) else {}
+
+        five, seven = _win("five_hour"), _win("seven_day")
+        stmt = insert(subscription_headroom_history).values(
+            subscription_id=subscription_id,
+            # Defensive: `_probe` always stamps this, but the column is NOT NULL
+            # and a missing value must not turn enrichment into an exception.
+            fetched_at=snapshot.get("fetched_at") or utc_now_iso(),
+            status=snapshot.get("status") or "ok",
+            five_hour_utilization_pct=five.get("utilization_pct"),
+            five_hour_resets_at=five.get("resets_at"),
+            five_hour_status=five.get("status"),
+            seven_day_utilization_pct=seven.get("utilization_pct"),
+            seven_day_resets_at=seven.get("resets_at"),
+            seven_day_status=seven.get("status"),
+            representative_claim=snapshot.get("representative_claim"),
+            overage_status=snapshot.get("overage_status"),
+            unified_status=snapshot.get("unified_status"),
+        )
+        with get_engine().begin() as conn:
+            conn.execute(stmt)
+
+    def get_headroom_history(
+        self, subscription_id: str, *, hours: int, bucket: str
+    ) -> List[Dict[str, Any]]:
+        """Bucketed headroom series — the LAST sample in each bucket (ent#433).
+
+        `last`, never `MAX`, for three independent reasons (see requirements
+        §20.5b): probes are demand-driven so a max is biased by how often anyone
+        looked; the 5h and 7d windows peak at different instants so a two-column
+        max has no single owning row; and a 429 carries a window status with a
+        NULL utilization, which a max would drop exactly when it matters most.
+
+        Bucketing is `substr` on the ISO-Z string — dialect-agnostic on both
+        backends, no date functions, no timezone conversion, and it slices the
+        same UTC string the row was written with (Invariant #16). No
+        `replace(...,' ','T')` wrapper here: unlike `schedule_executions`, this
+        column is only ever written by `utc_now_iso()`, so the space-separated
+        legacy form that wrapper exists for cannot occur.
+
+        Selection uses ROW_NUMBER() rather than a bare non-aggregated column
+        beside an aggregate — the latter is a SQLite-only extension that raises
+        GroupingError on PostgreSQL.
+
+        Only buckets that actually hold a sample are returned; gaps are gaps.
+        The caller pairs each row's real `fetched_at` with its logical
+        `bucket_start` so a consumer can tell a gap from sample jitter.
+        """
+        width = 13 if bucket == "hour" else 10  # YYYY-MM-DDTHH | YYYY-MM-DD
+        key = func.substr(subscription_headroom_history.c.fetched_at, 1, width)
+        ranked = (
+            select(
+                key.label("bucket"),
+                subscription_headroom_history.c.fetched_at,
+                subscription_headroom_history.c.status,
+                subscription_headroom_history.c.five_hour_utilization_pct,
+                subscription_headroom_history.c.five_hour_resets_at,
+                subscription_headroom_history.c.five_hour_status,
+                subscription_headroom_history.c.seven_day_utilization_pct,
+                subscription_headroom_history.c.seven_day_resets_at,
+                subscription_headroom_history.c.seven_day_status,
+                subscription_headroom_history.c.representative_claim,
+                subscription_headroom_history.c.overage_status,
+                subscription_headroom_history.c.unified_status,
+                func.row_number()
+                .over(
+                    partition_by=key,
+                    order_by=subscription_headroom_history.c.fetched_at.desc(),
+                )
+                .label("rn"),
+                func.count()
+                .over(partition_by=key)
+                .label("samples"),
+            )
+            .where(
+                and_(
+                    subscription_headroom_history.c.subscription_id == subscription_id,
+                    subscription_headroom_history.c.fetched_at > iso_cutoff(hours),
+                )
+            )
+            .subquery()
+        )
+        stmt = (
+            select(ranked)
+            .where(ranked.c.rn == 1)
+            .order_by(ranked.c.bucket.asc())
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append({
+                # Logical bucket key, normalised to a full ISO-Z instant. This
+                # is what makes gap detection decidable client-side: a real
+                # timestamp alone cannot distinguish sample jitter from a
+                # missing bucket.
+                "bucket_start": (
+                    f"{r['bucket']}:00:00Z" if bucket == "hour"
+                    else f"{r['bucket']}T00:00:00Z"
+                ),
+                "fetched_at": r["fetched_at"],
+                "status": r["status"],
+                "samples": int(r["samples"]),
+                "five_hour": {
+                    "utilization_pct": r["five_hour_utilization_pct"],
+                    "resets_at": r["five_hour_resets_at"],
+                    "status": r["five_hour_status"],
+                },
+                "seven_day": {
+                    "utilization_pct": r["seven_day_utilization_pct"],
+                    "resets_at": r["seven_day_resets_at"],
+                    "status": r["seven_day_status"],
+                },
+                "representative_claim": r["representative_claim"],
+                "overage_status": r["overage_status"],
+                "unified_status": r["unified_status"],
+            })
+        return out
+
+    def count_headroom_history_candidates(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """Bounded candidate count for the #1644 blast-radius guard (ent#433).
+
+        Shares `_headroom_history_prune_predicate` with the prune BY
+        CONSTRUCTION — a guard that counts a different row set than the one
+        about to be deleted protects nothing.
+        """
+        if retention_days <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        sub = (
+            select(subscription_headroom_history.c.id)
+            .where(_headroom_history_prune_predicate(cutoff))
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(select(func.count()).select_from(sub)).scalar_one())
+
+    def prune_headroom_history(
+        self, retention_days: int = 30, chunk_size: int = 1000
+    ) -> int:
+        """Delete headroom history older than ``retention_days`` (ent#433).
+
+        Chunked DELETE (mirrors `prune_agent_reports`) so a large table doesn't
+        hold the write lock for the full purge. `0` disables the sweep.
+        """
+        if retention_days <= 0 or chunk_size <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        total = 0
+        while True:
+            with get_engine().begin() as conn:
+                ids = [
+                    row["id"]
+                    for row in conn.execute(
+                        select(subscription_headroom_history.c.id)
+                        .where(_headroom_history_prune_predicate(cutoff))
+                        .limit(chunk_size)
+                    ).mappings()
+                ]
+                if not ids:
+                    break
+                total += conn.execute(
+                    delete(subscription_headroom_history).where(
+                        subscription_headroom_history.c.id.in_(ids)
+                    )
+                ).rowcount
+            if len(ids) < chunk_size:
+                break
+        return total
+
+    def count_rate_limit_event_candidates(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """Bounded candidate count for the failure-event sweep guard (ent#433).
+
+        Shares `_rate_limit_event_prune_predicate` with the prune, same
+        constraint as the headroom counterpart above.
+        """
+        if retention_days <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        sub = (
+            select(subscription_rate_limit_events.c.id)
+            .where(_rate_limit_event_prune_predicate(cutoff))
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(select(func.count()).select_from(sub)).scalar_one())
 
     def get_agent_subscription_map(
         self, agent_names: Optional[List[str]] = None

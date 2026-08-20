@@ -301,18 +301,38 @@ class TestRateLimitAging:
         self._seed_event(tmp_db, "sub-a", iso_cutoff(25))
         assert sub_ops.is_subscription_rate_limited("sub-a") is False
 
-    def test_cleanup_removes_old_events(self, sub_ops, tmp_db):
-        """`cleanup_old_rate_limit_events` deletes rows with occurred_at >24h
-        ago, leaves fresher rows alone."""
+    def test_cleanup_removes_events_past_the_retention_window(self, sub_ops, tmp_db):
+        """`cleanup_old_rate_limit_events` deletes rows past its window and
+        leaves fresher rows alone.
+
+        UPDATED by ent#433. This previously asserted a HARDCODED 24-hour sweep
+        — that was a characterization of the defect, not a contract. This table
+        is the platform's only durable record of real agent work hitting a
+        provider rate limit, and it was destroyed daily with no operator-visible
+        window, no #1644 blast-radius guard, and no `GET /api/settings/retention`
+        entry, while every sibling table had all three. The window is now a real
+        retention setting defaulting to 30 days, so a 25h/30h-old event is
+        legitimately RETAINED.
+        """
         from utils.helpers import iso_cutoff
 
-        self._seed_event(tmp_db, "sub-a", iso_cutoff(25))   # should prune
-        self._seed_event(tmp_db, "sub-a", iso_cutoff(30))   # should prune
-        self._seed_event(tmp_db, "sub-a", iso_cutoff(1))    # should keep
-        pruned = sub_ops.cleanup_old_rate_limit_events()
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(24 * 45))  # should prune
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(24 * 40))  # should prune
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(25))       # kept — was pruned pre-ent#433
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(1))        # should keep
+        pruned = sub_ops.cleanup_old_rate_limit_events(retention_days=30)
         assert pruned == 2
         # Fresh event still flags the subscription
         assert sub_ops.is_subscription_rate_limited("sub-a") is True
+
+    def test_cleanup_window_is_configurable_and_zero_disables(self, sub_ops, tmp_db):
+        """ent#433: the window is a real setting, and `0` disables the sweep
+        like every other retention window."""
+        from utils.helpers import iso_cutoff
+
+        self._seed_event(tmp_db, "sub-a", iso_cutoff(25))
+        assert sub_ops.cleanup_old_rate_limit_events(retention_days=0) == 0
+        assert sub_ops.cleanup_old_rate_limit_events(retention_days=1) == 1
 
 
 # =============================================================================

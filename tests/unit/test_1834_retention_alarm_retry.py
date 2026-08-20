@@ -503,7 +503,18 @@ def test_a_later_cleanup_cycle_actually_re_attempts(monkeypatch):
     rows = {}
     calls = {"n": 0}
 
+    # Scoped to THIS test's own window. A cycle refuses once per guarded sweep,
+    # and the set of guarded sweeps grows (ent#433 added two), so counting every
+    # alarm in the cycle would make this test fail whenever an unrelated
+    # retention window is added — while proving nothing extra about the retry.
+    KEY = "execution_row_retention_days"
+
     def sink(agent_name, item):
+        if KEY not in item["id"]:
+            # Another window's alarm — irrelevant to the retry under test, and
+            # deliberately not recorded so the `rows == {}` assertion below
+            # keeps meaning "THIS alarm has not landed yet".
+            return item["id"]
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("operator queue is down")
