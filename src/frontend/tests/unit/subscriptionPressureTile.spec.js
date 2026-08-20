@@ -7,6 +7,7 @@ import {
   SUBSCRIPTION_TILE_MAX_ROWS,
   UTILIZATION_HIGH_PCT,
   UTILIZATION_WARM_PCT,
+  barWidthPct,
   formatApproxCost,
   formatTokenCount,
   pressureHeadline,
@@ -154,6 +155,38 @@ describe('utilizationLevel — the colour band', () => {
   })
 })
 
+describe('barWidthPct — geometry is clamped, the claim is not', () => {
+  it('passes an in-range reading through', () => {
+    expect(barWidthPct(0)).toBe(0)
+    expect(barWidthPct(62)).toBe(62)
+    expect(barWidthPct(100)).toBe(100)
+  })
+
+  it('clamps an overage above 100', () => {
+    // An overage plan really can report >100%. An unclamped `width: 137%`
+    // overruns the track and shoves the row's siblings out of a tile body that
+    // is `overflow: hidden` — content gone, no trace.
+    expect(barWidthPct(137)).toBe(100)
+  })
+
+  it('clamps a negative or unreadable value to empty', () => {
+    expect(barWidthPct(-5)).toBe(0)
+    expect(barWidthPct(Number.NaN)).toBe(0)
+    expect(barWidthPct(undefined)).toBe(0)
+  })
+
+  it('reports the overage NUMBER even though the bar is capped', () => {
+    const over = usage({
+      source: 'anthropic',
+      headroom: { five_hour: { utilization_pct: 137 }, seven_day: null, snapshot_age_seconds: 10, status: 'ok' },
+    })
+    const [w] = windowReadings(over)
+    expect(w.pct).toBe(137)   // the claim — honest
+    expect(w.fill).toBe(100)  // the geometry — bounded
+    expect(w.level).toBe('high')
+  })
+})
+
 describe('windowReadings — both limits, spend against each', () => {
   it('reports the 5h AND 7d limits with their own bands', () => {
     const u = usage({
@@ -166,8 +199,8 @@ describe('windowReadings — both limits, spend against each', () => {
       },
     })
     expect(windowReadings(u)).toEqual([
-      { label: '5h', pct: 15, level: 'ok', resetsAt: '2026-08-19T21:00:00Z' },
-      { label: '7d', pct: 91, level: 'high', resetsAt: '2026-08-26T05:00:00Z' },
+      { label: '5h', pct: 15, fill: 15, level: 'ok', resetsAt: '2026-08-19T21:00:00Z' },
+      { label: '7d', pct: 91, fill: 91, level: 'high', resetsAt: '2026-08-26T05:00:00Z' },
     ])
   })
 
@@ -333,7 +366,7 @@ describe('subscriptionPressureRows — the roster drives the rows', () => {
   it('carries both limit readings on the row', () => {
     const { rows } = subscriptionPressureRows([{ id: 'a', name: 'A' }], { a: fresh(15) })
     expect(rows[0].windows).toEqual([
-      { label: '5h', pct: 15, level: 'ok', resetsAt: null },
+      { label: '5h', pct: 15, fill: 15, level: 'ok', resetsAt: null },
     ])
   })
 

@@ -41,6 +41,21 @@ const RANK = { crit: 3, warn: 2, unknown: 1, ok: 0 }
 export const UTILIZATION_WARM_PCT = 60
 export const UTILIZATION_HIGH_PCT = 85
 
+/**
+ * Bar fill width for a utilization percentage, clamped to 0..100.
+ *
+ * The provider can report **over 100%** on an overage plan, and an unclamped
+ * `width: 137%` bleeds the fill past its track and shoves the row's siblings
+ * sideways — inside a tile body that is `overflow: hidden`, that pushes content
+ * out of view with no trace. The *number* beside the bar stays unclamped, so an
+ * overage is still reported honestly; only the geometry is bounded.
+ */
+export function barWidthPct(pct) {
+  const v = Number(pct)
+  if (!Number.isFinite(v)) return 0
+  return Math.max(0, Math.min(100, v))
+}
+
 /** `null` when there is no reading — the caller must not colour a guess. */
 export function utilizationLevel(pct) {
   if (pct == null || !Number.isFinite(Number(pct))) return null
@@ -71,7 +86,14 @@ export function windowReadings(usage) {
   for (const [label, win] of [['5h', h.five_hour], ['7d', h.seven_day]]) {
     if (!win || win.utilization_pct == null) continue
     const pct = Math.round(Number(win.utilization_pct))
-    out.push({ label, pct, level: utilizationLevel(pct), resetsAt: win.resets_at || null })
+    out.push({
+      label,
+      pct,
+      // `fill` is geometry (clamped); `pct` is the claim (not clamped).
+      fill: barWidthPct(pct),
+      level: utilizationLevel(pct),
+      resetsAt: win.resets_at || null,
+    })
   }
   return out.length ? out : null
 }

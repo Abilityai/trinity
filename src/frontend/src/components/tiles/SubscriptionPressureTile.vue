@@ -43,8 +43,20 @@
            never synthesized from consumption alone. -->
       <template #meta="{ row }">
         <span v-if="row.windows" class="sp-wins">
-          <span v-for="w in row.windows" :key="w.label" class="sp-win">
+          <span
+            v-for="w in row.windows"
+            :key="w.label"
+            class="sp-win"
+            role="img"
+            :aria-label="`${w.label} limit ${w.pct}% used`"
+          >
             <span class="sp-wlab">{{ w.label }}</span>
+            <span class="sp-bar">
+              <!-- Width is `fill` (clamped), not `pct`: an overage plan can
+                   report >100% and an unclamped fill would overrun its track
+                   and shove the row sideways. The NUMBER stays unclamped. -->
+              <span class="sp-fill" :class="`sp-lvl-${w.level}`" :style="{ width: w.fill + '%' }"></span>
+            </span>
             <span class="sp-wpct" :class="`sp-lvl-${w.level}`">{{ w.pct }}%</span>
           </span>
         </span>
@@ -210,13 +222,50 @@ function retry() {
    label stays muted so the eye lands on the number. */
 .sp-wins {
   display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 9px;
 }
 .sp-win {
   display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Small by intent: the bar is a glanceable second channel beside the number,
+   not the primary readout. A fixed track width keeps the two windows aligned
+   across every row, so the column reads as a column. */
+.sp-bar {
+  position: relative;
+  display: inline-block;
+  width: 30px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--gv-bar-track);
+  overflow: hidden;
+}
+.sp-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  /* Only the width animates, and only over the poll's own cadence — a bar that
+     springs on every 60s refresh reads as activity that did not happen. */
+  transition: width 320ms cubic-bezier(0.3, 0.7, 0.25, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-fill {
+    transition: none;
+  }
+}
+.sp-fill.sp-lvl-ok {
+  background: var(--gv-green);
+}
+.sp-fill.sp-lvl-warm {
+  background: var(--gv-yellow);
+}
+.sp-fill.sp-lvl-high {
+  background: var(--gv-red);
 }
 .sp-wlab {
   font-size: 10px;
