@@ -9,6 +9,7 @@ As a platform admin, I want to see aggregate usage, live headroom, and failure p
 ## Entry Points
 - **UI**: Settings → Integrations → Claude Subscriptions (`components/settings/SubscriptionsPanel.vue`, extracted from Settings.vue in #471) — Pressure column per row; expanded row shows the usage/headroom block, per-agent breakdown (lazy), and the Refresh (probe) button. Dashboard pressure badges: `GET /api/agents/subscription-pressure` (see below).
 - **API**: `GET /api/subscriptions/{subscription_id}/usage` (extended), `GET /{id}/usage/breakdown`, `POST /{id}/usage/refresh`, `GET|PUT /api/subscriptions/settings/headroom-auto-refresh`. Accepts subscription UUID or name as the path parameter.
+- **UI (Dashboard Grid)**: the **Subscription pressure** tile (ent#259, `components/tiles/SubscriptionPressureTile.vue`) — one row per SUBSCRIPTION, the inverse unit of the per-agent chip below. Composes `GET /api/subscriptions` + `/{id}/usage` per subscription in `stores/subscriptions.js::fetchPressureData` on the Grid's 60s batch poll; **no endpoint of its own** (operator ruling, ent#259 2026-08-19). Admin-only, since the payload carries per-subscription spend. Its display rules — a real utilization % only while `headroomIsFresh`, "429s" from the `rate_limit` kind only, `input_tokens` kept off the row face as context occupancy — are pinned in `utils/subscriptionPressureTile.js`; see [dashboard-grid-view.md](dashboard-grid-view.md) § Subscription pressure.
 
 ## #471 — Live headroom (provider truth)
 
