@@ -317,6 +317,30 @@ def test_migration_failure_on_read_still_returns_the_credential(monkeypatch):
 # One-shot migration plan (shared by both DB tracks)
 # =============================================================================
 
+def test_missing_encryption_key_explains_why_the_upgrade_needs_one(monkeypatch):
+    """The rare install this can bite — provisioned by a bare `docker compose up`,
+    which defaults the key to empty, and configured credentials through the UI —
+    has been running fine for months. A bare "encryption key not configured"
+    gives that operator no clue an upgrade is what changed, so the message names
+    ent#435, why refusing to boot is deliberate, the exact fix, and the runbook.
+    """
+    from services.secret_settings import MissingEncryptionKeyError
+
+    monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY", raising=False)
+    with pytest.raises(MissingEncryptionKeyError) as exc:
+        encrypt_secret_setting("github_pat", "ghp_x")
+
+    msg = str(exc.value)
+    assert "ent#435" in msg
+    assert "CREDENTIAL_ENCRYPTION_KEY" in msg
+    assert "SECRET_SETTINGS_ENCRYPTION_2026-08.md" in msg
+    # It must not leak the credential it failed to encrypt.
+    assert "ghp_x" not in msg
+    # Still a ValueError, so the #453-shaped `except ValueError` callers and the
+    # migration runner's failure path keep working unchanged.
+    assert isinstance(exc.value, ValueError)
+
+
 def test_plan_migration_converts_cleartext_rows():
     plan = plan_migration([
         ("anthropic_api_key", "sk-ant-abc"),

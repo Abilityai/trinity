@@ -62,8 +62,15 @@ never blocked.) This matches the #453 Slack sweep and every Invariant #12 helper
 
 `scripts/deploy/start.sh` generates the key automatically
 (`ensure_hex32_secret CREDENTIAL_ENCRYPTION_KEY`), so a deployment started the
-supported way already has one. If you launch `docker compose` directly, confirm
-the variable is set in `.env` before upgrading:
+supported way already has one — it has done so since **v0.6.0 (2026-06-01)**,
+three weeks *before* `start.sh` began generating `AGENT_AUTH_SECRET`. So any
+install with a working agent fleet provably has an encryption key.
+
+The gap is an install provisioned by a bare `docker compose up`: compose
+defaults the variable to empty (`${CREDENTIAL_ENCRYPTION_KEY:-}`) and
+`.env.example` ships it blank. If that install also configured credentials
+through the UI, this upgrade will refuse to boot — deliberately, and with a
+message naming this runbook. Confirm the variable is set before upgrading:
 
 ```bash
 grep -q '^CREDENTIAL_ENCRYPTION_KEY=.\+' .env || \

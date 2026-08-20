@@ -169,18 +169,52 @@ def assert_plaintext_write_allowed(key: str) -> None:
 # Envelope helpers
 # =============================================================================
 
+class MissingEncryptionKeyError(ValueError):
+    """``CREDENTIAL_ENCRYPTION_KEY`` is unset/invalid but a credential needs it.
+
+    Distinct from the generic ``CredentialEncryptionService`` error so the
+    ent#435 migration can say WHY the key became necessary. Almost no install
+    hits this: ``scripts/deploy/start.sh`` has auto-generated the key via
+    ``ensure_hex32_secret`` since v0.6.0 — three weeks BEFORE it started
+    generating ``AGENT_AUTH_SECRET``, so any install with a working agent fleet
+    provably has one. The gap is an install provisioned by a bare
+    ``docker compose up`` (compose defaults it to empty and ``.env.example``
+    ships it blank) that ALSO configured credentials through the UI. For that
+    operator the platform has always worked, so a bare "encryption key not
+    configured" gives no clue that an upgrade is what changed.
+    """
+
+
 def encrypt_secret_setting(key: str, value: str) -> str:
     """Wrap ``value`` in an AES-256-GCM envelope keyed by the setting name.
 
-    Raises whatever ``CredentialEncryptionService`` raises when
-    ``CREDENTIAL_ENCRYPTION_KEY`` is unset or malformed — fail-CLOSED on the
-    write path is the point: silently falling back to cleartext is the defect.
-    (``scripts/deploy/start.sh`` auto-generates the key via
-    ``ensure_hex32_secret``, so a supported deployment always has one.)
+    Fail-CLOSED when ``CREDENTIAL_ENCRYPTION_KEY`` is unset or malformed —
+    silently falling back to cleartext is the defect this module exists to fix.
+    Re-raised as :class:`MissingEncryptionKeyError` with upgrade context.
     """
     from services.credential_encryption import CredentialEncryptionService
 
-    return CredentialEncryptionService().encrypt({key: value})
+    try:
+        return CredentialEncryptionService().encrypt({key: value})
+    except ValueError as e:
+        raise MissingEncryptionKeyError(
+            f"Cannot encrypt the credential setting '{key}': {e}\n"
+            "\n"
+            "This is required as of ent#435, which stores credential-bearing "
+            "system_settings rows encrypted at rest instead of in cleartext "
+            "(CWE-312). Your install has at least one such credential, so the "
+            "upgrade cannot proceed without an encryption key — refusing to "
+            "start is deliberate; the alternative is booting with the "
+            "credentials still readable in every DB dump and backup.\n"
+            "\n"
+            "Fix: add CREDENTIAL_ENCRYPTION_KEY to your .env and restart.\n"
+            "  echo \"CREDENTIAL_ENCRYPTION_KEY=$(python3 -c 'import secrets; "
+            "print(secrets.token_hex(32))')\" >> .env\n"
+            "(scripts/deploy/start.sh generates it automatically; installs "
+            "started with a bare `docker compose up` may not have one.)\n"
+            "\n"
+            "Runbook: docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md"
+        ) from e
 
 
 def decrypt_secret_setting(key: str, envelope: str) -> Optional[str]:
