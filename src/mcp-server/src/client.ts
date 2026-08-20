@@ -54,11 +54,23 @@ export class ApiError extends Error {
   readonly status: number;
   readonly conflictType?: string;
   readonly conflictClass?: string;
+  /**
+   * The raw response body, retained verbatim (ent#443).
+   *
+   * The message already embeds it, but a caller that needs to tell a SERVING
+   * module's own refusal from the ABSENCE of that module has to parse it —
+   * a served refusal authors `detail: {code, …}` while absence is a plain
+   * string (FastAPI's own "Not Found", or an entitlement gate's sentence).
+   * Re-deriving the body by regex off the message is the kind of thing that
+   * breaks the day the message format changes, so it is kept as a field.
+   */
+  readonly body: string;
 
   constructor(status: number, body: string, headers?: Headers) {
     super(`API error (${status}): ${body}`);
     this.name = "ApiError";
     this.status = status;
+    this.body = body;
     this.conflictType = headers?.get("X-Conflict-Type") ?? undefined;
     this.conflictClass = headers?.get("X-Conflict-Class") ?? undefined;
   }

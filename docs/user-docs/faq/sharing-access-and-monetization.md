@@ -64,7 +64,7 @@ Its description and health, how many tasks it ran in the last 7, 14, or 30 days 
 
 ## What's the difference between a public link, sharing, and the Workspace?
 
-Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Sharing** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **Workspace** is a signed-in app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations that keep their memory between turns, browses each agent's page, and uploads files — a client workspace, not an anonymous URL and not the operator UI. It ships in every build; only multi-agent rooms within it are enterprise-gated. See [Workspace](../sharing-and-access/workspace.md).
+Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Sharing** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **Workspace** is a signed-in app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations that keep their memory between turns, browses each agent's page, and uploads files — a client workspace, not an anonymous URL and not the operator UI. Both it and the multi-agent rooms within it ship in every build. See [Workspace](../sharing-and-access/workspace.md).
 
 ## How do I keep a growing fleet of agents organized?
 

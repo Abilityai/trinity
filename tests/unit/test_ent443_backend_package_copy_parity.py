@@ -103,6 +103,28 @@ def test_every_package_main_imports_is_copied_into_the_image():
     )
 
 
+def test_every_top_level_package_is_copied_into_the_image():
+    """The stronger form: `main.py`'s import list is not the whole risk.
+
+    A package pulled in only TRANSITIVELY — imported by a router or a service
+    that `main.py` imports — is invisible to the test above and dies at import
+    exactly the same way. There is no reason to key on `main.py` at all while
+    the two sets are equal, and they are: every non-exempt package under
+    `src/backend/` is copied today, so this assertion is free.
+
+    `_EXEMPT` is the escape hatch if a package ever legitimately must not ship;
+    an entry there is a claim, and the test above still holds the line for
+    anything `main.py` imports directly.
+    """
+    missing = sorted(_top_level_packages() - _EXEMPT - _copied_packages())
+    assert not missing, (
+        f"these backend packages never ship in the production image: {missing}\n"
+        "Add a COPY line to docker/backend/Dockerfile, or — if the package "
+        "genuinely must not ship — add it to _EXEMPT with a reason:\n"
+        + "\n".join(f"  COPY ../../src/backend/{p} /app/{p}/" for p in missing)
+    )
+
+
 def test_the_copy_list_has_no_dead_entries():
     """Backward parity: a COPY naming a directory that no longer exists is a
     build failure waiting for the next image build, and reads as intentional."""

@@ -109,10 +109,16 @@ def _raise(e: RoomError):
 # #4), on the one surface where the reader must never be a client.
 #
 # Double-gated since ent#443 removed the entitlement layer: `require_admin` per
-# route, and `reject_agent_principal` on the setter. The second is the one that is
-# easy to omit and expensive to miss — an agent-scoped MCP key resolves to its
-# owner CARRYING the owner's role, so on a default admin-owned install
-# `require_admin` alone would admit an agent to widen the budget that bounds it.
+# route, and `reject_agent_principal` on the setter.
+#
+# The reason the second one is here is historical and worth stating correctly:
+# an agent-scoped MCP key resolves to its owner CARRYING the owner's role, so on
+# a default admin-owned install a bare role check would admit an agent to widen
+# the very budget that bounds it. That class was closed at the GATE by #1890 /
+# ent#297 — `require_admin` now rejects agent principals itself — so this call is
+# belt-and-braces today, NOT the mechanism. It stays because it is free, it keeps
+# the intent legible at the route, and it is the check that would still hold if
+# this router were ever mounted behind a different admin gate.
 # The `/api/enterprise/` path segment is retained history, exactly like the
 # `enterprise_` table prefix: the OSS frontend panel already calls this URL
 # (`components/settings/RoomBudgetDefaultsPanel.vue`), so renaming it would
