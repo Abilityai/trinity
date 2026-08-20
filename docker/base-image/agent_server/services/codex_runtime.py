@@ -517,7 +517,11 @@ def _login_with_api_key(codex_home: str, api_key: str) -> Tuple[bool, str]:
         proc = subprocess.run(
             ["codex", "login", "--with-api-key"],
             input=api_key,
-            env={**os.environ, "CODEX_HOME": codex_home},
+            # #1999: every spawn site builds its env through the helper — a
+            # `{**os.environ}` snapshot re-applies credentials the agent already
+            # removed from `.env`. Guarded by test_1999_execution_env, which
+            # caught this line.
+            env=build_execution_env({"CODEX_HOME": codex_home}),
             capture_output=True,
             text=True,
             timeout=_LOGIN_TIMEOUT_SECONDS,
@@ -565,22 +569,38 @@ async def _materialize_api_key_auth(codex_home: str, api_key: str) -> None:
       untouched, as is one we cannot parse. We overwrite only a file we can
       positively identify as our own.
     * **Key rotation propagates** — a stored key that no longer matches the
-      resolved one is re-logged-in. Since #1999 the execution env is rebuilt
-      from ``.env`` per spawn, so the key CAN change under a live container; an
-      auth.json pinned at first-turn value would silently outrank it.
+      resolved one is re-logged-in. ``_load_api_key_with_source`` re-resolves
+      per turn (process env first, then ``/home/developer/.env``), so an edited
+      ``.env`` changes the key under a live container; an auth.json pinned at
+      its first-turn value would silently outrank it. Note the precedence: a key
+      baked into the container env still wins over ``.env`` — rotation via
+      ``.env`` only reaches agents that do not carry one.
     * **Never raises** — a login failure is logged at ERROR and the turn
       proceeds to fail with the CLI's own auth error. Raising here would convert
       an auth problem into a Trinity 503 on the subscription path too.
     """
-    if not _needs_api_key_login(codex_home, api_key):
-        return
-
-    async with _AUTH_MATERIALIZE_LOCK:
-        # Re-check under the lock: a concurrent first turn may have just done it.
+    try:
         if not _needs_api_key_login(codex_home, api_key):
             return
-        rotating = _read_auth_json(codex_home)[0] == _AUTH_PARSED
-        ok, detail = await asyncio.to_thread(_login_with_api_key, codex_home, api_key)
+
+        async with _AUTH_MATERIALIZE_LOCK:
+            # Re-check under the lock: a concurrent first turn may have just done it.
+            if not _needs_api_key_login(codex_home, api_key):
+                return
+            rotating = _read_auth_json(codex_home)[0] == _AUTH_PARSED
+            ok, detail = await asyncio.to_thread(_login_with_api_key, codex_home, api_key)
+    except Exception as exc:  # never raises — see docstring
+        # The helpers below catch OSError/ValueError/TimeoutExpired, but "never
+        # raises" has to hold for everything: this runs on the turn path, and an
+        # escaping exception would turn an auth problem into a 500 — including
+        # for a subscription agent that needed nothing from this function.
+        logger.error(
+            "[Codex] auth materialisation failed unexpectedly (%s: %s); "
+            "continuing — the turn will fail with the CLI's own auth error",
+            type(exc).__name__,
+            sanitize_text(str(exc)),
+        )
+        return
 
     if ok:
         logger.info(

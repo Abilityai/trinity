@@ -1821,3 +1821,20 @@ async def test_execute_codex_materializes_auth_before_spawn(tmp_path, monkeypatc
 
     assert [step[0] for step in order] == ["login", "spawn"]
     assert order[0][1] == str(tmp_path) and order[0][2] == "sk-test"
+
+
+@pytest.mark.asyncio
+async def test_materialize_swallows_unexpected_errors(tmp_path, monkeypatch, caplog):
+    """"Never raises" has to hold for everything, not just the errors the
+    helpers catch: this runs on the turn path, so an escaping exception would
+    turn an auth problem into a 500 — including for a subscription agent that
+    needed nothing from this function."""
+
+    def _boom(codex_home, api_key):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(codex_runtime, "_login_with_api_key", _boom)
+    with caplog.at_level(logging.ERROR):
+        await codex_runtime._materialize_api_key_auth(str(tmp_path), "sk-new")
+    assert "auth materialisation failed unexpectedly" in caplog.text
+    assert "sk-new" not in caplog.text

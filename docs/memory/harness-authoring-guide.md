@@ -106,6 +106,14 @@ If the runtime authenticates with its own key (not a Claude subscription):
   NOT exported into the agent-server process — so the runtime must read it from
   the process env OR parse `/home/developer/.env`, then inject it into the
   subprocess env.
+- **Check whether the env var is actually enough.** A CLI may authenticate from
+  its own state file rather than the environment, in which case the key must be
+  *materialised to disk* before the first spawn — Codex authenticates its
+  websocket transport from `$CODEX_HOME/auth.json` and 401s on every turn with
+  only `OPENAI_API_KEY` set (#2208). Write it through the CLI's own login verb
+  (key on **stdin**, never argv), make it idempotent, never overwrite a
+  subscription credential or one you cannot parse, and re-write it when the
+  resolved key changes.
 - Skip the Claude-subscription auto-assign in `crud.py` and the OAuth juggle in
   `lifecycle.py` via `agent_service/helpers.is_claude_runtime(...)`, so the
   runtime gets no `CLAUDE_CODE_OAUTH_TOKEN` and no persisted `subscription_id`.
