@@ -1278,6 +1278,11 @@ def _install_fake_codex(
     monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: "sk-test")
     monkeypatch.setattr(codex_runtime, "_is_read_only", lambda: False)
     monkeypatch.setattr(codex_runtime, "_load_guardrails", lambda: {})
+    # #2208: _execute_codex materialises auth.json before spawning, which shells
+    # out to `codex login`. Same reason the pgid helpers are neutralized below —
+    # there is no real codex binary here. Behaviour is covered by the dedicated
+    # materialisation tests and by test_execute_codex_materializes_auth_first.
+    monkeypatch.setattr(codex_runtime, "_login_with_api_key", lambda h, k: (True, ""))
     # Neutralize OS-level process-group operations — there is no real pgid.
     monkeypatch.setattr(codex_runtime, "_capture_pgid", lambda proc: None)
     monkeypatch.setattr(codex_runtime, "_terminate_process_group", lambda *a, **k: None)
@@ -1623,3 +1628,196 @@ async def test_execute_headless_timeout_maps_to_504(available_runtime, monkeypat
     with pytest.raises(HTTPException) as exc_info:
         await available_runtime.execute_headless(prompt="hi")
     assert exc_info.value.status_code == 504
+
+
+# ---------------------------------------------------------------------------
+# API-key auth materialisation (#2208)
+#
+# The CLI authenticates its wss://api.openai.com/v1/responses transport from
+# $CODEX_HOME/auth.json, NOT from the environment. With only OPENAI_API_KEY set,
+# every turn fails 401 and exits non-zero. Reproduced on codex 0.139.0 and
+# 0.147.0 against a live key: 18-19x "401 Unauthorized", exit=1, empty result;
+# after `codex login --with-api-key` on the same key/model/container, exit=0.
+# ---------------------------------------------------------------------------
+
+def _write_auth(tmp_path, payload):
+    (tmp_path / "auth.json").write_text(json.dumps(payload))
+    return str(tmp_path)
+
+
+def test_subscription_auth_true_for_chatgpt_mode(tmp_path):
+    home = _write_auth(tmp_path, {"auth_mode": "chatgpt", "tokens": {"a": 1}})
+    assert codex_runtime._has_subscription_auth(home) is True
+
+
+def test_subscription_auth_false_for_our_own_apikey_file(tmp_path):
+    """The #2208 regression guard: our own auth.json must not read as a
+    subscription credential, or the #1971 gate lets a container whose key was
+    removed from .env keep running on the stale file."""
+    home = _write_auth(tmp_path, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x"})
+    assert codex_runtime._has_subscription_auth(home) is False
+
+
+def test_subscription_auth_true_when_mode_absent(tmp_path):
+    """Older CLI wrote no auth_mode — unknown provenance stays a subscription
+    credential (preserves pre-#2208 behaviour)."""
+    home = _write_auth(tmp_path, {"tokens": {"a": 1}})
+    assert codex_runtime._has_subscription_auth(home) is True
+
+
+def test_subscription_auth_false_when_absent(tmp_path):
+    assert codex_runtime._has_subscription_auth(str(tmp_path)) is False
+
+
+def test_subscription_auth_true_when_unreadable(tmp_path):
+    """Pre-#2208 an unparseable-but-present auth.json counted as a credential,
+    and #1971 wants that surfaced as the CLI's own auth error rather than a
+    Trinity 503 claiming nothing is configured. Narrowing to `apikey` must not
+    change that."""
+    (tmp_path / "auth.json").write_text("{not json")
+    assert codex_runtime._has_subscription_auth(str(tmp_path)) is True
+
+
+@pytest.fixture
+def login_spy(monkeypatch):
+    calls = []
+
+    def _fake(codex_home, api_key):
+        calls.append((codex_home, api_key))
+        (os.path.join(codex_home, "auth.json"))
+        with open(os.path.join(codex_home, "auth.json"), "w") as fh:
+            json.dump({"auth_mode": "apikey", "OPENAI_API_KEY": api_key}, fh)
+        return True, ""
+
+    monkeypatch.setattr(codex_runtime, "_login_with_api_key", _fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_materialize_logs_in_when_no_auth_json(tmp_path, login_spy):
+    await codex_runtime._materialize_api_key_auth(str(tmp_path), "sk-new")
+    assert login_spy == [(str(tmp_path), "sk-new")]
+    assert json.loads((tmp_path / "auth.json").read_text())["OPENAI_API_KEY"] == "sk-new"
+
+
+@pytest.mark.asyncio
+async def test_materialize_never_clobbers_subscription_auth(tmp_path, login_spy):
+    payload = {"auth_mode": "chatgpt", "tokens": {"refresh": "r"}}
+    home = _write_auth(tmp_path, payload)
+    await codex_runtime._materialize_api_key_auth(home, "sk-new")
+    assert login_spy == []
+    assert json.loads((tmp_path / "auth.json").read_text()) == payload
+
+
+@pytest.mark.asyncio
+async def test_materialize_leaves_unclassifiable_auth_alone(tmp_path, login_spy):
+    (tmp_path / "auth.json").write_text("{not json")
+    await codex_runtime._materialize_api_key_auth(str(tmp_path), "sk-new")
+    assert login_spy == []
+    assert (tmp_path / "auth.json").read_text() == "{not json"
+
+
+@pytest.mark.asyncio
+async def test_materialize_is_noop_when_key_already_current(tmp_path, login_spy):
+    home = _write_auth(tmp_path, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-same"})
+    await codex_runtime._materialize_api_key_auth(home, "sk-same")
+    assert login_spy == []
+
+
+@pytest.mark.asyncio
+async def test_materialize_rotates_a_stale_key(tmp_path, login_spy):
+    """Since #1999 the execution env is rebuilt from .env per spawn, so the key
+    can change under a live container; auth.json must follow it."""
+    home = _write_auth(tmp_path, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-old"})
+    await codex_runtime._materialize_api_key_auth(home, "sk-new")
+    assert login_spy == [(home, "sk-new")]
+    assert json.loads((tmp_path / "auth.json").read_text())["OPENAI_API_KEY"] == "sk-new"
+
+
+@pytest.mark.asyncio
+async def test_materialize_failure_logs_and_does_not_raise(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(
+        codex_runtime, "_login_with_api_key", lambda h, k: (False, "exit 1: nope")
+    )
+    with caplog.at_level(logging.ERROR):
+        await codex_runtime._materialize_api_key_auth(str(tmp_path), "sk-new")
+    assert "could not write API-key auth.json" in caplog.text
+    assert "sk-new" not in caplog.text
+
+
+def test_login_passes_key_on_stdin_never_argv(monkeypatch):
+    """A process listing is readable by the agent's own turns."""
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "Successfully logged in"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["input"] = kwargs.get("input")
+        seen["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(codex_runtime.subprocess, "run", _fake_run)
+    ok, detail = codex_runtime._login_with_api_key("/tmp/ch", "sk-secret")
+
+    assert ok is True and detail == ""
+    assert seen["cmd"] == ["codex", "login", "--with-api-key"]
+    assert "sk-secret" not in " ".join(seen["cmd"])
+    assert seen["input"] == "sk-secret"
+    assert seen["env"]["CODEX_HOME"] == "/tmp/ch"
+
+
+def test_login_failure_reports_sanitized_detail(monkeypatch):
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "bad key"
+
+    monkeypatch.setattr(codex_runtime.subprocess, "run", lambda cmd, **kw: _Proc())
+    ok, detail = codex_runtime._login_with_api_key("/tmp/ch", "sk-secret")
+    assert ok is False
+    assert "exit 1" in detail and "bad key" in detail
+    assert "sk-secret" not in detail
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_materializes_auth_before_spawn(tmp_path, monkeypatch):
+    """The fix is only worth anything if the turn path actually calls it, and
+    calls it BEFORE the CLI is spawned — after would still 401."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    order = []
+    _install_fake_codex(
+        monkeypatch,
+        result_text="PONG",
+        stdout_events=[{"type": "thread.started", "thread_id": "thr_a"}],
+    )
+
+    def _spy_login(home, key):
+        order.append(("login", home, key))
+        return True, ""
+
+    fake_popen = codex_runtime.subprocess.Popen  # installed by _install_fake_codex
+
+    def _spy_popen(cmd, **kwargs):
+        order.append(("spawn",))
+        return fake_popen(cmd, **kwargs)
+
+    monkeypatch.setattr(codex_runtime, "_login_with_api_key", _spy_login)
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", _spy_popen)
+
+    await codex_runtime.CodexRuntime()._execute_codex(
+        prompt="ping",
+        model=None,
+        system_prompt=None,
+        resume_thread_id=None,
+        timeout_seconds=30,
+        allowed_tools=None,
+        execution_id="exec_auth_first",
+        concurrent_reader=False,
+    )
+
+    assert [step[0] for step in order] == ["login", "spawn"]
+    assert order[0][1] == str(tmp_path) and order[0][2] == "sk-test"

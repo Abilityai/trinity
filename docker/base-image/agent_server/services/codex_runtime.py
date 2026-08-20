@@ -426,6 +426,53 @@ def _api_key_source_name() -> Optional[str]:
     return _load_api_key_with_source()[1]
 
 
+# ``codex login --with-api-key`` writes {"auth_mode": "apikey", "OPENAI_API_KEY": ...};
+# a ChatGPT-plan login writes {"auth_mode": "chatgpt", "tokens": {...}, ...}. The MODE
+# is the discriminator, NOT the presence of an ``OPENAI_API_KEY`` field — a subscription
+# auth.json carries that key too (usually null), so a presence test misreads it.
+_AUTH_MODE_API_KEY = "apikey"
+
+# One writer at a time. ``_execute_codex`` runs concurrently up to the agent's
+# ``max_parallel_tasks``, and two simultaneous first turns would otherwise both
+# shell out to ``codex login`` against the same file.
+_AUTH_MATERIALIZE_LOCK = asyncio.Lock()
+
+# ``codex login`` is a local file write; it must never hang a turn.
+_LOGIN_TIMEOUT_SECONDS = 30
+
+
+# Tri-state, because "no file" and "a file I cannot parse" must NOT collapse:
+# the first is safe to write, the second is a credential of unknown provenance
+# that we must leave exactly where it is.
+_AUTH_ABSENT = "absent"
+_AUTH_UNREADABLE = "unreadable"
+_AUTH_PARSED = "parsed"
+
+
+def _read_auth_json(codex_home: str) -> Tuple[str, Optional[Dict]]:
+    """``(state, data)`` for ``$CODEX_HOME/auth.json``.
+
+    ``data`` is populated only for :data:`_AUTH_PARSED`. Anything we cannot read
+    or that is not a JSON object is :data:`_AUTH_UNREADABLE` — callers treat it
+    as "not ours", never as "safe to overwrite".
+    """
+    auth = Path(codex_home) / "auth.json"
+    try:
+        if not auth.is_file() or auth.stat().st_size == 0:
+            return _AUTH_ABSENT, None
+        data = json.loads(auth.read_text())
+    except OSError as exc:
+        logger.warning("[Codex] auth.json present but unreadable (%s)", exc)
+        return _AUTH_UNREADABLE, None
+    except ValueError as exc:
+        logger.warning("[Codex] auth.json present but not valid JSON (%s)", exc)
+        return _AUTH_UNREADABLE, None
+    if not isinstance(data, dict):
+        logger.warning("[Codex] auth.json is not a JSON object; leaving it alone")
+        return _AUTH_UNREADABLE, None
+    return _AUTH_PARSED, data
+
+
 def _has_subscription_auth(codex_home: str) -> bool:
     """True when this container holds a Codex **subscription** credential.
 
@@ -436,16 +483,118 @@ def _has_subscription_auth(codex_home: str) -> bool:
     *placeholder* ``OPENAI_API_KEY`` to get past the gate. A placeholder that
     exists solely to satisfy a check is the check being wrong.
 
-    Deliberately only an existence + non-empty test: validating the token is the
-    CLI's job, and a stale ``auth.json`` should surface as the CLI's own auth
-    error rather than as a Trinity 503 claiming no key is configured — which
-    would be a false statement about a subscription agent.
+    #2208 narrows it from existence to **mode**. That is not the token
+    validation #1971 declined to do (still the CLI's job) — it is classifying
+    who wrote the file. Trinity now writes an ``auth_mode: apikey`` auth.json
+    itself, so an existence test would report every API-key agent as a
+    subscription agent, and the gate below would then let a container whose key
+    was REMOVED from ``.env`` keep running on the stale file it left behind —
+    silent failure of credential revocation, the #1999 class.
+
+    An auth.json with no ``auth_mode`` (older CLI) — or one we cannot parse —
+    still counts as a subscription credential: unknown provenance is not ours to
+    discount, and over-reporting here preserves the pre-#2208 behaviour exactly.
+    That matters for the unreadable case specifically, because #1971's whole
+    point is that a bad auth.json should surface as the CLI's own auth error,
+    not as a Trinity 503 claiming no credential is configured.
+    """
+    state, data = _read_auth_json(codex_home)
+    if state == _AUTH_ABSENT:
+        return False
+    if state == _AUTH_UNREADABLE:
+        return True
+    return data.get("auth_mode") != _AUTH_MODE_API_KEY
+
+
+def _login_with_api_key(codex_home: str, api_key: str) -> Tuple[bool, str]:
+    """Run ``codex login --with-api-key``, key on **stdin**.
+
+    Never argv: a process listing is world-readable inside the container, and
+    the agent's own turns can read it. Returns ``(ok, detail)``; ``detail`` is
+    sanitized CLI output for logging, never the key.
     """
     try:
-        auth = Path(codex_home) / "auth.json"
-        return auth.is_file() and auth.stat().st_size > 0
-    except OSError:  # pragma: no cover - defensive
+        proc = subprocess.run(
+            ["codex", "login", "--with-api-key"],
+            input=api_key,
+            env={**os.environ, "CODEX_HOME": codex_home},
+            capture_output=True,
+            text=True,
+            timeout=_LOGIN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {_LOGIN_TIMEOUT_SECONDS}s"
+    except (OSError, ValueError) as exc:
+        return False, sanitize_text(str(exc))
+    if proc.returncode != 0:
+        detail = sanitize_text((proc.stderr or proc.stdout or "").strip())
+        return False, f"exit {proc.returncode}: {detail[:300]}"
+    return True, ""
+
+
+def _needs_api_key_login(codex_home: str, api_key: str) -> bool:
+    """True only when we may write, and writing would change something.
+
+    False for: a subscription credential, an auth.json we cannot classify, and
+    one that already carries this exact key (so the common path is one small
+    file read per turn, not a subprocess).
+    """
+    state, data = _read_auth_json(codex_home)
+    if state == _AUTH_UNREADABLE:
         return False
+    if state == _AUTH_ABSENT:
+        return True
+    if data.get("auth_mode") != _AUTH_MODE_API_KEY:
+        return False
+    return data.get("OPENAI_API_KEY") != api_key
+
+
+async def _materialize_api_key_auth(codex_home: str, api_key: str) -> None:
+    """Ensure ``$CODEX_HOME/auth.json`` carries the CURRENT API key (#2208).
+
+    Passing ``OPENAI_API_KEY`` in the environment is no longer sufficient: the
+    CLI authenticates its ``wss://api.openai.com/v1/responses`` transport from
+    ``auth.json``, and that transport is no longer toggleable
+    (``responses_websockets`` is listed as *removed* in ``codex features list``).
+    With only the env var set, every turn fails ``401 Unauthorized`` and exits
+    non-zero — i.e. an API-key Codex agent could not complete a single turn.
+
+    Three properties, each load-bearing:
+
+    * **Subscription auth wins** (#1971) — a non-``apikey`` auth.json is left
+      untouched, as is one we cannot parse. We overwrite only a file we can
+      positively identify as our own.
+    * **Key rotation propagates** — a stored key that no longer matches the
+      resolved one is re-logged-in. Since #1999 the execution env is rebuilt
+      from ``.env`` per spawn, so the key CAN change under a live container; an
+      auth.json pinned at first-turn value would silently outrank it.
+    * **Never raises** — a login failure is logged at ERROR and the turn
+      proceeds to fail with the CLI's own auth error. Raising here would convert
+      an auth problem into a Trinity 503 on the subscription path too.
+    """
+    if not _needs_api_key_login(codex_home, api_key):
+        return
+
+    async with _AUTH_MATERIALIZE_LOCK:
+        # Re-check under the lock: a concurrent first turn may have just done it.
+        if not _needs_api_key_login(codex_home, api_key):
+            return
+        rotating = _read_auth_json(codex_home)[0] == _AUTH_PARSED
+        ok, detail = await asyncio.to_thread(_login_with_api_key, codex_home, api_key)
+
+    if ok:
+        logger.info(
+            "[Codex] materialised API-key auth.json under %s (%s)",
+            codex_home,
+            "rotated" if rotating else "first use",
+        )
+    else:
+        logger.error(
+            "[Codex] could not write API-key auth.json under %s (%s); "
+            "the turn will fail with the CLI's own auth error",
+            codex_home,
+            detail,
+        )
 
 
 def _codex_home() -> str:
@@ -998,6 +1147,13 @@ class CodexRuntime(AgentRuntime):
                     f"auth.json under CODEX_HOME ({codex_home})."
                 ),
             )
+        # #2208: the CLI authenticates its websocket transport from auth.json,
+        # not from the environment, so the key must be materialised BEFORE the
+        # first `codex exec` or every turn 401s. Idempotent, subscription-safe,
+        # and never raises — see `_materialize_api_key_auth`.
+        if api_key:
+            await _materialize_api_key_auth(codex_home, api_key)
+
         result_file = os.path.join(codex_home, f"{_safe_result_token(execution_id)}-last.txt")
         sandbox_mode = _resolve_sandbox_mode()
         _surface_unmapped_guardrails(allowed_tools)
