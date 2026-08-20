@@ -248,7 +248,15 @@ ABC. Follow-up to spike #854.
   Read-only agents keep `--sandbox read-only` (sandbox-native write protection) as the interim
   enforcement — a fail-closed read-only enforcement story for Codex is a fast-follow.
 - **FR-5 — Credentials:** `OPENAI_API_KEY` from the agent's `.env` (CRED-002),
-  loaded into the subprocess env; Codex agents are NOT assigned a Claude subscription.
+  loaded into the subprocess env **and materialised into `$CODEX_HOME/auth.json`**
+  before the first spawn (#2208 — the CLI authenticates its
+  `wss://api.openai.com/v1/responses` transport from that file, not from the
+  environment, and the transport is no longer toggleable, so the env var alone
+  yields `401` on every turn). Written via `codex login --with-api-key` with the
+  key on stdin, never argv. A subscription `auth.json` (#1971) wins and is never
+  overwritten, nor is one that cannot be parsed; a stored key that no longer
+  matches `.env` is refreshed, since #1999 rebuilds the execution env per spawn.
+  Codex agents are NOT assigned a Claude subscription.
 - **FR-6 — MCP:** Trinity HTTP MCP + template MCP servers wired via `$CODEX_HOME/config.toml`;
   the bearer token is referenced by env var, never persisted as a literal.
 - **FR-7 — Capabilities:** each runtime declares `RuntimeCapabilities`
