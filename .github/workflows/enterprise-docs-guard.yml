@@ -86,7 +86,13 @@ jobs:
           # same reasoning: ent#356 moved those TABLES onto the OSS track, and their
           # `enterprise_` prefix is retained history (renaming them would be a data
           # migration on every existing install), not a private-schema disclosure.
-          PATTERN='\bSIEM\b|\bSCIM\b|\bpermissions_matrix\b|\btwo_factor\b|2fa_recovery_codes|\benterprise_(?!features\b|schema_migrations\b|connectors|docs\b|registered\b|portal_|client_blocks\b)[a-z_]+'
+          # `enterprise_rooms` / `enterprise_room_participants` /
+          # `enterprise_room_messages` join them for exactly the same reason
+          # (ent#443 moved the rooms module to OSS core). Named one by one rather
+          # than as a `room` prefix: the exemption should cover the three tables
+          # that actually moved, so a future private `enterprise_room_*` table
+          # would still trip the guard.
+          PATTERN='\bSIEM\b|\bSCIM\b|\bpermissions_matrix\b|\btwo_factor\b|2fa_recovery_codes|\benterprise_(?!features\b|schema_migrations\b|connectors|docs\b|registered\b|portal_|client_blocks\b|rooms\b|room_participants\b|room_messages\b)[a-z_]+'
           # The open-core seam files: public code whose comments must stay generic
           # (the entitlement mechanism), never naming the paid catalog (#1461).
           # `a2a_outbound.py` (#736) is the newest seam: it resolves outbound A2A
