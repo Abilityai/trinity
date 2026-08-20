@@ -136,10 +136,41 @@ RUN chmod 0555 /opt/trinity/hooks/*.py && \
     chmod 0444 /opt/trinity/guardrails-baseline.json && \
     chown -R root:root /opt/trinity
 
+# ent#345 — the hook REGISTRATION goes where the agent cannot reach it.
+#
+# It used to live in `/home/developer/.claude/settings.json`, owned by
+# `developer`, mode 0644, inside the git-synced working tree (HOME is the repo
+# root) and read live by Claude Code. So the guarded agent had write access to its
+# own guardrail registration: one Edit call and the bash deny-list, file guard,
+# read-only guard and credential output-scanner stop running for every subsequent
+# tool call. That was not theoretical — an agent was observed editing this file
+# autonomously and committing it through git sync during the #2036 investigation.
+# Being git-synced also made it settable from OUTSIDE, by a push to the agent's
+# repo.
+#
+# Claude Code's managed-settings path is admin-controlled and takes precedence
+# over user and project settings, and it sits outside the synced tree — which
+# closes the self-edit vector and the inbound-git vector in one move. Verified
+# against the CLI shipped in this image: it resolves `/etc/claude-code`
+# (`managed-settings.json`, plus a `managed-settings.d` drop-in dir) on Linux.
+#
+# Root-owned and 0444: `developer` cannot write the file, and cannot write the
+# directory either (so it cannot be replaced or shadowed by a drop-in). Both
+# paths are already in the three write-deny lists
+# (`_FILE_WRITE_DENY_PATTERNS` / `guardrails-baseline.json::path_deny` /
+# `EDIT_PROTECTED_PATHS`) — belt and braces, not the primary control.
+RUN mkdir -p /etc/claude-code
+COPY ./hooks/managed-settings.json /etc/claude-code/managed-settings.json
+RUN chown -R root:root /etc/claude-code && \
+    chmod 0755 /etc/claude-code && \
+    chmod 0444 /etc/claude-code/managed-settings.json
+
+# `~/.claude` still belongs to the agent — Claude Code writes its own state there
+# (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a
+# platform-owned `settings.json` inside it: the registration above is the single
+# source, so there is nothing there for an agent to edit away.
 RUN mkdir -p /home/developer/.claude && \
     chown developer:developer /home/developer/.claude
-COPY --chown=developer:developer ./hooks/claude-settings.json /home/developer/.claude/settings.json
-RUN chmod 0644 /home/developer/.claude/settings.json
 USER developer
 
 # --- Trinity plugin pre-install (ent#411) ---------------------------------

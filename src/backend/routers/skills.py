@@ -339,9 +339,25 @@ async def get_skill_assignments(current_user: User = Depends(get_current_user)):
             )
         )
 
+    # ent#386 — the assign targets ride along on the read the Library already
+    # does, so the write half costs no extra round-trip and no N+1 per block.
+    # `None` username = admin ⇒ unfiltered, the same admin convention as
+    # `visible` above; passing the username for an admin would silently narrow
+    # the list to the agents that admin personally owns.
+    assignable = [
+        SkillAssignmentAgent(
+            name=row["agent_name"],
+            display_label=row.get("display_label"),
+        )
+        for row in db.get_assignable_agents(
+            None if current_user.role == "admin" else current_user.username
+        )
+    ]
+
     return SkillAssignmentsResponse(
         assignments=assignments,
         scope="all" if visible is None else "accessible",
+        assignable_agents=assignable,
     )
 
 

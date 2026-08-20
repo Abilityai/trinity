@@ -69,7 +69,23 @@ class SettingsOperations:
 
         Creates the setting if it doesn't exist, updates if it does.
         Returns the updated setting.
+
+        Refuses a cleartext write to a credential-bearing key (ent#435) — see
+        ``services.secret_settings.assert_plaintext_write_allowed``. The guard
+        lives at the SINK rather than only on the routes because the generic
+        ``PUT /api/settings/{key}`` catch-all can write ANY key, which is how the
+        same door was found open by #506, #1609, ent#12, #1644, ent#14 and
+        ent#346 in turn; validate at the boundary AND at the sink (#1525). It
+        raises ``SecretSettingWriteError`` (a ``ValueError``), not an
+        ``HTTPException`` — this layer holds no HTTP concerns (Invariant #1).
+
+        Imported lazily, matching every other ``db/`` → ``services/`` credential
+        edge (``db/users.py``, ``db/slack_channels.py``, ``db/agent_settings/git_pat.py``).
         """
+        from services.secret_settings import assert_plaintext_write_allowed
+
+        assert_plaintext_write_allowed(key)
+
         now = utc_now_iso()
 
         stmt = (
