@@ -62,6 +62,44 @@
         </div>
       </div>
     </div>
+
+    <!-- ent#329 — respond → resume ------------------------------------------>
+    <hr class="my-6 border-gray-200 dark:border-gray-700" />
+
+    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Wake this agent when an operator answers</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+      An answer to one of this agent's parked requests always reaches it — but by
+      default it is only read on the agent's <em>next</em> turn. An agent with no
+      schedule has no next turn, so an approved action waits indefinitely. Turn
+      this on and answering starts one turn so the agent acts on it (ent#329).
+    </p>
+
+    <div v-if="resumeLoading" class="text-sm text-gray-400">Loading…</div>
+
+    <div v-else class="flex items-start gap-3">
+      <label class="relative inline-flex items-center cursor-pointer mt-0.5">
+        <input
+          type="checkbox"
+          class="sr-only peer"
+          :checked="resumeEnabled"
+          :disabled="resumeSaving"
+          @change="onResumeToggle($event.target.checked)"
+        />
+        <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-action-primary-600"></div>
+      </label>
+      <div class="min-w-0">
+        <p class="text-sm text-gray-900 dark:text-gray-100">
+          Answering a request re-triggers this agent
+        </p>
+        <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+          Each answer then costs one agent turn, billed to you — which is why it
+          is off by default and set per agent, not per request.
+        </p>
+        <p v-if="resumeMessage" class="mt-1 text-xs" :class="resumeMessageOk ? 'text-green-600 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'">
+          {{ resumeMessage }}
+        </p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -126,5 +164,43 @@ async function onToggle(next) {
   }
 }
 
+// ent#329 — respond → resume opt-in
+const resumeEnabled = ref(false)
+const resumeLoading = ref(false)
+const resumeSaving = ref(false)
+const resumeMessage = ref('')
+const resumeMessageOk = ref(true)
+
+async function loadResume() {
+  resumeLoading.value = true
+  try {
+    const { data } = await api.get(`/api/agents/${props.agentName}/operator-resume`)
+    resumeEnabled.value = !!data?.enabled
+  } catch (e) {
+    notifyUser('Failed to load the respond-to-resume setting.', 'error')
+  } finally {
+    resumeLoading.value = false
+  }
+}
+
+async function onResumeToggle(next) {
+  resumeSaving.value = true
+  resumeMessage.value = ''
+  try {
+    const { data } = await api.put(`/api/agents/${props.agentName}/operator-resume`, { enabled: next })
+    resumeEnabled.value = !!data?.enabled
+    resumeMessage.value = next
+      ? 'On — answers will start a turn.'
+      : 'Off — answers are read on the next turn.'
+    resumeMessageOk.value = true
+  } catch (e) {
+    notifyUser('Failed to update the respond-to-resume setting.', 'error')
+    await loadResume()  // re-sync to the true persisted state
+  } finally {
+    resumeSaving.value = false
+  }
+}
+
 onMounted(load)
+onMounted(loadResume)
 </script>

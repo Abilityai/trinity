@@ -57,7 +57,12 @@ pytestmark = pytest.mark.unit
 # a pull-claimed row is dispatched by the agent later and produces no
 # synchronous response, so pull dispatch structurally cannot serve this
 # trigger. Same reason `fan_out` and `loop` are here.
-_STRANDED = ["schedule", "webhook", "loop", "fan_out", "reminder", "a2a"]
+# ent#329: `operator_response` joins the stranded set. It is dispatched by a
+# direct backend call from the respond endpoint, not by `POST /task`, so
+# `_derive_task_trigger` can never emit it and the pilot flag is inert for it —
+# the same shape as `schedule` and `reminder`.
+_STRANDED = ["schedule", "webhook", "loop", "fan_out", "reminder", "a2a",
+             "operator_response"]
 # The two that can.
 _REACHABLE = ["agent", "event"]
 

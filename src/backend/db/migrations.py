@@ -2873,6 +2873,34 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_operator_resume(cursor, conn):
+    """ent#329 — owner opt-in: an operator answer re-triggers the agent.
+
+    Adds ``operator_resume_enabled INTEGER DEFAULT 0`` to ``agent_ownership``.
+    An operator response is written back to the agent's queue file within ~5s but
+    is only *processed* at the agent's next turn, so an agent with no schedule
+    never acts on it — an approved action silently never runs. With this flag on,
+    a CAS-won respond dispatches one execution carrying the item + answer.
+
+    Default 0 and per-AGENT rather than per-request on purpose: a dispatch spends
+    money, so it is never unconditional (respond-storms must not fan out
+    executions), and an agent-declared per-request flag would let any agent turn
+    any answer into spend — including a Workspace client's (ent#430 AC #3).
+
+    Edition-agnostic OSS primitive: OSS owns the column, the dispatch and its
+    enforcement; the entitled Workspace surface only renders the ask (the #995
+    primitive/knob split). Mirrored by Alembic revision
+    0039_agent_ownership_operator_resume for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "operator_resume_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN operator_resume_enabled INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_tts_voice(cursor, conn):
     """epic #24 / #25 — outbound voice replies (shared agent-level config).
 
@@ -3695,4 +3723,5 @@ MIGRATIONS = [
     ("operator_queue_addressed_to", _migrate_operator_queue_addressed_to),
     ("rate_limit_events_failure_kind", _migrate_rate_limit_events_failure_kind),
     ("secret_settings_encryption", _migrate_secret_settings_encryption),
+    ("agent_ownership_operator_resume", _migrate_agent_ownership_operator_resume),
 ]

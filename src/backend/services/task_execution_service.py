@@ -276,7 +276,11 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # command, on the one trigger an untrusted participant can drive — operator
     # fatigue by design (the #1632 concern), for a message the room already
     # shows.
-    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder", "a2a"}
+    # ent#329: `operator_response` belongs here. The operator answered and moved
+    # on; the resume turn runs with nobody reading its reply, so an unresolved
+    # command in it is invisible without the alert.
+    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
+     "a2a", "operator_response"}
 )
 
 # The agent runtime (Claude Code) answers a slash-command that doesn't resolve

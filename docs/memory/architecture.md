@@ -1061,6 +1061,7 @@ Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md
 | GET | `/api/agents/{name}/circuit-breaker` | Unified breaker state: `{dispatch:{state,failure_count,retry_after_seconds}, transport:{...}, open:bool, config:{enabled,global_enabled}}` (#526) |
 | PUT | `/api/agents/{name}/circuit-breaker` | Enable/disable per-agent dispatch breaker (owner-only); engages only with global `DISPATCH_BREAKER_ENABLED` (#526) |
 | POST | `/api/agents/{name}/circuit-breaker/reset` | Admin-only; resets BOTH transport and dispatch breakers to closed (#921, #526) |
+| GET/PUT | `/api/agents/{name}/operator-resume` | Per-agent respond→resume opt-in (ent#329). GET any accessor; PUT **owner-only** (enabling means answers may now spend, and the bill is the owner's). Default OFF — see [Respond → Resume](#respond--resume-dispatch-ent329) |
 | GET | `/api/agents/{name}/brain-orb/data` | Read-only proxy of the agent's Brain Orb `data.json` (`AuthorizedAgentByName`; byte pass-through; 404 when flag off / no export, 503/504 unreachable, 502 agent error). See [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58) |
 | GET | `/api/agents/{name}/brain-orb/scopes` | List the agent's selectable + active vault scopes for the orb scope panel (`AuthorizedAgentByName`; 404 when unsupported). (#58 Phase 2) |
 | POST | `/api/agents/{name}/brain-orb/scope` | Mutate the active scope set → agent re-export (**`OwnedAgentByName`** — owner/admin; body-capped; 404 when unsupported). (#58 Phase 2) |
@@ -1240,6 +1241,51 @@ WebSocket events: `operator_queue_new`, `operator_queue_responded`, `operator_qu
 **Addressed asks (ent#364).** `operator_queue.addressed_to_email` names the HUMAN an item is for; `agent_name` only ever said which agent. NULL — every pre-ent#364 row — means "the operator answers", so the column is additive by construction. It is a **column and not a key in `context`** because it is an authorization decision (who may answer, whose Workspace sidebar it appears in) and `context` is agent-authored JSON whose clamp bounds size and type only. Validated at the one agent-authored boundary (`operator_queue_service._validated_addressee`, inside the #1632 clamp) against `client_portal.service.agent_on_roster(agent, email, include_owned=False)` — an agent may address only someone already on its roster — and **fails closed**: malformed, off-roster, or an unreadable roster all drop to NULL. The read/answer surface is the entitled `workspace_asks` module (`/api/enterprise/client-portal/asks`), which re-checks the roster at read time so a revoked share stops showing an already-raised ask, projects an explicit client-facing shape (never `context`), and answers through the OSS respond path so write-back, audit fields and the WS broadcast are unforked. `responded_by_id` stays NULL for a client answerer — there is no `users` row, and inventing one would be a lie in the audit trail.
 
 **Ingestion caps (#1632).** There is **no HTTP create** — every operator-queue item is created through `db.create_operator_queue_item`, and the only untrusted producer is the sync service reading the agent-authored `~/.trinity/operator-queue.json` (`operator_queue_service._sync_agent`). #1402 makes this queue the approval channel for irreversible actions, so a compromised / prompt-injected agent that floods plausible "approve this" items causes operator fatigue → reflexive approval (XSS is already handled by DOMPurify; the exposure is volume + social engineering). The one agent-authored seam is bounded by two independent limits plus field hygiene, all env-tunable (see requirements §26.7): (1) a per-agent **pending-DEPTH cap** (`db.count_operator_queue_pending_for_agent`, default 25) — the **primary** bound, DB-measured ⇒ Redis-independent; at the cap the sync **stops** ingesting (never drips a growing file) and holds the surplus behind one aggregated alert; (2) a per-agent + fleet **create RATE limit** (`rate_limiter.check`, 60/60s + 300/60s, fail-open); (3) a total field-hygiene clamp (`_clamp_ingested_item`, inside the #1525 create try/except) — truncate-with-marker title/question, context/options over cap → marker (validated `execution_id` only), non-dict context → `{}`, `created_at` normalized to ingest time, priority validate-only; (4) a **reserved-id guard** rejecting agent ids that start with a platform-reserved prefix (`queue-flood-`/`poison-`/`cb-dormant-`/`sync-failing-`/`git-bloat-`/`skill-not-found-`/`val_`/`system-seed-`/`base-image-stale-`/`alert-budget-`) so an agent can't pre-create — and via `on_conflict_do_nothing` silence — its own flood alarm or the #1402 poison alert, plus a malformed/oversize-id reject; (5) a per-cycle scan bound (skip an oversized file wholesale; cap at 500 requests/cycle). The 5s sync loop is **leader-locked** (`opqueue:leader`, mirror monitoring #1464) so `--workers 2` doesn't double-charge / double-broadcast / double-scan. Platform creates bypass `_sync_agent`, and the exemption is **scoped by influence, not by caller location (#1677)**: a *platform-only* emitter (volume bound by platform cadence — edge-triggered, idempotent/bucketed id, leader-locked, or operator-driven: lease-reaper poison-park #1402, `validation_service._notify_operator_on_failure` — converted to a **direct DB create** in #1632 — and the internal breaker/skill/git alerts) stays direct and unthrottled, while an *agent-influenceable* one — `task_execution_service._alert_skill_not_found` (#1410), whose per-command dedup distinct unknown slash-commands defeat at $0/turn — routes through `operator_queue_service.create_bounded_alert`: a per-(agent, registered-type) pending-DEPTH budget (`OPERATOR_ALERT_MAX_PENDING_PER_TYPE`, default 5; type derived from `item["type"]` against the `_BUDGETED_ALERT_TYPES` frozenset; **fail-closed on every arm** — an unreadable count / unregistered type / failed create suppresses the ALERT only, the FAILED execution rows stay the primary surface, and the paired notification is gated on the same bool), with ONE cooldown-gated `alert-budget-{agent}-{type}-b{bucket}` episode alert per window (deterministic bucket ⇒ the `(agent_name, request_id)` on-conflict target dedups cross-worker; no `held` count, no agent-controlled text). The classification is CI-forced by the AST caller-parity guard `tests/unit/test_1677_operator_alert_emitters.py` (every `create_operator_queue_item` call site must be allowlisted platform-only or routed; OSS tree only — the private submodule owns its twin); a sink-level default bound was rejected because it fails QUIETLY at the load-bearing poison-park create where the parity test fails LOUDLY at CI (#1890's lesson deliberately inverted). A generous DB-sink belt in `create_item` (reject title>4 KiB / question>16 KiB / context>64 KiB / id>512; the derived `execution_id` COLUMN belted to None on non-str/>512, #1677) is a second layer so the exemption is never solely load-bearing (#1525 validate-at-boundary-AND-at-sink). A depth-held / rate-skipped / oversize-file episode emits **one** `queue-flood-{agent}-{utc_now_iso()}` alert (un-guessable id, priority `high`, in-memory cooldown, emit-failure-safe). The platform-emitter residual named on the pull-mode default-ON gate list (#1081 / `TARGET_ARCHITECTURE.md`) is closed by #1677; the remaining gate items are unchanged.
+
+### Respond → Resume Dispatch (ent#329)
+
+An operator's answer to a parked `operator_queue` item is written back to the
+agent's `~/.trinity/operator-queue.json` within ~5s, but it is only *processed*
+at the agent's next turn. An agent with a schedule picks it up on its next tick;
+an agent started by a one-shot webhook or chat task has no next tick, so an
+approved action silently never executes until somebody re-triggers it by hand
+(the limitation #1402 documented and told agents to work around in prose). This
+is the platform-side fix, and the prerequisite the Workspace ask surface is gated
+on (ent#364 AC #5).
+
+- **Opt-in, per agent** (`agent_ownership.operator_resume_enabled`, default 0,
+  read via `db/agent_settings/operator_resume.py`). A dispatch spends money, so
+  it is never unconditional — a respond-storm must not fan out executions. The
+  switch is on the AGENT and not on the item because a per-request `resume: true`
+  the agent sets itself would let the agent decide that answering costs the
+  answerer money, which is unacceptable once the answerer is an external
+  Workspace client. Every fail path (missing row, soft-deleted agent, NULL
+  column, unreadable flag) reads as OFF.
+- **One dispatch surface.** `services/operator_resume_service.py` calls
+  `task_execution_service.execute_task(triggered_by="operator_response")` — so
+  capacity admission, the dispatch breaker, cost accounting, activity rows and
+  the terminal appliers are the platform's existing ones. There is deliberately
+  no workspace- or queue-specific execution path.
+- **Hung off the CAS win.** `routers/operator_queue.py`'s respond endpoint
+  raises 409 when the item left `pending` under the caller; the dispatch call
+  sits after that raise, so an answer that was never recorded never spends
+  (the #1083 rule that side effects follow the CAS result).
+- **Idempotent** (Invariant #18): the key is `operator_resume:{item_id}:{sha256
+  of the answer}` in the agent scope, so a replayed or double respond dispatches
+  once.
+- **Never silent.** A dispatch failure is a FAILED execution row plus an
+  `operator_resume_dispatch` audit entry; the audit `details` carry the item id,
+  execution id and status but **never the answer text** (that row is broadly
+  readable and the answer is whatever a client typed).
+- **Trigger registration.** `operator_response` is in all three trigger sets —
+  `_VALID_TRIGGERS` (Executions filter), `_TRIGGER_BUCKETS` → its own
+  "Operator queue" analytics bucket (unmapped triggers silently become "Other"),
+  and `_AUTONOMOUS_TRIGGERS` (nobody reads a resume turn's reply, so an
+  unresolved slash command earns an alert). It is **stranded** for pull mode:
+  dispatched by a direct backend call, never by `POST /task`, so
+  `_derive_task_trigger` cannot emit it (#2048).
+
+The owner-facing toggle is in `components/ReliabilityPanel.vue`.
 
 ### Platform Audit Log (SEC-001)
 | Method | Path | Auth | Description |
@@ -1644,6 +1690,7 @@ CREATE TABLE agent_ownership (
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in
     mcp_exposed INTEGER DEFAULT 0,                 -- #846: dedicated chat_with_<slug> MCP tool opt-in
+    operator_resume_enabled INTEGER DEFAULT 0,     -- ent#329: an operator answer re-triggers the agent (owner opt-in; each answer costs a turn)
     a2a_exposed INTEGER DEFAULT 0,                 -- ent#157: A2A inbound-server exposure opt-in (default OFF)
     tts_voice_replies_enabled INTEGER DEFAULT 0,   -- epic #24/#25: outbound voice replies (shared agent-level)
     tts_voice_id TEXT,                             -- epic #24/#25: ElevenLabs voice id for spoken replies
