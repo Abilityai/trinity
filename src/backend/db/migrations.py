@@ -3446,6 +3446,86 @@ def _migrate_portal_chat_state(cursor, conn):
     conn.commit()
 
 
+def _migrate_shared_sessions_tables_to_oss(cursor, conn):
+    """Adopt the multi-agent room tables onto the OSS track (ent#443).
+
+    The `shared_sessions` module moved from the entitled enterprise seam into
+    OSS core, so its three tables move from `enterprise_schema_migrations` to
+    `schema_migrations`.
+
+    ADOPTION, NOT CREATION — the `_migrate_client_portal_tables_to_oss`
+    contract, for the same reason. On every existing entitled install these
+    tables already exist, created by the enterprise runner, and carry live room
+    transcripts; "no data migration, no lost rooms" is an acceptance criterion
+    of the move. Every statement is IF NOT EXISTS, so this is a NO-OP there and
+    does real work only on a fresh or community build.
+
+    The `enterprise_` table-name prefix is therefore load-bearing history, not a
+    licensing claim: renaming would be exactly the data migration this forbids.
+
+    The enterprise Alembic revision `0011_shared_sessions` stays in place on its
+    own line — deleting it would break that chain — and is likewise idempotent.
+
+    Mirrored by Alembic `0044_shared_sessions_oss` and the DDL in `db/schema.py`.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_rooms (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            topic TEXT,
+            created_by TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            stop_reason TEXT,
+            max_messages INTEGER NOT NULL DEFAULT 60,
+            max_cost_usd REAL,
+            expires_at TEXT,
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_room_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            identity TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            joined_at TEXT NOT NULL,
+            left_at TEXT,
+            last_read_seq INTEGER NOT NULL DEFAULT 0,
+            cached_session_id TEXT,
+            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(room_id, kind, identity)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_room_messages (
+            id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            sender_kind TEXT NOT NULL,
+            sender_identity TEXT,
+            kind TEXT NOT NULL DEFAULT 'message',
+            mentions TEXT,
+            content TEXT NOT NULL,
+            execution_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(room_id, seq)
+        )
+    """)
+    for index_sql in (
+        "CREATE INDEX IF NOT EXISTS idx_rooms_status ON enterprise_rooms(status)",
+        "CREATE INDEX IF NOT EXISTS idx_room_participants_room "
+        "ON enterprise_room_participants(room_id)",
+        "CREATE INDEX IF NOT EXISTS idx_room_participants_identity "
+        "ON enterprise_room_participants(kind, identity)",
+        "CREATE INDEX IF NOT EXISTS idx_room_messages_room_seq "
+        "ON enterprise_room_messages(room_id, seq)",
+    ):
+        cursor.execute(index_sql)
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3556,4 +3636,5 @@ MIGRATIONS = [
     ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
     ("portal_session_resume", _migrate_portal_session_resume),
     ("portal_chat_state", _migrate_portal_chat_state),
+    ("shared_sessions_tables_to_oss", _migrate_shared_sessions_tables_to_oss),
 ]

@@ -64,7 +64,7 @@ Yes. Trinity is licensed under the Apache License 2.0 — free for any use, comm
 
 ## Are some features only available in an enterprise edition?
 
-Trinity is open-core: the open-source platform in the public repository is complete and fully functional on its own. Customers with an enterprise agreement additionally get access to a private companion repository that mounts as an optional module and unlocks extra capabilities under a separate commercial license — for example shared multi-agent chat rooms, per-agent Slack bot identities, and opt-in fleet usage-sharing with benchmarks (described generically here; the specifics live in the private repo). You can check what your instance is running via `GET /api/version`, which reports `edition` (`oss` or `enterprise`) and the list of registered enterprise features — an empty list is normal for open-source installs. See [Enterprise Modules](../../ENTERPRISE.md).
+Trinity is open-core: the open-source platform in the public repository is complete and fully functional on its own. Customers with an enterprise agreement additionally get access to a private companion repository that mounts as an optional module and unlocks extra capabilities under a separate commercial license — for example per-agent Slack bot identities and opt-in fleet usage-sharing with benchmarks (described generically here; the specifics live in the private repo). You can check what your instance is running via `GET /api/version`, which reports `edition` (`oss` or `enterprise`) and the list of registered enterprise features — an empty list is normal for open-source installs. See [Enterprise Modules](../../ENTERPRISE.md).
 
 ## Where can I get help if I'm stuck?
 

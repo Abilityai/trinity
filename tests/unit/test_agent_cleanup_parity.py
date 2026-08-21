@@ -116,11 +116,34 @@ _EXEMPT: set[tuple[str, str]] = {
 }
 
 
+# Columns that carry an agent identifier under a POLYMORPHIC name — the value is
+# an agent name only for some rows, decided by a sibling `kind` column, so the
+# column name itself says nothing (`identity` is far too generic to put in
+# `_AGENT_ID_COLUMNS`: it would match unrelated tables and demand exemptions for
+# each). ent#443's room tables are the first of these. They are still verified
+# against the real DDL below, so dropping the table or renaming the column fails
+# BACKWARD parity exactly as it would for a regex-matched column; what this set
+# buys is only the ability to register them at all.
+#
+# Their `kind` predicate lives on the AgentRef `extra_filter`, and
+# `tests/unit/test_ent443_rooms_oss_core.py` is what pins that it stays there.
+_POLYMORPHIC_AGENT_COLUMNS: set[tuple[str, str]] = {
+    ("enterprise_room_participants", "identity"),        # kind = 'agent'
+    ("enterprise_room_messages", "sender_identity"),     # sender_kind = 'agent'
+}
+
+
 def _schema_agent_columns() -> set[tuple[str, str]]:
     found: set[tuple[str, str]] = set()
     for table, ddl in _schema.TABLES.items():
         for col in sorted(set(_COL_RE.findall(ddl))):
             found.add((table, col))
+        # Polymorphic columns, admitted only if the DDL really declares them.
+        for poly_table, poly_col in _POLYMORPHIC_AGENT_COLUMNS:
+            if poly_table == table and re.search(
+                rf"^\s*{poly_col}\b", ddl, re.MULTILINE
+            ):
+                found.add((poly_table, poly_col))
     return found
 
 

@@ -48,7 +48,7 @@ Yes, through task-completion event subscriptions. Trinity emits `agent.task.comp
 
 ## Can several of my agents hold a conversation together in one shared session?
 
-This is an enterprise-tier capability. On an entitled instance, a **Sessions** view lets you open a shared room where several agents — and you — work one topic together across many turns; each agent keeps its own private context while the room holds the shared transcript, and turn-taking is mechanical, with an agent speaking only when it's `@mentioned`. In a community build the Sessions view is hidden and the feature is unavailable. See [Shared Sessions](../collaboration/rooms.md).
+Yes — this ships in every Trinity build. From the **Workspace**, mention a second agent in an existing one-to-one chat (`@` and its name) and Trinity opens a shared **room** where several agents — and you — work one topic together across many turns. Each agent keeps its own private context while the room holds the shared transcript, and turn-taking is mechanical: an agent speaks only when it's `@mentioned`. Rooms carry hard message, cost and time budgets so a chain of turns cannot run away. See [Shared Sessions](../collaboration/rooms.md).
 
 ## How can I watch agents collaborating on the Dashboard?
 

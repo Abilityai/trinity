@@ -125,6 +125,8 @@ from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
 from client_portal.router import router as client_portal_router
+from shared_sessions.router import budget_router as room_budget_router
+from shared_sessions.router import router as rooms_router
 
 # Import activity service
 from services.activity_service import activity_service
@@ -1061,6 +1063,12 @@ app.include_router(loops_loop_router)  # Sequential agent loops (#740)
 app.include_router(webhooks_router)  # Webhook Triggers (WEBHOOK-001, #291)
 app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 app.include_router(client_portal_router)  # Workspace / client portal (ent#356, epic #78)
+# Multi-agent rooms — OSS core since ent#443 (engine ent#169). Two routers: the
+# membership-scoped room surface, and the admin-only operator budget defaults
+# (ent#387), which is deliberately NOT under /api/rooms — a `/budget-defaults`
+# path there would sit beside `/{room_id}` (Invariant #4).
+app.include_router(rooms_router)
+app.include_router(room_budget_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule

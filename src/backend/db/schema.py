@@ -584,6 +584,70 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Multi-agent rooms — OSS core (ent#169, moved out of the entitled seam by
+    # ent#443). "A room is a shared persistent RECORD, never a shared CONTEXT":
+    # each agent keeps its own isolated session and is handed only the
+    # transcript it has not seen (`last_read_seq`), so a room does not cost N x
+    # tokens and turn-taking stays mechanical — you are woken iff @mentioned.
+    #
+    # The `enterprise_` prefix is retained history, exactly as for the portal
+    # tables above: every entitled install already holds live transcripts under
+    # these names, and renaming them would be the data migration the move
+    # forbids. It is provenance, not a licensing claim — see
+    # `shared_sessions/__init__.py`.
+    # -------------------------------------------------------------------------
+    "enterprise_rooms": """
+        CREATE TABLE IF NOT EXISTS enterprise_rooms (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            topic TEXT,
+            created_by TEXT,
+            status TEXT NOT NULL DEFAULT 'open',      -- open | closed
+            stop_reason TEXT,                          -- user_closed|max_messages|max_cost|expired
+            max_messages INTEGER NOT NULL DEFAULT 60,
+            max_cost_usd REAL,                         -- NULL = uncapped
+            expires_at TEXT,                           -- ISO-Z; NULL = no TTL
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+        )
+    """,
+
+    "enterprise_room_participants": """
+        CREATE TABLE IF NOT EXISTS enterprise_room_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id TEXT NOT NULL,
+            kind TEXT NOT NULL,                        -- agent | user | workspace_user
+            identity TEXT NOT NULL,                    -- agent name, user id, or verified email
+            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator
+            joined_at TEXT NOT NULL,
+            left_at TEXT,
+            -- THE delta-injection cursor: the highest seq this participant has seen.
+            last_read_seq INTEGER NOT NULL DEFAULT 0,
+            -- Per-(agent, room) Claude session for --resume continuity, plus the
+            -- Session-tab cold-fallback counter.
+            cached_session_id TEXT,
+            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(room_id, kind, identity)
+        )
+    """,
+
+    "enterprise_room_messages": """
+        CREATE TABLE IF NOT EXISTS enterprise_room_messages (
+            id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,                      -- monotonic per room
+            sender_kind TEXT NOT NULL,                 -- agent | user | workspace_user | system
+            sender_identity TEXT,
+            kind TEXT NOT NULL DEFAULT 'message',      -- message | system
+            mentions TEXT,                             -- JSON array of agent names
+            content TEXT NOT NULL,
+            execution_id TEXT,                         -- schedule_executions.id (nullable)
+            created_at TEXT NOT NULL,
+            UNIQUE(room_id, seq)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Local product-event capture — activation funnel, Tier-1 (ent#184)
     # Local-only, default-on, zero egress. Wizard step transitions are emitted;
     # first-value events are derived on read from audit_log/agent_activities.
@@ -1742,6 +1806,16 @@ INDEXES = [
     # migration to a pre-existing table and this index had to wait for it.
     "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
     "ON enterprise_portal_messages(session_id, created_at)",
+    # Multi-agent rooms (ent#169, OSS since ent#443). Same rule as the portal
+    # indexes above: names unchanged from the enterprise runner that created
+    # them, so an install that already has rooms re-runs these as no-ops.
+    "CREATE INDEX IF NOT EXISTS idx_rooms_status ON enterprise_rooms(status)",
+    "CREATE INDEX IF NOT EXISTS idx_room_participants_room "
+    "ON enterprise_room_participants(room_id)",
+    "CREATE INDEX IF NOT EXISTS idx_room_participants_identity "
+    "ON enterprise_room_participants(kind, identity)",
+    "CREATE INDEX IF NOT EXISTS idx_room_messages_room_seq "
+    "ON enterprise_room_messages(room_id, seq)",
 ]
 
 
