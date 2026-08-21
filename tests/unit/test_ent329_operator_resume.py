@@ -207,9 +207,21 @@ def _install(monkeypatch, *, enabled=True, recorder=None, flag_raises=False, rep
             AuditEventType=SimpleNamespace(EXECUTION="execution"),
         ),
     )
+    # The stub mirrors the REAL module's API — `get_task_execution_service()`,
+    # not a `task_execution_service` singleton, which does not exist.
+    #
+    # It used to supply the singleton, and that is why this suite was green
+    # while the feature had never once fired: `monkeypatch.setitem(sys.modules,
+    # …)` replaces the module wholesale, so a stub that INVENTS an attribute
+    # makes the import under test resolve here and raise in production. The
+    # raise landed inside a `create_task`, i.e. an unretrieved task exception —
+    # no audit row, no FAILED execution, nothing to notice.
+    #
+    # `test_the_stub_mirrors_the_real_module` below is what keeps this honest:
+    # a stub is only evidence if the real module exports what it pretends to.
     _install_module(
         "services.task_execution_service",
-        SimpleNamespace(task_execution_service=recorder),
+        SimpleNamespace(get_task_execution_service=lambda: recorder),
     )
     return recorder, audit
 
@@ -380,3 +392,88 @@ def test_the_knob_is_owner_only():
     source = _read("routers/agents.py")
     block = source.split('@router.put("/{agent_name}/operator-resume")')[1][:400]
     assert "OwnedAgentByName" in block
+
+
+# ---------------------------------------------------------------------------
+# The guard for the class that hid this (ent#430)
+# ---------------------------------------------------------------------------
+
+def test_the_stub_mirrors_the_real_module():
+    """Every name `operator_resume_service` imports must exist for real.
+
+    This suite stubs `services.task_execution_service` wholesale via
+    `sys.modules`, so it can only prove the dispatch logic — never that the
+    symbols it reaches for are there. For eleven weeks they were not: the module
+    exports `get_task_execution_service()`, the service imported a
+    `task_execution_service` singleton, and the stub supplied one, so the tests
+    passed and respond→resume never fired for anybody.
+
+    Parsed from source and checked against the REAL module, with no stub in
+    scope — that combination is the whole point.
+    """
+    import ast
+    import importlib
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "backend"
+    tree = ast.parse((src / "services" / "operator_resume_service.py").read_text())
+
+    wanted: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            wanted.setdefault(node.module, set()).update(a.name for a in node.names)
+
+    missing = []
+    for module_name, names in sorted(wanted.items()):
+        if not module_name.startswith(("services.", "database", "db.")):
+            continue
+        module = importlib.import_module(module_name)
+        for name in sorted(names):
+            if not hasattr(module, name):
+                missing.append(f"{module_name}.{name}")
+
+    assert not missing, (
+        "operator_resume_service imports names that do not exist: "
+        + ", ".join(missing)
+        + " — a sys.modules stub will hide this, production will not."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dispatch_that_dies_early_is_not_silent():
+    """A task whose exception nobody retrieves is a feature failing quietly.
+
+    `maybe_dispatch_resume` guards what it expects to fail, but its imports run
+    before the first `try` — which is precisely where the ent#430 defect lived.
+    """
+    import asyncio
+    import logging
+
+    import services.operator_resume_service as mod
+
+    async def _boom(item, **kw):
+        raise RuntimeError("import blew up")
+
+    original = mod.maybe_dispatch_resume
+    mod.maybe_dispatch_resume = _boom
+    try:
+        records = []
+
+        class _Catch(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Catch()
+        mod.logger.addHandler(handler)
+        try:
+            mod.spawn_resume_dispatch({"id": "q1", "agent_name": "a"}, response="yes")
+            await asyncio.sleep(0)   # let the task run and its callbacks fire
+            await asyncio.sleep(0)
+        finally:
+            mod.logger.removeHandler(handler)
+
+        assert any(r.levelno >= logging.ERROR for r in records), (
+            "a dispatch that died before its own error handling logged nothing"
+        )
+    finally:
+        mod.maybe_dispatch_resume = original

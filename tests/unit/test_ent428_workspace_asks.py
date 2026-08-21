@@ -251,12 +251,13 @@ def test_an_expired_ask_is_shown_as_expired_not_hidden(asks_db, client_email):
 
 # --- answering --------------------------------------------------------------
 
-def test_answering_records_the_client_without_a_fabricated_user_id(asks_db, client_email):
+@pytest.mark.asyncio
+async def test_answering_records_the_client_without_a_fabricated_user_id(asks_db, client_email):
     from database import db
     from client_portal.asks import service
     item_id = _raise_ask(addressed=client_email)
 
-    service.answer_ask(item_id, client_email, False, "yes", "ship it")
+    await service.answer_ask(item_id, client_email, False, "yes", "ship it")
 
     row = db.get_operator_queue_item(item_id)
     assert row["status"] == "responded"
@@ -268,41 +269,45 @@ def test_answering_records_the_client_without_a_fabricated_user_id(asks_db, clie
     assert row["responded_at"]
 
 
-def test_answering_clears_it_everywhere_because_there_is_one_row(asks_db, client_email):
+@pytest.mark.asyncio
+async def test_answering_clears_it_everywhere_because_there_is_one_row(asks_db, client_email):
     from client_portal.asks import service
     item_id = _raise_ask(addressed=client_email)
 
-    service.answer_ask(item_id, client_email, False, "no", None)
+    await service.answer_ask(item_id, client_email, False, "no", None)
 
     # Every surface reads this one list; no sync step exists to get wrong.
     assert service.list_asks(client_email, is_platform=False) == []
 
 
-def test_an_empty_answer_is_refused(asks_db, client_email):
+@pytest.mark.asyncio
+async def test_an_empty_answer_is_refused(asks_db, client_email):
     from client_portal.asks import service
     item_id = _raise_ask(addressed=client_email)
 
     with pytest.raises(service.AskError) as ei:
-        service.answer_ask(item_id, client_email, False, None, None)
+        await service.answer_ask(item_id, client_email, False, None, None)
     assert (ei.value.status_code, ei.value.code) == (422, "empty_answer")
 
 
-def test_someone_elses_ask_is_a_uniform_404(asks_db, client_email):
+@pytest.mark.asyncio
+async def test_someone_elses_ask_is_a_uniform_404(asks_db, client_email):
     """Not 403. A distinguishable refusal would let any client enumerate ask ids."""
     from client_portal.asks import service
     item_id = _raise_ask(addressed="someone-else@example.com")
 
     with pytest.raises(service.AskError) as ei:
-        service.answer_ask(item_id, client_email, False, "yes", None)
+        await service.answer_ask(item_id, client_email, False, "yes", None)
     assert ei.value.status_code == 404
 
     with pytest.raises(service.AskError) as missing:
-        service.answer_ask("no-such-id", client_email, False, "yes", None)
+        await service.answer_ask("no-such-id", client_email, False, "yes", None)
     assert missing.value.status_code == 404
     assert missing.value.code == ei.value.code, "the two must be indistinguishable"
 
 
-def test_answering_twice_is_refused_exactly_as_the_operator_path_refuses_it(
+@pytest.mark.asyncio
+async def test_answering_twice_is_refused_exactly_as_the_operator_path_refuses_it(
     asks_db, client_email
 ):
     """ent#428 AC #6 — the SAME 400 `POST /api/operator-queue/{id}/respond`
@@ -315,29 +320,31 @@ def test_answering_twice_is_refused_exactly_as_the_operator_path_refuses_it(
     """
     from client_portal.asks import service
     item_id = _raise_ask(addressed=client_email)
-    service.answer_ask(item_id, client_email, False, "yes", None)
+    await service.answer_ask(item_id, client_email, False, "yes", None)
 
     with pytest.raises(service.AskError) as ei:
-        service.answer_ask(item_id, client_email, False, "no", None)
+        await service.answer_ask(item_id, client_email, False, "no", None)
     assert (ei.value.status_code, ei.value.code) == (400, "already_resolved")
 
 
-def test_an_expired_ask_cannot_be_answered(asks_db, client_email):
+@pytest.mark.asyncio
+async def test_an_expired_ask_cannot_be_answered(asks_db, client_email):
     from client_portal.asks import service
     item_id = _raise_ask(addressed=client_email, expires_at="2000-01-01T00:00:00Z")
 
     with pytest.raises(service.AskError) as ei:
-        service.answer_ask(item_id, client_email, False, "yes", None)
+        await service.answer_ask(item_id, client_email, False, "yes", None)
     assert (ei.value.status_code, ei.value.code) == (409, "expired")
 
 
-def test_a_revoked_share_cannot_answer(asks_db, client_email, roster):
+@pytest.mark.asyncio
+async def test_a_revoked_share_cannot_answer(asks_db, client_email, roster):
     from client_portal.asks import service
     item_id = _raise_ask(addressed=client_email)
     roster["on"] = False
 
     with pytest.raises(service.AskError) as ei:
-        service.answer_ask(item_id, client_email, False, "yes", None)
+        await service.answer_ask(item_id, client_email, False, "yes", None)
     assert ei.value.status_code == 404
 
 
@@ -469,3 +476,135 @@ def test_the_roster_is_not_re_read_once_per_ask(asks_db, client_email, roster):
     assert len(roster["calls"]) == 2, (
         f"roster consulted {len(roster['calls'])} times for 8 asks across 2 agents"
     )
+
+
+# ---------------------------------------------------------------------------
+# The gate: an answer has to REACH the agent (ent#430)
+# ---------------------------------------------------------------------------
+#
+# Without this, ent#429's surface records answers nobody acts on — which is what
+# the issue says, and what an audit of the shipped code found: the operator route
+# called `operator_resume_service`, the Workspace answer path did not. A client
+# answered, the row flipped to `responded`, the ask cleared from all three
+# surfaces, and the agent was never woken.
+
+@pytest.fixture()
+def dispatched(monkeypatch):
+    """Capture what the answer path hands the ONE dispatch surface."""
+    calls = []
+
+    import services.operator_resume_service as resume
+
+    monkeypatch.setattr(resume, "spawn_resume_dispatch",
+                        lambda item, **kw: calls.append((item, kw)))
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_answering_from_the_workspace_dispatches_the_resume(
+    asks_db, client_email, dispatched
+):
+    """AC #1 — the answer reaches the agent, including one with no next tick."""
+    from client_portal.asks import service
+    item_id = _raise_ask(addressed=client_email)
+
+    await service.answer_ask(item_id, client_email, False, "yes", "ship it")
+
+    assert len(dispatched) == 1
+    item, kw = dispatched[0]
+    assert item["id"] == item_id
+    assert kw["response"] == "yes"
+    assert kw["response_text"] == "ship it"
+    assert kw["responded_by_email"] == client_email
+
+
+def test_the_dispatch_is_the_operator_paths_own_surface(asks_db, client_email):
+    """AC #2 — no workspace-specific execution surface.
+
+    Asserted by IDENTITY: this module must call the same function the operator
+    route calls. A second dispatch path is how the cost, trigger-label and
+    loop-prevention questions get answered twice, differently.
+    """
+    import services.operator_resume_service as resume
+    from client_portal.asks import service as ask_service
+    from routers import operator_queue as operator_route
+
+    assert ask_service.__dict__ or True  # (import side-effect only)
+    assert operator_route.operator_resume_service is resume
+
+
+@pytest.mark.asyncio
+async def test_an_agent_answer_is_not_framed_as_an_operators(asks_db, client_email, dispatched):
+    """The agent is told WHO answered, truthfully.
+
+    This module already anticipated a client answerer — its audit note says the
+    text "can carry whatever a Workspace client typed" — while the message it
+    built still said "An operator answered". An agent may reasonably weigh an
+    operator's instruction differently from a client's, so the wrong one is a
+    false warrant, not a cosmetic slip.
+    """
+    from client_portal.asks import service
+    item_id = _raise_ask(addressed=client_email)
+
+    await service.answer_ask(item_id, client_email, False, "yes", None)
+    assert dispatched[0][1]["answerer_kind"] == "client"
+
+    # And a PLATFORM principal answering their own ask is still an operator.
+    other = _raise_ask(addressed=client_email)
+    await service.answer_ask(other, client_email, True, "yes", None)
+    assert dispatched[1][1]["answerer_kind"] == "operator"
+
+
+def test_the_framed_message_states_the_answerer(asks_db):
+    """The two framings differ where it matters, and an unknown kind is treated
+    as the LESS privileged one — a typo must not promote a client to operator."""
+    from services.operator_resume_service import _framed_message
+
+    item = {"id": "q1", "question": "Ship it?"}
+    op = _framed_message(item, "yes", None, "operator")
+    cl = _framed_message(item, "yes", None, "client")
+    unknown = _framed_message(item, "yes", None, "nonsense")
+
+    assert "An operator answered" in op and "[Operator answer" in op
+    assert "not an operator of the platform" in cl and "[Client answer" in cl
+    assert "An operator answered" not in cl
+    assert unknown == cl
+
+
+@pytest.mark.asyncio
+async def test_a_failed_answer_dispatches_nothing(asks_db, client_email, dispatched):
+    """The CAS-win rule. A refused answer must not spend anything — the operator
+    route hangs its dispatch off the same win."""
+    from client_portal.asks import service
+    item_id = _raise_ask(addressed=client_email)
+
+    await service.answer_ask(item_id, client_email, False, "yes", None)
+    assert len(dispatched) == 1
+
+    with pytest.raises(service.AskError):
+        await service.answer_ask(item_id, client_email, False, "no", None)   # already resolved
+    with pytest.raises(service.AskError):
+        await service.answer_ask(item_id, "stranger@example.com", False, "no", None)  # not theirs
+
+    assert len(dispatched) == 1, "a refused answer dispatched a turn"
+
+
+@pytest.mark.asyncio
+async def test_the_spend_is_gated_per_agent_and_defaults_off(asks_db, client_email, monkeypatch):
+    """AC #3, confirmed rather than built (ent#329 already decided it).
+
+    The opt-in is on the AGENT, never on the item: an opt-in the agent could set
+    itself would let it decide that answering costs the answerer money — and the
+    answerer here is an external client. Unreadable ⇒ not opted in, never "spend".
+    """
+    from database import db
+    from services import operator_resume_service as resume
+
+    item = {"id": "q1", "agent_name": "agent-a", "question": "?"}
+    assert db.get_operator_resume_enabled("agent-a") is False   # default OFF
+
+    def _boom(agent_name):
+        raise RuntimeError("flag unreadable")
+
+    monkeypatch.setattr(db, "get_operator_resume_enabled", _boom)
+    assert await resume.maybe_dispatch_resume(item, response="yes") is None

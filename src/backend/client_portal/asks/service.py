@@ -130,9 +130,18 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -
     return out
 
 
-def answer_ask(item_id: str, email: str, is_platform: bool,
-               response: Optional[str], response_text: Optional[str]) -> WorkspaceAsk:
-    """Answer one ask as the addressee. Raises `AskError` with a named code."""
+async def answer_ask(item_id: str, email: str, is_platform: bool,
+                     response: Optional[str], response_text: Optional[str]) -> WorkspaceAsk:
+    """Answer one ask as the addressee. Raises `AskError` with a named code.
+
+    Async for one reason (ent#430): the resume dispatch below is scheduled with
+    `asyncio.create_task`, which needs a RUNNING loop — and FastAPI runs a `def`
+    route in a threadpool where there is none, so a sync version raised
+    `RuntimeError: no running event loop` AFTER committing the answer, i.e. a 500
+    on a successful answer. The operator route this mirrors
+    (`routers/operator_queue.py::respond_to_queue_item`) is async for the same
+    reason, and does its sync DB work inline exactly like this one.
+    """
     if not (response or response_text):
         raise AskError(422, "empty_answer",
                        "An answer needs a choice or some text — an empty answer would "
@@ -180,6 +189,42 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     if not updated:
         # Lost a race with an operator answering the same row.
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
+
+    # ent#430 — respond → resume, through ent#329's ONE dispatch surface.
+    #
+    # Hung off the CAS *win* only: the 409 above already returned for a lost
+    # race, so reaching here means this caller's answer is the one that landed —
+    # the same rule `routers/operator_queue.py` follows, and the #1083 rule that
+    # side effects hang off the CAS result.
+    #
+    # Deliberately NOT awaited. `execute_task` runs a whole agent turn; awaiting
+    # it here would make a client's "yes" click block for the length of that
+    # turn. The execution row is created inside `execute_task`, so the work is
+    # visible in Executions the moment it is admitted — returning first does not
+    # make a failure invisible (AC #5).
+    #
+    # What a dispatch failure does NOT mean: that the answer was lost. It is
+    # already committed above, and the 5s sync loop writes it back to the agent's
+    # queue file either way — an agent with a standing schedule picks it up on
+    # its next tick regardless. This dispatch is the ACCELERATION for an agent
+    # with no next tick (the ent#1402 gap ent#329 closes). So the ask reading as
+    # resolved is correct even when the dispatch fails, and telling the client
+    # their answer failed would be the false statement here.
+    #
+    # The spend is gated per AGENT (`operator_resume_enabled`, default OFF) and
+    # never per answer — read `operator_resume_service`'s docstring before
+    # changing that: an opt-in the agent could set itself would let the agent
+    # decide that answering costs the answerer money, and here the answerer is
+    # an external client.
+    from services import operator_resume_service
+
+    operator_resume_service.spawn_resume_dispatch(
+        updated,
+        response=response or "",
+        response_text=response_text,
+        responded_by_email=email,
+        answerer_kind="operator" if is_platform else "client",
+    )
 
     logger.info(
         "[WorkspaceAsks] %s answered by %s (client=%s)",

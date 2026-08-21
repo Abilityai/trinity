@@ -49,7 +49,7 @@ def list_asks(
 
 
 @router.post("/{item_id}/answer", response_model=WorkspaceAsk)
-def answer_ask(
+async def answer_ask(
     item_id: str,
     body: WorkspaceAskAnswer,
     principal: PortalPrincipal = Depends(get_portal_principal),
@@ -60,7 +60,7 @@ def answer_ask(
     would let any client enumerate which ask ids exist.
     """
     try:
-        return service.answer_ask(
+        return await service.answer_ask(
             item_id, principal.email, principal.is_platform,
             body.response, body.response_text,
         )
