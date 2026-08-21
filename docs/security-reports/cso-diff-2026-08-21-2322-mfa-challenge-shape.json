@@ -1,0 +1,120 @@
+{
+  "version": "1.1",
+  "date": "2026-08-21",
+  "mode": "daily",
+  "scope": "--diff",
+  "target": {
+    "branch": "fix/2322-mfa-challenge-response-shape",
+    "pr": 2357,
+    "issue": "abilityai/trinity#2322",
+    "base": "76615f2691bc567adf91c352c1fc5eb3008f8e6c"
+  },
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    5,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_noop": {
+    "4": "no .github/workflows changes in diff",
+    "6": "no webhook/integration code in diff",
+    "7": "no LLM/agent-prompt path in diff",
+    "8": "no .claude/skills changes in diff"
+  },
+  "attack_surface": {
+    "public_endpoints_touched": 2,
+    "endpoints_added": 0,
+    "auth_dependencies_changed": 0,
+    "websocket_channels": 0,
+    "file_upload_points": 0,
+    "ci_workflows_changed": 0,
+    "docker_configs_changed": 0,
+    "dependencies_added": 0
+  },
+  "findings": [],
+  "supply_chain_summary": {
+    "manifests_in_diff": [],
+    "lockfile_modified": false,
+    "new_install_script_deps": 0,
+    "note": "npm ci run in worktree to execute the MCP suite; package.json and package-lock.json unmodified"
+  },
+  "checks_executed": [
+    {
+      "check": "enterprise-docs-guard PCRE run locally against branch",
+      "result": "pass",
+      "detail": "0 hits; PR changes docs/** so the guard runs in CI"
+    },
+    {
+      "check": "vendored-copy parity (Invariant #5)",
+      "result": "pass",
+      "detail": "test_credential_paths_parity + test_model_context_parity: 4 passed"
+    },
+    {
+      "check": "secrets archaeology on 76615f26..HEAD",
+      "result": "pass",
+      "detail": "no AKIA/sk-/ghp_/gho_/github_pat_/xox* or credential assignments"
+    },
+    {
+      "check": "generated OpenAPI clients / strict schema validators",
+      "result": "none found",
+      "detail": "no consumer distinguishes field-absent from field-null"
+    },
+    {
+      "check": "lockfile integrity",
+      "result": "pass",
+      "detail": "package-lock.json unmodified"
+    }
+  ],
+  "filter_stats": {
+    "candidates_considered": 5,
+    "excluded_hard_rules": 2,
+    "excluded_rules_applied": [
+      4,
+      5
+    ],
+    "below_confidence_gate": 0,
+    "reported": 0
+  },
+  "verification": {
+    "method": "in-context",
+    "subagent_used": false,
+    "reason": "operator standing instruction: no unrequested agent spawns; skill's documented fallback"
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "tentative": 0
+  },
+  "posture_delta": "net reduction in disclosure: every change removes a response field; no path emits more than before",
+  "residual_risk": [
+    {
+      "id": "R1",
+      "severity": "informational",
+      "title": "/token still answers HTTP 200 for a grant that issued no session",
+      "note": "RFC 6749 says a failed grant is an error response. Deliberate scope boundary on #2322, deferred to the issue owner. Contract/correctness rather than security: the response no longer carries a credential-shaped field to misread."
+    },
+    {
+      "id": "R2",
+      "severity": "informational",
+      "title": "role policy sweeps unattended machine credentials into a human-interactive second factor",
+      "note": "Availability property of the #5 design, not introduced here. Second question deferred to the issue owner."
+    }
+  ],
+  "trend": {
+    "prior_reports": 41,
+    "comparable_diff_audits": [
+      "cso-diff-2026-08-17-2258-workspace-signout",
+      "cso-diff-2026-08-16-2214-portal-turn-bound"
+    ],
+    "fingerprint_comparison": "not meaningful \u2014 scoped single-branch diff audit vs full-scan history"
+  }
+}
