@@ -1816,7 +1816,13 @@ def record_turn_outcome(session_id: str, execution_id: str, *,
             json.dumps({
                 "execution_id": execution_id,
                 "category": category if category in PORTAL_FAILURE_CATEGORIES else "internal",
-                "message": message,
+                # Same 500-char bound `_fail_unstarted_execution` puts on the row
+                # it writes beside this. Every producer today is a fixed string,
+                # so this changes nothing now — it is here so that a future raise
+                # site with a long or foreign-derived `detail` cannot put
+                # unbounded text into Redis and onto a client. The two writers
+                # bound the same content and should bound it the same way.
+                "message": (message or "")[:500],
                 "retryable": bool(retryable),
             }),
             ex=TURN_OUTCOME_TTL_SECONDS,
