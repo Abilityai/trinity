@@ -278,6 +278,10 @@ class OperatorQueueOperations:
         stores (`_validated_addressee`), so today every stored value is already
         lower — but `create_item` is a public writer and the read must not
         silently depend on every future caller remembering that.
+
+        `None` means "do not filter"; any other value — including `""` — filters,
+        and an empty one therefore matches nothing. See the comment at the
+        condition for why this one argument does not use truthiness like the rest.
         """
         if accessible_agent_names is not None and len(accessible_agent_names) == 0:
             return []
@@ -296,7 +300,13 @@ class OperatorQueueOperations:
             conds.append(operator_queue.c.priority == priority)
         if agent_name:
             conds.append(operator_queue.c.agent_name == agent_name)
-        if addressed_to_email:
+        if addressed_to_email is not None:
+            # `is not None`, deliberately NOT the truthiness the filters above
+            # use. For this argument's callers it IS the authorization boundary
+            # — "the asks addressed to this person" — so a falsy value has to
+            # match NOTHING rather than silently widening to everyone's. The
+            # other filters narrow a view the caller is already entitled to see;
+            # this one decides entitlement, which is why it diverges.
             conds.append(
                 func.lower(operator_queue.c.addressed_to_email)
                 == addressed_to_email.strip().lower()

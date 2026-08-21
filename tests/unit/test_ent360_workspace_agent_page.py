@@ -64,7 +64,12 @@ def test_recent_work_carries_no_message_cost_or_model(monkeypatch):
 def test_asks_exclude_platform_alerts(monkeypatch):
     """`alert` items are platform-generated ops telemetry — sync-failing,
     git-bloat, breaker dormancy — not something an agent is asking a person.
-    Surfacing them on a client's page is both noise and disclosure."""
+    Surfacing them on a client's page is both noise and disclosure.
+
+    The viewer's email is a required argument (ent#428): the addressee filter is
+    applied in SQL, and these two tests stub the query out, so it is the type
+    filter alone that is under test here.
+    """
     from client_portal import agent_page
 
     monkeypatch.setattr(agent_page.db, "list_operator_queue_items", lambda **k: [
@@ -73,7 +78,7 @@ def test_asks_exclude_platform_alerts(monkeypatch):
         {"id": "3", "type": "approval", "title": "Send it?", "question": "ok?"},
     ])
 
-    got = agent_page._asks(AGENT)
+    got = agent_page._asks(AGENT, EMAIL)
 
     assert [a["id"] for a in got] == ["2", "3"]
 
@@ -89,7 +94,7 @@ def test_asks_never_carry_context(monkeypatch):
         "context": {"api_key": "sk-live-should-never-appear"},
     }])
 
-    ask = agent_page._asks(AGENT)[0]
+    ask = agent_page._asks(AGENT, EMAIL)[0]
 
     assert "context" not in ask
     assert "sk-live" not in repr(ask)

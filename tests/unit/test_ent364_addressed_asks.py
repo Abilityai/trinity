@@ -229,3 +229,66 @@ def test_no_addressee_argument_leaves_the_operator_listing_alone(queue_db, roste
     got = db.list_operator_queue_items(status="pending")
 
     assert {i["id"] for i in got} == ids
+
+
+def test_an_empty_addressee_matches_nothing_rather_than_everyone(queue_db, roster):
+    """The falsy value fails CLOSED.
+
+    Every other filter on `list_items` uses truthiness, so an empty value means
+    "don't filter". This one decides who may see a row, so the same convention
+    would turn a caller that lost its email into a caller that sees everyone's
+    asks. `None` still means "no filter" — that is the operator listing.
+    """
+    from database import db
+
+    _seed(db, "scout", "req-mine", "client@example.com")
+    _seed(db, "scout", "req-operator")
+
+    assert db.list_operator_queue_items(status="pending", addressed_to_email="") == []
+    assert len(db.list_operator_queue_items(status="pending", addressed_to_email=None)) == 2
+
+
+# --- the reader that predated the column (ent#428) -----------------------------
+
+def test_the_agent_page_does_not_show_one_client_another_clients_ask(queue_db, roster):
+    """One agent, two clients, one ask addressed to the first.
+
+    `client_portal/agent_page.py` renders the client-facing "waiting on you"
+    block, and it was scoped by `agent_name` alone — so the second client read
+    the first's ask, `title` and `question` verbatim. `context` was already
+    withheld there as a known leak surface, but the agent-authored title and
+    question are exactly where an ask meant for someone else says something not
+    meant for this reader.
+    """
+    from client_portal import agent_page
+    from database import db
+    from services.operator_queue_service import _clamp_ingested_item
+
+    roster["members"] = {("scout", "alice@example.com"), ("scout", "bob@example.com")}
+    # The row id is platform-minted (#1631); the agent's own string is
+    # `request_id`, so keep what create returns rather than assuming either.
+    item_id = db.create_operator_queue_item("scout", _clamp_ingested_item({
+        "id": "req-for-alice", "type": "approval",
+        "title": "Invoice Acme at the agreed discount?",
+        "question": "Alice, confirm the Q3 discount before I send it.",
+        "options": ["yes", "no"],
+        "addressed_to_email": "alice@example.com",
+    }, "scout"))
+
+    assert [a["id"] for a in agent_page._asks("scout", "alice@example.com")] == [item_id]
+    assert agent_page._asks("scout", "bob@example.com") == []
+
+
+def test_the_agent_page_does_not_show_a_client_an_operator_ask(queue_db, roster):
+    """The narrowing is intended, not a side effect.
+
+    An unaddressed ask is agent-authored text written FOR THE OPERATOR, and a
+    client cannot act on it from this page anyway — the only affordance is
+    "reply in chat". Operators keep the full queue in Operations.
+    """
+    from client_portal import agent_page
+    from database import db
+
+    _seed(db, "scout", "req-operator")
+
+    assert agent_page._asks("scout", "client@example.com") == []

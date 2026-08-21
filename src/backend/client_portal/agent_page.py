@@ -135,16 +135,33 @@ def _stats(agent_name: str, window: str) -> dict:
     }
 
 
-def _asks(agent_name: str) -> list[dict]:
-    """What this agent is waiting on a person for.
+def _asks(agent_name: str, viewer_email: str) -> list[dict]:
+    """What this agent is waiting on THIS VIEWER for.
 
     Read-only here. Answering an approval writes to the operator queue, which is
     an operator surface with its own auth; the page offers "reply in chat"
     instead, so neither audience lands on a control that does nothing.
+
+    `viewer_email` is not decoration (ent#428). One agent is routinely shared
+    with several clients, and this block used to be scoped by `agent_name`
+    alone — so every co-shared client read every other client's pending ask,
+    title and question verbatim. `context` was already withheld here as a known
+    leak surface, but `title`/`question`/`options` are agent-authored free text
+    and are exactly where an ask addressed to someone else says something not
+    meant for this reader. `addressed_to_email` exists to decide *whose* surface
+    an ask appears on (ent#364); this reader predates it and was never taught.
+
+    Unaddressed operator asks (`addressed_to_email IS NULL`) are excluded by the
+    same condition, and that is the intended narrowing rather than a side
+    effect: this is a client-facing page, an operator ask is agent-authored text
+    written for the operator, and a client cannot act on one from here anyway.
+    Operators keep the full queue in Operations, and this matches what the
+    Workspace's other ask surfaces already show the same person.
     """
     try:
         items = db.list_operator_queue_items(
-            status="pending", agent_name=agent_name, limit=MAX_ASKS,
+            status="pending", agent_name=agent_name,
+            addressed_to_email=viewer_email, limit=MAX_ASKS,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: operator queue read failed for %s: %s", agent_name, e)
@@ -298,7 +315,7 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
         # unified exposable-skills config this becomes a view of when it lands.
         "capabilities": card.get("playbooks") or [],
         "stats": _stats(agent_name, window),
-        "asks": _asks(agent_name),
+        "asks": _asks(agent_name, email),
         "recent_work": _recent_work(agent_name),
     }
 
