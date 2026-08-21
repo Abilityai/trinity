@@ -177,6 +177,16 @@ Model selection is **not** a task field: per-call `model` is demoted to a
 session/schedule attribute (map #2, MODEL-001). `async_mode` disappears —
 everything is async; sync is the `?wait=true` edge adapter (map #4).
 
+> **Pilot reality (#2317).** The table above is the TARGET shape. Until the
+> demotion PRs land, the producer of a queued row (`backlog_service.enqueue`)
+> still records a per-task `model` and `timeout_seconds`, the push path enforces
+> both, and the pull worker reads both off `task_overrides` — so the claim
+> envelope built by `pull_coordination_service._build_claim_response` carries
+> `model` and `timeout_seconds` alongside the three fields above. They leave the
+> payload when the demotion that removes them from `ParallelTaskRequest` lands,
+> not before; dropping them from the wire earlier is a silent correctness
+> regression on the pull path (that was #2317).
+
 ### 2.3 `kind: event`
 
 Agent event pub/sub (EVT-001). Emitted once by a source agent; the projector

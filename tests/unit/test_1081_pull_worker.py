@@ -376,3 +376,99 @@ class TestDeliverResult:
         ))
         assert ok is True
         assert max(sleeps) >= 7  # Retry-After floor respected
+
+
+# ===========================================================================
+# #2317 — the claimed row's own per-task settings reach the runtime
+# ===========================================================================
+class TestTaskOverridesReachTheRuntime:
+    """The backend records a concrete per-task `model` / `allowed_tools` /
+    `max_turns` / `timeout_seconds` on every queued row and the PUSH path
+    enforces them. Before #2317 the claim envelope carried none of it (it read a
+    `task_overrides` key no producer writes), so this pool silently ran every
+    pulled turn on agent/global defaults — including `TRINITY_PULL_TURN_TIMEOUT`
+    in place of the row's own turn budget."""
+
+    @staticmethod
+    def _stub_runtime(monkeypatch, runtime):
+        stub = types.ModuleType("agent_server.services.runtime_adapter")
+        stub.get_runtime = lambda: runtime
+        monkeypatch.setitem(sys.modules, "agent_server.services.runtime_adapter", stub)
+
+    def test_resolve_turn_timeout_prefers_the_rows_budget(self, monkeypatch):
+        monkeypatch.setenv("TRINITY_PULL_TURN_TIMEOUT", "900")
+        assert pw._resolve_turn_timeout({"timeout_seconds": 60}) == 60
+        assert pw._resolve_turn_timeout({"timeout_seconds": "120"}) == 120
+
+    def test_resolve_turn_timeout_falls_back_when_absent_or_junk(self, monkeypatch):
+        monkeypatch.setenv("TRINITY_PULL_TURN_TIMEOUT", "900")
+        assert pw._resolve_turn_timeout({}) == 900                        # absent
+        assert pw._resolve_turn_timeout({"timeout_seconds": None}) == 900  # null
+        assert pw._resolve_turn_timeout({"timeout_seconds": "soon"}) == 900
+        assert pw._resolve_turn_timeout({"timeout_seconds": 0}) == 900     # non-positive
+        assert pw._resolve_turn_timeout({"timeout_seconds": -5}) == 900
+
+    def test_every_override_is_forwarded_to_execute_headless(self, monkeypatch):
+        monkeypatch.setenv("TRINITY_PULL_TURN_TIMEOUT", "900")
+        md = SimpleNamespace(model_dump=lambda: {"cost_usd": 0.0})
+        runtime = SimpleNamespace(
+            execute_headless=AsyncMock(return_value=("done", [], md, "sess-1"))
+        )
+        self._stub_runtime(monkeypatch, runtime)
+
+        client = _FakeClient(post_responses=[_FakeResp(200, {"applied": True})])
+        claim = {
+            "execution_id": "exec-2317",
+            "claim_token": "tok",
+            "envelope": {"payload": {
+                "message": "run recon",
+                "session_id": "claude-sess-7",
+                "task_overrides": {
+                    "model": "opus",
+                    "allowed_tools": ["mcp__trinity__report"],
+                    "system_prompt": "PLATFORM::CALLER",
+                    "max_turns": 7,
+                    "timeout_seconds": 60,
+                },
+            }},
+        }
+        asyncio.run(pw._run_and_report(claim, client, "http://b", "s", "alpha"))
+
+        kwargs = runtime.execute_headless.call_args.kwargs
+        assert kwargs["model"] == "opus"
+        assert kwargs["allowed_tools"] == ["mcp__trinity__report"]
+        assert kwargs["system_prompt"] == "PLATFORM::CALLER"
+        assert kwargs["max_turns"] == 7
+        assert kwargs["timeout_seconds"] == 60          # the ROW's budget, not 900
+        assert kwargs["resume_session_id"] == "claude-sess-7"
+        assert kwargs["persist_session"] is True
+
+    def test_short_row_timeout_does_not_shrink_the_delivery_window(self, monkeypatch):
+        """A 60s turn budget must not cut the result-POST retry window down to
+        60s+buffer — the backend lease derives from the agent's
+        execution_timeout, not the row's, so the reaper would re-run a turn whose
+        terminal was still being retried."""
+        monkeypatch.setenv("TRINITY_PULL_TURN_TIMEOUT", "900")
+        md = SimpleNamespace(model_dump=lambda: {})
+        runtime = SimpleNamespace(
+            execute_headless=AsyncMock(return_value=("done", [], md, None))
+        )
+        self._stub_runtime(monkeypatch, runtime)
+
+        seen = {}
+
+        async def _capture_deadline(client, execution_id, body, url, key, deadline):
+            seen["deadline"] = deadline
+            return True
+
+        monkeypatch.setattr(pw, "_deliver_result", _capture_deadline)
+        claim = {
+            "execution_id": "exec-2317", "claim_token": "tok",
+            "envelope": {"payload": {
+                "message": "m", "task_overrides": {"timeout_seconds": 60},
+            }},
+        }
+        before = time.monotonic()
+        asyncio.run(pw._run_and_report(claim, _FakeClient(), "http://b", "s", "alpha"))
+        # 900 (pool budget) + 300 (slot-TTL buffer), NOT 60 + 300.
+        assert seen["deadline"] - before >= 900 + pw._SLOT_TTL_BUFFER_SECONDS - 5

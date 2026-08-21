@@ -2394,6 +2394,19 @@
       "description": "Dev deploy must not ship OSS-only silently (#2246). Behavioural half: runs scripts/ci/classify-submodule-failure.sh over the verbatim output of the real failure and asserts CLASS: host-key \u2014 plus, crucially, that the host-key remedy does NOT mention read access / deploy keys / org membership, which is what the old unconditional diagnostic said while the clone was dying one layer earlier at SSH host-key verification (follow that hint and you install a deploy key and get the identical warning). Also pins that a genuine credential failure still says access, that a DNS failure is neither \u2014 host-key output also contains 'Could not read from remote repository', so ordering is load-bearing \u2014 that silence is its own class (an `update = none` submodule is SKIPPED and exits 0, #1443), and that an unrecognised shape is admitted rather than guessed. Static half over deploy-dev.yml: the not-mounted branch EXISTS (the #2068 ::error:: assertions sit inside `if [ -f \u2026/enterprise/backend/__init__.py ]`, so they structurally cannot fire on the state the VM was actually in), it fails the run rather than warning (direction, not presence \u2014 a ::warning:: is exactly how this hid across 200 consecutive runs), the escape hatch is an opt-in repo variable, the clone output is captured and classified, the optional PAT transport uses `git -c \u2026 insteadOf` so no token persists to the VM's .git/config, and the submodule step contains no `exit 1` \u2014 failing there would leave the VM half-updated after the pull."
     },
     {
+      "file": "unit/test_2317_pull_envelope_parity.py",
+      "feature": "#2317",
+      "added": "2026-08-19",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "regression",
+        "guard"
+      ],
+      "description": "Pull claim envelope <-> push drain parity on backlog_metadata (#2317). The envelope read a nested `task_overrides` key no producer writes, so every pull-claimed turn dropped the row's model / allowed_tools / max_turns / timeout_seconds, and `session_id` was read from a key the producer never writes (it records `resume_session_id`). Every test runs off ONE fixture built by the REAL producer (`BacklogService.enqueue`): exhaustive classification of the keys enqueue writes into runtime-facing vs backend-only (a new key reds the suite until classified); both consumers resolve the same keys to the same values, and to the producer's own recorded values; #1629/#1633 system-prompt composition preserved (caller_prompt threaded from the flat key, ent#243 model tier); session_id sourced from resume_session_id and never from the chat_session_id row id; nested task_overrides still overlays for forward-compat; absent settings omitted, not nulled. No live backend, no DB harness."
+    },
+    {
       "file": "unit/test_471_subscription_usage_observability.py",
       "feature": "#471",
       "added": "2026-08-19",
