@@ -172,3 +172,41 @@ audits: `cso-diff-2026-08-17-2258-workspace-signout`,
    complete a TOTP challenge and including accounts that have not enrolled. That
    is an availability property of the #5 design, not a defect introduced here,
    and it is the second question deferred to the issue owner.
+
+---
+
+## Addendum — 2026-08-21, after R1 was implemented
+
+**R1 is closed.** It is left in the Residual Risk section above as the
+point-in-time record of what the audit found; this addendum is the correction
+rather than a rewrite of the finding.
+
+`/token` no longer answers HTTP 200 for a grant that issued no session. It
+answers **403** with `{"detail": "mfa_required", …challenge}` — the issue's own
+Suggested Fix. Three outcomes now carry three status codes (200 grant / 403
+second-factor-pending / 401 rejected).
+
+Two security-relevant properties of that change, both newly pinned by tests:
+
+1. **A rejected password still returns 401 and carries no challenge.** The two
+   failure modes stay distinguishable; collapsing them would hand a challenge
+   token to a caller who never proved the first factor
+   (`test_wrong_password_is_still_401_and_carries_no_challenge`).
+2. **403 was chosen over 401 partly for security-adjacent reasons.** A 401
+   drives the frontend's global axios interceptor into `authStore.logout()` +
+   redirect, and the CLI's `_handle_response` into a hard exit telling the user
+   to re-login — both wrong for a login still in flight, and both would have
+   made the refusal *less* legible, which is the whole defect class #2322 is
+   about (`test_the_403_is_not_a_401`).
+
+Posture is unchanged from the audit's conclusion: still a net reduction in
+disclosure. The challenge response lost two fields and gained `detail`, which
+carries no secret.
+
+**R2 remains open and is NOT a defect** — see the residual note above. Trinity
+has no service-account principal, so "exempt machine credentials from the 2FA
+policy" is a new capability rather than a fix, and any such exemption is a
+second-factor bypass by construction. The supported answer today is that
+automation should use an MCP API key (`trinity_mcp_*`), which is not subject to
+the second-factor flow; the user-facing docs updated in this PR now say so
+explicitly.
