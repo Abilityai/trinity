@@ -84,9 +84,30 @@
             />
           </div>
 
-          <!-- Agent list -->
-          <div v-if="loading.agents" class="loading-state">Loading agents...</div>
-          <div v-else-if="filteredAgents.length === 0" class="empty-state">No agents found</div>
+          <!-- Agent list. #1927: the 15s poll swaps values in place; the
+               "Loading…" copy shows only before the first data, a failed first
+               fetch is the failed state (never "No agents found"), and a failed
+               refresh with data on screen is the SIBLING stale banner. -->
+          <InlineError
+            v-if="agentsView.stale"
+            class="mb-3"
+            :message="staleBannerMessage('agents', lastLoadedAt.agents)"
+            :detail="fetchError.agents"
+            retryable
+            @retry="fetchAgents"
+            @dismiss="fetchError.agents = ''"
+          />
+          <div v-if="agentsView.state === 'loading'" class="loading-state">Loading agents...</div>
+          <LoadFailed
+            v-else-if="agentsView.state === 'failed'"
+            dense
+            title="Couldn't load agents"
+            message="The agent list didn't load. Try again or pull down to refresh."
+            :detail="fetchError.agents"
+            :retrying="loading.agents"
+            @retry="fetchAgents"
+          />
+          <div v-else-if="agentsView.state === 'empty'" class="empty-state">No agents found</div>
           <div v-else class="agent-list">
             <div
               v-for="agent in filteredAgents"
@@ -186,8 +207,26 @@
 
           <!-- Queue items -->
           <div v-if="activeOpsTab === 'queue'" class="ops-section">
-            <div v-if="loading.queue" class="loading-state">Loading queue...</div>
-            <div v-else-if="queueItems.length === 0" class="empty-state">No pending items</div>
+            <InlineError
+              v-if="queueView.stale"
+              class="mb-3"
+              :message="staleBannerMessage('the queue', lastLoadedAt.queue)"
+              :detail="fetchError.queue"
+              retryable
+              @retry="fetchQueue"
+              @dismiss="fetchError.queue = ''"
+            />
+            <div v-if="queueView.state === 'loading'" class="loading-state">Loading queue...</div>
+            <LoadFailed
+              v-else-if="queueView.state === 'failed'"
+              dense
+              title="Couldn't load the queue"
+              message="We can't tell whether your agents need you. Try again."
+              :detail="fetchError.queue"
+              :retrying="loading.queue"
+              @retry="fetchQueue"
+            />
+            <div v-else-if="queueView.state === 'empty'" class="empty-state">No pending items</div>
             <div v-else class="ops-list">
               <div v-for="item in queueItems" :key="item.id" class="ops-card">
                 <div class="ops-card-header">
@@ -229,8 +268,26 @@
 
           <!-- Notifications -->
           <div v-if="activeOpsTab === 'notifications'" class="ops-section">
-            <div v-if="loading.notifications" class="loading-state">Loading...</div>
-            <div v-else-if="notifications.length === 0" class="empty-state">No notifications</div>
+            <InlineError
+              v-if="notificationsView.stale"
+              class="mb-3"
+              :message="staleBannerMessage('notifications', lastLoadedAt.notifications)"
+              :detail="fetchError.notifications"
+              retryable
+              @retry="fetchNotifications"
+              @dismiss="fetchError.notifications = ''"
+            />
+            <div v-if="notificationsView.state === 'loading'" class="loading-state">Loading...</div>
+            <LoadFailed
+              v-else-if="notificationsView.state === 'failed'"
+              dense
+              title="Couldn't load notifications"
+              message="The notification list didn't load. Try again."
+              :detail="fetchError.notifications"
+              :retrying="loading.notifications"
+              @retry="fetchNotifications"
+            />
+            <div v-else-if="notificationsView.state === 'empty'" class="empty-state">No notifications</div>
             <div v-else class="ops-list">
               <div v-for="notif in notifications" :key="notif.id" class="ops-card">
                 <div class="ops-card-header">
@@ -259,7 +316,25 @@
           <!-- Fleet Health Summary -->
           <div class="system-section">
             <h2 class="section-title">Fleet Health</h2>
-            <div v-if="loading.fleet" class="loading-state">Loading...</div>
+            <InlineError
+              v-if="fleetView.stale"
+              class="mb-3"
+              :message="staleBannerMessage('fleet health', lastLoadedAt.fleet)"
+              :detail="fetchError.fleet"
+              retryable
+              @retry="fetchFleetHealth"
+              @dismiss="fetchError.fleet = ''"
+            />
+            <div v-if="fleetView.state === 'loading'" class="loading-state">Loading...</div>
+            <LoadFailed
+              v-else-if="fleetView.state === 'failed'"
+              dense
+              title="Couldn't load fleet health"
+              message="The fleet summary didn't load. Try again."
+              :detail="fetchError.fleet"
+              :retrying="loading.fleet"
+              @retry="fetchFleetHealth"
+            />
             <div v-else class="health-grid">
               <div class="health-card">
                 <div class="health-value text-white">{{ fleetSummary.total }}</div>
@@ -454,6 +529,9 @@ import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import { apiErrorMessage } from '../utils/apiError'
+import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
+import LoadFailed from '../components/LoadFailed.vue'
+import InlineError from '../components/InlineError.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -510,18 +588,41 @@ const actionResult = ref(null)
 const actionError = ref('')
 const actionErrorDetail = ref('')
 
-// Loading states
+// Loading states — `loading.*` stays "a fetch is in flight" (drives Retry
+// labels). #1927: what the templates GATE on is "no data yet" — `hasLoaded.*`
+// flips on the first SUCCEEDED fetch of each dataset, so the 15s poll swaps
+// values in place instead of re-flashing "Loading…" every cycle (design-system
+// p13/p14). `fetchError.*` with data on screen is the stale banner; with none it
+// is the failed state — never the empty copy (p15).
 const loading = reactive({
   agents: false,
   queue: false,
   notifications: false,
   fleet: false
 })
+const hasLoaded = reactive({ agents: false, queue: false, notifications: false, fleet: false })
+const fetchError = reactive({ agents: '', queue: '', notifications: '', fleet: '' })
+const lastLoadedAt = reactive({ agents: null, queue: null, notifications: null, fleet: null })
 
 // Polling
 let pollInterval = null
 
 // ─── Computed ────────────────────────────────────────────────────────────────
+
+// #1927: one rule (utils/loadingState.js) decides loading / failed / empty /
+// ready + stale per dataset; the templates read these, never the raw flags.
+const agentsView = computed(() => viewState({
+  loading: loading.agents, hasLoaded: hasLoaded.agents, error: fetchError.agents, count: filteredAgents.value.length,
+}))
+const queueView = computed(() => viewState({
+  loading: loading.queue, hasLoaded: hasLoaded.queue, error: fetchError.queue, count: queueItems.value.length,
+}))
+const notificationsView = computed(() => viewState({
+  loading: loading.notifications, hasLoaded: hasLoaded.notifications, error: fetchError.notifications, count: notifications.value.length,
+}))
+const fleetView = computed(() => viewState({
+  loading: loading.fleet, hasLoaded: hasLoaded.fleet, error: fetchError.fleet,
+}))
 
 const filteredAgents = computed(() => {
   let list = agents.value.filter(a => !a.is_system)
@@ -576,26 +677,46 @@ function handleLogout() {
 async function fetchAgents() {
   loading.agents = true
   try {
-    const [fleetRes, autonomyRes, statsRes] = await Promise.all([
+    // #1927: fleet + autonomy are REQUIRED (autonomy feeds the rendered toggle);
+    // execution stats are decorative, so a failing stats call must not fail the
+    // tab. `allSettled` instead of `all` for exactly that split.
+    const [fleetRes, autonomyRes, statsRes] = await Promise.allSettled([
       axios.get('/api/ops/fleet/status'),
       axios.get('/api/agents/autonomy-status'),
       axios.get('/api/agents/execution-stats', { params: { include_7d: true } })
     ])
-    const autonomyMap = autonomyRes.data || {}
-    const agentList = (fleetRes.data.agents || []).map(a => ({
+    if (fleetRes.status !== 'fulfilled') throw fleetRes.reason
+    if (autonomyRes.status !== 'fulfilled') throw autonomyRes.reason
+    const autonomyMap = autonomyRes.value.data || {}
+    const agentList = (fleetRes.value.data.agents || []).map(a => ({
       ...a,
       autonomy_enabled: autonomyMap[a.name]?.autonomy_enabled || false
     }))
     agents.value = agentList
-    fleetSummary.value = fleetRes.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
-    // Build execution stats map
-    const statsMap = {}
-    for (const stat of (statsRes.data || [])) {
-      statsMap[stat.name] = stat
+    fleetSummary.value = fleetRes.value.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
+    // Both datasets this response writes are now loaded (the System tab's fleet
+    // summary has two writers — every writer marks it, or its first poll strobes).
+    hasLoaded.agents = true
+    hasLoaded.fleet = true
+    lastLoadedAt.agents = Date.now()
+    lastLoadedAt.fleet = lastLoadedAt.agents
+    fetchError.agents = ''
+    if (statsRes.status === 'fulfilled') {
+      // The endpoint returns {agents:[…]} — this loop used to iterate the object
+      // itself and throw on every poll (after the list was already written).
+      const statsMap = {}
+      for (const stat of listFrom(statsRes.value.data, 'agents')) {
+        statsMap[stat.name] = stat
+      }
+      executionStats.value = statsMap
+    } else {
+      console.error('Failed to fetch execution stats:', statsRes.reason)
     }
-    executionStats.value = statsMap
   } catch (e) {
     console.error('Failed to fetch agents:', e)
+    // Data already on screen stays; the template renders failed (no data) or the
+    // stale banner (data) from this field.
+    fetchError.agents = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.agents = false
   }
@@ -605,9 +726,15 @@ async function fetchQueue() {
   loading.queue = true
   try {
     const res = await axios.get('/api/operator-queue', { params: { limit: 100 } })
-    queueItems.value = (res.data || []).filter(i => i.status === 'pending')
+    // The endpoint returns {items, count}; `(res.data || []).filter` on that
+    // object threw on every poll, so this tab always read "No pending items".
+    queueItems.value = listFrom(res.data, 'items').filter(i => i.status === 'pending')
+    hasLoaded.queue = true
+    lastLoadedAt.queue = Date.now()
+    fetchError.queue = ''
   } catch (e) {
     console.error('Failed to fetch queue:', e)
+    fetchError.queue = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.queue = false
   }
@@ -617,9 +744,13 @@ async function fetchNotifications() {
   loading.notifications = true
   try {
     const res = await axios.get('/api/notifications', { params: { status: 'pending', limit: 100 } })
-    notifications.value = res.data.notifications || []
+    notifications.value = listFrom(res.data, 'notifications')
+    hasLoaded.notifications = true
+    lastLoadedAt.notifications = Date.now()
+    fetchError.notifications = ''
   } catch (e) {
     console.error('Failed to fetch notifications:', e)
+    fetchError.notifications = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.notifications = false
   }
@@ -630,8 +761,12 @@ async function fetchFleetHealth() {
   try {
     const res = await axios.get('/api/ops/fleet/status')
     fleetSummary.value = res.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
+    hasLoaded.fleet = true
+    lastLoadedAt.fleet = Date.now()
+    fetchError.fleet = ''
   } catch (e) {
     console.error('Failed to fetch fleet health:', e)
+    fetchError.fleet = apiErrorMessage(e, 'Request failed')
   } finally {
     loading.fleet = false
   }

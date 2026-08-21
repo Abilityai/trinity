@@ -6,11 +6,12 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import axios from 'axios'
 import api from '../api'
 import { useAuthStore } from './auth'
 import { apiErrorMessage } from '../utils/apiError'
+import { decideAutoExpand } from '../utils/loadingState'
 
 // Agent display helpers
 const AGENT_COLORS = [
@@ -33,6 +34,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // State
   const items = ref([])
   const expandedItemId = ref(null)
+  // #1927: the landing rule's arming bit. True until a human toggles any card
+  // (they have taken control of expansion — principle 5), re-armed whenever the
+  // open set drains to zero so the next 0→N arrival lands expanded again.
+  const autoExpandArmed = ref(true)
   const loading = ref(false)
   const error = ref(null)
   // #1926: "the list is empty" is only true once a fetch has SUCCEEDED and
@@ -177,7 +182,33 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
 
   function toggleExpand(id) {
     expandedItemId.value = expandedItemId.value === id ? null : id
+    // A human chose — no poll, WS delta or remount may override it (#1927).
+    autoExpandArmed.value = false
   }
+
+  // #1927: auto-expand the first open item ONCE per armed episode. Lives beside
+  // the expansion state it governs (design-system p21), not in the view — the
+  // store is a singleton fed by WS events and earlier visits, so a view-local
+  // "once per mount" either misses a warm store or re-expands over a remembered
+  // collapse. `decideAutoExpand` checks MEMBERSHIP of expandedItemId in the open
+  // set, so an id that was answered while the operator was away never blocks
+  // the rule forever. `respondToItem`'s auto-advance is a separate, unchanged rule.
+  function maybeAutoExpand() {
+    const id = decideAutoExpand({
+      armed: autoExpandArmed.value,
+      openIds: openItems.value.map(i => i.id),
+      expandedId: expandedItemId.value,
+    })
+    if (id == null) return false
+    expandedItemId.value = id
+    autoExpandArmed.value = false
+    return true
+  }
+
+  // Re-arm when the queue drains, whatever drained it (poll, respond, WS, clear).
+  watch(() => openItems.value.length, (len) => {
+    if (len === 0) autoExpandArmed.value = true
+  })
 
   // WebSocket event handler
   function handleWebSocketEvent(data) {
@@ -222,6 +253,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   return {
     items,
     expandedItemId,
+    autoExpandArmed,
     loading,
     error,
     hasLoaded,
@@ -234,6 +266,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     getProfile,
     fetchItems,
     toggleExpand,
+    maybeAutoExpand,
     respondToItem,
     acknowledgeItem,
     bulkCancel,

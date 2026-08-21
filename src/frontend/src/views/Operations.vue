@@ -429,10 +429,16 @@ onUnmounted(() => {
   operatorQueueStore.stopPolling()
 })
 
-// Auto-expand first item when items arrive
-watch(() => operatorQueueStore.openItems.length, (len) => {
-  if (len > 0 && !operatorQueueStore.expandedItemId) {
-    operatorQueueStore.toggleExpand(operatorQueueStore.openItems[0].id)
-  }
-})
+// #1927: auto-expand is a STORE rule (`maybeAutoExpand` — once per armed
+// episode, disarmed by any human toggle, re-armed when the queue drains), so a
+// poll delta or WS arrival can never re-expand a card the operator collapsed
+// (principle 5: updates preserve expansion). Evaluated immediately so a revisit
+// with a warm store still lands expanded, and on every open-set change so a
+// 0→N arrival does too. Keyed on the open SET (the computed re-evaluates to a
+// new array whenever items change), not its length — an answered item replaced
+// by a new one keeps the length and must still be evaluated. The old watcher
+// fired `toggleExpand` on EVERY length delta.
+watch(() => operatorQueueStore.openItems, () => {
+  operatorQueueStore.maybeAutoExpand()
+}, { immediate: true })
 </script>

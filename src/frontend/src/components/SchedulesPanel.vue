@@ -683,15 +683,40 @@
           </template>
         </div>
 
-        <!-- Execution History -->
+        <!-- Execution History. #1927: the 10s poll (armed while a run is
+             `running`) used to swap the list for a spinner on every tick. The
+             chain now gates on "no data yet"; a failed refresh with rows on
+             screen is the SIBLING banner below (never an else-if arm, so it can
+             never replace the rows it promises to keep). -->
         <div v-if="expandedSchedule === schedule.id" class="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3">
-          <div v-if="executionsLoading" class="text-center py-4">
+          <InlineError
+            v-if="execView(schedule.id).stale"
+            class="mb-2"
+            :message="staleBannerMessage('executions', executionsLoadedAt[schedule.id])"
+            :detail="executionsError[schedule.id]"
+            retryable
+            :retry-label="executionsLoading[schedule.id] ? 'Retrying…' : 'Try again'"
+            @retry="loadExecutions(schedule.id)"
+            @dismiss="executionsError[schedule.id] = ''"
+          />
+          <div v-if="execView(schedule.id).state === 'loading'" class="text-center py-4" data-testid="executions-loading">
             <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-action-primary-500 mx-auto"></div>
           </div>
-          <div v-else-if="!executions[schedule.id] || executions[schedule.id].length === 0" class="text-center py-4 text-xs text-gray-400 dark:text-gray-500">
+          <!-- Failed FIRST fetch (#1926): not the empty copy — "No executions yet"
+               on a failed request tells the operator the schedule never ran. -->
+          <LoadFailed
+            v-else-if="execView(schedule.id).state === 'failed'"
+            dense
+            title="Couldn't load executions"
+            message="The execution history didn't load. Try again."
+            :detail="executionsError[schedule.id]"
+            :retrying="!!executionsLoading[schedule.id]"
+            @retry="loadExecutions(schedule.id)"
+          />
+          <div v-else-if="execView(schedule.id).state === 'empty'" class="text-center py-4 text-xs text-gray-400 dark:text-gray-500">
             No executions yet
           </div>
-          <div v-else class="space-y-2 max-h-60 overflow-y-auto">
+          <div v-else class="space-y-2 max-h-60 overflow-y-auto" data-testid="executions-list">
             <div
               v-for="exec in executions[schedule.id]"
               :key="exec.id"
@@ -899,6 +924,7 @@ import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { viewState, staleBannerMessage } from '../utils/loadingState'
 // #925: client-side mirror of the backend cron grammar (see utils/cronValidation.js
 // header — parity pinned by tests/fixtures/cron-grammar-cases.json in both suites).
 import {
@@ -988,8 +1014,15 @@ const actionError = ref('')
 const actionErrorDetail = ref('')
 const deleteLoading = ref(null)
 const expandedSchedule = ref(null)
+// #1927: per-schedule, never one shared flag. `executions[id]` is assigned ONLY
+// on a succeeded fetch — so `undefined` = never loaded (spinner), `[]` = loaded
+// and empty (the honest empty copy), a list = ready. A single boolean lied across
+// rows: collapsing A mid-flight cleared the flag while B was still loading, and
+// B rendered "No executions yet" with nothing loaded (#1926 class).
 const executions = ref({})
-const executionsLoading = ref(false)
+const executionsLoading = ref({})
+const executionsError = ref({})
+const executionsLoadedAt = ref({})
 const selectedExecution = ref(null)
 
 // ent#77: per-schedule webhook config state (id -> { loading, busy, status, revealed, secretOnce, error })
@@ -1514,19 +1547,40 @@ function stopExecutionPolling() {
   }
 }
 
-// Load executions for a schedule
+// #1927: loading / failed / empty / ready (+ stale) for one schedule's history,
+// from the one rule in utils/loadingState.js. "Loaded" means a fetch succeeded
+// for THIS schedule (the row is a list), so the empty copy can only follow a
+// succeeded-and-returned-zero fetch.
+function execView(scheduleId) {
+  const list = executions.value[scheduleId]
+  const hasLoaded = Array.isArray(list)
+  return viewState({
+    loading: !!executionsLoading.value[scheduleId],
+    hasLoaded,
+    error: executionsError.value[scheduleId],
+    count: hasLoaded ? list.length : 0,
+  })
+}
+
+// Load executions for a schedule. Keyed by schedule id throughout, so a late
+// response for a collapsed row lands on that row and never on the one now open.
 async function loadExecutions(scheduleId) {
-  executionsLoading.value = true
+  executionsLoading.value[scheduleId] = true
   try {
     const response = await axios.get(
       `/api/agents/${props.agentName}/schedules/${scheduleId}/executions?limit=20`,
       { headers: authStore.authHeader }
     )
-    executions.value[scheduleId] = response.data
+    executions.value[scheduleId] = Array.isArray(response.data) ? response.data : []
+    executionsError.value[scheduleId] = ''
+    executionsLoadedAt.value[scheduleId] = Date.now()
   } catch (error) {
     console.error('Failed to load executions:', error)
+    // Keep whatever rows are on screen; the chain renders failed (no data) or
+    // the stale banner (data) from this field.
+    executionsError.value[scheduleId] = apiErrorMessage(error, 'Request failed')
   } finally {
-    executionsLoading.value = false
+    executionsLoading.value[scheduleId] = false
   }
 }
 
@@ -1654,6 +1708,14 @@ watch(() => props.agentName, () => {
   // #1926 state is per-agent too: a failed verb on agent A must not show as an
   // error banner under agent B. (loadError clears inside loadSchedules().)
   clearActionError()
+  // #1927: execution-history state is per-agent too — and its 10s poll must not
+  // keep hitting the previous agent's schedule id under the new agent's header.
+  stopExecutionPolling()
+  expandedSchedule.value = null
+  executions.value = {}
+  executionsLoading.value = {}
+  executionsError.value = {}
+  executionsLoadedAt.value = {}
   loadSchedules()
 })
 
