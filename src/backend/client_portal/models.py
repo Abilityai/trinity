@@ -408,6 +408,30 @@ class PortalHistoryMessage(BaseModel):
     created_at: Optional[str] = None
 
 
+class PortalTurnOutcome(BaseModel):
+    """Why the last turn on this thread ended badly (#2320).
+
+    A turn that fails before or at start persists no assistant message and
+    clears its in-flight marker, so the client sees a thread that looks idle and
+    reports "we've lost track of this turn" — for a turn the backend diagnosed
+    precisely. This is that diagnosis, in the only form a client may receive it.
+
+    ``message`` is client-safe by construction: every producer is a
+    ``ClientPortalError`` detail already authored as client copy, and the one
+    uncategorised path substitutes a fixed sentence. The raw
+    ``schedule_executions.error`` text is never carried here.
+
+    ``retryable`` is decided at the raise site and answers exactly one question:
+    is re-sending guaranteed to be wrong? It is True only where nothing reached
+    the agent, so nothing was billed — the case the #2120/#2133 no-Retry rule
+    was never about.
+    """
+    execution_id: str
+    category: str          # see PORTAL_FAILURE_CATEGORIES in service.py
+    message: str
+    retryable: bool = False
+
+
 class PortalHistory(BaseModel):
     """A client's persisted conversation with a rostered agent (oldest-first).
     ``session_id`` is the thread these messages belong to (None for an empty or
@@ -428,6 +452,12 @@ class PortalHistory(BaseModel):
     # fields, so without this line the budget would silently never leave the
     # server.
     in_flight_wait_budget_seconds: Optional[int] = None
+    # #2320: the last turn's failure, when it failed. Present only while the
+    # record lives (15 min) and only for a turn that ended badly — a thread
+    # whose last turn answered carries None. Declared here for the same reason
+    # the budget above is: an undeclared key is stripped by `response_model` and
+    # never reaches the client.
+    last_turn_outcome: Optional[PortalTurnOutcome] = None
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

@@ -359,8 +359,10 @@ async function loadThread(sessionId) {
   let inFlight = null
   let inFlightBudget = null
   let budgetReadAt = null
+  let outcome = null
   try {
-    const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds } =
+    const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds,
+            lastTurnOutcome } =
       await store.fetchHistory(props.agent.name, sessionId || null)
     // #2214: the budget is the marker's REMAINING TTL, honest only from the
     // instant it was measured — stamp that instant beside the fetch, not when
@@ -370,6 +372,7 @@ async function loadThread(sessionId) {
     messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
+    outcome = lastTurnOutcome
   } catch { /* start empty */ }
   finally { loadingHistory.value = false; await scrollDown() }
 
@@ -377,7 +380,36 @@ async function loadThread(sessionId) {
   // rather than showing a thread that looks finished. The user's message is
   // already in `messages` (persisted at dispatch), so what is missing is only
   // the "working" state and the reply.
-  if (inFlight) await reattach(inFlight, inFlightBudget, budgetReadAt)
+  if (inFlight) { await reattach(inFlight, inFlightBudget, budgetReadAt); return }
+
+  // #2320: nothing running, but the last turn on this thread failed. The user
+  // message is on screen (persisted at dispatch, deliberately — ent#286) with
+  // no reply after it and, before this, no explanation either: reopening the
+  // thread showed a question the agent had silently ignored. The verdict
+  // outlives the tab that sent it, so it is applied on load too, not only to
+  // the client that happened to be watching.
+  if (outcome) markLastUserTurnFailed(outcome)
+}
+
+// Apply a server verdict to the most recent user message. Used by the two
+// surfaces that have no in-memory index for it — a fresh load and a reattach —
+// where the row came from history rather than from this tab's own `send()`.
+function markLastUserTurnFailed(outcome) {
+  if (!outcome?.message) return
+  const last = messages.value[messages.value.length - 1]
+  // Only ever the UNANSWERED tail. Two raise sites (`portal_chat`'s roster 404
+  // and its availability refusal) fire BEFORE `_persist_user_turn`, so they
+  // record a verdict while leaving no user row of their own. Walking back to
+  // "the last user message" would then pin the failure onto an EARLIER turn
+  // that was answered — reporting a successful exchange as failed, and offering
+  // a Retry that re-sends it. Today both are gated earlier in
+  // `start_portal_turn`, so no execution row exists to carry a verdict; that is
+  // a property of the current call graph, not of this function, and it is the
+  // kind of property that rots quietly. If nothing is waiting for a reply, say
+  // nothing.
+  if (!last || last.role !== 'user') return
+  markFailed(messages.value.length - 1, last.content, outcome.message,
+             { retryable: outcome.retryable === true })
 }
 
 // Rejoin a turn already in progress. The agent replays its buffered log before
@@ -401,7 +433,21 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
     const data = await awaitPersistedReply(currentSessionId.value, baseline,
-                                           budgetSeconds, budgetReadAt)
+                                           budgetSeconds, budgetReadAt, executionId)
+    // #2320: this surface was the silent one. It checked ONLY for a reply, so a
+    // turn that failed — or was lost — rendered nothing at all: no message, no
+    // Retry, the spinner simply stopped. A client that refreshed mid-turn got
+    // less than one that stayed, which is backwards.
+    if (data?.failed) {
+      markLastUserTurnFailed(data.outcome)
+    } else if (data?.lost) {
+      markLastUserTurnFailed({
+        message: data.idle
+          ? 'The agent did not reply. Check the conversation in a moment.'
+          : "Still no reply — we've lost track of this turn. It may still finish; check the conversation shortly.",
+        retryable: false,
+      })
+    }
     if (data?.response) {
       messages.value.push({ role: 'assistant', content: data.response })
       // A reattached reply is still a reply the user just watched land, so it
@@ -770,19 +816,42 @@ async function deliver(text) {
       }
       data = await awaitPersistedReply(
         started.session_id || currentSessionId.value, baseline,
-        started.wait_budget_seconds, dispatchedAt,
+        started.wait_budget_seconds, dispatchedAt, started.execution_id,
       )
+      if (data?.failed) {
+        // #2320: the server diagnosed this turn. Say what it said, and offer a
+        // Retry only where the server states nothing reached the agent — the
+        // #2120/#2133 rule is about turns that MAY HAVE RUN AND BILLED, and a
+        // verdict of "never started" is precisely the evidence that rule always
+        // lacked.
+        return { failed: true, error: data.outcome.message,
+                 retryable: data.outcome.retryable === true }
+      }
+      if (data?.lost && data.idle) {
+        // The server reports nothing running, and offered no verdict either.
+        // Distinct from the budget case below: nothing is still going, so
+        // "it may still finish" would be a fabrication. Still no Retry —
+        // `mark_turn_inflight` no-ops when Redis is down, so a perfectly
+        // healthy, already-billed turn reaches this branch on its first poll.
+        return { lost: true, retryable: false,
+                 error: 'The agent did not reply. Check the conversation in a moment.' }
+      }
       if (data?.lost) {
         // #2133: we ran out of budget while the marker still claimed a turn.
         // That turn probably RAN and was billed — we merely lost sight of it.
         // So this is reported without a Retry: re-sending is the one action
         // guaranteed to be wrong.
-        return { lost: true, error: "Still no reply — we've lost track of this turn. It may still finish; check the conversation shortly." }
+        return { lost: true, retryable: false, error: "Still no reply — we've lost track of this turn. It may still finish; check the conversation shortly." }
       }
       if (!data) {
-        // The server reports nothing running and no new reply — a genuine
-        // no-answer. Report it; never re-send, the turn was already billed.
-        throw new Error('The agent did not reply. Check the conversation in a moment.')
+        // Defensive only: every return above is enumerated. Kept non-retryable
+        // because an unclassifiable outcome must take the unprivileged answer.
+        // (Before #2320 this branch was unreachable AND retryable — #2150
+        // believed it preserved a Retry for a genuine no-answer, but
+        // `awaitPersistedReply` never returned null, so `idle` fell into the
+        // lost-track message above instead. That is the bug #2320 reported.)
+        return { lost: true, retryable: false,
+                 error: 'The agent did not reply. Check the conversation in a moment.' }
       }
     }
 
@@ -878,8 +947,12 @@ function replyPollInterval(elapsedMs) {
   return every
 }
 
+// #2320: `executionId` is the turn THIS call is waiting on. The outcome record
+// is matched against it before it is believed — a thread can hold a verdict from
+// an earlier turn, and reporting that one as this turn's failure would be a new
+// way to lie about the same thing.
 async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
-                                   dispatchedAtMs) {
+                                   dispatchedAtMs, executionId = null) {
   let idleSince = null
   // Measured from DISPATCH, not from when this function was reached. The
   // server's marker TTL starts ticking at dispatch, so a client clock that
@@ -908,6 +981,14 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
     if (assistants.length > baselineAssistants) {
       const last = assistants[assistants.length - 1]
       return { response: last.content, cost: last.cost, session_id: data.sessionId || sessionId }
+    }
+    // #2320: the server told us how this turn ended. Authoritative regardless
+    // of the marker — a verdict naming THIS execution means it is over — and
+    // read before the idle timer so a diagnosed failure is reported at once
+    // instead of after a 6s wait that pretends we do not know.
+    const outcome = data.lastTurnOutcome
+    if (outcome && executionId && outcome.execution_id === executionId) {
+      return { failed: true, outcome }
     }
     // Still running server-side? Then keep waiting, however long it takes.
     if (data.inFlightExecutionId) { idleSince = null }
@@ -984,7 +1065,11 @@ async function send() {
   autoGrowAfterUpdate()
   await scrollDown()
   const res = await deliver(text)
-  if (res !== true) markFailed(index, text, res?.error, { retryable: !res?.lost })
+  // #2320: `retryable` when `deliver` decided it (a server verdict, or a
+  // give-up it enumerated); otherwise the pre-existing rule, which still covers
+  // the one path `deliver` does not classify — a dispatch that threw, where
+  // nothing reached the server and re-sending is correct.
+  if (res !== true) markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
 }
 
 async function retry(i) {
@@ -994,7 +1079,7 @@ async function retry(i) {
   msg.failed = false
   msg.error = null
   const res = await deliver(content)
-  if (res !== true) markFailed(i, content, res?.error, { retryable: !res?.lost })
+  if (res !== true) markFailed(i, content, res?.error, { retryable: res?.retryable ?? !res?.lost })
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------

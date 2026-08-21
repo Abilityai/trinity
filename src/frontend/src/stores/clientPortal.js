@@ -1006,6 +1006,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // marker's remaining TTL in seconds. Null/absent (old backend, TTL
         // unreadable) → the component falls back via resolveWaitBudgetMs.
         inFlightWaitBudgetSeconds: data.in_flight_wait_budget_seconds ?? null,
+        // #2320: why the last turn ended, when it ended badly. Absent on an
+        // older backend and on a thread whose last turn answered — both mean
+        // "no verdict", and the caller degrades to its pre-#2320 handling.
+        lastTurnOutcome: data.last_turn_outcome || null,
       }
     },
 
