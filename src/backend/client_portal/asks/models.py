@@ -1,4 +1,4 @@
-"""Pydantic models for Workspace asks (ent#364). Private."""
+"""Pydantic models for Workspace asks (ent#364). OSS core since ent#428."""
 from __future__ import annotations
 
 from typing import Any, List, Optional

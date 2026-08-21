@@ -98,11 +98,30 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
         return []
 
+    # Memoized per REQUEST, not cached across them: `agent_on_roster` is
+    # `agent_name in roster_agent_names(...)` and that inner call is one-to-two
+    # DB reads, so asking it per item made this O(items) queries for an answer
+    # that cannot change inside one request — on an endpoint the Workspace polls
+    # every 20s, per signed-in client, per open tab. A client's asks cluster on
+    # one or two agents, so in practice this is 1-2 reads instead of N.
+    #
+    # Deliberately memoizing `_on_roster` rather than hoisting
+    # `roster_agent_names` up here: that function IS the access predicate
+    # ("the scope of what a caller can DO must equal the scope of what they can
+    # SEE"), and re-implementing membership beside it is how the two drift. It
+    # also keeps the fail-CLOSED behaviour per agent, unchanged.
+    seen: dict[str, bool] = {}
+
+    def _allowed(agent: str) -> bool:
+        if agent not in seen:
+            seen[agent] = _on_roster(agent, email, is_platform)
+        return seen[agent]
+
     out: List[WorkspaceAsk] = []
     for item in items or []:
         if item.get("type") not in _VISIBLE_KINDS:
             continue
-        if not _on_roster(item.get("agent_name") or "", email, is_platform):
+        if not _allowed(item.get("agent_name") or ""):
             continue
         out.append(_project(item))
     return out

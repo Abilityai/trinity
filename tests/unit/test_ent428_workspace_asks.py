@@ -424,3 +424,31 @@ def test_the_oss_asks_router_is_mounted_before_the_enterprise_seam():
     assert _call_line("app.include_router(portal_asks_router)") < _call_line(
         "register_enterprise(app)"
     )
+
+
+def test_the_roster_is_not_re_read_once_per_ask(asks_db, client_email, roster):
+    """ent#428 — the listing asks the roster once per AGENT, not once per ask.
+
+    `agent_on_roster` is `agent_name in roster_agent_names(...)`, and that inner
+    call is one-to-two DB reads. Per item, that is O(items) queries for an answer
+    that cannot change inside one request — on an endpoint the Workspace polls
+    every 20s, per signed-in client, per open tab.
+
+    Asserted on the CALL COUNT rather than on timing: a duration assertion would
+    be flaky and would not say what it means.
+    """
+    from client_portal.asks import service
+
+    for n in range(5):
+        _raise_ask(agent="agent-a", addressed=client_email, req_id=f"req-a-{n}")
+    for n in range(3):
+        _raise_ask(agent="agent-b", addressed=client_email, req_id=f"req-b-{n}")
+
+    roster["calls"].clear()
+    asks = service.list_asks(client_email, is_platform=False)
+
+    assert len(asks) == 8
+    assert sorted({c[0] for c in roster["calls"]}) == ["agent-a", "agent-b"]
+    assert len(roster["calls"]) == 2, (
+        f"roster consulted {len(roster['calls'])} times for 8 asks across 2 agents"
+    )
