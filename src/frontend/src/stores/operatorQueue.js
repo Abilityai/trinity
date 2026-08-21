@@ -12,6 +12,7 @@ import api from '../api'
 import { useAuthStore } from './auth'
 import { apiErrorMessage } from '../utils/apiError'
 import { decideAutoExpand } from '../utils/loadingState'
+import { queueResponseBody, QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending } from '../utils/operatorQueue'
 
 // Agent display helpers
 const AGENT_COLORS = [
@@ -115,18 +116,24 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   async function respondToItem(id, response, responseText = '') {
     const item = items.value.find(i => i.id === id)
     if (!item) return
+    // A decision is required — never let an empty/undefined one be stringified
+    // into the body (the callers guard this today; this is the belt).
+    if (response == null || String(response).trim() === '') return
 
+    // #2370: ONE builder for every producer of this body — the decision rides
+    // `response`, the note rides `response_text` (trimmed; empty → null).
+    const body = queueResponseBody(response, responseText)
     try {
       await axios.post(
         `/api/operator-queue/${id}/respond`,
-        { response, response_text: responseText || null },
+        body,
         { headers: authStore.authHeader }
       )
 
-      // Optimistic update
+      // Optimistic update — mirror the body that was sent
       item.status = 'responded'
-      item.response = response
-      item.response_text = responseText
+      item.response = body.response
+      item.response_text = body.response_text
       item.responded_by_email = authStore.userEmail || authStore.user?.username
       item.responded_at = new Date().toISOString()
       expandedItemId.value = null
@@ -137,10 +144,12 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         expandedItemId.value = nextOpen.id
       }
     } catch (err) {
-      if (err.response?.status === 409) {
-        // Item left 'pending' under us (e.g. another operator cleared the
-        // queue) — the response was NOT recorded (#1017).
-        error.value = 'This item was cancelled or answered by another operator — your response was not recorded.'
+      if (respondRefusedAsNotPending(err)) {
+        // Item left 'pending' under us (409 — e.g. another operator cleared
+        // the queue, #1017) or was already terminal (400) — the response was
+        // NOT recorded. Copy shared with `/m` (#2370) and attribution-free:
+        // the status may be responded, cancelled or expired.
+        error.value = QUEUE_RESPONSE_NOT_RECORDED
         fetchItems()
       } else {
         error.value = apiErrorMessage(err, 'Request failed')

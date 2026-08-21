@@ -1,0 +1,72 @@
+{
+  "version": "1.1",
+  "date": "2026-08-21",
+  "mode": "diff",
+  "scope": "trinity#2370 \u2014 feature/2370-mobile-approval-payload vs merge-base b7bac09d (working tree)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_na": [
+    3,
+    4,
+    5,
+    6,
+    8
+  ],
+  "attack_surface": {
+    "new_routes": 0,
+    "new_ws": 0,
+    "new_uploads": 0,
+    "new_integrations": 0,
+    "new_jobs": 0,
+    "changed_files": 11,
+    "backend_touched": false
+  },
+  "findings": [],
+  "below_gate": [
+    {
+      "title": "look-alike option strings (agent-authored) recorded verbatim as the decision",
+      "confidence": 5,
+      "disposition": "accepted residual \u2014 #1632 caps + restated consequence + Send: <option>; #2376 adds membership check"
+    },
+    {
+      "title": "options size-cap marker selectable as a decision (desktop parity)",
+      "confidence": 4,
+      "disposition": "DEBT_INBOX debt:2026-08-21-options-size-cap-marker-selectable"
+    },
+    {
+      "title": "Workspace asks panel sends a typed answer as response_text",
+      "confidence": null,
+      "disposition": "filed #2375"
+    }
+  ],
+  "supply_chain_summary": "N/A \u2014 no dependency, lockfile, Dockerfile, compose or workflow change",
+  "filter_stats": {
+    "candidates": 3,
+    "reported": 0,
+    "below_gate": 3
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_diff_reports_today": [
+      "cso-diff-2026-08-21-2322-mfa-challenge-shape",
+      "cso-diff-2026-08-21-1927-poll-reflash",
+      "cso-diff-2026-08-21-2320-workspace-failed-turn"
+    ],
+    "direction": "stable \u2014 zero gate-passing findings; this diff raises integrity (decision field) rather than widening a read"
+  }
+}
