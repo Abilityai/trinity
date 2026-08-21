@@ -143,6 +143,11 @@ COPY ../../src/backend/canary /app/canary/
 # module (#1033's class). `prod-image-smoke` is what catches it; source-only CI
 # cannot, because the source tree always has the directory.
 COPY ../../src/backend/client_portal /app/client_portal/
+# Multi-agent rooms (ent#443) — same rule, one module later. `main.py` imports
+# `shared_sessions.router` unconditionally now, so an image without this package
+# builds clean and dies at import with ModuleNotFoundError. That is exactly what
+# `prod-image-smoke` caught on the PR that added it.
+COPY ../../src/backend/shared_sessions /app/shared_sessions/
 
 # Alembic migration scripts (#1183). db/alembic_runner.py points Alembic's
 # script_location at /app/migrations at runtime, so the directory MUST ship in

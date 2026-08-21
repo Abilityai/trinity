@@ -11,12 +11,13 @@
  * confirm the room exists). The acting identity comes from the API key, so an
  * agent-scoped key always acts as its own agent and cannot post as anyone else.
  *
- * On an OSS build (or an unentitled instance) the backend routes are absent and
- * these tools return a structured "not enabled" result rather than throwing a
- * transport error at the agent.
+ * Rooms are OSS core since ent#443, so on a CURRENT backend the routes always
+ * answer. Against an older backend that does not serve them, these tools return
+ * a structured "not enabled" result rather than throwing a transport error at
+ * the agent.
  */
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 const NOT_ENABLED = {
@@ -24,9 +25,47 @@ const NOT_ENABLED = {
   message: "Shared sessions are not enabled on this Trinity instance.",
 };
 
-function unavailable(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message : String(e);
-  return msg.includes("404") || msg.includes("403");
+/**
+ * Is this error the ABSENCE of the rooms surface, rather than a refusal BY it?
+ *
+ * The status alone cannot answer that, and reading it as if it could is how a
+ * real refusal gets reported to an agent as "rooms are switched off on this
+ * instance" — sending whoever reads it after entirely the wrong thing. The
+ * serving module authors every refusal as a structured `detail: {code, …}`:
+ * 403 for an agent it may not reach, and a deliberately uniform 404 for a room
+ * the caller is not a member of (never a 403, which would confirm the room
+ * exists). Absence is a plain string — FastAPI's own "Not Found" for a route
+ * that was never mounted, or an older build's entitlement sentence.
+ *
+ * So the discriminator is the SHAPE of `detail`, not the status code. This
+ * mirrors the rule the Workspace already follows for the same distinction
+ * (#2128) — before ent#443 the two were genuinely indistinguishable here,
+ * because an unentitled 403 really did mean "not enabled".
+ */
+export function unavailable(e: unknown): boolean {
+  const status = e instanceof ApiError ? e.status : undefined;
+  if (status !== 404 && status !== 403) {
+    // Not an ApiError at all (transport failure), or some other status.
+    // Fall back to the pre-ent#443 string test ONLY for a non-ApiError, so an
+    // older client path still degrades the way it used to.
+    if (e instanceof ApiError) return false;
+    const msg = e instanceof Error ? e.message : String(e);
+    return msg.includes("404") || msg.includes("403");
+  }
+
+  const body = (e as ApiError).body;
+  try {
+    const detail = (JSON.parse(body) as { detail?: unknown }).detail;
+    // A coded object is the module speaking. Anything else — a plain string,
+    // a missing detail, an unparseable body — reads as absence, which keeps
+    // the friendly result as the default for everything we do not recognise.
+    if (detail && typeof detail === "object" && "code" in (detail as object)) {
+      return false;
+    }
+  } catch {
+    // Not JSON — absence.
+  }
+  return true;
 }
 
 export function createRoomTools(client: TrinityClient, requireApiKey: boolean) {

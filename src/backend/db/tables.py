@@ -490,7 +490,7 @@ enterprise_portal_messages = Table(
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
-# (`thread` = enterprise_portal_sessions, `room` = the enterprise shared_sessions
+# (`thread` = enterprise_portal_sessions, `room` = the shared_sessions
 # room). Separate from the chat row because a room is shared between users and a
 # star is not; see db/schema.py for the full rationale.
 enterprise_portal_chat_state = Table(
@@ -512,6 +512,55 @@ enterprise_client_blocks = Table(
     Column("blocked_by_id", Text),
     Column("blocked_by_email", Text),
     Column("reason", Text),
+)
+
+
+# Multi-agent rooms — OSS core since ent#443 (engine: ent#169). The
+# `enterprise_` prefix is retained history, same as the portal tables above.
+enterprise_rooms = Table(
+    "enterprise_rooms",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("name", Text),
+    Column("topic", Text),
+    Column("created_by", Text),
+    Column("status", Text),
+    Column("stop_reason", Text),
+    Column("max_messages", Integer),
+    Column("max_cost_usd", Float),
+    Column("expires_at", Text),
+    Column("created_at", Text),
+    Column("closed_at", Text),
+)
+
+enterprise_room_participants = Table(
+    "enterprise_room_participants",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("room_id", Text),
+    Column("kind", Text),
+    Column("identity", Text),
+    Column("role", Text),
+    Column("joined_at", Text),
+    Column("left_at", Text),
+    Column("last_read_seq", Integer),
+    Column("cached_session_id", Text),
+    Column("consecutive_resume_failures", Integer),
+)
+
+enterprise_room_messages = Table(
+    "enterprise_room_messages",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("room_id", Text),
+    Column("seq", Integer),
+    Column("sender_kind", Text),
+    Column("sender_identity", Text),
+    Column("kind", Text),
+    Column("mentions", Text),
+    Column("content", Text),
+    Column("execution_id", Text),
+    Column("created_at", Text),
 )
 
 

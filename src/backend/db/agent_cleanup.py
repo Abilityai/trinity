@@ -141,6 +141,32 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("enterprise_portal_messages",   "agent_name",        Policy.CASCADE),
     AgentRef("enterprise_portal_sessions",   "agent_name",        Policy.CASCADE),
 
+    # --- Multi-agent rooms (ent#169; OSS core since ent#443) ----------------
+    # Same story as the portal tables above, one module later: these came from
+    # the entitled enterprise submodule, which was OUTSIDE this registry, so a
+    # renamed agent stopped being woken in every room it was in (its
+    # `participants` row still names the old agent, and mention resolution
+    # matches against that row) and a purge orphaned participants + transcript.
+    #
+    # BOTH columns are POLYMORPHIC — `kind` decides whether `identity` is an
+    # agent name, a user id, or a workspace client's verified email — so each
+    # ref carries the `kind` predicate. Registering them unscoped would rewrite
+    # a HUMAN participant whose id or email happened to equal the old agent
+    # name, and on purge would delete that person's membership and messages.
+    # The `extra_filter` is load-bearing, not defensive.
+    #
+    # The forward parity test cannot see either column: it greps DDL for
+    # `agent_name|source_agent|target_agent|subscriber_agent|source_channel_agent`,
+    # and `identity` is too generic a name to add to that list without matching
+    # unrelated tables. `tests/unit/test_ent443_rooms_oss_core.py` pins them
+    # explicitly instead — the guard is the test, not the regex.
+    #
+    # Children before parents, matching the chat and portal pairs above.
+    AgentRef("enterprise_room_messages",     "sender_identity",   Policy.CASCADE,
+             extra_filter="sender_kind = 'agent'"),
+    AgentRef("enterprise_room_participants", "identity",          Policy.CASCADE,
+             extra_filter="kind = 'agent'"),
+
     # --- Activity / notifications ------------------------------------------
     AgentRef("agent_activities",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_notifications",          "agent_name",        Policy.CASCADE),
