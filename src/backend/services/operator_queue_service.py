@@ -279,6 +279,20 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     isinstance-guarded, json.dumps is wrapped). Returns a NEW dict; never mutates
     the caller's request.
 
+    NOT PURE, and the name undersells it. Two of the steps below reach the
+    database, and one of them WRITES:
+
+    * `addressed_to_email` (ent#364) is resolved against the agent's roster —
+      an authorization decision, and the reason it is not simply copied through.
+    * `context.workspace_session_id` (ent#429) is stripped and then re-written
+      with a thread this call may CREATE (`_workspace_thread_for`).
+
+    So this is not safe to call speculatively "just to see what a clamped item
+    would look like": today's one production caller creates the row immediately
+    after, and a second caller that did not would leave an empty client thread
+    behind. Both reads/writes are fail-soft and neither can raise, so the #1525
+    contract above still holds.
+
     - title / question: truncate-with-marker.
     - context: non-dict → {} (fixes the create_item .get crash class); serialized
       > cap OR non-serializable → a marker object that preserves only a *valid*
@@ -288,6 +302,9 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
       expires_at is left untouched (honored).
     - priority: validate-only (unknown → medium; a legit `critical` is untouched —
       the depth cap already bounds critical *volume*).
+    - addressed_to_email: resolved, never trusted (ent#364) — see above.
+    - context.workspace_session_id: agent value stripped, platform value written
+      for an addressed ask (ent#429) — see above.
     """
     out = dict(req)
 
