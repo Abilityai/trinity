@@ -230,6 +230,7 @@
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
+          @open-thread="openThread"
         >
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />

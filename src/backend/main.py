@@ -125,6 +125,7 @@ from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
+from client_portal.asks.router import router as portal_asks_router
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -546,6 +547,24 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting skills library sync service: {e}")
     asyncio.create_task(_start_skills_sync_delayed())
 
+    # #447: subscription recovery probe — re-asks the provider whether a
+    # subscription believed rate-limited is back. Nothing else can clear the
+    # badge (no success path clears a failure row), and the ambient refresh is
+    # demand-driven, so an unwatched instance never re-checks. Self-gates on the
+    # `subscription_headroom_auto_refresh` setting and is leader-locked, so
+    # starting it in every worker is safe. Staggered +13s past the other loops.
+    async def _start_subscription_recovery_delayed():
+        await asyncio.sleep(13)
+        try:
+            from services.subscription_recovery_service import (
+                subscription_recovery_service,
+            )
+            subscription_recovery_service.start()
+            logger.info("Subscription recovery probe service started (staggered +13s)")
+        except Exception as e:
+            logger.error(f"Error starting subscription recovery service: {e}")
+    asyncio.create_task(_start_subscription_recovery_delayed())
+
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
@@ -855,6 +874,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
 
+    # Shutdown subscription recovery probe service (#447) — releases the
+    # leader lease so a sibling worker takes over immediately instead of
+    # waiting out the TTL.
+    try:
+        from services.subscription_recovery_service import (
+            subscription_recovery_service,
+        )
+        subscription_recovery_service.stop()
+    except Exception as e:
+        logger.error(f"Error stopping subscription recovery service: {e}")
+
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
         await canary_service.stop()
@@ -1071,6 +1101,11 @@ app.include_router(client_portal_router)  # Workspace / client portal (ent#356, 
 # path there would sit beside `/{room_id}` (Invariant #4).
 app.include_router(rooms_router)
 app.include_router(room_budget_router)
+# Workspace asks — OSS core since ent#428 (engine ent#364). A separate router
+# on the same prefix, mounted BEFORE `register_enterprise(app)` below so that
+# on an install whose submodule still registers the old gated module, the
+# ungated OSS routes win the match order (the ent#443 transition rule).
+app.include_router(portal_asks_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule

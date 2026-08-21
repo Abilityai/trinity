@@ -154,6 +154,98 @@ export function rateLimitEventCount(usage) {
   return Number(usage.failure_events_by_kind?.rate_limit || 0)
 }
 
+/** `representative_claim` values → the label the row face uses. */
+const CLAIM_LABELS = { five_hour: '5h', seven_day: '7d' }
+
+/**
+ * The window whose clock the operator is actually waiting on (#447).
+ *
+ * Order matters and is evidence-driven, not a preference:
+ *  1. `representative_claim` — the provider NAMES the binding window. Prefer it
+ *     outright: on a live instance both windows reported the SAME utilization
+ *     (32% / 32%), so a "fullest wins" tiebreak has no answer there and would
+ *     silently pick by array order.
+ *  2. A window the provider marks anything other than `allowed` is the one
+ *     currently blocking, whatever the percentages say.
+ *  3. Otherwise the fullest window that actually carries a reset.
+ */
+function bindingWindow(headroom) {
+  const cands = []
+  if (headroom.five_hour) cands.push({ ...headroom.five_hour, label: '5h' })
+  if (headroom.seven_day) cands.push({ ...headroom.seven_day, label: '7d' })
+  if (!cands.length) return null
+
+  const claimed = CLAIM_LABELS[headroom.representative_claim]
+  if (claimed) {
+    const hit = cands.find((w) => w.label === claimed && w.resets_at)
+    if (hit) return hit
+  }
+  const blocked = cands.find((w) => w.status && w.status !== 'allowed' && w.resets_at)
+  if (blocked) return blocked
+
+  const withReset = cands.filter((w) => w.resets_at)
+  if (!withReset.length) return null
+  return withReset.reduce(
+    (a, b) => ((Number(b.utilization_pct) || 0) > (Number(a.utilization_pct) || 0) ? b : a),
+  )
+}
+
+/**
+ * When the binding limit comes back — `null` when the payload cannot say (#447).
+ *
+ * Read from `usage.headroom` DIRECTLY, deliberately bypassing `windowReadings`,
+ * and therefore NOT behind `headroomIsFresh`. That is the same asymmetry
+ * `headroomStatus` documents (#2353): a *number* decays — a 40-minute-old 62%
+ * may be 90% by now — but an *instant* does not. 19:10 is still 19:10 no matter
+ * how old the snapshot is. Reusing the freshness gate here is precisely what
+ * hid the reset on the rows that most need it: a 429 probe sets
+ * `status: 'rate_limited'`, so `decorate_usage` never promotes `source` to
+ * `anthropic`, so `headroomIsFresh` is false, so `windowReadings` returns null
+ * — while `headroom.five_hour.resets_at` sits populated in the same object.
+ *
+ * A stale instant CAN fall into the past (the windows roll), which is reported
+ * as `due` rather than as a confident future claim.
+ *
+ * A rejected token returns null: there is no quota reset to wait for when the
+ * credential is dead, and the remedy is a person, not a clock (#2353's
+ * separation, kept explicit here so the two never re-merge).
+ */
+export function resetReading(usage, now = Date.now()) {
+  if (isUnavailable(usage) || isTokenRejected(usage)) return null
+  const headroom = usage?.headroom
+  if (!headroom) return null
+  const win = bindingWindow(headroom)
+  if (!win || !win.resets_at) return null
+  const at = formatResetTime(win.resets_at)
+  if (!at) return null
+  const t = Date.parse(win.resets_at)
+  return {
+    label: win.label,
+    resetsAt: win.resets_at,
+    at,
+    due: Number.isFinite(t) ? t <= now : false,
+  }
+}
+
+/** Row-face text for the reset, or `null` when there is nothing honest to say. */
+export function resetText(usage, now = Date.now()) {
+  const r = resetReading(usage, now)
+  if (!r) return null
+  // Past its instant: the window should have rolled, but only another probe can
+  // confirm it — so this says "go look", never a stale future time.
+  return r.due ? 'reset due' : `resets ${r.at}`
+}
+
+/**
+ * Should this row spend space on a reset at all?
+ *
+ * Only under pressure. A reset time on a subscription at 12% is noise — the
+ * quota is not what anyone is waiting for.
+ */
+export function showsReset(severity, windows) {
+  return severity === 'crit' || !!(windows && windows.some((w) => w.level === 'high'))
+}
+
 /**
  * One subscription's pressure severity.
  *
@@ -293,7 +385,7 @@ export function usageLine(usage) {
 }
 
 /** Full hover text — where the caveats live, since the row face has no room. */
-export function rowTooltip(sub, usage) {
+export function rowTooltip(sub, usage, now = Date.now()) {
   if (isUnavailable(usage)) {
     return `${sub.name}\nUsage could not be read. The subscription itself is unaffected.`
   }
@@ -311,6 +403,20 @@ export function rowTooltip(sub, usage) {
       + (reset ? ` · resets ${reset}` : ''),
     )
   }
+  // #447 — the two things the row face cannot say in the space it has.
+  const reset = resetReading(usage, now)
+  if (reset?.due) {
+    lines.push(
+      `The ${reset.label} reset time (${reset.at}) has already passed — `
+      + 'refresh to confirm the window has rolled.',
+    )
+  } else if (usage.rate_limited_now && !reset && !isTokenRejected(usage)) {
+    lines.push(
+      'No reset time was reported for this limit. Refresh from '
+      + 'Settings → Integrations to re-check.',
+    )
+  }
+
   lines.push(usageSourceLabel(usage))
 
   // 5h is a SUBSET of 7d — spelled out so the two lines are never read as
@@ -367,6 +473,8 @@ export const SUBSCRIPTION_SETTINGS_ROUTE = { name: 'Settings', query: { tab: 'in
  */
 export function subscriptionPressureRows(subscriptions, usageBySub, options = {}) {
   const maxRows = options.maxRows || SUBSCRIPTION_TILE_MAX_ROWS
+  // Injectable so "is this reset in the past" is testable without faking timers.
+  const now = options.now == null ? Date.now() : options.now
   const list = Array.isArray(subscriptions) ? subscriptions : []
   const usageMap = usageBySub || {}
 
@@ -378,6 +486,28 @@ export function subscriptionPressureRows(subscriptions, usageBySub, options = {}
     // 5h limit but 95% of its weekly is the one about to stop working, and
     // ranking it below a busier-but-fine neighbour would bury the actual risk.
     const utilization = windows ? Math.max(...windows.map((x) => x.pct)) : null
+
+    // #447 — "when does it come back". Placement is decided HERE rather than in
+    // the template, so the SFC needs no change and every rule stays reachable
+    // by the node-environment suite. The two branches are not two rules: the
+    // reset always takes whichever of the row's two text slots is free.
+    //   • no windows (the rate-limited row) → `meta` holds one short word, so
+    //     the reset joins it on the primary line, where the eye already is.
+    //   • windows present (the near-limit row) → `meta` is full of fixed-width
+    //     bars and cannot take more without overflowing a row that clips
+    //     silently, so the reset leads the second line instead.
+    const pressured = showsReset(severity, windows)
+    const reset = pressured ? resetText(usage, now) : null
+
+    let meta = pressureHeadline(usage)
+    if (pressured && !windows) {
+      // A `crit` row with no reset says so. Blank would read as "no reset
+      // exists"; inventing one would be worse. The row already links to
+      // Settings → Integrations, which is where a refresh lives.
+      meta += reset ? ` · ${reset}` : ' · reset unknown'
+    }
+    const subLine = reset && windows ? `${reset} · ${usageLine(usage)}` : usageLine(usage)
+
     return {
       key: sub.id,
       id: sub.id,
@@ -388,11 +518,12 @@ export function subscriptionPressureRows(subscriptions, usageBySub, options = {}
       windows,
       utilization,
       events: rateLimitEventCount(usage),
+      reset,
       primary: sub.name,
       // Rendered only when `windows` is null — the percentages are the reading.
-      meta: pressureHeadline(usage),
-      sub: usageLine(usage),
-      title: rowTooltip(sub, usage),
+      meta,
+      sub: subLine,
+      title: rowTooltip(sub, usage, now),
     }
   })
 

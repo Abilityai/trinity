@@ -228,7 +228,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // underlying row is one row: answering anywhere clears it everywhere with no
     // sync step, and three separate queries is how that stops being true.
     asks: [],
-    asksAvailable: false,   // false when the module is absent/unentitled (404/403)
+    asksAvailable: false,   // false when the backend does not serve /asks (404/403)
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -1006,6 +1006,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // marker's remaining TTL in seconds. Null/absent (old backend, TTL
         // unreadable) → the component falls back via resolveWaitBudgetMs.
         inFlightWaitBudgetSeconds: data.in_flight_wait_budget_seconds ?? null,
+        // #2320: why the last turn ended, when it ended badly. Absent on an
+        // older backend and on a thread whose last turn answered — both mean
+        // "no verdict", and the caller degrades to its pre-#2320 handling.
+        lastTurnOutcome: data.last_turn_outcome || null,
       }
     },
 
@@ -1149,10 +1153,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // store onto a dedicated instance so a workspace request can never inherit
     // the platform JWT from `axios.defaults`.
     //
-    // Degrades to silence: the module is enterprise-gated, so an OSS or unentitled
-    // build answers 404/403 and there is nothing to render. That is not an error
-    // worth showing a client — `asksAvailable` stays false and every surface
-    // renders nothing, which is how this ships in the OSS bundle at all.
+    // Degrades to silence. Asks are OSS core since ent#428, so a CURRENT backend
+    // always serves this; against an OLDER one — which either predates the
+    // surface or still gates it behind the entitlement it used to carry — the
+    // 404/403 is not an error worth showing a client. `asksAvailable` stays
+    // false and every surface renders nothing.
     async fetchAsks(agentName = null) {
       if (!this.isClientSignedIn) return []
       try {

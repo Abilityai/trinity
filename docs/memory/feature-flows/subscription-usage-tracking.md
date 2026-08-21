@@ -206,3 +206,105 @@ None. This is a read-only analytics endpoint. No WebSocket broadcasts, no activi
 - [subscription-credential-health.md](feature-flows/subscription-credential-health.md) - Credential health monitoring
 - [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md) - Chat flow that writes messages
 - [task-execution-service.md](feature-flows/task-execution-service.md) - Execution lifecycle that writes execution records
+
+---
+
+## Recovery: how a `LIMIT` badge clears (#447)
+
+Three defects sat on top of each other, and only the third is what an operator
+sees. Fixed together because fixing any one alone leaves the surface still lying.
+
+### 1. `rate_limited_now` was an OR, so ground truth could not win
+
+```
+before:  rate_limited_now = db_2h_predicate OR fresh_provider_verdict
+after:   fresh says limited -> True
+         fresh says allowed -> False          <-- the missing arm
+         no usable verdict  -> db_2h_predicate
+```
+
+The db half is *"a failure row exists in the last 2 hours"*, and **nothing clears
+a failure row on success** — `clear_rate_limit_events` has had zero production
+callers since #444 removed the one call, because clearing was destroying
+auto-switch's detection signal. So the db half only decays with the clock, and
+being OR'd it outranked a fresh probe reporting `allowed · 32% used · resets
+19:10`. Observed live: two subscriptions wearing `LIMIT` while every agent
+assigned to them answered normally.
+
+`_headroom_indicates_healthy` is deliberately **not** the negation of
+`_headroom_indicates_limited`. "Not limited" is also true for a stale snapshot, a
+rejected token and a transport error — none of which are evidence the
+subscription is usable — so all three fall through to the db predicate instead of
+clearing it. Only a fresh `ok` snapshot with at least one window, every reported
+window `allowed`, is positive proof of headroom.
+
+**Scope:** this is the DISPLAY predicate. Candidate selection reads the
+kind-blind `has_recent_subscription_failures` (#2352's split), so a just-recovered
+subscription is still skipped as a *switch target* until its failures age out —
+#444's ping-pong cannot return through this door.
+
+### 2. Nothing asked the provider again
+
+The fresh verdict arm above is only reachable if a probe actually runs. Ambient
+refresh is **demand-driven** — it fires when someone reads the dashboard or the
+usage endpoint — so an unwatched instance never re-checked at all, and a watched
+one waited out the general 15-minute cadence.
+
+`subscription_recovery_service` (backend lifespan, staggered +13s) sweeps every
+`SUBSCRIPTION_RECOVERY_PROBE_SECONDS` (default 300) and probes **only**
+subscriptions currently presented as limited — the union of "last snapshot said
+`rate_limited`" and "the db predicate says so", i.e. exactly the set wearing a
+badge. Normally that set is empty and the cycle costs nothing.
+
+Properties worth keeping:
+
+| Property | Why |
+|---|---|
+| Reuses the `max_tokens=1` Haiku probe | ~a dozen tokens of the operator's own quota per limited subscription |
+| Cannot feed itself | `_probe` writes a 429 to the **snapshot only**, never `subscription_rate_limit_events` — so re-probing can never manufacture the db row that keeps it limited |
+| Gated on `subscription_headroom_auto_refresh` | That Settings toggle already answers *may Trinity probe on its own?*; a second knob would split one question in two |
+| Leader-locked, fail-**open** | `subscription:recovery:leader`. A duplicated probe wastes a dozen tokens; failing closed would silently stop recovery detection — the mode the operator cannot see |
+| Probe itself fail-**closed** on Redis | Without a readable cache the result could not be stored for anyone to see, so it would be quota spent for nothing (the ambient path's rule) |
+
+### 3. The row never said when the limit comes back
+
+`resets_at` was on the wire from #471 and rendered nowhere but a hover.
+`resetReading()` reads `headroom.*.resets_at` **directly**, bypassing
+`windowReadings` and therefore its freshness gate — the same asymmetry
+`headroomStatus` documents (#2353): a *number* decays, an *instant* does not.
+
+That gate is exactly what hid it. A 429 probe sets `status: 'rate_limited'`, so
+`decorate_usage` never promotes `source` to `anthropic`, so `headroomIsFresh` is
+false, so `windowReadings` returns `null` — while `headroom.five_hour.resets_at`
+sits populated in the same object.
+
+Binding window, in order: `representative_claim` (live-verified populated — and
+both windows can report the *same* utilization, so a "fullest wins" tiebreak has
+no answer there and would pick by array order) → any window the provider marks
+other than `allowed` → the fullest window carrying a reset.
+
+Honest states, none of them blank:
+
+- `resets 19:10` — a real instant
+- `reset due` — the instant has passed; the window should have rolled, but only
+  another probe confirms it
+- `reset unknown` — limited with no reset in the payload; the row already links
+  to Settings → Integrations
+- *nothing at all* — a rejected token has no quota clock, and the remedy is a
+  person, not a wait
+
+Placement is decided in the pure module, so the SFC is unchanged: the reset takes
+whichever text slot is free — joining the headline on the primary line when there
+are no bars, leading the second line when there are, because the fixed-width bars
+cannot take more without overflowing a row that clips silently.
+
+### Row alignment
+
+The two window groups are fixed-width (label `min-width: 16px`, bar `30px`,
+percentage `min-width: 32px` right-aligned, tabular numerals) so they form
+**columns** down the tile. Without it `0%` / `6%` / `24%` each had a different
+advance and pushed the `7d` group left by a different amount per row — the bars
+were always 30px, but landing at three x positions they read as three lengths.
+`min-width`, not `width`: an overage plan reporting >100% must overflow the cell
+rather than be clipped, the same report-honestly / clamp-only-geometry rule
+`barWidthPct` follows.

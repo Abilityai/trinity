@@ -11,6 +11,9 @@ import {
   formatApproxCost,
   formatTokenCount,
   pressureHeadline,
+  resetReading,
+  resetText,
+  showsReset,
   utilizationLevel,
   warnReason,
   windowReadings,
@@ -551,5 +554,145 @@ describe('formatters', () => {
     expect(formatApproxCost(0.4)).toBe('≈$0.40')
     expect(formatApproxCost(1500)).toBe('≈$1500')
     expect(formatApproxCost(undefined)).toBe('≈$0')
+  })
+})
+
+/**
+ * #447 — "when does the limit come back".
+ *
+ * The rules that matter here are the ones whose regression is SILENT: a reset
+ * that quietly stops rendering on the one row that needs it, or a stale instant
+ * presented as a confident future time.
+ */
+const T0 = Date.parse('2026-08-20T18:00:00Z')
+
+/** A snapshot the provider returned WITH a 429 — the #447 case. */
+function limitedSnapshot(o = {}) {
+  return usage({
+    // `source` stays 'observed': `decorate_usage` only promotes to 'anthropic'
+    // on status 'ok', which a 429 never is. That is exactly why the reset was
+    // unreachable through `windowReadings`.
+    source: 'observed',
+    rate_limited_now: true,
+    headroom: {
+      five_hour: { utilization_pct: 100, resets_at: '2026-08-20T19:10:00Z', status: 'blocked' },
+      seven_day: { utilization_pct: 40, resets_at: '2026-08-26T05:00:00Z', status: 'allowed' },
+      representative_claim: 'five_hour',
+      snapshot_age_seconds: 30,
+      status: 'rate_limited',
+      ...o,
+    },
+  })
+}
+
+describe('resetReading — the reset survives the freshness gate that hides the %', () => {
+  it('reads a reset off a rate_limited snapshot, where windowReadings gives nothing', () => {
+    const u = limitedSnapshot()
+    // The precondition this whole feature exists for.
+    expect(windowReadings(u)).toBeNull()
+    expect(resetReading(u, T0)).toMatchObject({ label: '5h', at: expect.any(String), due: false })
+  })
+
+  it('is not gated on snapshot age — an instant does not decay like a percentage', () => {
+    const stale = limitedSnapshot({ snapshot_age_seconds: 4000 })
+    expect(resetReading(stale, T0)).not.toBeNull()
+  })
+
+  it('prefers the window the provider names in representative_claim', () => {
+    const u = limitedSnapshot({ representative_claim: 'seven_day' })
+    expect(resetReading(u, T0).label).toBe('7d')
+  })
+
+  it('falls back to the blocking window when no claim is given', () => {
+    const u = limitedSnapshot({ representative_claim: null })
+    expect(resetReading(u, T0).label).toBe('5h')
+  })
+
+  it('falls back to the fullest window when nothing is blocking and no claim is given', () => {
+    const u = limitedSnapshot({
+      representative_claim: null,
+      five_hour: { utilization_pct: 10, resets_at: '2026-08-20T19:10:00Z', status: 'allowed' },
+      seven_day: { utilization_pct: 90, resets_at: '2026-08-26T05:00:00Z', status: 'allowed' },
+    })
+    expect(resetReading(u, T0).label).toBe('7d')
+  })
+
+  it('reports a lapsed instant as due rather than as a future time', () => {
+    const u = limitedSnapshot()
+    const after = Date.parse('2026-08-20T19:30:00Z')
+    expect(resetReading(u, after).due).toBe(true)
+    expect(resetText(u, after)).toBe('reset due')
+  })
+
+  it('returns nothing for a rejected token — a dead credential has no quota clock', () => {
+    const u = limitedSnapshot({ status: 'invalid_token' })
+    expect(resetReading(u, T0)).toBeNull()
+  })
+
+  it('returns nothing when the payload carries no reset, rather than inventing one', () => {
+    const u = limitedSnapshot({
+      five_hour: { utilization_pct: 100, resets_at: null, status: 'blocked' },
+      seven_day: null,
+      representative_claim: 'five_hour',
+    })
+    expect(resetReading(u, T0)).toBeNull()
+    expect(resetText(u, T0)).toBeNull()
+  })
+
+  it('returns nothing when there is no snapshot at all (db-predicate-only limit)', () => {
+    expect(resetReading(usage({ rate_limited_now: true }), T0)).toBeNull()
+  })
+})
+
+describe('showsReset — only under pressure', () => {
+  it('shows on a rate-limited row', () => {
+    expect(showsReset('crit', null)).toBe(true)
+  })
+
+  it('shows on a near-limit row', () => {
+    expect(showsReset('warn', [{ level: 'high' }])).toBe(true)
+  })
+
+  it('stays off a healthy row — a reset at 12% used is noise', () => {
+    expect(showsReset('ok', [{ level: 'ok' }])).toBe(false)
+    expect(showsReset('warn', [{ level: 'warm' }])).toBe(false)
+  })
+})
+
+describe('subscriptionPressureRows — where the reset lands on the row face', () => {
+  const subs = [{ id: 's1', name: 'Max' }]
+
+  it('joins the headline on the primary line when there are no windows', () => {
+    const { rows } = subscriptionPressureRows(subs, { s1: limitedSnapshot() }, { now: T0 })
+    expect(rows[0].meta).toContain('rate-limited')
+    expect(rows[0].meta).toContain('resets')
+    // The second line keeps the spend figures untouched.
+    expect(rows[0].sub).not.toContain('resets')
+  })
+
+  it('says so when a limited row has no reset to show', () => {
+    const u = usage({ rate_limited_now: true })
+    const { rows } = subscriptionPressureRows(subs, { s1: u }, { now: T0 })
+    expect(rows[0].meta).toContain('reset unknown')
+  })
+
+  it('leads the second line when the bars already occupy the first', () => {
+    const u = fresh(92, { resets_at: null })
+    u.headroom.five_hour = { utilization_pct: 92, resets_at: '2026-08-20T19:10:00Z', status: 'allowed' }
+    u.headroom.representative_claim = 'five_hour'
+    const { rows } = subscriptionPressureRows(subs, { s1: u }, { now: T0 })
+    expect(rows[0].windows).not.toBeNull()
+    expect(rows[0].sub.startsWith('resets ')).toBe(true)
+    // The bars are the meta; nothing is appended there that could overflow a
+    // row that clips silently.
+    expect(rows[0].meta).not.toContain('resets')
+  })
+
+  it('leaves a healthy row exactly as it was', () => {
+    const u = fresh(12)
+    const { rows } = subscriptionPressureRows(subs, { s1: u }, { now: T0 })
+    expect(rows[0].sub).not.toContain('resets')
+    expect(rows[0].meta).not.toContain('resets')
+    expect(rows[0].reset).toBeNull()
   })
 })

@@ -62,6 +62,13 @@ REFRESH_SECONDS = int(os.getenv("SUBSCRIPTION_HEADROOM_REFRESH_SECONDS", "900"))
 MIN_PROBE_INTERVAL_SECONDS = 60
 # Past this age a snapshot no longer drives rate_limited_now (still shown, with age).
 FRESHNESS_SECONDS = REFRESH_SECONDS * 2
+# #447: how often a subscription BELIEVED LIMITED is re-probed to see whether it
+# is back. Tighter than REFRESH_SECONDS on purpose — a healthy subscription's
+# utilization drifting for 15 minutes costs nothing, whereas a recovered one
+# still displaying `LIMIT` is actively wrong, and this is the only signal that
+# can clear it (nothing clears a failure row on success, see
+# `resolve_rate_limited_now`).
+RECOVERY_PROBE_SECONDS = int(os.getenv("SUBSCRIPTION_RECOVERY_PROBE_SECONDS", "300"))
 
 AUTO_REFRESH_SETTING = "subscription_headroom_auto_refresh"
 
@@ -418,6 +425,52 @@ async def get_headroom(
     return _to_model(snapshot)
 
 
+def _believed_limited(subscription_id: str, snapshot: Optional[dict]) -> bool:
+    """Is this subscription currently PRESENTED as rate-limited? (#447)
+
+    Deliberately the union of both arms the display resolver can fire on, so
+    the recovery probe targets exactly the set of subscriptions wearing a
+    `LIMIT` badge — including the common case where the badge comes from the
+    stale 2h db predicate and no provider snapshot disagrees with it yet.
+    """
+    if snapshot and snapshot.get("status") == "rate_limited":
+        return True
+    try:
+        return bool(db.is_subscription_rate_limited(subscription_id))
+    except Exception:  # noqa: BLE001 — a db blip must not stall the sweep
+        return False
+
+
+async def recover_probe(subscription_id: str) -> str:
+    """Re-probe ONE subscription believed limited; return a short outcome (#447).
+
+    Never raises. Fail-CLOSED on Redis, exactly like the ambient path: a client
+    object existing proves nothing about the server, and without a readable
+    cache the probe's result could not be stored for anyone to see — so it
+    would be quota spent for nothing.
+
+    Safe to run repeatedly against a still-limited subscription: ``_probe``
+    records a 429 into the SNAPSHOT only and never writes
+    ``subscription_rate_limit_events``, so this loop can never feed the very db
+    predicate it exists to clear.
+    """
+    redis_ok, snapshot = _read_snapshot(subscription_id)
+    if not redis_ok:
+        return "redis_unavailable"
+    if not _believed_limited(subscription_id, snapshot):
+        return "not_limited"
+    age = _snapshot_age_seconds(snapshot) if snapshot else None
+    if age is not None and age < RECOVERY_PROBE_SECONDS:
+        return "too_soon"
+    if not _probe_floor_ok(subscription_id, snapshot):
+        return "floored"
+    fresh = await _locked_probe(subscription_id)
+    if fresh is None:
+        return "no_token"
+    status = fresh.get("status")
+    return "recovered" if status == "ok" else f"still_{status}"
+
+
 def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> bool:
     """Fresh provider verdict only — a stale snapshot never drives the badge."""
     if headroom is None:
@@ -433,19 +486,75 @@ def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> boo
     return False
 
 
+def _headroom_indicates_healthy(headroom: Optional[SubscriptionHeadroom]) -> bool:
+    """A FRESH probe that actually reached the quota and found headroom (#447).
+
+    The mirror of ``_headroom_indicates_limited``, and deliberately **not** its
+    negation: "not limited" is also true for a stale snapshot, a rejected token
+    and a transport error, none of which are evidence the subscription is
+    usable. Only a fresh ``ok`` snapshot carrying at least one window, every
+    reported window ``allowed``, is positive proof of headroom.
+    """
+    if headroom is None:
+        return False
+    age = headroom.snapshot_age_seconds
+    if age is None or age > FRESHNESS_SECONDS:
+        return False
+    if headroom.status != "ok":
+        return False
+    windows = [w for w in (headroom.five_hour, headroom.seven_day) if w is not None]
+    if not windows:
+        return False
+    return all(w.status in (None, "allowed") for w in windows)
+
+
+def resolve_rate_limited_now(
+    *, db_says_limited: bool, headroom: Optional[SubscriptionHeadroom]
+) -> bool:
+    """THE one `rate_limited_now` derivation (#2157 one-gate rule), three-state.
+
+    #447: this used to be ``db_predicate OR fresh_provider_verdict`` — an OR, so
+    a fresh, authoritative "allowed, 32% used, resets 19:10" straight from the
+    provider was structurally **powerless** to clear the badge. The db predicate
+    is "a failure row exists in the last 2 hours" and there is no success path
+    that clears it (``clear_rate_limit_events`` has had zero production callers
+    since #444 removed the one call, because clearing was destroying
+    auto-switch's detection signal). So a subscription that recovered kept
+    reporting `LIMIT` for up to two hours while its agents answered normally —
+    observed live on a real fleet.
+
+    The db predicate is an **inference from past failures**; a fresh probe is
+    **ground truth about now**. So a fresh verdict wins in BOTH directions, and
+    the inference is only consulted when the provider could not answer:
+
+        fresh provider says limited   -> True   (unchanged)
+        fresh provider says allowed   -> False  (#447: the missing arm)
+        no usable provider verdict    -> the 2h db predicate (unchanged)
+
+    Scope note: this is the DISPLAY predicate. Auto-switch candidate filtering
+    reads ``has_recent_subscription_failures`` (kind-blind, separate by #2352),
+    so nothing here can reintroduce #444's ping-pong — a subscription that just
+    recovered is still skipped as a switch target until its failures age out.
+    """
+    if _headroom_indicates_limited(headroom):
+        return True
+    if _headroom_indicates_healthy(headroom):
+        return False
+    return bool(db_says_limited)
+
+
 async def decorate_usage(usage: SubscriptionUsage, *, force: bool = False) -> SubscriptionUsage:
-    """Attach the provider snapshot + finalize `rate_limited_now` — the ONE
-    derivation every surface consumes (#2157 one-gate lesson): the db layer's
-    2h event predicate OR a fresh provider verdict. ``force`` = operator click
-    (probe now, floored)."""
+    """Attach the provider snapshot + finalize `rate_limited_now` via the ONE
+    derivation every surface consumes (``resolve_rate_limited_now``).
+    ``force`` = operator click (probe now, floored)."""
     headroom = await get_headroom(usage.subscription_id, force=force)
     if headroom is not None and headroom.status == "ok" and (
         headroom.five_hour or headroom.seven_day
     ):
         usage.source = "anthropic"
     usage.headroom = headroom
-    usage.rate_limited_now = bool(
-        usage.rate_limited_now or _headroom_indicates_limited(headroom)
+    usage.rate_limited_now = resolve_rate_limited_now(
+        db_says_limited=bool(usage.rate_limited_now), headroom=headroom
     )
     return usage
 
@@ -509,7 +618,11 @@ async def pressure_states(
         # wait=False: the dashboard's 60s poll is the DEMAND signal for a
         # refresh, never a caller that blocks on one.
         headroom = await get_headroom(sid, wait=False)
-        limited = db.is_subscription_rate_limited(sid) or _headroom_indicates_limited(headroom)
+        # Same one-gate resolver as `decorate_usage` — the per-agent chip and
+        # the tile must never disagree about one subscription (#447).
+        limited = resolve_rate_limited_now(
+            db_says_limited=db.is_subscription_rate_limited(sid), headroom=headroom
+        )
         entry = counts_24h.get(sid) or {}
         by_kind = entry.get("by_kind") or {}
         out[sid] = {

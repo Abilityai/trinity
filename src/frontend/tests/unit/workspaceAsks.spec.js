@@ -6,12 +6,19 @@
  * removes the row from it. So these tests are about the list — the three components
  * are template work over what is pinned here.
  *
- * Also pinned: the module is enterprise-gated, so an OSS or unentitled build gets
- * 404/403 on every poll. That has to be silent, or every OSS install logs a warning
- * every 20 seconds for a feature it does not have.
+ * Also pinned: a backend that does not serve `/asks` answers 404/403 on every poll,
+ * and that has to be silent. Asks are OSS core since ent#428, so this is now the
+ * OLDER-backend case rather than the unentitled one — but the guard still earns its
+ * place, and without it such an install would log a warning every 20 seconds.
+ *
+ * ent#429 adds the expiry wording, which lives in `portalUtils` for the same reason
+ * everything else decidable does: a sentence composed inside a component is a
+ * sentence no test can reach.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
+
+import { expiredLabel, askThreadLink } from '@/components/portal/portalUtils'
 
 vi.hoisted(() => {
   const mem = new Map()
@@ -181,5 +188,96 @@ describe('answering surfaces the backend refusal', () => {
 
     await expect(store.answerAsk('a1', { response: 'yes' })).rejects.toBeTruthy()
     expect(store.askCount).toBe(1)
+  })
+})
+
+// --- expiry wording (ent#429) -------------------------------------------------
+//
+// AC #3 asks for an expired ask to be visibly expired "with the time it lapsed".
+// The window matters: the #1142 sweep DELETES terminal rows, so between lapsing
+// and being swept this row is the only evidence the question was ever asked, and
+// "this expired" without a WHEN cannot tell an hour ago from last March.
+describe('expiredLabel', () => {
+  const T = Date.parse('2026-08-21T12:00:00Z')
+
+  it('says how long ago, in the units a reader thinks in', () => {
+    expect(expiredLabel('2026-08-21T11:59:40Z', T)).toContain('moments ago')
+    expect(expiredLabel('2026-08-21T11:30:00Z', T)).toContain('30m ago')
+    expect(expiredLabel('2026-08-21T09:00:00Z', T)).toContain('3h ago')
+    expect(expiredLabel('2026-08-18T12:00:00Z', T)).toContain('3d ago')
+  })
+
+  it('switches to a date once "Nd ago" stops meaning anything', () => {
+    const label = expiredLabel('2026-06-01T12:00:00Z', T)
+    expect(label).not.toContain('d ago')
+    expect(label).toContain('expired on')
+  })
+
+  it('always still says it expired before it was answered', () => {
+    for (const iso of ['2026-08-21T11:30:00Z', '2026-06-01T12:00:00Z', null, 'nonsense']) {
+      expect(expiredLabel(iso, T)).toContain('before it was answered')
+    }
+  })
+
+  it('degrades to the bare sentence rather than inventing a time', () => {
+    // A wrong time is worse than no time: the reader would act on it.
+    expect(expiredLabel(null, T)).toBe('This expired before it was answered.')
+    expect(expiredLabel('nonsense', T)).toBe('This expired before it was answered.')
+    expect(expiredLabel(undefined, T)).toBe('This expired before it was answered.')
+  })
+
+  it('says nothing about timing when the row claims to expire in the future', () => {
+    // Not actually expired, so something upstream disagrees with us — say less.
+    expect(expiredLabel('2026-08-22T12:00:00Z', T)).toBe('This expired before it was answered.')
+  })
+})
+
+// --- the thread link, and the surface that never rendered (ent#429) -----------
+describe('askThreadLink', () => {
+  it('links to the thread an ask was raised against', () => {
+    expect(askThreadLink({ chat_id: 'sess-1' }, null)).toBe('sess-1')
+    expect(askThreadLink({ chat_id: 'sess-1' }, 'sess-2')).toBe('sess-1')
+  })
+
+  it('offers nothing when the reader is already there', () => {
+    expect(askThreadLink({ chat_id: 'sess-1' }, 'sess-1')).toBeNull()
+  })
+
+  it('offers nothing for a homeless ask', () => {
+    // Pre-ent#429 rows, and any ask whose attachment could not be resolved.
+    expect(askThreadLink({ chat_id: null }, 'sess-1')).toBeNull()
+    expect(askThreadLink({}, null)).toBeNull()
+    expect(askThreadLink(undefined, null)).toBeNull()
+  })
+})
+
+describe('the inline-in-chat surface filters by agent NAME', () => {
+  // ent#429. `PortalConversation` passes `props.agent`, which is the agent
+  // OBJECT `{name, owner, ...}`, and `asksForAgent` compares it against the
+  // string `a.agent_name` — so it matched nothing and the third of ent#364's
+  // three surfaces had never rendered. It failed silently: an empty ask list is
+  // a legitimate state, and the wrapper is `v-if="agentAsks.length"`.
+  //
+  // Asserted against the SOURCE because this repo's vitest runs in `node` with
+  // no component-mount harness, so a prop passed wrongly is otherwise unreachable
+  // by any test. Crude, but it is the difference between pinning this and not.
+  it('the store getter matches on the name, and only the name', () => {
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.asks = [{ id: 'a1', agent_name: 'scout', status: 'pending' }]
+
+    expect(store.asksForAgent('scout')).toHaveLength(1)
+    expect(store.asksForAgent({ name: 'scout' })).toHaveLength(0)
+  })
+
+  it('the conversation passes a name, not the agent object', async () => {
+    const fs = await import('node:fs')
+    const src = fs.readFileSync(
+      new URL('../../src/components/portal/PortalConversation.vue', import.meta.url),
+      'utf8',
+    )
+    expect(src).toContain('store.asksForAgent(props.agent.name)')
+    expect(src).not.toContain('store.asksForAgent(props.agent)')
+    expect(src).toMatch(/:agent-name="agent\.name"/)
   })
 })

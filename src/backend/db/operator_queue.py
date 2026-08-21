@@ -252,6 +252,7 @@ class OperatorQueueOperations:
         offset: int = 0,
         accessible_agent_names: Optional[Set[str]] = None,
         include_cleared: bool = False,
+        addressed_to_email: Optional[str] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
@@ -262,6 +263,25 @@ class OperatorQueueOperations:
         include_cleared: rows hidden by Clear All (#1017) are excluded by
         default. Only listing honors this — get_item and the sync-service
         accessors never filter on cleared_at.
+
+        addressed_to_email: narrow to the asks addressed to ONE person
+        (ent#364/ent#428). This has to be a SQL condition rather than a filter
+        the caller applies to the result: the ordering is status, then priority,
+        then age, and `limit` is applied before the caller ever sees a row — so
+        a post-hoc filter reads "the newest N pending items in the FLEET, some
+        of which happen to be yours", and one person's low-priority ask falls
+        out of the window as soon as the fleet is busy. It disappears from their
+        sidebar while still sitting pending in the queue, which is the one
+        failure this surface cannot have.
+
+        Compared case-insensitively. The ingestion boundary lowercases before it
+        stores (`_validated_addressee`), so today every stored value is already
+        lower — but `create_item` is a public writer and the read must not
+        silently depend on every future caller remembering that.
+
+        `None` means "do not filter"; any other value — including `""` — filters,
+        and an empty one therefore matches nothing. See the comment at the
+        condition for why this one argument does not use truthiness like the rest.
         """
         if accessible_agent_names is not None and len(accessible_agent_names) == 0:
             return []
@@ -280,6 +300,17 @@ class OperatorQueueOperations:
             conds.append(operator_queue.c.priority == priority)
         if agent_name:
             conds.append(operator_queue.c.agent_name == agent_name)
+        if addressed_to_email is not None:
+            # `is not None`, deliberately NOT the truthiness the filters above
+            # use. For this argument's callers it IS the authorization boundary
+            # — "the asks addressed to this person" — so a falsy value has to
+            # match NOTHING rather than silently widening to everyone's. The
+            # other filters narrow a view the caller is already entitled to see;
+            # this one decides entitlement, which is why it diverges.
+            conds.append(
+                func.lower(operator_queue.c.addressed_to_email)
+                == addressed_to_email.strip().lower()
+            )
         if since:
             conds.append(operator_queue.c.created_at >= since)
 
@@ -319,12 +350,21 @@ class OperatorQueueOperations:
         item_id: str,
         response: str,
         response_text: Optional[str],
-        responded_by_id: str,
+        responded_by_id: Optional[str],
         responded_by_email: str,
     ) -> Optional[Dict]:
-        """Record an operator response to a queue item.
+        """Record a response to a queue item.
 
         Returns the updated item or None if not found.
+
+        `responded_by_id` is Optional on purpose (ent#364/ent#428): it is a
+        `users` id, and an ask answered by a Workspace client has no row there.
+        Writing one would be a lie in the audit trail, so a client answer is
+        recorded as NULL id + the answering email — and THAT pair is what
+        distinguishes "answered by a client" from "answered by an operator whose
+        account was since deleted", which keeps its id. The annotation says so
+        because the alternative is someone later "tidying" it back to `str` and
+        quietly making the two indistinguishable.
         """
         now = utc_now_iso()
 
