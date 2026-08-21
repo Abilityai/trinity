@@ -1,19 +1,33 @@
 """#2322 — a login that did not issue a session must not look like one that did.
 
-When enterprise 2FA defers a login, `POST /token` used to answer HTTP 200 with
-`access_token: null` **and** `token_type: "bearer"`. Any client reading the
-token field without checking it — our own MCP client and CLI both did — stored
-nothing, reported success, and failed with an unexplained 401 on its next call,
-far from the cause. Two of the three `mfa_gate` consumers (the email route and
-the enterprise SSO redirect) already omitted the token fields on the challenge;
-`/token` was the outlier.
+`POST /token` used to answer HTTP 200 with `access_token: null` **and**
+`token_type: "bearer"` when enterprise 2FA deferred the login. Any client
+reading the token field without checking it — our own MCP client and CLI both
+did — stored nothing, reported success, and failed with an unexplained 401 on
+its next call, far from the cause.
 
-These tests pin BOTH shapes, because the fix moved both:
+The fix is the issue's own suggested one: a password grant that issued no
+session is an **error for the grant** (RFC 6749 §5.2), so the challenge is now
+a **403** carrying `detail: "mfa_required"` plus the challenge fields, and no
+token fields at all.
 
-* challenge  → no `access_token`, no `token_type`
-* real grant → `access_token` + `token_type`, and **no** 2FA fields (before
-  #2322 every successful login carried all four as `null`, including in
+**403, not 401** — the issue permits either, and 401 is actively wrong here:
+our CLI's `_handle_response` treats 401 as "your session expired, run
+`trinity login`" and hard-exits, and the frontend registers a global axios 401
+interceptor that logs out and redirects. Both would fire on a login that is
+still in flight.
+
+These tests pin all three shapes, because the fix moved all three:
+
+* challenge   → 403, `detail: "mfa_required"`, no `access_token`, no `token_type`
+* real grant  → 200, `access_token` + `token_type`, and **no** 2FA fields
+  (before #2322 every successful login carried all four as `null`, including in
   OSS-only builds, contradicting `Token`'s own docstring)
+* email route → unchanged 200 + raw challenge dict. Deliberate: the issue scopes
+  the RFC change to "`/token` (the OAuth2-shaped surface)", and
+  `/api/auth/email/verify` is not an OAuth2 grant. The invariant both satisfy is
+  *no response ever presents a session that was not issued*; they satisfy it via
+  the mechanism each contract calls for.
 
 Edition-agnostic by construction: the provider is registered through the OSS
 `mfa_gate` seam, so these run in an OSS-only checkout with no enterprise
@@ -116,7 +130,10 @@ def test_challenge_response_carries_no_grant_fields(
     body = r.json()
 
     assert p.calls == 1, "the gate never ran — this test would pass vacuously"
-    assert r.status_code == 200
+
+    # A grant that issued no session is an error for the grant (RFC 6749 §5.2).
+    assert r.status_code == 403, f"expected 403, got {r.status_code}: {body}"
+    assert body["detail"] == "mfa_required"
 
     # The regression itself. `access_token` was `null` and `token_type` was
     # `"bearer"`; both are now absent, so a client that reads either fails at
@@ -162,9 +179,16 @@ def test_challenge_token_is_challenge_scoped_not_a_session(client, provider):
 
 
 def test_challenge_carries_every_field_the_frontend_reads(client, provider):
-    """`stores/auth.js::_setMfaChallenge` reads exactly these three."""
+    """`stores/auth.js::_setMfaChallenge` reads exactly these three.
+
+    Since #2322 the store reads them off `error.response.data` on the 403 —
+    same fields, error path. If they moved under `detail`, the 2FA prompt
+    would never render and the user would see a raw "mfa_required" string.
+    """
     provider(enrolled=True, required=False)
-    body = _login(client).json()
+    r = _login(client)
+    assert r.status_code == 403
+    body = r.json()
 
     for field in ("challenge_token", "mfa_enrolled", "enrollment_required"):
         assert field in body, f"frontend 2FA prompt needs {field}: {body}"
@@ -206,8 +230,10 @@ def test_oss_only_build_grant_is_exactly_two_fields(client):
 def test_alias_route_matches(client, provider):
     """`/token` and `/api/token` are the same handler and must not drift."""
     provider(enrolled=True, required=False)
-    bare = client.post("/token", data={"username": "admin", "password": "pw"}).json()
-    aliased = client.post("/api/token", data={"username": "admin", "password": "pw"}).json()
+    r_bare = client.post("/token", data={"username": "admin", "password": "pw"})
+    r_alias = client.post("/api/token", data={"username": "admin", "password": "pw"})
+    assert r_bare.status_code == r_alias.status_code == 403, "both must refuse identically"
+    bare, aliased = r_bare.json(), r_alias.json()
 
     assert set(bare) == set(aliased)
     assert "access_token" not in bare and "token_type" not in bare
@@ -281,3 +307,41 @@ def test_email_route_grant_is_unchanged(email_client, provider):
     assert body["user"]["username"] == "admin@example.com"
     for field in ("mfa_required", "challenge_token"):
         assert field not in body, f"a real grant must not carry {field}: {body}"
+
+
+def test_the_403_is_not_a_401(client, provider):
+    """401 is the wrong status here, and both first-party clients prove it.
+
+    The CLI's `_handle_response` treats 401 as "your session expired, run
+    `trinity login`" and hard-exits — nonsense during login itself. The
+    frontend registers a GLOBAL axios 401 interceptor that calls
+    `authStore.logout()` and redirects to /login, which is wrong for a login
+    still in flight (it is only safe today because of a `currentPath !==
+    '/login'` guard). The issue permits "401/403"; this pins the choice so a
+    later tidy-up cannot silently re-arm either behaviour.
+    """
+    provider(enrolled=True, required=False)
+    r = _login(client)
+
+    assert r.status_code == 403
+    assert r.status_code != 401, (
+        "401 triggers the CLI's re-login exit and the frontend's global "
+        "logout interceptor — see the route comment in routers/auth.py"
+    )
+
+
+def test_wrong_password_is_still_401_and_carries_no_challenge(client, provider, auth_router, monkeypatch):
+    """The two failure modes must stay distinguishable.
+
+    A deferred grant (correct password, second factor pending) is 403 with a
+    challenge; a rejected grant (wrong password) stays 401 with none. Collapsing
+    them would hand an unauthenticated caller a challenge token.
+    """
+    monkeypatch.setattr(auth_router, "authenticate_user", lambda u, p: None)
+    provider(enrolled=True, required=False)
+
+    r = _login(client)
+    assert r.status_code == 401
+    body = r.json()
+    assert "challenge_token" not in body, "a rejected password must never yield a challenge"
+    assert "mfa_required" not in body

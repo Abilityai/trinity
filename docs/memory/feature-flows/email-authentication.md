@@ -667,9 +667,15 @@ client reading that field fails at the login call rather than storing nothing
 and 401ing later.
 
 This route already behaved correctly (it carries no `response_model`, so the
-raw challenge dict is returned as-is); `POST /token` was the outlier and was
-brought in line in #2322. See `feature-flows/admin-login.md` for the full
-contract and the failure mode.
+raw challenge dict is returned as-is) and **keeps its 200**. `POST /token` was
+the outlier and now answers **403** instead — deliberately not mirrored here:
+the issue scopes the RFC 6749 change to "`/token` (the OAuth2-shaped surface)",
+and this endpoint is a bespoke JSON route, not an OAuth2 grant.
+
+The invariant both satisfy is *no response ever presents a session that was not
+issued*; they satisfy it via the mechanism each contract calls for — a grant
+error for the grant endpoint, an absent field for the JSON one. See
+`feature-flows/admin-login.md` for the full contract and the failure mode.
 
 OSS-only builds register no provider, `gate_login` returns `None`, and this
 section does not apply.

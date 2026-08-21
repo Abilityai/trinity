@@ -377,25 +377,38 @@ async def get_auth_mode():
 
 ### Second Factor Pending (#5 / #2322)
 
-`POST /token` has **two mutually exclusive response shapes**, and the route
-serializes with `response_model_exclude_none=True` so each carries only its own
-fields:
+`POST /token` has **two mutually exclusive outcomes**, and they are now
+distinguished by **status code**, not by a field a caller has to know to check:
 
-| Outcome | Body |
-|---|---|
-| Grant issued | `{"access_token": "...", "token_type": "bearer"}` |
-| Second factor pending | `{"mfa_required": true, "mfa_enrolled": ..., "enrollment_required": ..., "challenge_token": "..."}` |
+| Outcome | Status | Body |
+|---|---|---|
+| Grant issued | 200 | `{"access_token": "...", "token_type": "bearer"}` |
+| Second factor pending | **403** | `{"detail": "mfa_required", "mfa_required": true, "mfa_enrolled": ..., "enrollment_required": ..., "challenge_token": "..."}` |
+| Credentials rejected | 401 | `{"detail": "Incorrect username or password"}` — never a challenge |
 
-The challenge shape carries **no `access_token` and no `token_type`**. That is
-the load-bearing part: a password grant that issued no session must not
-describe itself as a bearer grant. Until #2322 it answered 200 with
-`access_token: null` **and** `token_type: "bearer"`, so any client reading the
+A password grant that issued no session is an **error for the grant** (RFC 6749
+§5.2). The challenge carries **no `access_token` and no `token_type`**: it must
+not describe itself as a bearer grant. Until #2322 it answered **200** with
+`access_token: null` *and* `token_type: "bearer"`, so any client reading the
 token field without checking it — `src/mcp-server/src/client.ts` and
 `src/cli/trinity_cli/commands/auth.py` both did — stored nothing, reported
 success, and produced unexplained 401s on its next call with nothing pointing
 back at the login. The same bug's second half: every *successful* login,
 including in OSS-only builds with no provider registered, used to carry all
-four 2FA fields as `null`.
+four 2FA fields as `null`. The success path serializes with
+`response_model_exclude_none=True`, which is what keeps them off it.
+
+**403 and not 401** is deliberate, and both first-party clients are the reason:
+`trinity_cli/client.py::_handle_response` treats 401 as "your session expired,
+run `trinity login`" and hard-exits — nonsense during login itself — and
+`main.js` registers a **global** axios 401 interceptor that calls
+`authStore.logout()` and redirects to `/login`, which is wrong for a login still
+in flight (safe today only because of a `currentPath !== '/login'` guard).
+Semantically the credentials were *correct*; authentication is incomplete, not
+rejected. Pinned by `test_the_403_is_not_a_401`.
+
+Clients branch on the **boolean** `mfa_required`, never on parsing `detail` —
+`detail` is for humans and for RFC shape.
 
 The gate itself is `services/mfa_gate.py::gate_login`, called after the
 password is verified. OSS-only builds register no provider, it returns `None`,
@@ -404,8 +417,9 @@ enrolled **or** a role policy requires it — note the second arm means enabling
 the policy defers logins for every admin/creator-role account immediately,
 before anyone has enrolled.
 
-Clients must treat "did I receive a token?" as the success test, never the
-status code. Regression tests: `tests/unit/test_2322_mfa_challenge_response.py`,
+Clients must still treat "did I receive a token?" as a belt on any 2xx — a
+status code alone was never proof — but the deferred case is now a distinct
+status they cannot miss. Regression tests: `tests/unit/test_2322_mfa_challenge_response.py`,
 `tests/test_2322_cli_login_no_session.py`,
 `src/mcp-server/src/auth-challenge.test.ts`.
 

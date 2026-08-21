@@ -15,26 +15,43 @@ from ..config import (
 def _require_access_token(result: dict) -> str:
     """Read the session out of a login response, or fail loudly (#2322).
 
-    A login can succeed at the HTTP level and still issue no session: when a
-    second factor is pending, the server answers 200 with a challenge and no
-    `access_token`. Reading the field blind stored `None` in the profile and
-    turned that into unexplained 401s on every later command, far from the
-    cause. The CLI cannot complete a TOTP challenge, so this is terminal —
-    but it must say so here.
+    Since #2322 a deferred login is a 403 and never reaches here, so this is
+    the belt: any future path that answers 2xx without a session still fails
+    at the login call rather than storing `None` in the profile and turning
+    that into unexplained 401s on every later command. `_mfa_required_exit`
+    handles the 403 itself.
     """
     token = (result or {}).get("access_token")
     if token:
         return token
 
     if (result or {}).get("mfa_required"):
-        click.echo(
-            "Login incomplete: this account requires a second factor, which the "
-            "CLI cannot complete. Sign in through the web UI and use an MCP API "
-            "key for CLI access (Settings -> MCP Keys).",
-            err=True,
-        )
-    else:
-        click.echo("Login failed: the server returned no access token.", err=True)
+        _mfa_required_exit()
+    click.echo("Login failed: the server returned no access token.", err=True)
+    raise SystemExit(1)
+
+
+def _mfa_required_exit() -> None:
+    """The account needs a second factor the CLI cannot supply (#2322)."""
+    click.echo(
+        "Login incomplete: this account requires a second factor, which the "
+        "CLI cannot complete. Sign in through the web UI and use an MCP API "
+        "key for CLI access (Settings -> MCP Keys).",
+        err=True,
+    )
+    raise SystemExit(1)
+
+
+def _exit_on_login_error(e: TrinityAPIError, prefix: str) -> None:
+    """Map a failed login response to an exit message (#2322).
+
+    A deferred second factor is a 403 carrying `mfa_required`, so it lands here
+    rather than in the success path. Branch on the boolean, never on `detail` —
+    the string is for humans.
+    """
+    if e.status_code == 403 and e.body.get("mfa_required"):
+        _mfa_required_exit()
+    click.echo(f"{prefix}: {e.detail}", err=True)
     raise SystemExit(1)
 
 
@@ -152,8 +169,7 @@ def login(ctx, instance, profile_opt, admin):
                 "password": password,
             })
         except TrinityAPIError as e:
-            click.echo(f"Admin login failed: {e.detail}", err=True)
-            raise SystemExit(1)
+            _exit_on_login_error(e, "Admin login failed")
 
         token = _require_access_token(result)
 
@@ -190,8 +206,7 @@ def login(ctx, instance, profile_opt, admin):
             "code": code,
         })
     except TrinityAPIError as e:
-        click.echo(f"Verification failed: {e.detail}", err=True)
-        raise SystemExit(1)
+        _exit_on_login_error(e, "Verification failed")
 
     token = _require_access_token(result)
     user = result.get("user")
@@ -310,8 +325,7 @@ def init(ctx, profile_opt, admin):
                 "password": password,
             })
         except TrinityAPIError as e:
-            click.echo(f"Admin login failed: {e.detail}", err=True)
-            raise SystemExit(1)
+            _exit_on_login_error(e, "Admin login failed")
 
         token = _require_access_token(result)
         authed_client = TrinityClient(base_url=url, token=token)
@@ -350,8 +364,7 @@ def init(ctx, profile_opt, admin):
                 "code": code,
             })
         except TrinityAPIError as e:
-            click.echo(f"Verification failed: {e.detail}", err=True)
-            raise SystemExit(1)
+            _exit_on_login_error(e, "Verification failed")
 
         token = _require_access_token(result)
         user = result.get("user")

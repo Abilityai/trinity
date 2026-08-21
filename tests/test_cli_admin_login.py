@@ -238,6 +238,7 @@ class TestAdminLoginFlag:
 
 
 _CHALLENGE = {
+    "detail": "mfa_required",
     "mfa_required": True,
     "mfa_enrolled": True,
     "enrollment_required": False,
@@ -254,13 +255,17 @@ def _no_token_written(config_file):
 
 
 class TestLoginWithoutASession:
-    """#2322 — HTTP 200 is not proof a session was issued.
+    """#2322 — a login that issued no session must fail at the login call.
 
-    When enterprise 2FA defers a login, /token answers 200 with a challenge and
-    no `access_token`. Reading that field blind wrote `None` into the profile
-    and printed "Logged in as ...", so the refusal surfaced much later as
-    unexplained 401s with nothing pointing back at the login. Both login paths
-    are covered because they read the token separately.
+    Enterprise 2FA defers the login; `/token` now answers **403** carrying
+    `mfa_required` (it used to answer 200 with `access_token: null`, which the
+    CLI wrote into the profile before printing "Logged in as ..."). The
+    challenge therefore arrives on the ERROR path, so these exercise
+    `_exit_on_login_error` rather than `_require_access_token`.
+
+    403 and not 401 matters here specifically: `client._handle_response` treats
+    401 as "your session expired, run `trinity login`" and hard-exits with that
+    message — during login, which would be nonsense.
     """
 
     def test_admin_login_refuses_a_pending_second_factor(self, tmp_config):
@@ -271,7 +276,7 @@ class TestLoginWithoutASession:
             MockClient.return_value.__enter__ = MagicMock(return_value=mock_client)
             MockClient.return_value.__exit__ = MagicMock(return_value=False)
             mock_client.get.side_effect = [auth_mode_resp]
-            mock_client.post.side_effect = [_mock_response(200, _CHALLENGE)]
+            mock_client.post.side_effect = [_mock_response(403, _CHALLENGE)]
 
             runner = CliRunner()
             result = runner.invoke(cli, [
@@ -304,6 +309,9 @@ class TestLoginWithoutASession:
         assert _no_token_written(tmp_config)
 
     def test_email_login_refuses_a_pending_second_factor(self, tmp_config):
+        """The email route still answers 200 + raw challenge (out of the RFC
+        change's scope — it is not an OAuth2 grant), so this one exercises the
+        `_require_access_token` belt rather than the 403 mapper."""
         auth_mode_resp = _mock_response(200, {"email_auth_enabled": True, "setup_completed": True})
         request_resp = _mock_response(200, {"message": "Code sent", "expires_in_seconds": 600})
 
