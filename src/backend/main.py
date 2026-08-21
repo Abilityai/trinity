@@ -125,6 +125,7 @@ from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
+from client_portal.asks.router import router as portal_asks_router
 from client_portal.router import router as client_portal_router
 
 # Import activity service
@@ -1063,6 +1064,11 @@ app.include_router(loops_loop_router)  # Sequential agent loops (#740)
 app.include_router(webhooks_router)  # Webhook Triggers (WEBHOOK-001, #291)
 app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 app.include_router(client_portal_router)  # Workspace / client portal (ent#356, epic #78)
+# Workspace asks — OSS core since ent#428 (engine ent#364). A separate router
+# on the same prefix, mounted BEFORE `register_enterprise(app)` below so that
+# on an install whose submodule still registers the old gated module, the
+# ungated OSS routes win the match order (the ent#443 transition rule).
+app.include_router(portal_asks_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule
