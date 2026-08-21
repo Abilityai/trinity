@@ -657,6 +657,23 @@ Used by the public-facing verification flow (separate from the main email login)
 
 **Note:** This endpoint does not apply per-email OTP rate limiting (`check_otp_rate_limit`); only the IP-based limit is enforced here.
 
+### Second Factor Pending (#5 / #2322)
+
+`POST /api/auth/email/verify` runs the same `services/mfa_gate.py::gate_login`
+check as the password grant, after the emailed code is verified. When a second
+factor is pending it returns the challenge — `mfa_required`, `mfa_enrolled`,
+`enrollment_required`, `challenge_token` — and **no `access_token`**, so a
+client reading that field fails at the login call rather than storing nothing
+and 401ing later.
+
+This route already behaved correctly (it carries no `response_model`, so the
+raw challenge dict is returned as-is); `POST /token` was the outlier and was
+brought in line in #2322. See `feature-flows/admin-login.md` for the full
+contract and the failure mode.
+
+OSS-only builds register no provider, `gate_login` returns `None`, and this
+section does not apply.
+
 ### Whitelist Management Endpoints (`src/backend/routers/settings.py`)
 
 All whitelist endpoints are **admin-only** (require `role="admin"`).

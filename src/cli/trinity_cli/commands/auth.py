@@ -12,6 +12,32 @@ from ..config import (
 )
 
 
+def _require_access_token(result: dict) -> str:
+    """Read the session out of a login response, or fail loudly (#2322).
+
+    A login can succeed at the HTTP level and still issue no session: when a
+    second factor is pending, the server answers 200 with a challenge and no
+    `access_token`. Reading the field blind stored `None` in the profile and
+    turned that into unexplained 401s on every later command, far from the
+    cause. The CLI cannot complete a TOTP challenge, so this is terminal —
+    but it must say so here.
+    """
+    token = (result or {}).get("access_token")
+    if token:
+        return token
+
+    if (result or {}).get("mfa_required"):
+        click.echo(
+            "Login incomplete: this account requires a second factor, which the "
+            "CLI cannot complete. Sign in through the web UI and use an MCP API "
+            "key for CLI access (Settings -> MCP Keys).",
+            err=True,
+        )
+    else:
+        click.echo("Login failed: the server returned no access token.", err=True)
+    raise SystemExit(1)
+
+
 def _provision_mcp_key(client: TrinityClient, profile_name: str):
     """Ensure the user has an MCP API key and store it in the profile."""
     try:
@@ -129,7 +155,7 @@ def login(ctx, instance, profile_opt, admin):
             click.echo(f"Admin login failed: {e.detail}", err=True)
             raise SystemExit(1)
 
-        token = result["access_token"]
+        token = _require_access_token(result)
 
         # Fetch user info with the new token
         authed_client = TrinityClient(base_url=url, token=token)
@@ -167,7 +193,7 @@ def login(ctx, instance, profile_opt, admin):
         click.echo(f"Verification failed: {e.detail}", err=True)
         raise SystemExit(1)
 
-    token = result["access_token"]
+    token = _require_access_token(result)
     user = result.get("user")
 
     # Determine profile name: explicit > global flag > derive from URL
@@ -287,7 +313,7 @@ def init(ctx, profile_opt, admin):
             click.echo(f"Admin login failed: {e.detail}", err=True)
             raise SystemExit(1)
 
-        token = result["access_token"]
+        token = _require_access_token(result)
         authed_client = TrinityClient(base_url=url, token=token)
         try:
             user = authed_client.get("/api/users/me")
@@ -327,7 +353,7 @@ def init(ctx, profile_opt, admin):
             click.echo(f"Verification failed: {e.detail}", err=True)
             raise SystemExit(1)
 
-        token = result["access_token"]
+        token = _require_access_token(result)
         user = result.get("user")
 
     set_auth(url, token, user, profile_name=profile_name)

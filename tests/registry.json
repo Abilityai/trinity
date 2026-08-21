@@ -2415,6 +2415,31 @@
         "subscriptions"
       ],
       "description": "Subscription headroom history (ent#433): live round-trip of all 13 columns against a migrated DB (the ONLY test exercising db/tables.py \u2014 schema-parity never imports it); DatabaseManager delegations (no __getattr__); last-per-bucket selection, not max (observer-effect bias, two-peak ambiguity, NULL-utilization 429s); bucket_start vs fetched_at so gaps are decidable from jitter; PostgreSQL dialect compilation pinning ROW_NUMBER over a bare-column GROUP BY; probe-path invariants (Redis-before-DB ordering, to_thread off the event loop, failure never changes the probe result, no row when the probe never ran); no_windows classification; both retention windows registered, range-validated, guard-gated, and absent from the community seed; explicit cascade on subscription delete; coverage_pct reporting a thin series as thin."
+    },
+    {
+      "file": "unit/test_2322_mfa_challenge_response.py",
+      "feature": "#2322",
+      "added": "2026-08-20",
+      "categories": [
+        "backend",
+        "auth",
+        "2fa",
+        "api-contract",
+        "unit"
+      ],
+      "description": "POST /token had ONE response shape for two outcomes. With a second factor pending it answered HTTP 200 carrying access_token: null AND token_type: 'bearer' \u2014 a grant that issued no session describing itself as a bearer grant \u2014 so any client reading the token field without checking it (our own MCP client and CLI both did) stored nothing, reported success, and produced unexplained 401s on its next call, far from the cause. Two of the three mfa_gate consumers (the email route, the enterprise SSO redirect) already omitted the token fields; /token was the outlier. Pins BOTH shapes because the fix moved both: the challenge carries no access_token and no token_type, and a real grant carries no 2FA fields (before this every successful login \u2014 OSS-only builds included \u2014 carried all four as null, contradicting Token's own docstring). Both trigger arms covered: user enrolled, and the worse one, policy-required-but-not-yet-enrolled, where one admin toggle defers every unattended admin/creator credential before anyone has enrolled. Edition-agnostic \u2014 the provider is registered through the OSS mfa_gate seam, so it runs with no enterprise submodule present. The stub holds (enrolled, required) as independent booleans rather than deriving either from mfa_gate (learnings 2026-08-02)."
+    },
+    {
+      "file": "mcp-server/src/auth-challenge.test.ts",
+      "feature": "#2322",
+      "added": "2026-08-20",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "auth",
+        "unit"
+      ],
+      "description": "TrinityClient.authenticate() checked only response.ok, so a 200 carrying a 2FA challenge and no access_token set this.token = undefined and every later request 401'd with nothing pointing back at the login \u2014 Trinity shipping the exact broken-machine-client pattern #2322 describes. Pins that a session-less 200 throws at the login call (distinct message when a second factor is the cause) and that a real grant still authenticates."
     }
   ]
 }

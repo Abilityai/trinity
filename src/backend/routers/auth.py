@@ -315,7 +315,7 @@ async def get_auth_mode():
     }
 
 
-@router.post("/token", response_model=Token)
+@router.post("/token", response_model=Token, response_model_exclude_none=True)
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Login with username/password and get JWT token.
 
@@ -384,6 +384,11 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin"},
         )
+        # No `access_token` and no `token_type` (#2322): this grant did not
+        # issue a session, so it must not describe itself as a bearer grant.
+        # `response_model_exclude_none=True` drops both, which is what makes a
+        # client that reads the token field without checking it fail HERE
+        # rather than with an unexplained 401 on its next call.
         return challenge
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -409,7 +414,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/api/token", response_model=Token)
+@router.post("/api/token", response_model=Token, response_model_exclude_none=True)
 async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Alias for /token endpoint."""
     return await login(request, form_data)

@@ -144,6 +144,18 @@ export class TrinityClient {
     }
 
     const data = (await response.json()) as TokenResponse;
+
+    // #2322 — a 2xx is not proof a session was issued. When a second factor is
+    // pending, /token answers 200 with the challenge and no `access_token`.
+    // Checking only `response.ok` stored `undefined` here and turned a login
+    // refusal into unexplained 401s on every later call.
+    if (!data.access_token) {
+      const reason = data.mfa_required
+        ? "a second factor is required, which this client cannot complete"
+        : "the server returned no access token";
+      throw new Error(`Authentication failed: ${reason}`);
+    }
+
     this.token = data.access_token;
   }
 

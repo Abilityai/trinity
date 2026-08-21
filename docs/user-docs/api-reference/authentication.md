@@ -28,6 +28,38 @@ curl -s -X POST http://localhost:8000/api/token \
    `POST /api/auth/email/verify` with `{"email": "user@example.com", "code": "123456"}`
 3. Returns a JWT token on success.
 
+### Second Factor Pending
+
+If the account requires two-factor authentication, a **correct** password or
+email code returns HTTP 200 with a challenge instead of a session:
+
+```json
+{"mfa_required": true, "mfa_enrolled": true, "enrollment_required": false,
+ "challenge_token": "eyJ..."}
+```
+
+There is **no `access_token`** and **no `token_type`** — the login is not
+complete. Finish it at `/api/enterprise/2fa/login/verify` (or
+`/login/enroll/start` + `/login/enroll/confirm` if the account has not enrolled
+yet) using the `challenge_token`, which is what returns the real token.
+
+**Scripts and unattended clients: test for the token, not the status code.**
+
+```bash
+resp=$(curl -s -X POST http://localhost:8000/api/token \
+  -d 'username=admin&password=your-password')
+token=$(echo "$resp" | jq -r '.access_token // empty')
+if [ -z "$token" ]; then
+  echo "login did not issue a session: $resp" >&2; exit 1
+fi
+```
+
+A 2xx alone does not mean a session was issued. Two-factor authentication
+applies as soon as the account enrols **or** an administrator enables the
+role policy — including before anyone has enrolled — so an unattended
+credential can start receiving challenges without its own configuration
+changing.
+
 ### Using Tokens
 
 Include the token in the `Authorization` header for all authenticated requests:

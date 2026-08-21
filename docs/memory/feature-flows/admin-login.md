@@ -375,6 +375,40 @@ async def get_auth_mode():
     }
 ```
 
+### Second Factor Pending (#5 / #2322)
+
+`POST /token` has **two mutually exclusive response shapes**, and the route
+serializes with `response_model_exclude_none=True` so each carries only its own
+fields:
+
+| Outcome | Body |
+|---|---|
+| Grant issued | `{"access_token": "...", "token_type": "bearer"}` |
+| Second factor pending | `{"mfa_required": true, "mfa_enrolled": ..., "enrollment_required": ..., "challenge_token": "..."}` |
+
+The challenge shape carries **no `access_token` and no `token_type`**. That is
+the load-bearing part: a password grant that issued no session must not
+describe itself as a bearer grant. Until #2322 it answered 200 with
+`access_token: null` **and** `token_type: "bearer"`, so any client reading the
+token field without checking it — `src/mcp-server/src/client.ts` and
+`src/cli/trinity_cli/commands/auth.py` both did — stored nothing, reported
+success, and produced unexplained 401s on its next call with nothing pointing
+back at the login. The same bug's second half: every *successful* login,
+including in OSS-only builds with no provider registered, used to carry all
+four 2FA fields as `null`.
+
+The gate itself is `services/mfa_gate.py::gate_login`, called after the
+password is verified. OSS-only builds register no provider, it returns `None`,
+and this section does not apply. Enterprise 2FA fires it when the user is
+enrolled **or** a role policy requires it — note the second arm means enabling
+the policy defers logins for every admin/creator-role account immediately,
+before anyone has enrolled.
+
+Clients must treat "did I receive a token?" as the success test, never the
+status code. Regression tests: `tests/unit/test_2322_mfa_challenge_response.py`,
+`tests/test_2322_cli_login_no_session.py`,
+`src/mcp-server/src/auth-challenge.test.ts`.
+
 ### Authentication Logic
 
 **dependencies.py** (`src/backend/dependencies.py`)
