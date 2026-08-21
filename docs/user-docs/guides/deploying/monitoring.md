@@ -162,7 +162,7 @@ The fleet health endpoint returns per-agent health data:
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
   -d 'username=admin&password=your-admin-password' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token') or '')")
 
 curl -s -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/ops/fleet/health | jq .

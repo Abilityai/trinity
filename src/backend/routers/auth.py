@@ -6,6 +6,7 @@ import logging
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 import redis
@@ -315,7 +316,8 @@ async def get_auth_mode():
     }
 
 
-@router.post("/token", response_model=Token)
+@router.post("/token", response_model=Token, response_model_exclude_none=True,
+             responses={403: {"description": "Second factor required — no session issued (#2322)"}})
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Login with username/password and get JWT token.
 
@@ -384,7 +386,31 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin"},
         )
-        return challenge
+        # #2322 — a password grant that issued no session is an ERROR for the
+        # grant (RFC 6749 §5.2), not a 200. Returned as a JSONResponse rather
+        # than raised as an HTTPException so the challenge fields sit at the
+        # top level beside `detail`, which is the shape the issue specifies and
+        # the shape clients can branch on without unwrapping.
+        #
+        # 403, not 401, for three reasons — the issue permits either:
+        #  1. Our own CLI's `_handle_response` treats 401 as "your session
+        #     expired, run `trinity login`" and hard-exits. During login that
+        #     message is nonsense.
+        #  2. The frontend registers a GLOBAL axios 401 interceptor that calls
+        #     `authStore.logout()` and redirects to /login. It happens to be
+        #     guarded by `currentPath !== '/login'` today, but wiring a
+        #     mid-flight login refusal into "your session died" machinery is a
+        #     trap for whoever next moves the login form.
+        #  3. Semantically the credentials were CORRECT. Authentication is
+        #     incomplete, not rejected — which is why OAuth providers answer
+        #     `mfa_required` with 403.
+        #
+        # `mfa_required` and the two flags are kept alongside `detail` so a
+        # client branches on a boolean, never on parsing a human string.
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "mfa_required", **challenge},
+        )
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -409,7 +435,8 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/api/token", response_model=Token)
+@router.post("/api/token", response_model=Token, response_model_exclude_none=True,
+             responses={403: {"description": "Second factor required — no session issued (#2322)"}})
 async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Alias for /token endpoint."""
     return await login(request, form_data)
@@ -568,7 +595,7 @@ async def request_email_login_code(request: Request):
     return generic_response
 
 
-@router.post("/api/auth/email/verify")
+@router.post("/api/auth/email/verify")  # deliberately no response_model — see #2322
 async def verify_email_login_code(request: Request):
     """
     Verify email login code and get JWT token.

@@ -436,16 +436,32 @@ class User(BaseModel):
 
 
 class Token(BaseModel):
-    """JWT token response.
+    """OAuth2 password-grant response for ``POST /token``.
 
-    Normally carries ``access_token``. When enterprise 2FA (#5) requires a
-    second factor, the login endpoint instead returns ``mfa_required`` +
-    ``challenge_token`` and no ``access_token`` — the client completes the
-    flow at ``/api/enterprise/2fa/login/*`` to obtain the real token. The 2FA
-    fields are always absent in OSS-only builds.
+    Two mutually exclusive shapes, and the routes serialize with
+    ``response_model_exclude_none=True`` so each carries **only** its own
+    fields (#2322):
+
+    * **Grant issued** — ``access_token`` + ``token_type``. The 2FA fields are
+      absent, which is what makes this docstring's old claim ("absent in
+      OSS-only builds") true; before #2322 every successful login, OSS
+      included, carried all four of them as ``null``.
+    * **Second factor pending** (enterprise 2FA, #5) — ``mfa_required`` +
+      ``challenge_token`` (+ the two flags), and **no** ``access_token`` and
+      **no** ``token_type``. The caller completes the flow at
+      ``/api/enterprise/2fa/login/*`` to obtain the real token.
+
+    ``token_type`` is the load-bearing part of that second bullet and the
+    reason it is ``Optional`` rather than a plain ``str`` default. A password
+    grant that did not issue a session must not describe itself as a bearer
+    grant: it made a refusal indistinguishable from a success for every
+    client that reads the token field without checking it (our own MCP client
+    and CLI both did), turning a login refusal into unexplained 401s much
+    later. Both success paths set it explicitly, so the wire format of a real
+    grant is unchanged.
     """
     access_token: Optional[str] = None
-    token_type: str = "bearer"
+    token_type: Optional[str] = None
     mfa_required: Optional[bool] = None
     mfa_enrolled: Optional[bool] = None
     enrollment_required: Optional[bool] = None

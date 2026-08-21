@@ -67,8 +67,11 @@ export interface Template {
 }
 
 export interface TokenResponse {
-  access_token: string;
-  token_type: string;
+  /** Absent when a second factor is pending (#2322) — always check before use. */
+  access_token?: string;
+  token_type?: string;
+  mfa_required?: boolean;
+  challenge_token?: string;
 }
 
 // Agent-to-Agent Collaboration Types

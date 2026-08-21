@@ -4,6 +4,16 @@ CLI Admin Login Tests (test_cli_admin_login.py)
 Unit tests for the `trinity login --admin` command.
 Tests password-based admin authentication via /api/token.
 
+Also covers #2322: a login can succeed at the HTTP level and still issue no
+session (a second factor is pending), and the CLI must refuse it at the login
+call rather than storing `None` in the profile and 401ing on every later
+command. These live HERE rather than in `tests/unit/` on purpose —
+`tests/requirements-test.txt` deliberately does not install `trinity_cli`
+(an `-e ./src/cli` line breaks GitHub's dependency-graph updater), and the
+#660 contract is that a bare `pytest unit/` runs green after installing only
+that file. This module is already grandfathered in
+`lint_root_test_placement_baseline.txt`, which a NEW root file would not be.
+
 FAST TESTS - No backend required (mocked HTTP).
 """
 
@@ -225,3 +235,98 @@ class TestAdminLoginFlag:
         config = load_config()
         user = config["profiles"]["localhost"].get("user", {})
         assert user.get("username") == "admin"
+
+
+_CHALLENGE = {
+    "detail": "mfa_required",
+    "mfa_required": True,
+    "mfa_enrolled": True,
+    "enrollment_required": False,
+    "challenge_token": "eyJ-challenge",
+}
+
+
+def _no_token_written(config_file):
+    """No profile written, or none that received a token."""
+    if not config_file.exists():
+        return True
+    config = load_config()
+    return all(not p.get("token") for p in config.get("profiles", {}).values())
+
+
+class TestLoginWithoutASession:
+    """#2322 — a login that issued no session must fail at the login call.
+
+    Enterprise 2FA defers the login; `/token` now answers **403** carrying
+    `mfa_required` (it used to answer 200 with `access_token: null`, which the
+    CLI wrote into the profile before printing "Logged in as ..."). The
+    challenge therefore arrives on the ERROR path, so these exercise
+    `_exit_on_login_error` rather than `_require_access_token`.
+
+    403 and not 401 matters here specifically: `client._handle_response` treats
+    401 as "your session expired, run `trinity login`" and hard-exits with that
+    message — during login, which would be nonsense.
+    """
+
+    def test_admin_login_refuses_a_pending_second_factor(self, tmp_config):
+        auth_mode_resp = _mock_response(200, {"email_auth_enabled": True, "setup_completed": True})
+
+        with patch("trinity_cli.client.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            MockClient.return_value.__enter__ = MagicMock(return_value=mock_client)
+            MockClient.return_value.__exit__ = MagicMock(return_value=False)
+            mock_client.get.side_effect = [auth_mode_resp]
+            mock_client.post.side_effect = [_mock_response(403, _CHALLENGE)]
+
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "login", "--admin", "--instance", "http://localhost:8000",
+            ], input="password\n")
+
+        assert result.exit_code == 1, "a login that issued no session must not exit 0"
+        assert "second factor" in result.output.lower(), result.output
+        assert "Logged in as" not in result.output, "must not claim success"
+        assert _no_token_written(tmp_config), "a session-less login must not write a token"
+
+    def test_admin_login_refuses_a_missing_token(self, tmp_config):
+        """Same guard without the 2FA flag — any session-less 200."""
+        auth_mode_resp = _mock_response(200, {"email_auth_enabled": True, "setup_completed": True})
+
+        with patch("trinity_cli.client.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            MockClient.return_value.__enter__ = MagicMock(return_value=mock_client)
+            MockClient.return_value.__exit__ = MagicMock(return_value=False)
+            mock_client.get.side_effect = [auth_mode_resp]
+            mock_client.post.side_effect = [_mock_response(200, {"token_type": "bearer"})]
+
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "login", "--admin", "--instance", "http://localhost:8000",
+            ], input="password\n")
+
+        assert result.exit_code == 1
+        assert "no access token" in result.output.lower(), result.output
+        assert _no_token_written(tmp_config)
+
+    def test_email_login_refuses_a_pending_second_factor(self, tmp_config):
+        """The email route still answers 200 + raw challenge (out of the RFC
+        change's scope — it is not an OAuth2 grant), so this one exercises the
+        `_require_access_token` belt rather than the 403 mapper."""
+        auth_mode_resp = _mock_response(200, {"email_auth_enabled": True, "setup_completed": True})
+        request_resp = _mock_response(200, {"message": "Code sent", "expires_in_seconds": 600})
+
+        with patch("trinity_cli.client.httpx.Client") as MockClient:
+            mock_client = MagicMock()
+            MockClient.return_value.__enter__ = MagicMock(return_value=mock_client)
+            MockClient.return_value.__exit__ = MagicMock(return_value=False)
+            mock_client.get.side_effect = [auth_mode_resp]
+            mock_client.post.side_effect = [request_resp, _mock_response(200, _CHALLENGE)]
+
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "login", "--instance", "http://localhost:8000",
+            ], input="admin@example.com\n123456\n")
+
+        assert result.exit_code == 1
+        assert "second factor" in result.output.lower(), result.output
+        assert _no_token_written(tmp_config)

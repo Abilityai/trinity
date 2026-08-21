@@ -203,12 +203,6 @@ export const useAuthStore = defineStore('auth', {
 
         const response = await axios.post('/api/token', formData)
 
-        // Enterprise 2FA (#5): a second factor is required — defer the token.
-        if (response.data?.mfa_required) {
-          this._setMfaChallenge(response.data)
-          return false
-        }
-
         // Create a dev user profile
         const devUser = {
           sub: `local|${username}`,
@@ -221,6 +215,17 @@ export const useAuthStore = defineStore('auth', {
         console.log('🔐 Admin login: authenticated as', username)
         return true
       } catch (error) {
+        // Enterprise 2FA (#5): a second factor is required — defer the token.
+        // #2322 moved this from a 200 body to a 403: a password grant that
+        // issued no session is an error for the grant, so the challenge now
+        // arrives on the error path. Branch on the boolean, never on `detail`.
+        // 403 (not 401) is deliberate — the global axios 401 interceptor in
+        // main.js logs out and redirects, which is wrong for a login that is
+        // still in flight.
+        if (error.response?.status === 403 && error.response?.data?.mfa_required) {
+          this._setMfaChallenge(error.response.data)
+          return false
+        }
         console.error('Admin login failed:', error)
         const detail = error.response?.data?.detail || 'Invalid username or password'
         this.authError = detail

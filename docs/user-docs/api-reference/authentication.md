@@ -28,6 +28,58 @@ curl -s -X POST http://localhost:8000/api/token \
    `POST /api/auth/email/verify` with `{"email": "user@example.com", "code": "123456"}`
 3. Returns a JWT token on success.
 
+### Second Factor Pending
+
+If the account requires two-factor authentication, a **correct** password
+returns **HTTP 403** — the login is not complete, so no session is issued:
+
+```json
+{"detail": "mfa_required", "mfa_required": true, "mfa_enrolled": true,
+ "enrollment_required": false, "challenge_token": "eyJ..."}
+```
+
+There is **no `access_token`** and **no `token_type`**. Finish the login at
+`/api/enterprise/2fa/login/verify` (or `/login/enroll/start` +
+`/login/enroll/confirm` if the account has not enrolled yet) using the
+`challenge_token` — that is what returns the real token.
+
+Three outcomes, three status codes:
+
+| Status | Meaning |
+|---|---|
+| 200 | Session issued — `access_token` present |
+| 403 | Credentials correct, second factor required — no session |
+| 401 | Credentials rejected — no session, no challenge |
+
+The email route (`/api/auth/email/verify`) is not an OAuth2 grant and keeps its
+200 for the same case, simply omitting `access_token`.
+
+**Scripts and unattended clients: check the status, and check for the token.**
+
+```bash
+resp=$(curl -s -w '\n%{http_code}' -X POST http://localhost:8000/api/token \
+  -d 'username=admin&password=your-password')
+code=$(echo "$resp" | tail -1)
+body=$(echo "$resp" | sed '$d')
+
+if [ "$code" = "403" ]; then
+  # Don't echo $body — a challenge carries a short-lived challenge_token,
+  # and script stderr often ends up in CI logs.
+  echo "login needs a second factor this script cannot complete" >&2
+  echo "use an MCP API key (Settings -> MCP Keys) instead" >&2
+  exit 1
+fi
+
+token=$(echo "$body" | jq -r '.access_token // empty')
+[ -n "$token" ] || { echo "login issued no session" >&2; exit 1; }
+```
+
+Two-factor authentication applies as soon as the account enrols **or** an
+administrator enables the role policy — including before anyone has enrolled —
+so an unattended credential can start receiving 403s without its own
+configuration changing. For automation, prefer an **MCP API key**
+(`trinity_mcp_*`), which is not subject to the second-factor flow.
+
 ### Using Tokens
 
 Include the token in the `Authorization` header for all authenticated requests:

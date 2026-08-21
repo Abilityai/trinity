@@ -139,11 +139,33 @@ export class TrinityClient {
       body: formData,
     });
 
+    // #2322 — parse BEFORE the status check. A login deferred by a second
+    // factor answers 403 carrying `mfa_required`; reading only `statusText`
+    // would report a bare "Forbidden" for the one failure with a specific,
+    // actionable cause.
+    const data = (await response
+      .json()
+      .catch(() => ({}))) as TokenResponse;
+
+    if (data.mfa_required) {
+      throw new Error(
+        "Authentication failed: a second factor is required, which this client " +
+          "cannot complete. Use a Trinity MCP API key instead of password auth.",
+      );
+    }
+
     if (!response.ok) {
       throw new Error(`Authentication failed: ${response.statusText}`);
     }
 
-    const data = (await response.json()) as TokenResponse;
+    // Belt for any 2xx that carries no session: a status code is not proof a
+    // session was issued, and checking only `response.ok` is what stored
+    // `undefined` here and turned a login refusal into unexplained 401s on
+    // every later call.
+    if (!data.access_token) {
+      throw new Error("Authentication failed: the server returned no access token");
+    }
+
     this.token = data.access_token;
   }
 

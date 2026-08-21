@@ -72,7 +72,7 @@ shows a **Get started** button in the empty state that opens the same wizard.
 ```bash
 # Get auth token
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
-  -d 'username=admin&password=YOUR_PASSWORD' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+  -d 'username=admin&password=YOUR_PASSWORD' | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token') or '')")
 
 # Create agent from template
 curl -X POST http://localhost:8000/api/agents \

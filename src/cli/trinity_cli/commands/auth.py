@@ -12,6 +12,49 @@ from ..config import (
 )
 
 
+def _require_access_token(result: dict) -> str:
+    """Read the session out of a login response, or fail loudly (#2322).
+
+    Since #2322 a deferred login is a 403 and never reaches here, so this is
+    the belt: any future path that answers 2xx without a session still fails
+    at the login call rather than storing `None` in the profile and turning
+    that into unexplained 401s on every later command. `_mfa_required_exit`
+    handles the 403 itself.
+    """
+    token = (result or {}).get("access_token")
+    if token:
+        return token
+
+    if (result or {}).get("mfa_required"):
+        _mfa_required_exit()
+    click.echo("Login failed: the server returned no access token.", err=True)
+    raise SystemExit(1)
+
+
+def _mfa_required_exit() -> None:
+    """The account needs a second factor the CLI cannot supply (#2322)."""
+    click.echo(
+        "Login incomplete: this account requires a second factor, which the "
+        "CLI cannot complete. Sign in through the web UI and use an MCP API "
+        "key for CLI access (Settings -> MCP Keys).",
+        err=True,
+    )
+    raise SystemExit(1)
+
+
+def _exit_on_login_error(e: TrinityAPIError, prefix: str) -> None:
+    """Map a failed login response to an exit message (#2322).
+
+    A deferred second factor is a 403 carrying `mfa_required`, so it lands here
+    rather than in the success path. Branch on the boolean, never on `detail` —
+    the string is for humans.
+    """
+    if e.status_code == 403 and e.body.get("mfa_required"):
+        _mfa_required_exit()
+    click.echo(f"{prefix}: {e.detail}", err=True)
+    raise SystemExit(1)
+
+
 def _provision_mcp_key(client: TrinityClient, profile_name: str):
     """Ensure the user has an MCP API key and store it in the profile."""
     try:
@@ -126,10 +169,9 @@ def login(ctx, instance, profile_opt, admin):
                 "password": password,
             })
         except TrinityAPIError as e:
-            click.echo(f"Admin login failed: {e.detail}", err=True)
-            raise SystemExit(1)
+            _exit_on_login_error(e, "Admin login failed")
 
-        token = result["access_token"]
+        token = _require_access_token(result)
 
         # Fetch user info with the new token
         authed_client = TrinityClient(base_url=url, token=token)
@@ -164,10 +206,9 @@ def login(ctx, instance, profile_opt, admin):
             "code": code,
         })
     except TrinityAPIError as e:
-        click.echo(f"Verification failed: {e.detail}", err=True)
-        raise SystemExit(1)
+        _exit_on_login_error(e, "Verification failed")
 
-    token = result["access_token"]
+    token = _require_access_token(result)
     user = result.get("user")
 
     # Determine profile name: explicit > global flag > derive from URL
@@ -284,10 +325,9 @@ def init(ctx, profile_opt, admin):
                 "password": password,
             })
         except TrinityAPIError as e:
-            click.echo(f"Admin login failed: {e.detail}", err=True)
-            raise SystemExit(1)
+            _exit_on_login_error(e, "Admin login failed")
 
-        token = result["access_token"]
+        token = _require_access_token(result)
         authed_client = TrinityClient(base_url=url, token=token)
         try:
             user = authed_client.get("/api/users/me")
@@ -324,10 +364,9 @@ def init(ctx, profile_opt, admin):
                 "code": code,
             })
         except TrinityAPIError as e:
-            click.echo(f"Verification failed: {e.detail}", err=True)
-            raise SystemExit(1)
+            _exit_on_login_error(e, "Verification failed")
 
-        token = result["access_token"]
+        token = _require_access_token(result)
         user = result.get("user")
 
     set_auth(url, token, user, profile_name=profile_name)
