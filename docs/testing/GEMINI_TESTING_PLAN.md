@@ -110,7 +110,7 @@ curl -s http://localhost:8000/api/version | jq
 # Login and get token
 TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"your-password"}' | jq -r '.access_token')
+  -d '{"username":"admin","password":"your-password"}' | jq -r '.access_token // empty')
 
 echo "Token: ${TOKEN:0:20}..."
 ```

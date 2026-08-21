@@ -632,10 +632,35 @@ async authenticate(username: string, password: string): Promise<void> {
     body: formData,
   });
 
-  const data = (await response.json()) as TokenResponse;
+  // #2322 — parse BEFORE the status check. A login deferred by a second factor
+  // answers 403 carrying `mfa_required`; reading only `statusText` would report
+  // a bare "Forbidden" for the one failure with an actionable cause.
+  const data = (await response.json().catch(() => ({}))) as TokenResponse;
+
+  if (data.mfa_required) {
+    throw new Error(
+      "Authentication failed: a second factor is required, which this client " +
+        "cannot complete. Use a Trinity MCP API key instead of password auth.",
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`Authentication failed: ${response.statusText}`);
+  }
+  // Belt for any 2xx that carries no session — a status code is not proof one
+  // was issued, and checking only `response.ok` is what stored `undefined` here.
+  if (!data.access_token) {
+    throw new Error("Authentication failed: the server returned no access token");
+  }
+
   this.token = data.access_token;
 }
 ```
+
+> **Password auth is the legacy path.** In production `MCP_REQUIRE_API_KEY=true`,
+> so the MCP server holds no password and never reaches this method. It stays
+> correct because a dev/legacy caller that silently stored `undefined` here is
+> exactly the #2322 failure — see [admin-login.md](admin-login.md) for the
+> three-status contract.
 
 ### Request Pattern with Auto-Retry (lines 103-155)
 ```typescript

@@ -158,7 +158,7 @@ When an agent sends a chat message to another agent via Trinity MCP:
 # Get auth token
 TOKEN=$(curl -s -X POST http://localhost:8000/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin&password=YOUR_PASSWORD" | jq -r '.access_token')
+  -d "username=admin&password=YOUR_PASSWORD" | jq -r '.access_token // empty')
 
 # Trigger collaboration from agent-a to agent-b
 curl -X POST http://localhost:8000/api/agents/agent-b/chat \

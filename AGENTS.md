@@ -97,7 +97,7 @@ cd my-agent/ && trinity deploy .      # package, upload, create + start the cont
 
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
-  -d 'username=admin&password=YOUR_ADMIN_PASSWORD' | jq -r .access_token)
+  -d 'username=admin&password=YOUR_ADMIN_PASSWORD' | jq -r '.access_token // empty')
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 ```
 

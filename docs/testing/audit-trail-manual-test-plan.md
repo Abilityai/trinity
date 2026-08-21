@@ -9,7 +9,7 @@ Covers Phases 2b, 3, and 4. Assumes services running via `./scripts/deploy/start
 ```bash
 # Get admin token (used in all curl commands below)
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
-  -d "username=admin&password=${ADMIN_PASSWORD}" | jq -r .access_token)
+  -d "username=admin&password=${ADMIN_PASSWORD}" | jq -r '.access_token // empty')
 
 # Verify token works
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/users/me | jq .
