@@ -54,7 +54,8 @@ To raise it for one agent:
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
   -d "username=admin&password=$ADMIN_PASSWORD" \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+  | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token') or '')")
+[ -n "$TOKEN" ] || { echo "login issued no session (second factor required?)" >&2; exit 1; }
 
 curl -X PUT http://localhost:8000/api/agents/<agent-name>/guardrails \
   -H "Authorization: Bearer $TOKEN" \

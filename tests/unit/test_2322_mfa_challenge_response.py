@@ -220,3 +220,64 @@ def test_gate_is_a_no_op_without_a_provider(client):
     from services import mfa_gate
 
     assert mfa_gate.gate_login({"id": 1, "username": "admin", "role": "admin"}, mode="admin") is None
+
+
+# ------------------------------------------- the other OSS consumer (email)
+
+@pytest.fixture
+def email_client(auth_router, monkeypatch):
+    """`/api/auth/email/verify` — the second of the three `gate_login` consumers."""
+    ra = auth_router
+
+    monkeypatch.setattr(ra.db, "get_setting_value",
+                        lambda key, default=None: "true" if key == "email_auth_enabled" else default)
+    monkeypatch.setattr(ra, "check_otp_rate_limit", lambda *a, **k: True)
+    monkeypatch.setattr(ra, "record_otp_attempt", lambda *a, **k: None)
+    monkeypatch.setattr(ra.db, "verify_login_code", lambda email, code: True)
+    monkeypatch.setattr(
+        ra.db, "get_or_create_email_user",
+        lambda email: {"id": 2, "username": email, "role": "admin", "email": email},
+    )
+
+    app = FastAPI()
+    app.include_router(ra.router)
+    return TestClient(app)
+
+
+def _email_login(client):
+    return client.post(
+        "/api/auth/email/verify",
+        json={"email": "admin@example.com", "code": "123456"},
+    )
+
+
+def test_email_route_challenge_also_carries_no_grant_fields(email_client, provider):
+    """This route was ALREADY correct — pin it so it stays that way.
+
+    It carries no `response_model`, so the raw challenge dict is returned as-is
+    and there is no `access_token` key at all. That is load-bearing: three
+    documents and this PR's own commit message cite it as the reference
+    behaviour `/token` was brought in line with. Adding a `response_model` here
+    later would silently reintroduce the #2322 shape on the one route that
+    never had it, and nothing else would notice.
+    """
+    p = provider(enrolled=True, required=False)
+    body = _email_login(email_client).json()
+
+    assert p.calls == 1, "the gate never ran — this test would pass vacuously"
+    assert "access_token" not in body, f"email challenge must not carry access_token: {body}"
+    assert "token_type" not in body, f"email challenge must not carry token_type: {body}"
+    assert body["mfa_required"] is True
+    assert body["challenge_token"]
+
+
+def test_email_route_grant_is_unchanged(email_client, provider):
+    """A declined gate still issues the session + user profile the frontend reads."""
+    provider(enrolled=False, required=False)
+    body = _email_login(email_client).json()
+
+    assert body["access_token"]
+    assert body["token_type"] == "bearer"
+    assert body["user"]["username"] == "admin@example.com"
+    for field in ("mfa_required", "challenge_token"):
+        assert field not in body, f"a real grant must not carry {field}: {body}"

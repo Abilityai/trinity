@@ -70,7 +70,8 @@ Authentication uses Bearer tokens. Obtain a token from `/api/token` using form-e
 # Authenticate
 TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
   -d 'username=admin&password=your-password' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+  | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token') or '')")
+[ -n "$TOKEN" ] || { echo "login issued no session (second factor required?)" >&2; exit 1; }
 
 # List agents
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents

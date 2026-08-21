@@ -573,7 +573,7 @@ async def request_email_login_code(request: Request):
     return generic_response
 
 
-@router.post("/api/auth/email/verify")
+@router.post("/api/auth/email/verify")  # deliberately no response_model — see #2322
 async def verify_email_login_code(request: Request):
     """
     Verify email login code and get JWT token.

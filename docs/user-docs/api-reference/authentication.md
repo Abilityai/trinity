@@ -50,7 +50,10 @@ resp=$(curl -s -X POST http://localhost:8000/api/token \
   -d 'username=admin&password=your-password')
 token=$(echo "$resp" | jq -r '.access_token // empty')
 if [ -z "$token" ]; then
-  echo "login did not issue a session: $resp" >&2; exit 1
+  # Don't echo $resp — a challenge response carries a short-lived
+  # challenge_token, and script stderr often ends up in CI logs.
+  echo "login did not issue a session (second factor required?)" >&2
+  exit 1
 fi
 ```
 
