@@ -134,7 +134,11 @@
          because it is a turn that is waiting on the person about to type. -->
     <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
       <div class="max-w-4xl mx-auto">
-        <PortalAsks :agent-name="agent" />
+        <PortalAsks
+          :agent-name="agent.name"
+          :current-session-id="currentSessionId"
+          @open-thread="(t) => emit('open-thread', t)"
+        />
       </div>
     </div>
 
@@ -314,11 +318,15 @@ const props = defineProps({
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread'])
 
 const store = useClientPortalStore()
 // ent#364: one list, filtered — never a second fetch for this surface.
-const agentAsks = computed(() => store.asksForAgent(props.agent))
+// `.name`, not the object (ent#429): `agent` is `{name, owner, ...}` and
+// `asksForAgent` compares against `a.agent_name`, so passing the object matched
+// nothing and this surface — the third of the three ent#364 promises — had never
+// rendered. It failed SILENTLY, as an empty list is a legitimate state.
+const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 const loadingHistory = ref(false)

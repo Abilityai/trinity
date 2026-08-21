@@ -40,7 +40,7 @@
       <!-- ent#364: asks this agent raised for you, at the top of its page where a
            pending decision belongs. Renders nothing when there are none. -->
       <div v-if="store.asksForAgent(agentName).length" class="px-3 sm:px-6 pt-3">
-        <PortalAsks :agent-name="agentName" />
+        <PortalAsks :agent-name="agentName" @open-thread="(t) => $emit('open-thread', t)" />
       </div>
 
       <!-- Stats strip -->

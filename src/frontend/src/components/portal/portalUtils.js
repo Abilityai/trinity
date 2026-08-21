@@ -1076,3 +1076,65 @@ export function resolveComposerGrowth(metrics, max) {
     overflowY: wanted > ceiling ? 'auto' : 'hidden',
   }
 }
+
+/**
+ * How an expired ask describes itself (ent#429).
+ *
+ * "Visibly expired" is not enough on its own: the #1142 sweep DELETES terminal
+ * rows, so between lapsing and being swept an ask is the only evidence that a
+ * question was ever asked — and "this expired" without a WHEN leaves the reader
+ * unable to tell a question that lapsed an hour ago from one that lapsed in
+ * March. The first is worth chasing; the second is history.
+ *
+ * Pure, and `now` is injected, because a component that formats its own dates is
+ * a component whose wording no test can reach (the ent#392 rule for this file).
+ *
+ * Degrades to the bare sentence on anything it cannot read — a missing, garbled
+ * or future `expires_at`. A wrong time is worse than no time here: the reader
+ * would act on it.
+ */
+export function expiredLabel(expiresAt, now = Date.now()) {
+  const bare = 'This expired before it was answered.'
+  if (!expiresAt) return bare
+
+  const at = Date.parse(expiresAt)
+  if (Number.isNaN(at)) return bare
+
+  const ms = now - at
+  // A future timestamp means the row is not actually expired and something
+  // upstream disagrees with us; say less rather than something false.
+  if (ms < 0) return bare
+
+  const mins = Math.floor(ms / 60000)
+  if (mins < 1) return 'This expired moments ago, before it was answered.'
+  if (mins < 60) return `This expired ${mins}m ago, before it was answered.`
+
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `This expired ${hours}h ago, before it was answered.`
+
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `This expired ${days}d ago, before it was answered.`
+
+  // Past a month, "43d ago" stops meaning anything — a date does.
+  return `This expired on ${new Date(at).toLocaleDateString()}, before it was answered.`
+}
+
+/**
+ * Should this ask offer "open the conversation it belongs to"? (ent#429)
+ *
+ * `chat_id` is written at RAISE time so the ask is never homeless — but a link
+ * is only useful when it goes somewhere the reader is not. Offered when the ask
+ * names a thread AND that is not the thread already on screen; the agent page
+ * and the sidebar pass no current thread, so there it is always offered.
+ *
+ * Additive by design: it never HIDES an ask from a thread it was not raised
+ * against. The attachment exists so a scheduled run's question is durable and
+ * findable, not to restrict where it may be answered — and an ask the reader
+ * can see but not reach is the failure this closes, not one it should create.
+ */
+export function askThreadLink(ask, currentSessionId = null) {
+  const target = ask?.chat_id
+  if (!target) return null
+  if (currentSessionId && target === currentSessionId) return null
+  return target
+}
