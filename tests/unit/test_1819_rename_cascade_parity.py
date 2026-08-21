@@ -77,7 +77,23 @@ def _placeholder(coltype: str, name: str) -> object:
     return f"seed-{name}"
 
 
-def _seed_row(conn, table: str, agent_column: str) -> bool:
+_FILTER_RE = re.compile(r"(\w+)\s*=\s*'([^']*)'")
+
+
+def _filter_values(extra_filter: str | None) -> dict:
+    """The column values a ref's `extra_filter` requires a row to carry.
+
+    A filtered ref only re-keys rows its predicate selects, so a seeded row that
+    does not satisfy the predicate is skipped by design — and would then be
+    reported as a strand that is really this seeder's fault. Parsing the filter
+    keeps the harness correct for ANY filtered ref, instead of one hard-coded
+    column per ref (the `scope` special case this replaces, and the `kind` /
+    `sender_kind` pair ent#443 added for the polymorphic room columns).
+    """
+    return dict(_FILTER_RE.findall(extra_filter or ""))
+
+
+def _seed_row(conn, table: str, agent_column: str, extra_filter: str | None = None) -> bool:
     """Insert one minimally-valid row for `table` keyed to OLD.
 
     Returns False when the table cannot be seeded generically (e.g. a required
@@ -90,17 +106,17 @@ def _seed_row(conn, table: str, agent_column: str) -> bool:
     if agent_column not in cols:
         return False
 
+    required = _filter_values(extra_filter)
     values = {}
     for name, (coltype, notnull, default, pk) in cols.items():
         if name == agent_column:
             values[name] = OLD
-        elif name == "scope":
-            # Some refs are scope-filtered (mcp_api_keys). A synthetic scope
-            # matches no filter, which would look like a strand when it is
-            # really this seeder's fault — see
-            # test_scope_filtered_keys_narrow_deliberately for the rows the
+        elif name in required:
+            # Satisfy the ref's own predicate — see `_filter_values`. Applies to
+            # the scope-filtered key refs and to ent#443's kind-scoped room refs;
+            # `test_scope_filtered_keys_narrow_deliberately` covers the rows the
             # filters intentionally leave alone.
-            values[name] = "agent"
+            values[name] = required[name]
         elif pk and "INT" in (coltype or "").upper():
             continue  # let AUTOINCREMENT assign
         elif notnull and default is None:
@@ -139,7 +155,7 @@ def test_rename_rekeys_every_registered_table(sqlite_db):
             {"n": OLD},
         )
         for ref in AGENT_REFS:
-            if _seed_row(conn, ref.table, ref.column):
+            if _seed_row(conn, ref.table, ref.column, ref.extra_filter):
                 seeded.append((ref.table, ref.column))
             else:
                 unseedable.append(f"{ref.table}.{ref.column}")

@@ -2,7 +2,7 @@
 
 A **room** is one shared, persistent conversation where several agents — and a human — can work a topic together across many turns. Each agent still runs in its own isolated session; the room is a shared *record*, not a shared *context*.
 
-> **Enterprise feature.** Shared sessions are available on the enterprise tier, when the enterprise edition is entitled on your instance. In a community build the room MCP tools return a `shared_sessions_not_enabled` result, and the Workspace offers single-agent chats only — its agent picker is single-select and a room link reports that the conversation isn't available on this instance, rather than failing when you try to start one.
+Shared sessions ship in **every** Trinity build. They used to be an enterprise capability; if you point a current Workspace at an older backend that does not serve rooms, it degrades rather than breaking — the agent picker is single-select, `@mention` escalation is off, the room MCP tools return a `shared_sessions_not_enabled` result, and a room link reports that the conversation isn't available on this instance.
 
 ## Concepts
 
@@ -46,11 +46,11 @@ A room lets your agent collaborate with other agents over many turns without sha
 | `post_to_room(room_id, content)` | Post a message. `@mention` a participant by name to wake it; no mention = silent note. You always post as yourself. |
 | `close_room(room_id, reason?)` | Close the room. Idempotent — closing an already-closed room is a no-op. |
 
-If shared sessions are not enabled, each tool returns a structured `shared_sessions_not_enabled` result instead of an error.
+Against a backend that does not serve rooms, each tool returns a structured `shared_sessions_not_enabled` result instead of an error.
 
 ### API Endpoints
 
-These enterprise endpoints back the tools above (present only when the feature is entitled). See the [API reference](http://localhost:8000/docs) for full request and response schemas.
+These endpoints back the tools above. See the [API reference](http://localhost:8000/docs) for full request and response schemas.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -65,7 +65,6 @@ These enterprise endpoints back the tools above (present only when the feature i
 - **Per-message cost is not shown in the transcript** yet. Only the room-level cost total is displayed.
 - **Roles are recorded, not enforced.** Designating a moderator or scribe is advisory — no participant is prevented from posting based on its role.
 - **Turn chains run synchronously.** A mention triggers the mentioned agent's turn inline, so a long chain of hand-offs can run longer than a single HTTP request.
-- **Multi-agent chat is gated** behind the enterprise entitlement. Where it is absent, the Workspace picker is single-select, `@mention` escalation is off, and a room link reports that the conversation isn't available on this instance.
 - **Rooms show no unread badge** in the Workspace sidebar. Starring works for rooms; unread counts currently cover one-to-one chats only.
 
 ## See Also

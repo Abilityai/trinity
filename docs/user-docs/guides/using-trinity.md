@@ -18,7 +18,7 @@ A quick tour of the web UI — dashboard, agent management, chat, and day-to-day
 | **Operations** | Operator queue, notifications, health, executions |
 | **Settings** | Platform configuration (all users see MCP Keys; admins see every tab) |
 
-Two more entries appear only on entitled installations: **Sessions** (shared multi-agent rooms) and **Enterprise** (the entitled-feature catalogue).
+One more entry appears only on entitled installations: **Enterprise** (the entitled-feature catalogue). Shared multi-agent rooms are not a nav entry — they open from the Workspace when you `@mention` a second agent in a chat.
 
 There is no separate Agents page — it is now the Dashboard's List mode, and `/agents` redirects there.
 

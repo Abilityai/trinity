@@ -54,7 +54,7 @@
 - [Agent Network](collaboration/agent-network.md) — Multi-agent communication, async collaboration, Timeline replay
 - [Agent Permissions](collaboration/agent-permissions.md) — Who can call whom, access control
 - [Event Subscriptions](collaboration/event-subscriptions.md) — Pub/sub + automatic task-completion report-back
-- [Shared Sessions (Rooms)](collaboration/rooms.md) — Several agents converse in one shared room (enterprise)
+- [Shared Sessions (Rooms)](collaboration/rooms.md) — Several agents converse in one shared room
 - [System Manifest](collaboration/system-manifest.md) — Recipe-based multi-agent deployment, resilient deploy
 
 ## Automation
