@@ -42,8 +42,11 @@ def _is_expired(item: dict) -> bool:
 def _project(item: dict) -> WorkspaceAsk:
     """The explicit client-facing projection (see `WorkspaceAsk`).
 
-    `chat_id` comes from platform-written context only. `context` is otherwise
-    agent-authored and never forwarded.
+    `chat_id` comes from platform-written context only — enforced since ent#429,
+    which strips any agent-authored `workspace_session_id` at the ingestion
+    boundary before writing the real one. Until then this docstring described an
+    intention rather than a property. `context` is otherwise agent-authored and
+    never forwarded.
     """
     context = item.get("context") if isinstance(item.get("context"), dict) else {}
     chat_id = context.get("workspace_session_id")

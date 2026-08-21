@@ -215,11 +215,28 @@ def test_the_projection_never_forwards_agent_authored_context(asks_db, client_em
 
 
 def test_the_chat_id_comes_from_platform_written_context_only(asks_db, client_email):
+    """The name was always right; the body used to assert the opposite (ent#429).
+
+    It fed an AGENT-authored `workspace_session_id` and asserted it reached the
+    client as `chat_id` — which is the hole, not the contract. `chat_id` is where
+    the Workspace sends a reader; an agent that can set it chooses which
+    conversation its own ask claims to belong to.
+
+    Now: the agent's value is stripped at the ingestion boundary, and the value
+    the client sees is the one the PLATFORM resolved for (agent, addressee).
+    """
     from client_portal.asks import service
+    from client_portal.db import get_portal_session
+
     _raise_ask(addressed=client_email, context={"workspace_session_id": "sess-123"})
 
     ask = service.list_asks(client_email, is_platform=False)[0]
-    assert ask.chat_id == "sess-123"
+
+    assert ask.chat_id != "sess-123", "an agent-authored chat_id reached the client"
+    assert ask.chat_id, "an addressed ask should not be homeless"
+    # And it is a REAL thread belonging to this (agent, client) pair — proving it
+    # came from the platform resolver rather than from anywhere else.
+    assert get_portal_session(ask.chat_id, "agent-a", client_email)
 
 
 def test_an_expired_ask_is_shown_as_expired_not_hidden(asks_db, client_email):

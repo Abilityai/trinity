@@ -1117,6 +1117,29 @@ def _resolve_session_id(agent_name: str, email: str, session_id: str | None) -> 
     return new_id
 
 
+def ensure_thread_for_ask(agent_name: str, email: str) -> str:
+    """The chat an ask addressed to `email` belongs to (ent#429).
+
+    "Nothing homeless": an ask raised outside any conversation — a scheduled run
+    is the normal case — still has to land somewhere the addressee can find it.
+    Resolved at RAISE time rather than at render time, so the attachment is
+    durable and auditable: it is a column-ish fact on the row, not a guess the
+    UI makes each time it draws.
+
+    Reuses the client's latest thread with that agent and opens one only if they
+    have never chatted — the same `_resolve_session_id(..., None)` a first client
+    turn takes, deliberately, so an ask does not accumulate threads beside the
+    conversation it belongs in.
+
+    Public because the ingestion boundary (`services/operator_queue_service`)
+    calls it, and reaching across a package for a private helper is how two
+    definitions of "which thread" start drifting. It raises like any other
+    portal call; the caller owns the fail-soft, because what is soft about a
+    failure THERE (an ask lands homeless) is not what would be soft here.
+    """
+    return _resolve_session_id(agent_name, email, None)
+
+
 def _format_history_context(history: list[dict]) -> str:
     """Render prior turns (oldest-first) as a labelled context block. Empty when
     there is no history."""

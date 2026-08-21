@@ -235,6 +235,42 @@ def _validated_addressee(agent_name: str, raw) -> Optional[str]:
     return None
 
 
+# ent#429: the context key naming the chat an addressed ask belongs to. Written
+# by the platform (below), read by `client_portal/asks/service.py::_project` as
+# the client-facing `chat_id`, and stripped from anything the agent authored —
+# named here so the writer and the stripper cannot drift apart.
+_WORKSPACE_THREAD_KEY = "workspace_session_id"
+
+
+def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
+    """The chat an addressed ask attaches to, or None (ent#429).
+
+    Resolved at RAISE time, never at render time: an ask raised by a scheduled
+    run has no conversation of its own, and "we will work out where it belongs
+    when someone looks at it" is not an attachment — it is a guess repeated
+    per view, with nothing durable to audit.
+
+    Fail-SOFT, and deliberately the opposite direction to `_validated_addressee`
+    beside it. That one fails CLOSED because an addressee it cannot verify is an
+    authorization decision it must not make. This one only decides where a link
+    POINTS: a thread we could not resolve costs the reader one extra click, and
+    refusing the whole ask over it would lose the question entirely. Never
+    raises — the #1632 clamp contract.
+    """
+    try:
+        from client_portal.service import ensure_thread_for_ask
+
+        return ensure_thread_for_ask(agent_name, email) or None
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[OperatorQueue] could not attach a workspace chat for an ask from %s; "
+            "it will render without a thread link (ent#429)",
+            agent_name,
+            exc_info=True,
+        )
+        return None
+
+
 def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """#1632: total field-hygiene clamp for an agent-authored queue item.
 
@@ -263,22 +299,58 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     if isinstance(question, str):
         out["question"] = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX)
 
+    # ent#364: the addressee is an authorization decision, so it is resolved here
+    # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
+    #
+    # Resolved BEFORE the context block below, not after, because ent#429 writes
+    # the addressee's thread id INTO context — doing it afterwards would add
+    # bytes the size cap had already signed off on.
+    out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
+
     context = out.get("context")
     if not isinstance(context, dict):
         # Non-dict context (str/list/None) → {} — also fixes the pre-existing
-        # create_item execution_id `.get` crash.
+        # create_item execution_id `.get` crash. An ask with no context at all is
+        # the COMMON case for a scheduled run, and it is exactly the one that must
+        # still get a thread (ent#429), so the attach happens on this branch too.
         out["context"] = {}
+        if out["addressed_to_email"]:
+            thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
+            if thread_id:
+                out["context"][_WORKSPACE_THREAD_KEY] = thread_id
     else:
+        # ent#429: `workspace_session_id` is PLATFORM-written and this is the one
+        # place that writes it. Stripped UNCONDITIONALLY first — an agent that
+        # could author it would be choosing which conversation its ask claims to
+        # belong to, and `_project` hands that straight to the client as
+        # `chat_id`. The projection's docstring already promised "platform-written
+        # context only"; nothing enforced it until now.
+        #
+        # Rebuilt rather than popped: `out = dict(req)` is a SHALLOW copy, so the
+        # context dict is still the caller's, and this function's contract is that
+        # it never mutates the request it was handed.
+        context = {k: v for k, v in context.items() if k != _WORKSPACE_THREAD_KEY}
+        out["context"] = context
+        if out["addressed_to_email"]:
+            thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
+            if thread_id:
+                context[_WORKSPACE_THREAD_KEY] = thread_id
         try:
             ctx_bytes = len(json.dumps(context).encode("utf-8"))
         except (TypeError, ValueError):
             ctx_bytes = None  # non-serializable
         if ctx_bytes is None or ctx_bytes > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
-            out["context"] = {
+            marker = {
                 "_truncated": True,
                 "_original_bytes": ctx_bytes,
                 "execution_id": _valid_execution_id(context.get("execution_id")),
             }
+            # The thread id survives truncation. It is platform-written and ~32
+            # bytes, and dropping it would make an oversize agent context the one
+            # way to produce a homeless ask (ent#429).
+            if context.get(_WORKSPACE_THREAD_KEY):
+                marker[_WORKSPACE_THREAD_KEY] = context[_WORKSPACE_THREAD_KEY]
+            out["context"] = marker
 
     options = out.get("options")
     if options is not None:
@@ -291,10 +363,6 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
 
     if out.get("priority") not in _VALID_PRIORITIES:
         out["priority"] = "medium"
-
-    # ent#364: the addressee is an authorization decision, so it is resolved here
-    # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
-    out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
 
     # Ignore the agent-supplied created_at (a future date pins the item atop the
     # `created_at DESC` sort, C4). expires_at is honored as authored.

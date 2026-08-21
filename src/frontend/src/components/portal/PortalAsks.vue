@@ -39,8 +39,21 @@
            terminal rows, and an ask that simply vanishes reads as "answered" to the
            person who did not answer it. -->
       <p v-if="ask.status === 'expired'" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        This expired before it was answered.
+        {{ expiredLabel(ask.expires_at) }}
       </p>
+
+      <!-- ent#429: the conversation this ask was raised against. Shown only when
+           it is somewhere the reader is not — an ask raised by a scheduled run
+           attaches to a thread at RAISE time, and without a way back to it the
+           attachment is a fact nobody can act on. Additive: it never hides an
+           ask from the thread being read. -->
+      <button
+        v-if="askThreadLink(ask, currentSessionId)"
+        type="button"
+        class="mt-1.5 text-xs text-action-primary-600 hover:underline"
+        :data-testid="`portal-ask-open-thread-${ask.id}`"
+        @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
+      >Open the conversation</button>
 
       <template v-else>
         <div v-if="ask.options?.length" class="mt-2 flex flex-wrap gap-2">
@@ -80,13 +93,19 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { expiredLabel, askThreadLink } from './portalUtils'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
   // render one agent's (the agent page).
   agentName: { type: String, default: null },
   showAgent: { type: Boolean, default: false },
+  // The thread on screen, when there is one. Only used to suppress a link that
+  // would go where the reader already is (ent#429).
+  currentSessionId: { type: String, default: null },
 })
+
+const emit = defineEmits(['open-thread'])
 
 const store = useClientPortalStore()
 const busyId = ref(null)

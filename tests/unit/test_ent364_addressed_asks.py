@@ -292,3 +292,126 @@ def test_the_agent_page_does_not_show_a_client_an_operator_ask(queue_db, roster)
     _seed(db, "scout", "req-operator")
 
     assert agent_page._asks("scout", "client@example.com") == []
+
+
+# --- raise-time chat attachment (ent#429) --------------------------------------
+
+def _clamp_full(raw: dict, agent: str = "scout") -> dict:
+    from services.operator_queue_service import _clamp_ingested_item
+    return _clamp_ingested_item(raw, agent)
+
+
+def test_an_addressed_ask_is_attached_to_a_chat_at_raise_time(queue_db, roster):
+    """AC #2 — an ask raised by a scheduled run has no conversation of its own,
+    so it must be given one when it is RAISED. Render-time resolution is not an
+    attachment: it is a guess repeated per view, with nothing durable to audit.
+    """
+    from client_portal.db import get_portal_session
+
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                       "addressed_to_email": "client@example.com"})
+
+    chat_id = out["context"]["workspace_session_id"]
+    assert get_portal_session(chat_id, "scout", "client@example.com")
+
+
+def test_the_attachment_reuses_the_clients_existing_thread(queue_db, roster):
+    """Reuse, not accumulate: an ask belongs IN the conversation the client
+    already has with that agent, not beside it."""
+    first = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                         "addressed_to_email": "client@example.com"})
+    second = _clamp_full({"id": "req-2", "title": "t", "question": "q",
+                          "addressed_to_email": "client@example.com"})
+
+    assert first["context"]["workspace_session_id"] == second["context"]["workspace_session_id"]
+
+
+def test_an_agent_cannot_choose_the_chat_its_ask_points_at(queue_db, roster):
+    """The security half. `chat_id` is where the Workspace SENDS a reader, so an
+    agent-authored value is the agent picking that destination."""
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                       "addressed_to_email": "client@example.com",
+                       "context": {"workspace_session_id": "sess-planted"}})
+
+    assert out["context"]["workspace_session_id"] != "sess-planted"
+
+
+def test_an_operator_ask_is_not_given_a_client_thread(queue_db, roster):
+    """NULL addressee means the operator answers, and the operator does not read
+    the Workspace. Attaching one would create an empty client thread for an ask
+    that client will never see."""
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q"})
+
+    assert "workspace_session_id" not in out["context"]
+
+
+def test_a_stripped_agent_value_does_not_survive_on_an_operator_ask(queue_db, roster):
+    """The strip is unconditional — it does not depend on an addressee resolving.
+    An off-roster addressee drops to NULL, and the planted id must go with it."""
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                       "addressed_to_email": "stranger@example.com",
+                       "context": {"workspace_session_id": "sess-planted"}})
+
+    assert out["addressed_to_email"] is None
+    assert "workspace_session_id" not in out["context"]
+
+
+def test_the_clamp_still_does_not_mutate_the_callers_request(queue_db, roster):
+    """`out = dict(req)` is a SHALLOW copy, so stripping the key by popping it
+    would reach into the caller's own context dict — and the clamp's contract is
+    that it never does."""
+    req = {"id": "req-1", "title": "t", "question": "q",
+           "addressed_to_email": "client@example.com",
+           "context": {"workspace_session_id": "sess-planted", "keep": "me"}}
+
+    _clamp_full(req)
+
+    assert req["context"] == {"workspace_session_id": "sess-planted", "keep": "me"}
+
+
+def test_the_thread_id_survives_an_oversize_context(queue_db, roster):
+    """Otherwise an oversize agent context would be the one way to produce a
+    homeless ask — and it is agent-controlled, which makes it a lever."""
+    from services.operator_queue_service import OPERATOR_QUEUE_CONTEXT_MAX_BYTES
+
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                       "addressed_to_email": "client@example.com",
+                       "context": {"blob": "x" * (OPERATOR_QUEUE_CONTEXT_MAX_BYTES + 100)}})
+
+    assert out["context"]["_truncated"] is True
+    assert out["context"]["workspace_session_id"]
+
+
+def test_the_clamped_context_still_respects_the_size_cap(queue_db, roster):
+    """The attach happens BEFORE the size check, not after — otherwise it adds
+    bytes to a context the cap had already signed off on."""
+    import json
+
+    from services.operator_queue_service import OPERATOR_QUEUE_CONTEXT_MAX_BYTES
+
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                       "addressed_to_email": "client@example.com",
+                       "context": {"blob": "x" * (OPERATOR_QUEUE_CONTEXT_MAX_BYTES - 200)}})
+
+    assert len(json.dumps(out["context"]).encode("utf-8")) <= OPERATOR_QUEUE_CONTEXT_MAX_BYTES
+
+
+def test_an_unresolvable_thread_leaves_the_ask_homeless_rather_than_dropping_it(
+    queue_db, roster, monkeypatch
+):
+    """Fail-SOFT, the opposite direction to the addressee check beside it. That
+    one fails closed because it is an authorization decision; this one only
+    decides where a link points, and losing the whole question over a missing
+    link would be the worse trade."""
+    import client_portal.service as portal_service
+
+    def _boom(agent_name, email):
+        raise RuntimeError("portal down")
+
+    monkeypatch.setattr(portal_service, "ensure_thread_for_ask", _boom)
+
+    out = _clamp_full({"id": "req-1", "title": "t", "question": "q",
+                       "addressed_to_email": "client@example.com"})
+
+    assert out["addressed_to_email"] == "client@example.com"   # the ask survives
+    assert "workspace_session_id" not in out["context"]        # just without a link
