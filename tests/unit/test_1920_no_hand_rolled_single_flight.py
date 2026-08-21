@@ -54,6 +54,7 @@ _ALLOWED = {
     "services/operator_queue_service.py": "opqueue:leader — leader lease, verbatim copy of monitoring (#1632)",
     "services/skills_sync_service.py": "skills:sync:leader — leader lease (ent#236)",
     "services/canary_service.py": "canary:leader — Lua-CAD leader lease, the 8th shape (#1881)",
+    "services/subscription_recovery_service.py": "subscription:recovery:leader — leader lease in the #1464 monitoring shape (#447). NOT adoptable: SingleFlightLock mints a UNIQUE token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; this one keeps a stable per-worker id for exactly that",
     # --- pre-#1920 hand-rolled single-flight locks NOT in this issue's scope ---
     #     (the LeaderLease / other-lock consolidation follow-up surface).
     "routers/agent_data.py": "agent:data_op single-flight lock (#1169) — pre-#1920, follow-up",
