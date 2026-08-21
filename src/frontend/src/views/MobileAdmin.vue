@@ -239,7 +239,7 @@
                   <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + item.priority">{{ item.priority }}</span>
                 </div>
-                <!-- The API field is `type`; a `request_type` read here rendered a blank line for months. -->
+                <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
                 <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title">{{ item.title }}</p>
                 <p class="ops-card-message">{{ item.message || item.question || item.description }}</p>
@@ -249,7 +249,7 @@
                      rides `response`, the note rides `response_text`, and the
                      body comes from utils/operatorQueue.js — the same builder
                      the desktop store uses (the hand-built body here used to
-                     send a hard-coded `response: 'approved'` for every tap).
+                     send a hard-coded literal decision for every tap).
                      This inline step is deliberately p19-shaped — named verb,
                      restated consequence, the safe action first and focused —
                      and is NOT a confirm overlay (see the note on #1924). -->
@@ -1104,8 +1104,8 @@ function autoResizeInput(e) {
 // #2370 — queue answers. `response` carries the DECISION (the tapped option,
 // the typed answer, or `acknowledged`); a note rides `response_text`. The body
 // comes from utils/operatorQueue.js — the builder the desktop store uses —
-// because this view used to hand-build it with a hard-coded
-// `response: 'approved'` and so recorded a Deny as an approval.
+// because this view used to hand-build it with a hard-coded literal decision
+// ('approved', whatever was tapped) and so recorded a Deny as an approval.
 
 function registerCancelButton(id, el) {
   if (el) cancelButtons[id] = el

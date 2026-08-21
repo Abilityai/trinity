@@ -42,22 +42,6 @@ import { useOperatorQueueStore } from '@/stores/operatorQueue'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(resolve(here, '../../src', rel), 'utf8')
-// Source-text comment stripping for the wiring assertions below (this is NOT an
-// HTML sanitizer — it runs over repo files, never user input). Applied to a
-// fixpoint so a nested/overlapping delimiter cannot survive a single pass
-// (CodeQL js/incomplete-multi-character-sanitization).
-const stripComments = (src) => {
-  let out = src
-  for (;;) {
-    const next = out
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
-    if (next === out) return out
-    out = next
-  }
-}
-
 // ------------------------------------------------------------- optionsOf
 
 describe('optionsOf — the DB stores whatever JSON the agent wrote', () => {
@@ -260,9 +244,11 @@ describe('operatorQueue store — respondToItem builds its body with the shared 
 // ------------------------------------------------------------------ wiring
 
 describe('wiring — the producers call the builder and the old literals are gone', () => {
-  const mobile = stripComments(read('views/MobileAdmin.vue'))
-  const store = stripComments(read('stores/operatorQueue.js'))
-  const card = stripComments(read('components/operator/QueueCard.vue'))
+  // Raw source, comments included — the old literals may not survive anywhere
+  // in these files, not even in a comment.
+  const mobile = read('views/MobileAdmin.vue')
+  const store = read('stores/operatorQueue.js')
+  const card = read('components/operator/QueueCard.vue')
 
   it('MobileAdmin imports the util and builds every answer with it', () => {
     expect(mobile).toMatch(/from ['"]\.\.\/utils\/operatorQueue['"]/)
