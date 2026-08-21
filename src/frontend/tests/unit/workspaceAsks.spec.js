@@ -18,7 +18,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 
-import { expiredLabel, askThreadLink } from '@/components/portal/portalUtils'
+import {
+  expiredLabel, askThreadLink, pendingAsksByAgent,
+  readDismissedAsks, dismissAsk, visibleAsks,
+} from '@/components/portal/portalUtils'
 
 vi.hoisted(() => {
   const mem = new Map()
@@ -279,5 +282,124 @@ describe('the inline-in-chat surface filters by agent NAME', () => {
     expect(src).toContain('store.asksForAgent(props.agent.name)')
     expect(src).not.toContain('store.asksForAgent(props.agent)')
     expect(src).toMatch(/:agent-name="agent\.name"/)
+  })
+})
+
+// --- which agent is waiting on you (ent#429 follow-up) -----------------------
+describe('pendingAsksByAgent', () => {
+  it('counts per agent', () => {
+    expect(pendingAsksByAgent([
+      { agent_name: 'scout', status: 'pending' },
+      { agent_name: 'scout', status: 'pending' },
+      { agent_name: 'sage', status: 'pending' },
+    ])).toEqual({ scout: 2, sage: 1 })
+  })
+
+  it('excludes expired, exactly as the aggregate badge does', () => {
+    // An expired ask still RENDERS — it is evidence a question went unanswered —
+    // but a badge no action can clear is a badge that trains people to ignore
+    // badges.
+    expect(pendingAsksByAgent([
+      { agent_name: 'scout', status: 'pending' },
+      { agent_name: 'scout', status: 'expired' },
+    ])).toEqual({ scout: 1 })
+  })
+
+  it('sums to the aggregate the header shows — they cannot disagree', () => {
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.asks = [
+      { agent_name: 'scout', status: 'pending' },
+      { agent_name: 'sage', status: 'pending' },
+      { agent_name: 'sage', status: 'expired' },
+    ]
+    const perAgent = pendingAsksByAgent(store.asks)
+    const summed = Object.values(perAgent).reduce((a, b) => a + b, 0)
+    expect(summed).toBe(store.askCount)
+  })
+
+  it('survives the shapes a real payload can carry', () => {
+    expect(pendingAsksByAgent(null)).toEqual({})
+    expect(pendingAsksByAgent(undefined)).toEqual({})
+    expect(pendingAsksByAgent([{ status: 'pending' }])).toEqual({})       // no agent_name
+    expect(pendingAsksByAgent([null, { agent_name: 'a', status: 'pending' }])).toEqual({ a: 1 })
+  })
+})
+
+describe('an expired ask offers no way to answer', () => {
+  // Source-asserted: vitest runs in `node` here with no component-mount harness,
+  // so template STRUCTURE is otherwise unreachable by any test — and this bug
+  // lived entirely in the structure. The build was clean and every unit test
+  // green while an expired ask rendered live answer buttons.
+  it('gates the answer controls on the status, not on element order', async () => {
+    const fs = await import('node:fs')
+    const src = fs.readFileSync(
+      new URL('../../src/components/portal/PortalAsks.vue', import.meta.url), 'utf8')
+
+    // `v-else` binds to the immediately preceding `v-if`. Any element inserted
+    // between the expiry notice and the controls silently re-points it — which
+    // is exactly what happened.
+    expect(src).toContain(`<template v-if="ask.status !== 'expired'">`)
+    expect(src).not.toContain('<template v-else>')
+  })
+})
+
+// --- dismissing an expired ask ------------------------------------------------
+describe('dismissing an expired ask', () => {
+  const mem = () => {
+    const m = new Map()
+    return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)) }
+  }
+
+  it('hides only the ask that was dismissed', () => {
+    const s = mem()
+    const asks = [
+      { id: 'a', status: 'expired' },
+      { id: 'b', status: 'expired' },
+      { id: 'c', status: 'pending' },
+    ]
+    dismissAsk('me@example.com', 'a', s)
+    const seen = visibleAsks(asks, readDismissedAsks('me@example.com', s))
+    expect(seen.map((x) => x.id)).toEqual(['b', 'c'])
+  })
+
+  it('never hides a PENDING ask, even if its id was somehow recorded', () => {
+    // A client silently dropping a decision turns a visible question into a hung
+    // agent nobody can explain. The filter enforces it, not just the UI.
+    const s = mem()
+    dismissAsk('me@example.com', 'c', s)
+    const seen = visibleAsks([{ id: 'c', status: 'pending' }], readDismissedAsks('me@example.com', s))
+    expect(seen.map((x) => x.id)).toEqual(['c'])
+  })
+
+  it('is per viewer — one browser, two clients, no bleed', () => {
+    const s = mem()
+    dismissAsk('alice@example.com', 'a', s)
+    expect([...readDismissedAsks('alice@example.com', s)]).toEqual(['a'])
+    expect([...readDismissedAsks('bob@example.com', s)]).toEqual([])
+  })
+
+  it('survives a storage that refuses to work', () => {
+    // Private mode, blocked site data, corrupt JSON. A tidying preference is not
+    // worth a broken surface.
+    const broken = { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') } }
+    expect([...readDismissedAsks('me@example.com', broken)]).toEqual([])
+    expect(() => dismissAsk('me@example.com', 'a', broken)).not.toThrow()
+    expect([...dismissAsk('me@example.com', 'a', broken)]).toEqual(['a'])   // holds for the session
+    const corrupt = { getItem: () => '{not json', setItem: () => {} }
+    expect([...readDismissedAsks('me@example.com', corrupt)]).toEqual([])
+  })
+
+  it('bounds what it stores', () => {
+    const s = mem()
+    for (let i = 0; i < 250; i++) dismissAsk('me@example.com', `id-${i}`, s)
+    expect(readDismissedAsks('me@example.com', s).size).toBe(200)
+  })
+
+  it('passes the list through untouched when nothing is dismissed', () => {
+    const asks = [{ id: 'a', status: 'expired' }, { id: 'b', status: 'pending' }]
+    expect(visibleAsks(asks, new Set())).toEqual(asks)
+    expect(visibleAsks(asks, undefined)).toEqual(asks)
+    expect(visibleAsks(null, new Set())).toEqual([])
   })
 })

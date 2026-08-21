@@ -135,6 +135,19 @@
             <span class="shrink-0 min-w-[4.5rem] flex justify-end">
               <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
             </span>
+            <!-- ent#429 follow-up: WHICH agent is blocked on you, not just that
+                 one is. The aggregate in the header says something is waiting;
+                 with more than one agent it does not say where to go.
+
+                 Amber and placed BEFORE the unread badge, mirroring the header
+                 exactly — an ask waiting on your decision outranks unread
+                 chatter, and the two facts stay visually distinct rather than
+                 being summed into one number that means neither. -->
+            <span
+              v-if="asksFor(a.name)"
+              class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-amber-500 text-white text-[11px] font-semibold flex items-center justify-center"
+              :data-testid="`sidebar-agent-asks-${a.name}`"
+            >{{ asksFor(a.name) > 99 ? '99+' : asksFor(a.name) }}</span>
             <span
               v-if="waitingFor(a.name)"
               class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
@@ -230,6 +243,7 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
+  pendingAsksByAgent,
   signOutLabelFor,
 } from './portalUtils'
 
@@ -268,6 +282,10 @@ const totalWaiting = computed(() => totalUnread(props.threads))
 // would be a second path to the same fact, free to disagree with it.
 const asksStore = useClientPortalStore()
 const askCount = computed(() => asksStore.askCount)
+// Per-agent, from the SAME list the aggregate comes from — summing these
+// reproduces `askCount` exactly, so the header and the rows cannot disagree.
+const asksPerAgent = computed(() => pendingAsksByAgent(asksStore.asks))
+const asksFor = (name) => asksPerAgent.value[name] || 0
 
 // A row key has to include the kind: thread ids and room ids are independent
 // spaces, so two chats of different kinds could collide on a bare id.
@@ -302,11 +320,16 @@ const chipFor = (a) => availabilityChip(a, { detailed: props.isPlatformSession }
 
 function agentRowTitle(a) {
   const n = waitingFor(a.name)
+  const asks = asksFor(a.name)
   const label = agentLabel(a)
   const who = label === a.name ? label : `${label} (${a.name})`
-  const base = n
-    ? `${who} — ${n} unread ${n === 1 ? 'reply' : 'replies'}`
-    : `Open ${who}`
+  // Asks lead: the row's most actionable fact goes first, and the amber badge
+  // must be reachable without relying on colour (the same rule the availability
+  // chip follows below).
+  const parts = []
+  if (asks) parts.push(`${asks} ${asks === 1 ? 'question' : 'questions'} waiting on you`)
+  if (n) parts.push(`${n} unread ${n === 1 ? 'reply' : 'replies'}`)
+  const base = parts.length ? `${who} — ${parts.join(', ')}` : `Open ${who}`
   // The state must be reachable without relying on colour.
   const chip = chipFor(a)
   return chip ? `${base} — ${chip.title}` : base

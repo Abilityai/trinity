@@ -47,15 +47,46 @@
            attaches to a thread at RAISE time, and without a way back to it the
            attachment is a fact nobody can act on. Additive: it never hides an
            ask from the thread being read. -->
-      <button
-        v-if="askThreadLink(ask, currentSessionId)"
-        type="button"
-        class="mt-1.5 text-xs text-action-primary-600 hover:underline"
-        :data-testid="`portal-ask-open-thread-${ask.id}`"
-        @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
-      >Open the conversation</button>
+      <div class="mt-1.5 flex items-center gap-3">
+        <button
+          v-if="askThreadLink(ask, currentSessionId)"
+          type="button"
+          class="text-xs text-action-primary-600 hover:underline"
+          :data-testid="`portal-ask-open-thread-${ask.id}`"
+          @click="emit('open-thread', { id: askThreadLink(ask, currentSessionId), agent_name: ask.agent_name })"
+        >Open the conversation</button>
 
-      <template v-else>
+        <!-- An expired ask cannot be answered by anyone, so without this the card
+             was inert — nothing to click, and it stayed until the 90-day
+             retention sweep deleted the row. Showing expiry once is the point;
+             showing it forever is not.
+
+             Expired ONLY. A pending ask must be answered, never dismissed:
+             letting a client silently drop a decision would turn a visible
+             question into a hung agent nobody can explain. -->
+        <button
+          v-if="ask.status === 'expired'"
+          type="button"
+          class="text-xs text-gray-500 dark:text-gray-400 hover:underline"
+          :data-testid="`portal-ask-dismiss-${ask.id}`"
+          title="Hide this expired question. It stays in the operator's queue."
+          @click="dismiss(ask)"
+        >Dismiss</button>
+      </div>
+
+      <!-- EXPLICIT condition, deliberately not `v-else` (ent#429 follow-up).
+           `v-else` binds to whatever `v-if` immediately precedes it, so when the
+           "Open the conversation" button was inserted above, these controls
+           silently re-paired onto ITS condition: an expired ask rendered its
+           answer buttons whenever the thread link was hidden — i.e. while
+           reading the very thread the ask belongs to — and answering then 409'd
+           with "This ask expired before it was answered.", printed under a card
+           that already said so.
+
+           Stating the condition means the next element inserted above cannot
+           re-point it. The build was clean and the unit suite green throughout,
+           because neither can see template structure. -->
+      <template v-if="ask.status !== 'expired'">
         <div v-if="ask.options?.length" class="mt-2 flex flex-wrap gap-2">
           <button
             v-for="opt in ask.options"
@@ -93,7 +124,9 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { expiredLabel, askThreadLink } from './portalUtils'
+import {
+  expiredLabel, askThreadLink, readDismissedAsks, dismissAsk, visibleAsks,
+} from './portalUtils'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
@@ -112,9 +145,16 @@ const busyId = ref(null)
 const drafts = reactive({})
 const errors = reactive({})
 
-const items = computed(() =>
-  props.agentName ? store.asksForAgent(props.agentName) : store.asks
-)
+const dismissed = ref(readDismissedAsks(store.clientEmail))
+
+function dismiss(ask) {
+  dismissed.value = new Set(dismissAsk(store.clientEmail, ask.id))
+}
+
+const items = computed(() => visibleAsks(
+  props.agentName ? store.asksForAgent(props.agentName) : store.asks,
+  dismissed.value,
+))
 const visible = computed(() => store.asksAvailable && items.value.length > 0)
 
 const KINDS = { question: 'Question', approval: 'Approval needed', alert: 'Update' }

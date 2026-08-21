@@ -1138,3 +1138,104 @@ export function askThreadLink(ask, currentSessionId = null) {
   if (currentSessionId && target === currentSessionId) return null
   return target
 }
+
+/**
+ * Pending asks per agent, for the sidebar row badge (ent#429 follow-up).
+ *
+ * Deliberately the mirror of `unreadByAgent` above — same shape, same return,
+ * so the two signals on one row are computed the same way and can be read the
+ * same way. They are different FACTS, though, and the sidebar keeps them
+ * visually distinct for that reason: an unread reply is waiting on you to
+ * READ, an ask is waiting on you to DECIDE, and one of those blocks an agent.
+ *
+ * PENDING only. An expired ask still renders in the ask list — it is evidence a
+ * question was asked and went unanswered — but it is not something to nag
+ * about, and counting it would make a badge that no action can clear. Same rule
+ * as the aggregate `askCount`, which this must agree with by construction:
+ * summing these values reproduces it exactly.
+ */
+export function pendingAsksByAgent(asks) {
+  const out = {}
+  for (const a of Array.isArray(asks) ? asks : []) {
+    if (a?.status !== 'pending') continue
+    const name = a.agent_name
+    if (!name) continue
+    out[name] = (out[name] || 0) + 1
+  }
+  return out
+}
+
+// --- dismissing an expired ask ------------------------------------------------
+//
+// An expired ask cannot be answered by anyone: the client is refused (409) and
+// the row is past its own deadline. Rendering it is still right — an ask that
+// simply vanishes reads as "answered" to the person who did not answer it — but
+// "show it once" is not "show it until the 90-day retention sweep deletes the
+// row", which is what it did. With no control at all the card was inert: two
+// `<!--v-if-->` placeholders and nothing to click.
+//
+// PER VIEWER and CLIENT-SIDE, deliberately:
+//
+//   * `operator_queue.cleared_at` was the tempting reuse — it exists, it is
+//     durable, and it is exactly this idea for operators (#1017's Clear All).
+//     It is also too blunt HERE: the row's stored status is still `pending`
+//     (expiry is derived from `expires_at`, never written back), and
+//     `list_items` hides cleared rows from EVERY reader, so a client tidying
+//     their own view would delete the row from the operator's queue. A client
+//     must not be able to do that.
+//   * So this is a viewer preference, in the same place this app already keeps
+//     viewer preferences. It does not travel between devices, which is a real
+//     limitation and the reason a durable per-viewer store is the right
+//     follow-up rather than something to fake now.
+//
+// Keyed by EMAIL: two people signing in on one browser must not inherit each
+// other's dismissals.
+
+const DISMISSED_KEY_PREFIX = 'trinity-workspace-asks-dismissed:'
+
+function dismissedKey(email) {
+  return `${DISMISSED_KEY_PREFIX}${(email || '').toLowerCase()}`
+}
+
+/** Ids this viewer has dismissed. Always a Set; never throws. */
+export function readDismissedAsks(email, storage = globalThis.localStorage) {
+  try {
+    const raw = storage?.getItem(dismissedKey(email))
+    const parsed = raw ? JSON.parse(raw) : []
+    return new Set(Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [])
+  } catch {
+    // Private mode, blocked site data, corrupt JSON — a tidying preference is
+    // not worth a broken surface, so an unreadable store means "none dismissed".
+    return new Set()
+  }
+}
+
+/** Record a dismissal. Returns the new Set so the caller can render from it. */
+export function dismissAsk(email, askId, storage = globalThis.localStorage) {
+  const next = readDismissedAsks(email, storage)
+  if (askId) next.add(askId)
+  try {
+    // Bounded: ids accumulate for a viewer who never clears site data, and the
+    // rows themselves are deleted by retention long before this matters. Keep
+    // the most recent — a dropped old id can only cause a long-gone ask to
+    // reappear, and there is nothing left to reappear.
+    storage?.setItem(dismissedKey(email), JSON.stringify([...next].slice(-200)))
+  } catch {
+    // Ignore: the dismissal still applies for this session via the returned Set.
+  }
+  return next
+}
+
+/**
+ * The asks this viewer should see.
+ *
+ * Only EXPIRED asks are dismissible. A pending one must be answered — letting a
+ * client silently drop a decision an agent is blocked on would turn a visible
+ * question into a hung agent nobody can explain.
+ */
+export function visibleAsks(asks, dismissed) {
+  const gone = dismissed instanceof Set ? dismissed : new Set()
+  return (Array.isArray(asks) ? asks : []).filter(
+    (a) => !(a?.status === 'expired' && gone.has(a?.id)),
+  )
+}
