@@ -96,7 +96,7 @@ Before requesting review, verify:
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
 - [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival; the empty branch gates on a succeeded fetch (`hasLoaded`), not on list length
 - [ ] Every action failure has a user-visible home (`InlineError` near the control); no `console.error`-only catch, no `alert()`, and `Promise.allSettled` bulk helpers report their rejected count
-- [ ] Data loading uses the scanline primitive keyed off store state; background refresh is invisible (no re-flash, no scroll reset)
+- [ ] Data loading uses the scanline primitive keyed off store state; background refresh is invisible (no re-flash, no scroll reset) — no bare `v-if="loading"` gate on a data surface: gate on "no data yet" (`utils/loadingState.js::viewState`), stale refresh = sibling `InlineError` banner; `tests/unit/loadingGateRatchet.spec.js` fails if a file's bare-gate count grows (#1927)
 - [ ] `prefers-reduced-motion` handled on any animation touched
 - [ ] Empty states name purpose + one next action; errors name problem + fix + example
 - [ ] Keyboard pass: visible focus, Esc, focus trap, logical tab order

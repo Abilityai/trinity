@@ -115,6 +115,7 @@ Tab selection uses `?tab=` query parameter. `Operations.vue` reads `route.query.
 **Operator Queue Store State:**
 - `items` (ref) -- Array of queue items from backend API
 - `expandedItemId` (ref) -- Currently expanded card (null = none)
+- `autoExpandArmed` (ref, #1927) -- the landing rule's arming bit: `true` at store creation, consumed by an auto-expand, cleared by ANY human `toggleExpand`, re-armed (store-internal `watch`) whenever `openItems` drains to zero
 - `activeTab` (ref) -- Tab state (note: the 5-tab switching is managed locally in Operations.vue, not in the store)
 - `loading` (ref) -- Loading state
 - `error` (ref) -- Error message
@@ -133,7 +134,8 @@ Tab selection uses `?tab=` query parameter. `Operations.vue` reads `route.query.
 - `bulkCancel(ids)` -- `POST /api/operator-queue/bulk-cancel` via shared `api.js` client; refetches; returns `{cancelled, skipped}` (#1017, line 141-152)
 - `clearResolved(agentName = null)` -- `POST /api/operator-queue/clear-resolved` via `api.js`; refetches; returns `{cleared}` (#1017, line 154-166)
 - `acknowledgeItem(id)` -- Shorthand that calls `respondToItem(id, 'acknowledged', '')` (line 168-170)
-- `toggleExpand(id)` -- Toggle expandedItemId (line 172-174)
+- `toggleExpand(id)` -- Toggle expandedItemId AND disarm auto-expand (a human took control — #1927)
+- `maybeAutoExpand()` (#1927) -- expand the first open item iff armed and no OPEN item is already expanded (`utils/loadingState.js::decideAutoExpand` checks membership of `expandedItemId` in the open set, so an id answered while the operator was away never blocks the rule); consumes the armed bit. Called by `Operations.vue`'s `watch(() => store.openItems, …, { immediate: true })`
 - `handleWebSocketEvent(data)` -- Handles real-time updates from WebSocket; `operator_queue_cleared` triggers a full `fetchItems()` refetch (line 177-200)
 - `startPolling(interval)` -- Begin polling with initial fetch + setInterval (default 15s, called with 10s from Operations.vue at container level) (line 203-207)
 - `stopPolling()` -- Clear poll timer (line 209-214)
@@ -208,7 +210,7 @@ Event handling in the store (`handleWebSocketEvent`, line 177-200):
 1. **5-tab layout** -- Needs Response, Notifications, Health (admin-only), Executions, Resolved. Operator card-feed tabs show a count badge when > 0. Tabs toggle by `v-if` so each panel's store-owned polling tears down on tab-leave.
 2. **Deep linking** -- `?tab=` query parameter selects the active tab; `switchTab()` updates URL via `router.replace()` (line 168-170)
 3. **Dynamic subtitle** -- Shows combined summary like "3 pending responses, 2 notifications" or "All clear" (computed `subtitle`, line 152-165)
-4. **Auto-expand first item** on page load -- `watch` on `openItems.length` in `Operations.vue`
+4. **Auto-expand first item** on page load -- store rule `maybeAutoExpand()` (#1927), evaluated by `Operations.vue` immediately and on every open-set change; once per armed episode, so a poll delta / WS arrival / remount never re-expands a card the operator collapsed (design-system p5); re-arms when the queue drains to zero. (Before #1927 a bare `watch(openItems.length)` re-expanded on every delta.)
 5. **Auto-advance** after responding -- next open item expands automatically (store `respondToItem` line 119-122)
 6. **Collapse on click** -- X button in QueueCard header (`@click.stop="store.toggleExpand(item.id)"` line 52)
 7. **Context collapsible** -- "Show details" toggle in QueueCard (line 70-94)

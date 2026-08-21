@@ -439,11 +439,16 @@ platforms:
 ## UI States
 
 ### Loading State
+Gated on **"no data yet"**, never on fetch-in-flight (#1927, design-system p13/p14). `loading` stays the in-flight flag (it drives the Retry labels); the spinner renders only for `firstLoad` — mount, or an agent switch (the `agentName` watcher nulls `templateInfo`). The `agentStatus → running` refetch (Start/Restart) and a Retry are therefore silent: the rendered content stays and the values swap in place.
 ```vue
-<div v-if="loading" class="flex items-center justify-center py-8">
-  <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
+<div v-if="firstLoad" class="flex items-center justify-center py-8" data-testid="info-loading">
+  <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
 </div>
 ```
+where `firstLoad`/`loadFailed` come from `utils/loadingState.js::viewState({ loading, hasLoaded: templateInfo !== null, error: loadError })`.
+
+### Stale State (refresh failed with content on screen)
+A sibling `InlineError` **before** the loading/failed/empty chain (never an `else-if` arm, so it cannot replace the content it keeps): `staleBannerMessage('template info', lastLoadedAt)` → "Couldn't refresh template info — showing data from HH:MM.", with Retry (`Retrying…` while in flight) and Dismiss. `LoadFailed` (#1926) is now reached only with no data on screen.
 
 ### No Template State
 ```vue

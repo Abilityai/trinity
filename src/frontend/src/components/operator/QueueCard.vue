@@ -1,6 +1,8 @@
 <template>
   <div
     class="bg-white dark:bg-gray-800 rounded-xl border transition-all duration-200"
+    data-testid="queue-card"
+    :aria-expanded="isExpanded"
     :class="isExpanded
       ? 'border-blue-300 dark:border-blue-600 shadow-lg ring-1 ring-blue-100 dark:ring-blue-900/50'
       : 'border-gray-200 dark:border-gray-700 shadow-sm hover:shadow-md hover:border-gray-300 dark:hover:border-gray-600 cursor-pointer'"
@@ -49,6 +51,7 @@
           v-if="isExpanded"
           @click.stop="store.toggleExpand(item.id)"
           class="flex-shrink-0 p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 rounded"
+          aria-label="Collapse"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

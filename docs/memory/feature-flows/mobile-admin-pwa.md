@@ -84,7 +84,7 @@ Browser (/m)
 - `overscroll-behavior: none` — prevents iOS rubber-band bounce
 - `visualViewport` API — hides tab bar when keyboard opens
 - Pull-to-refresh via touch event handlers
-- 15-second auto-polling per active tab
+- 15-second auto-polling per active tab. **Background refresh is invisible (#1927, design-system p13/p14):** each dataset (agents / queue / notifications / fleet) carries `loading.*` (fetch in flight), `hasLoaded.*` (first SUCCEEDED fetch) and `fetchError.*`; the templates gate on `utils/loadingState.js::viewState(...)` — "Loading…" only before the first data, a failed first fetch renders `LoadFailed` (never "No agents found" / "No pending items"), a failed poll with data on screen renders a sibling `InlineError` stale banner ("Couldn't refresh … — showing data from HH:MM", Retry/Dismiss) and keeps the rows. `fetchAgents` uses `Promise.allSettled` (fleet + autonomy required, execution stats decorative) and the response-shape normalizer `listFrom` — `/api/operator-queue` returns `{items, count}` and `/api/agents/execution-stats` returns `{agents}`, both previously parsed as arrays (a TypeError on every poll; the Queue sub-tab had always read "No pending items"). `fetchAgents` also marks the fleet summary loaded, since it writes it too.
 
 ## PWA
 

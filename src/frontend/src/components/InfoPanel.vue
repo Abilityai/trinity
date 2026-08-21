@@ -1,15 +1,34 @@
 <template>
   <div class="space-y-6">
-    <!-- Loading State -->
-    <div v-if="loading" class="flex items-center justify-center py-8">
+    <!-- Refresh failed with content on screen (#1927 × #1926): the agentStatus
+         watcher re-fetches on Start/Restart and a Retry re-fetches too — both
+         used to blow the rendered content away behind a spinner (design-system
+         p13). The content stays; this SIBLING banner names the staleness and
+         carries the retry. It is a sibling of the chain below, never an
+         else-if arm, so it can never replace the data it promises to keep. -->
+    <InlineError
+      v-if="view.stale"
+      :message="staleMessage"
+      :detail="loadError"
+      retryable
+      :retry-label="loading ? 'Retrying…' : 'Try again'"
+      @retry="loadTemplateInfo"
+      @dismiss="loadError = ''"
+    />
+
+    <!-- Loading State — only while there is NO data yet (#1927, p13/p14):
+         first mount and an agent switch (the agentName watcher nulls the data),
+         never a refetch with content on screen. -->
+    <div v-if="firstLoad" class="flex items-center justify-center py-8" data-testid="info-loading">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
     </div>
 
     <!-- Failed State (#1926) — a failed /info fetch used to be dressed up as
          has_template:false, i.e. "This agent was created without a template",
-         which is a claim about the agent rather than about the request. -->
+         which is a claim about the agent rather than about the request. Gated
+         on "no data" too: with content on screen the failure is the banner above. -->
     <LoadFailed
-      v-else-if="loadError"
+      v-else-if="loadFailed"
       title="Couldn't load template info"
       :message="agentStatus === 'running'
         ? 'The agent did not return its template information. Try again.'
@@ -36,7 +55,7 @@
     </div>
 
     <!-- Template Info Display -->
-    <div v-else class="space-y-6">
+    <div v-else class="space-y-6" data-testid="info-content">
       <!-- Header Section -->
       <div class="bg-gradient-to-r from-action-primary-50 to-accent-purple-50 dark:from-action-primary-900/30 dark:to-accent-purple-900/30 rounded-lg p-6 border border-action-primary-100 dark:border-action-primary-800">
         <div class="flex items-start justify-between">
@@ -306,7 +325,9 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const props = defineProps({
   agentName: {
@@ -327,6 +348,21 @@ const loading = ref(true)
 // #1926: "the request failed" is a different state from "the agent has no
 // template" — the old code collapsed the first into the second.
 const loadError = ref('')
+const lastLoadedAt = ref(null)
+
+// #1927: loading/failed/empty/stale from ONE rule (utils/loadingState.js).
+// `loading` keeps meaning "fetch in flight" (it drives the Retry labels); what
+// the template gates on is "no data yet" — `templateInfo === null`.
+const view = computed(() => viewState({
+  loading: loading.value,
+  hasLoaded: templateInfo.value !== null,
+  error: loadError.value,
+}))
+// The genuine first load of this mount (or of a newly selected agent). Exposed
+// as one boolean so the #1921 ScanlineReveal swap is mechanical (`:loading="firstLoad"`).
+const firstLoad = computed(() => view.value.state === 'loading')
+const loadFailed = computed(() => view.value.state === 'failed')
+const staleMessage = computed(() => staleBannerMessage('template info', lastLoadedAt.value))
 
 // #1107: whether any technical-metadata section has content (gates the
 // collapsible "Technical details" disclosure).
@@ -351,6 +387,7 @@ const loadTemplateInfo = async () => {
   try {
     const response = await agentsStore.getAgentInfo(props.agentName)
     templateInfo.value = response
+    lastLoadedAt.value = Date.now()
     loadError.value = ''
   } catch (error) {
     console.error('Failed to load template info:', error)
@@ -416,7 +453,9 @@ watch(() => props.agentName, (newName, oldName) => {
   }
 })
 
-// Reload when agent status changes to running (to get full info)
+// Reload when agent status changes to running (to get full info). #1927: with
+// content already on screen this refetch is silent — the spinner is gated on
+// "no data yet", so the values swap in place and a failure shows the stale banner.
 watch(() => props.agentStatus, (newStatus) => {
   if (newStatus === 'running') {
     loadTemplateInfo()
