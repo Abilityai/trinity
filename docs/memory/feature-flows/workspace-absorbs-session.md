@@ -152,6 +152,8 @@ untouched — AC #3. Only the entry point went away.
 | `src/frontend/e2e/workspace-absorbs-session.spec.js` | the redirect, that it replaces history, and that no mode toggle remains |
 | `tests/unit/test_2133_bounded_reply_poll.py` | the turn-bound chain (#2214 successors of the #2133 pins): derived arithmetic over the whole TIMEOUT-001 range against the real retry constant; resolver clamp + fail-open-to-default; marker TTL == 202 budget == dispatched timeout proven on one observed dispatch; reattach budget on the history response (remaining TTL / -2 / -1 / exception); the honest 504 |
 | `src/frontend/tests/unit/portalSidebarIA.spec.js` | `resolveWaitBudgetMs` (positive budget wins; unusable → fallback) and that the fallback stays frozen at the pre-#2214 server bound |
+| `tests/unit/test_2320_portal_failed_turn_visibility.py` | the failure taxonomy as two parametrised tables (a new unclassified branch is a missing row); outcome written BEFORE the marker clears; cleared at dispatch and on success; raw exception text never leaves the server; `AUTH`/`BILLING` no longer falls through; the substring fallback still classifies a `None` code; `last_turn_outcome` declared on `PortalHistory` (the `response_model` strip trap); the `@dataclass` enum cannot be compared with `==` |
+| `src/frontend/tests/unit/portalFailedTurn.spec.js` | the first spec to exercise `PortalConversation.vue` — the retryable rule `res?.retryable ?? !res?.lost`, the execution-id match before a verdict is believed, and `markLastUserTurnFailed` marking only the unanswered tail. Extracts the shipped expressions and runs them (there is no component-mount harness in this project) |
 
 ## Streaming (ent#286, same PR)
 
@@ -256,6 +258,75 @@ A turn that hits the bound 504s naming the agent's limit (seconds below 120,
 else rounded minutes). Long-timeout **headless** integrators should prefer the
 streaming route — the synchronous `POST .../chat` holds a byte-silent response
 for the whole turn, which is proxy read-timeout territory at hour scale.
+
+## Failed turns are visible, and Retry follows the billing evidence (#2320)
+
+A turn that fails before or at start persists **no assistant message** and its
+`finally` clears the in-flight marker on every exit path. The client learns an
+outcome exactly two ways — a new assistant row, or the marker still being set —
+so a fast failure produced neither, and after `REPLY_IDLE_GIVE_UP_MS` the client
+rendered the #2133 *"we've lost track of this turn — it may still finish"* copy
+for a turn the backend had diagnosed precisely and written to
+`schedule_executions.error`. Every clause of that message was false, and Retry
+was suppressed on the one path where re-sending is safe.
+
+Three parts:
+
+**The two bits live on the exception, decided at the raise site.**
+`ClientPortalError(status, detail, *, category, retryable)`. Not inferred
+downstream — `_fail_unstarted_execution` is reached from the pre-start branch
+**and** from the generic `except Exception`, which can fire after `execute_task`
+already returned, so "was this billed" is not a property of the row being
+written. `retryable` defaults **False**, so a raise site that forgets it gets the
+unprivileged answer.
+
+| Raise site | category | retryable |
+|---|---|---|
+| roster miss / stopped / containerless | `agent_unavailable` | ✗ — unbilled, but ent#286 settled that retrying cannot work |
+| `ResumeLockBusy` | `busy` | **✓** never reached the agent |
+| `CAPACITY` | `capacity` | **✓** admission refused; the queue drains |
+| `AUTH` / `BILLING` | `auth` | ✗ retry re-fails |
+| `TIMEOUT` | `timeout` | ✗ ran to the bound |
+| generic turn failure | `agent_error` | ✗ ran |
+| uncaught crash | `internal` | ✗ fixed sentence; raw text stays operator-only |
+
+Classification now reads `TaskExecutionResult.error_code` (via
+`_error_code_name`, which takes `.name` — the enum is `@dataclass`-decorated so
+`AUTH == TIMEOUT` is **True**, the #1085 footgun) and keeps the old substring
+tests as the `None`-code fallback, so it is additive. `AUTH`/`BILLING` had no
+branch at all before and fell through to the generic 502 — that is the
+subscription-limit case #2320 was reported from.
+
+**The record rides Redis beside the marker it is the terminal half of.**
+`portal_turn_outcome:{session_id}`, TTL 900s, written in `_run`'s except
+branches — **before** the `finally` that clears the marker, which is the whole
+ordering contract: the client's give-up timer starts when the marker vanishes,
+so an outcome written after it races a 6s window. Cleared at dispatch (so turn
+N+1 never inherits turn N's verdict) and on success. Redis down ⇒ no outcome ⇒
+the pre-#2320 message, never worse. Surfaced as `PortalHistory.last_turn_outcome`
+— **declared** on the model, because the route's `response_model` strips
+undeclared keys, so a service-layer-only change is a no-op.
+
+Deliberately **not** a message row in `enterprise_portal_messages`: `role` is
+bare TEXT with no enum, but `_format_history_context` replays any non-`user` role
+to the agent **as its own words**, and `_persist_user_turn`'s dedupe reads
+`recent[-1].role == "user"`, so an error row would make Retry duplicate the user
+message — breaking a #2120 pin that does have a test. No schema change, no
+migration.
+
+**The client believes a verdict only for the turn it is waiting on**
+(`outcome.execution_id === executionId`), reports it instead of the lost-track
+copy, and offers Retry iff the verdict says nothing reached the agent. The two
+give-ups are now worded distinctly. `reattach()` and `loadThread()` render
+failures too — that surface previously checked only for a reply and rendered
+**nothing at all** on a failed or lost turn, so refreshing mid-turn showed less
+than staying put. `markLastUserTurnFailed` marks only the thread's **unanswered
+tail**, never "the last user row": two raise sites record a verdict without
+persisting a user row of their own, and a backwards walk would pin the failure
+onto an earlier, answered turn.
+
+Residual: the synchronous `POST .../chat` path records no outcome — it raises
+into a live request, where the client already gets a real HTTP error.
 
 ## Known Limitations
 

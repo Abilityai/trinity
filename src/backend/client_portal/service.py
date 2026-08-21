@@ -58,10 +58,51 @@ DEFAULT_MODE = "public"
 
 
 class ClientPortalError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    """A refusal with client-safe copy, plus the two bits #2320 needs.
+
+    ``category`` and ``retryable`` are decided AT THE RAISE SITE, never inferred
+    downstream. That is the whole point: ``_fail_unstarted_execution`` is reached
+    from both the ``ClientPortalError`` branch (genuinely pre-start) and the
+    generic ``except Exception`` (which can fire after ``execute_task`` already
+    returned), so "did this turn get billed" is not a property of the row being
+    written — only the raise site knows.
+
+    ``retryable`` defaults to **False**: a principal that forgets to declare it
+    gets the unprivileged answer, because the cost of a wrong True is dispatching
+    and billing a turn twice (the #2120 hazard the #2133 no-Retry rule exists for).
+    """
+
+    def __init__(self, status_code: int, detail: str, *,
+                 category: str = "internal", retryable: bool = False):
         self.status_code = status_code
         self.detail = detail
+        self.category = category
+        self.retryable = retryable
         super().__init__(detail)
+
+
+# #2320: the client-safe failure taxonomy. Deliberately a small closed set of
+# TOKENS — the prose lives in `detail`, which every raise site already authors
+# for a client. Aligned with `TaskExecutionErrorCode` where one maps, but not a
+# mirror of it: that enum describes what the execution engine saw, this one
+# describes what a Workspace client can be told.
+PORTAL_FAILURE_CATEGORIES = (
+    "agent_unavailable",   # not on roster, stopped, or containerless
+    "busy",                # another turn holds this thread; retrying works
+    "capacity",            # admission refused before any agent work; unbilled
+    "auth",                # subscription/credential exhausted — retry re-fails
+    "timeout",             # the turn RAN and hit the agent's bound
+    "agent_error",         # the turn RAN and did not come back
+    "internal",            # anything uncategorised; copy is fixed, never raw
+)
+
+# The ONE sentence a client ever sees for an uncategorised crash. The raw
+# `type(exc).__name__: exc` still goes to the log and to
+# `schedule_executions.error`, where operators already read it (#2320 AC 2).
+INTERNAL_FAILURE_DETAIL = (
+    "Something went wrong on our side and this turn did not run. "
+    "The team has been notified."
+)
 
 
 def _public_chat_url() -> str:
@@ -1226,7 +1267,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     passes nothing (it sets no marker) and this resolves it here."""
     if not agent_on_roster(agent_name, email, include_owned):
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
-        raise ClientPortalError(404, "Agent not found")
+        raise ClientPortalError(404, "Agent not found",
+                                category="agent_unavailable", retryable=False)
 
     # #2196: refuse a turn the agent cannot run — HERE, before anything is
     # created or written.
@@ -1246,7 +1288,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
     if availability is None:
         availability = await _agent_availability(agent_name)
     if not _availability_allows_turn(availability):
-        raise ClientPortalError(502, _refusal_detail(availability))
+        # Unbilled — nothing was dispatched — but NOT retryable: ent#286 settled
+        # that for `stopped`/`unavailable` "retrying cannot work", and pins the
+        # copy against the words "try again". Unbilled and retryable are
+        # different questions; this is the case that proves it, so the two bits
+        # stay independent rather than one derived from the other.
+        raise ClientPortalError(502, _refusal_detail(availability),
+                                category="agent_unavailable", retryable=False)
 
     # Imported here, like every other service this module reaches for: the
     # portal package is imported during app construction, and the execution
@@ -1418,28 +1466,59 @@ async def portal_chat(agent_name: str, message: str, email: str,
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
         # is busy" answer below — the client retries, nothing is lost.
-        raise ClientPortalError(429, "This conversation is already handling a message. Please try again shortly.")
+        #
+        # Raised BEFORE `run_resumable_turn` reaches the agent, so nothing ran
+        # and nothing was billed: this is the case #2320 names where suppressing
+        # Retry is actively wrong. The copy has invited a retry all along; now
+        # the button agrees with it.
+        raise ClientPortalError(429, "This conversation is already handling a message. Please try again shortly.",
+                                category="busy", retryable=True)
 
     result = turn.result
 
     status = getattr(result, "status", None)
     if status in ("failed", "cancelled"):
         err = (getattr(result, "error", "") or "").lower()
-        if "at capacity" in err:
-            raise ClientPortalError(429, "The agent is busy. Please try again shortly.")
-        if "timed out" in err:
+        # #2320: the execution engine already answered "what kind of failure was
+        # this" — `TaskExecutionResult.error_code`. This branch was matching
+        # substrings of the human-readable error instead, which is both fragile
+        # (a copy edit upstream silently reclassifies) and lossy: AUTH/BILLING
+        # had no branch at all and fell through to the generic 502 below, which
+        # is exactly the subscription-limit case #2320 was reported from.
+        # The substring tests stay as the fallback for a None code, so this is
+        # additive — nothing that classified before stops classifying now.
+        code = _error_code_name(result)
+        if code in ("AUTH", "BILLING"):
+            # The pool is exhausted, not momentarily busy — re-sending re-fails.
+            # Remediation ("add an API key", "register a subscription") is
+            # OPERATOR guidance and stays on the Executions surface; a client can
+            # only be told to come back later.
+            raise ClientPortalError(
+                502,
+                "The agent has reached its usage limit and can't respond right now. "
+                "Please try again later.",
+                category="auth", retryable=False)
+        if code == "CAPACITY" or "at capacity" in err:
+            # Admission refused before any agent work — unbilled, and the queue
+            # drains, so this one genuinely does resolve by retrying.
+            raise ClientPortalError(429, "The agent is busy. Please try again shortly.",
+                                    category="capacity", retryable=True)
+        if code == "TIMEOUT" or "timed out" in err:
             # #2214: name the bound that was actually enforced — with honest
             # rounding (a 90s bound reported as "1-minute" would be a lie, so
             # short bounds speak in seconds).
             limit = (f"{turn_timeout}-second" if turn_timeout < 120
                      else f"{round(turn_timeout / 60)}-minute")
+            # The turn RAN to the bound — billed. Not retryable.
             raise ClientPortalError(
-                504, f"The request timed out after the agent's {limit} limit."
+                504, f"The request timed out after the agent's {limit} limit.",
+                category="timeout", retryable=False,
             )
         # #2196: the turn RAN and did not come back, so retrying may genuinely
         # help and the instruction stays — but "it may be offline" is only
         # honest when we could not read the agent's state at dispatch.
-        raise ClientPortalError(502, _turn_failed_detail(availability))
+        raise ClientPortalError(502, _turn_failed_detail(availability),
+                                category="agent_error", retryable=False)
 
     # Cache the id the turn ran under so the NEXT turn resumes it.
     #
@@ -1683,6 +1762,109 @@ def get_turn_inflight_matches(execution_id: str) -> bool:
         return True
 
 
+def _error_code_name(result) -> str | None:
+    """The engine's own verdict on a failed turn, as a bare name.
+
+    `TaskExecutionResult.error_code` is a `TaskExecutionErrorCode` member, but
+    this reads `.name` defensively rather than comparing enum identity: the
+    #1085 footgun is that a fieldless `@dataclass` compares equal across
+    distinct codes, and an enum import would drag the execution stack into a
+    branch that must never raise. None whenever it cannot be read — the caller
+    keeps its substring fallback for exactly that.
+    """
+    code = getattr(result, "error_code", None)
+    if code is None:
+        return None
+    name = getattr(code, "name", None)
+    return name if isinstance(name, str) else str(code)
+
+
+def _outcome_key(session_id: str) -> str:
+    return f"portal_turn_outcome:{session_id}"
+
+
+# Short next to the marker's bound (up to ~4.2h at the agent cap): this is a
+# READ-ONCE hand-off to a client that is already polling, not a record. The
+# durable record is `schedule_executions` (status + error + cost), which
+# operators read on the Executions surface and which retention governs. Fifteen
+# minutes covers the reattach case #2320 cares about — a client that refreshes
+# mid-turn — without inventing a second, unswept history of failures in Redis.
+TURN_OUTCOME_TTL_SECONDS = 900
+
+
+def record_turn_outcome(session_id: str, execution_id: str, *,
+                        category: str, message: str, retryable: bool) -> None:
+    """Publish WHY this turn ended, for the client that is watching it.
+
+    Written from `_run`'s except branches, which run BEFORE the `finally` that
+    clears the in-flight marker — deliberately, and it is the whole ordering
+    contract: the client's give-up timer starts the moment the marker vanishes,
+    so an outcome written after it would race a 6s window in which the client
+    sees neither a turn nor a reason and falls back to "lost track".
+
+    Best-effort, exactly like the marker it sits beside. Redis down ⇒ no outcome
+    ⇒ the client degrades to the pre-#2320 lost-track message, which is the
+    behaviour this replaces, never something worse.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return
+        client.set(
+            _outcome_key(session_id),
+            json.dumps({
+                "execution_id": execution_id,
+                "category": category if category in PORTAL_FAILURE_CATEGORIES else "internal",
+                "message": message,
+                "retryable": bool(retryable),
+            }),
+            ex=TURN_OUTCOME_TTL_SECONDS,
+        )
+    except Exception as e:  # noqa: BLE001 — a degraded message, never a failed turn
+        logger.warning("portal outcome SET failed for %s: %s", session_id, e)
+
+
+def clear_turn_outcome(session_id: str) -> None:
+    """Drop any recorded failure for this thread.
+
+    Called at dispatch AND on a successful turn. Both matter: without the
+    dispatch clear, a client polling turn N+1 would be handed turn N's failure
+    the instant the new marker lands and read it as its own.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            client.delete(_outcome_key(session_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal outcome DEL failed for %s: %s", session_id, e)
+
+
+def get_turn_outcome(session_id: str) -> dict | None:
+    """The last recorded failure on this thread, or None.
+
+    Returns None on anything unreadable — absent key, Redis down, or a value
+    that will not parse. Every one of those means "we cannot say why", and the
+    honest answer to that is the caller's existing lost/idle handling.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return None
+        raw = client.get(_outcome_key(session_id))
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal outcome GET failed for %s: %s", session_id, e)
+        return None
+
+
 def get_turn_inflight(session_id: str) -> str | None:
     """The execution id of the turn currently running on this thread, if any.
 
@@ -1810,7 +1992,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # would cost two reads on the hottest portal path.
     availability = await _agent_availability(agent_name)
     if not _availability_allows_turn(availability):
-        raise ClientPortalError(502, _refusal_detail(availability))
+        raise ClientPortalError(502, _refusal_detail(availability),
+                                category="agent_unavailable", retryable=False)
 
     # Resolve the thread up front so the client can adopt it immediately rather
     # than waiting for the turn; `portal_chat` resolving it again is idempotent.
@@ -1846,6 +2029,10 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     turn_timeout = resolve_turn_timeout(agent_name)
     wait_budget = portal_max_turn_seconds(turn_timeout)
 
+    # #2320: drop any verdict left by the PREVIOUS turn on this thread before
+    # the new marker lands. Without this, a client polling turn N+1 is handed
+    # turn N's failure the moment the marker appears and reads it as its own.
+    clear_turn_outcome(session_id)
     mark_turn_inflight(session_id, execution_id, ttl_seconds=wait_budget)
 
     async def _run() -> None:
@@ -1856,13 +2043,30 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               # #2196: already resolved above — one Docker read per turn.
                               availability=availability)
         except ClientPortalError as e:
-            # The client sees this on the stream (the agent's log ends) and in
-            # the execution row; there is no request left to raise into.
+            # There is no request left to raise into — the 202 went out long ago
+            # — so the ONLY way this reaches the client is the record written
+            # here. Before #2320 it went to `schedule_executions.error` and
+            # nowhere else, and the client, seeing no reply and no marker,
+            # reported a turn the backend had precisely diagnosed as "lost".
             logger.info("portal streaming turn %s ended: %s", execution_id, e.detail)
             _fail_unstarted_execution(execution_id, e.detail)
+            record_turn_outcome(session_id, execution_id, category=e.category,
+                                message=e.detail, retryable=e.retryable)
         except Exception as exc:  # noqa: BLE001 — a background task must never die silently
+            # An uncategorised crash. The raw text is operator-only: it goes to
+            # the log and to `schedule_executions.error`, never to the client
+            # (#2320 AC 2). And never retryable — this branch can fire AFTER
+            # `execute_task` returned (a persistence crash), so the turn may
+            # already have been billed.
             logger.exception("portal streaming turn %s crashed", execution_id)
             _fail_unstarted_execution(execution_id, f"{type(exc).__name__}: {exc}")
+            record_turn_outcome(session_id, execution_id, category="internal",
+                                message=INTERNAL_FAILURE_DETAIL, retryable=False)
+        else:
+            # A turn that answered clears the slate: the reply itself is the
+            # outcome, and a stale record would otherwise outlive it for the
+            # whole TTL and shadow the next give-up.
+            clear_turn_outcome(session_id)
         finally:
             # Always clear, on every exit path: a stuck marker would leave the
             # UI reattaching to a turn that ended, forever (until the TTL).
@@ -2068,6 +2272,15 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         "messages": messages,
         "in_flight_execution_id": inflight,
         "in_flight_wait_budget_seconds": wait_budget,
+        # #2320: WHY the last turn ended, when it ended badly. Rides the poll
+        # the client is already making — `awaitPersistedReply` reads this same
+        # response — so surfacing a failure costs no extra request.
+        #
+        # NOTE: this only reaches the client because `PortalHistory` declares
+        # it. The route's `response_model` strips undeclared keys silently
+        # (models.py), so adding a field here alone is a no-op that tests
+        # against the service layer would still pass.
+        "last_turn_outcome": get_turn_outcome(session_id) if session_id else None,
     }
 
 
