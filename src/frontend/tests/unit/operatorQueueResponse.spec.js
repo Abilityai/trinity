@@ -42,8 +42,21 @@ import { useOperatorQueueStore } from '@/stores/operatorQueue'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(resolve(here, '../../src', rel), 'utf8')
-const stripComments = (src) =>
-  src.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+// Source-text comment stripping for the wiring assertions below (this is NOT an
+// HTML sanitizer — it runs over repo files, never user input). Applied to a
+// fixpoint so a nested/overlapping delimiter cannot survive a single pass
+// (CodeQL js/incomplete-multi-character-sanitization).
+const stripComments = (src) => {
+  let out = src
+  for (;;) {
+    const next = out
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    if (next === out) return out
+    out = next
+  }
+}
 
 // ------------------------------------------------------------- optionsOf
 
