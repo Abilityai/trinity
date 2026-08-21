@@ -50,6 +50,49 @@ This is an MVP (follow-up to spike #854). For adding a *fourth* runtime, see the
 | Guardrails | `--disallowedTools` + turn caps | sandbox + network; unmappable tool-names **logged** (not dropped) |
 | Credential redaction | sanitizer over response + logs | identical sanitizer calls |
 
+## Authentication (#1971, #2208)
+
+Two credential shapes, one file. The CLI authenticates its
+`wss://api.openai.com/v1/responses` transport from **`$CODEX_HOME/auth.json`**,
+NOT from the environment — and that transport is no longer optional
+(`responses_websockets` / `..._v2` are listed as *removed* in
+`codex features list`, so there is no flag back to the HTTP path that did accept
+a bare env key).
+
+| Agent | Credential | Who writes `auth.json` |
+|---|---|---|
+| Subscription (ChatGPT plan) | none — no API key by design (#1971) | the operator, via `codex login`; `auth_mode: chatgpt` |
+| API key | `OPENAI_API_KEY` (or `CODEX_API_KEY`) in `.env` | **Trinity**, lazily on first turn; `auth_mode: apikey` |
+
+`_materialize_api_key_auth` runs in `_execute_codex` **before** the spawn —
+after would still 401. It shells out to `codex login --with-api-key` with the key
+on **stdin, never argv** (a process listing is readable by the agent's own
+turns). Before #2208 nothing ever ran it, so an API-key agent 401'd on every turn
+and could not complete a single one; only subscription agents worked.
+
+Three properties carry the design:
+
+* **Subscription auth wins.** Only an `auth_mode: apikey` file is overwritten.
+  A `chatgpt` file — or one that will not parse — is left exactly where it is.
+  The classification is tri-state (`absent` / `unreadable` / `parsed`) precisely
+  so "no file" and "a file I cannot read" never collapse into "safe to write".
+* **Rotation propagates.** Since #1999 the execution env is rebuilt from `.env`
+  per spawn, so the key can change under a live container; a stored key that no
+  longer matches is re-logged-in. The steady state costs one small file read per
+  turn, not a subprocess.
+* **It never raises.** A login failure logs at ERROR and the turn proceeds to
+  fail with the CLI's own auth error. Raising would convert an auth problem into
+  a Trinity 503 on the subscription path too.
+
+`_has_subscription_auth` is therefore keyed on **`auth_mode`, not existence**.
+Once Trinity writes an `auth.json` of its own, an existence test reports every
+API-key agent as a subscription agent — and the #1971 credential gate would then
+let a container whose key was *removed* from `.env` keep running on the stale
+file it left behind, i.e. silent failure of credential revocation (the #1999
+class). An `auth.json` with no `auth_mode` (older CLI) or an unreadable one still
+counts as a subscription credential: unknown provenance is not ours to discount,
+and over-reporting there preserves the pre-#2208 behaviour exactly.
+
 ## Error → HTTP mapping
 
 auth (missing/invalid key, 401) → **503**; rate-limit → **429**;

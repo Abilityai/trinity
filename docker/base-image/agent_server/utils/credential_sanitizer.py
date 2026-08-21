@@ -92,9 +92,13 @@ SENSITIVE_VAR_PATTERNS = [
 
 # Credential value patterns (values that look like secrets regardless of variable name)
 SECRET_VALUE_PATTERNS = [
-    r'sk-[a-zA-Z0-9]{20,}',           # OpenAI API keys
-    r'sk-proj-[a-zA-Z0-9\-_]{20,}',   # OpenAI project keys
-    r'sk-ant-[a-zA-Z0-9\-_]{20,}',    # Anthropic API keys
+    # One rule for the whole `sk-` family (#2208). Three prefix-specific patterns
+    # meant every NEW variant shipped unredacted until someone noticed: the
+    # generic `sk-[a-zA-Z0-9]{20,}` stops at the first hyphen, so an OpenAI
+    # SERVICE-ACCOUNT key (`sk-svcacct-...`) matched none of them and passed
+    # through logs and error bodies in clear text. Allowing `-`/`_` after the
+    # prefix covers sk-proj-, sk-ant-, sk-svcacct- and whatever comes next.
+    r'sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}',
     r'ghp_[a-zA-Z0-9]{36,}',          # GitHub PAT (classic, ~40 chars)
     r'github_pat_[a-zA-Z0-9_]{22,}',  # GitHub PAT (fine-grained, ~93 chars)
     r'gho_[a-zA-Z0-9]{36,}',          # GitHub OAuth token
