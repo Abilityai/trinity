@@ -142,3 +142,90 @@ def test_an_unaddressed_item_reads_back_as_none(queue_db, roster):
     })
 
     assert db.get_operator_queue_item(item_id)["addressed_to_email"] is None
+
+
+# --- the read path (ent#428) --------------------------------------------------
+#
+# The addressee has to be a SQL condition, not something the caller filters out
+# of the result. `list_items` orders by status, then priority, then age, and
+# applies `limit` before the caller sees a row — so a post-hoc filter really
+# means "the newest N pending items in the FLEET, of which some are yours", and
+# one person's ask silently drops out of their sidebar as soon as the fleet is
+# busy enough. It is still pending in the queue; it just stops being visible to
+# the only person who may answer it.
+
+def _seed(db, agent, req_id, email=None, priority="medium"):
+    item = {"id": req_id, "title": "t", "question": "q", "priority": priority}
+    if email is not None:
+        item["addressed_to_email"] = email
+    return db.create_operator_queue_item(agent, item)
+
+
+def test_the_read_path_narrows_to_the_addressee(queue_db, roster):
+    from database import db
+
+    mine = _seed(db, "scout", "req-mine", "client@example.com")
+    _seed(db, "scout", "req-operator")                      # NULL — operator's
+    _seed(db, "scout", "req-someone-else", "other@example.com")
+
+    got = db.list_operator_queue_items(
+        status="pending", addressed_to_email="client@example.com"
+    )
+
+    assert [i["id"] for i in got] == [mine]
+
+
+def test_the_addressee_filter_is_case_insensitive(queue_db, roster):
+    """The ingestion boundary lowercases, but `create_item` is a public writer
+    and the read must not depend on every caller having remembered to."""
+    from database import db
+
+    item_id = db.create_operator_queue_item("scout", {
+        "id": "req-mixed", "title": "t", "question": "q",
+        "addressed_to_email": "Client@Example.COM",
+    })
+
+    got = db.list_operator_queue_items(
+        status="pending", addressed_to_email="client@example.com"
+    )
+
+    assert [i["id"] for i in got] == [item_id]
+
+
+def test_an_ask_is_not_crowded_out_of_its_own_window(queue_db, roster):
+    """The regression this filter exists for.
+
+    One low-priority ask addressed to a client, behind a wall of higher-priority
+    operator items. Filtering after the fact loses it; filtering in SQL does not.
+    The `limit` here stands in for the caller's page size — the point is that the
+    cap is spent on the fleet's items rather than on the client's.
+    """
+    from database import db
+
+    for n in range(5):
+        _seed(db, "scout", f"req-noise-{n}", priority="critical")
+    mine = _seed(db, "scout", "req-quiet", "client@example.com", priority="low")
+
+    unfiltered = db.list_operator_queue_items(status="pending", limit=5)
+    assert mine not in [i["id"] for i in unfiltered], (
+        "fixture is not exercising the crowd-out; raise the noise count"
+    )
+
+    filtered = db.list_operator_queue_items(
+        status="pending", limit=5, addressed_to_email="client@example.com"
+    )
+    assert [i["id"] for i in filtered] == [mine]
+
+
+def test_no_addressee_argument_leaves_the_operator_listing_alone(queue_db, roster):
+    """AC #4: a platform caller's view of the queue does not move."""
+    from database import db
+
+    ids = {
+        _seed(db, "scout", "req-a"),
+        _seed(db, "scout", "req-b", "client@example.com"),
+    }
+
+    got = db.list_operator_queue_items(status="pending")
+
+    assert {i["id"] for i in got} == ids
