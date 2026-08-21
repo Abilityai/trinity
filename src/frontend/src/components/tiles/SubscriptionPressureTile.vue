@@ -284,13 +284,29 @@ function retry() {
 .sp-fill.sp-lvl-high {
   background: var(--gv-red);
 }
+/* Fixed width, like the bar track above it. `5H` and `7D` are both two
+   characters but not the same two, so a proportional font gives them
+   different advances and every downstream element in the row shifts. */
 .sp-wlab {
+  flex: none;
+  min-width: 16px;
   font-size: 10px;
   color: var(--gv-faint);
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+/* Fixed width + right-aligned so the two window groups form COLUMNS down the
+   tile rather than floating with the digit count. Without it `0%` / `6%` /
+   `24%` each have a different advance, which pushes the `7D` group left by a
+   different amount on every row — the bars are all 30px, but they land at
+   three different x positions and read as three different lengths.
+   `min-width`, not `width`: an overage plan can report >100% and must be
+   allowed to overflow the cell rather than be clipped (the same
+   report-honestly / clamp-only-geometry rule `barWidthPct` follows). */
 .sp-wpct {
+  flex: none;
+  min-width: 32px;
+  text-align: right;
   font-variant-numeric: tabular-nums;
   font-weight: 650;
 }

@@ -544,6 +544,24 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting skills library sync service: {e}")
     asyncio.create_task(_start_skills_sync_delayed())
 
+    # #447: subscription recovery probe — re-asks the provider whether a
+    # subscription believed rate-limited is back. Nothing else can clear the
+    # badge (no success path clears a failure row), and the ambient refresh is
+    # demand-driven, so an unwatched instance never re-checks. Self-gates on the
+    # `subscription_headroom_auto_refresh` setting and is leader-locked, so
+    # starting it in every worker is safe. Staggered +13s past the other loops.
+    async def _start_subscription_recovery_delayed():
+        await asyncio.sleep(13)
+        try:
+            from services.subscription_recovery_service import (
+                subscription_recovery_service,
+            )
+            subscription_recovery_service.start()
+            logger.info("Subscription recovery probe service started (staggered +13s)")
+        except Exception as e:
+            logger.error(f"Error starting subscription recovery service: {e}")
+    asyncio.create_task(_start_subscription_recovery_delayed())
+
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
@@ -852,6 +870,17 @@ async def lifespan(app: FastAPI):
         logger.info("Skills library sync service stopped")
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
+
+    # Shutdown subscription recovery probe service (#447) — releases the
+    # leader lease so a sibling worker takes over immediately instead of
+    # waiting out the TTL.
+    try:
+        from services.subscription_recovery_service import (
+            subscription_recovery_service,
+        )
+        subscription_recovery_service.stop()
+    except Exception as e:
+        logger.error(f"Error stopping subscription recovery service: {e}")
 
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
