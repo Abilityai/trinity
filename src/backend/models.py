@@ -716,6 +716,10 @@ class ReportSummary(BaseModel):
     period_start: Optional[str] = None
     period_end: Optional[str] = None
     created_at: str
+    # ent#365: who the report was produced for (NULL = operator-facing). On the
+    # access-controlled REST surfaces only — deliberately NOT on the `/ws`
+    # broadcast, which is SCOPE_ALL and unfiltered (the #918 rule).
+    addressed_to: Optional[str] = None
 
     class Config:
         from_attributes = True

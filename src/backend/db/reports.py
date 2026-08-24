@@ -33,6 +33,10 @@ _SUMMARY_COLUMNS = (
     agent_reports.c.period_start,
     agent_reports.c.period_end,
     agent_reports.c.created_at,
+    # ent#365, appended in review: operators need to answer "who was this
+    # produced for" — the support question a deliverable creates. APPEND-only,
+    # because `_row_to_summary` reads this tuple POSITIONALLY.
+    agent_reports.c.addressed_to_email,
 )
 
 
@@ -61,11 +65,19 @@ class ReportOperations:
             "period_start": row[6],
             "period_end": row[7],
             "created_at": row[8],
+            "addressed_to": row[9],
         }
 
     @staticmethod
     def _mapping_to_report(row) -> Dict:
-        """Full dict (incl. decoded payload) from a name-accessible mapping row."""
+        """Full dict (incl. decoded payload) from a name-accessible mapping row.
+
+        ent#365 note: `addressed_to` is exposed here for the operator surfaces,
+        but the AUDIENCE GATE must never read it — `get_report_for_client` runs
+        its own SELECT for exactly that reason. A gate written against this
+        whitelist would compare `None` to an email and deny everything: silently
+        wrong, and fail-closed enough to look fine.
+        """
         return {
             "id": row["id"],
             "agent_name": row["agent_name"],
@@ -78,6 +90,7 @@ class ReportOperations:
             "period_start": row["period_start"],
             "period_end": row["period_end"],
             "created_at": row["created_at"],
+            "addressed_to": row["addressed_to_email"],
         }
 
     def create_report(

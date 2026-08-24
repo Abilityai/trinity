@@ -64,8 +64,11 @@ mcp__trinity__report(
     title="Week 30: 14 leads, 3 qualified",
     payload={...},                         # max __REPORT_PAYLOAD_MAX__ serialized
     display_hint="table",                  # optional, see below
+    audience_email="ada@client.com",       # optional, see below
     period_start="...", period_end="...")  # optional ISO-8601
 ```
+
+Reports are operator-facing by default. When the work was done **for** a person the operator shared you with, pass `audience_email`: it also reaches their Workspace — their deliverables, and a card in the chat it came from. Address what a client asked for; leave it off for fleet telemetry. An address that cannot reach you is refused, never silently dropped.
 
 Match the payload to the `display_hint` or it renders as raw JSON:
 

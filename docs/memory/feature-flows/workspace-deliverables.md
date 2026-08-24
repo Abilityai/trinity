@@ -92,6 +92,24 @@ Reports tab where it previously showed the agent's full history. That history
 was the leak; the empty state is the correct answer until an agent addresses
 something.
 
+**Adoption is a mechanism, not a hope** (caught in review on PR #2383). The
+column is nullable and every agent defaults to NULL, so the surface shipped
+inert until the fleet-wide platform prompt taught the argument:
+`services/platform_prompt_service.py`'s "Publishing Reports" block documents
+`audience_email` and when to use it, which is the same reason #1535 put
+reporting itself in the platform prompt rather than in each template — a
+fleet-wide default instead of a per-template opt-in. The block is CI-pinned
+(`tests/unit/test_1535_report_prompt_guidance.py`), including a test asserting
+the argument stays documented AND that the name matches what the MCP tool
+accepts; the block's character budget was raised 2000 -> 2400 as an explicit
+decision recorded there.
+
+Who a report was for is answerable on the operator surfaces too: `addressed_to`
+rides the access-controlled REST list and detail responses — and deliberately
+NOT the `/ws` broadcast, which is SCOPE_ALL and unfiltered (the #918 rule). A
+badge rendering it on the Agent Detail Reports tab is a follow-up; the data is
+there.
+
 ## Files
 
 | File | Role |

@@ -65,7 +65,17 @@ def _resolve_portal_session(execution_id: str, agent_name: str) -> Optional[str]
         from client_portal import service as portal_service
         return portal_service.get_inflight_session_for_execution(execution_id)
     except Exception as e:  # noqa: BLE001
-        logger.debug("portal session resolution skipped for %s: %s", execution_id, e)
+        # WARNING, not debug (caught in review on #2383). Fail-soft is right —
+        # a card placement must never fail a publish — but this is the one
+        # function the entire in-chat half of the deliverable depends on. A
+        # Redis outage, an import error or a renamed marker key would make
+        # every card silently stop appearing while the agent page still lists
+        # the reports, so nothing would give anyone a reason to look.
+        logger.warning(
+            "portal session resolution failed for execution %s (%s) — the "
+            "report will publish without an in-chat card",
+            execution_id, type(e).__name__,
+        )
         return None
 
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
