@@ -265,7 +265,6 @@ def _resolve_telegram(
     return _deliver
 
 
-# D10: per-channel resolver dispatch — a third channel (WhatsApp) is one added
 def _resolve_portal(
     *,
     binding_agent: str,
@@ -362,7 +361,8 @@ def _portal_body(*, executing_agent: str, session_agent: str, status: str,
     return f"{head}\n\n{detail}" if detail else head
 
 
-# entry, not another hand-rolled if/else. SUPPORTED_CHANNELS derives from it.
+# D10: per-channel resolver dispatch — a fourth channel is one added entry,
+# not another hand-rolled if/else. SUPPORTED_CHANNELS derives from it.
 _CHANNEL_RESOLVERS: dict = {
     "slack": _resolve_slack,
     "telegram": _resolve_telegram,
