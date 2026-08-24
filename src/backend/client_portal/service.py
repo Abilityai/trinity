@@ -3142,9 +3142,12 @@ async def dispatch_capture_feedback(agent_name: str, email: str, *, target_kind:
     before this runs, so every failure path here costs a follow-up, never the
     feedback itself.
     """
-    from services.task_execution_service import task_execution_service
+    # The accessor, not a module-level singleton — there isn't one, and the
+    # first version of this imported a name that does not exist. Unit tests
+    # stubbed around the dispatch and never caught it; the live run did.
+    from services.task_execution_service import get_task_execution_service
     try:
-        await task_execution_service.execute_task(
+        await get_task_execution_service().execute_task(
             agent_name=agent_name,
             message=build_capture_feedback_prompt(target_kind, target_id, comment, email),
             triggered_by="public",     # a client-originated turn, like every portal turn

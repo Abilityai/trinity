@@ -19,6 +19,7 @@ import uuid
 from typing import Any, Optional
 
 from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
 from db.tables import agent_evaluations
@@ -120,27 +121,33 @@ class EvaluationOperations:
             values["comment"] = comment
         if execution_id is not None:
             values["execution_id"] = execution_id
-        with get_engine().begin() as conn:
-            result = conn.execute(
-                update(agent_evaluations)
-                .where(and_(
-                    agent_evaluations.c.evaluator == evaluator,
-                    agent_evaluations.c.target_kind == target_kind,
-                    agent_evaluations.c.target_id == target_id,
-                ))
-                .values(**values)
+
+        def _apply(conn) -> Optional[dict]:
+            """UPDATE if the rating exists; return None if it does not."""
+            where = and_(
+                agent_evaluations.c.evaluator == evaluator,
+                agent_evaluations.c.target_kind == target_kind,
+                agent_evaluations.c.target_id == target_id,
             )
-            if result.rowcount:
-                row = conn.execute(
-                    select(agent_evaluations).where(and_(
-                        agent_evaluations.c.evaluator == evaluator,
-                        agent_evaluations.c.target_kind == target_kind,
-                        agent_evaluations.c.target_id == target_id,
-                    ))
-                ).mappings().first()
-                return self._row_to_dict(row)
+            if not conn.execute(update(agent_evaluations).where(where).values(**values)).rowcount:
+                return None
+            return self._row_to_dict(
+                conn.execute(select(agent_evaluations).where(where)).mappings().first()
+            )
+
+        with get_engine().begin() as conn:
+            existing = _apply(conn)
+            if existing is not None:
+                return existing
+            # Two first-ratings of the same target by the same person race here:
+            # both UPDATE zero rows, both INSERT, and the unique index refuses
+            # the loser. That is a double-click, and it must read as "your
+            # rating is recorded", not as a 500 — so the loser re-runs the
+            # UPDATE it should have run, which is what the winner just made
+            # possible. The index stays the authority; this is how a caller
+            # experiences it.
             eval_id = f"eval_{uuid.uuid4().hex[:16]}"
-            conn.execute(insert(agent_evaluations).values(
+            insert_values = dict(
                 id=eval_id,
                 agent_name=agent_name,
                 execution_id=execution_id,
@@ -155,7 +162,19 @@ class EvaluationOperations:
                 target_id=target_id,
                 comment=comment,
                 updated_at=now,
-            ))
+            )
+            try:
+                conn.execute(insert(agent_evaluations).values(**insert_values))
+            except IntegrityError:
+                # The loser of that race. Its rating is not lost: the row now
+                # exists, so the UPDATE it originally skipped is the correct
+                # action, applied in a fresh transaction because this one is
+                # poisoned by the failed statement.
+                with get_engine().begin() as retry_conn:
+                    applied = _apply(retry_conn)
+                if applied is not None:
+                    return applied
+                raise
             row = conn.execute(
                 select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
             ).mappings().first()

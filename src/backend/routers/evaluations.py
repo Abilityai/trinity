@@ -62,7 +62,19 @@ def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
     return redacted
 
 
-def _to_response(row: dict) -> EvaluationResponse:
+def _to_response(row: dict, current_user: User) -> EvaluationResponse:
+    """Project a row for THIS caller.
+
+    `current_user` is required rather than optional on purpose. The first
+    version of ent#366 redacted inside `list_agent_evaluations` only, which left
+    the fleet list and the by-id read handing the rated agent its own comments —
+    an agent-scoped key resolves to its OWNER, so `accessible_agent_names`
+    includes the agent itself. That is the "defense added to one of N call
+    sites" class this repo keeps re-learning (#686, #1264, #1153). Threading the
+    caller through the single projection makes the redaction structural: a new
+    read path cannot compile without deciding.
+    """
+    row = _redact_for_agent_principal(row, current_user)
     return EvaluationResponse(
         id=row["id"],
         agent_name=row["agent_name"],
@@ -90,12 +102,9 @@ async def list_agent_evaluations(
 ):
     """An agent's own evaluations (newest first). `AuthorizedAgentByName` gates
     read to owner/admin/agent-self — reading feedback is allowed; writing is not."""
-    # ent#366: an agent-scoped caller reading its OWN evaluations gets the
-    # tallies and not the words (see `_redact_for_agent_principal`).
-    return [
-        _to_response(_redact_for_agent_principal(r, current_user))
-        for r in db.list_agent_evaluations(agent_name, limit)
-    ]
+    # ent#366: an agent-scoped caller gets the tallies and not the words —
+    # applied inside `_to_response`, so every read path below inherits it.
+    return [_to_response(r, current_user) for r in db.list_agent_evaluations(agent_name, limit)]
 
 
 @router.get("/evaluations", response_model=List[EvaluationResponse])
@@ -106,7 +115,7 @@ async def list_fleet_evaluations(
 ):
     """Fleet evaluations across accessible agents (admin = all)."""
     names = narrow_to_agent(accessible_agent_names(current_user), agent)
-    return [_to_response(r) for r in db.list_fleet_evaluations(names, limit)]
+    return [_to_response(r, current_user) for r in db.list_fleet_evaluations(names, limit)]
 
 
 @router.get("/evaluations/{eval_id}", response_model=EvaluationResponse)
@@ -118,7 +127,7 @@ async def get_evaluation(eval_id: str, current_user: User = Depends(get_current_
     names = accessible_agent_names(current_user)
     if names is not None and row["agent_name"] not in names:
         raise HTTPException(status_code=404, detail="Evaluation not found")
-    return _to_response(row)
+    return _to_response(row, current_user)
 
 
 @router.post("/agents/{agent_name}/evaluations", response_model=EvaluationResponse)
@@ -144,4 +153,4 @@ async def create_evaluation(
         checks=body.checks,
         judge=body.judge,
     )
-    return _to_response(row)
+    return _to_response(row, current_user)
