@@ -715,6 +715,12 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # "agent").
             if agent_name:
                 _enforce_ephemeral_key_fence(request, agent_name)
+            # #2323 — bounded ops credential. Enforced here for the same reason
+            # as the connector and portal_delegate fences above: this principal
+            # resolves to the key OWNER, so any endpoint doing an inline access
+            # check would otherwise treat it as that human.
+            if scope == OPS_SCOPE:
+                _enforce_ops_key_fence(request)
             return User(
                 id=user["id"],
                 username=user["username"],
@@ -732,6 +738,14 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                 # NOT read as "interactive" — coerce it the same way
                 # `validate_mcp_api_key` does.
                 mcp_scope=scope or "user",
+                # #2323 — the key identity `validate_mcp_api_key` already
+                # returned and this constructor already discarded. Derived from
+                # the PRESENTED bearer, so it is the one trustworthy answer to
+                # "which credential did this"; the `X-MCP-Key-Id` header that
+                # previously fed the audit log is client-supplied and validated
+                # nowhere.
+                mcp_key_id=mcp_key_info.get("key_id"),
+                mcp_key_name=mcp_key_info.get("key_name"),
             )
 
     # Both JWT and MCP key failed
@@ -781,6 +795,88 @@ def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Ephemeral agent keys are restricted to heartbeat, result delivery, reports, notifications, and self-info",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# #2323 — the `ops` scope: a machine credential NARROWER than its owner.
+# --------------------------------------------------------------------------- #
+# Trinity already had a machine identity for admin/ops surfaces: a `user`-scoped
+# MCP key owned by an admin reaches every admin gate, is exempt from interactive
+# 2FA (the MFA gate lives on the two login routes; key validation never passes
+# through it), is revocable, and rotates by minting a second key. What it is NOT
+# is bounded: it carries the owner's full role, so the only way to keep a
+# monitoring dashboard alive under enforced 2FA was to hand it a permanent,
+# unattributable, unlimited admin credential.
+#
+# `ops` is the bounded alternative. Two independent layers, both load-bearing:
+#
+#   1. This route allowlist, enforced HERE at the single auth entry point rather
+#      than per-endpoint — the ent#293/#297 lesson (five occurrences meant the
+#      GATE was wrong, not the endpoints), and the same placement as the
+#      connector, ephemeral and portal_delegate fences.
+#   2. `ADMIN_GATE_SCOPES` above, which keeps `ops` OUT of the admin gates by
+#      default; an admin-gated ops route opts in explicitly with
+#      `assert_admin(..., allow_scopes={"ops"})`.
+#
+# Layer 2 is what makes this a machine identity rather than a human's proxy:
+# authority comes from being an ops key, not from who owns it. It also flips the
+# failure direction — a new ops route is INACCESSIBLE until someone opts it in,
+# noticed at once by the integration owner, instead of silently reachable and
+# noticed by whoever finds it first.
+#
+# EVERY ENTRY IS A `GET`, and a test asserts it. The method belt is not
+# decorative: without it a future `POST /api/ops/<anything>` under an allowlisted
+# prefix would be admitted, and `/api/ops` is where `emergency-stop` and
+# `fleet/stop` live.
+#
+# The set is deliberately fail-CLOSED on a route that moves or is added: legit
+# traffic 403s and an operator notices. Do NOT "fix" that with a prefix match.
+OPS_SCOPE = "ops"
+
+_OPS_ALLOWED_ROUTES = (
+    # Platform identity + fleet posture
+    ("GET", re.compile(r"^/api/version$")),
+    ("GET", re.compile(r"^/api/ops/fleet/status$")),
+    ("GET", re.compile(r"^/api/ops/fleet/health$")),
+    ("GET", re.compile(r"^/api/ops/schedules$")),
+    ("GET", re.compile(r"^/api/ops/alerts$")),
+    ("GET", re.compile(r"^/api/ops/costs$")),
+    ("GET", re.compile(r"^/api/ops/auth-report$")),
+    ("GET", re.compile(r"^/api/monitoring/status$")),
+    # Host + container telemetry
+    ("GET", re.compile(r"^/api/telemetry/host$")),
+    ("GET", re.compile(r"^/api/telemetry/containers$")),
+    # Fleet roster + capacity
+    ("GET", re.compile(r"^/api/agents$")),
+    ("GET", re.compile(r"^/api/agents/execution-stats$")),
+    ("GET", re.compile(r"^/api/agents/slots$")),
+    # Execution history + live log relay
+    ("GET", re.compile(r"^/api/executions$")),
+    ("GET", re.compile(r"^/api/executions/stats$")),
+    ("GET", re.compile(r"^/api/agents/[^/]+/executions$")),
+    ("GET", re.compile(r"^/api/agents/[^/]+/executions/[^/]+/stream$")),
+    # Subscription pressure
+    ("GET", re.compile(r"^/api/subscriptions$")),
+    ("GET", re.compile(r"^/api/subscriptions/[^/]+/usage$")),
+)
+
+
+def _enforce_ops_key_fence(request: Request) -> None:
+    """Route containment for `ops`-scoped keys (#2323).
+
+    Reads only the method and path — no DB, no Redis — so unlike the ephemeral
+    fence there is nothing here that can fail open. Keep it that way: never make
+    membership a settings lookup.
+    """
+    method = request.method.upper()
+    path = request.url.path
+    for allowed_method, pattern in _OPS_ALLOWED_ROUTES:
+        if method == allowed_method and pattern.fullmatch(path):
+            return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Ops keys are read-only and limited to fleet health, telemetry, execution and subscription reads",
     )
 
 
@@ -914,12 +1010,89 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     """
     _reject_connector_principal(current_user)
     reject_agent_principal(current_user)
+    _reject_scope_at_admin_gate(current_user)
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
         )
     return current_user
+
+
+# ent#293/#297 closed the admin gate against `agent` and `connector` principals by
+# NAMING them. That is a denylist over a free-text column: `mcp_api_keys.scope`
+# carries no CHECK constraint, and any scope that sets neither `agent_name` nor
+# `connector_agent` walks both rejections and inherits the OWNER'S ROLE in full —
+# on a default admin-owned install, that is every admin gate in the tree.
+# `models.User.mcp_scope`'s own docstring predicted this: "fail-closed against a
+# sixth scope a future PR invents."
+#
+# This is that allowlist. A scope not named here cannot satisfy an admin gate on
+# the strength of its owner's role, whether or not anyone remembered it existed.
+#
+#   None     - the JWT branch: an interactive human. The only principal the role
+#              check was ever written for.
+#   "user"   - a human's own user-scoped MCP key. It legitimately drives admin
+#              endpoints today (ops dashboards, trinity-ops-agent), so removing it
+#              would be a behaviour change. Deliberately IN the set; #2323 adds a
+#              bounded alternative rather than narrowing this one.
+#   "system" - trinity-system. `require_admin`'s docstring already documents that
+#              it passes; removing it breaks the orchestrator.
+#
+# `agent` and `connector` are absent but already rejected one line earlier by the
+# named guards, so their 403 is unchanged. `portal_delegate` is absent and IS a
+# real narrowing: it passes both named guards today and is contained only by its
+# route fence in `get_current_user`. It has no business at an admin gate, its
+# fence already forbids every route that has one, so this clause is unreachable in
+# normal operation — it fires only if that fence is ever holed. Which is the point.
+#
+# NULL/empty scope columns are double-coerced to "user" (`db/mcp_keys.py` and
+# `get_current_user` below), so no legacy row is stranded outside the set.
+#
+# Deliberately NOT consulted by `require_role` — see its docstring: agent-spawned
+# agent creation through `require_role("creator")` is supported ent#69 behaviour.
+ADMIN_GATE_SCOPES = frozenset({None, "user", "system"})
+
+# Sentinel for "this object has no `mcp_scope` at all" — deliberately not `None`,
+# which is the JWT-human value and would make an absent attribute the privileged
+# one.
+_SCOPE_ABSENT = object()
+
+
+def _reject_scope_at_admin_gate(
+    current_user: User, allow_scopes: Optional[frozenset] = None
+) -> None:
+    """Allowlist half of the admin gate (#2323).
+
+    `allow_scopes` lets an individual endpoint opt a bounded scope in — the
+    per-route grant that makes a machine credential authorized because of WHAT IT
+    IS rather than who owns it. Absent, only `ADMIN_GATE_SCOPES` passes.
+    """
+    permitted = ADMIN_GATE_SCOPES if not allow_scopes else (ADMIN_GATE_SCOPES | frozenset(allow_scopes))
+    # A principal that does not carry `mcp_scope` at all fails CLOSED. The
+    # tempting `getattr(..., None)` would default to the JWT value — the most
+    # privileged member of the set — which is the documented trap: when a
+    # getattr default reads an authorization discriminator across principal
+    # types, the default must be the UNPRIVILEGED answer. `models.User` always
+    # declares the field, so the only objects this can reject are stand-ins that
+    # do not match the real principal, and a stand-in that does not match the
+    # real principal is exactly how #2323 found two live bugs.
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if scope is _SCOPE_ABSENT:
+        # Names the cause, because the alternative is a puzzling 403 on a
+        # principal that "looks like" an admin. In production this is
+        # unreachable (`models.User` declares the field); in a test it means the
+        # stand-in does not match the real principal — which is the defect this
+        # allowlist exists to make visible, not an inconvenience to route around.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Principal carries no mcp_scope; cannot satisfy an admin gate",
+        )
+    if scope not in permitted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This key scope cannot satisfy an admin gate",
+        )
 
 
 # Role hierarchy: admin > creator > operator > user
@@ -1178,7 +1351,12 @@ def get_owned_agent_by_name(
 # ============================================================================
 
 
-def assert_admin(current_user: User, *, detail: str = "Admin access required") -> None:
+def assert_admin(
+    current_user: User,
+    *,
+    detail: str = "Admin access required",
+    allow_scopes: Optional[frozenset] = None,
+) -> None:
     """Imperative admin gate — parity with the ``require_admin`` Depends form.
 
     Rejects connector AND agent principals (neither is a human admin), then
@@ -1212,6 +1390,7 @@ def assert_admin(current_user: User, *, detail: str = "Admin access required") -
     """
     _reject_connector_principal(current_user)
     reject_agent_principal(current_user)
+    _reject_scope_at_admin_gate(current_user, allow_scopes)
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 

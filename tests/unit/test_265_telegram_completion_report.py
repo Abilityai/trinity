@@ -431,7 +431,7 @@ def _decision():
 
 
 def _user(user_id=1, username="owner", role="user", agent_name=None,
-          connector_agent=None):
+          connector_agent=None, mcp_scope=None):
     """A principal. ``agent_name`` set ⇒ an AGENT-scoped MCP key (scope='agent'),
     which is what the provenance guard's agent arm keys on — NOT the
     X-Source-Agent header (unvalidated client input for a human caller)."""

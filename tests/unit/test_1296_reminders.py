@@ -42,7 +42,7 @@ def _load():
     return None
 
 
-def _user(agent_name=None, uid=1, email="u@example.com", connector_agent=None):
+def _user(agent_name=None, uid=1, email="u@example.com", connector_agent=None, mcp_scope=None):
     return SimpleNamespace(
         id=uid,
         agent_name=agent_name,

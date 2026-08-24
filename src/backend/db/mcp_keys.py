@@ -106,7 +106,17 @@ class McpKeyOperations:
     # `system` are deliberately absent — they are bound to an agent and are
     # minted by their own code paths; accepting them here would let a caller
     # forge an agent principal with no agent behind it.
-    _USER_CREATABLE_SCOPES = ("user", "portal_delegate")
+    # #2323: `ops` is a bounded read-only machine credential. Admin-gated AND
+    # human-only at the router; refused here too so a bad value can never reach
+    # the column by another path.
+    _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops")
+
+    # #2323: scopes that must never carry an `agent_name`. Three separate sweeps
+    # filter on `scope IN ('agent','connector')` to find their work — the canary
+    # L-03 orphan scan, the key orphan sweep, and the agent rename/purge cascade
+    # — so a non-agent scope carrying an agent name would be invisible to all
+    # three and outlive its agent forever. Enforced, not left to convention.
+    _AGENTLESS_SCOPES = ("user", "portal_delegate", "ops")
 
     def create_mcp_api_key(self, username: str, key_data: McpApiKeyCreate) -> Optional[McpApiKeyWithSecret]:
         """Create a new MCP API key for a user.
@@ -121,6 +131,11 @@ class McpKeyOperations:
 
         scope = getattr(key_data, "scope", None) or "user"
         if scope not in self._USER_CREATABLE_SCOPES:
+            return None
+        # #2323 — see `_AGENTLESS_SCOPES`. This endpoint has never set an agent
+        # name, so the guard is belt-and-braces today; it exists so a future
+        # caller cannot quietly bind one.
+        if scope in self._AGENTLESS_SCOPES and getattr(key_data, "agent_name", None):
             return None
 
         key_id = self._generate_id()

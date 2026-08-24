@@ -1564,8 +1564,7 @@ async def dispatch_parallel_task(
     if replay is not None:
         await dispatch_admission_service.audit_idempotent_replay(
             name=name, endpoint=f"/api/agents/{name}/task", x_via_mcp=x_via_mcp,
-            x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name, current_user=current_user,
+            x_source_agent=x_source_agent, current_user=current_user,
             idempotency_key=idempotency_key, idem=idem,
         )
         return replay

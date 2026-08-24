@@ -88,6 +88,15 @@
                   <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300">
                     Agent
                   </span>
+                  <!-- #2323: a bounded read-only machine credential. Badged
+                       because an unbadged ops key is visually identical to an
+                       unbounded personal key here, which defeats the point of
+                       having a bounded tier at all. -->
+                  <span v-else-if="key.scope === 'ops'"
+                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-blue-100 dark:bg-accent-blue-900/50 text-accent-blue-800 dark:text-accent-blue-300"
+                        title="Read-only machine credential — fleet health, telemetry, execution and subscription reads only">
+                    Ops (read-only)
+                  </span>
                   <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
                     System
                   </span>

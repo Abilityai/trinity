@@ -7,11 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
 from dependencies import (
+    OPS_SCOPE,
     PORTAL_DELEGATE_SCOPE,
     _reject_connector_principal,
     assert_admin,
     get_current_user,
     reject_agent_principal,
+    reject_non_interactive_principal,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -34,11 +36,20 @@ async def create_mcp_api_key_endpoint(
     """
     requested_scope = (getattr(key_data, "scope", None) or "user").strip()
     if requested_scope != "user":
-        if requested_scope != PORTAL_DELEGATE_SCOPE:
+        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE):
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported key scope '{requested_scope}'",
             )
+        if requested_scope == OPS_SCOPE:
+            # #2323 — minting a credential is a GRANT, and the guards used for
+            # `portal_delegate` below are the wrong shape for this one: both
+            # `reject_agent_principal` and `assert_admin`'s named rejections are
+            # no-ops for an ops principal, so an ops key could mint ops keys.
+            # `reject_non_interactive_principal` is the ALLOWlist form — it
+            # passes only a JWT session — and is the one guard already
+            # fail-closed against a scope nobody has invented yet.
+            reject_non_interactive_principal(current_user)
         # Human-only AND admin. `assert_admin` alone is not enough: it rejects
         # connector principals but not agent-scoped ones, and an agent key
         # resolves to its OWNER carrying the owner's role — on a default

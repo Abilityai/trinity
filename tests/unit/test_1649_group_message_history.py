@@ -201,11 +201,11 @@ class TestRoutersPersist:
         monkeypatch.setattr(slack_router.slack_service, "send_message_detailed", _send)
 
         req = types.SimpleNamespace(message="deploy at 4pm", thread_ts=None)
-        # connector_agent=None: the migrated owner gate (assert_agent_owner →
+        # connector_agent=None, mcp_scope=None: the migrated owner gate (assert_agent_owner →
         # _enforce_connector_scope, #1710) reads this; a real non-connector
         # User carries it. can_user_share_agent stays stubbed True, so the owner
         # is still admitted exactly as before the migration.
-        user = types.SimpleNamespace(username="admin", connector_agent=None)
+        user = types.SimpleNamespace(username="admin", connector_agent=None, mcp_scope=None)
         await slack_router.send_agent_slack_channel_message("atlas", "C1", req, user)
 
         assert captured, "the router never persisted the broadcast"
@@ -237,11 +237,11 @@ class TestRoutersPersist:
         monkeypatch.setattr(slack_router.slack_service, "send_message_detailed", _send)
 
         req = types.SimpleNamespace(message="ack", thread_ts="1720000000.111222")
-        # connector_agent=None: the migrated owner gate (assert_agent_owner →
+        # connector_agent=None, mcp_scope=None: the migrated owner gate (assert_agent_owner →
         # _enforce_connector_scope, #1710) reads this; a real non-connector
         # User carries it. can_user_share_agent stays stubbed True, so the owner
         # is still admitted exactly as before the migration.
-        user = types.SimpleNamespace(username="admin", connector_agent=None)
+        user = types.SimpleNamespace(username="admin", connector_agent=None, mcp_scope=None)
         await slack_router.send_agent_slack_channel_message("atlas", "C1", req, user)
 
         assert captured["session_identifier"] == "T1:C1:1720000000.111222"
@@ -312,11 +312,11 @@ class TestRoutersPersist:
         monkeypatch.setattr(slack_router.slack_service, "send_message_detailed", _send)
 
         req = types.SimpleNamespace(message="hi", thread_ts=None)
-        # connector_agent=None: the migrated owner gate (assert_agent_owner →
+        # connector_agent=None, mcp_scope=None: the migrated owner gate (assert_agent_owner →
         # _enforce_connector_scope, #1710) reads this; a real non-connector
         # User carries it. can_user_share_agent stays stubbed True, so the owner
         # is still admitted exactly as before the migration.
-        user = types.SimpleNamespace(username="admin", connector_agent=None)
+        user = types.SimpleNamespace(username="admin", connector_agent=None, mcp_scope=None)
         with pytest.raises(HTTPException):
             await slack_router.send_agent_slack_channel_message("atlas", "C1", req, user)
         assert not called, "a failed send wrote a phantom assistant turn"

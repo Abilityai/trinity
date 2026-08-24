@@ -285,6 +285,86 @@
   security-surface pointer; the resolution mechanics and the recreate-vs-create
   ladder distinction live there.
 
+### 20.10 Machine Identities for Admin/Ops APIs (#2323)
+- **Status**: ✅ Implemented.
+- **Premise correction (recorded, because the issue as filed says the opposite)**:
+  Trinity already had a machine identity for admin/ops surfaces. A `user`-scoped
+  MCP key owned by an admin reaches every admin gate, is **already exempt from
+  interactive 2FA** (the MFA gate is invoked only at the two login routes; key
+  validation never passes through it), is already revocable, and already rotates
+  by minting a second key while the first stays valid. What it lacked was
+  **bounds, attribution, and expiry** — so the only 2FA-surviving option was a
+  permanent, unattributable, unlimited admin credential, a worse posture than the
+  control it worked around.
+- **Admin gate is an allowlist (`ADMIN_GATE_SCOPES`)**: `require_admin` /
+  `assert_admin` require `mcp_scope ∈ {None, "user", "system"}`. A scope that
+  sets neither `agent_name` nor `connector_agent` previously walked both named
+  rejections and inherited the owner's role. A principal lacking the attribute
+  fails **closed** via a sentinel — never a `None` default, which is the
+  privileged JWT value. See `architecture.md` Invariant #8.
+- **`ops` scope — read-only, route-fenced, self-authorizing**:
+  - Admin-minted and **human-only** to mint (`reject_non_interactive_principal` —
+    the allowlist form; the guards used for `portal_delegate` are both no-ops for
+    an ops principal, so an ops key could otherwise mint ops keys).
+  - Fenced at the **single auth entry point** (`get_current_user`), beside the
+    connector / ephemeral / portal_delegate fences. **Every entry is a `GET`**,
+    asserted by a test that imports the constant; the method belt stops a future
+    `POST /api/ops/*` inheriting read access under a prefix.
+  - Kept **out** of `ADMIN_GATE_SCOPES`; an admin-gated ops route opts in with
+    `assert_admin(..., allow_scopes={"ops"})`. Authority therefore comes from
+    being an ops key, not from the owner's role — which is what makes it a
+    machine identity rather than a human's proxy, and what stops every ops
+    integration dying when that admin is offboarded.
+  - Never carries an `agent_name` (`_AGENTLESS_SCOPES`): three sweeps — the
+    canary orphan scan, the key orphan sweep, and the rename/purge cascade —
+    find their work by filtering `scope IN ('agent','connector')`, so a
+    non-agent scope holding an agent name is invisible to all three.
+  - Excluded from the MCP tool surface **by construction**: `OPERATOR_SCOPES` is
+    an allowlist pinned by its own test. This is a backend bearer credential.
+  - Fence set is derived from the **measured** read set of the real consumer, not
+    from the issue's wording (which named only `/api/ops/*` and would have
+    shipped a credential unable to run the dashboard it exists for).
+- **Audit attribution comes from the presented credential**: `models.User` carries
+  `mcp_key_id`/`mcp_key_name`; `platform_audit_service.log()` derives the three
+  `mcp_*` columns from `actor_user` when not passed explicitly, fixing ~70 call
+  sites with no diff at any of them. `actor_type` stays `"user"` — the owner is
+  the accountable party and is the only branch yielding an email, and the
+  enterprise user-activity view matches on it. `GET /api/audit-log` gains
+  `mcp_key_id` / `mcp_scope` filters so "what did that leaked key touch?" is
+  answerable.
+- **The `X-MCP-Key-Id` header is no longer trusted for attribution**: it is
+  `Header(None)` on six routes, validated nowhere, and persisted into the backlog
+  replay blob — so honouring it let any authenticated caller forge the credential
+  named in the two highest-volume audit events, surfacing minutes later on queue
+  drain. The parameters were **removed**, not ignored.
+- **Security fix carried by the same change**: the A2A inbound idempotency scope
+  reads `mcp_key_id` off the principal and fell back to `username` because the
+  field did not exist, so two agent-scoped keys of one owner shared a
+  peer-controlled `messageId` namespace — caller B received caller A's full
+  response text and B's task never ran. Reachable on an entitled install with ≥2
+  `a2a_exposed` agents under one owner. **Deploy note**: the scope string moves
+  from `a2a:{agent}:{username}` to `a2a:{agent}:{key_id}`, so a `messageId`
+  replayed across the deploy re-executes instead of replaying (bounded by the 24h
+  TTL).
+- **Explicitly NOT delivered**: key expiry (`mcp_api_keys` still has no
+  `expires_at`); narrowing the existing `user` scope (would break the fleet); a
+  **write-capable** ops tier — the human-driven ops toolkit's 24 writes stay on
+  password auth or a `user`-scoped key. The read fence does not retire the admin
+  password.
+- **Two costs inherited, not introduced** (flagged in review; stated so they are
+  not discovered): key validation writes `last_used_at`/`usage_count` on **every**
+  request, so a 10s poll takes a write lock every 10s; and
+  `GET /api/ops/fleet/status` issues one HTTP round-trip **per agent**, through
+  the client that hosts the transport circuit breaker. Neither is a regression —
+  the Observatory already polls exactly these endpoints on an admin JWT at the
+  same cadence, and this credential replaces that one rather than adding load.
+  A `track_usage=False` path exists (the heartbeat uses it) and is the obvious
+  lever if the write rate becomes a problem, at the cost of the key appearing
+  dormant; caching for the fleet-status fan-out is a separate change.
+- **Honest bound**: the credential narrows the **API** surface only. Ops tooling
+  that mutates containers over SSH never touches the API; SSH remains the real
+  privilege boundary on those hosts.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)

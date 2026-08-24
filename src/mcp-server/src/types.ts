@@ -100,7 +100,7 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous";
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
 
   // --- #848 inline email auth (anonymous scope only) ---------------------

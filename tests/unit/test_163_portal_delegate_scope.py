@@ -84,13 +84,13 @@ def test_minting_the_scope_is_admin_only_and_human_only():
 
     d = _deps()
     non_admin = SimpleNamespace(id=2, username="bob", role="user",
-                                agent_name=None, connector_agent=None)
+                                agent_name=None, connector_agent=None, mcp_scope=None)
     with pytest.raises(HTTPException) as exc:
         d.assert_admin(non_admin)
     assert exc.value.status_code == 403
 
     agent_principal = SimpleNamespace(id=1, username="admin", role="admin",
-                                      agent_name="atlas", connector_agent=None)
+                                      agent_name="atlas", connector_agent=None, mcp_scope=None)
     with pytest.raises(HTTPException) as exc:
         d.reject_agent_principal(agent_principal)
     assert exc.value.status_code == 403
