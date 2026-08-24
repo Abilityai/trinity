@@ -34,7 +34,7 @@
           <!-- Type + priority pills (subtle) -->
           <div class="flex items-center gap-2 mt-1.5">
             <span class="text-xs px-2 py-0.5 rounded-full" :class="typePill(item.type)">
-              {{ typeLabel(item.type) }}
+              {{ queueTypeLabel(item.type) }}
             </span>
             <span
               v-if="item.priority === 'critical' || item.priority === 'high'"
@@ -176,6 +176,7 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
+import { queueTypeLabel } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
 
 const props = defineProps({
@@ -226,10 +227,6 @@ function typePill(type) {
     question: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400',
     alert: 'bg-state-autonomous-50 text-state-autonomous-600 dark:bg-state-autonomous-900/20 dark:text-state-autonomous-400'
   }[type] || ''
-}
-
-function typeLabel(type) {
-  return { approval: 'Needs approval', question: 'Question', alert: 'Heads up' }[type] || type
 }
 
 function priorityPill(priority) {

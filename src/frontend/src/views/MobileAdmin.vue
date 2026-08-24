@@ -228,23 +228,84 @@
             />
             <div v-else-if="queueView.state === 'empty'" class="empty-state">No pending items</div>
             <div v-else class="ops-list">
-              <div v-for="item in queueItems" :key="item.id" class="ops-card">
+              <div
+                v-for="item in queueItems"
+                :key="item.id"
+                class="ops-card"
+                data-testid="queue-card"
+                :data-item-id="item.id"
+              >
                 <div class="ops-card-header">
                   <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + item.priority">{{ item.priority }}</span>
                 </div>
-                <div class="ops-card-type">{{ item.request_type }}</div>
+                <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
+                <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
+                <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title">{{ item.title }}</p>
                 <p class="ops-card-message">{{ item.message || item.question || item.description }}</p>
-                <div v-if="item.options && item.options.length" class="ops-options">
+                <!-- Controls switch on the item TYPE (desktop parity), and an
+                     approval is never answered on one tap: select → restated
+                     consequence → optional note → explicit Send. The decision
+                     rides `response`, the note rides `response_text`, and the
+                     body comes from utils/operatorQueue.js — the same builder
+                     the desktop store uses (the hand-built body here used to
+                     send a hard-coded literal decision for every tap).
+                     This inline step is deliberately p19-shaped — named verb,
+                     restated consequence, the safe action first and focused —
+                     and is NOT a confirm overlay (see the note on #1924). -->
+                <template v-if="queueResponseKind(item) === 'approval'">
+                  <div class="ops-options" role="group" aria-label="Options">
+                    <button
+                      v-for="(opt, idx) in optionsOf(item)"
+                      :key="idx + ':' + opt"
+                      type="button"
+                      class="ops-option-btn"
+                      data-testid="queue-option"
+                      :aria-pressed="selectedOptions[item.id] === opt ? 'true' : 'false'"
+                      :disabled="respondingItems[item.id]"
+                      @click="selectOption(item.id, opt)"
+                    >{{ opt }}</button>
+                  </div>
+                  <div v-if="selectedOptions[item.id]" class="ops-approval-form" data-testid="queue-approval-form">
+                    <p class="ops-card-body" role="status" data-testid="queue-consequence">
+                      Sending <strong>{{ selectedOptions[item.id] }}</strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
+                    </p>
+                    <input
+                      v-model="responseTexts[item.id]"
+                      type="text"
+                      enterkeyhint="done"
+                      placeholder="Add a note (optional)..."
+                      class="ops-response-input"
+                      data-testid="queue-note"
+                      :disabled="respondingItems[item.id]"
+                    />
+                    <div class="ops-response-row">
+                      <button
+                        type="button"
+                        class="ops-ack-btn"
+                        data-testid="queue-cancel"
+                        :ref="(el) => registerCancelButton(item.id, el)"
+                        :disabled="respondingItems[item.id]"
+                        @click="clearSelection(item.id)"
+                      >Cancel</button>
+                      <button
+                        type="button"
+                        class="ops-respond-btn ops-send-btn"
+                        data-testid="queue-send"
+                        :disabled="respondingItems[item.id]"
+                        @click="submitApproval(item)"
+                      >Send: {{ selectedOptions[item.id] }}</button>
+                    </div>
+                  </div>
+                </template>
+                <div v-else-if="queueResponseKind(item) === 'acknowledge'" class="ops-card-footer ops-ack-only">
                   <button
-                    v-for="opt in item.options"
-                    :key="opt"
-                    @click="respondToQueueItem(item.id, opt)"
-                    class="ops-option-btn"
+                    type="button"
+                    class="ops-ack-btn"
+                    data-testid="queue-ack"
                     :disabled="respondingItems[item.id]"
-                  >
-                    {{ opt }}
-                  </button>
+                    @click="acknowledgeQueueItem(item)"
+                  >Got it</button>
                 </div>
                 <div v-else class="ops-response-row">
                   <input
@@ -252,15 +313,23 @@
                     type="text"
                     placeholder="Type response..."
                     class="ops-response-input"
-                    @keyup.enter="respondToQueueItem(item.id, responseTexts[item.id])"
+                    data-testid="queue-answer"
+                    @keyup.enter="submitAnswer(item)"
                   />
                   <button
-                    @click="respondToQueueItem(item.id, responseTexts[item.id])"
+                    type="button"
                     class="ops-respond-btn"
-                    :disabled="respondingItems[item.id] || !responseTexts[item.id]"
-                  >
-                    Send
-                  </button>
+                    data-testid="queue-answer-send"
+                    :disabled="respondingItems[item.id] || !String(responseTexts[item.id] || '').trim()"
+                    @click="submitAnswer(item)"
+                  >Send</button>
+                </div>
+                <div v-if="respondErrors[item.id]" class="mt-2" data-testid="queue-respond-error">
+                  <InlineError
+                    :message="respondErrors[item.id].message"
+                    :detail="respondErrors[item.id].detail"
+                    @dismiss="dismissRespondError(item.id)"
+                  />
                 </div>
               </div>
             </div>
@@ -530,6 +599,10 @@ import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import { apiErrorMessage } from '../utils/apiError'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
+import {
+  optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
+  QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending,
+} from '../utils/operatorQueue'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 
@@ -576,6 +649,11 @@ const queueItems = ref([])
 const notifications = ref([])
 const responseTexts = reactive({})
 const respondingItems = reactive({})
+// #2370 — per-card answer state, keyed by item id (cards are keyed the same
+// way, so a poll that swaps the list keeps a half-typed answer in place).
+const selectedOptions = reactive({})   // approval cards: the tapped option
+const respondErrors = reactive({})     // a failed send, shown NEXT TO the control (p18)
+const cancelButtons = {}               // item id → Cancel element (focused on reveal, p19)
 
 // System
 const fleetSummary = ref({ total: 0, running: 0, stopped: 0, high_context: 0 })
@@ -670,6 +748,7 @@ async function handleLogin() {
 function handleLogout() {
   authStore.logout()
   stopPolling()
+  resetQueueItemState()
 }
 
 // ─── Data Loading ────────────────────────────────────────────────────────────
@@ -722,21 +801,36 @@ async function fetchAgents() {
   }
 }
 
+// #2370: a poll issued BEFORE an answer's POST can complete AFTER the
+// success-path refetch and rewrite the list with the answered card still
+// pending. Only the newest fetch may write — and that holds on EVERY exit,
+// not just the success one: a superseded poll that rejects on a transient
+// blip would otherwise paint "couldn't refresh" over a list the newer fetch
+// just proved fresh, and drop `loading.queue` while that newer request is
+// still outstanding.
+let queueFetchSeq = 0
+
 async function fetchQueue() {
+  const seq = ++queueFetchSeq
   loading.queue = true
   try {
     const res = await axios.get('/api/operator-queue', { params: { limit: 100 } })
+    if (seq !== queueFetchSeq) return // a newer fetch owns the list now
     // The endpoint returns {items, count}; `(res.data || []).filter` on that
     // object threw on every poll, so this tab always read "No pending items".
     queueItems.value = listFrom(res.data, 'items').filter(i => i.status === 'pending')
+    pruneQueueItemState(queueItems.value)
     hasLoaded.queue = true
     lastLoadedAt.queue = Date.now()
     fetchError.queue = ''
   } catch (e) {
+    if (seq !== queueFetchSeq) return // superseded — its failure is not news
     console.error('Failed to fetch queue:', e)
     fetchError.queue = apiErrorMessage(e, 'Request failed')
   } finally {
-    loading.queue = false
+    // The newest fetch owns the spinner; a superseded one leaves it to the
+    // request that is still running (`return` in try/catch runs this block).
+    if (seq === queueFetchSeq) loading.queue = false
   }
 }
 
@@ -1014,22 +1108,130 @@ function autoResizeInput(e) {
 
 // ─── Ops Actions ─────────────────────────────────────────────────────────────
 
-async function respondToQueueItem(id, response) {
-  if (!response) return
-  respondingItems[id] = true
-  try {
-    await axios.post(`/api/operator-queue/${id}/respond`, {
-      response: 'approved',
-      response_text: response
-    })
-    responseTexts[id] = ''
-    await fetchQueue()
-  } catch (e) {
-    // Critical: the operator believes they answered the agent. They did not.
-    reportActionFailure(e, 'send your response — the agent is still waiting')
-  } finally {
-    respondingItems[id] = false
+// #2370 — queue answers. `response` carries the DECISION (the tapped option,
+// the typed answer, or `acknowledged`); a note rides `response_text`. The body
+// comes from utils/operatorQueue.js — the builder the desktop store uses —
+// because this view used to hand-build it with a hard-coded literal decision
+// ('approved', whatever was tapped) and so recorded a Deny as an approval.
+
+function registerCancelButton(id, el) {
+  if (el) cancelButtons[id] = el
+  else delete cancelButtons[id]
+}
+
+function selectOption(id, opt) {
+  if (respondingItems[id]) return
+  selectedOptions[id] = opt
+  delete respondErrors[id]
+  // p19: the safe action is focused first. Focusing a button pops no keyboard
+  // and draws no ring after a touch (:focus-visible), so this is invisible on
+  // a phone and load-bearing for keyboard / screen-reader users.
+  nextTick(() => cancelButtons[id]?.focus({ preventScroll: true }))
+}
+
+function clearSelection(id) {
+  if (respondingItems[id]) return
+  delete selectedOptions[id]
+}
+
+function dismissRespondError(id) {
+  delete respondErrors[id]
+}
+
+function clearQueueItemState(id) {
+  delete selectedOptions[id]
+  delete responseTexts[id]
+  delete respondErrors[id]
+  delete respondingItems[id]
+}
+
+// Drop per-card state for cards that left the list (answered elsewhere,
+// expired, cancelled) so a long-lived PWA tab does not accumulate it.
+//
+// A card whose POST is still outstanding is NEVER pruned. `respondingItems` is
+// the in-flight guard `sendQueueResponse` checks, and the GET is a `limit: 100`
+// window ordered status → priority → created_at: on a busy queue an item can be
+// pushed out of that window by newer high-priority arrivals and return once
+// they are answered. Clearing its guard mid-flight re-enables Send under an
+// outstanding POST — the server 400s the loser, so nothing is mis-recorded, but
+// the operator is told an answer that WAS recorded was not. The selection and
+// note are held for the same reason: the retryable-failure path keeps them for
+// a second attempt.
+function pruneQueueItemState(items) {
+  const live = new Set(items.map(i => i.id))
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+    for (const id of Object.keys(map)) {
+      if (live.has(id) || respondingItems[id] === true) continue
+      delete map[id]
+    }
   }
+}
+
+// Logout forgets everything, in-flight included — the session is over, and a
+// guard surviving into the next sign-in would leave that card's Send disabled
+// with no way to clear it. It therefore clears the maps directly instead of
+// delegating to the prune above, which would inherit that exemption: this is a
+// wipe, not a reconcile against a served list.
+function resetQueueItemState() {
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+    for (const id of Object.keys(map)) delete map[id]
+  }
+}
+
+async function sendQueueResponse(item, body) {
+  const id = item.id
+  if (!body || respondingItems[id]) return false
+  respondingItems[id] = true
+  delete respondErrors[id]
+  try {
+    await axios.post(`/api/operator-queue/${id}/respond`, body)
+  } catch (e) {
+    console.error('Failed to send queue response:', e?.response?.status ?? e?.message ?? e)
+    respondingItems[id] = false
+    if (respondRefusedAsNotPending(e)) {
+      // 409 (somebody else resolved it first, #1017), 400 (already terminal)
+      // or 404 (row gone): the answer was NOT recorded and the item is not
+      // waiting for it, so drop the card now (the server said so — a failed
+      // refetch must not leave it tappable under the notice) and put the
+      // notice on the persistent page-level banner, brought into view — a
+      // per-card message would vanish with the card.
+      queueItems.value = queueItems.value.filter(i => i.id !== id)
+      clearQueueItemState(id)
+      actionError.value = QUEUE_RESPONSE_NOT_RECORDED
+      actionErrorDetail.value = apiErrorMessage(e, 'Request failed')
+      scrollContainer.value?.scrollTo?.({ top: 0, behavior: 'smooth' })
+      await fetchQueue()
+    } else {
+      // The operator believes they answered the agent. They did not — say so
+      // NEXT TO the control (p18) and keep the selection + note for a retry.
+      // No "nothing was changed" claim: a timed-out POST may have landed.
+      respondErrors[id] = {
+        message: "Couldn't send your response — the agent is still waiting. Try again.",
+        detail: apiErrorMessage(e, 'Request failed'),
+      }
+    }
+    return false
+  }
+  // Success: drop the card NOW. `fetchQueue` swallows its own errors, so a
+  // failed refetch must never leave an answered card looking pending.
+  queueItems.value = queueItems.value.filter(i => i.id !== id)
+  clearQueueItemState(id)
+  await fetchQueue()
+  return true
+}
+
+function submitApproval(item) {
+  return sendQueueResponse(item, buildQueueResponse({
+    kind: 'approval', option: selectedOptions[item.id], note: responseTexts[item.id],
+  }))
+}
+
+function submitAnswer(item) {
+  return sendQueueResponse(item, buildQueueResponse({ kind: 'question', answer: responseTexts[item.id] }))
+}
+
+function acknowledgeQueueItem(item) {
+  return sendQueueResponse(item, buildQueueResponse({ kind: 'acknowledge' }))
 }
 
 async function acknowledgeNotification(id) {
@@ -1693,7 +1895,7 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 
 .ops-card-type {
   font-size: 12px;
-  color: #6b7280;
+  color: #9ca3af; /* issue 2370: gray-500 is the dark-ink floor, never meta text */
   margin-bottom: 6px;
 }
 
@@ -1724,10 +1926,52 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   color: white;
   font-size: 14px;
   cursor: pointer;
+  /* issue 2370: options are agent-authored and may be sentence-length — wrap, never clip */
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .ops-option-btn:active {
   background: #4b5563;
+}
+
+/* issue 2370: an option button SELECTS, it never sends. The selected state is
+   colour-free (an inset ring in currentColor — the raw-colour ratchet allows no
+   new literal here) and uses box-shadow so `outline` stays the focus indicator. */
+.ops-option-btn[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 2px currentColor;
+  font-weight: 600;
+}
+
+.ops-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-bottom: 4px;
+}
+
+.ops-approval-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* actions right-aligned, safe choice first (left), destructive last */
+.ops-approval-form .ops-response-row {
+  justify-content: flex-end;
+}
+
+.ops-send-btn {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ops-card-footer.ops-ack-only {
+  justify-content: flex-end;
 }
 
 .ops-response-row {

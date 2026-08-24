@@ -532,12 +532,12 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   - System agents hidden by default
 
 ### 27.3 Ops Tab
-- **Status**: ⏳ Not Started
+- **Status**: ✅ Implemented — queue + alerts (answer payload + explicit-submit parity: #2370, 2026-08-21); the "cost alerts summary" bullet below is not built
 - **Requirement ID**: MOB-001-OPS
 - **Description**: Mobile-optimized Operating Room showing items needing attention
 - **Key Features**:
   - Needs Response queue with expandable cards
-  - Respond/acknowledge actions inline
+  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer); question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response`, a note in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
   - Notification list with priority badges
   - Badge count on tab icon
   - Cost alerts summary

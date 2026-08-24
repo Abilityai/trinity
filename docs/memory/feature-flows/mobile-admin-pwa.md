@@ -46,6 +46,7 @@ Browser (/m)
 | File | Purpose |
 |------|---------|
 | `src/frontend/src/views/MobileAdmin.vue` | Complete mobile admin SPA (~1100 lines) |
+| `src/frontend/src/utils/operatorQueue.js` | The ONE builder of the operator-queue respond payload + controls-kind switch + type labels, shared with the desktop store (#2370) |
 | `src/frontend/src/router/index.js` | `/m` route (requiresAuth: false) |
 | `src/frontend/src/main.js` | 401 interceptor exclusion for `/m` |
 | `src/frontend/public/mobile-manifest.json` | PWA manifest (standalone, portrait, dark) |
@@ -66,7 +67,7 @@ Browser (/m)
 
 ### Ops Tab
 - Sub-tabs: Queue | Alerts
-- Queue: operator queue items with inline respond (text input or option buttons)
+- Queue: operator queue items answered inline. **#2370:** controls switch on the item **type** (desktop parity) — an *approval* is select an option → restated consequence ("Sending **Deny** to <agent> — it reads this as your decision on its next run") → optional note → `Cancel` + `Send: <option>` (the safe action is first and focused on reveal, p19; nothing sends on one tap, and Enter in the note does not send); a *question* is a text answer + Send; an *alert* is `Got it`. The body comes from `utils/operatorQueue.js::buildQueueResponse` — the decision rides `response` (the option / the typed answer / `acknowledged`), a note rides `response_text` — the same builder the desktop store uses. Before #2370 every option tap POSTed a hard-coded `response: 'approved'` with the tapped option in `response_text` (a Deny was recorded as an approval, a typed answer became a note), the card answered on one tap with no note, and the type line read a nonexistent `request_type` (blank). On success the card is dropped locally before the refetch (`fetchQueue` swallows its own errors); a 5xx/transport failure renders an `InlineError` **inside the card** (p18) and keeps the selection + note for a retry; a 409/400 "no longer pending" refusal goes to the persistent page-level banner (the card is about to leave) with attribution-free copy. Per-card state (`selectedOptions`/`responseTexts`/`respondErrors`/`respondingItems`) is keyed by item id, pruned on every poll and wiped on logout — except for a card whose POST is still outstanding, which is never pruned: `respondingItems` is the in-flight guard `sendQueueResponse` checks, and the `limit: 100` window (ordered status → priority → created_at) is one a busy queue can push an item out of and back into, which would re-enable Send under a live POST and report a recorded answer as not recorded. `fetchQueue` is sequence-guarded on **every** exit — a superseded poll writes neither the list, nor `fetchError.queue`, nor `loading.queue` — so a slow poll that rejects cannot paint a stale-refresh banner over data a newer fetch just proved fresh. Pinned by `tests/unit/operatorQueueResponse.spec.js` + `e2e/mobile-admin-queue-respond.spec.js` (`@smoke`, captures the real POST body; fails on the pre-fix code with `captured POSTs: [{response:'approved',…}]`).
 - Alerts: notifications with acknowledge button
 - Badge counts on tab and sub-tabs
 

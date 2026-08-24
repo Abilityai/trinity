@@ -130,7 +130,7 @@ Tab selection uses `?tab=` query parameter. `Operations.vue` reads `route.query.
 
 **Actions:**
 - `fetchItems()` -- `GET /api/operator-queue?limit=200` with auth header (line 87-102)
-- `respondToItem(id, response, responseText)` -- `POST /api/operator-queue/{id}/respond`, optimistic local update, auto-advance to next open item. On **409** (item left 'pending' under us, e.g. another operator's bulk-cancel landed first, #1017) sets a user-visible `error` ("...your response was not recorded.") and refetches (line 104-138)
+- `respondToItem(id, response, responseText)` -- `POST /api/operator-queue/{id}/respond` with a body built by `utils/operatorQueue.js::queueResponseBody` (#2370 — the decision rides `response`, the note rides `response_text`, trimmed, empty → `null`; the ONE builder shared with `/m`), optimistic local update mirroring that body, auto-advance to next open item. On **409** (item left 'pending' under us, e.g. another operator's bulk-cancel landed first, #1017) **or 400** (already terminal) — `respondRefusedAsNotPending` — sets `error` to the shared attribution-free `QUEUE_RESPONSE_NOT_RECORDED` copy and refetches (`stores/operatorQueue.js` ~line 116-158; 404 "row gone" is treated the same). The refetch is **awaited and the copy assigned after it**: `fetchItems()` nulls `error` in its own synchronous prologue, so assigning first and calling it un-awaited destroyed the notice in the same tick. That was survivable while 409 was the only refused status, but `respondRefusedAsNotPending` also takes 400 and 404 — which previously fell through to the generic `apiErrorMessage` branch and *did* report — so the ordering had to be fixed with the widening or two statuses would have gone silent. A failed refetch's own message is deliberately overwritten by the not-recorded copy. Remaining under **#2377**: `Operations.vue` still renders `error` only as the `:detail` of the "Couldn't refresh the queue" banner, and `InlineError` puts `detail` inside a **collapsed `<details>` disclosure** — so the operator sees a headline about *refreshing* and must expand "Technical detail" to learn their answer was not recorded; the next 15s poll then clears it. Verified against the running stack: with the fix, the banner renders and the copy is one click away; without it, no banner renders at all. This is the fetch-error field carrying a verb outcome and it needs its own field/surface (#2377's own AC — of which "the store test asserts the notice is observable after a 409 and a 400" is now satisfied here)
 - `bulkCancel(ids)` -- `POST /api/operator-queue/bulk-cancel` via shared `api.js` client; refetches; returns `{cancelled, skipped}` (#1017, line 141-152)
 - `clearResolved(agentName = null)` -- `POST /api/operator-queue/clear-resolved` via `api.js`; refetches; returns `{cleared}` (#1017, line 154-166)
 - `acknowledgeItem(id)` -- Shorthand that calls `respondToItem(id, 'acknowledged', '')` (line 168-170)
@@ -149,11 +149,9 @@ await axios.get('/api/operator-queue', {
   headers: authStore.authHeader
 })
 
-// Respond to item (respondToItem)
-await axios.post(`/api/operator-queue/${id}/respond`, {
-  response: response,
-  response_text: responseText || null
-}, { headers: authStore.authHeader })
+// Respond to item (respondToItem) — body from utils/operatorQueue.js (#2370)
+const body = queueResponseBody(response, responseText)  // { response, response_text: trimmed || null }
+await axios.post(`/api/operator-queue/${id}/respond`, body, { headers: authStore.authHeader })
 
 // Clear All on Needs Response tab (bulkCancel, #1017) — via shared api.js client
 await api.post('/api/operator-queue/bulk-cancel', { ids })   // -> {cancelled, skipped}
@@ -190,6 +188,8 @@ Event handling in the store (`handleWebSocketEvent`, line 177-200):
 | Approval | Option buttons (green/red/blue border) + optional text input + Send (line 99-133) | `respondToItem(id, selectedOption, note)` |
 | Question | Textarea + "Send Answer" button (line 136-156) | `respondToItem(id, answerText, '')` |
 | Alert | "Got it" button (line 159-166) | `acknowledgeItem(id)` |
+
+The type pill text comes from `utils/operatorQueue.js::queueTypeLabel` (`Needs approval` / `Question` / `Heads up`), shared with `/m` (#2370). **The `/m` mobile admin mirrors this table** — approval: select → restated consequence → optional note → `Cancel` + `Send: <option>` (nothing sends on one tap); question: text + Send; alert: `Got it` — and builds the identical body via `buildQueueResponse` (see [mobile-admin-pwa.md](mobile-admin-pwa.md)). The Workspace asks panel posts to its own endpoint/model and is **not** yet a consumer of the shared builder (#2375).
 
 ### NavBar Badge
 
