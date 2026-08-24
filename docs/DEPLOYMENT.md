@@ -31,6 +31,72 @@ cp .env.example .env
 # API Docs: http://localhost:8000/docs
 ```
 
+## Installing on a server — use the pull-only path (#2280)
+
+**On a server, `--hosted` is the default you want.** The Quick Start above builds
+every image from source, and the agent base image alone (Python + Node + Go +
+Claude Code, ~1.9 GB) takes 5-10 minutes and wants more RAM than a small VM has
+spare. Hosted mode pulls prebuilt images from GHCR instead, so a fresh VM is
+serving in roughly two minutes:
+
+```bash
+git clone https://github.com/abilityai/trinity.git && cd trinity
+cp .env.example .env          # set ADMIN_PASSWORD, ANTHROPIC_API_KEY, ...
+
+# Pin the release you want. `latest` moves on every Trinity release, so an
+# unpinned install turns your next pull into an unscheduled upgrade.
+export TRINITY_IMAGE_TAG=v0.9.0
+
+./scripts/deploy/start.sh --hosted --unattended
+```
+
+This is the same script, the same `.env` contract and the same
+`ADMIN_PASSWORD` behaviour as a source install — only the image source differs.
+`--hosted` selects [`docker-compose.hosted.yml`](../docker-compose.hosted.yml),
+which is `docker-compose.prod.yml` with the `build:` blocks replaced by GHCR
+`image:` references and nothing else changed (a CI guard,
+`tests/unit/test_2280_hosted_compose_parity.py`, fails the build if the two ever
+disagree on a service, port, volume, network or environment variable).
+
+**Minimum size: 8 GB RAM.** Below that the agent containers and the platform
+services contend and turns start failing under load.
+
+**Run `start.sh --hosted` to upgrade, not a bare `docker compose pull`.** The
+agent base image is not a compose service — the backend creates agent containers
+through the Docker SDK from the local tag `trinity-agent-base:latest` — so the
+script pulls it and retags it separately. A plain `docker compose -f
+docker-compose.hosted.yml pull` updates the four platform images and silently
+leaves every agent on the old runtime.
+
+Useful commands on a hosted install (note the explicit `-f` — hosted opts out of
+compose's default file merge):
+
+```bash
+docker compose -f docker-compose.hosted.yml logs -f backend
+docker compose -f docker-compose.hosted.yml stop     # 'stop', never 'down'
+```
+
+### TLS on a bare VM
+
+Trinity serves plain HTTP and terminates TLS **outside** the application. There
+is no HTTPS listener in the compose file and no auto-certificate step, so pick
+one of these before putting an instance on a public address:
+
+| Path | What it gives you | When to use it |
+|---|---|---|
+| **Tunnel** (Cloudflare Tunnel — `cloudflared` is already in the compose file, set `TUNNEL_TOKEN`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
+| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
+| **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
+
+Plain HTTP on a public IPv4 with none of the above is the one combination to
+avoid: credentials and JWTs cross the network in the clear.
+
+A marketplace droplet (#2281) is a special case — it comes up on a bare public IP
+with no domain, which is why that channel provisions a Caddy sidecar using
+Let's Encrypt's short-lived IP certificates, and why Trinity shows a first-run
+hardening guide there (#2380) prompting for a real domain or a VPN. That guide is
+gated on install provenance and never appears on an install like this one.
+
 ## Configuration
 
 > **Database backend:** Trinity uses **SQLite by default** (zero-config). To run

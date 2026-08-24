@@ -45,7 +45,22 @@ docker compose version >/dev/null 2>&1 && echo "compose: ok" || echo "compose: M
 
 ## Step 1 — Install (one shot, unattended)
 
-**Fresh machine (no clone yet):**
+**On a server — pull prebuilt images (`--hosted`). This is the default you want (#2280):**
+
+```bash
+git clone https://github.com/abilityai/trinity.git
+cd trinity
+export TRINITY_IMAGE_TAG=v0.9.0        # pin a release; `latest` moves every cut
+./scripts/deploy/start.sh --hosted --unattended
+```
+
+Same script, same `.env` contract, same `ADMIN_PASSWORD` behaviour — it just
+pulls the platform images and the agent base image from GHCR instead of
+building them. That skips the 5-10 minute agent-base build, which is the slow
+step you would otherwise have to narrate, and it is what makes a small VM
+viable at all. Tell the user which tag you pinned.
+
+**Fresh machine, building from source (a dev box, or a server with no registry access):**
 
 ```bash
 git clone https://github.com/abilityai/trinity.git
@@ -64,8 +79,11 @@ What this does, in order (explain the slow ones to the user):
 1. Creates `.env` from the template if missing.
 2. **Auto‑generates** `CREDENTIAL_ENCRYPTION_KEY`, `SECRET_KEY`, `INTERNAL_API_SECRET`, `AGENT_AUTH_SECRET`, Redis passwords, and — in unattended mode — a strong **`ADMIN_PASSWORD`** (printed in the final summary).
 3. Detects the Docker socket GID and the right Vector log source for the runtime.
-4. Builds `trinity-agent-base:latest` if absent (**slow — minutes**), then `docker compose up -d`.
+4. Gets `trinity-agent-base:latest` — **pulled and retagged from GHCR in `--hosted` mode (fast)**, otherwise built locally (**slow — minutes**) — then `docker compose up -d`.
+   The base image is not a compose service, so `--hosted` handles it separately; a bare `docker compose pull` would skip it and leave agents on the old runtime.
 5. Polls the backend until it's actually serving (migrations + init done), then prints the next‑steps card.
+
+> **Minimum size: 8 GB RAM.** Below that the agent containers and the platform services contend and turns start failing under load. Check before installing, and say so plainly if the machine is smaller.
 
 > **Unattended is the key flag.** Without `--unattended` / `TRINITY_UNATTENDED=1`, `start.sh` *hard‑stops* asking the operator to choose an `ADMIN_PASSWORD` — which blocks an agent‑run install. With it, one is generated and surfaced.
 

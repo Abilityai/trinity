@@ -17,6 +17,32 @@ echo ""
 UNATTENDED="${TRINITY_UNATTENDED:-0}"
 for _arg in "$@"; do [ "$_arg" = "--unattended" ] && UNATTENDED=1; done
 
+# --- Hosted (pull-only) mode (#2280) -----------------------------------------
+# `--hosted` runs the SAME install against prebuilt GHCR images instead of
+# building from source: docker-compose.hosted.yml plus a pulled-and-retagged
+# agent base image. It is a flag on this script rather than a second script on
+# purpose — everything else an install needs (secret generation, the
+# ADMIN_PASSWORD contract #2381 made honest, DOCKER_GID detection, the serving
+# health poll, the next-steps card) is identical, and a parallel copy of it is
+# precisely the shape that has gone stale here before (#1039, #1056, #1707,
+# #1871). One code path, one behaviour, two image sources.
+HOSTED="${TRINITY_HOSTED:-0}"
+for _arg in "$@"; do [ "$_arg" = "--hosted" ] && HOSTED=1; done
+
+# Compose file selection. Dev/default passes NO -f so `docker compose` merges
+# docker-compose.yml + docker-compose.override.yml as it always has; hosted
+# passes an explicit -f, which (deliberately, same as prod) disables that
+# auto-merge.
+COMPOSE_FILES=()
+if [ "$HOSTED" = "1" ]; then
+    COMPOSE_FILES=(-f docker-compose.hosted.yml)
+fi
+# The image tag every hosted pull resolves. Pin it on an install you keep —
+# `latest` moves on every release, so leaving it unset makes any later `pull`
+# an unscheduled upgrade.
+TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-latest}"
+export TRINITY_IMAGE_TAG
+
 # Fail fast with ONE consolidated, actionable message rather than crashing
 # mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
 # doubles as the "daemon actually reachable" check the DOCKER_GID probe and
@@ -263,8 +289,31 @@ ensure_docker_gid() {
 
 ensure_docker_gid
 
-# Check base image before starting — without it, agent creation will silently fail
-if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "trinity-agent-base:latest"; then
+# Check base image before starting — without it, agent creation will silently fail.
+#
+# #2280: the backend creates agent containers from the literal local tag
+# `trinity-agent-base:latest` (hardcoded in services/agent_service/lifecycle.py,
+# allowlisted as `trinity-agent-base:*` by SEC-172), and compose cannot retag —
+# so hosted mode PULLS the GHCR copy and tags it locally rather than spending
+# 5-10 minutes building it. Retagging keeps the SEC-172 allowlist and the
+# #1809 image-drift check untouched: both read the container's own reference,
+# which stays `trinity-agent-base:latest` either way.
+if [ "$HOSTED" = "1" ]; then
+    _base_remote="ghcr.io/abilityai/trinity-agent-base:${TRINITY_IMAGE_TAG}"
+    echo "Pulling agent base image (${_base_remote})..."
+    if ! docker pull "$_base_remote"; then
+        echo ""
+        echo "ERROR: could not pull ${_base_remote}."
+        echo "       Hosted mode cannot fall back to a local build — that is the"
+        echo "       5-10 minute first boot it exists to avoid. Check network and"
+        echo "       image-tag spelling (TRINITY_IMAGE_TAG=${TRINITY_IMAGE_TAG}), or"
+        echo "       drop --hosted to build from source instead."
+        exit 1
+    fi
+    docker tag "$_base_remote" trinity-agent-base:latest
+    echo "Tagged locally as trinity-agent-base:latest (the reference the backend creates agents from)."
+    echo ""
+elif ! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "trinity-agent-base:latest"; then
     echo "⚠️  trinity-agent-base:latest not found."
     echo "   Building base agent image first (required for agent creation)..."
     echo ""
@@ -277,7 +326,12 @@ fi
 # ARGs → ENV vars → `GET /api/version` payload. Best-effort: if the host
 # isn't a git checkout (CI tarball install) fall back to "unknown" so the
 # downstream Dockerfile defaults still produce a well-typed response.
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# #2280: skipped in hosted mode. These feed `backend.build.args`, and
+# docker-compose.hosted.yml has no build block — the provenance a pulled image
+# reports was stamped by the publish workflow at release time, and re-exporting
+# the local checkout's git state here would be, at best, inert and, at worst, a
+# claim about a build this host did not do.
+if [ "$HOSTED" != "1" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     export GIT_COMMIT=$(git rev-parse HEAD)
     export GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
     export GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
@@ -298,8 +352,13 @@ export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # file source via docker-compose.override.yml (auto-merged by `docker compose up`).
 # Native Linux dockerd is unaffected. Opt out: TRINITY_LOCAL_LOG_SOURCE=docker.
 # Force on: TRINITY_LOCAL_LOG_SOURCE=file. Default: auto-detect Docker Desktop.
+# Hosted passes an explicit -f, which disables override auto-merge (same as
+# prod — see docker-compose.override.example.yml), so writing the file would be
+# a silent no-op that looks like a fix.
 _log_src="${TRINITY_LOCAL_LOG_SOURCE:-auto}"
-if [ "$_log_src" = "auto" ]; then
+if [ "$HOSTED" = "1" ]; then
+    _log_src=docker
+elif [ "$_log_src" = "auto" ]; then
     if docker info 2>/dev/null | grep -qi 'Docker Desktop'; then
         _log_src=file
     else
@@ -317,8 +376,14 @@ if [ "$_log_src" = "file" ]; then
 fi
 # -----------------------------------------------------------------------------
 
+if [ "$HOSTED" = "1" ]; then
+    echo "Pulling platform images (tag: ${TRINITY_IMAGE_TAG})..."
+    docker compose "${COMPOSE_FILES[@]}" pull
+    echo ""
+fi
+
 echo "Starting services..."
-docker compose up -d
+docker compose "${COMPOSE_FILES[@]}" up -d
 
 # Read FRONTEND_PORT from .env or use default (needed for the serving check + URL).
 FRONTEND_PORT=${FRONTEND_PORT:-$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "80")}
@@ -355,7 +420,11 @@ echo ""
 if [ "$SERVING_OK" != "1" ]; then
     echo "⚠️  The backend health check at http://localhost:8000/health did not"
     echo "    respond within 180s. Containers are up but may still be initializing"
-    echo "    (first-run image build / migrations). Check:  docker compose logs -f backend"
+    if [ "$HOSTED" = "1" ]; then
+        echo "    (image pulls / migrations). Check:  docker compose -f docker-compose.hosted.yml logs -f backend"
+    else
+        echo "    (first-run image build / migrations). Check:  docker compose logs -f backend"
+    fi
     echo "    Re-running start.sh is safe once it settles."
     echo ""
 fi
@@ -407,13 +476,36 @@ fi
 echo ""
 echo "─────────────────────────────────────────────────────────────────────────"
 echo ""
-echo "To view logs:      docker compose logs -f"
-echo "To stop services:  docker compose stop"
-echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
-echo ""
-echo "Just pulled new code? If services fail with ModuleNotFoundError or"
-echo "the UI shows 'Disconnected', the platform images may be stale —"
-echo "rebuild with:  docker compose build && docker compose up -d"
-echo "(See docs/DEPLOYMENT.md → Troubleshooting → Stale platform images.)"
-echo ""
+# #2280: hosted installs have no build context, so the stale-image remedy is a
+# pull, not a build — and every compose command needs the explicit -f, since
+# hosted deliberately opts out of the default file merge. Printing the dev
+# commands to a hosted operator sends them at a `build` that cannot work.
+if [ "$HOSTED" = "1" ]; then
+    _cf="-f docker-compose.hosted.yml"
+    echo "To view logs:      docker compose ${_cf} logs -f"
+    echo "To stop services:  docker compose ${_cf} stop"
+    echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
+    echo ""
+    echo "To upgrade: set TRINITY_IMAGE_TAG to the release you want, then re-run"
+    echo "this script with --hosted. It re-pulls the platform images AND the agent"
+    echo "base image; a plain 'docker compose ${_cf} pull' skips the base image,"
+    echo "which is not a compose service, and leaves agents on the old runtime."
+    echo "Currently pinned to: TRINITY_IMAGE_TAG=${TRINITY_IMAGE_TAG}"
+    if [ "$TRINITY_IMAGE_TAG" = "latest" ]; then
+        echo "  ⚠️  'latest' moves on every Trinity release. Pin a version"
+        echo "     (TRINITY_IMAGE_TAG=v0.9.0) on any install you intend to keep,"
+        echo "     or your next pull is an unscheduled upgrade."
+    fi
+    echo ""
+else
+    echo "To view logs:      docker compose logs -f"
+    echo "To stop services:  docker compose stop"
+    echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
+    echo ""
+    echo "Just pulled new code? If services fail with ModuleNotFoundError or"
+    echo "the UI shows 'Disconnected', the platform images may be stale —"
+    echo "rebuild with:  docker compose build && docker compose up -d"
+    echo "(See docs/DEPLOYMENT.md → Troubleshooting → Stale platform images.)"
+    echo ""
+fi
 
