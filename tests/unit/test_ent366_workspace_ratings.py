@@ -227,6 +227,38 @@ def test_the_prefix_matches_the_one_the_portal_writes():
     assert evaluations.WORKSPACE_EVALUATOR_PREFIX == service.WORKSPACE_EVALUATOR_PREFIX
 
 
+def test_the_orchestrator_is_a_machine_reader_too():
+    """Third pass. `trinity-system` bypasses permission checks and can read
+    EVERY agent's evaluations, so leaving it unredacted put other agents' client
+    comments and rater emails into a machine context. The first version argued
+    it was safe because nothing can rate a system agent (the portal roster
+    excludes them) — true, and a property of a different module that this
+    function neither states nor enforces.
+    """
+    from routers import evaluations
+    from models import User
+    system = User(id=1, username="admin", role="admin", mcp_scope="system")
+
+    out = evaluations._redact_for_agent_principal(_row_with_comment(), system)
+
+    assert out["comment"] is None
+    assert out["evaluator"] == "workspace"
+
+
+def test_a_user_scoped_key_reads_like_the_person_it_belongs_to():
+    """A `user` MCP key is a person's own credential — an operator running a
+    script is still the operator, and redacting there would break the surfaces
+    the eval epic exists to serve."""
+    from routers import evaluations
+    from models import User
+    human_key = User(id=1, username="admin", role="admin", mcp_scope="user")
+
+    out = evaluations._redact_for_agent_principal(_row_with_comment(), human_key)
+
+    assert out["comment"] == "this was useless"
+    assert out["evaluator"] == f"workspace:{CLIENT}"
+
+
 def test_a_human_operator_reads_the_words():
     from routers import evaluations
     from models import User

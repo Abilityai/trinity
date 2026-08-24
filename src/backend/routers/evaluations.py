@@ -40,6 +40,32 @@ from services.agent_service.helpers import accessible_agent_names, narrow_to_age
 router = APIRouter(prefix="/api", tags=["evaluations"])
 
 
+# Scopes that are a MACHINE reading, not a person. `agent` is the rated agent
+# itself; `system` is `trinity-system`, which bypasses permission checks and can
+# therefore read every agent's evaluations — including other agents' client
+# comments and the emails attached to them.
+_MACHINE_SCOPES = ("agent", "system")
+
+
+def _is_machine_principal(current_user: User) -> bool:
+    """Whether this caller is software rather than a person.
+
+    Gating on `agent_name` alone (set only for `scope="agent"`) left
+    `trinity-system` reading both the words and the rater's email. The first
+    version of this argued that was safe because the portal roster excludes
+    system agents, so nothing can rate one — true, and exactly the reasoning
+    this repo's learnings ledger warns about: a safety property that holds only
+    by a fact elsewhere in the call graph, which this function neither states
+    nor enforces. It is also the wrong frame — the risk is not "the rated agent
+    reads its own grade", it is "a person's words and identity enter a machine
+    context", and the orchestrator is a machine context that can read every
+    agent's rows.
+
+    A `user`-scoped MCP key is a person's own credential and reads like a JWT.
+    """
+    return bool(current_user.agent_name) or (current_user.mcp_scope in _MACHINE_SCOPES)
+
+
 def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
     """Strip a Workspace rating's free text when the RATED agent is reading.
 
@@ -57,7 +83,7 @@ def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
     Only the comment is withheld. Quality, target and evaluator stay, so the
     agent can count its ratings and an operator surface loses nothing.
     """
-    if not current_user.agent_name:
+    if not _is_machine_principal(current_user):
         return row
     redacted = dict(row)
     if row.get("comment"):
