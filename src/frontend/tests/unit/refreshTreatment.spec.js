@@ -167,7 +167,10 @@ describe('the three fixed surfaces (what only source can answer)', () => {
   it('offers a failed FIRST load a retry, distinct from the empty state', () => {
     for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
       expect(src, name).toContain('<LoadFailed')
-      expect(src, name).toContain('v-if="loadFailed"')
+      // `v-else-if` since the first-load placeholder took the first arm; the
+      // rule being pinned is that a failed FIRST load has its own branch, not
+      // which keyword introduces it.
+      expect(src, name).toMatch(/v-(else-)?if="loadFailed"/)
     }
   })
 
