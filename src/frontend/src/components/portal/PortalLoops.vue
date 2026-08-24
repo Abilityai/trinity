@@ -186,6 +186,8 @@ const expanded = ref(false)
 const showForm = ref(false)
 const startError = ref(null)
 const errors = ref({})
+// What this instance last handed the shared store — see onUnmounted.
+const ownedKey = ref(null)
 const form = reactive({ ...FORM_INITIAL, agent: null })
 
 // Platform door only. An external client never sees the strip at all — not a
@@ -239,9 +241,18 @@ async function onStop(loop) {
   if (!res.success) store.error = 'Could not stop that loop.'
 }
 
-watch(participants, (names) => {
-  if (!visible.value) return
+// Watch `visible` alongside the participants, not the participants alone.
+// `isPlatformSession` derives from `authStore.isAuthenticated` and the portal
+// token, both of which settle asynchronously — so at mount `visible` is
+// routinely still false. Guarding on it inside a participants-only watch meant
+// a late auth confirmation left the strip rendered and permanently empty: the
+// guard returned, and nothing re-ran it because the participants never changed.
+// Same class as `AdminEmailNudge`'s `profileVerified` and the ent#384 tile's
+// key-appearance watch — a derived auth flag needs a watcher, not a read.
+watch([participants, visible], ([names, isVisible]) => {
+  if (!isVisible) return
   store.setParticipants(names)
+  ownedKey.value = names.join('\u0000')
   form.agent = names[0] || null
   store.fetchLoops()
 }, { immediate: true })
@@ -252,5 +263,16 @@ onMounted(() => {
   if (store.hasActive) expanded.value = true
 })
 
-onUnmounted(() => { store.clear() })
+onUnmounted(() => {
+  // Clear only if the store still holds THIS instance's participants.
+  // PortalConversation and PortalRoom share one store singleton, and switching
+  // between a room and a 1:1 can mount the new panel before the old one
+  // unmounts — an unconditional clear would then wipe the list the new panel
+  // just set and leave it empty with no watcher left to re-run.
+  if (ownedKey.value && store.participants.join('\u0000') === ownedKey.value) {
+    store.clear()
+  } else {
+    store.stopPolling()
+  }
+})
 </script>

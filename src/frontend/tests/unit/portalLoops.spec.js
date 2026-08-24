@@ -257,6 +257,26 @@ describe('ent#458 — the panel is the platform door only', () => {
   })
 })
 
+describe('ent#458 — auth and lifecycle races (caught in review)', () => {
+  const sfc = SRC('components/portal/PortalLoops.vue')
+
+  it('watches the derived auth flag instead of only reading it', () => {
+    // `isPlatformSession` derives from authStore.isAuthenticated + the portal
+    // token, both settled asynchronously. A participants-only watch guarded on
+    // it returns at mount and never re-runs — the strip renders permanently
+    // empty. Same class as AdminEmailNudge's `profileVerified`.
+    expect(sfc).toMatch(/watch\(\[participants, visible\]/)
+    expect(sfc).not.toMatch(/watch\(participants,\s*\(names\)/)
+  })
+
+  it('does not let one mount point clear the other\'s list', () => {
+    // PortalConversation and PortalRoom share one store singleton, and a
+    // room -> 1:1 switch can mount the new panel before the old unmounts.
+    expect(sfc).toMatch(/ownedKey/)
+    expect(sfc).toMatch(/store\.stopPolling\(\)/)
+  })
+})
+
 describe('ent#458 — live push degrades to poll (AC #4)', () => {
   const store = SRC('stores/portalLoops.js')
   const ws = SRC('utils/websocket.js')
