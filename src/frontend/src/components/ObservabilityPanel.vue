@@ -150,12 +150,20 @@
       No metrics data yet. Start chatting with agents to generate data.
     </div>
 
-    <!-- Loading -->
-    <div v-if="observabilityStore.loading" class="absolute inset-0 bg-white/50 dark:bg-gray-800/50 flex items-center justify-center rounded-lg">
-      <svg class="animate-spin h-5 w-5 text-blue-600" fill="none" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-      </svg>
+    <!-- ent#253: a refresh that failed with metrics on screen. The numbers
+         stay (the store no longer discards them); this line says the reading is
+         no longer live, so nothing here presents stale data as fresh. -->
+    <p v-if="isStale" class="mt-2 text-xs text-status-warning-600 dark:text-status-warning-400">
+      Couldn't refresh — showing the reading from {{ formatLastUpdated }}.
+    </p>
+
+    <!-- First load only (ent#253). This used to gate on `loading`, i.e. "a
+         fetch is in flight", so the whole panel dimmed behind an overlay
+         spinner on EVERY poll. A static placeholder rather than a bespoke
+         spinner: this panel is a 192px floating chip, too small for the
+         scanline primitive to read as anything but noise. -->
+    <div v-if="firstLoad" class="absolute inset-0 bg-white/50 dark:bg-gray-800/50 flex items-center justify-center rounded-lg">
+      <span class="text-xs text-gray-500 dark:text-gray-400">Loading…</span>
     </div>
   </div>
 </template>
@@ -166,6 +174,13 @@ import { useObservabilityStore } from '@/stores/observability'
 
 const observabilityStore = useObservabilityStore()
 const isExpanded = ref(false)
+
+// "No data yet", never "fetch in flight" (#1927 / ent#253). Deliberately not
+// `viewState()`: this panel's terminals are the store's own `enabled` /
+// `available` verdicts rather than a row count, so only the loading half of
+// the rule applies here.
+const firstLoad = computed(() => observabilityStore.loading && !observabilityStore.hasLoaded)
+const isStale = computed(() => Boolean(observabilityStore.refreshError) && observabilityStore.hasLoaded)
 
 const formatLastUpdated = computed(() => {
   if (!observabilityStore.lastUpdated) return 'never'

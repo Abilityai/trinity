@@ -9,6 +9,15 @@ export const useObservabilityStore = defineStore('observability', {
     available: false,
     error: null,
     loading: false,
+    // ent#253: "has a fetch ever succeeded" — the input the UI gates its
+    // loading face on. `loading` alone means "a fetch is in flight", and the
+    // poll below calls the same action every tick, so gating on it made the
+    // panel dim behind an overlay spinner on every refresh.
+    hasLoaded: false,
+    // A TRANSPORT failure, kept apart from `error`, which carries the
+    // collector's own message out of a SUCCESSFUL response. Collapsing the two
+    // let a dropped request read as "the collector says it is unavailable".
+    refreshError: null,
     lastUpdated: null,
 
     // Raw metrics
@@ -173,11 +182,21 @@ export const useObservabilityStore = defineStore('observability', {
         }
 
         this.lastUpdated = new Date()
+        this.hasLoaded = true
+        this.refreshError = null
 
       } catch (error) {
-        console.error('Failed to fetch observability metrics:', error)
-        this.error = error.response?.data?.detail || 'Failed to fetch metrics'
-        this.available = false
+        // ent#253: the metrics on screen were the last thing the collector
+        // actually reported; a dropped refresh does not retract them. Keep
+        // them, flag the staleness, and leave `available` alone once we have
+        // data — a failed GET is not the collector declaring itself down.
+        // Before a first success there is nothing to protect and nothing is
+        // known, so the pre-existing unavailable verdict stands.
+        this.refreshError = error.response?.data?.detail || error.message || 'Failed to fetch metrics'
+        if (!this.hasLoaded) {
+          this.error = this.refreshError
+          this.available = false
+        }
       } finally {
         this.loading = false
       }

@@ -1,9 +1,33 @@
 <template>
   <div class="space-y-6">
-    <!-- Loading State -->
-    <div v-if="loading" class="flex items-center justify-center py-8">
-      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
-    </div>
+    <!-- ent#253: a failed refresh keeps the dashboard on screen. The refresh
+         interval used to overwrite `dashboardData` with `{has_dashboard: false}`
+         on any error, so one blip replaced a rendered dashboard with "no
+         dashboard" — a statement about the agent produced by a failed request
+         (#1926). Sibling banner, never an else-if arm. -->
+    <InlineError
+      v-if="view.stale"
+      :message="staleMessage"
+      :detail="loadError"
+      retryable
+      :retry-label="loading ? 'Retrying…' : 'Try again'"
+      @retry="loadDashboard"
+      @dismiss="loadError = ''"
+    />
+
+    <!-- ONE persistent ScanlineReveal, branching INSIDE the slot (ent#245):
+         branches around it would remount and kill the reveal. Replaces this
+         panel's bespoke spinner (ent#253 AC #4) and carries reduced-motion.
+         Gated on "no data yet", so the poll is invisible. -->
+    <ScanlineReveal :loading="firstLoad" :reveal="view.state === 'ready'">
+      <LoadFailed
+        v-if="loadFailed"
+        title="Couldn't load the dashboard"
+        message="The agent did not return its dashboard. This is not the same as an agent without one."
+        :detail="loadError"
+        :retrying="loading"
+        @retry="loadDashboard"
+      />
 
     <!-- Agent Not Running State -->
     <div v-else-if="agentStatus !== 'running'" class="text-center py-8">
@@ -382,16 +406,21 @@
         </div>
       </div>
     </div>
+    </ScanlineReveal>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import axios from 'axios'
 import SparklineChart from './SparklineChart.vue'
+import ScanlineReveal from './ScanlineReveal.vue'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const props = defineProps({
   agentName: {
@@ -408,25 +437,39 @@ const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
 const dashboardData = ref(null)
 const loading = ref(true)
+const loadError = ref('')
+const lastLoadedAt = ref(null)
 const hasUpdateDashboardPlaybook = ref(false)
 const updatingDashboard = ref(false)
 let refreshInterval = null
 
+// ent#253: `loading` stays "fetch in flight" (it drives the Retry label); the
+// template gates on "no data yet" (`dashboardData === null`), so the scheduled
+// refresh swaps values in place and is invisible.
 const loadDashboard = async () => {
   loading.value = true
   try {
     const response = await agentsStore.getAgentDashboard(props.agentName)
     dashboardData.value = response
+    lastLoadedAt.value = new Date()
+    loadError.value = ''
   } catch (error) {
-    console.error('Failed to load dashboard:', error)
-    dashboardData.value = {
-      has_dashboard: false,
-      error: 'Failed to load dashboard'
-    }
+    // Keep what the agent last published; a failed refresh does not unpublish
+    // it. The banner above says the reading is stale and offers the retry.
+    loadError.value = error?.response?.data?.detail || error?.message || 'Request failed'
   } finally {
     loading.value = false
   }
 }
+
+const view = computed(() => viewState({
+  loading: loading.value,
+  hasLoaded: dashboardData.value !== null,
+  error: loadError.value,
+}))
+const firstLoad = computed(() => view.value.state === 'loading')
+const loadFailed = computed(() => view.value.state === 'failed')
+const staleMessage = computed(() => staleBannerMessage('the dashboard', lastLoadedAt.value))
 
 // Check if agent has an update-dashboard playbook
 const checkUpdateDashboardPlaybook = async () => {
@@ -610,6 +653,8 @@ const stopRefresh = () => {
 watch(() => props.agentName, (newName, oldName) => {
   if (newName && newName !== oldName) {
     dashboardData.value = null
+    loadError.value = ''
+    lastLoadedAt.value = null
     hasUpdateDashboardPlaybook.value = false
     stopRefresh()
     if (props.agentStatus === 'running') {

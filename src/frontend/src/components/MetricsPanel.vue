@@ -1,9 +1,39 @@
 <template>
   <div class="space-y-6">
-    <!-- Loading State -->
-    <div v-if="loading" class="flex items-center justify-center py-8">
-      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
-    </div>
+    <!-- ent#253: a refresh that FAILED, with metrics still on screen. The 30s
+         poll used to overwrite `metricsData` with `{has_metrics: false}` on any
+         error, so one transient 502 rendered a working agent as "No Metrics
+         Defined" — a claim about the agent made out of a claim about the
+         request (#1926). The values stay; this SIBLING banner names the
+         staleness and carries the retry. Never an else-if arm: an arm would
+         replace the data it promises to keep. -->
+    <InlineError
+      v-if="view.stale"
+      :message="staleMessage"
+      :detail="loadError"
+      retryable
+      :retry-label="loading ? 'Retrying…' : 'Try again'"
+      @retry="loadMetrics"
+      @dismiss="loadError = ''"
+    />
+
+    <!-- ONE persistent ScanlineReveal with the branching INSIDE its slot
+         (ent#245 idiom): sibling branches AROUND it remount the component,
+         which re-inits from loading=false and the reveal never plays. It
+         replaces this panel's bespoke spinner (ent#253 AC #4) and brings
+         `prefers-reduced-motion` with it. `loading` here is "no data yet",
+         never "fetch in flight" — the background poll is invisible. -->
+    <ScanlineReveal :loading="firstLoad" :reveal="view.state === 'ready'">
+      <!-- Failed FIRST load — distinct from the empty state below, which is a
+           statement about the agent rather than about the request. -->
+      <LoadFailed
+        v-if="loadFailed"
+        title="Couldn't load metrics"
+        message="The agent did not return its custom metrics. This is not the same as an agent without metrics."
+        :detail="loadError"
+        :retrying="loading"
+        @retry="loadMetrics"
+      />
 
     <!-- Agent Not Running State -->
     <div v-else-if="agentStatus !== 'running'" class="text-center py-8">
@@ -155,12 +185,17 @@
         </div>
       </div>
     </div>
+    </ScanlineReveal>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import ScanlineReveal from './ScanlineReveal.vue'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const props = defineProps({
   agentName: {
@@ -176,19 +211,38 @@ const props = defineProps({
 const agentsStore = useAgentsStore()
 const metricsData = ref(null)
 const loading = ref(true)
+const loadError = ref('')
+const lastLoadedAt = ref(null)
 let refreshInterval = null
 
+// #1927's one rule, applied here: loading / failed / empty / ready + a
+// staleness bit, all derived from whether data has ever arrived.
+const view = computed(() => viewState({
+  loading: loading.value,
+  hasLoaded: metricsData.value !== null,
+  error: loadError.value,
+}))
+const firstLoad = computed(() => view.value.state === 'loading')
+const loadFailed = computed(() => view.value.state === 'failed')
+const staleMessage = computed(() => staleBannerMessage('metrics', lastLoadedAt.value))
+
+// ent#253: `loading` keeps meaning "a fetch is in flight" — it drives the
+// refresh button's spin and the Retry label. What the template gates on is
+// "no data yet" (`metricsData === null`), so the 30s poll swaps values in
+// place and is invisible.
 const loadMetrics = async () => {
   loading.value = true
   try {
     const response = await agentsStore.getAgentMetrics(props.agentName)
     metricsData.value = response
+    lastLoadedAt.value = new Date()
+    loadError.value = ''
   } catch (error) {
-    console.error('Failed to load metrics:', error)
-    metricsData.value = {
-      has_metrics: false,
-      message: 'Failed to load metrics'
-    }
+    // The data on screen is the last thing the agent actually said; a failed
+    // refresh does not make it untrue, so it stays and the banner says the
+    // reading is stale. Fabricating `has_metrics: false` here is what made a
+    // network blip indistinguishable from an agent with no metrics.
+    loadError.value = error?.response?.data?.detail || error?.message || 'Request failed'
   } finally {
     loading.value = false
   }
@@ -327,8 +381,11 @@ const stopRefresh = () => {
 // Reload when agent name changes (navigating between agents)
 watch(() => props.agentName, (newName, oldName) => {
   if (newName && newName !== oldName) {
-    // Reset state for new agent
+    // Reset state for new agent. `loadError` too: otherwise agent B's first
+    // load, if it fails, is reported with agent A's error detail.
     metricsData.value = null
+    loadError.value = ''
+    lastLoadedAt.value = null
     stopRefresh()
     if (props.agentStatus === 'running') {
       loadMetrics()
