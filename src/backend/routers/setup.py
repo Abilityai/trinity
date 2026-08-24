@@ -15,6 +15,16 @@ internet-reachable instance MUST be deployed behind a tunnel/VPN (or otherwise
 network-restricted) until first-time setup completes — see
 `docs/DEPLOYMENT.md` → Security Recommendations. The endpoint still self-disables
 after the first success, so the exposure is limited to the pre-setup window only.
+
+#2381 narrows that window to where ent#49's reasoning actually holds. ent#49
+priced the tradeoff on the premise *there is no admin yet, so there is nothing
+to hijack* — true for a blank-`ADMIN_PASSWORD` dev install, false for every
+install that boots with `ADMIN_PASSWORD` set (mandatory in prod compose, always
+present after `start.sh`), where `_ensure_admin_user` has already created a real
+admin. This endpoint now refuses whenever a usable admin account exists, so it
+provisions the first account and can never overwrite an existing one. The
+wizard therefore still renders for installs that genuinely have no way in, and
+disappears for installs where it had nothing left to do.
 """
 import logging
 import re
@@ -27,12 +37,9 @@ from dependencies import hash_password
 from services.system_seed_service import ensure_first_run_seeded
 from services.operator_intake_service import submit_operator_intake
 from utils.password_validation import validate_password_strength, PASSWORD_REQUIREMENTS_MESSAGE
+from utils.admin_identity import admin_username, is_usable_password_hash
 
 logger = logging.getLogger(__name__)
-
-# The fixed admin username this endpoint provisions (matches update_user_password
-# below). The email captured here is bound to THIS account as its sign-in identity.
-_ADMIN_USERNAME = "admin"
 
 # Lightweight email shape check — deliberately permissive (one @, a dot in the
 # domain, no spaces). We only need to reject obvious typos; we never send a
@@ -80,6 +87,46 @@ async def set_admin_password(
     - Password must meet OWASP ASVS 2.1 complexity requirements.
     - Password and confirm_password must match.
     """
+    # Refuse if this install already HAS a usable admin account (#2381).
+    #
+    # This runs FIRST, before the flag and before any password work, and it is
+    # the actual security boundary. The flag below is derived state that can be
+    # — and on every fresh install was — wrong: `setup_completed` stayed false
+    # while `_ensure_admin_user` had already created a real admin from
+    # `ADMIN_PASSWORD`, so this endpoint would happily overwrite that admin's
+    # password hash and bind a stranger's email to it. The endpoint's own
+    # precondition ("nobody can log in yet") is now authoritative.
+    #
+    # Ordering matters for two more reasons: password hashing below is bcrypt
+    # (deliberately expensive) on an unauthenticated, unrate-limited route, and
+    # a refusal must not be distinguishable by how long it took.
+    #
+    # Fails CLOSED: a DB read error refuses rather than falling through to the
+    # flag. The opposite direction would restore the vulnerability on exactly
+    # the transient conditions an attacker can retry against.
+    try:
+        existing_admin = db.get_user_by_username(admin_username())
+        admin_provisioned = existing_admin is not None and is_usable_password_hash(
+            existing_admin.get("password")
+        )
+    except Exception as e:
+        logger.error(
+            "Setup admin-existence check failed (%s) — refusing first-run setup",
+            type(e).__name__,
+        )
+        admin_provisioned = True
+
+    if admin_provisioned:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This instance already has an administrator account. "
+                "Sign in with the admin password from your deployment "
+                "configuration; this endpoint only provisions the very first "
+                "account."
+            ),
+        )
+
     # Check setup not already completed.
     if db.get_setting_value('setup_completed', 'false') == 'true':
         raise HTTPException(
@@ -114,7 +161,11 @@ async def set_admin_password(
     hashed_password = hash_password(data.password)
 
     # Update admin user's password in database (creates the admin row if absent).
-    db.update_user_password(_ADMIN_USERNAME, hashed_password)
+    # `admin_username()`, not a hardcoded "admin" (#2381): `_ensure_admin_user`
+    # honours ADMIN_USERNAME, so on an `ADMIN_USERNAME=root` install the literal
+    # made this call miss the real admin and INSERT a *second* role='admin'
+    # account (update_user_password upserts) instead of updating the first.
+    db.update_user_password(admin_username(), hashed_password)
 
     # Register the operator email as the admin's sign-in identity (#82 Phase 1).
     # No verification email is sent: a fresh install has no email provider
@@ -123,7 +174,7 @@ async def set_admin_password(
     # email + password instead of the fixed 'admin' username.
     email_registered = False
     try:
-        db.update_user(_ADMIN_USERNAME, {"email": normalized_email})
+        db.update_user(admin_username(), {"email": normalized_email})
         email_registered = True
     except Exception as e:  # never block setup on a profile write
         logger.warning("Failed to register admin email at setup: %s", type(e).__name__)

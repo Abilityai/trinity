@@ -634,8 +634,40 @@ async def verify_email_login_code(request: Request):
     # Check per-email OTP attempt rate limit (pentest 3.1.5)
     check_otp_rate_limit(email)
 
+    # Re-check the allow-list here, not only at /email/request (#2381).
+    #
+    # Login codes live in ONE shared table keyed on (email, code), and nothing
+    # binds a code to the channel that minted it. `/email/request` checks the
+    # allow-list before minting, but three other producers do not:
+    # `telegram_adapter` and `whatsapp_adapter` `/login <email>` mint for any
+    # syntactically-valid address after a shape check, and `mcp_auth_service`
+    # mints for any address the users table already knows. Their own redeemers
+    # only grant channel- or connector-scope, but a code they minted was also
+    # redeemable HERE — the one redeemer that issues a full platform JWT with
+    # whatever role the matched account carries. Since `get_or_create_email_user`
+    # resolves by email column alone, an attacker-controlled address bound to
+    # the admin row turned any of those mints into an admin session.
+    #
+    # This narrows nothing legitimate: codes obtained through the web flow above
+    # already passed this exact check at mint time, channel users redeem in
+    # their own channel, and every account that can legitimately email-login is
+    # allow-listed by construction (sharing, access-request approval, and the
+    # admin allow-list UI are the only ways such an account comes to exist).
+    #
+    # Fails into the SAME branch as a bad code — identical status, message,
+    # audit row and rate-limit accounting — so this is not an oracle for
+    # "is this address allow-listed".
+    allowed = False
+    try:
+        allowed = db.is_email_whitelisted(email)
+    except Exception as e:
+        logger.error(
+            "Allow-list check failed during email verify (%s) — refusing",
+            type(e).__name__,
+        )
+
     # Verify code
-    verification = db.verify_login_code(email, code)
+    verification = db.verify_login_code(email, code) if allowed else None
     if not verification:
         record_login_attempt(client_ip, success=False, account=email)
         record_otp_attempt(email, success=False)

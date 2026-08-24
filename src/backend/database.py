@@ -100,6 +100,9 @@ from db_models import (
 # Re-export connection utilities
 from db.connection import get_db_connection, DB_PATH
 from utils.helpers import utc_now_iso
+# #2381: the shared "is this install provisioned?" policy. Stdlib-only leaf, so
+# it is safe at import time here; `routers/setup.py` reads the same two rules.
+from utils.admin_identity import admin_username, is_usable_password_hash
 
 # Import schema and migration utilities
 from db.migrations import run_all_migrations
@@ -173,6 +176,13 @@ def init_database():
         # ent#237: same fresh-install window, same ordering requirement.
         _seed_fresh_install_skill_source_engine()
         _ensure_admin_user_engine()
+        # #2381: make `setup_completed` honest about the admin that now exists.
+        # MUST follow the line above — asking before the admin is provisioned is
+        # the entire bug (the SQLite `setup_completed_backfill` migration asks
+        # during `run_all_migrations`, while `users` is still empty, then records
+        # itself as applied and never asks again). PostgreSQL had NO writer for
+        # this key at all: no Alembic revision touches it.
+        _mark_setup_completed_if_provisioned_engine()
         return
 
     db_path = Path(DB_PATH)
@@ -222,6 +232,14 @@ def init_database():
 
             # Create default admin user if not exists
             _ensure_admin_user(cursor, conn)
+
+            # #2381: make `setup_completed` honest about the admin that now
+            # exists. MUST follow the line above — asking before the admin is
+            # provisioned is the entire bug. The `setup_completed_backfill`
+            # migration asks the same question inside `run_all_migrations`
+            # above, while `users` is still empty on a fresh install, finds
+            # nothing, and is then RECORDED as applied so it never asks again.
+            _mark_setup_completed_if_provisioned(cursor, conn)
 
 
 _FRESH_INSTALL_SEED_NOTE = (
@@ -419,6 +437,93 @@ def _seed_fresh_install_retention_engine():
     except Exception as e:
         print(f"WARNING: [#1638] retention seed skipped ({e}); "
               f"install keeps the default (wider) retention windows")
+
+
+_SETUP_COMPLETED_RECONCILE_NOTE = (
+    "[#2381] Admin account is provisioned — setting setup_completed=true. The "
+    "unauthenticated first-run wizard is now closed and login is permitted."
+)
+
+_SETUP_COMPLETED_RECONCILE_SKIPPED = (
+    "WARNING: [#2381] setup_completed reconciliation skipped (%s). The install "
+    "keeps today's behaviour and converges on the next boot."
+)
+
+
+def _mark_setup_completed_if_provisioned(cursor, conn):
+    """Set `setup_completed` when a usable admin account exists (#2381).
+
+    Deliberately NOT a migration. The existing `setup_completed_backfill`
+    migration asks this same question during `run_all_migrations`, which on a
+    fresh install runs while `users` is still empty — so it finds nothing, does
+    nothing, and is then recorded in `schema_migrations` as applied. It can
+    never answer correctly for anyone. A *new* migration would inherit the same
+    once-only semantics; a boot-time reconciliation re-runs every start, so an
+    install already stuck in the exposed state converges on its next restart
+    instead of staying exposed forever.
+
+    Covers both of `_ensure_admin_user`'s branches by asking about the RESULT
+    rather than the action: create, env-password re-sync, and already-correct
+    all end in the same observable state, and all three mean the same thing —
+    somebody can log in, so the wizard has nothing left to do.
+
+    Fails SAFE and never raises. `init_database` runs at import time, so raising
+    here would crash-loop the backend permanently (the `_seed_fresh_install_*`
+    contract). A skipped write costs one more boot in the old behaviour; a raise
+    costs an instance that will not start at all.
+    """
+    try:
+        cursor.execute(
+            "SELECT password_hash FROM users WHERE username = ?",
+            (admin_username(),),
+        )
+        row = cursor.fetchone()
+        if row is None or not is_usable_password_hash(row[0]):
+            # No usable admin: this install genuinely needs the wizard, and it
+            # is the only way in (login is gated on the same flag). Leave it.
+            return
+
+        cursor.execute(
+            "SELECT value FROM system_settings WHERE key = 'setup_completed'"
+        )
+        current = cursor.fetchone()
+        if current is not None and current[0] == "true":
+            return
+
+        cursor.execute(
+            "INSERT OR REPLACE INTO system_settings (key, value, updated_at) "
+            "VALUES ('setup_completed', 'true', ?)",
+            (utc_now_iso(),),
+        )
+        conn.commit()
+        print(_SETUP_COMPLETED_RECONCILE_NOTE)
+    except Exception as e:
+        print(_SETUP_COMPLETED_RECONCILE_SKIPPED % e)
+
+
+def _mark_setup_completed_if_provisioned_engine():
+    """Engine-based twin of `_mark_setup_completed_if_provisioned` (#2381).
+
+    PostgreSQL previously had no writer for this key whatsoever — the SQLite
+    bespoke runner owns `setup_completed_backfill` and no Alembic revision
+    touches the key — so every PG install ran permanently with the flag absent
+    and the unauthenticated first-run endpoint open.
+
+    Same fail-safe contract as the SQLite twin: never raises.
+    """
+    try:
+        existing = UserOperations().get_user_by_username(admin_username())
+        if existing is None or not is_usable_password_hash(existing.get("password")):
+            return
+
+        settings_ops = SettingsOperations()
+        if settings_ops.get_setting_value("setup_completed", "false") == "true":
+            return
+
+        settings_ops.set_setting("setup_completed", "true")
+        print(_SETUP_COMPLETED_RECONCILE_NOTE)
+    except Exception as e:
+        print(_SETUP_COMPLETED_RECONCILE_SKIPPED % e)
 
 
 def _ensure_admin_user_engine():

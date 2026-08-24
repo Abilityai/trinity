@@ -259,6 +259,10 @@ def email_client(auth_router, monkeypatch):
                         lambda key, default=None: "true" if key == "email_auth_enabled" else default)
     monkeypatch.setattr(ra, "check_otp_rate_limit", lambda *a, **k: True)
     monkeypatch.setattr(ra, "record_otp_attempt", lambda *a, **k: None)
+    # #2381: the route re-checks the allow-list before redeeming a code. Every
+    # account that can legitimately email-login is allow-listed by construction,
+    # so this stub models a real signed-in user rather than relaxing the gate.
+    monkeypatch.setattr(ra.db, "is_email_whitelisted", lambda email: True)
     monkeypatch.setattr(ra.db, "verify_login_code", lambda email, code: True)
     monkeypatch.setattr(
         ra.db, "get_or_create_email_user",

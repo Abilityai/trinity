@@ -1,7 +1,40 @@
 # Feature: First-Time Setup
 
 ## Overview
-First-time setup wizard for admin password and API key configuration. On fresh install, users are redirected to `/setup` to set an admin password before accessing the platform. After login, admins can configure the Anthropic API key in Settings.
+First-time setup wizard for admin password and API key configuration. On an install with **no admin account**, users are redirected to `/setup` to set an admin password before accessing the platform. After login, admins can configure the Anthropic API key in Settings.
+
+> **Scope changed in #2381 (2026-08-24) — read this before trusting anything below.**
+>
+> The wizard now renders only where it has work to do: an install that has **no
+> usable admin account**. That is a blank-`ADMIN_PASSWORD` dev install or a
+> hand-rolled backend — the cases where login is blocked by the same
+> `setup_completed` flag and the wizard is the only door in.
+>
+> It does **not** render on an install that boots with `ADMIN_PASSWORD` set
+> (mandatory in `docker-compose.prod.yml`, always present after
+> `scripts/deploy/start.sh`, baked into hosted/marketplace images).
+> `_ensure_admin_user` provisions the admin during startup, and
+> `_mark_setup_completed_if_provisioned` then writes `setup_completed=true`, so
+> the operator logs straight in with the password from their deployment config.
+>
+> Two consequences for the flows documented below:
+>
+> 1. `POST /api/setup/admin-password` **refuses (403) whenever a usable admin
+>    account already exists**, regardless of the flag. It provisions the first
+>    account and can never overwrite one. Before #2381 the flag said `false` on
+>    every fresh install while a real admin existed, making this an
+>    unauthenticated admin-takeover surface (the same class #177 closed with a
+>    setup token and trinity-enterprise#49 reopened by removing it — ent#49
+>    priced the tradeoff on "there is no admin yet", which is now true exactly
+>    where the wizard still renders).
+> 2. The **admin sign-in email** is no longer captured here for most installs.
+>    It moves to a dismissible post-login prompt
+>    (`components/onboarding/AdminEmailNudge.vue` → Settings → General). The
+>    **product-updates opt-in** has no second home yet —
+>    `abilityai/trinity-enterprise#463`.
+>
+> Canonical description: `docs/memory/architecture.md` →
+> [First-Run Provisioning](../architecture.md#first-run-provisioning--honest-setup_completed-2381).
 
 ## User Story
 As a platform administrator deploying Trinity for the first time, I want to be guided through initial configuration so that the platform is secured with a proper password and agents have access to the required API key.

@@ -384,8 +384,14 @@ if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
     echo "         admin / ${GENERATED_ADMIN_PASSWORD}"
     echo ""
 else
-    echo "     Log in as 'admin' with the ADMIN_PASSWORD from your .env, then"
-    echo "     complete the first-run setup wizard (admin email + whitelist)."
+    # #2381: this used to say "then complete the first-run setup wizard". The
+    # wizard only appears on an install with no admin account; setting
+    # ADMIN_PASSWORD (which this script requires) provisions one at boot, so
+    # there is no wizard to complete. Binding a sign-in email is now a normal
+    # post-login action in Settings, not a first-run gate.
+    echo "     Log in as 'admin' with the ADMIN_PASSWORD from your .env."
+    echo "     Then bind a sign-in email in Settings → General (optional, but it"
+    echo "     lets you sign in by email instead of the fixed 'admin' username)."
 fi
 echo "  2. Install the agent-dev plugins (in Claude Code):"
 echo "         /plugin marketplace add abilityai/abilities"
