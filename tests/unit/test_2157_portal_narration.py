@@ -291,13 +291,35 @@ async def test_channel_turn_still_delivers():
 # ---------------------------------------------------------------------------
 
 def test_portal_source_channel_is_not_a_messaging_channel():
-    """It must never resolve as a delivery destination — the completion-report
-    resolver map and the voice service's supported set both have to miss it."""
+    """The portal is not a messaging transport — no bot, no outbound leg, so the
+    voice service must miss it. That half of #2157 is permanent: there is
+    nothing to speak *through*, which is why `send_voice_reply` answers
+    `portal_client_narrated` there.
+
+    **The completion-report half is superseded by ent#457** (operator ruling
+    2026-08-22, committed to the release cut). It asserted that portal must miss
+    `_CHANNEL_RESOLVERS` too, and that was true *because a portal row carried no
+    destination* — #2157 stamped the surface and nothing else, so every portal
+    terminal died at `report_completion`'s `if not source_channel_chat_id` gate.
+    ent#457 gives the row its session id and makes reporting back a platform
+    contract, so the Workspace is now a legitimate report destination.
+
+    What "not a messaging channel" still means, and is asserted below: the portal
+    has no outbound transport and no bot token. Its report is a persisted
+    assistant message the client reads on the next poll — the same history it
+    already reads — which is why it needs no consent flag (there is no third
+    party) and no push (AC #7's "degrades to poll" is the only mode it has)."""
     import services.voice_reply_service as vrs
-    from services.channel_completion_report import _CHANNEL_RESOLVERS
+    from services.channel_completion_report import _CHANNEL_RESOLVERS, INLINE_CHANNEL_TRIGGERS
 
     assert config.PORTAL_SOURCE_CHANNEL not in vrs._SUPPORTED_CHANNELS
-    assert config.PORTAL_SOURCE_CHANNEL not in _CHANNEL_RESOLVERS
+
+    # ent#457: it IS a completion destination now...
+    assert config.PORTAL_SOURCE_CHANNEL in _CHANNEL_RESOLVERS
+    # ...and the turn's own execution still must not be reported, or every chat
+    # message would gain a duplicate "done" — the #2157 surface stamp is what
+    # makes that discrimination possible in the first place.
+    assert "public" in INLINE_CHANNEL_TRIGGERS
 
 
 def test_portal_stamps_the_surface_on_its_executions():

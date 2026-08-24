@@ -303,6 +303,28 @@ def get_portal_session(session_id: str, agent_name: str, client_email: str) -> O
         return dict(row) if row else None
 
 
+def get_portal_session_by_id(session_id: str) -> Optional[dict]:
+    """One session row by id ALONE — who it belongs to, not whether you may read it.
+
+    Deliberately unscoped, and therefore deliberately not reachable from a
+    request handler: the only caller is the ent#457 completion reporter, which
+    is asking the opposite question from `get_portal_session` above. That one
+    answers "may THIS caller read this thread" and needs the caller's identity;
+    this one answers "whose thread is this", because the platform is deciding
+    where a finished job's result belongs and there is no caller to scope to.
+
+    Any future caller must justify the same: an unscoped session read in a path
+    that serves a request is an IDOR waiting to be written.
+    """
+    stmt = text(
+        "SELECT id, agent_name, client_email, title, last_message_at "
+        "FROM enterprise_portal_sessions WHERE id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"id": session_id}).mappings().first()
+        return dict(row) if row else None
+
+
 def get_latest_portal_session_id(agent_name: str, client_email: str) -> Optional[str]:
     """The most-recently-active session id for (agent, client), or None if the
     client has never chatted with this agent."""

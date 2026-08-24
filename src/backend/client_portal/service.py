@@ -1443,6 +1443,15 @@ async def portal_chat(agent_name: str, message: str, email: str,
             cached_uuid=cached_uuid,
             triggered_by="public",      # external-caller path; "Public" analytics bucket
             source_channel=PORTAL_SOURCE_CHANNEL,   # #2157: which public surface this is
+            # ent#457: WHICH chat. #2157 stamped the surface but no destination,
+            # so `channel_completion_report` skipped every portal row at its
+            # `if not source_channel_chat_id` gate — the Workspace was the one
+            # surface with no report-back. With the session id here, an agent
+            # that delegates during this turn produces a child row that inherits
+            # it through the existing ent#265 path, and that child's terminal has
+            # somewhere to go. This row itself is never reported (it replies
+            # inline — see INLINE_CHANNEL_TRIGGERS).
+            source_channel_chat_id=session_id,
             on_resume_failure=_on_resume_failure,
             source_user_email=email,
             timeout_seconds=turn_timeout,   # #2214: the agent's own bound, resolved above
@@ -2032,6 +2041,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # ent#286 pre-creates the row, so the stamp has to be here too — this is
         # the row `portal_chat` then runs into (#2157).
         source_channel=PORTAL_SOURCE_CHANNEL,
+        # ent#457: and the destination, for the same reason (both creation sites
+        # or the stamp is a coin flip depending on which path made the row).
+        source_channel_chat_id=session_id,
     )
     execution_id = execution.id if execution else None
     if not execution_id:

@@ -55,7 +55,12 @@ logger = logging.getLogger(__name__)
 
 # Triggers whose executions ALREADY reply inline through the channel adapter.
 # An execution carrying one of these must never be reported again.
-INLINE_CHANNEL_TRIGGERS = frozenset({"slack", "telegram", "whatsapp"})
+# ent#457 adds "public": a Workspace turn is synchronous too — `portal_chat`
+# persists the assistant reply itself — so the turn's OWN execution must never
+# be reported or every chat message would be followed by a duplicate "done".
+# Public links and x402 share this trigger and are unaffected: they carry no
+# `source_channel_chat_id`, so they never reach this check.
+INLINE_CHANNEL_TRIGGERS = frozenset({"slack", "telegram", "whatsapp", "public"})
 
 _MAX_REPORT_CHARS = 2800
 
@@ -261,10 +266,99 @@ def _resolve_telegram(
 
 
 # D10: per-channel resolver dispatch — a third channel (WhatsApp) is one added
+def _resolve_portal(
+    *,
+    binding_agent: str,
+    executing_agent: str,
+    chat_id: str,
+    thread: Optional[str],
+    status: str,
+    summary_or_error: Optional[str],
+    execution_id: str,
+) -> Optional[Callable[[], Awaitable[bool]]]:
+    """Deliver a terminal into the Workspace chat that started it (ent#457).
+
+    The Workspace was the one surface with no report-back: #2157 stamped portal
+    rows with the SURFACE but never a destination, so every one of them died at
+    `report_completion`'s `if not source_channel_chat_id` gate. `chat_id` is the
+    portal session, stamped at both turn-creation sites.
+
+    **Consent is by construction, like a Telegram DM** (ent#265): the session
+    belongs to one client, and delivering into a person's own conversation with
+    the agent they are talking to is what the conversation is for. There is no
+    `allow_proactive` flag to consult because there is no third party to protect
+    — which is exactly why the destination is read from the SESSION ROW rather
+    than from the execution's stamp alone. A stamp is a string that rode through
+    an inheritance chain; the session row is the platform's own record of whose
+    chat this is, and it is what decides the recipient.
+
+    Delivery is a persisted assistant message, so it renders through the same
+    history the client already reads. No push is required: the Workspace polls
+    its threads, so the report appears without any new transport (AC #7's
+    "degrades to poll" holds by construction here).
+    """
+    from client_portal import db as portal_db
+
+    session = portal_db.get_portal_session_by_id(chat_id)
+    if not session:
+        logger.info(
+            "[ent#457] portal completion suppressed: session %s no longer exists "
+            "(execution %s)", chat_id, execution_id,
+        )
+        return None
+    # The report belongs to the agent whose chat this is. A delegated child may
+    # execute as a DIFFERENT agent (A asks B); the client is talking to A, so
+    # the message is filed under A and names B in the body.
+    session_agent = session.get("agent_name") or binding_agent
+    client_email = session.get("client_email")
+    if not client_email:
+        logger.info(
+            "[ent#457] portal completion suppressed: session %s has no client "
+            "(execution %s)", chat_id, execution_id,
+        )
+        return None
+
+    body = _portal_body(
+        executing_agent=executing_agent,
+        session_agent=session_agent,
+        status=status,
+        summary_or_error=summary_or_error,
+    )
+
+    async def deliver() -> bool:
+        import uuid as _uuid
+        from utils.helpers import utc_now_iso
+        portal_db.add_portal_message(
+            _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
+            None, utc_now_iso(), session_id=chat_id,
+        )
+        return True
+
+    return deliver
+
+
+def _portal_body(*, executing_agent: str, session_agent: str, status: str,
+                 summary_or_error: Optional[str]) -> str:
+    """The message a person reads when background work finishes.
+
+    Honest about failure (AC #3: "never a silent vanish") and about WHO did the
+    work when it was delegated — a client talking to A should not see B's result
+    appear with no explanation of where it came from.
+    """
+    done = status == "success"
+    who = "" if executing_agent == session_agent else f" ({executing_agent})"
+    head = f"**Finished{who}**" if done else f"**Didn't finish{who}** — {status}"
+    detail = (summary_or_error or "").strip()
+    if len(detail) > _MAX_REPORT_CHARS:
+        detail = detail[:_MAX_REPORT_CHARS].rstrip() + "…"
+    return f"{head}\n\n{detail}" if detail else head
+
+
 # entry, not another hand-rolled if/else. SUPPORTED_CHANNELS derives from it.
 _CHANNEL_RESOLVERS: dict = {
     "slack": _resolve_slack,
     "telegram": _resolve_telegram,
+    "portal": _resolve_portal,
 }
 
 SUPPORTED_CHANNELS = frozenset(_CHANNEL_RESOLVERS)
