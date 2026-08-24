@@ -69,8 +69,18 @@ async def create_report(
     schema_version: int = 1,
     period_start: Optional[str] = None,
     period_end: Optional[str] = None,
+    addressed_to_email: Optional[str] = None,
+    portal_session_id: Optional[str] = None,
 ) -> Dict:
-    """Persist a report and broadcast its thin trigger. Returns the full report."""
+    """Persist a report and broadcast its thin trigger. Returns the full report.
+
+    ent#365: the audience and the producing chat arrive already decided — the
+    router validates the addressee against the agent's roster and resolves the
+    session from the publishing turn. They are deliberately NOT added to the
+    broadcast: `/ws` is SCOPE_ALL and unfiltered (#918), so the trigger stays
+    `{agent_name, report_id, report_type, created_at}` and an addressee's email
+    never rides a fleet-wide channel.
+    """
     report = db.create_report(
         agent_name=agent_name,
         user_id=user_id,
@@ -81,6 +91,8 @@ async def create_report(
         schema_version=schema_version,
         period_start=period_start,
         period_end=period_end,
+        addressed_to_email=addressed_to_email,
+        portal_session_id=portal_session_id,
     )
     await _broadcast_report(report)
     return report

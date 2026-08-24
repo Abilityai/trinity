@@ -1463,6 +1463,11 @@ export class TrinityClient {
       schema_version?: number;
       period_start?: string;
       period_end?: string;
+      // ent#365 — audience + the turn it is published from. Both optional;
+      // the backend validates the address against the agent's roster and
+      // resolves the chat itself.
+      audience_email?: string;
+      execution_id?: string;
     }
   ): Promise<{
     id: string;

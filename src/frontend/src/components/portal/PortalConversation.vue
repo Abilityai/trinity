@@ -125,6 +125,16 @@
             </ul>
           </div>
         </div>
+
+        <!-- ent#365: what this conversation actually produced, at the end of
+             the thread where the newest turns are. Inside the scroll region,
+             not pinned above the composer like the ent#364 asks — an ask is
+             waiting on you, a deliverable is something to read. -->
+        <PortalDeliverables
+          :agent-name="agent.name"
+          :session-id="currentSessionId"
+          :refresh-key="deliverableTick"
+        />
       </div>
     </div>
 
@@ -272,6 +282,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
+import PortalDeliverables from './PortalDeliverables.vue'
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -867,6 +878,10 @@ async function deliver(text) {
     // outlives the component), and without the id the shell cannot tell the two
     // apart, so it cleared the badge for a reply the user never saw.
     if (startedNew || currentSessionId.value) emit('sessions-changed', currentSessionId.value)
+    // ent#365: a turn is the only thing that can produce a deliverable in this
+    // chat, so the card list is re-read exactly then — no poll, and nothing to
+    // refresh on a conversation nobody is talking in.
+    deliverableTick.value += 1
     attachments.value = []
     return true
   } catch (err) {
@@ -882,6 +897,8 @@ async function deliver(text) {
 // of what the agent is doing right now; it is transient and never persisted.
 const streaming = ref(false)
 const liveActivity = ref([])
+// Bumped after each completed turn; `PortalDeliverables` watches it.
+const deliverableTick = ref(0)
 const LIVE_ACTIVITY_MAX = 6
 
 // One log entry from the agent's stream → at most one line of visible activity.

@@ -123,6 +123,24 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           .describe("Optional ISO-8601 start of the period this report covers."),
         period_end: z.string().optional()
           .describe("Optional ISO-8601 end of the period this report covers."),
+        // ent#365 — the audience. Without it a report is operator-only, which
+        // is what every report was before this field existed. The backend
+        // checks the address against YOUR OWN roster and refuses an address it
+        // does not already share you with, so this cannot reach a stranger.
+        audience_email: z.string().optional()
+          .describe(
+            "Optional. The Workspace user this report is FOR — it then appears as a deliverable " +
+            "on their agent page, and (with execution_id) as a card in the chat that produced it. " +
+            "Must be someone this agent is already shared with. Omit for an operator-only report."
+          ),
+        // Only meaningful alongside an audience: it places the card in the
+        // right conversation. The backend resolves the session itself; the id
+        // is never trusted as a conversation pointer.
+        execution_id: z.string().optional()
+          .describe(
+            "Optional. The execution_id of the turn you are publishing from, so the deliverable " +
+            "appears in that Workspace chat. Omit for a scheduled run — it still lists on the agent page."
+          ),
       }),
       execute: async (
         params: {
@@ -133,6 +151,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           schema_version?: number;
           period_start?: string;
           period_end?: string;
+          audience_email?: string;
+          execution_id?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -161,6 +181,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             schema_version: params.schema_version,
             period_start: params.period_start,
             period_end: params.period_end,
+            audience_email: params.audience_email,
+            execution_id: params.execution_id,
           });
           return JSON.stringify(
             {
@@ -169,6 +191,9 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
               agent_name: result.agent_name,
               report_type: result.report_type,
               created_at: result.created_at,
+              // Echoed so an agent can tell an addressed deliverable from an
+              // operator-only one without re-reading it.
+              addressed_to: params.audience_email ?? null,
             },
             null,
             2

@@ -18,6 +18,7 @@ require an agent-scoped caller's bound ``agent_name`` to equal the path agent
 the access check.
 """
 import json
+import logging
 import os
 from typing import List, Optional
 
@@ -38,7 +39,34 @@ from models import (
 from services import rate_limiter, report_export, report_service
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["reports"])
+
+
+def _resolve_portal_session(execution_id: str, agent_name: str) -> Optional[str]:
+    """The Workspace chat a publishing turn belongs to, or None (ent#365).
+
+    Two gates, in this order: the execution must belong to THIS agent
+    (`resolve_and_validate_execution`, the MEM-001 rule — the agent supplies an
+    id, never its own identity), and the id must be the turn currently in flight
+    for a portal session, which is what the ent#286 reverse marker answers.
+
+    Fail-soft to None everywhere: a report with no chat still lists on the agent
+    page, whereas a 5xx here would fail a publish over a card placement. The
+    marker is Redis-backed with a TTL sized to the turn, so a report published
+    after its own turn ended lands unlinked — correct, since by then the client
+    has the reply and the card belongs to the page, not to a closed exchange.
+    """
+    try:
+        from services.idempotency_service import resolve_and_validate_execution
+        if resolve_and_validate_execution(execution_id, agent_name) is None:
+            return None
+        from client_portal import service as portal_service
+        return portal_service.get_inflight_session_for_execution(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("portal session resolution skipped for %s: %s", execution_id, e)
+        return None
 
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
@@ -143,6 +171,41 @@ async def create_report(
             detail=f"payload exceeds {REPORT_PAYLOAD_MAX_BYTES} bytes",
         )
 
+    # ent#365 — the audience, checked against the agent's OWN roster. An agent
+    # naming an address it does not already talk to is refused by name rather
+    # than silently stored: the column decides whose Workspace this appears in,
+    # so an unchecked value would let an agent post its output into a stranger's
+    # surface. `email_has_agent_access` is the same predicate the #848 inline
+    # auth path gates on, so "can be addressed" cannot drift from "can reach".
+    audience = data.audience_email
+    if audience:
+        try:
+            reachable = db.email_has_agent_access(name, audience)
+        except Exception as e:  # noqa: BLE001 — an unreadable roster must not publish
+            logger.warning("report audience check failed for %s: %s", name, e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify the report audience — try again.",
+            )
+        if not reachable:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "audience_email is not a client of this agent — share the "
+                    "agent with that address first, or omit it to publish an "
+                    "operator-only report."
+                ),
+            )
+
+    # Which Workspace chat this belongs in, resolved from the publishing TURN.
+    # Never read from the request: the agent supplies an execution id, the
+    # backend decides what conversation that is (the MEM-001 rule). Absent,
+    # unresolvable, or a non-portal turn ⇒ NULL, and the report simply lists on
+    # the agent page without a chat card.
+    portal_session_id = None
+    if audience and data.execution_id:
+        portal_session_id = _resolve_portal_session(data.execution_id, name)
+
     report = await report_service.create_report(
         agent_name=name,
         user_id=current_user.id,
@@ -153,8 +216,10 @@ async def create_report(
         schema_version=data.schema_version,
         period_start=data.period_start,
         period_end=data.period_end,
+        addressed_to_email=audience,
+        portal_session_id=portal_session_id,
     )
-    return Report(**report)
+    return Report(**{k: v for k, v in report.items() if k in Report.model_fields})
 
 
 @router.get("/agents/{name}/reports", response_model=List[ReportSummary])

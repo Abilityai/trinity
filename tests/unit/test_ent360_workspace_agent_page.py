@@ -22,6 +22,11 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+# ent#365: the report read is scoped to who is asking, so every call names a
+# reader. These suites keep their own subjects (agent isolation, row windowing);
+# the audience rule itself is pinned in test_ent365_report_audience.py.
+CLIENT_EMAIL = "client@example.com"
+
 AGENT = "scribe"
 OTHER = "recon"
 EMAIL = "alice@example.com"
@@ -110,12 +115,12 @@ def test_a_report_belonging_to_another_agent_is_not_readable(monkeypatch):
     every report in the install."""
     from client_portal import agent_page
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: {
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: {
         "id": rid, "agent_name": OTHER, "title": "someone else's numbers",
         "payload": {"secret": 1},
     })
 
-    assert agent_page.report_detail(AGENT, "r1") is None
+    assert agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL) is None
 
 
 def test_a_missing_report_and_a_foreign_one_are_indistinguishable(monkeypatch):
@@ -123,12 +128,12 @@ def test_a_missing_report_and_a_foreign_one_are_indistinguishable(monkeypatch):
     test whether a report id exists (invariant #8)."""
     from client_portal import agent_page
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: None)
-    missing = agent_page.report_detail(AGENT, "nope")
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: None)
+    missing = agent_page.report_detail(AGENT, "nope", client_email=CLIENT_EMAIL)
 
-    monkeypatch.setattr(agent_page.db, "get_report",
-                        lambda rid: {"id": rid, "agent_name": OTHER, "payload": {}})
-    foreign = agent_page.report_detail(AGENT, "r1")
+    monkeypatch.setattr(agent_page.db, "get_report_for_client",
+                        lambda rid, _email: {"id": rid, "agent_name": OTHER, "payload": {}})
+    foreign = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL)
 
     assert missing is None and foreign is None
 
@@ -136,13 +141,13 @@ def test_a_missing_report_and_a_foreign_one_are_indistinguishable(monkeypatch):
 def test_the_agents_own_report_is_returned(monkeypatch):
     from client_portal import agent_page
 
-    monkeypatch.setattr(agent_page.db, "get_report", lambda rid: {
+    monkeypatch.setattr(agent_page.db, "get_report_for_client", lambda rid, _email: {
         "id": rid, "agent_name": AGENT, "title": "Weekly", "payload": {"rows": []},
         "report_type": "recon.weekly", "display_hint": "table",
         "period_start": None, "period_end": None, "created_at": "2026-08-13T00:00:00Z",
     })
 
-    got = agent_page.report_detail(AGENT, "r1")
+    got = agent_page.report_detail(AGENT, "r1", client_email=CLIENT_EMAIL)
 
     assert got["id"] == "r1" and got["payload"] == {"rows": []}
 
