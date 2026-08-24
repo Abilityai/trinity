@@ -190,6 +190,43 @@ def test_the_rated_agent_reads_the_score_and_never_the_words():
     assert out["comment_withheld"] is True  # and the reader can tell which
 
 
+def test_the_rated_agent_does_not_learn_WHO_was_unhappy():
+    """Second pass of the review: hiding the words while leaving
+    `workspace:someone@example.com` tells the agent exactly who complained —
+    arguably the more actionable half, since an agent that cannot read a
+    complaint but can name the complainant is better placed to change its
+    behaviour toward that person than one that read the text. The KIND survives,
+    because "a person rated this" is the signal and "which person" is not.
+    """
+    from routers import evaluations
+    from models import User
+    out = evaluations._redact_for_agent_principal(
+        _row_with_comment(), User(id=1, username="o", role="user", agent_name=AGENT))
+
+    assert out["evaluator"] == "workspace"
+    assert CLIENT not in str(out)
+
+
+def test_a_platform_evaluator_name_is_left_alone():
+    """Only the workspace prefix is anonymised: a Tier-0 pass name carries no
+    person, and blanking it would cost the agent the ability to tell a machine
+    grade from a human one."""
+    from routers import evaluations
+    from models import User
+    row = {**_row_with_comment(), "evaluator": "tier0", "comment": None}
+    out = evaluations._redact_for_agent_principal(
+        row, User(id=1, username="o", role="user", agent_name=AGENT))
+    assert out["evaluator"] == "tier0"
+
+
+def test_the_prefix_matches_the_one_the_portal_writes():
+    """The two constants live in different modules (a router importing the
+    portal service for one string is a worse dependency than this test)."""
+    from routers import evaluations
+    from client_portal import service
+    assert evaluations.WORKSPACE_EVALUATOR_PREFIX == service.WORKSPACE_EVALUATOR_PREFIX
+
+
 def test_a_human_operator_reads_the_words():
     from routers import evaluations
     from models import User
@@ -234,12 +271,20 @@ def test_every_read_path_redacts_not_just_the_per_agent_one():
     assert "_redact_for_agent_principal(row, current_user)" in body
 
 
-def test_a_row_with_no_comment_is_passed_through_untouched():
+def test_a_row_with_no_comment_is_not_flagged_as_withheld():
+    """`comment_withheld` must mean "there is text you may not read", never "there
+    was no text" — a reader that cannot tell those apart learns nothing from it.
+
+    Asserts the RULE, not object identity: the projection copies now, because a
+    workspace evaluator is anonymised even on rows that carry no comment.
+    """
     from routers import evaluations
     from models import User
-    row = {"id": "eval_1", "quality": 1.0, "comment": None}
+    row = {"id": "eval_1", "quality": 1.0, "comment": None, "evaluator": "tier0"}
     out = evaluations._redact_for_agent_principal(row, User(id=1, username="o", role="user", agent_name=AGENT))
-    assert out is row and not out.get("comment_withheld")
+    assert out["comment"] is None
+    assert not out.get("comment_withheld")
+    assert row["comment"] is None   # and the caller's row is untouched either way
 
 
 # ---------------------------------------------------------------------------

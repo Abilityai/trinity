@@ -30,6 +30,11 @@ from dependencies import (
     require_admin,
 )
 from models import EvaluationCreate, EvaluationResponse, User
+
+# Mirrors `client_portal.service.WORKSPACE_EVALUATOR_PREFIX`. Imported would be
+# a router→portal-module dependency for one constant; the two are pinned
+# together by `test_ent366_workspace_ratings.py` instead.
+WORKSPACE_EVALUATOR_PREFIX = "workspace:"
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
 router = APIRouter(prefix="/api", tags=["evaluations"])
@@ -54,11 +59,19 @@ def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
     """
     if not current_user.agent_name:
         return row
-    if not row.get("comment"):
-        return row
     redacted = dict(row)
-    redacted["comment"] = None
-    redacted["comment_withheld"] = True
+    if row.get("comment"):
+        redacted["comment"] = None
+        redacted["comment_withheld"] = True
+    # The rater's identity goes too, and this was missed on the first pass:
+    # hiding the words while leaving `workspace:someone@example.com` tells the
+    # rated agent exactly WHO was unhappy. That is arguably the more actionable
+    # half — an agent that cannot read a complaint but can name the complainant
+    # is in a better position to change its behaviour toward that person than
+    # one that read the text. The KIND survives (`workspace` vs a Tier-0 pass
+    # name), because "a person rated this" is the signal; "which person" is not.
+    if str(row.get("evaluator") or "").startswith(WORKSPACE_EVALUATOR_PREFIX):
+        redacted["evaluator"] = WORKSPACE_EVALUATOR_PREFIX.rstrip(":")
     return redacted
 
 
