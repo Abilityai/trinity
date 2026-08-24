@@ -35,6 +35,33 @@ from services.agent_service.helpers import accessible_agent_names, narrow_to_age
 router = APIRouter(prefix="/api", tags=["evaluations"])
 
 
+def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
+    """Strip a Workspace rating's free text when the RATED agent is reading.
+
+    The ent#366 grooming decision, made explicitly rather than inherited: an
+    agent may read its own tallies — three people finding an answer unhelpful is
+    a signal worth having — but never the verbatim words. Two reasons, and the
+    second is the harder one:
+
+      * a rating the agent can read is a feedback loop it may start optimizing
+        for, which is what the issue flags;
+      * the comment is untrusted free text written by an annoyed stranger, so
+        handing it to the rated agent verbatim is a prompt-injection path INTO
+        the thing being criticised.
+
+    Only the comment is withheld. Quality, target and evaluator stay, so the
+    agent can count its ratings and an operator surface loses nothing.
+    """
+    if not current_user.agent_name:
+        return row
+    if not row.get("comment"):
+        return row
+    redacted = dict(row)
+    redacted["comment"] = None
+    redacted["comment_withheld"] = True
+    return redacted
+
+
 def _to_response(row: dict) -> EvaluationResponse:
     return EvaluationResponse(
         id=row["id"],
@@ -47,6 +74,11 @@ def _to_response(row: dict) -> EvaluationResponse:
         judge=row.get("judge"),
         evaluator=row["evaluator"],
         created_at=row["created_at"],
+        target_kind=row.get("target_kind"),
+        target_id=row.get("target_id"),
+        comment=row.get("comment"),
+        comment_withheld=bool(row.get("comment_withheld")),
+        updated_at=row.get("updated_at"),
     )
 
 
@@ -58,7 +90,12 @@ async def list_agent_evaluations(
 ):
     """An agent's own evaluations (newest first). `AuthorizedAgentByName` gates
     read to owner/admin/agent-self — reading feedback is allowed; writing is not."""
-    return [_to_response(r) for r in db.list_agent_evaluations(agent_name, limit)]
+    # ent#366: an agent-scoped caller reading its OWN evaluations gets the
+    # tallies and not the words (see `_redact_for_agent_principal`).
+    return [
+        _to_response(_redact_for_agent_principal(r, current_user))
+        for r in db.list_agent_evaluations(agent_name, limit)
+    ]
 
 
 @router.get("/evaluations", response_model=List[EvaluationResponse])

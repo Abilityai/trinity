@@ -60,6 +60,15 @@
             :payload="payloads[d.id]"
             :fallback-component="ReportSummary"
           />
+          <!-- ent#366: "Useful / Not what I needed" on the work itself — the
+               affordance ent#365 left this card as the surface for. Different
+               words from a message's thumbs because a deliverable is judged as
+               a piece of work, not as an answer. -->
+          <PortalRating
+            :agent-name="agentName"
+            target-kind="deliverable"
+            :target-id="d.id"
+          />
         </div>
       </div>
     </div>
@@ -72,6 +81,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import InlineError from '@/components/InlineError.vue'
+import PortalRating from './PortalRating.vue'
 import { deliverableKindLabel, relativeTime } from './portalUtils'
 
 const props = defineProps({

@@ -311,6 +311,9 @@ class PortalAgentPage(BaseModel):
     stats: PortalAgentStats
     asks: list[PortalAgentAsk] = Field(default_factory=list)
     recent_work: list[PortalAgentWork] = Field(default_factory=list)
+    # ent#366 — raw up/down counts (never a percentage). `unavailable` keeps an
+    # unread tally from rendering as a real zero.
+    ratings: dict = Field(default_factory=lambda: {"up": 0, "down": 0, "total": 0, "unavailable": False})
 
 
 class PortalAgentReport(BaseModel):
@@ -400,12 +403,44 @@ class PortalUploads(BaseModel):
     uploads: list[PortalUploadItem]
 
 
+class PortalRatingRequest(BaseModel):
+    """One click on a message or a deliverable (ent#366).
+
+    `comment` is optional and only meaningful on a negative rating — it is the
+    box that opens under a thumbs-down. Capped here as well as at the service,
+    because this is the boundary a client writes to.
+    """
+    target_kind: str                  # 'message' | 'deliverable'
+    target_id: str = Field(..., max_length=128)
+    rating: str                       # 'up' | 'down'
+    comment: Optional[str] = Field(None, max_length=2000)
+
+
+class PortalRatingResult(BaseModel):
+    """What was recorded, and whether the words went anywhere further."""
+    target_kind: str
+    target_id: str
+    rating: str
+    comment_recorded: bool
+    rated_at: Optional[str] = None
+    # ent#366 AC #6: absent the capture-feedback skill the rating still records
+    # and this says so, so the UI can thank the person honestly instead of
+    # implying a follow-up that will not happen.
+    capture_feedback: Optional[str] = None   # 'dispatched' | 'skill_not_installed' | None
+
+
 class PortalHistoryMessage(BaseModel):
     """One persisted turn in a client↔agent conversation."""
+    # ent#366: the row's own id, so a thumb has something to point at. Optional
+    # because a message composed client-side during a live turn has no row yet.
+    id: Optional[str] = None
     role: str                       # 'user' | 'assistant'
     content: str
     cost: Optional[float] = None
     created_at: Optional[str] = None
+    # The caller's OWN rating of this message, if any — never anyone else's.
+    # Present so a reload shows the thumb the person already gave.
+    my_rating: Optional[str] = None  # 'up' | 'down' | None
 
 
 class PortalTurnOutcome(BaseModel):

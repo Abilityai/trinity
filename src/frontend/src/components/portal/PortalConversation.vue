@@ -99,11 +99,23 @@
               Not delivered · Retry
             </button>
           </div>
-          <div
-            v-else
-            class="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal"
-            v-html="render(m.content)"
-          ></div>
+          <div v-else class="max-w-[85%]">
+            <div
+              class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal"
+              v-html="render(m.content)"
+            ></div>
+            <!-- ent#366: one click, on the answer being judged. Only on a
+                 PERSISTED agent message — a reply composed locally during the
+                 live turn has no row id yet, and a thumb needs something to
+                 point at. It becomes rateable on the next load. -->
+            <PortalRating
+              v-if="m.id"
+              :agent-name="agent.name"
+              target-kind="message"
+              :target-id="m.id"
+              :initial-rating="m.myRating"
+            />
+          </div>
         </div>
 
         <!-- Long-turn status: elapsed-aware, not just bouncing dots -->
@@ -289,6 +301,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
+import PortalRating from './PortalRating.vue'
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -386,7 +399,12 @@ async function loadThread(sessionId) {
     // the (possibly long) reattached stream later ends.
     budgetReadAt = Date.now()
     currentSessionId.value = sessionId || resolved || null
-    messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
+    // ent#366: `id` and the caller's OWN rating ride along, so a reload shows
+    // the thumb they already gave. A message composed locally during a live turn
+    // has no row yet and therefore no id — it becomes rateable on the next load.
+    messages.value = (msgs || []).map((m) => ({
+      role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
+    }))
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome

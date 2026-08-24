@@ -18,7 +18,7 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, insert, and_
+from sqlalchemy import select, insert, update, and_, func
 
 from db.engine import get_engine
 from db.tables import agent_evaluations
@@ -75,6 +75,150 @@ class EvaluationOperations:
         with get_engine().begin() as conn:
             conn.execute(stmt)
         return self.get_evaluation(eval_id)
+
+    # ------------------------------------------------------------------
+    # ent#366 — one-click Workspace ratings
+    # ------------------------------------------------------------------
+
+    RATING_UP = 1.0
+    RATING_DOWN = 0.0
+
+    def upsert_workspace_rating(
+        self,
+        agent_name: str,
+        *,
+        evaluator: str,
+        target_kind: str,
+        target_id: str,
+        quality: float,
+        comment: Optional[str] = None,
+        execution_id: Optional[str] = None,
+    ) -> dict:
+        """Record (or change) one person's rating of one thing.
+
+        Idempotent per (evaluator, target) by construction — the unique index
+        carries the rule, and this method's UPDATE-then-INSERT reflects it. A
+        second thumb on the same message is a correction, not a second vote,
+        which is what makes a raw tally mean "how many people", not "how many
+        clicks".
+
+        `comment` is stored as sent (it is the point of the box) and is
+        withheld from the rated agent at the READ boundary — never here: a db
+        layer that redacted by caller would be a policy in the wrong place, and
+        the operator surfaces legitimately need the text.
+
+        Clearing the comment is explicit: passing None on a re-rate leaves the
+        previous text, because a person changing thumbs-down to thumbs-up has
+        not necessarily retracted what they wrote.
+        """
+        now = utc_now_iso()
+        values = {
+            "quality": quality,
+            "updated_at": now,
+        }
+        if comment is not None:
+            values["comment"] = comment
+        if execution_id is not None:
+            values["execution_id"] = execution_id
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_evaluations)
+                .where(and_(
+                    agent_evaluations.c.evaluator == evaluator,
+                    agent_evaluations.c.target_kind == target_kind,
+                    agent_evaluations.c.target_id == target_id,
+                ))
+                .values(**values)
+            )
+            if result.rowcount:
+                row = conn.execute(
+                    select(agent_evaluations).where(and_(
+                        agent_evaluations.c.evaluator == evaluator,
+                        agent_evaluations.c.target_kind == target_kind,
+                        agent_evaluations.c.target_id == target_id,
+                    ))
+                ).mappings().first()
+                return self._row_to_dict(row)
+            eval_id = f"eval_{uuid.uuid4().hex[:16]}"
+            conn.execute(insert(agent_evaluations).values(
+                id=eval_id,
+                agent_name=agent_name,
+                execution_id=execution_id,
+                archetype=None,
+                completion=None,
+                quality=quality,
+                checks_json=None,
+                judge_json=None,
+                evaluator=evaluator,
+                created_at=now,
+                target_kind=target_kind,
+                target_id=target_id,
+                comment=comment,
+                updated_at=now,
+            ))
+            row = conn.execute(
+                select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
+            ).mappings().first()
+        return self._row_to_dict(row)
+
+    def get_workspace_rating(self, evaluator: str, target_kind: str,
+                             target_id: str) -> Optional[dict]:
+        """This person's current rating of this thing, if any."""
+        stmt = select(agent_evaluations).where(and_(
+            agent_evaluations.c.evaluator == evaluator,
+            agent_evaluations.c.target_kind == target_kind,
+            agent_evaluations.c.target_id == target_id,
+        ))
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_dict(row) if row else None
+
+    def list_workspace_ratings_for_targets(self, evaluator: str, target_kind: str,
+                                           target_ids: list) -> dict:
+        """`{target_id: quality}` for ONE evaluator over many targets (ent#366).
+
+        One query per thread rather than one per message. Scoped to a single
+        evaluator by construction — this is how a client sees their own thumb
+        and never anyone else's.
+        """
+        if not evaluator or not target_ids:
+            return {}
+        stmt = select(
+            agent_evaluations.c.target_id, agent_evaluations.c.quality
+        ).where(and_(
+            agent_evaluations.c.evaluator == evaluator,
+            agent_evaluations.c.target_kind == target_kind,
+            agent_evaluations.c.target_id.in_(list(target_ids)),
+        ))
+        with get_engine().connect() as conn:
+            return {tid: q for tid, q in conn.execute(stmt).all()}
+
+    def workspace_rating_tally(self, agent_name: str) -> dict:
+        """Raw up/down counts for an agent — never a percentage (ent#366 AC #4).
+
+        At the volumes this surface sees, a percentage is the dishonest form: one
+        thumbs-down out of one rating is "100% negative", which is a number that
+        looks like evidence and is not. The denominator is the honest part, so
+        both numbers are returned and the caller renders both.
+        """
+        stmt = (
+            select(agent_evaluations.c.quality, func.count().label("n"))
+            .where(and_(
+                agent_evaluations.c.agent_name == agent_name,
+                agent_evaluations.c.target_id.isnot(None),
+            ))
+            .group_by(agent_evaluations.c.quality)
+        )
+        up = down = 0
+        with get_engine().connect() as conn:
+            for quality, n in conn.execute(stmt).all():
+                if quality is None:
+                    continue
+                if quality >= 0.5:
+                    up += int(n)
+                else:
+                    down += int(n)
+        return {"up": up, "down": down, "total": up + down}
 
     def get_evaluation(self, eval_id: str) -> Optional[dict]:
         stmt = select(agent_evaluations).where(agent_evaluations.c.id == eval_id)

@@ -1172,3 +1172,56 @@ export function relativeTime(iso, now = Date.now()) {
   if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
   return new Date(then).toISOString().slice(0, 10)
 }
+
+
+// ---- ent#366: ratings ------------------------------------------------------
+
+// The words differ by what is being rated, and the difference is deliberate: a
+// message is judged as an answer ("did this help?"), a deliverable as a piece of
+// work ("was this what you needed?"). Same underlying up/down.
+export const RATING_LABELS = {
+  message: { up: 'Helpful', down: 'Not helpful' },
+  deliverable: { up: 'Useful', down: 'Not what I needed' },
+}
+
+export function ratingLabels(targetKind) {
+  return RATING_LABELS[targetKind] || RATING_LABELS.message
+}
+
+// Clicking the rating you already gave is a no-op, not an un-rate: there is no
+// retract endpoint, and silently clearing a score locally would show the person
+// a state the server does not have.
+export function nextRating(current, clicked) {
+  return current === clicked ? null : clicked
+}
+
+// A negative rating is the one that opens the comment box (ent#366): the free
+// text was always the valuable part, and asking a happy person to explain
+// themselves is how you stop getting either.
+export function shouldPromptForComment(rating) {
+  return rating === 'down'
+}
+
+// The tally, as words. RAW COUNTS, never a percentage — one thumbs-down out of
+// one rating is "100% negative", a number that looks like evidence and is not.
+export const RATINGS_UNAVAILABLE_TEXT = 'Ratings unavailable right now.'
+export const RATINGS_EMPTY_TEXT = 'No ratings yet.'
+
+export function ratingTallyText(tally, targetKind = 'message') {
+  if (!tally || tally.unavailable) return RATINGS_UNAVAILABLE_TEXT
+  const up = Number(tally.up) || 0
+  const down = Number(tally.down) || 0
+  if (up + down === 0) return RATINGS_EMPTY_TEXT
+  const labels = ratingLabels(targetKind)
+  return `${up} ${labels.up.toLowerCase()} · ${down} ${labels.down.toLowerCase()}`
+}
+
+// What to tell someone after their words are saved. Both branches are honest:
+// "passed to the agent" only when it was, and otherwise the comment is still
+// recorded — never a promise of a follow-up that will not happen (AC #6).
+export const FEEDBACK_SENT_TEXT = 'Thanks — passed on to the agent.'
+export const FEEDBACK_RECORDED_TEXT = 'Thanks — recorded for the team.'
+
+export function feedbackAcknowledgement(captureFeedback) {
+  return captureFeedback === 'dispatched' ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
+}

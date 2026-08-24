@@ -610,6 +610,13 @@ agent_evaluations = Table(
     Column("judge_json", Text),
     Column("evaluator", Text),
     Column("created_at", Text),
+    # ent#366 — the rated object, the client's optional words, and when the
+    # rating last changed. All nullable: every row written before this is a
+    # graded run, not a click.
+    Column("target_kind", Text),
+    Column("target_id", Text),
+    Column("comment", Text),
+    Column("updated_at", Text),
 )
 
 agent_notifications = Table(

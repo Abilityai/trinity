@@ -19,6 +19,7 @@ from typing import Optional
 
 import httpx
 from fastapi import (
+    BackgroundTasks,
     APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,6 +39,8 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 
 from . import agent_page, service
 from .models import (
+    PortalRatingRequest,
+    PortalRatingResult,
     PortalAuthRequest,
     PortalAuthVerify,
     PortalBlockRequest,
@@ -716,6 +719,65 @@ async def portal_chat(
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
+
+
+@router.post("/agents/{agent_name}/ratings", response_model=PortalRatingResult)
+def portal_submit_rating(agent_name: str, body: PortalRatingRequest,
+                         background: BackgroundTasks,
+                         principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Rate one agent message or deliverable (ent#366).
+
+    Writes to `agent_evaluations` — the ent#206 referee surface — under a
+    `workspace:<email>` evaluator. This is the **amendment to that write fence**
+    the issue calls for: the fence exists so the graded agent never writes its
+    own grade, and a Workspace principal is exactly the kind of writer it was
+    built to admit. The rated agent still has no write path, and the route is
+    roster-scoped with the target checked against the reader (an id alone proves
+    nothing — see `_rating_target_is_visible`).
+
+    Idempotent per person per target, so changing your mind updates rather than
+    appends and a tally counts people, not clicks.
+
+    Rate-limited per (client, agent): a rating is one click, and a client that
+    can loop it can grow a table the retention sweep only prunes by age.
+    """
+    email = principal.email
+    include_owned = principal.is_platform
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_rating:{email}:{agent_name}", 60, 60)
+    try:
+        result = service.submit_rating(
+            agent_name, email,
+            target_kind=body.target_kind, target_id=body.target_id,
+            rating=body.rating, comment=body.comment,
+            include_owned=include_owned,
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # AC #2/#6: the words go further only when the agent can actually take them.
+    # The rating is already durable at this point, so everything below is
+    # additive — no branch here can lose the feedback.
+    #
+    # Dispatched as a BACKGROUND task: it is a whole agent turn, and a person
+    # clicking "not what I needed" should not wait on the agent that just
+    # disappointed them. `dispatched` therefore means "handed off", which is the
+    # honest claim — the turn's own outcome is observable as an execution row.
+    if result["comment_recorded"] and body.rating == "down":
+        if service.agent_has_capture_feedback(agent_name):
+            background.add_task(
+                service.dispatch_capture_feedback,
+                agent_name, email,
+                target_kind=body.target_kind, target_id=body.target_id,
+                comment=body.comment or "",
+            )
+            result["capture_feedback"] = "dispatched"
+        else:
+            # Not a failure: the comment is recorded either way, and saying so
+            # lets the UI thank the person for words that landed rather than
+            # imply a follow-up that will not happen.
+            result["capture_feedback"] = "skill_not_installed"
+    return PortalRatingResult(**result)
 
 
 @router.post("/agents/{agent_name}/tts")
