@@ -124,6 +124,48 @@ def _check_loop_access(loop: dict, user: User) -> None:
     assert_agent_access(user, loop["agent_name"])
 
 
+def _reject_timeout_above_cap(agent_name: str, requested_seconds: Optional[int]) -> None:
+    """Refuse a per-run loop timeout above the agent's cap (ent#338).
+
+    `agent_ownership.execution_timeout_seconds` is the per-agent ceiling, and
+    nothing downstream re-applies it: `task_execution_service` reads the cap
+    only when the caller passed no `timeout_seconds`, so an explicit
+    `timeout_per_run` was handed straight to dispatch. A loop could therefore
+    run iterations LONGER than the ceiling its owner set — a bypass, not merely
+    a number displayed wrongly, and one that multiplies: `max_runs` is up to 100.
+
+    Refuse rather than clamp, mirroring #929 for schedules (`ScheduleCreate`'s
+    closest sibling — explicit, human-set config). A silent clamp would start a
+    loop whose guardrails differ from the ones the caller was shown, which is
+    exactly what ent#458 puts on screen before Start. `agent_cap_seconds` rides
+    the structured detail so a UI can show the real bound instead of guessing.
+
+    Reminders clamp instead (#1296); that is deliberate and different — there
+    the timeout is derived from an agent's own request mid-turn, with no human
+    reading a form.
+    """
+    if requested_seconds is None:
+        return
+    try:
+        cap = db.get_execution_timeout(agent_name)
+    except Exception:
+        return                      # fail-open: never block a loop on a cap read
+    if requested_seconds > cap:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "loop_timeout_exceeds_agent_cap",
+                "message": (
+                    f"Loop timeout_per_run {requested_seconds}s exceeds agent "
+                    f"execution_timeout_seconds {cap}s. Raise the agent cap "
+                    f"first via PUT /api/agents/{agent_name}/timeout."
+                ),
+                "agent_cap_seconds": cap,
+                "requested_seconds": requested_seconds,
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -138,6 +180,10 @@ async def start_loop(
     x_mcp_key_name: Optional[str] = Header(None),
 ):
     """Start a sequential agent loop; return loop_id immediately (202)."""
+    # ent#338: the per-agent ceiling first, so the deadline check below compares
+    # against a per-run timeout that is known to be allowed.
+    _reject_timeout_above_cap(name, payload.timeout_per_run)
+
     # #1156: a deadline shorter than a single run can never let even one
     # iteration finish — reject it. Compare against the effective per-run
     # timeout (explicit override, else the agent's configured timeout).

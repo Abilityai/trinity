@@ -138,6 +138,11 @@
       </div>
     </div>
 
+    <!-- ent#458: loops this agent is running, above the asks. Quiet unless
+         something is active; platform-authenticated door only, so an external
+         client never sees the strip. -->
+    <PortalLoops :participants="[agent.name]" />
+
     <!-- ent#364: asks this agent raised, immediately above the composer — the
          third rendering of the SAME row the sidebar counts and the agent page
          shows, so answering here clears it in both. Directly above the input
@@ -278,6 +283,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
+import PortalLoops from './PortalLoops.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'

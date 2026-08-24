@@ -487,3 +487,4 @@ As a [user type], I want to [action] so that [benefit].
 4. Update this index after creating
 
 See `docs/TESTING_GUIDE.md` for testing template and examples.
+| [workspace-loops.md](feature-flows/workspace-loops.md) | Run and watch loops from a Workspace chat; the per-run timeout ceiling (ent#458 / ent#338) |
