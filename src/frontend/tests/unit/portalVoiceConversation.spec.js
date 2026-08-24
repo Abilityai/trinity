@@ -308,6 +308,19 @@ describe('the component consumes the machine (what only source can answer)', () 
     expect(component).toContain('echoCancellation: true')
   })
 
+  it('cannot open two microphones while a permission prompt is open', () => {
+    // The loop is not live until getUserMedia resolves, so a second press, a
+    // press after Stop, or a nav-away would otherwise install a second stream
+    // and a second timer and orphan the first pair — a hot mic with no control
+    // pointing at it.
+    expect(component).toContain('if (voiceConvLive.value || voiceStarting) return')
+    expect(component).toContain('const token = ++voiceStartToken')
+    // Teardown invalidates an in-flight start rather than trusting it to notice.
+    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,400}voiceStartToken\+\+/)
+    // A superseded start stops the tracks it just acquired.
+    expect(component).toMatch(/token !== voiceStartToken[\s\S]{0,120}getTracks\(\)\.forEach/)
+  })
+
   it('releases the microphone on unmount', () => {
     expect(component).toMatch(/function cleanupVoice\(\)\s*\{\s*releaseVoiceHardware\(\)/)
   })

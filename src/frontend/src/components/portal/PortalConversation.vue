@@ -1399,6 +1399,9 @@ const conversationMode = computed(() => voiceConversationMode({
 let convStream = null, convRec = null, convChunks = []
 let convCtx = null, convAnalyser = null, convData = null, convTimer = null
 let uttStart = 0, lastSpeechAt = 0, sawSpeech = false, bargeSince = 0
+// Startup re-entrancy (see `startVoiceConversation`): a flag for the overlapping
+// press, a token for the start whose hardware was released while it was awaiting.
+let voiceStarting = false, voiceStartToken = 0
 
 function toggleVoiceConversation() {
   if (voiceConvLive.value) stopVoiceConversation()
@@ -1406,40 +1409,60 @@ function toggleVoiceConversation() {
 }
 
 async function startVoiceConversation() {
-  voiceError.value = ''
-  const mode = conversationMode.value
-  // Re-checked at click even though the control only renders when available:
-  // the roster refreshes in the background, so the capability can flip between
-  // render and press, and the answer then has to be words rather than silence.
-  if (!mode.available) { voiceError.value = mode.reason; return }
-  voiceNotice.value = mode.narrates ? '' : mode.reason
-  // Push-to-talk and the loop would otherwise hold two recorders on one device.
-  if (listening.value) { try { recog?.stop() } catch { /* noop */ } try { mediaRec?.stop() } catch { /* noop */ } }
+  // Startup is not instant and the loop is not live until it finishes: a
+  // permission prompt can sit open for seconds. Without these two guards a
+  // second press — or a press after Stop, or a nav-away — opens a SECOND stream
+  // and a second 100 ms timer while the first of each is still owned by nobody:
+  // a microphone left hot with no control pointing at it. `voiceStarting`
+  // rejects the re-entry; the token abandons a start whose hardware has already
+  // been released (`releaseVoiceHardware` bumps it), which is the unmount case.
+  if (voiceConvLive.value || voiceStarting) return
+  voiceStarting = true
+  const token = ++voiceStartToken
   try {
-    convStream = await navigator.mediaDevices.getUserMedia({
-      // Echo cancellation is load-bearing, not polish: without it the mic hears
-      // the agent's own narration through the speakers and interrupts itself.
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    })
-  } catch (e) { voiceError.value = recorderErrorMessage(e); return }
-  try {
-    const Ctx = window.AudioContext || window.webkitAudioContext
-    convCtx = new Ctx()
-    if (convCtx.state === 'suspended') await convCtx.resume()
-    convAnalyser = convCtx.createAnalyser()
-    convAnalyser.fftSize = 1024
-    convData = new Uint8Array(convAnalyser.fftSize)
-    convCtx.createMediaStreamSource(convStream).connect(convAnalyser)
-  } catch {
-    // Without a level meter nothing can decide when an utterance ended, so the
-    // loop cannot run at all. Say so and give the microphone back rather than
-    // holding it open behind a control that will never advance.
-    releaseVoiceHardware()
-    voiceError.value = "Couldn't listen on this device — use the mic button to dictate instead."
-    return
+    voiceError.value = ''
+    const mode = conversationMode.value
+    // Re-checked at click even though the control only renders when available:
+    // the roster refreshes in the background, so the capability can flip between
+    // render and press, and the answer then has to be words rather than silence.
+    if (!mode.available) { voiceError.value = mode.reason; return }
+    voiceNotice.value = mode.narrates ? '' : mode.reason
+    // Push-to-talk and the loop would otherwise hold two recorders on one device.
+    if (listening.value) { try { recog?.stop() } catch { /* noop */ } try { mediaRec?.stop() } catch { /* noop */ } }
+    let stream = null
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        // Echo cancellation is load-bearing, not polish: without it the mic hears
+        // the agent's own narration through the speakers and interrupts itself.
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
+    } catch (e) { voiceError.value = recorderErrorMessage(e); return }
+    // Superseded while the prompt was open — the tracks are live NOW, so they
+    // are stopped here rather than left to a teardown that already ran.
+    if (token !== voiceStartToken) { try { stream.getTracks().forEach((t) => t.stop()) } catch { /* noop */ } return }
+    convStream = stream
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      convCtx = new Ctx()
+      if (convCtx.state === 'suspended') await convCtx.resume()
+      if (token !== voiceStartToken) { releaseVoiceHardware(); return }
+      convAnalyser = convCtx.createAnalyser()
+      convAnalyser.fftSize = 1024
+      convData = new Uint8Array(convAnalyser.fftSize)
+      convCtx.createMediaStreamSource(convStream).connect(convAnalyser)
+    } catch {
+      // Without a level meter nothing can decide when an utterance ended, so the
+      // loop cannot run at all. Say so and give the microphone back rather than
+      // holding it open behind a control that will never advance.
+      releaseVoiceHardware()
+      voiceError.value = "Couldn't listen on this device — use the mic button to dictate instead."
+      return
+    }
+    convTimer = setInterval(monitorTick, 100)
+    voiceDispatch('start')
+  } finally {
+    voiceStarting = false
   }
-  convTimer = setInterval(monitorTick, 100)
-  voiceDispatch('start')
 }
 
 // `reason` is shown when the loop stopped itself; a user-pressed Stop is silent.
@@ -1454,6 +1477,10 @@ function failVoice(message) {
 }
 
 function releaseVoiceHardware() {
+  // Abandons any start still awaiting a permission prompt or an AudioContext:
+  // it will find its token stale and stop the stream it just acquired instead
+  // of installing it into a loop that has already been torn down.
+  voiceStartToken++
   if (convTimer) { clearInterval(convTimer); convTimer = null }
   try { if (convRec && convRec.state !== 'inactive') convRec.stop() } catch { /* noop */ }
   convRec = null; convChunks = []
