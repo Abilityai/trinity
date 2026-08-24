@@ -256,7 +256,7 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK) -> list[dict]:
     } for r in rows]
 
 
-def reports(agent_name: str, client_email: str, limit: int = 20, offset: int = 0,
+def reports(agent_name: str, client_email: str, *, limit: int = 20, offset: int = 0,
             portal_session_id: str | None = None) -> list[dict]:
     """Deliverables **addressed to this person** by this agent (ent#365).
 

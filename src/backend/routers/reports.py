@@ -219,6 +219,11 @@ async def create_report(
         addressed_to_email=audience,
         portal_session_id=portal_session_id,
     )
+    # The create dict now carries two fields the response model does not declare.
+    # Pydantic v2 ignores unknown keys by default, so this filter is a belt, not
+    # the mechanism — it keeps the audience out of the response shape explicitly
+    # rather than by relying on a model-config default that a later `extra=`
+    # change could flip.
     return Report(**{k: v for k, v in report.items() if k in Report.model_fields})
 
 
