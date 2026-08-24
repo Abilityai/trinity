@@ -93,7 +93,7 @@
                        unbounded personal key here, which defeats the point of
                        having a bounded tier at all. -->
                   <span v-else-if="key.scope === 'ops'"
-                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-blue-100 dark:bg-accent-blue-900/50 text-accent-blue-800 dark:text-accent-blue-300"
+                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-info-100 dark:bg-status-info-900/50 text-status-info-800 dark:text-status-info-300"
                         title="Read-only machine credential — fleet health, telemetry, execution and subscription reads only">
                     Ops (read-only)
                   </span>
