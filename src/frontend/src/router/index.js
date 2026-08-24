@@ -333,6 +333,17 @@ router.beforeEach(async (to, from) => {
     await authStore.waitForInit()
   }
 
+  // #2381: keep visitors off the setup page once the instance is provisioned.
+  // This check must run for the setup route ITSELF, which is why it sits above
+  // (and outside) the `!to.meta.isSetup` block below. It used to live inside
+  // that block, where it was unreachable dead code by construction — `/setup`
+  // carries `meta.isSetup: true`, so the only route the branch tested for was
+  // the one route the block skipped. Navigating straight to /setup rendered the
+  // full wizard on a completed install; only the backend 403 stopped a submit.
+  if (to.meta.isSetup && (await checkSetupStatus())) {
+    return '/login'
+  }
+
   // Check setup status for login and protected routes
   if (!to.meta.isSetup) {
     const setupCompleted = await checkSetupStatus()
@@ -344,11 +355,6 @@ router.beforeEach(async (to, from) => {
         return true
       }
       return '/setup'
-    }
-
-    // If setup completed and trying to access setup page, redirect to login
-    if (to.path === '/setup') {
-      return '/login'
     }
   }
 

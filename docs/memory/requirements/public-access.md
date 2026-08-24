@@ -396,9 +396,12 @@
   - Anonymous sessions have the same memory capability as email-verified sessions.
 
 ### 15.2 First-Time Setup
-- **Status**: ✅ Implemented (2025-12-23; streamlined trinity-enterprise#49, 2026-06-23)
-- **Description**: Admin-account wizard on fresh install — a welcoming, animated single-screen first-run page (orbiting fleet constellation)
-- **Key Features**: Bcrypt hashing, API key configuration in Settings. **Streamlined (#49)**: the log-copied **setup token was removed** (no token field); **admin email is required** (becomes the sign-in identity) with field order email → password (+confirm) → company → updates opt-in. Security tradeoff of token removal is an explicit operator responsibility (deploy behind a tunnel/VPN until setup completes) — see `docs/DEPLOYMENT.md` → Security Recommendations
+- **Status**: ✅ Implemented (2025-12-23; streamlined trinity-enterprise#49, 2026-06-23; scoped to unprovisioned installs #2381, 2026-08-24)
+- **Description**: Admin-account wizard for an install that has **no admin account yet** — a welcoming, animated single-screen first-run page (orbiting fleet constellation)
+- **Key Features**: Bcrypt hashing, API key configuration in Settings. **Streamlined (#49)**: the log-copied **setup token was removed** (no token field); **admin email is required** (becomes the sign-in identity) with field order email → password (+confirm) → company → updates opt-in.
+- **Audience (#2381)**: the wizard is scoped to installs that genuinely have no way in — blank `ADMIN_PASSWORD` dev, hand-rolled backends — where login is blocked by the same `setup_completed` flag and the wizard is the only door. It does **not** render where `ADMIN_PASSWORD` provisioned an admin at boot (production compose makes it mandatory; `start.sh` refuses blank and auto-generates under `--unattended`; hosted/marketplace images bake it), because there it can only overwrite a working account.
+- **Security (#2381)**: `POST /api/setup/admin-password` refuses whenever a usable admin account already exists — its own precondition, not the derived flag, which said `false` on every fresh install and made the endpoint an unauthenticated admin-takeover surface. Fail-closed on a DB read error; checked above the bcrypt hash on this unauthenticated, unrate-limited route. This closes ent#49's tokenless window **without reinstating the token**: ent#49 priced that tradeoff on "there is no admin yet", which now holds exactly where the wizard still renders. See `docs/DEPLOYMENT.md` → Security Recommendations for the residual (an unprovisioned install on a public IP).
+- **Related**: the product-updates opt-in has no home outside this wizard and needs a Settings surface — `abilityai/trinity-enterprise#463`. The admin sign-in email is captured post-login instead (`components/onboarding/AdminEmailNudge.vue`).
 - **Flow**: `docs/memory/feature-flows/first-time-setup.md`
 
 ### 15.3 Per-Agent API Key Control

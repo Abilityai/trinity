@@ -46,6 +46,12 @@ services:
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
+      # #2381: present in docker-compose.yml and .env.example but missing here,
+      # so setting ADMIN_USERNAME never reached a production container. The
+      # backend then provisioned `admin` while the operator believed otherwise —
+      # and `routers/setup.py` hardcoded the same literal, so the mismatch was
+      # invisible until it wasn't.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
