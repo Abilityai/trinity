@@ -228,6 +228,11 @@
              enterprise onboarding module is entitled AND the user still has an
              undone step — never a gate, always dismissible. -->
         <ActivationChecklist />
+        <!-- Sign-in email prompt (#2381). The first-run wizard used to capture
+             this, but it now only renders on installs with no admin account —
+             so an ADMIN_PASSWORD-provisioned operator is never asked. Renders
+             only for a verified admin with no email bound; dismissible. -->
+        <AdminEmailNudge />
 
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
@@ -484,6 +489,7 @@ import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import FrontDeskPanel from '@/components/onboarding/FrontDeskPanel.vue'
 import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
+import AdminEmailNudge from '@/components/onboarding/AdminEmailNudge.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'

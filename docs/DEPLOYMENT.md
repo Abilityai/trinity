@@ -241,16 +241,34 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
 
 ## Security Recommendations
 
-1. **Protect the first-run setup window** — first-time setup (`/setup` → create the
-   admin account) is **unauthenticated by design** so it works on a fresh install,
-   and it carries **no setup token** (removed in trinity-enterprise#49 to keep
-   self-hosted bring-up frictionless). The endpoint self-disables the moment the
-   admin account is created, but until then **anyone who can reach the URL can
-   claim the admin account**. On an instance reachable by anyone other than you
-   before setup completes (a public IP, a shared network), **keep it behind a
-   tunnel/VPN or otherwise network-restricted until you have created the admin
-   account.** On localhost / a trusted LAN this is a non-issue. After setup, login
-   is fully authenticated and the window is closed.
+1. **Set `ADMIN_PASSWORD` before first boot — that is what closes the setup window.**
+   First-time setup (`/setup` → create the admin account) is **unauthenticated by
+   design** so it works on an install that has no admin yet, and it carries **no
+   setup token** (removed in trinity-enterprise#49 to keep self-hosted bring-up
+   frictionless).
+
+   Since #2381 the endpoint refuses whenever a usable admin account already
+   exists — not merely once setup has been "completed", which on a fresh install
+   was a flag that said `false` while a real admin sat in the database. So an
+   install that boots with `ADMIN_PASSWORD` set is **never** in the vulnerable
+   window: the admin is provisioned during startup and the endpoint is closed
+   before the first request is served. `docker-compose.prod.yml` makes
+   `ADMIN_PASSWORD` mandatory and `scripts/deploy/start.sh` refuses to run
+   without one (auto-generating it under `--unattended`), so following either
+   path is sufficient.
+
+   The window is still open on an install with **no** admin — a blank
+   `ADMIN_PASSWORD`, or a hand-rolled backend — because there the wizard is the
+   only way in. Until you create that account, **anyone who can reach the URL can
+   claim it.** On such an instance reachable by anyone other than you (a public
+   IP, a shared network), keep it behind a **tunnel/VPN or otherwise
+   network-restricted** until you have created the admin account. On localhost /
+   a trusted LAN this is a non-issue. After setup, login is fully authenticated
+   and the window is closed.
+
+   Note the corollary: after a provisioned first boot there is no wizard, so
+   binding an admin **sign-in email** is a post-login step in
+   Settings → General — the dashboard prompts for it.
 2. **Never expose Redis externally** - Keep it internal only
 3. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
 4. **Use email whitelist** - Restrict access to approved email addresses only
