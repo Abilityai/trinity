@@ -20,8 +20,20 @@
          panel's bespoke spinner (ent#253 AC #4) and carries reduced-motion.
          Gated on "no data yet", so the poll is invisible. -->
     <ScanlineReveal :loading="firstLoad" :reveal="view.state === 'ready'">
+      <!-- First load, inside the slot (ent#253 review). ScanlineReveal clips
+           its content only during the REVEAL — during the loading phase the
+           slot renders normally under a 50%-opacity track. Without this arm the
+           chain below falls through to the empty state while `dashboardData` is still
+           null, so the panel spent the whole first load telling the operator
+           this agent has no dashboard — the exact false claim this pass removes,
+           merely dimmed. `LibrarySkillsSection` (the ent#245 reference adopter)
+           solves the same problem by gating each terminal on `store.hasLoaded`;
+           one placeholder arm is used here instead because it also RESERVES the
+           height, so nothing shifts when the content arrives (p4). -->
+      <div v-if="firstLoad" class="min-h-[8rem]" aria-hidden="true"></div>
+
       <LoadFailed
-        v-if="loadFailed"
+        v-else-if="loadFailed"
         title="Couldn't load the dashboard"
         message="The agent did not return its dashboard. This is not the same as an agent without one."
         :detail="loadError"

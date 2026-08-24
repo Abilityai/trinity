@@ -124,6 +124,20 @@ describe('the three fixed surfaces (what only source can answer)', () => {
     expect(observability).not.toContain('v-if="observabilityStore.loading"')
   })
 
+  it('renders no terminal branch while the first load is still running', () => {
+    // Caught in review, live: ScanlineReveal clips its slot only during the
+    // REVEAL — during the loading phase the slot renders normally under a
+    // 50%-opacity track. Without a first arm, the chain falls through to the
+    // empty state while the data ref is still null, so the panel spent the
+    // whole first load making the very claim this pass exists to remove.
+    for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
+      expect(src, name).toMatch(/<div v-if="firstLoad"[^>]*aria-hidden/)
+      // ...and the branch that used to be first must now be an else-if, or the
+      // placeholder is inert.
+      expect(src, name).toContain('v-else-if="loadFailed"')
+    }
+  })
+
   it('derives the loading face from "has data", not from the fetch', () => {
     for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
       expect(src, name).toContain("import { viewState, staleBannerMessage } from '../utils/loadingState'")

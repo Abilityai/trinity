@@ -26,8 +26,20 @@
     <ScanlineReveal :loading="firstLoad" :reveal="view.state === 'ready'">
       <!-- Failed FIRST load — distinct from the empty state below, which is a
            statement about the agent rather than about the request. -->
+      <!-- First load, inside the slot (ent#253 review). ScanlineReveal clips
+           its content only during the REVEAL — during the loading phase the
+           slot renders normally under a 50%-opacity track. Without this arm the
+           chain below falls through to the empty state while `metricsData` is still
+           null, so the panel spent the whole first load telling the operator
+           this agent has no metrics — the exact false claim this pass removes,
+           merely dimmed. `LibrarySkillsSection` (the ent#245 reference adopter)
+           solves the same problem by gating each terminal on `store.hasLoaded`;
+           one placeholder arm is used here instead because it also RESERVES the
+           height, so nothing shifts when the content arrives (p4). -->
+      <div v-if="firstLoad" class="min-h-[8rem]" aria-hidden="true"></div>
+
       <LoadFailed
-        v-if="loadFailed"
+        v-else-if="loadFailed"
         title="Couldn't load metrics"
         message="The agent did not return its custom metrics. This is not the same as an agent without metrics."
         :detail="loadError"
