@@ -328,10 +328,18 @@ def _resolve_portal(
     async def deliver() -> bool:
         import uuid as _uuid
         from utils.helpers import utc_now_iso
+        now = utc_now_iso()
         portal_db.add_portal_message(
             _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
-            None, utc_now_iso(), session_id=chat_id,
+            None, now, session_id=chat_id,
         )
+        # Every other writer of a portal message touches its session, and this
+        # one has to for the same reason: `last_message_at` is what orders the
+        # sidebar. The unread badge is safe either way — ent#359 counts message
+        # ROWS against a read cursor — but a badge on a thread that has not
+        # moved is a notification pointing at the middle of a list. A report
+        # nobody notices is the same silence this contract exists to end.
+        portal_db.touch_portal_session(chat_id, now, added=1)
         return True
 
     return deliver

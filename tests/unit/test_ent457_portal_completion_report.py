@@ -94,6 +94,28 @@ def test_the_recipient_comes_from_the_session_row_not_the_stamp(ccr, monkeypatch
     assert written["role"] == "assistant"
 
 
+def test_delivery_moves_the_thread_in_the_sidebar(ccr, monkeypatch):
+    """Caught in review. Every other writer of a portal message pairs it with
+    `touch_portal_session`, and this one must too: `last_message_at` is what
+    orders the thread list. The unread badge fires either way (ent#359 counts
+    message ROWS against a read cursor), but a badge on a thread that has not
+    moved points at the middle of a list — a report nobody notices is the same
+    silence the contract exists to end.
+    """
+    from client_portal import db as portal_db
+    touched = {}
+    monkeypatch.setattr(portal_db, "add_portal_message",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(portal_db, "touch_portal_session",
+                        lambda sid, now, added=0, **k: touched.update(session=sid, added=added))
+
+    deliver = _resolve(ccr, monkeypatch, {"agent_name": AGENT, "client_email": CLIENT})
+    import asyncio
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(deliver())
+
+    assert touched == {"session": SESSION, "added": 1}
+
+
 def test_a_vanished_session_suppresses_rather_than_guessing(ccr, monkeypatch):
     assert _resolve(ccr, monkeypatch, None) is None
 
