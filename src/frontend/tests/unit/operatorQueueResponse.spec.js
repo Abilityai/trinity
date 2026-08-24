@@ -233,11 +233,36 @@ describe('operatorQueue store — respondToItem builds its body with the shared 
     await store.respondToItem('a', 'Deny', '')
     expect(store.items.find(i => i.id === 'a').status).toBe('pending')
     expect(axios.get).toHaveBeenCalledTimes(2)
-    // The shared copy is assigned to `error` before the refetch (pinned by the
-    // wiring test below), but `fetchItems()` clears `error` synchronously at its
-    // start, so it is not observable here — a pre-existing desktop limitation
-    // (Operations renders `error` only as the detail of "Couldn't refresh the
-    // queue"), recorded as a follow-up in #2370, deliberately NOT pinned.
+  })
+
+  // The regression this ordering guards: `fetchItems` nulls `error` in its own
+  // synchronous prologue, so assigning the copy BEFORE an un-awaited refetch
+  // destroyed it before any render. 400 and 404 used to fall through to the
+  // `else` and leave a message, so widening the refusal set without fixing the
+  // order would have silenced two statuses that previously reported.
+  it.each([409, 400, 404])('a %s refusal leaves the not-recorded copy OBSERVABLE after the refetch', async (status) => {
+    axios.post.mockRejectedValueOnce({ response: { status, data: { detail: 'nope' } } })
+    axios.get.mockResolvedValueOnce({ data: { items: [item()], count: 1 } })
+    await store.respondToItem('a', 'Deny', '')
+    await nextTick()
+    expect(store.error).toBe(QUEUE_RESPONSE_NOT_RECORDED)
+  })
+
+  it('the not-recorded copy outranks a failed refetch — the answer matters more than the staleness', async () => {
+    axios.post.mockRejectedValueOnce({ response: { status: 409 } })
+    axios.get.mockRejectedValueOnce(new Error('network'))
+    await store.respondToItem('a', 'Deny', '')
+    await nextTick()
+    expect(store.error).toBe(QUEUE_RESPONSE_NOT_RECORDED)
+  })
+
+  it('a 500 is NOT a refusal — it keeps the generic message and never refetches', async () => {
+    axios.post.mockRejectedValueOnce({ response: { status: 500, data: { detail: 'boom' } } })
+    await store.respondToItem('a', 'Deny', '')
+    await nextTick()
+    expect(store.error).not.toBe(QUEUE_RESPONSE_NOT_RECORDED)
+    expect(store.error).toBeTruthy()
+    expect(axios.get).toHaveBeenCalledTimes(1) // the beforeEach load only
   })
 })
 
@@ -275,5 +300,33 @@ describe('wiring — the producers call the builder and the old literals are gon
     expect(card).toMatch(/from ['"]\.\.\/\.\.\/utils\/operatorQueue['"]/)
     expect(card).toMatch(/queueTypeLabel\(\s*item\.type\s*\)/)
     expect(card).not.toMatch(/function typeLabel\(/)
+  })
+
+  // The store's ordering is proved behaviourally above; this pins the shape so
+  // the un-awaited form cannot come back.
+  it('the desktop store awaits the refetch BEFORE assigning the not-recorded copy', () => {
+    expect(store).toMatch(/await fetchItems\(\)\s*\n\s*error\.value = QUEUE_RESPONSE_NOT_RECORDED/)
+    expect(store).not.toMatch(/error\.value = QUEUE_RESPONSE_NOT_RECORDED\s*\n\s*fetchItems\(\)/)
+  })
+
+  // `/m`'s fetchQueue + prune are `<script setup>` internals and vitest runs
+  // `environment: 'node'` (no component mounting), so these two are pinned on
+  // source — the same tool this file already uses for view wiring.
+  it("/m's stale-fetch guard covers every exit, not just the success path", () => {
+    // A superseded poll must not write an error over fresh data...
+    expect(mobile).toMatch(/catch \(e\) \{\s*\n\s*if \(seq !== queueFetchSeq\) return/)
+    // ...nor drop the spinner while the newer request is still running.
+    expect(mobile).toMatch(/if \(seq === queueFetchSeq\) loading\.queue = false/)
+    // fetchQueue is the only writer of `loading.queue`, so an unguarded
+    // assignment anywhere — at the start of a line, i.e. not behind the
+    // guard above — is the regression coming back.
+    expect(mobile).not.toMatch(/^\s*loading\.queue = false/m)
+  })
+
+  it('/m never prunes the in-flight send guard, and logout still wipes it', () => {
+    expect(mobile).toMatch(/live\.has\(id\) \|\| respondingItems\[id\] === true/)
+    // resetQueueItemState is a wipe, not a reconcile — delegating to the prune
+    // would inherit the in-flight exemption and strand a disabled Send.
+    expect(mobile).not.toMatch(/pruneQueueItemState\(\[\]\)/)
   })
 })

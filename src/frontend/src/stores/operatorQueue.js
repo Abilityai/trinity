@@ -146,11 +146,24 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     } catch (err) {
       if (respondRefusedAsNotPending(err)) {
         // Item left 'pending' under us (409 — e.g. another operator cleared
-        // the queue, #1017) or was already terminal (400) — the response was
-        // NOT recorded. Copy shared with `/m` (#2370) and attribution-free:
-        // the status may be responded, cancelled or expired.
+        // the queue, #1017), was already terminal (400) or the row is gone
+        // (404) — the response was NOT recorded. Copy shared with `/m` (#2370)
+        // and attribution-free: the status may be responded, cancelled or
+        // expired.
+        //
+        // The refetch is AWAITED and the copy assigned after it: `fetchItems`
+        // sets `error.value = null` in its own synchronous prologue, so
+        // assigning first and calling it un-awaited destroyed the notice
+        // before anything rendered. That cost nothing while 409 was the only
+        // refused status (#2377 owns that half), but this branch now also
+        // takes 400 and 404 — which used to fall through to the `else` and
+        // leave a message — so ordering it the other way would have widened a
+        // silent failure to two statuses that previously reported. The
+        // refetch's own error, if it failed, is deliberately overwritten: the
+        // operator needs to know their answer was not recorded more than they
+        // need to know the list is stale.
+        await fetchItems()
         error.value = QUEUE_RESPONSE_NOT_RECORDED
-        fetchItems()
       } else {
         error.value = apiErrorMessage(err, 'Request failed')
       }

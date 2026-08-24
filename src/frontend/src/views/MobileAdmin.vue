@@ -803,7 +803,11 @@ async function fetchAgents() {
 
 // #2370: a poll issued BEFORE an answer's POST can complete AFTER the
 // success-path refetch and rewrite the list with the answered card still
-// pending. Only the newest fetch may write.
+// pending. Only the newest fetch may write — and that holds on EVERY exit,
+// not just the success one: a superseded poll that rejects on a transient
+// blip would otherwise paint "couldn't refresh" over a list the newer fetch
+// just proved fresh, and drop `loading.queue` while that newer request is
+// still outstanding.
 let queueFetchSeq = 0
 
 async function fetchQueue() {
@@ -820,10 +824,13 @@ async function fetchQueue() {
     lastLoadedAt.queue = Date.now()
     fetchError.queue = ''
   } catch (e) {
+    if (seq !== queueFetchSeq) return // superseded — its failure is not news
     console.error('Failed to fetch queue:', e)
     fetchError.queue = apiErrorMessage(e, 'Request failed')
   } finally {
-    loading.queue = false
+    // The newest fetch owns the spinner; a superseded one leaves it to the
+    // request that is still running (`return` in try/catch runs this block).
+    if (seq === queueFetchSeq) loading.queue = false
   }
 }
 
@@ -1140,15 +1147,35 @@ function clearQueueItemState(id) {
 
 // Drop per-card state for cards that left the list (answered elsewhere,
 // expired, cancelled) so a long-lived PWA tab does not accumulate it.
+//
+// A card whose POST is still outstanding is NEVER pruned. `respondingItems` is
+// the in-flight guard `sendQueueResponse` checks, and the GET is a `limit: 100`
+// window ordered status → priority → created_at: on a busy queue an item can be
+// pushed out of that window by newer high-priority arrivals and return once
+// they are answered. Clearing its guard mid-flight re-enables Send under an
+// outstanding POST — the server 400s the loser, so nothing is mis-recorded, but
+// the operator is told an answer that WAS recorded was not. The selection and
+// note are held for the same reason: the retryable-failure path keeps them for
+// a second attempt.
 function pruneQueueItemState(items) {
   const live = new Set(items.map(i => i.id))
   for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
-    for (const id of Object.keys(map)) if (!live.has(id)) delete map[id]
+    for (const id of Object.keys(map)) {
+      if (live.has(id) || respondingItems[id] === true) continue
+      delete map[id]
+    }
   }
 }
 
+// Logout forgets everything, in-flight included — the session is over, and a
+// guard surviving into the next sign-in would leave that card's Send disabled
+// with no way to clear it. It therefore clears the maps directly instead of
+// delegating to the prune above, which would inherit that exemption: this is a
+// wipe, not a reconcile against a served list.
 function resetQueueItemState() {
-  pruneQueueItemState([])
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+    for (const id of Object.keys(map)) delete map[id]
+  }
 }
 
 async function sendQueueResponse(item, body) {
