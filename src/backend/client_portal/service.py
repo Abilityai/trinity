@@ -1226,6 +1226,54 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: str,
+                                          marker_execution_id: str | None, **kwargs):
+    """Run the turn, and always take the marker back down if we put it up.
+
+    A marker that outlives its turn is worse than none: the UI reattaches to a
+    turn that ended and waits out the whole TTL. `start_portal_turn` clears in a
+    `finally` for the same reason; this is that guarantee for the synchronous
+    path, on every exit including the raising ones.
+    """
+    from services.session_turn_service import run_resumable_turn
+    try:
+        return await run_resumable_turn(**kwargs)
+    finally:
+        if owns_marker and marker_execution_id:
+            clear_turn_inflight(marker_session_id, marker_execution_id)
+
+
+def _precreate_sync_execution(agent_name: str, message: str, email: str) -> str | None:
+    """Create the execution row for a synchronous portal turn (ent#365 review).
+
+    Mirrors `start_portal_turn`'s creation exactly — same trigger, same
+    `source_channel` stamp — so the two paths produce indistinguishable rows and
+    a report published from either can be joined back to its chat.
+
+    Fail-soft to None: this exists so an addressed report finds its session, and
+    a turn must not be refused because that bookkeeping could not be done.
+    `run_resumable_turn` then creates the row itself, exactly as before.
+    """
+    from database import db as core_db
+    try:
+        subscription_id = core_db.get_agent_subscription_id(agent_name)
+    except Exception:  # noqa: BLE001 — usage tracking, never a gate
+        subscription_id = None
+    try:
+        execution = core_db.create_task_execution(
+            agent_name=agent_name,
+            message=message,
+            triggered_by="public",
+            source_user_email=email,
+            subscription_id=subscription_id,
+            source_channel=PORTAL_SOURCE_CHANNEL,
+        )
+        return execution.id if execution else None
+    except Exception:  # noqa: BLE001
+        logger.warning("portal: could not pre-create the sync turn's execution row")
+        return None
+
+
 async def portal_chat(agent_name: str, message: str, email: str,
                       session_id: str | None = None,
                       include_owned: bool = False,
@@ -1435,7 +1483,29 @@ async def portal_chat(agent_name: str, message: str, email: str,
             logger.warning("portal resume-failure bookkeeping failed for %s: %s", session_id, e)
 
     try:
-        turn = await run_resumable_turn(
+        # Review finding (ent#365): `_resolve_portal_session` resolves a report's
+        # chat from the ent#286 reverse marker — and `mark_turn_inflight` had
+        # exactly ONE caller, inside `start_portal_turn`. This synchronous path
+        # never set it, so an agent publishing an addressed report from a turn
+        # that came through here stored `portal_session_id = NULL` and the card
+        # silently never rendered in the chat.
+        #
+        # Not an edge: `/chat` is ent#83's documented headless integration
+        # surface AND the browser's fallback when the streaming dispatch route
+        # is unavailable. Both are live paths.
+        #
+        # The row is pre-created here so there IS an id to mark with, which is
+        # what `start_portal_turn` already does — the two paths converge rather
+        # than this one growing its own turn machinery.
+        owns_marker = False
+        if not execution_id:
+            execution_id = _precreate_sync_execution(agent_name, message, email)
+            if execution_id:
+                mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
+                owns_marker = True
+
+        turn = await _run_sync_turn_and_clear_marker(
+            owns_marker, session_id, execution_id,
             agent_name=agent_name,
             session_key=session_id,
             message=message,

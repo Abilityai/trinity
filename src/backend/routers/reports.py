@@ -186,11 +186,25 @@ async def create_report(
     # than silently stored: the column decides whose Workspace this appears in,
     # so an unchecked value would let an agent post its output into a stranger's
     # surface. `email_has_agent_access` is the same predicate the #848 inline
-    # auth path gates on, so "can be addressed" cannot drift from "can reach".
+    # auth path gates on — but that predicate is BROADER than the Workspace read
+    # gate, and the difference is a publish that nobody can read (review
+    # finding): `email_has_agent_access` returns True for any user whose role is
+    # `admin`, regardless of sharing, while `agent_on_roster` is `agent_sharing`
+    # ∪ owned. So a report addressed to a platform admin who neither owns nor is
+    # shared this agent stored happily and 404'd in that admin's Workspace,
+    # falsifying the invariant stated one line above.
+    #
+    # The publish therefore gates on the SAME predicate the reader uses. Import
+    # is local: `client_portal` is a sibling package and a module-level import
+    # here would couple the reports router to it at load time.
     audience = data.audience_email
     if audience:
         try:
-            reachable = db.email_has_agent_access(name, audience)
+            from client_portal.service import agent_on_roster
+            # `include_owned=False`: an owner reads their agent's reports on the
+            # operator surface, and addressing one to themselves is not what the
+            # audience column is for.
+            reachable = agent_on_roster(name, audience, include_owned=False)
         except Exception as e:  # noqa: BLE001 — an unreadable roster must not publish
             logger.warning("report audience check failed for %s: %s", name, e)
             raise HTTPException(
@@ -231,10 +245,23 @@ async def create_report(
     )
     # The create dict now carries two fields the response model does not declare.
     # Pydantic v2 ignores unknown keys by default, so this filter is a belt, not
-    # the mechanism — it keeps the audience out of the response shape explicitly
-    # rather than by relying on a model-config default that a later `extra=`
-    # change could flip.
-    return Report(**{k: v for k, v in report.items() if k in Report.model_fields})
+    # the mechanism.
+    #
+    # Review finding: the comment used to say it "keeps the audience out of the
+    # response shape", which stopped being true the moment `ReportSummary` gained
+    # `addressed_to` — `Report` extends it, so the field IS in `model_fields`, and
+    # the filter was instead silently dropping it because `db.create_report`
+    # returns the column under its DB name (`addressed_to_email`). So the same
+    # model meant two different things depending on the route: populated on
+    # `GET /reports/{id}` (via `_mapping_to_report`), always null here. Two
+    # intentions contradicting each other, with the MCP tool papering over it by
+    # echoing back the caller's own argument.
+    #
+    # Mapped explicitly, so the response says what the row says.
+    projected = {k: v for k, v in report.items() if k in Report.model_fields}
+    if "addressed_to" not in projected and "addressed_to_email" in report:
+        projected["addressed_to"] = report["addressed_to_email"]
+    return Report(**projected)
 
 
 @router.get("/agents/{name}/reports", response_model=List[ReportSummary])

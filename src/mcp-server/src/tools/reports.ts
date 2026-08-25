@@ -28,6 +28,32 @@ export function filterReportsForAgentScope<T extends { agent_name: string }>(
   return reports.filter((r) => allowedNames.has(r.agent_name));
 }
 
+/**
+ * Strip the client's email address from report metadata (ent#365 review).
+ *
+ * `addressed_to` was appended to `_SUMMARY_COLUMNS` so an OPERATOR can answer
+ * "who was this produced for" — the support question a deliverable creates.
+ * But `list_reports` returns the backend's rows verbatim, and
+ * `filterReportsForAgentScope` filters ROWS by agent, never FIELDS. So an agent
+ * holding an `agent_permissions` edge to another agent could call
+ * `list_reports({agent_name: "A"})` and pull A's clients' email addresses into
+ * its own LLM context, where none were exposed before.
+ *
+ * It also contradicts the tool's own advertised contract — "Returns METADATA
+ * only (id, type, title, period, created_at)".
+ *
+ * Applied to every principal rather than only to agent-scoped keys: an operator
+ * reading through an MCP client still gets the field from the REST surface the
+ * UI uses, and a tool result is LLM context wherever it lands.
+ */
+export function stripAudienceFromReports<T extends Record<string, unknown>>(reports: T[]): T[] {
+  return reports.map((r) => {
+    if (!("addressed_to" in r)) return r;
+    const { addressed_to: _dropped, ...rest } = r as Record<string, unknown>;
+    return rest as T;
+  });
+}
+
 export function createReportTools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
     if (requireApiKey) {
@@ -329,7 +355,11 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             );
           }
 
-          return JSON.stringify({ count: reports.length, reports }, null, 2);
+          return JSON.stringify(
+            { count: reports.length, reports: stripAudienceFromReports(reports) },
+            null,
+            2,
+          );
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[list_reports] error: ${msg}`);
