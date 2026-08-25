@@ -384,6 +384,7 @@ import {
   utteranceVerdict,
   voiceConversationMode,
   voiceStateLabel,
+  TRANSCRIBE_TIMEOUT_MS,
 } from './voiceConversation'
 
 const props = defineProps({
@@ -835,6 +836,7 @@ const statusLabel = computed(() => {
 })
 
 async function deliver(text) {
+  voiceLoopEndedDuringTurn = false
   sending.value = true
   elapsed.value = 0
   clearInterval(elapsedTimer)
@@ -940,7 +942,15 @@ async function deliver(text) {
     // machine, not by this branch — narrating here as well would speak every
     // reply twice, once raw and once cleaned for the ear.
     lastAssistantReply.value = data.response || ''
-    if (voiceMode.value && ttsEnabled.value && data.response && !voiceConvLive.value) speak(data.response)
+    // Review finding: this is evaluated AFTER the turn's await, so a user who
+    // pressed Stop while the agent was thinking had `voiceConvLive` already
+    // false by the time it ran — and the un-cleaned reply (code fences, URLs,
+    // markdown) was synthesized and played, contradicting "explicit Stop ends
+    // the loop". They could not have muted it either: the speaker button is
+    // hidden for the whole duration of a conversation. `voiceLoopEndedDuringTurn`
+    // remembers that this turn belonged to a loop the user stopped.
+    if (voiceMode.value && ttsEnabled.value && data.response
+        && !voiceConvLive.value && !voiceLoopEndedDuringTurn) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
       currentSessionId.value = data.session_id
       emit('session-adopted', data.session_id)
@@ -1420,6 +1430,10 @@ let uttStart = 0, lastSpeechAt = 0, sawSpeech = false, bargeSince = 0
 // Startup re-entrancy (see `startVoiceConversation`): a flag for the overlapping
 // press, a token for the start whose hardware was released while it was awaiting.
 let voiceStarting = false, voiceStartToken = 0
+// True while a turn dispatched BY the voice loop is still in flight after the
+// loop itself ended (Stop, an error, teardown). The #2157 speaker branch is
+// evaluated after that await and would otherwise speak the raw reply.
+let voiceLoopEndedDuringTurn = false
 
 function toggleVoiceConversation() {
   if (voiceConvLive.value) stopVoiceConversation()
@@ -1489,12 +1503,24 @@ function stopVoiceConversation({ reason = '' } = {}) {
   voiceDispatch('stop')
 }
 
-function failVoice(message) {
+// Review finding: `failVoice` dispatched unconditionally, and `nextVoiceState`
+// handles `stop`/`error` BEFORE its `state === VOICE_OFF` short-circuit — so it
+// always returned OFF + ACT_RELEASE. A user who pressed Stop on a slow turn and
+// then restarted the loop had the NEW conversation torn down when the abandoned
+// turn finally rejected, with an error about a turn they had already abandoned.
+// The success paths already guard with a state re-check; the failure paths take
+// the same generation token `speak`/`startVoiceConversation` use.
+function failVoice(message, token = null) {
+  if (token !== null && token !== voiceStartToken) return
   voiceError.value = message || 'Voice stopped — you can keep typing.'
   voiceDispatch('error')
 }
 
 function releaseVoiceHardware() {
+  clearTranscribeWatchdog()
+  // A turn dispatched by this loop may still be in flight; mark it so the
+  // #2157 branch does not speak its reply after the loop is gone.
+  if (sending.value) voiceLoopEndedDuringTurn = true
   // Abandons any start still awaiting a permission prompt or an AudioContext:
   // it will find its token stale and stop the stream it just acquired instead
   // of installing it into a loop that has already been torn down.
@@ -1554,7 +1580,31 @@ function stopUtterance() {
   try { if (convRec && convRec.state !== 'inactive') convRec.stop() } catch { /* noop */ }
 }
 
+// Review finding: nothing bounded `transcribing`. `stopUtterance()` no-ops on an
+// already-`inactive` recorder, so `onstop` never fires and `finishUtterance`
+// never runs — reachable when the mic is unplugged or permission is revoked
+// mid-conversation, and again when `/stt` hangs (no transport timeout). Either
+// way the loop sits at "Got it…" forever with the tracks live and the browser
+// mic indicator on. The 15s no-speech guard covers `listening` only.
+let transcribeWatchdog = null
+function clearTranscribeWatchdog() {
+  if (transcribeWatchdog) { clearTimeout(transcribeWatchdog); transcribeWatchdog = null }
+}
+function armTranscribeWatchdog() {
+  clearTranscribeWatchdog()
+  transcribeWatchdog = setTimeout(() => {
+    transcribeWatchdog = null
+    // Only if we are STILL waiting — a transcript that landed in the meantime
+    // has already moved the machine on, and re-checking is what keeps this a
+    // backstop rather than a competing terminal.
+    if (voiceState.value !== VOICE_TRANSCRIBING) return
+    failVoice("I couldn't hear that one back — the loop stopped. Tap the voice button to start again.")
+  }, TRANSCRIBE_TIMEOUT_MS)
+}
+
 async function finishUtterance() {
+  clearTranscribeWatchdog()
+  const transcribeToken = voiceStartToken
   const heard = sawSpeech
   // Firefox leaves `mimeType` empty and puts the real type on the chunks;
   // mislabelling Ogg as WebM is a silent upload bug (#2212).
@@ -1574,15 +1624,27 @@ async function finishUtterance() {
   } catch (e) {
     // /stt answers with a user-facing `detail`; a provider outage stops the
     // loop with that sentence rather than looping silently on nothing (AC 6).
-    failVoice(transcriptionErrorMessage(e))
+    failVoice(transcriptionErrorMessage(e), transcribeToken)
   }
 }
 
 async function runVoiceTurn(text) {
+  // Review finding: `send()` opens with `if (!text || sending.value) return`;
+  // this path had no such check, and the textarea stays enabled while the loop
+  // is `listening`. A user who typed and sent, then spoke, put the utterance
+  // into a SECOND concurrent `deliver()` — and the two share `elapsedTimer`,
+  // `sending`, `attachments` and, worst, `awaitPersistedReply`'s baseline
+  // assistant count, so the second turn's poll returns the first turn's reply.
+  // The spoken turn yields to the typed one rather than racing it.
+  const token = voiceStartToken
+  if (sending.value) {
+    failVoice("I couldn't send that — a message was already on its way. Tap the voice button to start again.", token)
+    return
+  }
   const res = await submitUserText(text)
   // A failed turn already renders on its own message bubble with a retry; the
   // loop stops rather than talking over an error the user needs to read.
-  if (!res.ok) { failVoice(res.error || "That didn't send — try again or type it."); return }
+  if (!res.ok) { failVoice(res.error || "That didn't send — try again or type it.", token); return }
   // The user may have pressed Stop while the agent was thinking. The turn still
   // ran and is in the thread; it just is not spoken.
   if (voiceState.value !== VOICE_THINKING) return
@@ -1630,6 +1692,7 @@ function monitorTick() {
       // Dispatch first, stop second: `onstop` fires on a later tick and reads
       // the state this sets, so the reverse order races its own recorder.
       voiceDispatch('utterance')
+      armTranscribeWatchdog()
       stopUtterance()
     } else if (verdict === 'idle') {
       // A hot mic nobody is talking into is given back, with words — not left

@@ -297,7 +297,50 @@ describe('the component consumes the machine (what only source can answer)', () 
   })
 
   it('does not narrate a reply twice while the loop is running', () => {
-    expect(component).toContain('!voiceConvLive.value) speak(data.response)')
+    expect(component).toMatch(/!voiceConvLive\.value[\s\S]{0,60}speak\(data\.response\)/)
+  })
+
+  it('does not speak the raw reply for a loop the user already stopped', () => {
+    // Review finding: the #2157 branch is evaluated AFTER the turn's await, so
+    // a Stop pressed while the agent was thinking left `voiceConvLive` false by
+    // the time it ran — and the un-cleaned reply (code fences, URLs, markdown)
+    // played anyway, contradicting "explicit Stop ends the loop". The user
+    // could not mute it either: the speaker button is hidden for the whole
+    // duration of a conversation.
+    expect(component).toContain('!voiceLoopEndedDuringTurn')
+    expect(component).toMatch(/function releaseVoiceHardware[\s\S]{0,400}voiceLoopEndedDuringTurn = true/)
+    // ...and it describes ONE turn, so a later ordinary turn still speaks.
+    expect(component).toMatch(/async function deliver\(text\) \{\s*voiceLoopEndedDuringTurn = false/)
+  })
+
+  it('bounds the transcribing state, so the mic cannot stay hot forever', () => {
+    // `stopUtterance()` no-ops on an already-inactive recorder, so `onstop`
+    // never fires and `finishUtterance` never runs — reachable when the mic is
+    // unplugged or permission revoked mid-conversation, and when `/stt` hangs
+    // (no transport timeout). The 15s no-speech guard covers `listening` only.
+    expect(component).toContain('armTranscribeWatchdog()')
+    expect(component).toMatch(/voiceState\.value !== VOICE_TRANSCRIBING\) return[\s\S]{0,200}failVoice/)
+    // Cleared on every legitimate exit, or it fires over a working loop.
+    expect(component).toMatch(/async function finishUtterance\(\) \{\s*clearTranscribeWatchdog\(\)/)
+    expect(component).toMatch(/function releaseVoiceHardware\(\) \{\s*clearTranscribeWatchdog\(\)/)
+  })
+
+  it('yields to a typed turn instead of racing it', () => {
+    // `send()` guards on `sending`; this path did not, and the textarea stays
+    // enabled while the loop is listening. Two concurrent `deliver()` calls
+    // share `elapsedTimer`, `sending`, `attachments` and `awaitPersistedReply`'s
+    // baseline count — so the second turn's poll returns the first turn's reply.
+    expect(component).toMatch(/async function runVoiceTurn[\s\S]{0,700}if \(sending\.value\) \{[\s\S]{0,200}return/)
+  })
+
+  it('a stale turn\u2019s failure cannot tear down a restarted conversation', () => {
+    // `nextVoiceState` handles stop/error BEFORE its OFF short-circuit, so
+    // `failVoice` always returned OFF + ACT_RELEASE. A user who stopped a slow
+    // turn and restarted had the NEW loop released when the abandoned one
+    // finally rejected.
+    expect(component).toMatch(/function failVoice\(message, token = null\)[\s\S]{0,120}token !== voiceStartToken\) return/)
+    expect(component).toMatch(/failVoice\([^)]*, token\)/)
+    expect(component).toContain('failVoice(transcriptionErrorMessage(e), transcribeToken)')
   })
 
   it('only renders the control when the loop can actually run', () => {
@@ -316,7 +359,7 @@ describe('the component consumes the machine (what only source can answer)', () 
     expect(component).toContain('if (voiceConvLive.value || voiceStarting) return')
     expect(component).toContain('const token = ++voiceStartToken')
     // Teardown invalidates an in-flight start rather than trusting it to notice.
-    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,400}voiceStartToken\+\+/)
+    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,900}voiceStartToken\+\+/)
     // A superseded start stops the tracks it just acquired.
     expect(component).toMatch(/token !== voiceStartToken[\s\S]{0,120}getTracks\(\)\.forEach/)
   })
@@ -337,7 +380,7 @@ describe('the component consumes the machine (what only source can answer)', () 
     expect(component).toMatch(/function stopSpeaking\(\)\s*\{\s*narrationToken\+\+/)
     // ...and releasing the hardware tears narration down itself rather than
     // relying on the machine happening to emit ACT_STOP_NARRATION first.
-    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,800}stopSpeaking\(\)/)
+    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,1200}stopSpeaking\(\)/)
   })
 
   it('releases the microphone on unmount', () => {

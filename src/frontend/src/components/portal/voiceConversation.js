@@ -181,6 +181,19 @@ export const BARGE_IN_HOLD_MS = 350
 export const MAX_UTTERANCE_MS = 30000
 // Nothing said at all: release the mic rather than hold it open indefinitely.
 export const NO_SPEECH_TIMEOUT_MS = 15000
+// Review finding: `transcribing` had no ceiling at all. `stopUtterance()` is a
+// no-op when the recorder is already `inactive`, so `onstop` never fires and
+// `finishUtterance` never runs — reachable when the mic is unplugged or
+// permission is revoked mid-conversation (the recorder auto-stops while the
+// machine is still `listening`, then the next tick dispatches `utterance` into
+// a recorder that cannot stop), and again when `/stt` hangs, since
+// `transcribeStt` carries no timeout either. Both leave `convStream`'s tracks
+// live — the browser mic indicator on — with no path back but Stop, which is
+// the one failure this feature says it must not ship.
+//
+// Generous, because the honest cost of firing early is a lost utterance: it
+// bounds the wedge without competing with a slow-but-working transcription.
+export const TRANSCRIBE_TIMEOUT_MS = 45000
 export const VOICE_IDLE_STOP_REASON =
   'Stopped listening — I didn’t hear anything. Tap the voice button to start again.'
 
