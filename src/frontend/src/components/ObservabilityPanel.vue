@@ -42,8 +42,20 @@
       </div>
     </div>
 
+    <!-- Review finding: a failed FIRST fetch leaves `enabled` at its `false`
+         default, and this arm used to be first — so a dropped request rendered
+         as a claim about the platform's CONFIGURATION ("set OTEL_ENABLED=1"),
+         the #1926 class this pass exists to remove, one arm further up. The
+         store records the real reason (`hasLoaded === false` → `error`), and
+         the spec asserted it was truthy, but no arm could ever display it.
+         The request-shaped arm therefore goes first. -->
+    <div v-if="!observabilityStore.hasLoaded && observabilityStore.error"
+         class="text-xs text-status-warning-600 dark:text-status-warning-400">
+      {{ observabilityStore.error }}
+    </div>
+
     <!-- Not enabled message -->
-    <div v-if="!observabilityStore.enabled" class="text-xs text-gray-500 dark:text-gray-400">
+    <div v-else-if="!observabilityStore.enabled" class="text-xs text-gray-500 dark:text-gray-400">
       OTel not enabled. Set OTEL_ENABLED=1.
     </div>
 
@@ -154,7 +166,7 @@
          stay (the store no longer discards them); this line says the reading is
          no longer live, so nothing here presents stale data as fresh. -->
     <p v-if="isStale" class="mt-2 text-xs text-status-warning-600 dark:text-status-warning-400">
-      Couldn't refresh — showing the reading from {{ formatLastUpdated }}.
+      Couldn't refresh — showing the reading from {{ staleReadingTime }}.
     </p>
 
     <!-- First load only (ent#253). This used to gate on `loading`, i.e. "a
@@ -180,7 +192,33 @@ const isExpanded = ref(false)
 // `available` verdicts rather than a row count, so only the loading half of
 // the rule applies here.
 const firstLoad = computed(() => observabilityStore.loading && !observabilityStore.hasLoaded)
-const isStale = computed(() => Boolean(observabilityStore.refreshError) && observabilityStore.hasLoaded)
+// Review finding: `hasLoaded` means "a request succeeded", not "we have a
+// reading" — it is set on any HTTP 200, including `{enabled: false}` and
+// `{available: false, error: …}` responses that carry no metrics at all. Gated
+// on that alone, a later transport failure on such an install asserted
+// "showing the reading from …" when there had never been a reading to show.
+//
+// The banner is a claim about DATA, so it gates on data. `hasLoaded` is
+// deliberately left as-is: it also retires the first-load placeholder, and an
+// OTel-disabled install would otherwise sit behind that placeholder forever —
+// which is the bug this branch fixed one commit ago, by a new route.
+const isStale = computed(() => (
+  Boolean(observabilityStore.refreshError) && observabilityStore.hasLoaded && observabilityStore.hasData
+))
+
+// Review finding: the relative form below has ONE reactive dependency,
+// `lastUpdated` — and the elapsed time comes from a non-reactive `Date.now()`.
+// On a failed refresh `lastUpdated` does not change, so the computed is never
+// invalidated and keeps serving its cached string: a reading from 10:00 renders
+// as "just now" for the entire outage, which is precisely the stale-as-fresh
+// claim this banner exists to prevent. The banner therefore prints an ABSOLUTE
+// time, like `DashboardPanel`'s `staleBannerMessage` does; the "Updated …" line
+// keeps the relative form, where it is refreshed by every successful poll.
+const staleReadingTime = computed(() => (
+  observabilityStore.lastUpdated
+    ? observabilityStore.lastUpdated.toLocaleTimeString()
+    : 'an earlier check'
+))
 
 const formatLastUpdated = computed(() => {
   if (!observabilityStore.lastUpdated) return 'never'

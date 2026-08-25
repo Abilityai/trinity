@@ -478,6 +478,11 @@ const view = computed(() => viewState({
   loading: loading.value,
   hasLoaded: dashboardData.value !== null,
   error: loadError.value,
+  // Review finding: `count` defaults to 1, so `state` was 'ready' for every
+  // successful response INCLUDING an empty one — and `ScanlineReveal`'s
+  // contract is `reveal: false` when loading ended without real data, so the
+  // celebratory 550ms wipe played over the "No Dashboard Defined" empty state.
+  count: dashboardData.value?.has_dashboard ? 1 : 0,
 }))
 const firstLoad = computed(() => view.value.state === 'loading')
 // ent#253 review: `viewState` ignores `loading` by design, so on a STOPPED
@@ -695,6 +700,15 @@ watch(() => props.agentStatus, (newStatus) => {
     startRefresh()
   } else {
     stopRefresh()
+    // Review finding: with the request-shaped arms now ahead of it in the
+    // chain, a failed FIRST load outranks "Agent Not Running" — and nothing
+    // cleared `loadError` on the way to stopped. So an agent that 502'd while
+    // booting kept showing "Couldn't load the dashboard" with a Retry that can only
+    // fail again, where the not-running copy belongs; and with data on screen,
+    // the stale banner stayed pinned above it. The error described a request
+    // that is no longer possible, so it goes with the run state that made it
+    // impossible — mirroring what the `agentName` watcher already does.
+    loadError.value = ''
   }
 })
 

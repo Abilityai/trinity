@@ -206,6 +206,53 @@ describe('the three fixed surfaces (what only source can answer)', () => {
     }
   })
 
+  it('lets go of the error when the agent stops', () => {
+    // Review finding: with the request-shaped arms now ahead of it, a failed
+    // FIRST load outranks "Agent Not Running" — and nothing cleared
+    // `loadError` on the way to stopped. So an agent that 502'd while booting
+    // kept showing "Couldn't load the dashboard" with a Retry that can only
+    // fail again, where the not-running copy belongs.
+    for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
+      expect(src, name).toMatch(/stopRefresh\(\)[\s\S]{0,700}loadError\.value = ''/)
+    }
+  })
+
+  it('does not play the celebratory wipe over an empty state', () => {
+    // `viewState`'s `count` defaults to 1, so `state` was 'ready' for every
+    // successful response including an empty one — against ScanlineReveal's
+    // documented contract.
+    expect(dashboard).toMatch(/count: dashboardData\.value\?\.has_dashboard \? 1 : 0/)
+    expect(metrics).toMatch(/count: metricsData\.value\?\.has_metrics \? 1 : 0/)
+  })
+
+  it('never calls an old reading "just now" in the stale banner', () => {
+    // The relative helper's only reactive dependency is `lastUpdated`, which a
+    // FAILED refresh does not change — so it kept serving its cached string for
+    // the whole outage, which is stale-as-fresh in the one line that exists to
+    // deny it. The banner prints an absolute time; "Updated …" keeps relative.
+    expect(observability).toContain('showing the reading from {{ staleReadingTime }}')
+    expect(observability).toMatch(/staleReadingTime = computed[\s\S]{0,200}toLocaleTimeString/)
+  })
+
+  it('shows a failed FIRST fetch instead of a claim about the platform config', () => {
+    // `enabled` sits at its `false` default after a dropped request, and that
+    // arm used to be first — so a transport failure rendered as
+    // "OTel not enabled. Set OTEL_ENABLED=1." The store recorded the real
+    // reason and no arm could display it.
+    const errArm = observability.indexOf('!observabilityStore.hasLoaded && observabilityStore.error')
+    const cfgArm = observability.indexOf('!observabilityStore.enabled')
+    expect(errArm).toBeGreaterThan(-1)
+    expect(errArm).toBeLessThan(cfgArm)
+    expect(observability).toContain("v-else-if=\"!observabilityStore.enabled\"")
+  })
+
+  it('does not claim a reading it never had', () => {
+    // `hasLoaded` means "a request succeeded", not "we have data" — it is set
+    // on `{enabled:false}` too, so a later transport failure asserted
+    // "showing the reading from …" on an install that never had one.
+    expect(observability).toMatch(/isStale = computed[\s\S]{0,600}hasData/)
+  })
+
   it('drops the bespoke spinners the pass replaced', () => {
     // Both panels' full-panel spinners are gone; the primitive carries
     // prefers-reduced-motion so the AC is satisfied by construction.
