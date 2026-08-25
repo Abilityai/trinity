@@ -56,7 +56,12 @@ describe('#2157 portal voice-mode persistence', () => {
     // The #2157 rule is asserted term by term so it survives that addition
     // without the guard degrading into "some line mentions voiceMode".
     expect(CODE).toContain('if (voiceMode.value && ttsEnabled.value && data.response')
-    expect(CODE).toContain('&& !voiceConvLive.value) speak(data.response)')
+    // ent#440 review: the guard gained a second term — a Stop pressed while the
+    // agent was thinking left `voiceConvLive` false by the time this branch ran
+    // (it is evaluated after the turn's await), so the raw reply was spoken for
+    // a loop the user had already ended. Pinned as a RULE, not a literal.
+    expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceConvLive\.value[\s\S]{0,80}speak\(data\.response\)/)
+    expect(CODE).toMatch(/!voiceLoopEndedDuringTurn\) speak\(data\.response\)/)
     expect(CODE).toContain('const ttsEnabled = computed(() => !!props.agent.voice_available)')
   })
 })
