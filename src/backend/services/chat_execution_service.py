@@ -1599,7 +1599,8 @@ async def dispatch_parallel_task(
 # ===========================================================================
 
 
-async def _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user):
+async def _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user,
+                                  actor_kind="operator"):
     """BACKLOG-001: if the execution is still queued in the backlog, cancel it
     directly (no container interaction, no slot to release) and return the
     cancelled-while-queued payload. Returns None if not queued (fall through to
@@ -1617,13 +1618,18 @@ async def _cancel_queued_if_queued(name, execution_id, task_execution_id, curren
             await activity_service.track_activity(
                 agent_name=name,
                 activity_type=ActivityType.EXECUTION_CANCELLED,
-                user_id=current_user.id,
+                user_id=getattr(current_user, "id", None),
                 triggered_by="user",
                 related_execution_id=task_execution_id,
                 details={
                     "execution_id": execution_id,
                     "task_execution_id": task_execution_id,
                     "status": "cancelled_while_queued",
+                    # ent#155: a public-link visitor and a Workspace client are
+                    # both real people cancelling their own turn, and neither
+                    # has a `users` row — so `user_id` is legitimately NULL and
+                    # this is what says who acted.
+                    "actor_kind": actor_kind,
                 },
             )
             return {"status": "cancelled_while_queued", "execution_id": execution_id}
@@ -1667,7 +1673,8 @@ async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
         )
 
 
-async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user):
+async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user,
+                                       actor_kind="operator"):
     """Proxy the terminate to the agent container, force-release capacity on a
     terminal outcome, write the #679 CANCELLED CAS (only when we actually
     terminated a running turn), close the #1332 dispatch activity, and track the
@@ -1720,14 +1727,15 @@ async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, c
         await activity_service.track_activity(
             agent_name=name,
             activity_type=ActivityType.EXECUTION_CANCELLED,
-            user_id=current_user.id,
+            user_id=getattr(current_user, "id", None),
             triggered_by="user",
             related_execution_id=task_execution_id,
             details={
                 "execution_id": execution_id,
                 "task_execution_id": task_execution_id,
                 "status": result.get("status"),
-                "returncode": result.get("returncode")
+                "returncode": result.get("returncode"),
+                "actor_kind": actor_kind,
             }
         )
         return result
@@ -1738,11 +1746,27 @@ async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, c
         raise ChatDispatchError(504, f"Timeout connecting to agent '{name}'")
 
 
-async def terminate_execution(*, name, execution_id, task_execution_id, current_user):
+async def terminate_execution(*, name, execution_id, task_execution_id, current_user=None,
+                              actor_kind="operator"):
     """Terminate a running execution: cancel-if-queued (BACKLOG-001), else
     container-gate then proxy-terminate + finalize. Returns the result dict
-    (or the cancelled-while-queued payload); raises ChatDispatchError."""
-    queued = await _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user)
+    (or the cancelled-while-queued payload); raises ChatDispatchError.
+
+    ent#155: `current_user` is OPTIONAL because the cancel trigger is no longer
+    operator-only. A public-link visitor and a Workspace client are both people
+    stopping a turn they themselves started, and neither has a `users` row — so
+    the caller-identity gate belongs to the ROUTE (the public link token, or the
+    portal roster + started-by-this-caller check), and this function only needs
+    to know that someone authorised got here. It records `actor_kind` on the
+    activity so a NULL `user_id` is legible rather than mysterious.
+
+    The cancel SEMANTICS are unchanged and deliberately so: CANCELLED, not
+    FAILED (#679/#1332), neutral for the dispatch breaker, and CAS-guarded — a
+    cancel that lands after the row is already terminal loses and leaves the
+    real terminal alone.
+    """
+    queued = await _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user,
+                                            actor_kind=actor_kind)
     if queued is not None:
         return queued
 
@@ -1752,4 +1776,5 @@ async def terminate_execution(*, name, execution_id, task_execution_id, current_
     if container.status != "running":
         raise ChatDispatchError(503, "Agent is not running")
 
-    return await _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user)
+    return await _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user,
+                                               actor_kind=actor_kind)

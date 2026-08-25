@@ -28,6 +28,8 @@ from dependencies import get_current_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.agent_auth import agent_httpx_client
+from services.chat_execution_service import terminate_execution as _terminate_execution
+from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
@@ -1073,6 +1075,58 @@ async def public_execution_status(
         "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
         "error": execution.error if execution.status in ("failed", "cancelled") else None,
     }
+
+
+@router.post("/executions/{token}/{execution_id}/terminate")
+async def public_terminate_execution(
+    token: str,
+    execution_id: str,
+    request: Request,
+):
+    """Cancel a public-chat turn the visitor started (ent#155).
+
+    Same access scoping as every other public execution route: rate limit,
+    token validation, and the execution must belong to the agent behind THIS
+    link. There is no JWT and no `users` row — the token is the credential, and
+    it is the same one that was required to start the turn.
+
+    Deliberately no cross-visitor gate beyond the link: a public link has no
+    per-visitor identity to check against (`source_user_email` is only set when
+    the visitor verified an email), so scoping is per-link, exactly as the
+    `status` and `stream` routes already are. Anyone holding the link can
+    already read a turn's stream; being able to stop one is the same authority,
+    not a wider one.
+
+    Cancellation semantics are the platform's existing ones — CANCELLED, not
+    FAILED (#679/#1332), and CAS-guarded, so a cancel that arrives after the
+    turn finished loses and the reply stands.
+    """
+    client_ip = _get_client_ip(request)
+    check_public_link_rate_limit(client_ip)
+    link = _validate_public_link(token)
+
+    agent_name = link["agent_name"]
+
+    execution = db.get_execution(execution_id)
+    if not execution or execution.agent_name != agent_name:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Already finished: a no-op success, never a 4xx. The client races its own
+    # poll, and a cancel that lost that race is not an error the visitor did
+    # anything about — the reply is on screen.
+    if execution.status not in ("running", "queued"):
+        return {"status": "already_terminal", "execution_id": execution_id}
+
+    try:
+        return await _terminate_execution(
+            name=agent_name,
+            execution_id=execution_id,
+            task_execution_id=execution_id,
+            current_user=None,
+            actor_kind="public_link",
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
 @router.get("/sessions/{token}")

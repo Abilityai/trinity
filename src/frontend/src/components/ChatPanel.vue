@@ -160,8 +160,11 @@
           :playbooks="playbooks"
           :voice-available="voiceAvailable"
           :voice-active="voice.isActive.value"
+          :cancellable="canCancelTurn"
+          :cancelling="cancelling"
           @submit="sendMessage"
           @voice="startVoice"
+          @cancel="cancelTurn"
         />
       </div>
     </template>
@@ -173,6 +176,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome } from '../utils/turnCancel'
 import VoiceOverlay from './chat/VoiceOverlay.vue'
 import ModelSelector from './ModelSelector.vue'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
@@ -251,6 +255,15 @@ const endVoice = async () => {
 const message = ref('')
 const messages = ref([])
 const loading = ref(false)
+// ent#155 — stopping an in-flight turn.
+// `activeExecutionId` is the id the Stop control acts on; `pendingUserMessage`
+// is the text to give back. Both are set together at dispatch and cleared
+// together at every exit, because a Stop with an id but no text (or the
+// reverse) is a control that half-works.
+const activeExecutionId = ref(null)
+const pendingUserMessage = ref('')
+const cancelling = ref(false)
+const canCancelTurn = computed(() => loading.value && !!activeExecutionId.value)
 const loadingText = ref('Thinking...')
 const error = ref(null)
 const isRateLimitError = computed(() => {
@@ -662,6 +675,11 @@ const sendMessage = async (userMessage, files = []) => {
       throw new Error('No execution_id returned from async task submission')
     }
 
+    // ent#155: the Stop control can only act once we have an id, and the words
+    // can only be restored if we kept them. Set together, cleared together.
+    activeExecutionId.value = executionId
+    pendingUserMessage.value = userMessage
+
     // Subscribe to SSE stream for real-time status updates
     subscribeToStream(executionId)
 
@@ -708,7 +726,56 @@ const sendMessage = async (userMessage, files = []) => {
     loading.value = false
     loadingText.value = 'Thinking...'
     closeSSE()
+    // Cleared on EVERY exit, including the cancel path — a stale id would let
+    // a later Escape terminate an execution that already ended, and a stale
+    // pending message would be restored over a draft the user has moved on to.
+    activeExecutionId.value = null
+    pendingUserMessage.value = ''
+    cancelling.value = false
   }
+}
+
+// ent#155: stop the turn, give the words back.
+const cancelTurn = async () => {
+  const executionId = activeExecutionId.value
+  if (!executionId || cancelling.value) return
+  cancelling.value = true
+  const restoreText = pendingUserMessage.value
+  try {
+    const res = await axios.post(
+      `/api/agents/${props.agentName}/executions/${executionId}/terminate?task_execution_id=${executionId}`,
+      {},
+      { headers: authStore.authHeader }
+    )
+    const alreadyTerminal = res.data?.status === 'already_terminal'
+    const outcome = cancelOutcome({ ok: true, alreadyTerminal })
+    if (outcome.kind === 'cancelled') {
+      // The poll sees the CANCELLED terminal and renders it; the words come
+      // back here so the user can edit and resend. Prepended, never replacing
+      // a draft typed while waiting.
+      message.value = restoreDraft(restoreText, message.value)
+    }
+  } catch (err) {
+    // The turn is still running and still spending — say so, and leave the
+    // input alone: restoring the text here would imply a stop that did not
+    // happen (AC: honest status).
+    error.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
+    cancelling.value = false
+  }
+}
+
+// Escape stops the turn — and does nothing at all otherwise. The overlay list
+// is what keeps it from hijacking the Escape that closes a picker or exits the
+// voice overlay; the rule itself lives in `utils/turnCancel.js` so it can be
+// tested (vitest has no mount harness).
+const onEscapeKeydown = (event) => {
+  if (!shouldCancelOnEscape(event, {
+    inFlight: canCancelTurn.value,
+    cancelling: cancelling.value,
+    overlays: [voice.isActive.value, showSessionDropdown.value],
+  })) return
+  event.preventDefault()
+  cancelTurn()
 }
 
 // Click outside to close dropdown
@@ -764,6 +831,7 @@ watch(() => props.agentName, () => {
 // Initialize
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  document.addEventListener('keydown', onEscapeKeydown)
   if (props.agentStatus === 'running') {
     loadSessions()
     checkVoiceAvailability()
@@ -773,6 +841,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('keydown', onEscapeKeydown)
   closeSSE()
   // End voice session on unmount
   if (voice.isActive.value) {

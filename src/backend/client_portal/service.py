@@ -2108,6 +2108,50 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     }
 
 
+async def terminate_portal_turn(agent_name: str, execution_id: str) -> dict:
+    """Cancel an in-flight Workspace turn (ent#155).
+
+    HTTP-free like the rest of this module: the ROUTE has already established
+    that this caller may touch this execution (roster + started-by-this-caller),
+    so this only decides whether there is anything to cancel and delegates the
+    cancel itself to the platform's one terminate path — CANCELLED not FAILED,
+    CAS-guarded, breaker-neutral (#679/#1332). Reimplementing any of that here
+    would be a second cancel semantics for one surface.
+    """
+    from database import db as core_db
+    from services.chat_execution_service import terminate_execution
+    from services.chat_signals import ChatDispatchError
+
+    try:
+        execution = core_db.get_execution(execution_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("portal cancel: execution lookup failed for %s", execution_id)
+        raise ClientPortalError(503, "Couldn't stop the turn. Try again.")
+
+    if not execution:
+        raise ClientPortalError(404, "Execution not found")
+
+    # Already over — a no-op success, not a refusal. The client races its own
+    # reattach poll and losing that race is not something a person can act on.
+    if execution.status not in ("running", "queued"):
+        return {"status": "already_terminal", "execution_id": execution_id}
+
+    try:
+        return await terminate_execution(
+            name=agent_name,
+            execution_id=execution_id,
+            task_execution_id=execution_id,
+            current_user=None,
+            actor_kind="workspace_client",
+        )
+    except ChatDispatchError as e:
+        # Mapped 1:1, but with client-facing wording: the operator-facing
+        # detail names the agent host, which is not the client's business.
+        if e.status_code in (502, 503, 504):
+            raise ClientPortalError(503, "Couldn't stop the turn — the agent didn't respond.")
+        raise ClientPortalError(e.status_code, "Couldn't stop the turn.")
+
+
 def execution_belongs_to_caller(execution_id: str, agent_name: str, email: str) -> bool:
     """Whether ``email`` may watch ``execution_id`` on ``agent_name``.
 

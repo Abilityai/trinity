@@ -283,7 +283,10 @@
           :disabled="chatLoading"
           :public-token="token"
           placeholder="Type your message or / for playbooks..."
+          :cancellable="canCancelTurn"
+          :cancelling="cancelling"
           @submit="sendMessage"
+          @cancel="cancelTurn"
         />
       </div>
     </main>
@@ -295,6 +298,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { ChatMessages, ChatInput, ChatEmptyState, ChatHistoryDropdown } from '../components/chat'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome } from '../utils/turnCancel'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 import { useAuthStore } from '../stores/auth'
 
@@ -330,6 +334,14 @@ const chatLoading = ref(false)
 const chatError = ref(null)
 const messagesRef = ref(null)
 const loadingText = ref('Thinking...')
+
+// ent#155 — stopping an in-flight turn from the public link. The token IS the
+// credential here, exactly as it is for the status and stream routes; there is
+// no JWT and no user row.
+const activeExecutionId = ref(null)
+const pendingUserMessage = ref('')
+const cancelling = ref(false)
+const canCancelTurn = computed(() => chatLoading.value && !!activeExecutionId.value)
 
 // SSE state (THINK-001 for public chat)
 let heartbeatTimer = null
@@ -788,6 +800,11 @@ const sendMessage = async (userMessage, files = []) => {
       localStorage.setItem(`public_chat_session_id_${token.value}`, submitResponse.data.session_id)
     }
 
+    // ent#155: id + words captured together, so Stop has something to act on
+    // and something to give back.
+    activeExecutionId.value = executionId
+    pendingUserMessage.value = userMessage
+
     // Subscribe to SSE stream for real-time status updates
     subscribeToStream(executionId)
 
@@ -827,11 +844,47 @@ const sendMessage = async (userMessage, files = []) => {
     chatLoading.value = false
     loadingText.value = 'Thinking...'
     closeSSE()
+    activeExecutionId.value = null
+    pendingUserMessage.value = ''
+    cancelling.value = false
   }
+}
+
+// ent#155: stop the turn, give the words back. Same rules as the internal
+// chat — they live in `utils/turnCancel.js` precisely so these two surfaces
+// cannot drift on what a person sees.
+const cancelTurn = async () => {
+  const executionId = activeExecutionId.value
+  if (!executionId || cancelling.value) return
+  cancelling.value = true
+  const restoreText = pendingUserMessage.value
+  try {
+    const res = await axios.post(
+      `/api/public/executions/${token.value}/${executionId}/terminate`
+    )
+    const alreadyTerminal = res.data?.status === 'already_terminal'
+    const outcome = cancelOutcome({ ok: true, alreadyTerminal })
+    if (outcome.kind === 'cancelled') {
+      message.value = restoreDraft(restoreText, message.value)
+    }
+  } catch (err) {
+    chatError.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
+    cancelling.value = false
+  }
+}
+
+const onEscapeKeydown = (event) => {
+  if (!shouldCancelOnEscape(event, {
+    inFlight: canCancelTurn.value,
+    cancelling: cancelling.value,
+  })) return
+  event.preventDefault()
+  cancelTurn()
 }
 
 // Initialize
 onMounted(async () => {
+  document.addEventListener('keydown', onEscapeKeydown)
   await loadLinkInfo()
 
   // If link is valid and chat is accessible (no email needed or already verified)
@@ -856,6 +909,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('keydown', onEscapeKeydown)
   closeSSE()
 })
 </script>

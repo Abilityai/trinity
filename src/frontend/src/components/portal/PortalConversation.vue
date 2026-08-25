@@ -181,6 +181,23 @@
             @click="voiceError = ''"
           >Dismiss</button>
         </p>
+        <!-- ent#155: a cancel that was REFUSED. Deliberately not `markFailed` —
+             the turn is still running and still spending, so calling it failed
+             would be the dishonest half of "honest status". -->
+        <p
+          v-if="cancelError"
+          class="mb-2 text-xs text-status-danger-600 dark:text-status-danger-400 flex items-start gap-1.5"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="mt-1 w-1.5 h-1.5 rounded-full bg-status-danger-500 shrink-0"></span>
+          <span class="flex-1">{{ cancelError }}</span>
+          <button
+            type="button"
+            class="shrink-0 underline hover:no-underline text-gray-500 dark:text-gray-400"
+            @click="cancelError = ''"
+          >Dismiss</button>
+        </p>
         <!-- Attached (uploaded to the agent inbox) file chips -->
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
@@ -262,7 +279,26 @@
               @select="onComposerCaret"
             ></textarea>
           </div>
+          <!-- ent#155: Send becomes Stop while a turn is live. Send is disabled
+               for that whole period anyway, so this is the same control doing
+               the only thing it usefully can. -->
           <button
+            v-if="canCancelTurn"
+            type="button"
+            @click="cancelTurn"
+            :disabled="cancelling"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-status-danger-600 hover:bg-status-danger-700 text-white disabled:opacity-40 transition"
+            :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
+            aria-label="Stop this turn"
+          >
+            <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" /></svg>
+          </button>
+          <button
+            v-else
             type="submit"
             class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
             :disabled="sending || !input.trim()"
@@ -322,6 +358,7 @@ import {
   speechErrorMessage,
   transcriptionErrorMessage,
 } from './portalUtils'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome } from '../../utils/turnCancel'
 
 const props = defineProps({
   // `stt_available` (#2212) is the platform's ability to transcribe server-side
@@ -349,6 +386,14 @@ const currentSessionId = ref(props.sessionId)
 const loadingHistory = ref(false)
 const input = ref('')
 const sending = ref(false)
+// ent#155 — stopping an in-flight turn. The id arrives with the 202, so Stop is
+// offered only once there is something to stop; a turn that fell back to the
+// synchronous send has no id and correctly offers nothing.
+const activeExecutionId = ref(null)
+const pendingUserText = ref('')
+const cancelling = ref(false)
+const cancelError = ref('')
+const canCancelTurn = computed(() => sending.value && !!activeExecutionId.value)
 const attachments = ref([])
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
@@ -498,6 +543,7 @@ onMounted(async () => {
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onEscapeKeydown)
   window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
   if (props.sessionId) await loadThread(props.sessionId)
@@ -516,6 +562,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('online', onNet)
   window.removeEventListener('offline', onNet)
   document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onEscapeKeydown)
   window.removeEventListener('resize', onViewportResize)
   cleanupVoice()
 })
@@ -810,6 +857,10 @@ async function deliver(text) {
     }
 
     if (started) {
+      // ent#155: this is the first moment a Stop is possible — before it there
+      // is no turn to stop, and a control offered earlier would be a lie.
+      activeExecutionId.value = started.execution_id || null
+      pendingUserText.value = text
       // Stamp the dispatch instant: the server's marker TTL starts here, so the
       // client's ceiling must too (see awaitPersistedReply).
       const dispatchedAt = Date.now()
@@ -895,7 +946,48 @@ async function deliver(text) {
   } finally {
     sending.value = false
     clearInterval(elapsedTimer)
+    activeExecutionId.value = null
+    pendingUserText.value = ''
+    cancelling.value = false
     await scrollDown()
+  }
+}
+
+// ent#155: stop the turn, give the words back. The server keeps the cancel
+// semantics the rest of the platform uses (CANCELLED, CAS-guarded), and the
+// in-flight marker + resume lock are released by the turn's own `finally`, so
+// there is nothing to unwind here.
+// Escape stops the turn — but only when nothing else owns Escape. The
+// typeahead uses it to dismiss (`resolveComposerKey` → 'dismiss'/'close') and
+// the voice loop uses it to leave, so both are listed as overlays; the rule
+// itself is pure and lives in `utils/turnCancel.js`.
+function onEscapeKeydown(event) {
+  if (!shouldCancelOnEscape(event, {
+    inFlight: canCancelTurn.value,
+    cancelling: cancelling.value,
+    overlays: [typeaheadOpen.value, voiceConvLive.value],
+  })) return
+  event.preventDefault()
+  cancelTurn()
+}
+
+async function cancelTurn() {
+  const executionId = activeExecutionId.value
+  if (!executionId || cancelling.value) return
+  cancelling.value = true
+  cancelError.value = ''
+  const restoreText = pendingUserText.value
+  try {
+    const res = await store.cancelPortalTurn(props.agent.name, executionId)
+    const outcome = cancelOutcome({ ok: true, alreadyTerminal: res?.status === 'already_terminal' })
+    if (outcome.kind === 'cancelled') {
+      input.value = restoreDraft(restoreText, input.value)
+      autoGrowAfterUpdate()
+    }
+  } catch (err) {
+    // Still running, still spending — say so and leave the composer alone.
+    cancelError.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
+    cancelling.value = false
   }
 }
 

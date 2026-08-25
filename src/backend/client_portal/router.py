@@ -982,6 +982,50 @@ async def portal_chat_stream(
     return PortalTurnStarted(**started)
 
 
+@router.post("/agents/{agent_name}/executions/{execution_id}/terminate")
+async def portal_terminate_execution(
+    agent_name: str,
+    execution_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Stop one of the caller's OWN in-flight turns (ent#155).
+
+    The same three gates as the stream route, in the same order and for the
+    same reason: the agent must be on the caller's roster, the execution must
+    belong to that agent, and it must have been STARTED BY THIS CALLER. The
+    third is load-bearing — executions are agent-scoped, so without it any
+    client of a shared agent could stop another client's turn by guessing an
+    id, which is strictly worse than reading one.
+
+    A turn that has already finished answers `already_terminal` rather than a
+    4xx: the client is racing its own reattach poll, and losing that race is
+    not an error anyone can act on — the reply is on screen. Cancellation
+    itself is the platform's existing CAS-guarded CANCELLED terminal
+    (#679/#1332), so a cancel landing after the fact cannot overwrite it.
+
+    The in-flight marker and the resume lock need no special handling here:
+    `start_portal_turn`'s background task clears both in its `finally`, on
+    every exit path including the one a SIGINT produces.
+    """
+    email = principal.email
+    include_owned = principal.is_platform
+
+    _require_roster(agent_name, email, include_owned)
+    if not service.execution_belongs_to_caller(execution_id, agent_name, email):
+        # Uniform 404, exactly like the roster miss — never confirm that an
+        # execution exists to someone who may not touch it.
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_cancel:{email}:{agent_name}", 30, 60,
+                         detail="Too many cancellations.")
+
+    try:
+        return await service.terminate_portal_turn(agent_name, execution_id)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
 @router.get("/agents/{agent_name}/executions/{execution_id}/stream")
 async def portal_stream_execution(
     agent_name: str,
