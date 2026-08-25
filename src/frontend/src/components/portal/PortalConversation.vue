@@ -1238,19 +1238,37 @@ let recog = null, mediaRec = null, mediaStream = null, recChunks = [], lastAudio
 let speechWatchdog = null
 
 function revokeAudio() { if (lastAudioUrl) { URL.revokeObjectURL(lastAudioUrl); lastAudioUrl = null } }
+// ent#440 review: synthesis is a real 1-3 s round trip, and the loop keeps
+// running through it — `voiceState` is already SPEAKING, so `monitorTick` is
+// evaluating barge-in, and Stop is one click away. Without a generation token
+// `speak` COMMITS playback after the await regardless of what happened during
+// it: barge-in pauses an element that has no new src yet, the mic reopens, and
+// the agent then narrates over the user's fresh utterance; explicit Stop
+// releases the hardware and the audio plays anyway, contradicting "Stop ends
+// the loop". `narrateReply`'s trailing guard suppresses only the DISPATCH —
+// by then the element is already committed, so the check has to live here,
+// where the commit happens. `voiceStartToken` is the precedent for the shape.
+let narrationToken = 0
 async function speak(text) {
   if (!text) return
+  const token = ++narrationToken
   speaking.value = true
   try {
     const url = await store.synthesizeTts(props.agent.name, text)
+    // Abandoned mid-synthesis (barge-in, Stop, agent switch, unmount). Discard
+    // the audio rather than playing it into a conversation that moved on; the
+    // URL is ours and nothing else holds it, so revoke it here.
+    if (token !== narrationToken) { if (url) URL.revokeObjectURL(url); return }
     // The store answers `null` for every failure shape, so this is the only
     // place narration can report that it did not happen (#2212).
     if (!url) { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE; return }
     revokeAudio(); lastAudioUrl = url
     if (audioEl.value) { audioEl.value.src = url; await audioEl.value.play() } else speaking.value = false
-  } catch { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE }
+  } catch { if (token === narrationToken) { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE } }
 }
-function stopSpeaking() { if (audioEl.value) audioEl.value.pause(); speaking.value = false }
+// Bumping the token is what makes an in-flight synthesis abandon itself; the
+// pause alone cannot reach audio that has not been assigned yet.
+function stopSpeaking() { narrationToken++; if (audioEl.value) audioEl.value.pause(); speaking.value = false }
 // Dictated text lands at the end of whatever is already typed — one place, so
 // the two mic paths cannot drift on how a transcript is applied.
 function appendTranscript(text) {
@@ -1481,6 +1499,11 @@ function releaseVoiceHardware() {
   // it will find its token stale and stop the stream it just acquired instead
   // of installing it into a loop that has already been torn down.
   voiceStartToken++
+  // Narration is torn down HERE too, not left to the machine's SPEAKING exit:
+  // releasing the hardware while a synthesis is in flight would otherwise let
+  // it play after the loop is gone (ent#440 review). `stopSpeaking` bumps the
+  // narration token, which is what actually abandons it.
+  stopSpeaking()
   if (convTimer) { clearInterval(convTimer); convTimer = null }
   try { if (convRec && convRec.state !== 'inactive') convRec.stop() } catch { /* noop */ }
   convRec = null; convChunks = []

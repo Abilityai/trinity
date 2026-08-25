@@ -321,6 +321,25 @@ describe('the component consumes the machine (what only source can answer)', () 
     expect(component).toMatch(/token !== voiceStartToken[\s\S]{0,120}getTracks\(\)\.forEach/)
   })
 
+  it('cannot narrate into a loop that moved on during synthesis', () => {
+    // Review of this PR: `speak()` awaits a real 1-3 s TTS round trip while the
+    // machine is already SPEAKING, so barge-in or an explicit Stop can land
+    // mid-await. Without a generation token the function then COMMITS playback
+    // anyway — narrating over the user's fresh utterance, or playing after
+    // Stop released the hardware. `narrateReply`'s trailing guard suppresses
+    // only the dispatch; the element is committed before it runs, so the check
+    // has to be inside `speak`, before `src` is assigned.
+    expect(component).toMatch(/async function speak\([\s\S]{0,200}const token = \+\+narrationToken/)
+    expect(component).toMatch(
+      /await store\.synthesizeTts[\s\S]{0,400}token !== narrationToken[\s\S]{0,200}return/)
+    // The abandoning paths bump the token — a pause cannot reach audio that has
+    // not been assigned yet.
+    expect(component).toMatch(/function stopSpeaking\(\)\s*\{\s*narrationToken\+\+/)
+    // ...and releasing the hardware tears narration down itself rather than
+    // relying on the machine happening to emit ACT_STOP_NARRATION first.
+    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,800}stopSpeaking\(\)/)
+  })
+
   it('releases the microphone on unmount', () => {
     expect(component).toMatch(/function cleanupVoice\(\)\s*\{\s*releaseVoiceHardware\(\)/)
   })
