@@ -115,7 +115,16 @@ class McpKeyOperations:
     # filter on `scope IN ('agent','connector')` to find their work — the canary
     # L-03 orphan scan, the key orphan sweep, and the agent rename/purge cascade
     # — so a non-agent scope carrying an agent name would be invisible to all
-    # three and outlive its agent forever. Enforced, not left to convention.
+    # three and outlive its agent forever.
+    #
+    # The invariant holds HERE BY CONSTRUCTION: this creator writes the literal
+    # `agent_name=None` below, and `McpApiKeyCreate` declares no `agent_name` for
+    # a caller to supply. An earlier revision guarded on
+    # `getattr(key_data, "agent_name", None)` — which Pydantic makes permanently
+    # falsy, so it could never fire while reading as protection. Removed in
+    # review; the constant stays as the documented invariant and
+    # `test_2323_machine_identities.py` asserts the WRITTEN ROW rather than
+    # membership in this tuple.
     _AGENTLESS_SCOPES = ("user", "portal_delegate", "ops")
 
     def create_mcp_api_key(self, username: str, key_data: McpApiKeyCreate) -> Optional[McpApiKeyWithSecret]:
@@ -131,11 +140,6 @@ class McpKeyOperations:
 
         scope = getattr(key_data, "scope", None) or "user"
         if scope not in self._USER_CREATABLE_SCOPES:
-            return None
-        # #2323 — see `_AGENTLESS_SCOPES`. This endpoint has never set an agent
-        # name, so the guard is belt-and-braces today; it exists so a future
-        # caller cannot quietly bind one.
-        if scope in self._AGENTLESS_SCOPES and getattr(key_data, "agent_name", None):
             return None
 
         key_id = self._generate_id()

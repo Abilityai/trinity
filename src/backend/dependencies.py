@@ -862,6 +862,29 @@ _OPS_ALLOWED_ROUTES = (
 )
 
 
+# Scopes that may open the fleet-wide event stream (`/ws/events`). ALLOWlist.
+#
+# That handler validates the key itself and never runs `get_current_user`, so it
+# reaches NONE of the fences above — the ops fence's own "enforced at the single
+# auth entry point" claim was false for it. The stream carries fleet-wide
+# activity and execution events scoped by the OWNER's accessible agents, which
+# for an admin owner is everything, so it is exactly the kind of broad read the
+# bounded scopes exist to exclude.
+#
+# `ops` is absent because the stream is not in its read allowlist. `connector`
+# and `portal_delegate` are absent for the same reason their route fences deny
+# them everything else — this closes a hole that predates #2323 rather than
+# preserving it out of politeness; both are fenced to one or two routes, so
+# nothing legitimate reaches this one.
+WS_EVENT_STREAM_SCOPES = frozenset({None, "user", "agent", "system"})
+
+
+def scope_may_open_event_stream(scope: Optional[str]) -> bool:
+    """#2323 — allowlist gate for `/ws/events`. `None`/unset coerces to `user`,
+    matching `validate_mcp_api_key` and `get_current_user`."""
+    return (scope or "user") in WS_EVENT_STREAM_SCOPES
+
+
 def _enforce_ops_key_fence(request: Request) -> None:
     """Route containment for `ops`-scoped keys (#2323).
 

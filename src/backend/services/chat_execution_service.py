@@ -125,8 +125,6 @@ async def prepare_chat_execution(
     current_user: User,
     x_source_agent: Optional[str],
     x_via_mcp: Optional[str],
-    x_mcp_key_id: Optional[str],
-    x_mcp_key_name: Optional[str],
     idem: object,
     chat_execution_id: str,
     capacity_result: object,
@@ -173,8 +171,8 @@ async def prepare_chat_execution(
         source_user_id=current_user.id,
         source_user_email=current_user.email or current_user.username,
         source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
+        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         subscription_id=_exec_subscription_id,
     )
     task_execution_id = task_execution.id if task_execution else None
@@ -259,7 +257,7 @@ async def prepare_chat_execution(
 
 def build_chat_payload(
     *, name: str, request: ChatMessageRequest, triggered_by: str, current_user: User,
-    x_source_agent: Optional[str], x_mcp_key_name: Optional[str], task_execution_id: object,
+    x_source_agent: Optional[str], task_execution_id: object,
 ) -> dict:
     """Build the agent-server /api/chat payload: message + model + the
     runtime-aware platform/execution-context system prompt (MEM-001, #1187), and
@@ -284,7 +282,7 @@ def build_chat_payload(
             triggered_by=triggered_by,
             source_user_email=current_user.email or current_user.username,
             source_agent_name=x_source_agent,
-            source_mcp_key_name=x_mcp_key_name,
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             model=request.model,
         )
         payload["system_prompt"] = compose_system_prompt(
@@ -604,7 +602,6 @@ async def run_chat_turn(
     request: ChatMessageRequest,
     current_user: User,
     x_source_agent: Optional[str],
-    x_mcp_key_name: Optional[str],
     triggered_by: str,
     task_execution_id: object,
     _chat_subscription_id: object,
@@ -632,7 +629,7 @@ async def run_chat_turn(
         payload = build_chat_payload(
             name=name, request=request, triggered_by=triggered_by,
             current_user=current_user, x_source_agent=x_source_agent,
-            x_mcp_key_name=x_mcp_key_name, task_execution_id=task_execution_id,
+            task_execution_id=task_execution_id,
         )
         start_time = datetime.utcnow()
         response = await agent_post_with_retry(
@@ -1081,7 +1078,7 @@ async def process_task_file_uploads(*, request, name, container, current_user) -
 
 
 async def create_task_execution_and_activities(
-    *, request, name, current_user, x_source_agent, x_mcp_key_id, x_mcp_key_name,
+    *, request, name, current_user, x_source_agent,
     triggered_by, is_self_task, idem,
 ):
     """Create the execution record (#95/#96), attach the idempotency claim, and
@@ -1110,8 +1107,8 @@ async def create_task_execution_and_activities(
         source_user_id=current_user.id,
         source_user_email=current_user.email or current_user.username,
         source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
+        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         model_used=request.model,
         subscription_id=subscription_id,
         source_channel=src_channel,
@@ -1233,7 +1230,7 @@ def _ephemeral_dispatch_error(name, execution_id, exc) -> ChatDispatchError:
 async def _acquire_task_capacity(
     *, mode_label, name, request, execution_id, triggered_by, collaboration_activity_id,
     is_self_task, self_task_activity_id, user_id, user_email, subscription_id,
-    x_source_agent, x_mcp_key_id, x_mcp_key_name, idem,
+    x_source_agent, idem,
 ):
     """Pre-acquire the /task capacity slot (queue_persistent overflow) shared by
     the async and sync branches. On a deny it releases the idempotency claim and
@@ -1262,8 +1259,6 @@ async def _acquire_task_capacity(
                 user_email=user_email,
                 subscription_id=subscription_id,
                 x_source_agent=x_source_agent,
-                x_mcp_key_id=x_mcp_key_id,
-                x_mcp_key_name=x_mcp_key_name,
                 triggered_by=triggered_by,
                 collaboration_activity_id=collaboration_activity_id,
                 is_self_task=is_self_task,
@@ -1319,7 +1314,7 @@ def _map_task_failure(name, result):
 async def _dispatch_async(
     *, request, name, current_user, execution_id, subscription_id,
     collaboration_activity_id, self_task_activity_id, is_self_task, triggered_by,
-    reserved_event_dispatch, image_data, idem, x_source_agent, x_mcp_key_id, x_mcp_key_name,
+    reserved_event_dispatch, image_data, idem, x_source_agent,
 ):
     """Async branch (#95): pre-acquire capacity, then either report queued-202 or
     spawn the background task and report accepted-202."""
@@ -1328,8 +1323,7 @@ async def _dispatch_async(
         triggered_by=triggered_by, collaboration_activity_id=collaboration_activity_id,
         is_self_task=is_self_task, self_task_activity_id=self_task_activity_id,
         user_id=current_user.id, user_email=current_user.email or current_user.username,
-        subscription_id=subscription_id, x_source_agent=x_source_agent,
-        x_mcp_key_id=x_mcp_key_id, x_mcp_key_name=x_mcp_key_name, idem=idem,
+        subscription_id=subscription_id, x_source_agent=x_source_agent, idem=idem,
     )
 
     if cap_result.state == "queued_persistent":
@@ -1448,7 +1442,7 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
 
 async def _dispatch_sync_immediate(
     *, request, name, current_user, execution_id, subscription_id, triggered_by,
-    collaboration_activity_id, image_data, idem, x_source_agent, x_mcp_key_id, x_mcp_key_name,
+    collaboration_activity_id, image_data, idem, x_source_agent,
 ):
     """Sync immediate path (EXEC-024): delegate to the single applier
     (task_execution_service.execute_task), complete the collaboration activity,
@@ -1461,8 +1455,8 @@ async def _dispatch_sync_immediate(
         source_user_id=current_user.id,
         source_user_email=current_user.email or current_user.username,
         source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
+        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         model=request.model,
         timeout_seconds=request.timeout_seconds,  # TIMEOUT-001: None = use agent's config
         resume_session_id=request.resume_session_id,
@@ -1514,7 +1508,7 @@ async def _dispatch_sync_immediate(
 async def _dispatch_sync(
     *, request, name, current_user, execution_id, subscription_id,
     collaboration_activity_id, self_task_activity_id, is_self_task, triggered_by,
-    image_data, idem, x_source_agent, x_mcp_key_id, x_mcp_key_name,
+    image_data, idem, x_source_agent,
 ):
     """Sync branch (#498): pre-acquire; on immediate admit run the single
     applier, else long-poll the backlog drain."""
@@ -1523,8 +1517,7 @@ async def _dispatch_sync(
         triggered_by=triggered_by, collaboration_activity_id=collaboration_activity_id,
         is_self_task=is_self_task, self_task_activity_id=self_task_activity_id,
         user_id=current_user.id, user_email=current_user.email or current_user.username,
-        subscription_id=subscription_id, x_source_agent=x_source_agent,
-        x_mcp_key_id=x_mcp_key_id, x_mcp_key_name=x_mcp_key_name, idem=idem,
+        subscription_id=subscription_id, x_source_agent=x_source_agent, idem=idem,
     )
 
     if cap_result.state != "admitted":
@@ -1536,14 +1529,13 @@ async def _dispatch_sync(
         request=request, name=name, current_user=current_user, execution_id=execution_id,
         subscription_id=subscription_id, triggered_by=triggered_by,
         collaboration_activity_id=collaboration_activity_id, image_data=image_data,
-        idem=idem, x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
-        x_mcp_key_name=x_mcp_key_name,
+        idem=idem, x_source_agent=x_source_agent,
     )
 
 
 async def dispatch_parallel_task(
     *, request, name, current_user, container, x_source_agent, x_via_mcp,
-    x_mcp_key_id, x_mcp_key_name, idempotency_key, x_event_trigger, x_internal_secret,
+    idempotency_key, x_event_trigger, x_internal_secret,
 ):
     """The /task dispatch orchestrator (Invariant #1). Owns derive → idempotency
     (via dispatch_admission_service) → file upload → create-row+activities →
@@ -1577,8 +1569,7 @@ async def dispatch_parallel_task(
         execution_id, subscription_id, collaboration_activity_id, self_task_activity_id,
     ) = await create_task_execution_and_activities(
         request=request, name=name, current_user=current_user,
-        x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
-        x_mcp_key_name=x_mcp_key_name, triggered_by=derivation.triggered_by,
+        x_source_agent=x_source_agent, triggered_by=derivation.triggered_by,
         is_self_task=derivation.is_self_task, idem=idem,
     )
 
@@ -1589,14 +1580,13 @@ async def dispatch_parallel_task(
             self_task_activity_id=self_task_activity_id, is_self_task=derivation.is_self_task,
             triggered_by=derivation.triggered_by, reserved_event_dispatch=derivation.reserved_event_dispatch,
             image_data=image_data, idem=idem, x_source_agent=x_source_agent,
-            x_mcp_key_id=x_mcp_key_id, x_mcp_key_name=x_mcp_key_name,
         )
     return await _dispatch_sync(
         request=request, name=name, current_user=current_user, execution_id=execution_id,
         subscription_id=subscription_id, collaboration_activity_id=collaboration_activity_id,
         self_task_activity_id=self_task_activity_id, is_self_task=derivation.is_self_task,
         triggered_by=derivation.triggered_by, image_data=image_data, idem=idem,
-        x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id, x_mcp_key_name=x_mcp_key_name,
+        x_source_agent=x_source_agent,
     )
 
 

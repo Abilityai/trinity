@@ -234,8 +234,8 @@ class TestDispatchGate:
                 breaker_enabled=True,
                 overflow_payload=PersistentTaskPayload(
                     request=object(), effective_timeout=60, user_id=1, user_email="a@b.c",
-                    subscription_id=None, x_source_agent=None, x_mcp_key_id=None,
-                    x_mcp_key_name=None, triggered_by="manual", collaboration_activity_id=None,
+                    subscription_id=None, x_source_agent=None,
+ triggered_by="manual", collaboration_activity_id=None,
                 ),
             ))
         assert exc.value.agent_name == "dead"
@@ -334,8 +334,8 @@ def _dummy_payload():
     from services.capacity_manager import PersistentTaskPayload
     return PersistentTaskPayload(
         request=object(), effective_timeout=60, user_id=1, user_email="a@b.c",
-        subscription_id=None, x_source_agent=None, x_mcp_key_id=None,
-        x_mcp_key_name=None, triggered_by="manual", collaboration_activity_id=None,
+        subscription_id=None, x_source_agent=None,
+ triggered_by="manual", collaboration_activity_id=None,
     )
 
 

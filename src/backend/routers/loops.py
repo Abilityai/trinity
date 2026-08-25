@@ -134,8 +134,6 @@ async def start_loop(
     name: str = Depends(get_authorized_agent),
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
-    x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None),
 ):
     """Start a sequential agent loop; return loop_id immediately (202)."""
     # #1156: a deadline shorter than a single run can never let even one
@@ -176,8 +174,9 @@ async def start_loop(
         started_by_user_id=current_user.id,
         started_by_user_email=current_user.email,
         source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
+        # # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
+        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
     )
     return StartLoopResponse(
         loop_id=loop_row["id"],

@@ -332,11 +332,26 @@
   enterprise user-activity view matches on it. `GET /api/audit-log` gains
   `mcp_key_id` / `mcp_scope` filters so "what did that leaked key touch?" is
   answerable.
-- **The `X-MCP-Key-Id` header is no longer trusted for attribution**: it is
-  `Header(None)` on six routes, validated nowhere, and persisted into the backlog
-  replay blob — so honouring it let any authenticated caller forge the credential
-  named in the two highest-volume audit events, surfacing minutes later on queue
-  drain. The parameters were **removed**, not ignored.
+- **The `X-MCP-Key-Id` / `X-MCP-Key-Name` headers are gone from the backend**: they
+  were `Header(None)` on six routes, validated nowhere, and persisted into the
+  backlog replay blob — so honouring them let any authenticated caller forge the
+  credential named in the two highest-volume audit events, surfacing minutes later
+  on queue drain. The parameters were **removed**, not ignored. Review (#2389)
+  found the removal had covered the *audit* path only: five routers still declared
+  the headers and wrote them into **durable provenance columns** — `schedule_
+  executions.source_mcp_key_id` (`/chat`, `/task`, schedule trigger), `agent_loops`,
+  `agent_reminders`, the fan-out rows — and `backlog_service` still persisted both
+  into `backlog_metadata`, the longest-lived copy of a request and the one surface
+  canary G-04 scans and #1449 scrubs. One request therefore produced two provenance
+  records that disagreed, and the forged one outlived the honest one. Every writer
+  now derives from `current_user.mcp_key_id`/`mcp_key_name`; **no route declares
+  either header** (guarded by a router-tree scan, so the class cannot return one
+  endpoint at a time), and the blob no longer carries them — `_spawn_drain` never
+  read either key back, so they were stored and never reconstructed. A pre-existing
+  queued row still holding them drains unchanged (the drain reads the blob
+  key-by-key with `.get()`). The MCP server still *sends* the headers; nothing on
+  the backend reads them, and the values it sends are the same key the bearer
+  already identifies.
 - **Security fix carried by the same change**: the A2A inbound idempotency scope
   reads `mcp_key_id` off the principal and fell back to `username` because the
   field did not exist, so two agent-scoped keys of one owner shared a

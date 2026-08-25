@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED, GEMINI_API_KEY
 from models import User
-from dependencies import get_current_user
+from dependencies import get_current_user, scope_may_open_event_stream
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -1284,6 +1284,17 @@ async def websocket_events_endpoint(
     key_info = db.validate_mcp_api_key(token)
     if not key_info:
         await websocket.close(code=4001, reason="Invalid or inactive MCP API key")
+        return
+
+    # #2323 — bounded key scopes may not open the fleet event stream. This
+    # handler authenticates the key itself and never runs `get_current_user`,
+    # so none of that function's fences apply here; without this the ops fence's
+    # own docstring claim would be false, and a bounded credential could read
+    # fleet-wide activity through a surface outside its allowlist.
+    if not scope_may_open_event_stream(key_info.get("scope")):
+        await websocket.close(
+            code=4003, reason="This key scope may not open the event stream"
+        )
         return
 
     user_email = key_info.get("user_email")

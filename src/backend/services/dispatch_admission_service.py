@@ -45,15 +45,17 @@ async def _audit_idempotent_replay(
     current_user, idempotency_key, idem,
 ):
     """Emit the idempotent-replay audit row (shared by /chat and /task)."""
-    # #2323 — `x_mcp_key_id`/`x_mcp_key_name` are accepted (routers still thread
-    # them) but are NO LONGER trusted for attribution. They arrive as plain
-    # `Header(None)` on routes gated by `get_current_user` alone, nothing
-    # validates them, and `backlog_service` persists them into the replay blob —
-    # so honouring them let any authenticated caller forge the credential named
-    # in the two highest-volume audit events on the platform, and have the forgery
-    # surface minutes later on queue drain. The principal knows which key it
-    # presented; that is the only trustworthy source, and it works on the
-    # agent-to-agent branch too, where `actor_user` is deliberately None.
+    # #2323 — attribution comes from the presented credential on `current_user`,
+    # never from `X-MCP-Key-Id`/`X-MCP-Key-Name`. Those arrived as plain
+    # `Header(None)` on routes gated by `get_current_user` alone and were
+    # validated nowhere, so honouring them let any authenticated caller forge the
+    # credential named in the two highest-volume audit events on the platform.
+    # #2389 finished the removal: the headers are no longer declared on any route
+    # and `backlog_service` no longer persists them into the replay blob, so the
+    # forgery can no longer surface minutes later on queue drain either. The
+    # principal knows which key it presented; that is the only trustworthy
+    # source, and it works on the agent-to-agent branch too, where `actor_user`
+    # is deliberately None.
     await platform_audit_service.log(
         event_type=AuditEventType.EXECUTION,
         event_action="idempotent_replay",
@@ -79,15 +81,17 @@ async def _audit_chat_started(
     execution_id, queue_result, source, message,
 ):
     """Emit the chat_started audit row on a successful /chat admission."""
-    # #2323 — `x_mcp_key_id`/`x_mcp_key_name` are accepted (routers still thread
-    # them) but are NO LONGER trusted for attribution. They arrive as plain
-    # `Header(None)` on routes gated by `get_current_user` alone, nothing
-    # validates them, and `backlog_service` persists them into the replay blob —
-    # so honouring them let any authenticated caller forge the credential named
-    # in the two highest-volume audit events on the platform, and have the forgery
-    # surface minutes later on queue drain. The principal knows which key it
-    # presented; that is the only trustworthy source, and it works on the
-    # agent-to-agent branch too, where `actor_user` is deliberately None.
+    # #2323 — attribution comes from the presented credential on `current_user`,
+    # never from `X-MCP-Key-Id`/`X-MCP-Key-Name`. Those arrived as plain
+    # `Header(None)` on routes gated by `get_current_user` alone and were
+    # validated nowhere, so honouring them let any authenticated caller forge the
+    # credential named in the two highest-volume audit events on the platform.
+    # #2389 finished the removal: the headers are no longer declared on any route
+    # and `backlog_service` no longer persists them into the replay blob, so the
+    # forgery can no longer surface minutes later on queue drain either. The
+    # principal knows which key it presented; that is the only trustworthy
+    # source, and it works on the agent-to-agent branch too, where `actor_user`
+    # is deliberately None.
     await platform_audit_service.log(
         event_type=AuditEventType.EXECUTION,
         event_action="chat_started",
@@ -120,8 +124,6 @@ async def admit_chat_request(
     current_user: User,
     x_source_agent: Optional[str],
     x_via_mcp: Optional[str],
-    x_mcp_key_id: Optional[str],
-    x_mcp_key_name: Optional[str],
     idempotency_key: Optional[str],
 ):
     """Admission gate for chat_with_agent (#1026 slice 1), HTTP-free.

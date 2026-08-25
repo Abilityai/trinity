@@ -245,18 +245,6 @@ def test_ops_is_mintable_at_the_db_layer():
     assert "ops" in McpKeyOperations._USER_CREATABLE_SCOPES
 
 
-def test_ops_keys_must_never_carry_an_agent_name():
-    """Three sweeps find their work by filtering `scope IN ('agent','connector')`
-    — the canary orphan scan, the key orphan sweep, and the rename/purge
-    cascade. A non-agent scope carrying an agent name is invisible to all three
-    and outlives its agent forever."""
-    try:
-        from db.mcp_keys import McpKeyOperations
-    except ImportError:  # pragma: no cover
-        pytest.skip("backend venv required")
-    assert "ops" in McpKeyOperations._AGENTLESS_SCOPES
-
-
 # --------------------------------------------------------------------------- #
 # PR-A — attribution comes from the credential, not from a header
 # --------------------------------------------------------------------------- #
@@ -327,3 +315,195 @@ def test_audit_log_can_be_queried_by_credential():
 
     sig = inspect.signature(PlatformAuditOperations.get_audit_entries)
     assert "mcp_key_id" in sig.parameters and "mcp_scope" in sig.parameters
+
+
+# --------------------------------------------------------------------------- #
+# Review findings (#2389) — the fence and the gate must agree
+# --------------------------------------------------------------------------- #
+#
+# The admit-set test above exercises `_enforce_ops_key_fence` and nothing else,
+# so it passed while `GET /api/subscriptions/{id}/usage` was admitted by the
+# fence and then refused by its own `assert_admin` — the subscription-pressure
+# read the fence was measured for could not work. A test that proves one half of
+# a two-gate path is a test that gives false assurance.
+#
+# This guards the CLASS: every allowlisted route whose handler calls
+# `assert_admin` must opt `ops` in. Resolved from the live handler object, not
+# grepped from a file, so it follows the code if a route moves.
+
+def _handler_sources_for_allowlisted_routes():
+    """(path, source) for each allowlisted route that resolves to a handler."""
+    import inspect
+
+    out = []
+    for module_name in ("routers.ops", "routers.monitoring", "routers.telemetry",
+                        "routers.subscriptions", "routers.agents", "routers.executions",
+                        "routers.chat", "routers.schedules"):
+        try:
+            mod = __import__(module_name, fromlist=["router"])
+        except ImportError:  # pragma: no cover - backend venv required
+            pytest.skip("backend venv required")
+        for r in getattr(mod, "router", None).routes if getattr(mod, "router", None) else []:
+            path = getattr(r, "path", None)
+            endpoint = getattr(r, "endpoint", None)
+            if not path or endpoint is None:
+                continue
+            if "GET" not in (getattr(r, "methods", None) or set()):
+                continue
+            concrete = re.sub(r"\{[^}]+\}", "x", path)
+            d = _deps()
+            if not any(m == "GET" and pat.fullmatch(concrete)
+                       for m, pat in d._OPS_ALLOWED_ROUTES):
+                continue
+            try:
+                out.append((path, inspect.getsource(endpoint)))
+            except (OSError, TypeError):  # pragma: no cover
+                continue
+    return out
+
+
+def test_every_admin_gated_allowlisted_route_opts_ops_in():
+    """A route the fence admits but the gate refuses is dead to an ops key.
+
+    `ADMIN_GATE_SCOPES` deliberately excludes `ops`, so any allowlisted handler
+    calling `assert_admin` MUST pass `allow_scopes={"ops"}` — that opt-in is the
+    grant. Bare `assert_admin` on an allowlisted route is the #2389 finding."""
+    pairs = _handler_sources_for_allowlisted_routes()
+    assert pairs, "resolved no allowlisted handlers — guard would be vacuous"
+    offenders = []
+    for path, src in pairs:
+        for m in re.finditer(r"assert_admin\(([^)]*)\)", src, re.S):
+            if '"ops"' not in m.group(1) and "'ops'" not in m.group(1):
+                offenders.append(path)
+    assert not offenders, (
+        "allowlisted by the ops fence but refused by their own admin gate: "
+        f"{sorted(set(offenders))}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Review findings (#2389) — the event stream is not in the allowlist
+# --------------------------------------------------------------------------- #
+
+def test_bounded_scopes_cannot_open_the_fleet_event_stream():
+    """`/ws/events` authenticates the key itself and never runs
+    `get_current_user`, so NONE of that function's fences reach it. Without an
+    explicit gate the ops fence's own docstring claim is false and a bounded
+    credential reads fleet-wide activity through an unlisted surface."""
+    d = _deps()
+    for scope in ("ops", "connector", "portal_delegate", "scope_from_2027"):
+        assert not d.scope_may_open_event_stream(scope), scope
+
+
+@pytest.mark.parametrize("scope", [None, "", "user", "agent", "system"])
+def test_the_event_stream_still_admits_the_scopes_that_drive_it(scope):
+    """Guard against a gate satisfied by denying everyone. `None`/`""` coerce to
+    `user`, matching `validate_mcp_api_key` and `get_current_user`."""
+    d = _deps()
+    assert d.scope_may_open_event_stream(scope)
+
+
+# --------------------------------------------------------------------------- #
+# Review findings (#2389) — assert the written row, not a constant
+# --------------------------------------------------------------------------- #
+
+def test_a_minted_ops_key_carries_no_agent_name(tmp_path, monkeypatch):
+    """The earlier test asserted membership in `_AGENTLESS_SCOPES`, which is a
+    tuple asserting itself — it documented a protection rather than proving one,
+    and the guard it stood for read a field `McpApiKeyCreate` cannot carry (so it
+    could never fire). This drives the real creator and reads the row back.
+
+    Three sweeps filter on `scope IN ('agent','connector')`, so an ops key
+    holding an agent name would be invisible to all of them and outlive its
+    agent forever."""
+    db_file = tmp_path / "trinity-ops-key.db"
+    monkeypatch.setenv("TRINITY_DB_PATH", str(db_file))
+    try:
+        import db.connection as conn_mod
+        monkeypatch.setattr(conn_mod, "DB_PATH", str(db_file))
+        from db.engine import get_engine
+        from db.tables import metadata as m, users, mcp_api_keys
+        from sqlalchemy import insert, select
+    except ImportError:  # pragma: no cover - backend venv required
+        pytest.skip("backend venv required")
+
+    m.create_all(get_engine(), tables=[users, mcp_api_keys])
+    with get_engine().begin() as conn:
+        conn.execute(insert(users).values(
+            id=1, username="admin", role="admin", email="admin@example.com",
+            created_at="t", updated_at="t"))
+
+    from database import db as core_db, McpApiKeyCreate
+
+    created = core_db.create_mcp_api_key(
+        "admin", McpApiKeyCreate(name="obs", description=None, scope="ops")
+    )
+    assert created is not None, "ops must be mintable at the db layer"
+    assert created.scope == "ops"
+
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            select(mcp_api_keys.c.scope, mcp_api_keys.c.agent_name)
+            .where(mcp_api_keys.c.id == created.id)
+        ).mappings().first()
+    assert row["scope"] == "ops"
+    assert row["agent_name"] is None, "an ops key must never bind an agent"
+
+
+def test_durable_execution_provenance_is_not_taken_from_a_client_header():
+    """#2389: the audit path stopped trusting `X-MCP-Key-Id`, but
+    `schedule_executions.source_mcp_key_id` still recorded it — so one request
+    produced two provenance records that disagree, and the forged one is the one
+    that survives longest."""
+    import inspect
+
+    try:
+        from services import chat_execution_service as ces
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
+    src = inspect.getsource(ces)
+    assert "source_mcp_key_id=x_mcp_key_id" not in src
+    assert "source_mcp_key_name=x_mcp_key_name" not in src
+    assert 'source_mcp_key_id=getattr(current_user, "mcp_key_id", None)' in src
+
+
+def test_no_route_accepts_a_credential_name_as_a_request_header():
+    """#2389 — the strongest form of the rule: a value nothing declares cannot
+    be forged, threaded, or quietly picked up by a new consumer.
+
+    Grepping for the *use* was not enough. `X-MCP-Key-Id`/`X-MCP-Key-Name` were
+    removed from the audit path in #2323 while five routers still declared them
+    as `Header(None)` and wrote them into durable provenance columns
+    (`schedule_executions`, `agent_loops`, `agent_reminders`, the fan-out rows)
+    and into the backlog replay blob. This asserts the declaration is gone from
+    every router, so the class cannot come back one endpoint at a time."""
+    routers_dir = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
+    if not routers_dir.is_dir():  # pragma: no cover
+        pytest.skip("backend tree required")
+    offenders = []
+    for f in sorted(routers_dir.rglob("*.py")):
+        text = f.read_text()
+        for m in re.finditer(r"x_mcp_key_(?:id|name)\s*:\s*[^=\n]+=\s*Header\(", text):
+            offenders.append(f"{f.name}:{text[:m.start()].count(chr(10)) + 1}")
+    assert not offenders, (
+        "routers still declaring the forgeable credential header: " + ", ".join(offenders)
+    )
+
+
+def test_the_backlog_replay_blob_carries_no_credential_identity():
+    """#2389 — `backlog_metadata` is the longest-lived copy of a request and is
+    the one surface canary G-04 scans and #1449 scrubs. It persisted
+    `x_mcp_key_id`/`x_mcp_key_name` that `_spawn_drain` never read back: a
+    forgeable value stored, never used, and surviving the request that carried
+    it. Asserted against the metadata the REAL producer writes."""
+    try:
+        from services import backlog_service as bs
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
+
+    import inspect
+    src = inspect.getsource(bs.BacklogService.enqueue)
+    assert '"x_mcp_key_id"' not in src and '"x_mcp_key_name"' not in src
+    sig = inspect.signature(bs.BacklogService.enqueue)
+    assert "x_mcp_key_id" not in sig.parameters
+    assert "x_mcp_key_name" not in sig.parameters
