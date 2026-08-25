@@ -43,12 +43,19 @@ serving in roughly two minutes:
 git clone https://github.com/abilityai/trinity.git && cd trinity
 cp .env.example .env          # set ADMIN_PASSWORD, ANTHROPIC_API_KEY, ...
 
-# Pin the release you want. `latest` moves on every Trinity release, so an
-# unpinned install turns your next pull into an unscheduled upgrade.
-export TRINITY_IMAGE_TAG=v0.9.0
+# Pin the release you want, in .env — `latest` moves on every Trinity release,
+# so an unpinned install turns your next upgrade into an unscheduled one.
+# Each release publishes v0.9.0, 0.9.0, 0.9, latest and sha-<short> for the
+# same digest, so either version spelling works.
+echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env
 
 ./scripts/deploy/start.sh --hosted --unattended
 ```
+
+`start.sh` reads `TRINITY_IMAGE_TAG` from `.env` (an explicit shell or CI value
+wins over it). Put it in the file rather than the environment: `.env` is where
+the pin survives a reboot, an unattended re-run, and whoever runs the upgrade
+next.
 
 This is the same script, the same `.env` contract and the same
 `ADMIN_PASSWORD` behaviour as a source install — only the image source differs.
@@ -60,6 +67,15 @@ disagree on a service, port, volume, network or environment variable).
 
 **Minimum size: 8 GB RAM.** Below that the agent containers and the platform
 services contend and turns start failing under load.
+
+**Converting an existing source install in place is not a drop-in.** The dev
+stack keeps `/data` in the named volume `trinity-data`; hosted (like prod) binds
+`${TRINITY_DATA_PATH:-./trinity-data}`. They are different stores, so `--hosted`
+in a checkout that has been running `docker-compose.yml` would come up on an
+empty database and migrate from zero while the real one sat in the volume —
+with Redis, which the two stacks share, not reset. `start.sh --hosted` detects
+this and refuses with the copy command rather than starting; run that, then
+re-run.
 
 **Run `start.sh --hosted` to upgrade, not a bare `docker compose pull`.** The
 agent base image is not a compose service — the backend creates agent containers
@@ -84,12 +100,26 @@ one of these before putting an instance on a public address:
 
 | Path | What it gives you | When to use it |
 |---|---|---|
-| **Tunnel** (Cloudflare Tunnel — `cloudflared` is already in the compose file, set `TUNNEL_TOKEN`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
+| **Tunnel** (Cloudflare Tunnel — set `TUNNEL_TOKEN` in `.env`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
 | **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
 | **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
 
 Plain HTTP on a public IPv4 with none of the above is the one combination to
 avoid: credentials and JWTs cross the network in the clear.
+
+The `cloudflared` service is **profile-gated** (`profiles: ["tunnel"]`), so it
+does not start just because `TUNNEL_TOKEN` is set. `start.sh --hosted` activates
+the profile for you when the token is present; any other invocation needs it
+passed explicitly:
+
+```bash
+docker compose -f docker-compose.hosted.yml --profile tunnel up -d
+# or: COMPOSE_PROFILES=tunnel docker compose -f docker-compose.hosted.yml up -d
+```
+
+Check it actually came up — `docker ps | grep cloudflared`. A missing tunnel
+container is silent, and leaves the instance in exactly the plain-HTTP state
+this table says to avoid.
 
 A marketplace droplet (#2281) is a special case — it comes up on a bare public IP
 with no domain, which is why that channel provisions a Caddy sidecar using

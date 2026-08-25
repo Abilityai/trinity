@@ -122,27 +122,40 @@ def test_third_party_images_identical(prod: dict, hosted: dict) -> None:
         )
 
 
-@pytest.mark.parametrize("key", ["environment", "ports", "volumes", "networks",
-                                 "depends_on", "container_name", "restart",
-                                 "cap_drop", "cap_add", "security_opt", "user",
-                                 "healthcheck", "command", "entrypoint",
-                                 "group_add", "tmpfs", "sysctls", "extra_hosts"])
-def test_service_key_parity(prod: dict, hosted: dict, key: str) -> None:
-    """Every operational key is inherited verbatim.
+def test_service_parity_wholesale(prod: dict, hosted: dict) -> None:
+    """Every service key is inherited verbatim except the image source itself.
 
-    ``environment`` carries the weight: it IS the .env contract, and a variable
-    present in prod but missing here is inert on exactly the installs that
-    cannot debug it.
+    Deliberately a WHOLESALE comparison rather than a list of keys to check.
+    This started as an 18-key allowlist, which omitted ``profiles``,
+    ``env_file``, ``logging``, ``labels``, ``deploy`` and ``stop_grace_period``
+    — and ``profiles`` is live today on ``cloudflared``, so a prod change that
+    profile-gated or un-gated a service would have drifted silently past a guard
+    whose whole purpose is catching exactly that. An allowlist can only ever
+    watch the keys someone remembered; the drift that matters is the key nobody
+    thought of, which is the definition of this bug class.
+
+    So the rule is inverted: prod minus ``{build, image}`` must equal hosted
+    minus ``{image}``, and any new compose key is covered the day it appears.
+
+    ``environment`` carries the most weight — it IS the .env contract, and a
+    variable present in prod but missing here is inert on exactly the installs
+    that cannot debug it.
     """
     mismatches = []
     for name, prod_svc in prod["services"].items():
         hosted_svc = hosted["services"].get(name, {})
-        if prod_svc.get(key) != hosted_svc.get(key):
-            mismatches.append(name)
+        prod_cmp = {k: v for k, v in prod_svc.items() if k not in ("build", "image")}
+        hosted_cmp = {k: v for k, v in hosted_svc.items() if k != "image"}
+        if prod_cmp != hosted_cmp:
+            differing = sorted(
+                set(prod_cmp) ^ set(hosted_cmp)
+                | {k for k in set(prod_cmp) & set(hosted_cmp) if prod_cmp[k] != hosted_cmp[k]}
+            )
+            mismatches.append(f"{name}: {differing}")
     assert not mismatches, (
-        f"'{key}' differs between docker-compose.prod.yml and "
-        f"docker-compose.hosted.yml for: {sorted(mismatches)}. Regenerate the "
-        f"hosted file from prod rather than hand-editing it."
+        "docker-compose.hosted.yml has drifted from docker-compose.prod.yml on "
+        f"{mismatches}. Regenerate the hosted file from prod rather than "
+        "hand-editing it — only the build/image source may differ."
     )
 
 

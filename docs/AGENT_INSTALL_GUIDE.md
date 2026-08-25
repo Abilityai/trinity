@@ -50,7 +50,7 @@ docker compose version >/dev/null 2>&1 && echo "compose: ok" || echo "compose: M
 ```bash
 git clone https://github.com/abilityai/trinity.git
 cd trinity
-export TRINITY_IMAGE_TAG=v0.9.0        # pin a release; `latest` moves every cut
+echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env   # pin a release; `latest` moves every cut
 ./scripts/deploy/start.sh --hosted --unattended
 ```
 
@@ -59,6 +59,15 @@ pulls the platform images and the agent base image from GHCR instead of
 building them. That skips the 5-10 minute agent-base build, which is the slow
 step you would otherwise have to narrate, and it is what makes a small VM
 viable at all. Tell the user which tag you pinned.
+>
+> Put the pin in `.env`, not the shell — that is where it survives the reboot
+> and the next upgrade. Each release publishes `v0.9.0`, `0.9.0`, `0.9`,
+> `latest` and `sha-<short>` for one digest, so either spelling works.
+>
+> On a machine that has already run the source install, `--hosted` will refuse
+> to start rather than come up on an empty database (dev keeps `/data` in a
+> named volume, hosted binds a directory). It prints the copy command; run it
+> and re-run.
 
 **Fresh machine, building from source (a dev box, or a server with no registry access):**
 

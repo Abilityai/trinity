@@ -82,16 +82,27 @@ jobs:
 
       - name: Collect build provenance
         id: prov
+        env:
+          RESOLVED_REF: ${{ inputs.ref || github.ref_name }}
         run: |
           # Mirrors the args docker-compose.prod.yml forwards, so a pulled
           # image answers GET /api/version with real values instead of
           # "unknown" (#926/#958).
+          # Every value is read from the CHECKED-OUT tree. `GITHUB_REF_NAME`
+          # and `github.sha` describe the ref the workflow was *dispatched
+          # from*, which is not the same thing whenever `inputs.ref` is used —
+          # a dispatch of `ref: v0.9.0` from `dev` builds the tag's tree and
+          # would otherwise stamp `GIT_BRANCH=dev` into `GET /api/version` and
+          # publish it tagged with dev's head sha. That is precisely the path
+          # meant for out-of-band smoke builds, i.e. the one where provenance
+          # being a lie is most likely to mislead.
           {
             echo "version=$(tr -d '[:space:]' < VERSION)"
             echo "git_commit=$(git rev-parse HEAD)"
+            echo "short_sha=$(git rev-parse --short=7 HEAD)"
             echo "git_commit_subject=$(git log -1 --pretty=%s | tr -d '\n\r')"
             echo "git_commit_timestamp=$(git log -1 --pretty=%cI)"
-            echo "git_branch=${GITHUB_REF_NAME}"
+            echo "git_branch=${RESOLVED_REF}"
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
@@ -113,11 +124,27 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           # `latest` only on a real release tag — a workflow_dispatch smoke
           # build must never silently become what every hosted install pulls.
+          #
+          # BOTH `0.9.0` and `v0.9.0` are published for the same digest.
+          # `{{version}}` strips the leading `v`, so a release cut as git tag
+          # `v0.9.0` published ONLY `0.9.0` — while every doc, the compose
+          # header and start.sh's own pin warning told operators to set
+          # `TRINITY_IMAGE_TAG=v0.9.0`. That pull fails `manifest unknown`, and
+          # start.sh treats it as fatal with a message blaming the operator's
+          # spelling. Publishing the v-prefixed alias costs one tag ref and
+          # makes the release name and the image tag the same string, which is
+          # what anyone reading the releases page will type.
+          #
+          # `type=sha` is NOT used: it resolves from `github.sha`, which on a
+          # `workflow_dispatch` with `ref:` is the dispatching branch's head,
+          # not the tree that was checked out and built. The raw value below
+          # comes from the actual HEAD (see the provenance step).
           tags: |
             type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=sha,format=short
+            type=raw,value=sha-${{ steps.prov.outputs.short_sha }}
 
       - name: Select build args for this image
         id: args

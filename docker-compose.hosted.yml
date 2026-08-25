@@ -20,19 +20,35 @@
 #
 # Pick the image set with TRINITY_IMAGE_TAG (default `latest`):
 #
-#     TRINITY_IMAGE_TAG=v0.9.0 docker compose -f docker-compose.hosted.yml up -d
+#     TRINITY_IMAGE_TAG=v0.9.0 ./scripts/deploy/start.sh --hosted
 #
-# Pin it on any install you intend to keep. `latest` moves on every release,
-# so an unpinned `docker compose pull` is an unscheduled upgrade.
+# Every release publishes `v0.9.0`, `0.9.0`, `0.9`, `latest` and `sha-<short>`
+# for the same digest, so either spelling of the version works. Pin one on any
+# install you intend to keep: `latest` moves on every release, so an unpinned
+# pull is an unscheduled upgrade. `start.sh` reads the value from `.env` too,
+# which is where an unattended or marketplace install persists it.
 #
 # THE AGENT BASE IMAGE IS NOT A SERVICE HERE, and pulling it is not optional.
 # The backend creates agent containers through the Docker SDK from the literal
 # local tag `trinity-agent-base:latest` (hardcoded in
 # services/agent_service/lifecycle.py, and allowlisted as `trinity-agent-base:*`
-# by SEC-172). Compose cannot retag, so `scripts/deploy/hosted-up.sh` pulls the
-# GHCR copy and tags it locally before bringing the stack up. Use that script —
-# a bare `docker compose -f docker-compose.hosted.yml up -d` starts a platform
-# that cannot create a single agent.
+# by SEC-172). Compose cannot retag, so `./scripts/deploy/start.sh --hosted`
+# pulls the GHCR copy and tags it locally before bringing the stack up. Use
+# that — a bare `docker compose -f docker-compose.hosted.yml up -d` starts a
+# platform that cannot create a single agent, and does not fail until the first
+# agent-create.
+#
+# THIS FILE IS NOT STANDALONE. It needs the repository checked out beside it:
+# the backend mounts `./config/agent-templates`, `./config/process-templates`,
+# `./config/process-docs` and `./config/manifests`, Vector mounts
+# `./config/vector.yaml`, the OTel collector mounts
+# `./config/otel-collector.yaml`, and `/data` is the `${TRINITY_DATA_PATH:-
+# ./trinity-data}` bind mount. Handed to a catalogue or a managed host WITHOUT
+# the repo, Docker silently creates every one of those as an empty directory:
+# the local template catalog is empty and the ent#124 first-run system seed
+# finds no manifests to deploy — with no error at install time. Packaging the
+# config into the images so the file can travel alone is a follow-up; until
+# then, "pull-only" means "does not BUILD", not "needs nothing on disk".
 #
 # Minimum size: 8 GB RAM. Below that the agent containers and the platform
 # services contend and turns start failing under load.
@@ -469,8 +485,13 @@ services:
     restart: unless-stopped
     # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
     # preserved so external URLs do not change.
+    # #2280: FRONTEND_PORT was inert here — hardcoded "80". start.sh offers it
+    # as the remedy for a port conflict and prints the resulting URL in its
+    # summary, so an operator who set it got a working suggestion that changed
+    # nothing and an access URL pointing at a port nothing listened on. The
+    # container side stays 8080 (unprivileged nginx, #874).
     ports:
-      - "80:8080"
+      - "${FRONTEND_PORT:-80}:8080"
     depends_on:
       backend:
         condition: service_healthy

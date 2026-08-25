@@ -37,11 +37,10 @@ COMPOSE_FILES=()
 if [ "$HOSTED" = "1" ]; then
     COMPOSE_FILES=(-f docker-compose.hosted.yml)
 fi
-# The image tag every hosted pull resolves. Pin it on an install you keep —
-# `latest` moves on every release, so leaving it unset makes any later `pull`
-# an unscheduled upgrade.
-TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-latest}"
-export TRINITY_IMAGE_TAG
+# The image tag every hosted pull resolves is settled AFTER .env exists — see
+# resolve_image_tag() below. Resolving it here would be too early to read the
+# file, which is the only place an --unattended or marketplace install can
+# persist it.
 
 # Fail fast with ONE consolidated, actionable message rather than crashing
 # mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
@@ -289,6 +288,87 @@ ensure_docker_gid() {
 
 ensure_docker_gid
 
+# --- Resolve the hosted image tag (#2280) ------------------------------------
+# Precedence: an explicit shell/CI value > `.env` > `latest`. Reading `.env` is
+# the whole point: it is where every other knob in this install lives and the
+# only place an --unattended or marketplace install can persist a pin. Exporting
+# an unconditional default instead — as this first shipped — silently beat the
+# operator's own `.env` line, because compose gives the shell environment
+# precedence over `.env`. The summary then printed `Currently pinned to: latest`
+# as though they had chosen it, which is exactly the unscheduled upgrade the
+# rest of this script warns about.
+#
+# Mirrors the FRONTEND_PORT read further down; `cut -d'=' -f2-` keeps a value
+# containing '=' intact, and `tail -1` matches shell/compose last-wins semantics
+# for a duplicated key.
+resolve_image_tag() {
+    if [ -z "${TRINITY_IMAGE_TAG:-}" ]; then
+        TRINITY_IMAGE_TAG=$(grep -E '^TRINITY_IMAGE_TAG=' .env 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]')
+    fi
+    TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-latest}"
+    export TRINITY_IMAGE_TAG
+}
+resolve_image_tag
+
+# --- Activate the Cloudflare Tunnel profile when a token is present (#2280) ---
+# `cloudflared` is profile-gated (`profiles: ["tunnel"]`), so it starts only
+# under `--profile tunnel`. docs/DEPLOYMENT.md presents the tunnel as the
+# default posture for a public instance and says the service "is already in the
+# compose file, set TUNNEL_TOKEN" — which was true and useless: setting the
+# token and running this script produced no tunnel container, no error, and left
+# the instance in the plain-HTTP-on-a-public-IPv4 state the same table says to
+# avoid. A non-empty TUNNEL_TOKEN is unambiguous intent, so honour it.
+#
+# Hosted only: the dev stack is a localhost workflow and its file set is
+# untouched by this change.
+if [ "$HOSTED" = "1" ]; then
+    _tunnel_token="${TUNNEL_TOKEN:-$(grep -E '^TUNNEL_TOKEN=' .env 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]')}"
+    if [ -n "$_tunnel_token" ]; then
+        COMPOSE_FILES+=(--profile tunnel)
+        echo "TUNNEL_TOKEN set → starting the Cloudflare Tunnel (profile 'tunnel')."
+    fi
+fi
+
+# --- Refuse a silent dev -> hosted data switch (#2280) ------------------------
+# Dev and hosted share a compose project name (the directory basename) but NOT a
+# /data source: docker-compose.yml mounts the named volume `trinity-data`, while
+# hosted (inheriting prod) binds ${TRINITY_DATA_PATH:-./trinity-data}. So
+# re-running this script with --hosted in a checkout that has been running the
+# dev stack comes up against an EMPTY database and migrates from zero, while the
+# real one sits untouched in the named volume — and Redis (`redis-data`, a named
+# volume both files share) is NOT reset, so the result is a half-migrated
+# install with live session/lock state pointing at rows that no longer exist.
+#
+# Nothing about "the same script, only the image source differs" prepares an
+# operator for that, so refuse rather than warn: the failure is silent, and by
+# the time it is noticed the fresh DB may have been written to.
+if [ "$HOSTED" = "1" ]; then
+    _data_path="${TRINITY_DATA_PATH:-$(grep -E '^TRINITY_DATA_PATH=' .env 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]')}"
+    _data_path="${_data_path:-./trinity-data}"
+    _project=$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+    if [ ! -f "${_data_path}/trinity.db" ] \
+       && docker volume inspect "${_project}_trinity-data" >/dev/null 2>&1; then
+        echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
+        echo "" >&2
+        echo "   Found: docker volume '${_project}_trinity-data' (written by docker-compose.yml)" >&2
+        echo "   Wanted: ${_data_path}/trinity.db (the bind mount docker-compose.hosted.yml uses)" >&2
+        echo "" >&2
+        echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
+        echo "   one stays in the volume — and Redis is shared between the two stacks, so you" >&2
+        echo "   would get a half-migrated install rather than a clean one." >&2
+        echo "" >&2
+        echo "   Copy the data across first (with the stack stopped):" >&2
+        echo "       docker compose stop" >&2
+        echo "       mkdir -p ${_data_path}" >&2
+        echo "       docker run --rm -v ${_project}_trinity-data:/from -v \"\$(pwd)/${_data_path#./}\":/to \\" >&2
+        echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
+        echo "       ./scripts/deploy/start.sh --hosted" >&2
+        echo "" >&2
+        echo "   Or, to deliberately start fresh, set TRINITY_DATA_PATH to a new directory." >&2
+        exit 1
+    fi
+fi
+
 # Check base image before starting — without it, agent creation will silently fail.
 #
 # #2280: the backend creates agent containers from the literal local tag
@@ -352,13 +432,16 @@ export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # file source via docker-compose.override.yml (auto-merged by `docker compose up`).
 # Native Linux dockerd is unaffected. Opt out: TRINITY_LOCAL_LOG_SOURCE=docker.
 # Force on: TRINITY_LOCAL_LOG_SOURCE=file. Default: auto-detect Docker Desktop.
-# Hosted passes an explicit -f, which disables override auto-merge (same as
-# prod — see docker-compose.override.example.yml), so writing the file would be
-# a silent no-op that looks like a fix.
+# Hosted passes an explicit -f, which disables override AUTO-merge — but the
+# override is still applicable, so it is appended to COMPOSE_FILES explicitly
+# below rather than switched off. Forcing `_log_src=docker` under --hosted (as
+# this first shipped) meant a hosted install on Docker Desktop or any VM-backed
+# runtime shipped the very `docker_logs` source #1432 exists to avoid, and
+# Vector busy-loops and pegs the Docker VM. The vector service is byte-identical
+# between docker-compose.yml and the hosted file, so the override merges cleanly
+# onto either.
 _log_src="${TRINITY_LOCAL_LOG_SOURCE:-auto}"
-if [ "$HOSTED" = "1" ]; then
-    _log_src=docker
-elif [ "$_log_src" = "auto" ]; then
+if [ "$_log_src" = "auto" ]; then
     if docker info 2>/dev/null | grep -qi 'Docker Desktop'; then
         _log_src=file
     else
@@ -372,6 +455,12 @@ if [ "$_log_src" = "file" ]; then
         echo "  Created docker-compose.override.yml. To opt out: delete it, or set"
         echo "  TRINITY_LOCAL_LOG_SOURCE=docker. Local logs land in /data/logs/local-*.json;"
         echo "  prefer 'docker compose logs -f <service>' to tail a single service."
+    fi
+    # Dev gets this by auto-merge; hosted must ask for it by name, because its
+    # explicit -f turns auto-merge off. Order matters — the override has to come
+    # after the base file it patches.
+    if [ "$HOSTED" = "1" ]; then
+        COMPOSE_FILES+=(-f docker-compose.override.yml)
     fi
 fi
 # -----------------------------------------------------------------------------
@@ -492,9 +581,12 @@ if [ "$HOSTED" = "1" ]; then
     echo "which is not a compose service, and leaves agents on the old runtime."
     echo "Currently pinned to: TRINITY_IMAGE_TAG=${TRINITY_IMAGE_TAG}"
     if [ "$TRINITY_IMAGE_TAG" = "latest" ]; then
-        echo "  ⚠️  'latest' moves on every Trinity release. Pin a version"
-        echo "     (TRINITY_IMAGE_TAG=v0.9.0) on any install you intend to keep,"
-        echo "     or your next pull is an unscheduled upgrade."
+        echo "  ⚠️  'latest' moves on every Trinity release. Pin a version on any"
+        echo "     install you intend to keep, or your next run is an unscheduled"
+        echo "     upgrade:"
+        echo "         echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env"
+        echo "     (.env, not the shell — that is where the pin survives a reboot"
+        echo "      and whoever runs the upgrade next.)"
     fi
     echo ""
 else
