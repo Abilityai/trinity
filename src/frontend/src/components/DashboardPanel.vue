@@ -19,7 +19,7 @@
          branches around it would remount and kill the reveal. Replaces this
          panel's bespoke spinner (ent#253 AC #4) and carries reduced-motion.
          Gated on "no data yet", so the poll is invisible. -->
-    <ScanlineReveal :loading="firstLoad" :reveal="view.state === 'ready'">
+    <ScanlineReveal :loading="awaitingFirstLoad" :reveal="view.state === 'ready'">
       <!-- First load, inside the slot (ent#253 review). ScanlineReveal clips
            its content only during the REVEAL — during the loading phase the
            slot renders normally under a 50%-opacity track. Without this arm the
@@ -30,7 +30,7 @@
            solves the same problem by gating each terminal on `store.hasLoaded`;
            one placeholder arm is used here instead because it also RESERVES the
            height, so nothing shifts when the content arrives (p4). -->
-      <div v-if="firstLoad" class="min-h-[8rem]" aria-hidden="true"></div>
+      <div v-if="awaitingFirstLoad" class="min-h-[8rem]" aria-hidden="true"></div>
 
       <LoadFailed
         v-else-if="loadFailed"
@@ -480,6 +480,15 @@ const view = computed(() => viewState({
   error: loadError.value,
 }))
 const firstLoad = computed(() => view.value.state === 'loading')
+// ent#253 review: `viewState` ignores `loading` by design, so on a STOPPED
+// agent — where onMounted never fetches — `hasLoaded` is false forever and
+// `firstLoad` stays true for the life of the mount. Gated only on that, the
+// placeholder arm above wins permanently and the "Agent Not Running" arm
+// below is unreachable: a blank, dimmed, wordless panel under a track stuck
+// at :loading. The placeholder is a claim that data is COMING, which is only
+// true while a fetch can happen. The primitive takes the same gate, or it
+// animates behind the not-running copy.
+const awaitingFirstLoad = computed(() => firstLoad.value && props.agentStatus === 'running')
 const loadFailed = computed(() => view.value.state === 'failed')
 const staleMessage = computed(() => staleBannerMessage('the dashboard', lastLoadedAt.value))
 

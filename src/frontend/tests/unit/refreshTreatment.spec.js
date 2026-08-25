@@ -116,7 +116,7 @@ describe('the three fixed surfaces (what only source can answer)', () => {
   it('no longer gates rendered content on the in-flight flag', () => {
     for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
       expect(src, name).not.toContain('<div v-if="loading" class="flex items-center justify-center py-8">')
-      expect(src, name).toContain('ScanlineReveal :loading="firstLoad"')
+      expect(src, name).toContain('ScanlineReveal :loading="awaitingFirstLoad"')
     }
     // The floating chip keeps a placeholder rather than the primitive, but the
     // gate is the same rule: first load, never a poll.
@@ -131,10 +131,35 @@ describe('the three fixed surfaces (what only source can answer)', () => {
     // empty state while the data ref is still null, so the panel spent the
     // whole first load making the very claim this pass exists to remove.
     for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
-      expect(src, name).toMatch(/<div v-if="firstLoad"[^>]*aria-hidden/)
+      expect(src, name).toMatch(/<div v-if="awaitingFirstLoad"[^>]*aria-hidden/)
       // ...and the branch that used to be first must now be an else-if, or the
       // placeholder is inert.
       expect(src, name).toContain('v-else-if="loadFailed"')
+    }
+  })
+
+  it('does not let the placeholder swallow "Agent Not Running"', () => {
+    // Review of this PR: `viewState` ignores `loading` deliberately, so on a
+    // STOPPED agent — where onMounted takes the `else { loading = false }`
+    // branch and never fetches — the data ref stays null and `firstLoad` is
+    // true for the entire life of the mount. Gated on that alone, the
+    // placeholder arm wins forever, the not-running arm below it is never
+    // evaluated, and the operator gets a blank dimmed panel under a track
+    // stuck at :loading. Reachable on the default path: the tab is gated on
+    // the DB-backed /exists probe, not on run state.
+    //
+    // The rule, not the spelling: whatever gates the placeholder must also
+    // consider run state, and the primitive must take the same gate or it
+    // animates behind the not-running copy.
+    for (const [name, src] of [['MetricsPanel', metrics], ['DashboardPanel', dashboard]]) {
+      expect(src, name).toMatch(
+        /const awaitingFirstLoad = computed\(\(\) => firstLoad\.value && props\.agentStatus === 'running'\)/,
+      )
+      expect(src, name).not.toMatch(/<div v-if="firstLoad"[^>]*aria-hidden/)
+      expect(src, name).not.toContain('ScanlineReveal :loading="firstLoad"')
+      // The not-running arm still exists and is still downstream of the two
+      // request-shaped arms.
+      expect(src, name).toContain(`v-else-if="agentStatus !== 'running'"`)
     }
   })
 
