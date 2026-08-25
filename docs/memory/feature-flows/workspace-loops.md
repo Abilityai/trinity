@@ -101,6 +101,33 @@ ceiling, not a security gate, and the prior behaviour was no check at all.
 | `PortalConversation.vue`, `PortalRoom.vue` | mount points (1 participant / N) |
 | `tests/unit/test_ent338_loop_timeout_cap.py`, `tests/unit/portalLoops.spec.js` | the rules |
 
+## Testing
+
+`vitest.config.js` is `environment: 'node'` with no mount harness, so every
+rule that could be wrong lives in the pure module and is tested there; the SFC
+is a dispatcher over it.
+
+- `tests/unit/test_ent338_loop_timeout_cap.py` (5) — the per-run ceiling:
+  a `timeout_per_run` above the owner's `execution_timeout_seconds` is refused
+  with a structured `agent_cap_seconds`, a value AT the cap is allowed, an
+  absent one is untouched, an unreadable cap **fails open** (a resource ceiling
+  must not become an outage), and the guard is pinned to run BEFORE the #1156
+  deadline comparison — otherwise the deadline is validated against a bound the
+  request is not entitled to.
+- `src/frontend/tests/unit/portalLoops.spec.js` (39) — active detection;
+  the terminal vocabulary, including `max_runs_reached` reading as **Done**
+  rather than "Stopped" and every `stop_reason` keeping its own word; guardrail
+  headroom; strip text and grouping; start-form pre-flight and the request body;
+  refusal messages; which defaults mirror the server and which are the panel's
+  own; the panel being the platform-authenticated door only (an external client
+  never mounts it); the auth-confirm and shared-store races found in review; and
+  the poll backstop that covers a dropped broadcast.
+
+Live pass on a running instance (recorded in the PR): start from a chat, watch
+runs arrive over the existing broadcast, Stop mid-run, and a `timeout_per_run`
+above the agent cap refused with the bound named — with the bounds visible in
+the form before Start, which is why the ceiling refuses rather than clamps.
+
 ## Known gaps, stated
 
 - **AC #3 (history in the Activity tab) is deferred to ent#457**, which builds
