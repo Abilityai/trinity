@@ -164,14 +164,37 @@ class EvaluationOperations:
                 updated_at=now,
             )
             try:
-                conn.execute(insert(agent_evaluations).values(**insert_values))
+                # SAVEPOINT, so the failed INSERT can be undone without ending
+                # the transaction. Required for dialect portability: SQLite
+                # tolerates reusing the connection after a constraint violation
+                # (verified on SQLAlchemy 2.0.51), but PostgreSQL aborts the
+                # whole transaction — "current transaction is aborted, commands
+                # ignored until end of transaction block" — so a bare retry
+                # would fix the default backend and break the other one.
+                with conn.begin_nested():
+                    conn.execute(insert(agent_evaluations).values(**insert_values))
             except IntegrityError:
                 # The loser of that race. Its rating is not lost: the row now
                 # exists, so the UPDATE it originally skipped is the correct
-                # action, applied in a fresh transaction because this one is
-                # poisoned by the failed statement.
-                with get_engine().begin() as retry_conn:
-                    applied = _apply(retry_conn)
+                # action — retried on the SAME connection.
+                #
+                # Review finding: it used to open a SECOND connection here, and
+                # on SQLite (the default backend) that deadlocks against itself.
+                # pysqlite holds a RESERVED write lock on `conn` for the life of
+                # the transaction, and a constraint violation rolls back only
+                # the failed STATEMENT, not the transaction — so the retry's
+                # UPDATE waits on a lock its own caller is holding, burns the
+                # 30s `connect_args["timeout"]`, and raises
+                # `OperationalError: database is locked`, which `submit_rating`
+                # turns into the 503 this design exists to avoid. Deterministic,
+                # not a flake, and reachable from two tabs (the client-side
+                # `sending` guard covers one component instance). PostgreSQL
+                # tolerated it, so the DEFAULT backend was the broken one.
+                #
+                # The SAVEPOINT above is what makes reusing `conn` safe on
+                # both dialects; the same connection is then the only form that
+                # cannot block on itself.
+                applied = _apply(conn)
                 if applied is not None:
                     return applied
                 raise

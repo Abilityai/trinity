@@ -253,7 +253,7 @@ def test_a_user_scoped_key_reads_like_the_person_it_belongs_to():
     from models import User
     human_key = User(id=1, username="admin", role="admin", mcp_scope="user")
 
-    out = evaluations._redact_for_agent_principal(_row_with_comment(), human_key)
+    out = evaluations._redact_for_agent_principal(_row_with_comment(), human_key, {AGENT})
 
     assert out["comment"] == "this was useless"
     assert out["evaluator"] == f"workspace:{CLIENT}"
@@ -306,7 +306,7 @@ def test_a_human_operator_reads_the_words():
     from models import User
     human = User(id=1, username="admin", role="admin")
 
-    out = evaluations._redact_for_agent_principal(_row_with_comment(), human)
+    out = evaluations._redact_for_agent_principal(_row_with_comment(), human, {AGENT})
 
     assert out["comment"] == "this was useless"
     assert not out.get("comment_withheld")
@@ -333,8 +333,12 @@ def test_every_read_path_redacts_not_just_the_per_agent_one():
     from routers import evaluations
 
     sig = inspect.signature(evaluations._to_response)
-    assert list(sig.parameters) == ["row", "current_user"]
+    assert list(sig.parameters) == ["row", "current_user", "operator_agents"]
     assert sig.parameters["current_user"].default is inspect.Parameter.empty
+    # Review finding: `operator_agents` DOES carry a default, and it is the
+    # empty set on purpose — a caller that forgets it redacts rather than
+    # discloses. Fail-closed is the only safe default for a disclosure gate.
+    assert sig.parameters["operator_agents"].default == frozenset()
 
     source = inspect.getsource(evaluations)
     # Every call site names the caller — the property that makes it structural.
@@ -342,7 +346,7 @@ def test_every_read_path_redacts_not_just_the_per_agent_one():
     assert "_to_response(r)" not in source
     # ...and the redaction is reached from the projection, not from one route.
     body = inspect.getsource(evaluations._to_response)
-    assert "_redact_for_agent_principal(row, current_user)" in body
+    assert "_redact_for_agent_principal(row, current_user, operator_agents)" in body
 
 
 def test_a_row_with_no_comment_is_not_flagged_as_withheld():
@@ -547,3 +551,182 @@ def test_the_rating_route_is_bounded_in_two_tiers_like_chat():
     assert "portal_rating_hourly:" in src
     # Burst is enforced BEFORE the hourly window records a hit.
     assert src.index('f"portal_rating:') < src.index('f"portal_rating_hourly:')
+
+
+def test_a_shared_non_owner_is_not_an_operator():
+    """Review finding: the machine/human split was the right axis and not the
+    only one.
+
+    `list_agent_evaluations` is gated by `can_user_access_agent`, which is True
+    for **any user the agent is SHARED with** — and Workspace clients are
+    exactly that set (`agent_on_roster` is built from `agent_sharing`), with
+    `routers/sharing.py` auto-adding a shared email to the login whitelist when
+    email auth is on. So Bob's verbatim complaint, and the `workspace:bob@...`
+    naming him, were readable by Alice — another CLIENT of the same agent.
+    """
+    from routers import evaluations
+    from models import User
+    # A human, non-machine principal who is not an operator of this agent.
+    other_client = User(id=7, username="alice", role="user")
+
+    out = evaluations._redact_for_agent_principal(_row_with_comment(), other_client, set())
+
+    assert out["comment"] is None
+    assert out["comment_withheld"] is True
+    assert out["evaluator"] == "workspace"
+    # The tally still crosses — it is the part that is nobody's private text.
+    assert out["quality"] == 0.0
+
+
+def test_the_operator_set_fails_closed_when_the_lookup_raises():
+    """A disclosure gate that opens on an error is not a gate."""
+    from routers import evaluations
+    from models import User
+
+    class _Boom:
+        def can_user_share_agent(self, *a, **k):
+            raise RuntimeError("db down")
+
+    import routers.evaluations as mod
+    real = mod.db
+    mod.db = _Boom()
+    try:
+        out = mod._operator_for([{"agent_name": AGENT}], User(id=1, username="o", role="admin"))
+    finally:
+        mod.db = real
+    assert out == set()
+
+
+def test_the_operator_set_is_resolved_once_per_agent_not_per_row():
+    """A per-row query would make a 200-row page 200 lookups."""
+    from routers import evaluations
+    from models import User
+
+    calls = []
+
+    class _Counting:
+        def can_user_share_agent(self, username, agent_name):
+            calls.append(agent_name)
+            return True
+
+    import routers.evaluations as mod
+    real = mod.db
+    mod.db = _Counting()
+    try:
+        rows = [{"agent_name": AGENT} for _ in range(25)] + [{"agent_name": OTHER}]
+        out = mod._operator_for(rows, User(id=1, username="o", role="user"))
+    finally:
+        mod.db = real
+
+    assert out == {AGENT, OTHER}
+    assert sorted(calls) == sorted({AGENT, OTHER})
+
+
+# ---------------------------------------------------------------------------
+# The upsert against a real database (review finding: it had no test at all)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ratings_db(tmp_path, monkeypatch):
+    """A real SQLite engine, because the defect this covers is a LOCK, and a
+    stubbed db layer cannot hold one."""
+    import sqlalchemy as sa
+    from db import evaluations as mod
+    from db.tables import agent_evaluations
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path/'r.db'}", future=True,
+                              connect_args={"timeout": 5.0})
+    agent_evaluations.create(engine, checkfirst=True)
+    monkeypatch.setattr(mod, "get_engine", lambda: engine)
+    return mod.EvaluationOperations() if hasattr(mod, "EvaluationOperations") else mod
+
+
+def _ops():
+    from db import evaluations as mod
+    for attr in dir(mod):
+        obj = getattr(mod, attr)
+        if isinstance(obj, type) and attr.endswith("Operations"):
+            return obj()
+    raise AssertionError("no *Operations class in db.evaluations")
+
+
+def test_a_second_rating_of_the_same_thing_is_a_correction(ratings_db):
+    ops = _ops()
+    first = ops.upsert_workspace_rating(
+        AGENT, evaluator=f"workspace:{CLIENT}", target_kind="message",
+        target_id=MSG, quality=0.0, comment="useless")
+    second = ops.upsert_workspace_rating(
+        AGENT, evaluator=f"workspace:{CLIENT}", target_kind="message",
+        target_id=MSG, quality=1.0)
+
+    assert second["id"] == first["id"]          # one row, not two
+    assert second["quality"] == 1.0
+    # Changing the thumb does not retract the words.
+    assert second["comment"] == "useless"
+
+
+def test_two_people_racing_the_same_target_both_get_a_recorded_rating(ratings_db):
+    """The real shape of the retry branch, driven concurrently.
+
+    Two first-ratings of the same target by the same evaluator: both UPDATE
+    zero rows, both INSERT, and the unique index refuses one. The loser must
+    end up with its rating recorded, not with a 500 — and it must not take
+    seconds to get there.
+
+    This is the closest faithful reproduction available in a unit test. It is
+    NOT a guaranteed reproduction of the review's deadlock: whether the loser's
+    connection is holding SQLite's RESERVED write lock when the retry runs
+    depends on thread interleaving. What it does prove is that the retry path
+    is exercised for real — a genuine `IntegrityError` from a genuine INSERT,
+    not a synthesised one — and that it returns. The structural guarantee is
+    the SAVEPOINT, asserted separately below.
+    """
+    import threading
+    ops = _ops()
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+
+    def rate(q):
+        try:
+            barrier.wait(timeout=5)
+            results.append(ops.upsert_workspace_rating(
+                AGENT, evaluator=f"workspace:{CLIENT}", target_kind="message",
+                target_id=MSG, quality=q))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=rate, args=(q,)) for q in (0.0, 1.0)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    assert not errors, f"a rating was lost: {errors}"
+    assert len(results) == 2
+    # One row, whichever thumb landed last.
+    assert results[0]["id"] == results[1]["id"]
+
+
+def test_the_retry_cannot_block_on_a_lock_its_own_caller_holds(ratings_db):
+    """Review finding, pinned structurally — which is the only honest way.
+
+    The retry used to open a SECOND connection while the first still held
+    SQLite's RESERVED write lock for the life of its transaction. That is a
+    self-deadlock: it burns `connect_args["timeout"]` (30s in production) and
+    raises `database is locked`, which `submit_rating` turns into the 503 the
+    design exists to avoid. It worked on PostgreSQL, so the DEFAULT backend was
+    the broken one.
+
+    The fix retries on the SAME connection, inside a SAVEPOINT — the savepoint
+    is what makes that safe on both dialects, since PostgreSQL aborts a
+    transaction on a failed statement while SQLite does not.
+    """
+    import inspect
+    from db import evaluations as mod
+    src = inspect.getsource(mod.EvaluationOperations.upsert_workspace_rating
+                            if hasattr(mod, "EvaluationOperations")
+                            else _ops().upsert_workspace_rating)
+    assert "begin_nested()" in src
+    assert "applied = _apply(conn)" in src
+    # The second-connection form is what deadlocked; it must not come back.
+    assert "get_engine().begin() as retry_conn" not in src

@@ -18,6 +18,8 @@ is self-gated (an agent writes its own). This surface inverts that.
 """
 from __future__ import annotations
 
+import logging
+
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -36,6 +38,8 @@ from models import EvaluationCreate, EvaluationResponse, User
 # together by `test_ent366_workspace_ratings.py` instead.
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["evaluations"])
 
@@ -85,7 +89,8 @@ def _is_machine_principal(current_user: User) -> bool:
     return current_user.mcp_scope not in _HUMAN_SCOPES
 
 
-def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
+def _redact_for_agent_principal(row: dict, current_user: User,
+                                operator_agents: set = frozenset()) -> dict:
     """Strip a Workspace rating's free text when the RATED agent is reading.
 
     The ent#366 grooming decision, made explicitly rather than inherited: an
@@ -102,7 +107,12 @@ def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
     Only the comment is withheld. Quality, target and evaluator stay, so the
     agent can count its ratings and an operator surface loses nothing.
     """
-    if not _is_machine_principal(current_user):
+    # A machine never reads the words. Neither does a human who is not an
+    # OPERATOR of this agent — a shared non-owner is another client, and the
+    # rating they would be reading is somebody else's (review finding).
+    # `operator_agents` defaults empty, so a caller that forgets to pass it
+    # redacts rather than discloses.
+    if not _is_machine_principal(current_user) and row.get("agent_name") in operator_agents:
         return row
     redacted = dict(row)
     if row.get("comment"):
@@ -120,7 +130,39 @@ def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
     return redacted
 
 
-def _to_response(row: dict, current_user: User) -> EvaluationResponse:
+def _operator_for(rows, current_user: User) -> set:
+    """Which of these rows' agents this caller is an OPERATOR of.
+
+    Review finding: `_redact_for_agent_principal` split principals into machine
+    and human — the right axis, and not the only one. `list_agent_evaluations`
+    is gated by `get_authorized_agent_by_name` → `can_user_access_agent`, which
+    is True for **any user the agent is SHARED with**; Workspace clients are
+    exactly that set (`agent_on_roster` is built from `agent_sharing`), and
+    `routers/sharing.py` auto-adds a shared email to the login whitelist when
+    email auth is on. So one client's verbatim complaint — and the
+    `workspace:bob@y.com` that names them — was readable by every OTHER client
+    of the same agent through `GET /api/agents/{name}/evaluations`.
+
+    "Operator surfaces see everything" is the right model; a shared non-owner is
+    not an operator. Owner ∪ admin is, and `can_user_share_agent` is already
+    that exact predicate (it backs `assert_agent_owner`).
+
+    Resolved once per agent per request rather than per row, and fail-CLOSED:
+    a lookup that raises leaves the agent out of the set, so the words are
+    withheld rather than disclosed on an error.
+    """
+    names = {r.get("agent_name") for r in rows if r.get("agent_name")}
+    operator = set()
+    for name in names:
+        try:
+            if db.can_user_share_agent(current_user.username, name):
+                operator.add(name)
+        except Exception:  # noqa: BLE001
+            logger.warning("evaluations: operator check failed for %s", name)
+    return operator
+
+
+def _to_response(row: dict, current_user: User, operator_agents: set = frozenset()) -> EvaluationResponse:
     """Project a row for THIS caller.
 
     `current_user` is required rather than optional on purpose. The first
@@ -132,7 +174,7 @@ def _to_response(row: dict, current_user: User) -> EvaluationResponse:
     caller through the single projection makes the redaction structural: a new
     read path cannot compile without deciding.
     """
-    row = _redact_for_agent_principal(row, current_user)
+    row = _redact_for_agent_principal(row, current_user, operator_agents)
     return EvaluationResponse(
         id=row["id"],
         agent_name=row["agent_name"],
@@ -162,7 +204,9 @@ async def list_agent_evaluations(
     read to owner/admin/agent-self — reading feedback is allowed; writing is not."""
     # ent#366: an agent-scoped caller gets the tallies and not the words —
     # applied inside `_to_response`, so every read path below inherits it.
-    return [_to_response(r, current_user) for r in db.list_agent_evaluations(agent_name, limit)]
+    rows = db.list_agent_evaluations(agent_name, limit)
+    operator_agents = _operator_for(rows, current_user)
+    return [_to_response(r, current_user, operator_agents) for r in rows]
 
 
 @router.get("/evaluations", response_model=List[EvaluationResponse])
@@ -173,7 +217,9 @@ async def list_fleet_evaluations(
 ):
     """Fleet evaluations across accessible agents (admin = all)."""
     names = narrow_to_agent(accessible_agent_names(current_user), agent)
-    return [_to_response(r, current_user) for r in db.list_fleet_evaluations(names, limit)]
+    rows = db.list_fleet_evaluations(names, limit)
+    operator_agents = _operator_for(rows, current_user)
+    return [_to_response(r, current_user, operator_agents) for r in rows]
 
 
 @router.get("/evaluations/{eval_id}", response_model=EvaluationResponse)
@@ -185,7 +231,7 @@ async def get_evaluation(eval_id: str, current_user: User = Depends(get_current_
     names = accessible_agent_names(current_user)
     if names is not None and row["agent_name"] not in names:
         raise HTTPException(status_code=404, detail="Evaluation not found")
-    return _to_response(row, current_user)
+    return _to_response(row, current_user, _operator_for([row], current_user))
 
 
 @router.post("/agents/{agent_name}/evaluations", response_model=EvaluationResponse)
@@ -211,4 +257,8 @@ async def create_evaluation(
         checks=body.checks,
         judge=body.judge,
     )
-    return _to_response(row, current_user)
+    # The write fence is `require_admin` + `reject_agent_principal`, so this
+    # caller is an operator by construction — stated explicitly rather than
+    # left to the fail-closed default, which would redact an admin's own write
+    # back to them.
+    return _to_response(row, current_user, _operator_for([row], current_user))
