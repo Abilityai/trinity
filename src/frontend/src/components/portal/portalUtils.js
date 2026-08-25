@@ -1222,6 +1222,12 @@ export function ratingTallyText(tally, targetKind = 'message') {
 export const FEEDBACK_SENT_TEXT = 'Thanks — passed on to the agent.'
 export const FEEDBACK_RECORDED_TEXT = 'Thanks — recorded for the team.'
 
+// `already_dispatched` (ent#366 review) reads as SENT, not merely recorded: the
+// agent was handed this target's feedback on the first down-rating and one turn
+// per person per target is the rule, so "passed on to the agent" is the true
+// sentence. Only the no-skill and unknown cases fall back to "recorded".
+const FEEDBACK_REACHED_AGENT = new Set(['dispatched', 'already_dispatched'])
+
 export function feedbackAcknowledgement(captureFeedback) {
-  return captureFeedback === 'dispatched' ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
+  return FEEDBACK_REACHED_AGENT.has(captureFeedback) ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
 }

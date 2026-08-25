@@ -426,7 +426,7 @@ class PortalRatingResult(BaseModel):
     # ent#366 AC #6: absent the capture-feedback skill the rating still records
     # and this says so, so the UI can thank the person honestly instead of
     # implying a follow-up that will not happen.
-    capture_feedback: Optional[str] = None   # 'dispatched' | 'skill_not_installed' | None
+    capture_feedback: Optional[str] = None   # 'dispatched' | 'already_dispatched' | 'skill_not_installed' | None
 
 
 class PortalHistoryMessage(BaseModel):

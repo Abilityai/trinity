@@ -106,8 +106,21 @@ PORTAL_CHAT_HOURLY_LIMIT = int(os.getenv("PORTAL_CHAT_HOURLY_LIMIT", "300"))
 PORTAL_UPLOAD_BURST_LIMIT = int(os.getenv("PORTAL_UPLOAD_BURST_LIMIT", "20"))
 PORTAL_UPLOAD_HOURLY_LIMIT = int(os.getenv("PORTAL_UPLOAD_HOURLY_LIMIT", "100"))
 
+# Ratings take the same TWO tiers, for the same reason and with the same shape
+# (ent#366 review). A rating is one click, so the burst tier stays generous —
+# but this route dispatches a full `execute_task` on a down-rating with a
+# comment, i.e. the same expensive resource `portal_chat` is metered on, and a
+# single 60/min tier permits ~3600 turns an hour against that client's stated
+# 300. The hourly ceiling is the tier that actually bounds it; the per-target
+# dispatch claim in the service is what stops one target being re-rated into a
+# turn generator. Env-tunable, because the right ceiling depends on the
+# licensee's clients.
+PORTAL_RATING_BURST_LIMIT = int(os.getenv("PORTAL_RATING_BURST_LIMIT", "60"))
+PORTAL_RATING_HOURLY_LIMIT = int(os.getenv("PORTAL_RATING_HOURLY_LIMIT", "300"))
+
 _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
+_RATING_LIMIT_DETAIL = "Too many ratings for this agent."
 
 
 def _require_roster(agent_name: str, email: str, include_owned: bool = False) -> None:
@@ -738,13 +751,25 @@ def portal_submit_rating(agent_name: str, body: PortalRatingRequest,
     Idempotent per person per target, so changing your mind updates rather than
     appends and a tally counts people, not clicks.
 
-    Rate-limited per (client, agent): a rating is one click, and a client that
-    can loop it can grow a table the retention sweep only prunes by age.
+    Rate-limited per (client, agent) in TWO tiers, like `portal_chat`: the row
+    is cheap, but a down-rating with a comment dispatches a full agent turn, so
+    the hourly tier is what keeps this route inside the same budget the client
+    has through chat. The dispatch itself is claimed per (evaluator, target) in
+    the service, so re-rating one target is an update, never a new turn.
     """
     email = principal.email
     include_owned = principal.is_platform
     from services import rate_limiter
-    rate_limiter.enforce(f"portal_rating:{email}:{agent_name}", 60, 60)
+    # Burst first, so a client held at the per-minute limit does not also burn
+    # their hourly budget (the `portal_chat` ordering and its rationale).
+    rate_limiter.enforce(
+        f"portal_rating:{email}:{agent_name}", PORTAL_RATING_BURST_LIMIT, 60,
+        detail=_RATING_LIMIT_DETAIL,
+    )
+    rate_limiter.enforce(
+        f"portal_rating_hourly:{email}:{agent_name}", PORTAL_RATING_HOURLY_LIMIT, 3600,
+        detail=_RATING_LIMIT_DETAIL,
+    )
     try:
         result = service.submit_rating(
             agent_name, email,
@@ -765,13 +790,26 @@ def portal_submit_rating(agent_name: str, body: PortalRatingRequest,
     # honest claim — the turn's own outcome is observable as an execution row.
     if result["comment_recorded"] and body.rating == "down":
         if service.agent_has_capture_feedback(agent_name):
-            background.add_task(
-                service.dispatch_capture_feedback,
+            # One turn per person per target (ent#366 review). The row is
+            # idempotent through the partial UNIQUE; without this the SIDE
+            # EFFECT was not, so re-rating the same target with a tweaked
+            # comment re-fired a full agent turn each time.
+            if service.claim_capture_feedback_dispatch(
                 agent_name, email,
                 target_kind=body.target_kind, target_id=body.target_id,
-                comment=body.comment or "",
-            )
-            result["capture_feedback"] = "dispatched"
+            ):
+                background.add_task(
+                    service.dispatch_capture_feedback,
+                    agent_name, email,
+                    target_kind=body.target_kind, target_id=body.target_id,
+                    comment=body.comment or "",
+                )
+                result["capture_feedback"] = "dispatched"
+            else:
+                # Honest, and distinct from "no skill": the words ARE recorded
+                # (the update landed above) and the agent was already told about
+                # this target — it reads the row, not this message.
+                result["capture_feedback"] = "already_dispatched"
         else:
             # Not a failure: the comment is recorded either way, and saying so
             # lets the UI thank the person for words that landed rather than

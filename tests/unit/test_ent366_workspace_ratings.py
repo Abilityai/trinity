@@ -259,6 +259,48 @@ def test_a_user_scoped_key_reads_like_the_person_it_belongs_to():
     assert out["evaluator"] == f"workspace:{CLIENT}"
 
 
+def test_a_scope_nobody_has_heard_of_is_a_machine():
+    """Review of this PR. The predicate was a DENYLIST over a free-text column
+    with no CHECK constraint, so every scope it had not been told about —
+    `connector`, `portal_delegate`, anything added later — read as a person and
+    received the words plus the rater's email. That those scopes are fenced away
+    from this router elsewhere is a property of a different module; it is the
+    #848 `!== "connector"` class, which architecture.md records as admitting
+    every scope it had not heard of.
+
+    Parameterised over a scope that does not exist on purpose: the assertion is
+    about the DEFAULT, not about today's list.
+    """
+    from routers import evaluations
+    from models import User
+
+    for scope in ("connector", "portal_delegate", "some_scope_from_2027"):
+        out = evaluations._redact_for_agent_principal(
+            _row_with_comment(), User(id=1, username="svc", role="admin", mcp_scope=scope))
+        assert out["comment"] is None, scope
+        assert out["comment_withheld"] is True, scope
+        assert out["evaluator"] == "workspace", scope
+
+
+def test_an_agent_identity_is_a_machine_whatever_its_scope_says():
+    """`agent_name` is checked first and independently — a principal carrying an
+    agent identity is software even if its scope column reads `user`."""
+    from routers import evaluations
+    from models import User
+    agent = User(id=1, username="admin", role="admin", mcp_scope="user", agent_name=AGENT)
+
+    out = evaluations._redact_for_agent_principal(_row_with_comment(), agent)
+
+    assert out["comment"] is None
+    assert out["evaluator"] == "workspace"
+
+
+def test_the_human_allowlist_is_exactly_two_principals():
+    """Pinned so widening it is a deliberate edit rather than a drive-by."""
+    from routers import evaluations
+    assert evaluations._HUMAN_SCOPES == (None, "user")
+
+
 def test_a_human_operator_reads_the_words():
     from routers import evaluations
     from models import User
@@ -410,3 +452,98 @@ def test_the_skill_is_recognised_in_either_row_shape(svc, monkeypatch):
     assert svc.agent_has_capture_feedback(AGENT) is True
     monkeypatch.setattr(database.db, "get_agent_skills", lambda a: [{"skill_name": "capture-feedback"}])
     assert svc.agent_has_capture_feedback(AGENT) is True
+
+
+# ---------------------------------------------------------------------------
+# The turn is the expensive resource (review of this PR)
+# ---------------------------------------------------------------------------
+
+def test_re_rating_one_target_does_not_re_fire_the_turn(svc, monkeypatch):
+    """The partial UNIQUE made the ROW idempotent; the SIDE EFFECT was not.
+
+    Re-rating the same message down with a tweaked comment dispatched a fresh
+    `execute_task` every time, so a rostered client could drive ~3600 agent
+    turns an hour through a route the platform meters at 300/hour through chat —
+    by clicking. One claim per (evaluator, target_kind, target_id).
+    """
+    claims: dict = {}
+
+    class _Decision:
+        def __init__(self, replay): self.replay = replay; self.enabled = True
+        scope = "agent:scribe"; key = "k"
+
+    def fake_begin(scope, key):
+        seen = (scope, key) in claims
+        claims[(scope, key)] = True
+        return _Decision(replay=seen)
+
+    from services import idempotency_service
+    monkeypatch.setattr(idempotency_service, "begin", fake_begin)
+    monkeypatch.setattr(idempotency_service, "complete", lambda *a, **k: None)
+
+    first = svc.claim_capture_feedback_dispatch(
+        AGENT, CLIENT, target_kind="message", target_id=MSG)
+    second = svc.claim_capture_feedback_dispatch(
+        AGENT, CLIENT, target_kind="message", target_id=MSG)
+
+    assert first is True
+    assert second is False
+
+
+def test_the_dispatch_key_ignores_the_comment(svc, monkeypatch):
+    """A key that moved with the text would be a rename of the attack, not a
+    dedup — the same reason `derive_effect_key` hashes resolved identity and
+    structurally excludes a message body (#1084). `claim_...` is not even given
+    the comment, which is the strongest form of that guarantee.
+    """
+    import inspect
+    sig = inspect.signature(svc.claim_capture_feedback_dispatch)
+    assert "comment" not in sig.parameters
+
+
+def test_different_people_and_different_targets_each_get_their_turn(svc, monkeypatch):
+    """Dedup must not silence a SECOND person, or a second thing."""
+    keys = []
+    from services import idempotency_service
+
+    class _Fresh:
+        replay = False; enabled = True; scope = "s"; key = "k"
+
+    monkeypatch.setattr(idempotency_service, "begin",
+                        lambda scope, key: (keys.append(key), _Fresh())[1])
+    monkeypatch.setattr(idempotency_service, "complete", lambda *a, **k: None)
+
+    svc.claim_capture_feedback_dispatch(AGENT, CLIENT, target_kind="message", target_id=MSG)
+    svc.claim_capture_feedback_dispatch(AGENT, STRANGER, target_kind="message", target_id=MSG)
+    svc.claim_capture_feedback_dispatch(AGENT, CLIENT, target_kind="deliverable", target_id=REPORT)
+
+    assert len(set(keys)) == 3
+
+
+def test_a_dedup_hiccup_never_swallows_feedback(svc, monkeypatch):
+    """Fail-OPEN, like every other consumer of this layer: `begin` already
+    returns a disabled decision on a DB error, and a disabled decision is not a
+    replay — so the turn still runs."""
+    from services import idempotency_service
+
+    class _Disabled:
+        enabled = False; replay = False; scope = None; key = None
+
+    monkeypatch.setattr(idempotency_service, "begin", lambda scope, key: _Disabled())
+    monkeypatch.setattr(idempotency_service, "complete", lambda *a, **k: None)
+
+    assert svc.claim_capture_feedback_dispatch(
+        AGENT, CLIENT, target_kind="message", target_id=MSG) is True
+
+
+def test_the_rating_route_is_bounded_in_two_tiers_like_chat():
+    """A single 60/min tier is not a budget bound: it permits ~3600 turns an
+    hour against the 300 the same client gets through chat. Both tiers are
+    env-tunable for the same reason `portal_chat`'s are."""
+    from client_portal import router as mod
+
+    assert mod.PORTAL_RATING_HOURLY_LIMIT == mod.PORTAL_CHAT_HOURLY_LIMIT
+    src = __import__("inspect").getsource(mod)
+    assert "portal_rating_hourly:" in src
+    # Burst is enforced BEFORE the hourly window records a hit.
+    assert src.index('f"portal_rating:') < src.index('f"portal_rating_hourly:')

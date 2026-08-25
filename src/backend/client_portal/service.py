@@ -3104,6 +3104,46 @@ def agent_has_capture_feedback(agent_name: str) -> bool:
         return False
 
 
+def claim_capture_feedback_dispatch(agent_name: str, email: str, *,
+                                    target_kind: str, target_id: str) -> bool:
+    """Whether THIS rating is entitled to spend a turn (ent#366 review).
+
+    The partial UNIQUE makes the ROW idempotent — re-rating updates in place —
+    but the side effect was not: re-rating the same target down with a tweaked
+    comment fired a fresh `execute_task` every time. A rostered client could
+    therefore drive roughly 3600 agent turns an hour through this route, against
+    the 300/hour the platform deliberately allows that same client through chat,
+    by clicking. The row was never the expensive resource; the turn is.
+
+    Keyed on the RESOLVED IDENTITY only — `(evaluator, target_kind, target_id)`
+    — never the comment, exactly as `derive_effect_key` excludes a message body
+    (#1084): a key that moves with the text is not a dedup, it is a rename of
+    the attack. One dispatch per person per target per idempotency window; the
+    words are still recorded in full on every re-rate, because the row write
+    happens before this is consulted.
+
+    Fail-OPEN, like every other consumer of this layer: a dedup hiccup must not
+    swallow feedback the agent was meant to see. The rate limits on the route
+    are the bound that survives that.
+    """
+    from services import idempotency_service
+
+    scope = idempotency_service.make_agent_scope(agent_name)
+    key = idempotency_service.derive_effect_key(
+        f"workspace:{email}", "capture_feedback",
+        {"target_kind": target_kind, "target_id": target_id},
+    )
+    decision = idempotency_service.begin(scope, key)
+    if decision.replay:
+        return False
+    # Completed immediately: the effect being deduped is the HANDOFF, and the
+    # dispatched turn's own outcome is observable as an execution row. Leaving
+    # the claim `in_flight` until the background task finished would block a
+    # legitimate later re-rate for the TTL window on any crash.
+    idempotency_service.complete(decision, None, {"dispatched": True})
+    return True
+
+
 def build_capture_feedback_prompt(target_kind: str, target_id: str, comment: str,
                                   email: str) -> str:
     """The turn text handed to `capture-feedback`, with the client's words FRAMED.

@@ -40,11 +40,20 @@ from services.agent_service.helpers import accessible_agent_names, narrow_to_age
 router = APIRouter(prefix="/api", tags=["evaluations"])
 
 
-# Scopes that are a MACHINE reading, not a person. `agent` is the rated agent
-# itself; `system` is `trinity-system`, which bypasses permission checks and can
-# therefore read every agent's evaluations — including other agents' client
-# comments and the emails attached to them.
-_MACHINE_SCOPES = ("agent", "system")
+# The ALLOWLIST of scopes that read as a PERSON. `mcp_scope` is a free-text
+# column with no CHECK constraint, so the live values are a snapshot and never a
+# closed set — a denylist of machine scopes (`("agent", "system")`) hands the
+# words and the rater's email to everything it has not heard of: `connector`,
+# `portal_delegate`, any sixth scope added later, and a NULL column, which
+# `dependencies` coerces to `"user"` only on some paths. That those scopes are
+# route-fenced away from `/api/evaluations` elsewhere is exactly the
+# safety-property-held-somewhere-else this function's own docstring objects to
+# one paragraph down, and it is the #848 `!== "connector"` class verbatim.
+#
+# `None` is the JWT branch (a person in a browser); `"user"` is a person's own
+# MCP credential, which reads like a JWT. Everything else is a machine until
+# someone decides otherwise HERE.
+_HUMAN_SCOPES = (None, "user")
 
 
 def _is_machine_principal(current_user: User) -> bool:
@@ -62,8 +71,18 @@ def _is_machine_principal(current_user: User) -> bool:
     agent's rows.
 
     A `user`-scoped MCP key is a person's own credential and reads like a JWT.
+
+    Written as a fail-CLOSED allowlist (review of this PR): the predicate names
+    the two principals that are people and treats everything else as software,
+    so a scope introduced tomorrow is redacted on the day it appears rather than
+    on the day someone remembers this function.
     """
-    return bool(current_user.agent_name) or (current_user.mcp_scope in _MACHINE_SCOPES)
+    if current_user.agent_name:
+        # Set only for `scope="agent"`, but checked first and independently: a
+        # principal carrying an agent identity is a machine whatever its scope
+        # column says.
+        return True
+    return current_user.mcp_scope not in _HUMAN_SCOPES
 
 
 def _redact_for_agent_principal(row: dict, current_user: User) -> dict:
