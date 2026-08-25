@@ -362,23 +362,82 @@ def _handler_sources_for_allowlisted_routes():
     return out
 
 
+# The platform spells the admin gate three ways, and an allowlisted route must
+# opt `ops` in whichever one it uses:
+#
+#   assert_admin(user, allow_scopes={"ops"})            imperative
+#   Depends(require_admin_allowing("ops"))              declarative
+#   Depends(require_admin)                              declarative, NO opt-in
+#
+# The third is an offender by construction: `require_admin` takes no
+# `allow_scopes`, so an allowlisted route gated that way is permanently dead to
+# ops keys with nothing to write. `require_admin_allowing` (#2389) exists to
+# replace it.
+_OPS_OPT_IN = re.compile(r"""['"]ops['"]""")
+_ASSERT_ADMIN_CALL = re.compile(r"assert_admin\(([^)]*)\)", re.S)
+_ALLOWING_CALL = re.compile(r"require_admin_allowing\(([^)]*)\)", re.S)
+# `require_admin` NOT followed by `_allowing` — the bare Depends spelling.
+_BARE_REQUIRE_ADMIN = re.compile(r"\brequire_admin\b(?!_allowing)")
+
+
+def _ops_gate_offences(src: str) -> list:
+    """Admin-gate spellings in this handler that do not admit `ops`."""
+    offences = []
+    for m in _ASSERT_ADMIN_CALL.finditer(src):
+        if not _OPS_OPT_IN.search(m.group(1)):
+            offences.append("assert_admin() without allow_scopes={'ops'}")
+    for m in _ALLOWING_CALL.finditer(src):
+        if not _OPS_OPT_IN.search(m.group(1)):
+            offences.append("require_admin_allowing() without 'ops'")
+    if _BARE_REQUIRE_ADMIN.search(src):
+        offences.append("Depends(require_admin): no opt-in exists; use require_admin_allowing('ops')")
+    return offences
+
+
 def test_every_admin_gated_allowlisted_route_opts_ops_in():
     """A route the fence admits but the gate refuses is dead to an ops key.
 
-    `ADMIN_GATE_SCOPES` deliberately excludes `ops`, so any allowlisted handler
-    calling `assert_admin` MUST pass `allow_scopes={"ops"}` — that opt-in is the
-    grant. Bare `assert_admin` on an allowlisted route is the #2389 finding."""
+    `ADMIN_GATE_SCOPES` deliberately excludes `ops`, so an allowlisted handler's
+    admin gate MUST admit it — that opt-in is the grant.
+
+    #2389 (re-review): this guard originally matched `assert_admin(...)` calls
+    only. `require_admin` is the dominant admin-gate spelling platform-wide and
+    appears in a **signature**, not a call in the body, so an allowlisted route
+    written in the `Depends` style produced zero matches and passed **vacuously**
+    — the same one-half-asserted shape the guard exists to catch, made likelier
+    the moment `require_admin_allowing` shipped as a second spelling. All three
+    spellings are checked now."""
     pairs = _handler_sources_for_allowlisted_routes()
     assert pairs, "resolved no allowlisted handlers — guard would be vacuous"
-    offenders = []
+    offenders = {}
     for path, src in pairs:
-        for m in re.finditer(r"assert_admin\(([^)]*)\)", src, re.S):
-            if '"ops"' not in m.group(1) and "'ops'" not in m.group(1):
-                offenders.append(path)
+        offences = _ops_gate_offences(src)
+        if offences:
+            offenders.setdefault(path, set()).update(offences)
     assert not offenders, (
         "allowlisted by the ops fence but refused by their own admin gate: "
-        f"{sorted(set(offenders))}"
+        + "; ".join(f"{p} -> {sorted(v)}" for p, v in sorted(offenders.items()))
     )
+
+
+def test_the_ops_gate_guard_detects_every_spelling():
+    """The guard above is only worth its runtime if it fails on real offenders.
+
+    Pinned per spelling, because the vacuous-pass bug was a *missing* spelling,
+    not a broken predicate — a guard whose blind spot is silent is the defect it
+    was written to prevent."""
+    assert _ops_gate_offences("assert_admin(current_user)")
+    assert _ops_gate_offences('assert_admin(current_user, allow_scopes={"admin"})')
+    assert _ops_gate_offences("user: User = Depends(require_admin)")
+    assert _ops_gate_offences('Depends(require_admin_allowing("telemetry"))')
+    # ...and passes the three correct forms, so it cannot be satisfied by
+    # rejecting everything.
+    assert not _ops_gate_offences('assert_admin(current_user, allow_scopes={"ops"})')
+    assert not _ops_gate_offences("assert_admin(current_user, allow_scopes={'ops'})")
+    assert not _ops_gate_offences('user: User = Depends(require_admin_allowing("ops"))')
+    # A handler with no admin gate at all is not an offender — most allowlisted
+    # routes are `get_current_user`-only.
+    assert not _ops_gate_offences("user: User = Depends(get_current_user)")
 
 
 # --------------------------------------------------------------------------- #
@@ -663,20 +722,24 @@ def test_require_admin_allowing_is_the_depends_form_of_the_optin():
 
 
 def test_no_allowlisted_route_uses_the_unparameterised_require_admin():
-    """Sibling of `test_every_admin_gated_allowlisted_route_opts_ops_in`, closing
-    the SHAPE rather than the instance.
+    """Sibling of `test_every_admin_gated_allowlisted_route_opts_ops_in`, kept as
+    a NAMED assertion of the `Depends(require_admin)` shape specifically.
 
-    That guard regex-matched `assert_admin(` only, so converting an allowlisted
-    handler to `Depends(require_admin)` — the dominant spelling, and the one the
-    enterprise routers use — would silently 403 the ops dashboard with CI green.
-    `require_admin_allowing("ops")` is the supported form; bare `require_admin` on
-    an allowlisted route is the bug."""
+    Converting an allowlisted handler to `Depends(require_admin)` — the dominant
+    spelling, and the one the enterprise routers use — would silently 403 the ops
+    dashboard with CI green, because `require_admin` takes no `allow_scopes` and
+    there is nothing to opt in with. `require_admin_allowing("ops")` is the
+    supported form.
+
+    Delegates to the shared `_ops_gate_offences` predicate rather than carrying a
+    second copy of the regex (#2389 re-review): two guards over one policy, each
+    with its own pattern, is how the spellings diverged in the first place."""
     pairs = _handler_sources_for_allowlisted_routes()
     assert pairs, "resolved no allowlisted handlers — guard would be vacuous"
     offenders = [
         path
         for path, src in pairs
-        if re.search(r"require_admin(?!_allowing)\b", src)
+        if any(o.startswith("Depends(require_admin)") for o in _ops_gate_offences(src))
     ]
     assert not offenders, (
         "allowlisted by the ops fence but gated with the unparameterised "

@@ -111,21 +111,22 @@ class McpKeyOperations:
     # the column by another path.
     _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops")
 
-    # #2323: scopes that must never carry an `agent_name`. Three separate sweeps
-    # filter on `scope IN ('agent','connector')` to find their work — the canary
-    # L-03 orphan scan, the key orphan sweep, and the agent rename/purge cascade
-    # — so a non-agent scope carrying an agent name would be invisible to all
-    # three and outlive its agent forever.
+    # #2323 INVARIANT — every scope this creator can mint (`_USER_CREATABLE_SCOPES`
+    # above) must leave `agent_name` NULL. Three separate sweeps filter on
+    # `scope IN ('agent','connector')` to find their work — the canary L-03
+    # orphan scan, the key orphan sweep, and the agent rename/purge cascade — so
+    # a non-agent scope carrying an agent name would be invisible to all three
+    # and outlive its agent forever.
     #
-    # The invariant holds HERE BY CONSTRUCTION: this creator writes the literal
-    # `agent_name=None` below, and `McpApiKeyCreate` declares no `agent_name` for
-    # a caller to supply. An earlier revision guarded on
+    # It holds HERE BY CONSTRUCTION, with no guard to bypass: this creator writes
+    # the literal `agent_name=None` below, and `McpApiKeyCreate` declares no
+    # `agent_name` for a caller to supply. An earlier revision guarded on
     # `getattr(key_data, "agent_name", None)` — which Pydantic makes permanently
-    # falsy, so it could never fire while reading as protection. Removed in
-    # review; the constant stays as the documented invariant and
-    # `test_2323_machine_identities.py` asserts the WRITTEN ROW rather than
-    # membership in this tuple.
-    _AGENTLESS_SCOPES = ("user", "portal_delegate", "ops")
+    # falsy, so it could never fire while reading as protection. #2389 removed
+    # the guard, then removed the `_AGENTLESS_SCOPES` tuple it had been the only
+    # reader of: a constant nothing consults reads as enforcement to the next
+    # person, which is the same defect one step smaller.
+    # `test_2323_machine_identities.py` asserts the WRITTEN ROW.
 
     def create_mcp_api_key(self, username: str, key_data: McpApiKeyCreate) -> Optional[McpApiKeyWithSecret]:
         """Create a new MCP API key for a user.

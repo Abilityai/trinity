@@ -36,9 +36,27 @@ Two properties make `ops` a machine identity rather than a human's proxy:
 * It is **fenced at the single auth entry point**, not per-endpoint, so an
   endpoint doing its own inline access check cannot be reached by it either.
 * It is kept **out of the admin-gate allowlist**, so an admin-gated ops route
-  must opt it in explicitly. Authority comes from *being* an ops key — which is
-  why it keeps working when the owning admin is offboarded, and why a new ops
-  route is inaccessible until someone grants it rather than silently reachable.
+  must opt it in explicitly (`assert_admin(..., allow_scopes={"ops"})`, or
+  `Depends(require_admin_allowing("ops"))` on a route gated that way). The opt-in
+  flips the failure direction: a new ops route is inaccessible until someone
+  grants it, rather than silently reachable.
+
+**It does not survive its owner's offboarding, and an earlier revision of this
+document said it did.** The opt-in ADMITS the scope; `role == "admin"` is still
+enforced afterwards, so demoting the owner 403s the key at every admin-gated ops
+read — and `get_current_user` rejects a principal whose owner carries
+`suspended_at` (#995), so suspension kills the key at the auth entry point
+before any of this runs. Dropping the role check for an opted-in scope was
+considered and refused: it would make this bounded tier *harder* to revoke than
+the unbounded `user`-scoped key it exists to displace. #2323 asked for a
+credential that survives enforced **2FA** — which it does, key validation never
+passing through the MFA gate — not one that survives its **owner**.
+
+*Operator consequence, for the offboarding runbook:* an ops key is bound to the
+account that minted it. Mint it under a dedicated service-admin account that is
+not offboarded with people, and treat revoke-and-re-mint as part of offboarding
+any admin who holds one. Pinned by `test_2323_machine_identities.py` so the
+claim cannot drift back.
 
 Every fence entry is a `GET`, asserted by a test that imports the constant. The
 route set was derived from the **measured** read set of the real consumer; the
