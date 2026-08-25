@@ -225,10 +225,19 @@ export function startPayload(form) {
     timeout_per_run: numberOrNull(form?.timeout_per_run),
     delay_seconds: numberOrNull(form?.delay_seconds),
     no_progress_threshold: numberOrNull(form?.no_progress_threshold),
+    // Review finding: `FORM_INITIAL` spreads `GUARDRAIL_DEFAULTS`, which carries
+    // these two — and the payload dropped both. Harmless only while the omitted
+    // values happen to equal the server defaults in `models.StartLoopRequest`,
+    // but the strip already SHOWS `max_consecutive_failures` to the user as a
+    // promise about this loop, so the moment either default moves the form
+    // states one bound and the loop runs under another. Send what was shown.
+    max_consecutive_failures: numberOrNull(form?.max_consecutive_failures),
   }
   for (const [k, v] of Object.entries(optional)) {
     if (v !== null) body[k] = v
   }
+  const onFailure = (form?.on_failure || '').trim()
+  if (onFailure) body.on_failure = onFailure
   const signal = (form?.stop_signal || '').trim()
   if (signal) body.stop_signal = signal
   return body

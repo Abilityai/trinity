@@ -166,7 +166,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { usePortalLoopsStore } from '@/stores/portalLoops'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -249,19 +249,45 @@ async function onStop(loop) {
 // guard returned, and nothing re-ran it because the participants never changed.
 // Same class as `AdminEmailNudge`'s `profileVerified` and the ent#384 tile's
 // key-appearance watch — a derived auth flag needs a watcher, not a read.
-watch([participants, visible], ([names, isVisible]) => {
+// Review finding: the source was `participants`, a computed over `props.participants`
+// — and both parents build that array fresh on every render (`PortalConversation`
+// passes the literal `[agent.name]`; `PortalRoom` passes a computed re-derived
+// from `room.value`, which its 3s poll reassigns). A non-deep watch compares
+// with `Object.is`, so a new array identity always fired: typing a 40-character
+// message issued 40 `GET /loops` per participant, and a room polled
+// unconditionally every 3s with nothing running. `store.setParticipants`
+// early-returns on unchanged content, but `fetchLoops()` did not.
+//
+// Watching the JOINED KEY makes the watch fire on what actually changed. The
+// same re-fire also reset `form.agent` to the first participant mid-selection,
+// so a Start clicked in that window ran the loop on the wrong agent.
+const participantsKey = computed(() => participants.value.join('\u0000'))
+
+watch([participantsKey, visible], ([key, isVisible], previous) => {
   if (!isVisible) return
+  const names = participants.value
+  const keyChanged = !previous || previous[0] !== key
   store.setParticipants(names)
-  ownedKey.value = names.join('\u0000')
-  form.agent = names[0] || null
+  ownedKey.value = key
+  // Only when the SET changed — otherwise a poll tick silently discards the
+  // agent the user picked in the start form.
+  if (keyChanged) form.agent = names[0] || null
   store.fetchLoops()
 }, { immediate: true })
 
-onMounted(() => {
-  // Auto-expand when something is already running, so a user returning to a
-  // chat is not asked to go looking for work that is in flight.
-  if (store.hasActive) expanded.value = true
-})
+// Review finding: this used to read `store.hasActive` in `onMounted`, where it
+// is always false — the immediate watcher above only STARTS the async
+// `fetchLoops()`, and the matching-key branch of `onUnmounted` calls
+// `store.clear()`, so nothing can be left over from a previous mount either. So
+// the strip rendered collapsed saying "N loops running" and never expanded, and
+// the documented "not asked to go looking for work that is in flight" never
+// happened. One-shot: the first time the store reports something active.
+const autoExpanded = ref(false)
+watch(() => store.hasActive, (active) => {
+  if (!active || autoExpanded.value) return
+  autoExpanded.value = true
+  expanded.value = true
+}, { immediate: true })
 
 onUnmounted(() => {
   // Clear only if the store still holds THIS instance's participants.
@@ -271,8 +297,13 @@ onUnmounted(() => {
   // just set and leave it empty with no watcher left to re-run.
   if (ownedKey.value && store.participants.join('\u0000') === ownedKey.value) {
     store.clear()
-  } else {
-    store.stopPolling()
   }
+  // Review finding: the else-branch used to call `store.stopPolling()`, and
+  // that branch is reached exactly when the store belongs to the INCOMING
+  // panel. `_ensurePolling()` only runs from `fetchLoops`'s finally, so if the
+  // new panel's first fetch had already armed the 12s timer, the outgoing panel
+  // cleared it and nothing re-armed — leaving the new panel with WS as its only
+  // update path, which is precisely the failure the backstop exists to cover.
+  // The store is not ours any more: do nothing.
 })
 </script>

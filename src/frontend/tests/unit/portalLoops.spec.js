@@ -265,7 +265,7 @@ describe('ent#458 — auth and lifecycle races (caught in review)', () => {
     // token, both settled asynchronously. A participants-only watch guarded on
     // it returns at mount and never re-runs — the strip renders permanently
     // empty. Same class as AdminEmailNudge's `profileVerified`.
-    expect(sfc).toMatch(/watch\(\[participants, visible\]/)
+    expect(sfc).toMatch(/watch\(\[participantsKey, visible\]/)
     expect(sfc).not.toMatch(/watch\(participants,\s*\(names\)/)
   })
 
@@ -295,5 +295,58 @@ describe('ent#458 — live push degrades to poll (AC #4)', () => {
   it('keeps what loaded when one agent fails, instead of blanking the panel', () => {
     expect(store).toMatch(/allSettled/)
     expect(store).toMatch(/may be incomplete/)
+  })
+})
+
+describe('ent#458 — review findings', () => {
+  const SFC = SRC('components/portal/PortalLoops.vue')
+  const STORE = SRC('stores/portalLoops.js')
+
+  it('ignores an event that cannot say which agent it belongs to', () => {
+    // The filter was `if (name && !includes(name)) return`, so a payload with
+    // no `agent_name` fell through and refetched EVERY participant — and a
+    // 100-run loop anywhere in the fleet emits 100 of these.
+    expect(STORE).toContain('if (!name || !participants.value.includes(name)) return')
+  })
+
+  it('watches what changed, not a new array identity every render', () => {
+    // Both parents build the array fresh per render (`[agent.name]` inline;
+    // a computed re-derived from `room.value`, which a 3s poll reassigns), and
+    // a non-deep watch compares with `Object.is` — so typing a 40-character
+    // message issued 40 `GET /loops` per participant, and a room polled
+    // unconditionally every 3s with nothing running.
+    expect(SFC).toContain("const participantsKey = computed(() => participants.value.join('\\u0000'))")
+    expect(SFC).toMatch(/watch\(\[participantsKey, visible\]/)
+  })
+
+  it('does not reset the chosen agent on a re-fire', () => {
+    // The same re-fire set `form.agent = names[0]` mid-selection, so a Start
+    // clicked in that window ran the loop on the wrong agent.
+    expect(SFC).toMatch(/keyChanged[\s\S]{0,200}form\.agent = names\[0\]/)
+  })
+
+  it('never stops the incoming panel’s backstop poll', () => {
+    // That else-branch is reached exactly when the store belongs to the NEW
+    // panel; `_ensurePolling()` only runs from `fetchLoops`'s finally, so
+    // clearing the timer there left the new panel on WS alone — the failure the
+    // backstop exists to cover.
+    expect(SFC).not.toMatch(/\} else \{\s*store\.stopPolling\(\)/)
+  })
+
+  it('can actually auto-expand when something is running', () => {
+    // Read in `onMounted` it was always false: the immediate watcher only
+    // STARTS the async fetch, and the matching-key unmount branch calls
+    // `store.clear()`, so nothing survives a previous mount either.
+    expect(SFC).toMatch(/watch\(\(\) => store\.hasActive[\s\S]{0,200}expanded\.value = true/)
+    expect(SFC).toContain('autoExpanded')
+  })
+
+  it('sends every bound the form shows', () => {
+    // `FORM_INITIAL` spreads `GUARDRAIL_DEFAULTS`; the payload dropped two of
+    // them, and the strip shows `max_consecutive_failures` as a promise about
+    // this loop.
+    const body = startPayload({ ...FORM_INITIAL, message: 'go', max_runs: 3 })
+    expect(body.max_consecutive_failures).toBe(FORM_INITIAL.max_consecutive_failures)
+    expect(body.on_failure).toBe(FORM_INITIAL.on_failure)
   })
 })

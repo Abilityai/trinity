@@ -145,9 +145,17 @@ export const usePortalLoopsStore = defineStore('portalLoops', () => {
    */
   function handleWebSocketEvent(data) {
     if (data?.type !== 'loop_run_completed' && data?.type !== 'loop_completed') return
-    const name = data.agent_name
-    if (name && !participants.value.includes(name)) return
     if (!participants.value.length) return
+    // Review finding: the agent filter was `if (name && !includes(name)) return`,
+    // so a payload with NO `agent_name` fell through and refetched every
+    // participant — and a 100-run loop on any agent in the fleet emits 100 of
+    // these events, each costing N `GET /loops?limit=20` here (every one of
+    // which expands into per-loop run queries server-side). The operator
+    // sibling (`stores/loops.js`) requires the field; an event that cannot say
+    // which agent it belongs to cannot be shown to belong to this chat, so it
+    // is not ours to act on.
+    const name = data.agent_name
+    if (!name || !participants.value.includes(name)) return
     fetchLoops()
   }
 
