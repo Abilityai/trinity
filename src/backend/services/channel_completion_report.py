@@ -71,6 +71,42 @@ _MAX_REPORT_CHARS = 2800
 _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
 
+def _sanitized_detail(summary_or_error: Optional[str]) -> str:
+    """Credential-sanitise, THEN truncate. The one rule every channel uses.
+
+    Review finding: this was inline in `_summarize` (Slack/Telegram) and the
+    portal leg did a bare `strip()` and slice — no sanitizer anywhere on its
+    path. The failure call sites pass raw text (`_write_terminal_and_gate`
+    passes `error`; `apply_result`'s failure branch passes `envelope.error` —
+    only the SUCCESS branch passes an already-sanitized string), so a traceback
+    carrying `ANTHROPIC_API_KEY=sk-ant-…` or a `https://x:ghp_…@github.com/…`
+    clone URL was written verbatim into an EXTERNAL client's Workspace thread,
+    permanently, and replayed into the agent's own history context on the next
+    cold turn. It also contradicted #2320's rule that raw failure text is
+    operator-only.
+
+    Extracted rather than copied: a second implementation of a redaction rule is
+    a second place for it to be forgotten, which is how this happened once.
+
+    Order is load-bearing. Sanitise over a 2x window BEFORE truncating (the
+    #1578 emit chokepoint does the same, `event_dispatch_service.py:311`): a
+    bare slice can cut a secret so the redaction pattern no longer matches and
+    the tail survives. Truncation is then decided on what was actually cut, not
+    against `raw` — redaction changes length and would append a phantom ellipsis
+    to text that was never truncated.
+    """
+    from utils.credential_sanitizer import sanitize_text
+
+    raw = (summary_or_error or "").strip()
+    window = raw[: _MAX_REPORT_CHARS * 2]
+    cleaned = sanitize_text(window)
+    truncated = len(cleaned) > _MAX_REPORT_CHARS or len(raw) > len(window)
+    body = cleaned[:_MAX_REPORT_CHARS].rstrip()
+    if truncated:
+        body += "…"
+    return body
+
+
 def _summarize(
     status: str,
     summary_or_error: Optional[str],
@@ -85,24 +121,10 @@ def _summarize(
     agent, so delegated output arriving via A's bot is honestly attributed to
     the worker that produced it. Slack passes None — ``username=`` carries it.
     """
-    from utils.credential_sanitizer import sanitize_text
-
-    # Credential-sanitise BEFORE truncating, over a 2x window — the #1578 emit
-    # chokepoint does exactly this (event_dispatch_service.py:311) and for the
-    # same reason: a failure terminal's error text can carry secrets, and a bare
-    # slice can cut a secret so the redaction pattern no longer matches and it
-    # survives. A channel is a persistent, externally hosted, human-visible
+    # Sanitise-then-truncate lives in `_sanitized_detail`, shared with the
+    # portal leg — a channel is a persistent, externally hosted, human-visible
     # surface, so this is the last place to skip it.
-    raw = (summary_or_error or "").strip()
-    window = raw[: _MAX_REPORT_CHARS * 2]
-    cleaned = sanitize_text(window)
-    # Truncation is decided on what we actually cut — NOT by comparing against
-    # `raw`, because redaction changes length and would append a phantom ellipsis
-    # to text that was never truncated.
-    truncated = len(cleaned) > _MAX_REPORT_CHARS or len(raw) > len(window)
-    body = cleaned[:_MAX_REPORT_CHARS].rstrip()
-    if truncated:
-        body += "…"
+    body = _sanitized_detail(summary_or_error)
     if status == "success":
         head = "✅ Task finished"
     else:
@@ -292,9 +314,31 @@ def _resolve_portal(
     chat this is, and it is what decides the recipient.
 
     Delivery is a persisted assistant message, so it renders through the same
-    history the client already reads. No push is required: the Workspace polls
-    its threads, so the report appears without any new transport (AC #7's
-    "degrades to poll" holds by construction here).
+    history the client already reads.
+
+    **Durable, but not immediately visible** (review finding). An earlier
+    version of this docstring claimed the Workspace polls its threads. It does
+    not: `PortalConversation.vue` loads history only on mount and on an
+    agent/session prop change, `stores/clientPortal.js` states outright that
+    `refreshThreads()` is event-driven rather than periodic, and the only
+    interval in the Workspace is the 20s asks poll on a different surface. So a
+    client sitting on the thread sees the report at their next reload or thread
+    switch — the row is never lost, but "it appears while they watch" was not
+    true, and AC #7's "degrades to poll" does not hold by construction here. An
+    idle history poll is the obvious follow-up (the asks poll is the precedent);
+    this docstring stops asserting it in the meantime.
+
+    **Known limitation — a report landing mid-turn can be read as that turn's
+    answer.** `PortalConversation` decides a reply arrived with
+    `assistants.length > baseline` (a count taken before dispatch) and returns
+    the LAST assistant row. That heuristic assumed `portal_chat` was the only
+    writer of assistant rows in a session, and this resolver is now a second
+    one — so a delegated child finishing while the parent still works can have
+    its report returned as the reply. Fixing it properly needs a per-row
+    discriminator the table does not have (`enterprise_portal_messages` carries
+    no `execution_id`), i.e. a dual-track migration; overloading `role` was
+    rejected because two server-side readers and the client's rendering all
+    branch on it.
     """
     from client_portal import db as portal_db
 
@@ -325,20 +369,52 @@ def _resolve_portal(
     )
 
     async def deliver() -> bool:
+        import asyncio
         import uuid as _uuid
         from utils.helpers import utc_now_iso
-        now = utc_now_iso()
-        portal_db.add_portal_message(
-            _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
-            None, now, session_id=chat_id,
-        )
-        # Every other writer of a portal message touches its session, and this
-        # one has to for the same reason: `last_message_at` is what orders the
-        # sidebar. The unread badge is safe either way — ent#359 counts message
-        # ROWS against a read cursor — but a badge on a thread that has not
-        # moved is a notification pointing at the middle of a list. A report
-        # nobody notices is the same silence this contract exists to end.
-        portal_db.touch_portal_session(chat_id, now, added=1)
+
+        def _write() -> None:
+            now = utc_now_iso()
+            portal_db.add_portal_message(
+                _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
+                None, now, session_id=chat_id,
+            )
+            # Every other writer of a portal message touches its session, and
+            # this one has to for the same reason: `last_message_at` is what
+            # orders the sidebar. The unread badge is safe either way — ent#359
+            # counts message ROWS against a read cursor — but a badge on a
+            # thread that has not moved is a notification pointing at the middle
+            # of a list. A report nobody notices is the same silence this
+            # contract exists to end.
+            portal_db.touch_portal_session(chat_id, now, added=1)
+
+        try:
+            # Review finding: these are synchronous SQLAlchemy writes, and they
+            # ran directly on the event loop. Both existing resolvers do their
+            # I/O with `await` (httpx). A batch of delegated terminals firing at
+            # 03:30, while `db_backup_service` holds SQLite's read lock, blocks
+            # the single backend loop for up to the 30s busy timeout PER TASK —
+            # stalling every in-flight chat, heartbeat and WS fan-out on that
+            # worker. architecture.md records the same rule for the ent#433
+            # headroom write: try/except handles errors, not blocking.
+            await asyncio.to_thread(_write)
+        except Exception:  # noqa: BLE001
+            # Review finding: without this, a raise escapes into `effect_guard`,
+            # which calls `fail()` and RELEASES the claim — so a re-delivered
+            # terminal (a #1083 callback, the lease-reaper) finds no claim and
+            # appends a SECOND identical report. `add_portal_message` commits
+            # before `touch_portal_session` runs, so a transient
+            # "database is locked" on the second write is exactly that shape.
+            #
+            # Both existing resolvers catch and return False for this reason —
+            # the file documents it as "D4: failed send claims completed — the
+            # at-most-once bias; never blind-retry an ambiguous send." The
+            # portal leg was the one that opted out.
+            logger.exception(
+                "[ent#457] portal completion delivery failed for session %s (execution %s)",
+                chat_id, execution_id,
+            )
+            return False
         return True
 
     return deliver
@@ -355,9 +431,10 @@ def _portal_body(*, executing_agent: str, session_agent: str, status: str,
     done = status == "success"
     who = "" if executing_agent == session_agent else f" ({executing_agent})"
     head = f"**Finished{who}**" if done else f"**Didn't finish{who}** — {status}"
-    detail = (summary_or_error or "").strip()
-    if len(detail) > _MAX_REPORT_CHARS:
-        detail = detail[:_MAX_REPORT_CHARS].rstrip() + "…"
+    # The same sanitise-then-truncate rule the other channels use. A Workspace
+    # thread is a persistent, client-visible surface — if anything, MORE exposed
+    # than a Slack channel, since the reader is an external client.
+    detail = _sanitized_detail(summary_or_error)
     return f"{head}\n\n{detail}" if detail else head
 
 

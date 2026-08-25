@@ -190,3 +190,82 @@ def test_both_portal_row_creation_sites_name_the_chat():
     src = inspect.getsource(service)
     assert src.count("source_channel_chat_id=session_id") == 2
     assert src.count("source_channel=PORTAL_SOURCE_CHANNEL") == 2
+
+
+def test_the_portal_body_is_credential_sanitized_like_every_other_channel():
+    """Review finding: `_portal_body` did a bare strip-and-slice — no sanitizer
+    anywhere on its path — while Slack/Telegram ran `sanitize_text` over a 2x
+    window first.
+
+    The failure call sites pass RAW text (`_write_terminal_and_gate` passes
+    `error`; `apply_result`'s failure branch passes `envelope.error` — only the
+    success branch passes an already-sanitized string), so a traceback carrying
+    a key was written verbatim into an external client's Workspace thread,
+    permanently, and replayed into the agent's own context on the next cold
+    turn.
+    """
+    from services import channel_completion_report as mod
+
+    leaky = "boom: ANTHROPIC_API_KEY=sk-ant-api03-DEADBEEFDEADBEEFDEADBEEF while cloning"
+    body = mod._portal_body(executing_agent="a", session_agent="a",
+                            status="failed", summary_or_error=leaky)
+
+    assert "sk-ant-api03-DEADBEEFDEADBEEFDEADBEEF" not in body
+    assert "Didn't finish" in body
+
+
+def test_every_channel_shares_one_sanitize_then_truncate_rule():
+    """A second implementation of a redaction rule is a second place to forget
+    it — which is exactly how the portal leg shipped without one."""
+    import inspect
+    from services import channel_completion_report as mod
+
+    assert hasattr(mod, "_sanitized_detail")
+    for fn in (mod._summarize, mod._portal_body):
+        assert "_sanitized_detail(" in inspect.getsource(fn)
+    # ...and neither re-implements the slice.
+    assert "sanitize_text" not in inspect.getsource(mod._portal_body)
+
+
+def test_a_failed_portal_write_claims_the_effect_rather_than_releasing_it():
+    """Review finding: `deliver()` had no try/except, so a raise escaped into
+    `effect_guard`, which calls `fail()` and RELEASES the claim — and a
+    re-delivered terminal then appends a SECOND identical report.
+
+    `add_portal_message` commits before `touch_portal_session` runs, so a
+    transient "database is locked" on the second write is exactly that shape.
+    Both existing resolvers return False for this reason (D4: failed send
+    claims completed — the at-most-once bias).
+    """
+    import inspect
+    from services import channel_completion_report as mod
+    src = inspect.getsource(mod._resolve_portal)
+    assert "except Exception" in src
+    assert "return False" in src
+
+
+def test_the_portal_writes_do_not_run_on_the_event_loop():
+    """Sync SQLAlchemy writes on the loop block the whole worker for up to the
+    30s SQLite busy timeout when they land during the nightly backup window —
+    `try/except` handles errors, not blocking (architecture.md, ent#433)."""
+    import inspect
+    from services import channel_completion_report as mod
+    assert "asyncio.to_thread(_write)" in inspect.getsource(mod._resolve_portal)
+
+
+def test_the_docstring_no_longer_claims_the_workspace_polls():
+    """It does not: history loads on mount and prop change, `refreshThreads()`
+    is documented as event-driven, and the only interval is the asks poll on a
+    different surface. A false claim here is what stops anyone building the
+    poll that would make it true."""
+    import inspect
+    from services import channel_completion_report as mod
+    doc = inspect.getdoc(mod._resolve_portal) or ""
+    # Asserted as the CORRECTED claim, not as the absence of a phrase: the old
+    # wording legitimately appears in the sentence that retracts it, and a
+    # substring ban would forbid explaining the fix.
+    assert "not immediately visible" in doc.lower()
+    assert "event-driven" in doc
+    assert "does not hold by construction here" in doc
+    # And the known limitation is written down where the next reader will hit it.
+    assert "answer" in doc and "Known limitation" in doc
