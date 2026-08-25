@@ -46,7 +46,7 @@ export function filterReportsForAgentScope<T extends { agent_name: string }>(
  * reading through an MCP client still gets the field from the REST surface the
  * UI uses, and a tool result is LLM context wherever it lands.
  */
-export function stripAudienceFromReports<T extends Record<string, unknown>>(reports: T[]): T[] {
+export function stripAudienceFromReports<T extends object>(reports: T[]): T[] {
   return reports.map((r) => {
     if (!("addressed_to" in r)) return r;
     const { addressed_to: _dropped, ...rest } = r as Record<string, unknown>;
@@ -414,7 +414,13 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             }
           }
 
-          return JSON.stringify(report, null, 2);
+          // Review finding: stripping `list_reports` only left the disclosure
+          // open one hop further on. `_mapping_to_report` sets `addressed_to`
+          // and `GET /api/reports/{id}` returns it, so a permitted sibling agent
+          // could `list_reports({agent_name: "A"})` for ids — which is by design
+          // — and then `get_report(id)` to pull A's client email into its own
+          // context. Same strip, same reason.
+          return JSON.stringify(stripAudienceFromReports([report])[0], null, 2);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[get_report] error: ${msg}`);
