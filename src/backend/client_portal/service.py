@@ -1725,6 +1725,31 @@ def clear_turn_inflight(session_id: str, execution_id: str | None = None) -> Non
         logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
 
 
+def get_inflight_session_for_execution(execution_id: str) -> str | None:
+    """Which portal session ``execution_id`` is the in-flight turn of (ent#365).
+
+    The same reverse key `get_turn_inflight_matches` asks about, read for its
+    VALUE instead of its existence — `mark_turn_inflight` stores the session id
+    there. Used to place a report published mid-turn as a card in the chat that
+    produced it, without the agent ever naming a conversation.
+
+    Fail-soft to None: no marker, no Redis, or an expired turn simply means the
+    deliverable is not tied to a chat, and it still lists on the agent page.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return None
+        value = client.get(_inflight_exec_key(execution_id))
+        if value is None:
+            return None
+        return value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("portal inflight session lookup failed for %s: %s", execution_id, e)
+        return None
+
+
 def get_turn_inflight_matches(execution_id: str) -> bool:
     """Whether ``execution_id`` is the turn currently marked in flight.
 

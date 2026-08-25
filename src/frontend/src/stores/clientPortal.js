@@ -662,6 +662,24 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data.reports || []
     },
 
+    // ent#365 — deliverables produced in ONE chat, for the inline cards. Same
+    // endpoint, narrowed server-side: the audience condition is applied
+    // regardless, so a session id belonging to someone else returns nothing
+    // rather than their deliverables. Fail-soft to [] — a chat that cannot list
+    // its deliverables must still be a working chat.
+    async fetchSessionDeliverables(agentName, sessionId) {
+      if (!agentName || !sessionId) return []
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/reports`,
+          { headers: this.authHeader, params: { session_id: sessionId } },
+        )
+        return data.reports || []
+      } catch {
+        return []
+      }
+    },
+
     // #2162: `rowsLimit` windows a TABULAR payload server-side. Sent on every
     // expand — the server decides whether the payload actually has a row axis,
     // so the client never predicts the shape from an agent-authored

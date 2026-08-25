@@ -1138,3 +1138,37 @@ export function askThreadLink(ask, currentSessionId = null) {
   if (currentSessionId && target === currentSessionId) return null
   return target
 }
+
+
+// ---- ent#365: deliverables ------------------------------------------------
+
+// The badge on a deliverable card. Keyed off the report's `display_hint`, which
+// is the same enum the renderer dispatches on — so a hint the renderer knows
+// always has a label, and one it does not degrades to the same honest word the
+// fallback renderer is showing.
+export const DELIVERABLE_KIND_LABELS = {
+  table: 'Table',
+  kpi: 'Metrics',
+  markdown: 'Document',
+  timeline: 'Timeline',
+  json: 'Data',
+}
+
+export function deliverableKindLabel(displayHint) {
+  return DELIVERABLE_KIND_LABELS[displayHint] || 'Report'
+}
+
+// Relative for recency, absolute for anything older than a week (principle 22).
+// Locale-free by construction so it is testable: the absolute form is the ISO
+// date, not a formatted one.
+export function relativeTime(iso, now = Date.now()) {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return ''
+  const diff = Math.max(0, now - then)
+  if (diff < 60_000) return 'just now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
+  return new Date(then).toISOString().slice(0, 10)
+}

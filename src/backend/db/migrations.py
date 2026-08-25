@@ -3535,6 +3535,50 @@ def _migrate_operator_queue_addressed_to(cursor, conn):
     conn.commit()
 
 
+def _migrate_report_audience(cursor, conn):
+    """Reports gain an audience and the chat that produced them (ent#365).
+
+    `addressed_to_email` is who the report is FOR; `portal_session_id` is the
+    Workspace chat it was published in. Both are **validated columns**, not keys
+    inside `payload` — the ent#364 rule, and it matters more here: `payload` is
+    agent-authored free-form JSON that a client-facing renderer displays, so an
+    audience buried in it would let the agent choose whose Workspace shows the
+    report, and a session id buried in it would let the agent post a card into a
+    conversation it was never part of. The addressee is checked against the
+    agent's own roster at the publish boundary; the session is resolved
+    server-side from the publishing turn and never read from the request.
+
+    Nullable with no default, so every existing row keeps meaning what it meant:
+    an operator-scoped report, tied to no chat.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_reports",
+        "addressed_to_email",
+        "ALTER TABLE agent_reports ADD COLUMN addressed_to_email TEXT",
+        log_msg="Adding addressed_to_email to agent_reports for Workspace deliverables (ent#365)",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_reports",
+        "portal_session_id",
+        "ALTER TABLE agent_reports ADD COLUMN portal_session_id TEXT",
+        log_msg="Adding portal_session_id to agent_reports for Workspace deliverables (ent#365)",
+    )
+    # The Workspace reads by (addressee, agent) and by (addressee, session); an
+    # unindexed scan of a table the retention sweep lets grow to 90 days of
+    # fleet-wide reports is not a list view.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_audience "
+        "ON agent_reports(addressed_to_email, agent_name, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_portal_session "
+        "ON agent_reports(portal_session_id, created_at)"
+    )
+    conn.commit()
+
+
 def _migrate_portal_chat_state(cursor, conn):
     """Per-user star + read cursor for Workspace chats (ent#359).
 
@@ -3850,4 +3894,5 @@ MIGRATIONS = [
     ("agent_ownership_operator_resume", _migrate_agent_ownership_operator_resume),
     ("subscription_headroom_history_table", _migrate_subscription_headroom_history_table),
     ("shared_sessions_tables_to_oss", _migrate_shared_sessions_tables_to_oss),
+    ("report_audience", _migrate_report_audience),
 ]

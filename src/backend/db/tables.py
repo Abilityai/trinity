@@ -578,6 +578,11 @@ agent_reports = Table(
     Column("period_start", Text),
     Column("period_end", Text),
     Column("created_at", Text),
+    # ent#365 — audience + the chat it was produced in. Both nullable: NULL
+    # means "operator-only" and "not tied to a chat" respectively, which is
+    # exactly what every pre-existing row meant.
+    Column("addressed_to_email", Text),
+    Column("portal_session_id", Text),
 )
 
 product_events = Table(

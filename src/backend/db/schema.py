@@ -501,6 +501,17 @@ TABLES = {
             period_start TEXT,
             period_end TEXT,
             created_at TEXT NOT NULL,
+            -- ent#365: who this report is FOR. NULL = operator-only, which is
+            -- what every report published before this column meant. A validated
+            -- column rather than a key inside `payload`, for the ent#364 reason:
+            -- `payload` is agent-authored free-form JSON, so an audience buried
+            -- there would let the agent decide whose Workspace it appears in.
+            addressed_to_email TEXT,
+            -- The Workspace chat the report was produced in, resolved
+            -- SERVER-side from the publishing turn — never accepted from the
+            -- agent. NULL = not tied to a chat (a scheduled run), which still
+            -- lists on the agent page.
+            portal_session_id TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """,
@@ -1647,6 +1658,13 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",
+    # ent#365 — the Workspace reads by audience, and by audience+chat for the
+    # inline cards. Both mirror `_migrate_report_audience`; an index created
+    # only in the migration is a fresh install without it (test_schema_parity).
+    "CREATE INDEX IF NOT EXISTS idx_agent_reports_audience "
+    "ON agent_reports(addressed_to_email, agent_name, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_reports_portal_session "
+    "ON agent_reports(portal_session_id, created_at)",
 
     # Product-event capture (ent#184): funnel aggregation groups by event_type,
     # backfill/query orders by created_at.

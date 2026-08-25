@@ -604,16 +604,30 @@ def portal_agent_reports(
     agent_name: str,
     limit: int = 20,
     offset: int = 0,
+    session_id: Optional[str] = Query(
+        None,
+        description="Narrow to deliverables produced in one Workspace chat (ent#365).",
+    ),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
-    """Report metadata for the page's Reports tab. Payloads are fetched per
-    report on expansion — one is capped at 5 MiB (`REPORT_PAYLOAD_MAX_BYTES`,
-    raised from 256 KB in #1537) and a list of them is not a list view."""
+    """Deliverables this agent addressed to the caller (ent#365).
+
+    Metadata only — payloads are fetched per report on expansion, since one is
+    capped at 5 MiB (`REPORT_PAYLOAD_MAX_BYTES`) and a list of them is not a
+    list view.
+
+    `session_id` is what the inline chat cards read. It narrows within the
+    caller's own rows and is never a widening: the audience condition is applied
+    regardless, so passing another client's session id returns nothing rather
+    than their deliverables.
+    """
     _require_roster(agent_name, principal.email, principal.is_platform)
     return {
         "agent_name": agent_name,
         "reports": agent_page.reports(
-            agent_name, limit=min(max(limit, 1), 50), offset=max(offset, 0)
+            agent_name, principal.email,
+            limit=min(max(limit, 1), 50), offset=max(offset, 0),
+            portal_session_id=session_id,
         ),
     }
 
@@ -653,7 +667,8 @@ def portal_agent_report_detail(
     # the roster gate so an unreachable agent can never mint limiter keys.
     rate_limiter.enforce(f"portal_report_detail:{email}:{agent_name}", 60, 60)
     report = agent_page.report_detail(
-        agent_name, report_id, rows_offset=rows_offset, rows_limit=rows_limit,
+        agent_name, report_id, client_email=email,
+        rows_offset=rows_offset, rows_limit=rows_limit,
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")

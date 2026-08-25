@@ -635,6 +635,31 @@ class ReportCreate(BaseModel):
     schema_version: int = Field(1, ge=1, le=1000)
     period_start: Optional[str] = None
     period_end: Optional[str] = None
+    # ent#365 — who the report is FOR. Absent = operator-only, which is what
+    # every report published before this field meant. The address is checked at
+    # the router against the agent's own roster: an agent may hand a report to
+    # someone it already talks to, never to an arbitrary address.
+    audience_email: Optional[str] = Field(None, max_length=320)
+    # The turn the agent is publishing from. Used ONLY to resolve which
+    # Workspace chat the deliverable card belongs in, server-side — the session
+    # is never accepted from the agent, or a report could be posted into a
+    # conversation the agent was never part of.
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+    @field_validator("audience_email")
+    @classmethod
+    def _normalize_audience(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().lower()
+        # Shape only — reachability is the router's check, and it is the one
+        # that matters. Rejecting the empty string here means "unaddressed" has
+        # exactly one spelling (absent), so the audience column never holds ''.
+        if not v:
+            return None
+        if "@" not in v or " " in v:
+            raise ValueError("audience_email must be an email address")
+        return v
 
     @field_validator("report_type")
     @classmethod
@@ -691,6 +716,10 @@ class ReportSummary(BaseModel):
     period_start: Optional[str] = None
     period_end: Optional[str] = None
     created_at: str
+    # ent#365: who the report was produced for (NULL = operator-facing). On the
+    # access-controlled REST surfaces only — deliberately NOT on the `/ws`
+    # broadcast, which is SCOPE_ALL and unfiltered (the #918 rule).
+    addressed_to: Optional[str] = None
 
     class Config:
         from_attributes = True

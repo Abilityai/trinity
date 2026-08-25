@@ -1827,14 +1827,40 @@ class DatabaseManager:
 
     def create_report(self, agent_name, user_id, report_type, title, payload,
                        display_hint=None, schema_version=1,
-                       period_start=None, period_end=None):
+                       period_start=None, period_end=None,
+                       addressed_to_email=None, portal_session_id=None):
+        # Keyword-forwarded for the same reason `get_reports_for_agent` below
+        # is (#1539): this facade re-declares the signature, so a parameter
+        # added to the ops layer alone never arrives — ent#365 hit exactly that,
+        # as a 500 on the first live publish.
         return self._report_ops.create_report(
             agent_name, user_id, report_type, title, payload,
-            display_hint, schema_version, period_start, period_end,
+            display_hint=display_hint,
+            schema_version=schema_version,
+            period_start=period_start,
+            period_end=period_end,
+            addressed_to_email=addressed_to_email,
+            portal_session_id=portal_session_id,
         )
 
     def get_report(self, report_id: str):
         return self._report_ops.get_report(report_id)
+
+    def get_reports_for_client(self, agent_name: str, client_email: str,
+                               portal_session_id: str = None,
+                               limit: int = 20, offset: int = 0):
+        """ent#365 — reports ADDRESSED to one person (the Workspace question)."""
+        return self._report_ops.get_reports_for_client(
+            agent_name,
+            client_email,
+            portal_session_id=portal_session_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_report_for_client(self, report_id: str, client_email: str):
+        """ent#365 — one report, only if addressed to this person."""
+        return self._report_ops.get_report_for_client(report_id, client_email)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
                               hours: int = None, search: str = None,

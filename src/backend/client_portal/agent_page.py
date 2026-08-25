@@ -256,15 +256,38 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK) -> list[dict]:
     } for r in rows]
 
 
-def reports(agent_name: str, limit: int = 20, offset: int = 0) -> list[dict]:
-    """Metadata for the Reports tab (payload fetched separately when expanded).
+def reports(agent_name: str, client_email: str, *, limit: int = 20, offset: int = 0,
+            portal_session_id: str | None = None) -> list[dict]:
+    """Deliverables **addressed to this person** by this agent (ent#365).
 
     Reuses the existing report surface (#918) exactly as the Technical Notes
     ask. Metadata only: a payload is up to 5 MiB (`REPORT_PAYLOAD_MAX_BYTES`,
     raised from 256 KB in #1537) and belongs on expansion.
+
+    **Behaviour change, deliberate.** This used to call
+    `db.get_reports_for_agent`, which is the OPERATOR question — everything the
+    agent ever published — so every rostered client of an agent saw every report
+    it had produced, including ones produced for a different client, rendered
+    from agent-authored JSON on a client-facing surface. The Workspace asks a
+    different question, and ent#365 AC #4 states it: a user sees their own, not
+    the fleet. Unaddressed reports (`addressed_to_email IS NULL`) are
+    operator-only and no longer appear here at all — which is AC #1, and is why
+    an install whose agents have not adopted `audience_email` yet will show an
+    empty Reports tab until they do.
+
+    The scope is the caller's identity for BOTH principal kinds. A platform user
+    on this surface is using the client surface and sees what was addressed to
+    them; everything else stays on the operator Reports tab, which is where the
+    fleet view belongs.
+
+    `portal_session_id` narrows further to one chat, which is what the inline
+    deliverable cards read.
     """
     try:
-        rows = db.get_reports_for_agent(agent_name, limit=limit, offset=offset)
+        rows = db.get_reports_for_client(
+            agent_name, client_email, portal_session_id=portal_session_id,
+            limit=limit, offset=offset,
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: reports read failed for %s: %s", agent_name, e)
         return []
@@ -372,6 +395,7 @@ def _window_rows(payload, offset: int, limit: int):
 
 
 def report_detail(agent_name: str, report_id: str, *,
+                  client_email: str,
                   rows_offset: int = 0,
                   rows_limit: Optional[int] = None) -> Optional[dict]:
     """One report's full payload, scoped to the agent whose page is open.
@@ -396,7 +420,11 @@ def report_detail(agent_name: str, report_id: str, *,
     rate-limits (a client can loop it; an operator on a JWT is a different risk).
     """
     try:
-        row = db.get_report(report_id)
+        # ent#365: the audience gate first, then the agent gate. Same shape as
+        # `_asks`' ent#428 fix on the sibling surface — a report id is global,
+        # and a co-shared client reading another client's deliverable is the
+        # same defect as reading their ask, over a bigger blob.
+        row = db.get_report_for_client(report_id, client_email)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: report read failed for %s: %s", report_id, e)
         return None

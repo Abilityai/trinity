@@ -33,6 +33,10 @@ _SUMMARY_COLUMNS = (
     agent_reports.c.period_start,
     agent_reports.c.period_end,
     agent_reports.c.created_at,
+    # ent#365, appended in review: operators need to answer "who was this
+    # produced for" — the support question a deliverable creates. APPEND-only,
+    # because `_row_to_summary` reads this tuple POSITIONALLY.
+    agent_reports.c.addressed_to_email,
 )
 
 
@@ -61,11 +65,19 @@ class ReportOperations:
             "period_start": row[6],
             "period_end": row[7],
             "created_at": row[8],
+            "addressed_to": row[9],
         }
 
     @staticmethod
     def _mapping_to_report(row) -> Dict:
-        """Full dict (incl. decoded payload) from a name-accessible mapping row."""
+        """Full dict (incl. decoded payload) from a name-accessible mapping row.
+
+        ent#365 note: `addressed_to` is exposed here for the operator surfaces,
+        but the AUDIENCE GATE must never read it — `get_report_for_client` runs
+        its own SELECT for exactly that reason. A gate written against this
+        whitelist would compare `None` to an email and deny everything: silently
+        wrong, and fail-closed enough to look fine.
+        """
         return {
             "id": row["id"],
             "agent_name": row["agent_name"],
@@ -78,6 +90,7 @@ class ReportOperations:
             "period_start": row["period_start"],
             "period_end": row["period_end"],
             "created_at": row["created_at"],
+            "addressed_to": row["addressed_to_email"],
         }
 
     def create_report(
@@ -91,8 +104,18 @@ class ReportOperations:
         schema_version: int = 1,
         period_start: Optional[str] = None,
         period_end: Optional[str] = None,
+        addressed_to_email: Optional[str] = None,
+        portal_session_id: Optional[str] = None,
     ) -> Dict:
-        """Insert a report row and return the full report dict."""
+        """Insert a report row and return the full report dict.
+
+        ent#365: `addressed_to_email` is the Workspace audience and
+        `portal_session_id` the chat it was produced in. Both arrive already
+        decided by the caller — the router validates the addressee against the
+        agent's roster and resolves the session from the publishing turn — so
+        this layer stores them without re-deciding, in keeping with the db
+        layer holding no policy.
+        """
         report_id = str(uuid.uuid4())
         now = utc_now_iso()
         stmt = insert(agent_reports).values(
@@ -107,6 +130,8 @@ class ReportOperations:
             period_start=period_start,
             period_end=period_end,
             created_at=now,
+            addressed_to_email=addressed_to_email,
+            portal_session_id=portal_session_id,
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
@@ -122,6 +147,8 @@ class ReportOperations:
             "period_start": period_start,
             "period_end": period_end,
             "created_at": now,
+            "addressed_to_email": addressed_to_email,
+            "portal_session_id": portal_session_id,
         }
 
     def get_report(self, report_id: str) -> Optional[Dict]:
@@ -163,6 +190,70 @@ class ReportOperations:
         )
         with get_engine().connect() as conn:
             return [self._row_to_summary(r) for r in conn.execute(stmt).all()]
+
+    def get_reports_for_client(
+        self,
+        agent_name: str,
+        client_email: str,
+        portal_session_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """Reports **addressed to this person** by this agent, newest first.
+
+        ent#365. Deliberately NOT `get_reports_for_agent` with a filter bolted
+        on: that method answers the operator question ("everything this agent
+        published") and the Workspace asks a different one ("what was produced
+        for me"). Before this, the Workspace listed the agent's entire report
+        history to every rostered client, so one client saw reports produced for
+        another — free-form agent JSON rendered on a client-facing surface.
+
+        An empty/None `client_email` matches nothing rather than everything: the
+        rows with a NULL audience are operator-only, and a caller who cannot be
+        identified must not inherit them.
+        """
+        if not client_email:
+            return []
+        conditions = [
+            agent_reports.c.agent_name == agent_name,
+            agent_reports.c.addressed_to_email == client_email,
+        ]
+        if portal_session_id:
+            conditions.append(agent_reports.c.portal_session_id == portal_session_id)
+        stmt = (
+            select(*_SUMMARY_COLUMNS)
+            .where(and_(*conditions))
+            .order_by(agent_reports.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with get_engine().connect() as conn:
+            return [self._row_to_summary(r) for r in conn.execute(stmt).all()]
+
+    def get_report_for_client(self, report_id: str, client_email: str) -> Optional[Dict]:
+        """One report, only if it is addressed to this person (ent#365).
+
+        The single gate the portal detail route needs: `get_report` answers by
+        id alone, and an id is guessable enough to matter on a surface served to
+        people outside the fleet.
+
+        The audience is read with its own SELECT rather than off the returned
+        dict: `_mapping_to_report` whitelists the fields it exposes and does not
+        carry `addressed_to_email`, so a gate written against its output would
+        compare `None` to an email and deny every report — fail-closed, and
+        silently wrong. It also keeps the audience out of the operator response
+        shape, which no caller asked to change.
+        """
+        if not client_email:
+            return None
+        with get_engine().connect() as conn:
+            owner = conn.execute(
+                select(agent_reports.c.addressed_to_email)
+                .where(agent_reports.c.id == report_id)
+            ).scalar()
+        if owner != client_email:
+            return None
+        return self.get_report(report_id)
 
     def _fleet_conditions(
         self,

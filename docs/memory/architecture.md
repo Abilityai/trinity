@@ -701,6 +701,17 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   erroring; access reuses the detail route's 404-not-403; missing libraries answer **503**
   with a rebuild hint so an un-rebuilt image (#1814) fails legibly on one endpoint instead
   of at router import.
+- **An audience makes a report a deliverable (ent#365)**: `addressed_to_email` +
+  `portal_session_id` (both nullable; NULL = operator-only, tied to no chat) turn a
+  report into something a Workspace user can see. The address is validated against the
+  publishing agent's own roster at the create route (never a key in the agent-authored
+  `payload`, the ent#364 rule) and the session is resolved server-side from the
+  publishing turn (`resolve_and_validate_execution` + the ent#286 in-flight marker), so
+  an agent can neither choose a stranger's Workspace nor post into a chat it was not
+  part of. The portal read is reader-scoped — `db.get_reports_for_client` — which
+  replaced a call to the operator accessor that had shown every client of a shared agent
+  every report it ever published (the ent#428 defect on the sibling ask surface). See
+  [workspace-deliverables.md](feature-flows/workspace-deliverables.md).
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via

@@ -685,6 +685,61 @@
 
 ---
 
+### 5.14 Workspace deliverables — reports gain an audience and a place to appear (trinity-enterprise#365)
+
+**Description**: An agent's structured reports (#918) become **deliverables**: output
+addressed to a specific Workspace user, listed on that agent's page for them, and
+rendered as a card in the chat that produced it. A deliverable is not a new store — it
+is existing output gaining an audience.
+
+- **FR-1 — The audience is a validated column**: `agent_reports.addressed_to_email`
+  (nullable; NULL = operator-only, which is what every report published before it
+  meant). The MCP `report` tool takes `audience_email`, and the create route checks it
+  against the publishing agent's own roster (`db.email_has_agent_access`) — the same
+  predicate the #848 inline-auth path gates on, so "can be addressed" cannot drift from
+  "can reach". An address the agent does not already talk to is refused with a **named
+  400** that says how to fix it; an unreadable roster is a **503**, never a publish. The
+  address is deliberately not a key inside `payload`: that is agent-authored free-form
+  JSON, so an audience buried there would let a prompt-injected agent decide whose
+  Workspace its output appears in (the ent#364 rule, restated for a bigger blob).
+- **FR-2 — The Workspace read is scoped to the reader**: `agent_page.reports` asks
+  `db.get_reports_for_client(agent, email)`. It previously called the OPERATOR accessor
+  (`get_reports_for_agent`), so **every rostered client of an agent saw every report it
+  had ever published**, including reports produced for a different client — the same
+  defect ent#428 fixed on the sibling ask surface, over a larger payload. The detail
+  read carries the same gate (`get_report_for_client`) **in addition to** the ent#360
+  agent check, and `client_email` is a **required** keyword: a default would make the
+  gate fail open, which is the defect itself.
+- **FR-3 — Unaddressed output stays operator-only**: NULL-audience reports no longer
+  appear in the Workspace at all. This is a deliberate behaviour change — an install
+  whose agents have not adopted `audience_email` shows an empty Workspace Reports tab
+  rather than another client's deliverables. The operator surfaces (Agent Detail, the
+  fleet Reports view) are untouched.
+- **FR-4 — The chat is resolved server-side**: `agent_reports.portal_session_id` is
+  filled from the *publishing turn* — the agent passes `execution_id`, the backend
+  confirms the execution belongs to that agent (`resolve_and_validate_execution`, the
+  MEM-001 rule) and reads the session from the ent#286 in-flight reverse marker. The
+  agent never names a conversation, so it cannot post a card into a chat it was not part
+  of. Absent, expired, or a non-portal turn ⇒ NULL: the deliverable still lists on the
+  agent page, it simply has no card.
+- **FR-5 — One rendering layer**: cards render through the shared `components/reports/`
+  dispatch (Technical Notes: "do not build a second rendering layer"), with the #2162
+  client rule — `:fallback-component="ReportSummary"`, so an unknown shape degrades to a
+  bounded humanised summary and never a raw payload dump.
+- **FR-6 — Read after a turn, not on a timer**: a turn is the only thing that can
+  produce a deliverable in a chat, so the card list re-reads exactly then. No poll.
+- **FR-7 — Files**: file scoping is unchanged in this pass, as the issue directs — the
+  per-agent inbox boundary stays where it is (it is where the last two portal security
+  bugs lived). Shared files therefore keep listing per agent and are not yet addressable.
+- **FR-8 — Ratings deferred**: AC #6 asks deliverable cards to carry the rating
+  affordance from trinity-enterprise#366, which is not built. The card is the surface it
+  will attach to; nothing here pre-empts its shape.
+- **Migrations**: dual-track — `db/migrations.py::_migrate_report_audience` +
+  Alembic `0046_report_audience`, both nullable-with-no-default, plus two indexes
+  (`(addressed_to_email, agent_name, created_at)` and `(portal_session_id, created_at)`)
+  because the Workspace reads by audience on a table retention lets grow to 90 days.
+- **Flow**: `docs/memory/feature-flows/workspace-deliverables.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
