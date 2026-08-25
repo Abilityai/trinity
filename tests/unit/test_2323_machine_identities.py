@@ -395,12 +395,67 @@ def test_bounded_scopes_cannot_open_the_fleet_event_stream():
         assert not d.scope_may_open_event_stream(scope), scope
 
 
-@pytest.mark.parametrize("scope", [None, "", "user", "agent", "system"])
+@pytest.mark.parametrize("scope", [None, "", "user", "system"])
 def test_the_event_stream_still_admits_the_scopes_that_drive_it(scope):
     """Guard against a gate satisfied by denying everyone. `None`/`""` coerce to
     `user`, matching `validate_mcp_api_key` and `get_current_user`."""
     d = _deps()
     assert d.scope_may_open_event_stream(scope)
+
+
+def test_an_ordinary_agent_key_still_opens_the_event_stream(monkeypatch):
+    """The `agent` scope stays admitted — the #2389 narrowing is to ephemeral
+    ghosts, not to agent keys as a class."""
+    d = _deps()
+    monkeypatch.setattr(
+        d.db, "get_agent_ephemeral_info", lambda name: {"is_ephemeral": False}
+    )
+    assert d.scope_may_open_event_stream("agent", "atlas")
+
+
+def test_an_ephemeral_ghost_key_cannot_open_the_fleet_event_stream(monkeypatch):
+    """`_enforce_ephemeral_key_fence` exists because a ghost runs an untrusted
+    workspace and its key must not be a fleet skeleton key — and it lives in
+    `get_current_user`, which this handler never calls. So the ghost's own
+    `agent`-scoped key opened the fleet-wide stream, scoped by its OWNER's
+    accessible agents (everything, on a default admin-owned install)."""
+    d = _deps()
+    monkeypatch.setattr(
+        d.db, "get_agent_ephemeral_info", lambda name: {"is_ephemeral": True}
+    )
+    assert not d.scope_may_open_event_stream("agent", "ghost-a1b2c3d4")
+
+
+@pytest.mark.parametrize(
+    "info",
+    [None, {}, "not-a-dict"],
+    ids=["missing-row", "no-flag", "wrong-type"],
+)
+def test_an_unprovable_ephemerality_claim_is_refused(monkeypatch, info):
+    """Fails CLOSED, deliberately diverging from `_enforce_ephemeral_key_fence`'s
+    fail-open: that fence guards heartbeats and result callbacks, where a
+    transient DB error must not take the fleet down; losing this stream costs an
+    observability client a reconnect.
+
+    `{}` is the interesting one — `.get("is_ephemeral")` on an empty dict is the
+    same falsy value a genuine non-ephemeral row gives, so a naive `not
+    info.get(...)` would admit a row that was never read."""
+    d = _deps()
+    monkeypatch.setattr(d.db, "get_agent_ephemeral_info", lambda name: info)
+    assert not d.scope_may_open_event_stream("agent", "atlas")
+
+
+def test_a_raising_lookup_and_a_nameless_agent_key_are_both_refused(monkeypatch):
+    d = _deps()
+
+    def _boom(name):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(d.db, "get_agent_ephemeral_info", _boom)
+    assert not d.scope_may_open_event_stream("agent", "atlas")
+    # An `agent`-scoped key with no agent name cannot be proven non-ephemeral,
+    # which is itself the unprovable case.
+    assert not d.scope_may_open_event_stream("agent", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -526,3 +581,104 @@ def test_the_backlog_replay_blob_carries_no_credential_identity():
     sig = inspect.signature(bs.BacklogService.enqueue)
     assert "x_mcp_key_id" not in sig.parameters
     assert "x_mcp_key_name" not in sig.parameters
+
+
+# --------------------------------------------------------------------------- #
+# Review findings (#2389 round 2) — the opt-in is an ADDITIONAL gate
+# --------------------------------------------------------------------------- #
+
+def _principal(**kw):
+    """A REAL `models.User`, never a stand-in.
+
+    The whole #2323 allowlist exists because a stub carrying a field the real
+    principal lacks goes green over a property production never had — that is how
+    both live bugs in this PR survived their own tests."""
+    try:
+        from models import User
+    except ImportError:  # pragma: no cover - backend venv required
+        pytest.skip("backend venv required")
+    fields = {"id": 1, "username": "alice", "email": "a@b.c", "role": "admin"}
+    fields.update(kw)
+    return User(**fields)
+
+
+def test_an_opted_in_ops_key_still_needs_its_owner_to_be_admin():
+    """The opt-in admits the SCOPE; it does not replace the role check.
+
+    An earlier revision of the design comment (and of `requirements/security.md`)
+    claimed authority came from being an ops key rather than from the owner, and
+    that this "stops every ops integration dying when that admin is offboarded".
+    It never did — and someone would have acted on that sentence during a real
+    offboarding. This pins the actual behaviour so the claim cannot drift back.
+
+    Dropping the role check was considered and refused: it would make the bounded
+    tier HARDER to revoke than the unbounded `user`-scoped key it exists to
+    displace, and it still could not deliver the claim, because `get_current_user`
+    rejects a suspended owner (#995) one layer above this gate."""
+    d = _deps()
+    from fastapi import HTTPException
+
+    demoted = _principal(role="user", mcp_scope="ops")
+    with pytest.raises(HTTPException) as exc:
+        d.assert_admin(demoted, allow_scopes=frozenset({"ops"}))
+    assert exc.value.status_code == 403
+
+    # ...and with the role intact it passes, so the test is not satisfied by
+    # denying everyone.
+    d.assert_admin(_principal(mcp_scope="ops"), allow_scopes=frozenset({"ops"}))
+
+
+def test_the_optin_admits_only_the_scope_it_names():
+    """`allow_scopes={"ops"}` must not become a general bypass of the allowlist."""
+    d = _deps()
+    from fastapi import HTTPException
+
+    for scope in ("portal_delegate", "scope_from_2027"):
+        with pytest.raises(HTTPException):
+            d.assert_admin(_principal(mcp_scope=scope), allow_scopes=frozenset({"ops"}))
+
+
+def test_require_admin_allowing_is_the_depends_form_of_the_optin():
+    """`require_admin` is the dominant admin-gate spelling and took no
+    `allow_scopes`, so an ops-allowlisted route gated that way was permanently
+    dead to ops keys with NO opt-in available — the fence admits, the gate
+    refuses, and there was no third thing to write.
+
+    It delegates to `assert_admin` rather than restating the ladder: two admin
+    gates that must stay identical is exactly how the `require_role("admin")`
+    third spelling happened."""
+    d = _deps()
+    from fastapi import HTTPException
+
+    gate = d.require_admin_allowing("ops")
+    assert gate(_principal(mcp_scope="ops")).username == "alice"
+    # Same three refusals as the imperative form.
+    with pytest.raises(HTTPException):
+        gate(_principal(mcp_scope="ops", role="user"))
+    with pytest.raises(HTTPException):
+        gate(_principal(mcp_scope="portal_delegate"))
+    # And the bare form still refuses ops — the opt-in is per route, not global.
+    with pytest.raises(HTTPException):
+        d.require_admin(_principal(mcp_scope="ops"))
+
+
+def test_no_allowlisted_route_uses_the_unparameterised_require_admin():
+    """Sibling of `test_every_admin_gated_allowlisted_route_opts_ops_in`, closing
+    the SHAPE rather than the instance.
+
+    That guard regex-matched `assert_admin(` only, so converting an allowlisted
+    handler to `Depends(require_admin)` — the dominant spelling, and the one the
+    enterprise routers use — would silently 403 the ops dashboard with CI green.
+    `require_admin_allowing("ops")` is the supported form; bare `require_admin` on
+    an allowlisted route is the bug."""
+    pairs = _handler_sources_for_allowlisted_routes()
+    assert pairs, "resolved no allowlisted handlers — guard would be vacuous"
+    offenders = [
+        path
+        for path, src in pairs
+        if re.search(r"require_admin(?!_allowing)\b", src)
+    ]
+    assert not offenders, (
+        "allowlisted by the ops fence but gated with the unparameterised "
+        f"require_admin (use require_admin_allowing(\"ops\")): {sorted(set(offenders))}"
+    )

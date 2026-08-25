@@ -1291,7 +1291,14 @@ async def websocket_events_endpoint(
     # so none of that function's fences apply here; without this the ops fence's
     # own docstring claim would be false, and a bounded credential could read
     # fleet-wide activity through a surface outside its allowlist.
-    if not scope_may_open_event_stream(key_info.get("scope")):
+    #
+    # #2389 — `agent_name` is passed because the SAME absence of
+    # `get_current_user` also skips `_enforce_ephemeral_key_fence`: an ephemeral
+    # ghost's own key is `agent`-scoped, and without the name the gate cannot tell
+    # it from an ordinary agent's.
+    if not scope_may_open_event_stream(
+        key_info.get("scope"), key_info.get("agent_name")
+    ):
         await websocket.close(
             code=4003, reason="This key scope may not open the event stream"
         )

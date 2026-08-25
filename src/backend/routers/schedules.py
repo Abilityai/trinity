@@ -494,7 +494,7 @@ async def trigger_schedule(
         "source_user_id": current_user.id,
         "source_user_email": current_user.email,
         "source_agent_name": current_user.agent_name or x_source_agent,
-        # # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
+        # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
         "source_mcp_key_id": getattr(current_user, "mcp_key_id", None),
         "source_mcp_key_name": getattr(current_user, "mcp_key_name", None),
     }

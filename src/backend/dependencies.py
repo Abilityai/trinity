@@ -819,11 +819,37 @@ def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
 #      default; an admin-gated ops route opts in explicitly with
 #      `assert_admin(..., allow_scopes={"ops"})`.
 #
-# Layer 2 is what makes this a machine identity rather than a human's proxy:
-# authority comes from being an ops key, not from who owns it. It also flips the
-# failure direction — a new ops route is INACCESSIBLE until someone opts it in,
-# noticed at once by the integration owner, instead of silently reachable and
-# noticed by whoever finds it first.
+# Layer 2 is what makes the grant per-route: it flips the failure direction, so a
+# new ops route is INACCESSIBLE until someone opts it in — noticed at once by the
+# integration owner — instead of silently reachable and noticed by whoever finds
+# it first.
+#
+# WHAT LAYER 2 IS NOT (#2389): it is an ADDITIONAL gate, never a substitute one.
+# An ops key is a NARROWING of its owner, not a decoupling from them: the opt-in
+# admits the scope, and `role == "admin"` is still enforced afterwards. An
+# earlier revision of this comment claimed the key "survives that admin being
+# offboarded". It does not, and could not:
+#
+#   * demoting the owner below `admin` 403s the key at every admin-gated ops
+#     read, and
+#   * `get_current_user` rejects a principal whose owner carries `suspended_at`
+#     (#995), so suspension — the usual offboarding action — kills the key at the
+#     auth entry point, before any of this runs.
+#
+# Dropping the role check for an opted-in scope was considered and REFUSED. It
+# would have made this bounded tier HARDER to revoke than the unbounded
+# `user`-scoped key it exists to displace (that one loses admin the moment its
+# owner is demoted), and it still could not deliver the advertised property,
+# because suspension kills the key one layer up regardless. #2323 asked for a
+# credential that survives enforced 2FA — which it does, key validation never
+# passing through the MFA gate — not one that survives its owner.
+#
+# OPERATOR CONSEQUENCE, stated because someone will act on it during an
+# offboarding: an ops key is bound to the account that minted it. Mint it under a
+# dedicated service admin account that is not offboarded with people, and treat
+# revoke-and-re-mint as part of the offboarding runbook for any ops key held by a
+# departing admin. `test_2323_machine_identities.py` pins this behaviour so the
+# claim cannot drift back.
 #
 # EVERY ENTRY IS A `GET`, and a test asserts it. The method belt is not
 # decorative: without it a future `POST /api/ops/<anything>` under an allowlisted
@@ -876,13 +902,55 @@ _OPS_ALLOWED_ROUTES = (
 # them everything else — this closes a hole that predates #2323 rather than
 # preserving it out of politeness; both are fenced to one or two routes, so
 # nothing legitimate reaches this one.
+#
+# `agent` is present, but NOT wholesale (#2389): an EPHEMERAL agent's own key is
+# refused. `_enforce_ephemeral_key_fence` exists precisely because a ghost runs an
+# untrusted workspace and its key must not be a fleet skeleton key — and that
+# fence lives in `get_current_user`, which this handler never calls, so a ghost's
+# `TRINITY_MCP_API_KEY` opened the fleet-wide stream scoped by its OWNER's
+# accessible agents (everything, on a default admin-owned install). Pre-existing,
+# but this is the change that enumerated the permitted scopes on this surface, so
+# it finishes the job rather than leaving the one bounded principal inside.
 WS_EVENT_STREAM_SCOPES = frozenset({None, "user", "agent", "system"})
 
 
-def scope_may_open_event_stream(scope: Optional[str]) -> bool:
-    """#2323 — allowlist gate for `/ws/events`. `None`/unset coerces to `user`,
-    matching `validate_mcp_api_key` and `get_current_user`."""
-    return (scope or "user") in WS_EVENT_STREAM_SCOPES
+def scope_may_open_event_stream(
+    scope: Optional[str], agent_name: Optional[str] = None
+) -> bool:
+    """#2323/#2389 — allowlist gate for `/ws/events`.
+
+    `None`/unset coerces to `user`, matching `validate_mcp_api_key` and
+    `get_current_user`.
+
+    The `agent` scope is additionally gated on the row NOT being ephemeral, using
+    the same `is_ephemeral` predicate as `_enforce_ephemeral_key_fence`.
+
+    That sub-check fails **CLOSED**, deliberately diverging from the ephemeral
+    fence's fail-open: that fence guards heartbeats and result callbacks, where a
+    transient DB error must not take the fleet down, whereas losing this stream
+    costs an observability client a reconnect. An unprovable claim of
+    non-ephemerality is not a claim, and a missing `agent_name` on an
+    `agent`-scoped key is itself the unprovable case.
+    """
+    resolved = scope or "user"
+    if resolved not in WS_EVENT_STREAM_SCOPES:
+        return False
+    if resolved != "agent":
+        return True
+    if not agent_name:
+        return False
+    try:
+        info = db.get_agent_ephemeral_info(agent_name)
+    except Exception:
+        return False
+    if not isinstance(info, dict) or "is_ephemeral" not in info:
+        # The key's PRESENCE is what makes the answer real. `get_agent_ephemeral_info`
+        # coalesces the column and always returns it for a live row, so a dict
+        # without it is either no row at all or a stand-in that does not match the
+        # real principal — and `.get()` alone would map both onto the same falsy
+        # value a genuine non-ephemeral row gives.
+        return False
+    return not info["is_ephemeral"]
 
 
 def _enforce_ops_key_fence(request: Request) -> None:
@@ -1042,6 +1110,38 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def require_admin_allowing(*allow_scopes: str):
+    """`Depends` form of `assert_admin(..., allow_scopes=...)` (#2389).
+
+    `require_admin` is the dominant admin-gate spelling platform-wide, and it
+    took no `allow_scopes`. So an ops-allowlisted route gated that way was
+    permanently dead to ops keys **with no opt-in available** — the route fence
+    admits, the gate refuses, and there is no third thing to write. That is the
+    same two-gate false-assurance shape as the `GET /api/subscriptions/{id}/usage`
+    bug, one level up: the earlier fix closed the instance and left the shape open.
+
+    Usage mirrors `require_role`:
+
+        @router.get("/fleet/status")
+        async def fleet_status(user: User = Depends(require_admin_allowing("ops"))):
+
+    Deliberately delegates the whole ladder to `assert_admin` rather than
+    restating it — two admin gates that must stay identical is exactly how the
+    `require_role("admin")` third spelling happened. Resolved at request time, so
+    the forward reference to `assert_admin` is fine.
+
+    `tests/unit/test_2323_machine_identities.py` reds if an allowlisted handler
+    mentions bare `require_admin` without this form.
+    """
+    permitted = frozenset(allow_scopes)
+
+    def _require_admin_allowing(current_user: User = Depends(get_current_user)) -> User:
+        assert_admin(current_user, allow_scopes=permitted)
+        return current_user
+
+    return _require_admin_allowing
+
+
 # ent#293/#297 closed the admin gate against `agent` and `connector` principals by
 # NAMING them. That is a denylist over a free-text column: `mcp_api_keys.scope`
 # carries no CHECK constraint, and any scope that sets neither `agent_name` nor
@@ -1088,8 +1188,11 @@ def _reject_scope_at_admin_gate(
     """Allowlist half of the admin gate (#2323).
 
     `allow_scopes` lets an individual endpoint opt a bounded scope in — the
-    per-route grant that makes a machine credential authorized because of WHAT IT
-    IS rather than who owns it. Absent, only `ADMIN_GATE_SCOPES` passes.
+    per-route grant. It admits the SCOPE only; the caller's role check still runs
+    afterwards in `assert_admin` / `require_admin`, so an opted-in ops key whose
+    owner is no longer an admin is still refused (#2389 — see the ops block above
+    for why that is deliberate and not a gap). Absent, only `ADMIN_GATE_SCOPES`
+    passes.
     """
     permitted = ADMIN_GATE_SCOPES if not allow_scopes else (ADMIN_GATE_SCOPES | frozenset(allow_scopes))
     # A principal that does not carry `mcp_scope` at all fails CLOSED. The

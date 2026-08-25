@@ -174,7 +174,7 @@ async def start_loop(
         started_by_user_id=current_user.id,
         started_by_user_email=current_user.email,
         source_agent_name=x_source_agent,
-        # # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
+        # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
     )

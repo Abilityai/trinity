@@ -150,7 +150,7 @@ async def create_reminder_endpoint(
             owner_id=current_user.id,
             created_by_email=current_user.email,
             source_agent_name=current_user.agent_name or x_source_agent,
-            # # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
+            # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         )
     except HTTPException:

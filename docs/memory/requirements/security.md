@@ -311,10 +311,31 @@
     asserted by a test that imports the constant; the method belt stops a future
     `POST /api/ops/*` inheriting read access under a prefix.
   - Kept **out** of `ADMIN_GATE_SCOPES`; an admin-gated ops route opts in with
-    `assert_admin(..., allow_scopes={"ops"})`. Authority therefore comes from
-    being an ops key, not from the owner's role — which is what makes it a
-    machine identity rather than a human's proxy, and what stops every ops
-    integration dying when that admin is offboarded.
+    `assert_admin(..., allow_scopes={"ops"})`, or `Depends(require_admin_allowing("ops"))`
+    for the `Depends` spelling (#2389 — `require_admin` took no `allow_scopes`, so
+    an allowlisted route gated that way was permanently dead to ops keys with no
+    opt-in available; the factory delegates the whole ladder to `assert_admin`
+    rather than restating it). The opt-in is what makes the grant **per route** —
+    a new ops route is inaccessible until someone adds it, rather than silently
+    reachable.
+  - **The opt-in is an ADDITIONAL gate, never a substitute one (#2389).** An ops
+    key is a *narrowing* of its owner, not a *decoupling* from them: the scope is
+    admitted and `role == "admin"` is still enforced afterwards. An earlier
+    revision of this section claimed the tier "stops every ops integration dying
+    when that admin is offboarded" — **it does not, and could not**: demoting the
+    owner 403s the key at every ops read, and `get_current_user` rejects a
+    principal whose owner carries `suspended_at` (#995) one layer above this gate,
+    so suspension — the usual offboarding action — kills it before any of this
+    runs. Dropping the role check for an opted-in scope was considered and
+    refused: it would make this bounded tier *harder* to revoke than the unbounded
+    `user`-scoped key it exists to displace, and it still could not deliver the
+    claim. #2323 asked for a credential that survives enforced **2FA** — which it
+    does — not one that survives its owner.
+    **Operator consequence:** an ops key is bound to the account that minted it.
+    Mint it under a dedicated service admin account that is not offboarded with
+    people, and put revoke-and-re-mint in the offboarding runbook for any ops key
+    held by a departing admin. Pinned by `test_2323_machine_identities.py` so the
+    claim cannot drift back.
   - Never carries an `agent_name` (`_AGENTLESS_SCOPES`): three sweeps — the
     canary orphan scan, the key orphan sweep, and the rename/purge cascade —
     find their work by filtering `scope IN ('agent','connector')`, so a

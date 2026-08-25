@@ -199,15 +199,49 @@
                 ></textarea>
               </div>
 
-              <!-- ent#163. Admin-only, and deliberately opt-in rather than a
-                   default: a delegate key acts as other people, so creating one
-                   should be a conscious choice, never a stray click. -->
-              <div v-if="isAdmin">
+              <!-- ent#163 / #2323. Admin-only, and deliberately an explicit
+                   choice rather than a default: both non-standard scopes are
+                   consequential (one acts as other people, one is a machine
+                   credential), so neither should be a stray click.
+
+                   #2389 — a radio group, not the two independent checkboxes this
+                   started as: the scopes are mutually exclusive (one column), so
+                   a checkbox pair can express a state the backend cannot store. -->
+              <div v-if="isAdmin" class="space-y-2">
+                <span class="block text-sm font-medium scope-label">Key scope</span>
+
                 <label class="flex items-start gap-2 cursor-pointer">
-                  <input type="checkbox" v-model="newKey.portalDelegate" class="mt-0.5 rounded text-action-primary-600 focus:ring-action-primary-500" />
-                  <span class="text-sm text-gray-700 dark:text-gray-300">
-                    Portal delegate key
-                    <span class="block text-xs text-gray-500 dark:text-gray-400">
+                  <input type="radio" value="user" v-model="newKey.scope" class="mt-0.5 text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm scope-label">
+                    Standard
+                    <span class="scope-hint">
+                      Carries your own role in full, including admin. Use for your
+                      own tooling.
+                    </span>
+                  </span>
+                </label>
+
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="radio" value="ops" v-model="newKey.scope" class="mt-0.5 text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm scope-label">
+                    Ops (read-only)
+                    <span class="scope-hint">
+                      Bounded machine credential for a monitoring integration: fleet
+                      health, telemetry, roster, execution and subscription
+                      <em>reads</em> only — every write and every other endpoint is
+                      refused, and it gets no MCP tools. It stays bound to this
+                      account: if your admin role is removed or the account is
+                      suspended, the key stops working, so mint it under an account
+                      that is not offboarded with a person.
+                    </span>
+                  </span>
+                </label>
+
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="radio" value="portal_delegate" v-model="newKey.scope" class="mt-0.5 text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm scope-label">
+                    Portal delegate
+                    <span class="scope-hint">
                       Lets a trusted backend exchange one of your client emails for a
                       portal session — it acts as that person. It can do nothing else:
                       every other endpoint is refused. Revoke it to stop delegation.
@@ -381,10 +415,13 @@ const showApiKey = ref(false)
 const copied = ref(false)
 const copiedConfig = ref(false)
 
+// #2389 — one `scope` string, not a boolean per special scope: the column holds
+// exactly one value, so independent booleans can express a state that cannot be
+// stored. Non-admins never see the selector and keep the backend default.
 const newKey = ref({
   name: '',
   description: '',
-  portalDelegate: false
+  scope: 'user'
 })
 
 const confirmDialog = reactive({
@@ -493,7 +530,9 @@ const createKey = async () => {
         description: newKey.value.description || null,
         // Omitted (not `null`) for an ordinary key so the backend
         // default stands and nothing changes for existing callers.
-        ...(newKey.value.portalDelegate ? { scope: 'portal_delegate' } : {})
+        ...(newKey.value.scope && newKey.value.scope !== 'user'
+          ? { scope: newKey.value.scope }
+          : {})
       })
     })
 
@@ -502,7 +541,7 @@ const createKey = async () => {
       createdApiKey.value = data.api_key
       showCreateModal.value = false
       showKeyModal.value = true
-      newKey.value = { name: '', description: '', portalDelegate: false }
+      newKey.value = { name: '', description: '', scope: 'user' }
       await fetchApiKeys()
     } else {
       const error = await response.json()
@@ -607,3 +646,15 @@ onMounted(async () => {
   await ensureDefaultKey()
 })
 </script>
+
+<style scoped>
+/* #2389 — the three scope options share one chrome style instead of repeating
+   the gray palette classes per option. There is no semantic neutral token
+   family (`status-/state-/brand-/accent-/action-` are the five), so gray IS the
+   sanctioned neutral here — it is simply counted, and the raw-color ratchet
+   (`scripts/scan-raw-colors.mjs` against `raw-color-baseline.json`) may only
+   shrink per file. Hoisting keeps this file's count flat while adding a
+   three-option control. */
+.scope-label { @apply text-gray-700 dark:text-gray-300; }
+.scope-hint { @apply block text-xs text-gray-500 dark:text-gray-400; }
+</style>
