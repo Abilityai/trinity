@@ -50,9 +50,17 @@ docker compose version >/dev/null 2>&1 && echo "compose: ok" || echo "compose: M
 ```bash
 git clone https://github.com/abilityai/trinity.git
 cd trinity
+cp .env.example .env                      # MUST come first — see the note below
 echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env   # pin a release; `latest` moves every cut
 ./scripts/deploy/start.sh --hosted --unattended
 ```
+
+> **Copy the template before you append to it.** `start.sh` seeds `.env` from
+> `.env.example` only `if [ ! -f .env ]`. Writing the pin first *creates* the
+> file, so the seed is skipped and the install proceeds on a `.env` holding one
+> key — no `ANTHROPIC_API_KEY`, no `FRONTEND_URL`, no `EMAIL_*`, no
+> `TRINITY_DATA_PATH`. The stack still boots, which is what makes it worth
+> calling out: you find out later, one missing knob at a time.
 
 Same script, same `.env` contract, same `ADMIN_PASSWORD` behaviour — it just
 pulls the platform images and the agent base image from GHCR instead of

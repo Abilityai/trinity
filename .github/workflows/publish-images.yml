@@ -204,3 +204,33 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
           build-args: ${{ steps.args.outputs.build_args }}
+
+      # A container package first created by GITHUB_TOKEN is not reliably
+      # public. If any of the five lands private, `docker pull` on a fresh VM
+      # fails with `denied` — and start.sh, which has no way to tell that apart
+      # from a network fault, reports it to an operator who can do nothing
+      # about it. So prove the operator's exact path here, where it is cheap:
+      # an ANONYMOUS manifest fetch, with a scratch DOCKER_CONFIG so the
+      # runner's own ghcr.io login cannot mask a private package.
+      #
+      # This runs after the push and fails the job on purpose. The image is
+      # already published at that point; a red step is the signal to flip
+      # package visibility to Public once, which is a first-publish-only chore.
+      - name: Verify anonymous pull
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          TAG: sha-${{ steps.prov.outputs.short_sha }}
+        run: |
+          set -uo pipefail
+          cfg=$(mktemp -d)
+          # GHCR visibility/propagation is not instant on a first publish.
+          for attempt in 1 2 3 4 5; do
+            if DOCKER_CONFIG="$cfg" docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+              echo "${IMAGE}:${TAG} is anonymously pullable."
+              exit 0
+            fi
+            echo "attempt ${attempt}: not yet anonymously pullable, retrying..."
+            sleep 15
+          done
+          echo "::error title=GHCR package is not public::${IMAGE} cannot be pulled anonymously. A hosted install (scripts/deploy/start.sh --hosted) will fail with 'denied' on a fresh VM. Fix: GitHub → Packages → ${{ matrix.image }} → Package settings → Change visibility → Public. This is normally needed only on the first publish of a package."
+          exit 1

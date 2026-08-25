@@ -4,6 +4,65 @@ set -e
 
 cd "$(dirname "$0")/../.."
 
+# --- Shared .env + compose-project helpers (#2280) ---------------------------
+# Five call sites were each hand-rolling `grep ... | cut -d'=' -f2- | tr -d
+# '[:space:]'`, which is NOT how compose reads the same file. Compose strips
+# surrounding quotes and a trailing ` # comment`, and it PRESERVES internal
+# spaces; the hand-rolled form did the opposite on all three counts. That
+# matters more than it looks, because these values are `export`ed — and compose
+# gives the shell environment precedence over `.env`, so a mis-parse here
+# silently OVERRODE a perfectly valid operator line and then blamed them for it
+# (`TRINITY_IMAGE_TAG="v0.9.0"` became `"v0.9.0"`, the pull failed, and the
+# error message pointed at "image-tag spelling").
+#
+# Behaviour verified against `docker compose config` (compose-go dotenv):
+#     X="v0.9.0"        -> v0.9.0        (quotes stripped)
+#     X=v0.9.0  # pin   -> v0.9.0        (inline comment stripped)
+#     X=/srv/my dir     -> /srv/my dir   (internal spaces preserved)
+#     X='has#hash'      -> has#hash      ('#' inside quotes is literal)
+env_value() {
+    local key="$1" line val
+    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" .env 2>/dev/null | tail -1) || true
+    [ -n "$line" ] || return 0
+    val=${line#*=}
+    case "$val" in
+        \"*\"*) val=${val#\"}; val=${val%%\"*} ;;
+        \'*\'*) val=${val#\'}; val=${val%%\'*} ;;
+        *)
+            # Unquoted: whitespace followed by '#' starts a comment.
+            case "$val" in *" #"*) val=${val%%" #"*} ;; esac
+            case "$val" in *"	#"*) val=${val%%"	#"*} ;; esac
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            ;;
+    esac
+    printf '%s' "$val"
+}
+
+# Compose's own project-name rule, not an approximation of it: lowercase, keep
+# only [a-z0-9_-], drop every other character, then trim leading '_' and '-'.
+# Verified empirically: directory `proj_Trin-ity!x` -> project `proj_trin-ityx`;
+# `--_Foo.Bar` -> `foobar`; `COMPOSE_PROJECT_NAME` wins, shell over `.env`.
+#
+# This replaces TWO disagreeing derivations. `tr -cd '[:alnum:]'` also stripped
+# '_' and '-', which compose KEEPS — so in a checkout named `project_trinity`
+# (the layout CLAUDE.md documents), `trinity-dev`, or a worktree like
+# `trinity-2280`, the derived name matched no real volume, `docker volume
+# inspect` missed, and the dev<->hosted data guard below failed OPEN on exactly
+# the directory names most likely to be in use. `volume_exists()` had a third
+# spelling (`basename "$PWD"`, no lowercase, no filtering), which missed
+# whenever the directory contained an uppercase letter or a '.'.
+compose_project_name() {
+    local raw="${COMPOSE_PROJECT_NAME:-}"
+    [ -n "$raw" ] || raw=$(env_value COMPOSE_PROJECT_NAME)
+    [ -n "$raw" ] || raw=$(basename "$PWD")
+    printf '%s' "$raw" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -cd 'a-z0-9_-' \
+        | sed 's/^[_-]*//'
+}
+# -----------------------------------------------------------------------------
+
 echo "====================================="
 echo "Trinity Agent Platform - Starting"
 echo "====================================="
@@ -66,7 +125,14 @@ fi
 # the redirect is guarded so `set -e` never trips on a free port.
 _port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1 && exec 3>&- 3<&- ; }
 _busy_ports=()
-for _pp in 80 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
+# #2280: probe the port the Web UI will ACTUALLY bind. Both prod and hosted
+# publish `${FRONTEND_PORT:-80}`, so hardcoding 80 warned about a port Trinity
+# no longer uses and stayed silent about the one it does — while this message's
+# own advice is "set FRONTEND_PORT". On a first install there is no .env to
+# read yet, so the default is 80, which is what will be bound.
+_preflight_frontend_port="${FRONTEND_PORT:-$(env_value FRONTEND_PORT)}"
+_preflight_frontend_port="${_preflight_frontend_port:-80}"
+for _pp in "$_preflight_frontend_port" 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
 if [ ${#_busy_ports[@]} -gt 0 ]; then
     echo "ℹ️  Ports already in use: ${_busy_ports[*]}."
     echo "    If this is a re-run, that's expected — they're Trinity's own containers."
@@ -154,7 +220,7 @@ fi
 # On existing deployments with data, refuse and point at the migration doc:
 # re-keying a populated Redis would lock the backend out of its own data.
 volume_exists() {
-    docker volume inspect "$(basename "$PWD")_redis-data" >/dev/null 2>&1 \
+    docker volume inspect "$(compose_project_name)_redis-data" >/dev/null 2>&1 \
         || docker volume inspect redis-data >/dev/null 2>&1
 }
 
@@ -201,7 +267,7 @@ ensure_data_path_ownership() {
     # Dev compose uses a named volume and is unaffected.
     local data_path
     data_path="${TRINITY_DATA_PATH:-}"
-    [ -z "$data_path" ] && data_path=$(grep -E '^TRINITY_DATA_PATH=' .env 2>/dev/null | cut -d'=' -f2-)
+    [ -z "$data_path" ] && data_path=$(env_value TRINITY_DATA_PATH)
     [ -z "$data_path" ] && data_path="./trinity-data"
 
     mkdir -p "$data_path"
@@ -298,12 +364,14 @@ ensure_docker_gid
 # as though they had chosen it, which is exactly the unscheduled upgrade the
 # rest of this script warns about.
 #
-# Mirrors the FRONTEND_PORT read further down; `cut -d'=' -f2-` keeps a value
-# containing '=' intact, and `tail -1` matches shell/compose last-wins semantics
-# for a duplicated key.
+# Parsed by the shared env_value() helper, which mirrors compose's own dotenv
+# rules — quotes stripped, inline ` # comment` stripped, last-wins on a repeated
+# key. The hand-rolled parse this replaces kept the quotes and swallowed the
+# comment into the value, and because the result is exported it beat compose's
+# correct parse for every service image ref too.
 resolve_image_tag() {
     if [ -z "${TRINITY_IMAGE_TAG:-}" ]; then
-        TRINITY_IMAGE_TAG=$(grep -E '^TRINITY_IMAGE_TAG=' .env 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]')
+        TRINITY_IMAGE_TAG=$(env_value TRINITY_IMAGE_TAG)
     fi
     TRINITY_IMAGE_TAG="${TRINITY_IMAGE_TAG:-latest}"
     export TRINITY_IMAGE_TAG
@@ -321,52 +389,124 @@ resolve_image_tag
 #
 # Hosted only: the dev stack is a localhost workflow and its file set is
 # untouched by this change.
+#
+# The profile is also PERSISTED to `.env` as COMPOSE_PROFILES. Compose acts only
+# on services in the active profile set, so without it every command this script
+# prints in its own summary — `docker compose -f docker-compose.hosted.yml stop`,
+# `logs -f` — silently excludes `trinity-cloudflared`: `stop` leaves the tunnel
+# container running and the instance publicly reachable after the operator has
+# been told the stack is down. Compose reads COMPOSE_PROFILES from `.env`
+# (verified), so persisting it once makes every later bare command correct,
+# including ones a human types weeks from now. Additive: an operator who already
+# listed other profiles keeps them.
+persist_compose_profile() {
+    local want="$1" cur
+    cur=$(env_value COMPOSE_PROFILES)
+    case ",${cur}," in *",${want},"*) return 0 ;; esac
+    # Append rather than rewrite in place. Compose resolves a duplicated `.env`
+    # key last-wins (verified), so appending the merged list is sufficient — and
+    # it keeps an operator-authored value out of a `sed` replacement, where an
+    # `&` or a delimiter in the existing value would be substitution syntax
+    # rather than text. Re-running is a no-op: the second pass finds the profile
+    # already listed and returns above.
+    echo "COMPOSE_PROFILES=${cur:+${cur},}${want}" >> .env
+    echo "Persisted COMPOSE_PROFILES=${cur:+${cur},}${want} to .env so 'docker compose ... stop|logs' also acts on the tunnel."
+}
+
 if [ "$HOSTED" = "1" ]; then
-    _tunnel_token="${TUNNEL_TOKEN:-$(grep -E '^TUNNEL_TOKEN=' .env 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]')}"
+    _tunnel_token="${TUNNEL_TOKEN:-$(env_value TUNNEL_TOKEN)}"
     if [ -n "$_tunnel_token" ]; then
         COMPOSE_FILES+=(--profile tunnel)
         echo "TUNNEL_TOKEN set → starting the Cloudflare Tunnel (profile 'tunnel')."
+        persist_compose_profile tunnel
     fi
 fi
 
-# --- Refuse a silent dev -> hosted data switch (#2280) ------------------------
-# Dev and hosted share a compose project name (the directory basename) but NOT a
-# /data source: docker-compose.yml mounts the named volume `trinity-data`, while
-# hosted (inheriting prod) binds ${TRINITY_DATA_PATH:-./trinity-data}. So
-# re-running this script with --hosted in a checkout that has been running the
-# dev stack comes up against an EMPTY database and migrates from zero, while the
-# real one sits untouched in the named volume — and Redis (`redis-data`, a named
-# volume both files share) is NOT reset, so the result is a half-migrated
-# install with live session/lock state pointing at rows that no longer exist.
+# --- Refuse a silent data switch, in EITHER direction (#2280) -----------------
+# Dev and hosted share a compose project name but NOT a /data source:
+# docker-compose.yml mounts the named volume `trinity-data`, while hosted
+# (inheriting prod) binds ${TRINITY_DATA_PATH:-./trinity-data}. So crossing
+# between them comes up against an EMPTY database and migrates from zero while
+# the real one sits untouched — and Redis (`redis-data`, a named volume both
+# files share) is NOT reset, so the result is a half-migrated install with live
+# session/lock state pointing at rows that no longer exist.
 #
 # Nothing about "the same script, only the image source differs" prepares an
 # operator for that, so refuse rather than warn: the failure is silent, and by
 # the time it is noticed the fresh DB may have been written to.
-if [ "$HOSTED" = "1" ]; then
-    _data_path="${TRINITY_DATA_PATH:-$(grep -E '^TRINITY_DATA_PATH=' .env 2>/dev/null | tail -1 | cut -d'=' -f2- | tr -d '[:space:]')}"
-    _data_path="${_data_path:-./trinity-data}"
-    _project=$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
-    if [ ! -f "${_data_path}/trinity.db" ] \
-       && docker volume inspect "${_project}_trinity-data" >/dev/null 2>&1; then
-        echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
-        echo "" >&2
-        echo "   Found: docker volume '${_project}_trinity-data' (written by docker-compose.yml)" >&2
-        echo "   Wanted: ${_data_path}/trinity.db (the bind mount docker-compose.hosted.yml uses)" >&2
-        echo "" >&2
-        echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
-        echo "   one stays in the volume — and Redis is shared between the two stacks, so you" >&2
-        echo "   would get a half-migrated install rather than a clean one." >&2
-        echo "" >&2
-        echo "   Copy the data across first (with the stack stopped):" >&2
-        echo "       docker compose stop" >&2
-        echo "       mkdir -p ${_data_path}" >&2
-        echo "       docker run --rm -v ${_project}_trinity-data:/from -v \"\$(pwd)/${_data_path#./}\":/to \\" >&2
-        echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
-        echo "       ./scripts/deploy/start.sh --hosted" >&2
-        echo "" >&2
-        echo "   Or, to deliberately start fresh, set TRINITY_DATA_PATH to a new directory." >&2
-        exit 1
-    fi
+#
+# BOTH crossings are guarded. Only dev->hosted was, and hosted->dev is the
+# likelier of the two — it needs no new flag, just a forgotten one — so the
+# unguarded direction was the one an operator reaches by doing nothing special.
+# The state is read ONCE into `_dev_volume` / `_hosted_db` and the two refusals
+# branch off it, so the pair cannot drift into disagreeing about what it found.
+_data_path="${TRINITY_DATA_PATH:-$(env_value TRINITY_DATA_PATH)}"
+_data_path="${_data_path:-./trinity-data}"
+# Absolute form for the printed `docker run -v` — `"$(pwd)/${_data_path#./}"`
+# strips only a leading './', so TRINITY_DATA_PATH=/srv/trinity-data produced
+# `/path/to/repo//srv/trinity-data` and would have copied the database into a
+# directory nothing reads. (The value is no longer run through
+# `tr -d '[:space:]'` either, so a path containing spaces survives the read.)
+case "$_data_path" in
+    /*) _data_abs="$_data_path" ;;
+    *)  _data_abs="$(pwd)/${_data_path#./}" ;;
+esac
+_project=$(compose_project_name)
+_dev_volume=0
+docker volume inspect "${_project}_trinity-data" >/dev/null 2>&1 && _dev_volume=1
+_hosted_db=0
+[ -f "${_data_path}/trinity.db" ] && _hosted_db=1
+
+if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ]; then
+    echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
+    echo "" >&2
+    echo "   Found: docker volume '${_project}_trinity-data' (written by docker-compose.yml)" >&2
+    echo "   Wanted: ${_data_abs}/trinity.db (the bind mount docker-compose.hosted.yml uses)" >&2
+    echo "" >&2
+    echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
+    echo "   one stays in the volume — and Redis is shared between the two stacks, so you" >&2
+    echo "   would get a half-migrated install rather than a clean one." >&2
+    echo "" >&2
+    echo "   Copy the data across first (with the stack stopped):" >&2
+    echo "       docker compose stop" >&2
+    echo "       mkdir -p \"${_data_abs}\"" >&2
+    echo "       docker run --rm -v ${_project}_trinity-data:/from -v \"${_data_abs}\":/to \\" >&2
+    echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
+    echo "       ./scripts/deploy/start.sh --hosted" >&2
+    echo "" >&2
+    echo "   Or, to deliberately start fresh, set TRINITY_DATA_PATH to a new directory." >&2
+    exit 1
+fi
+
+# The reverse switch, and the likelier mistake of the two: an operator who
+# installed with --hosted and later runs this script WITHOUT the flag — having
+# forgotten it, or followed an older doc — gets docker-compose.yml, an empty
+# `trinity-data` named volume, and the same shared `redis-data`. That is the
+# identical half-migrated state as above, with no warning at all, so it earns
+# the same refusal rather than a one-directional one.
+if [ "$HOSTED" != "1" ] && [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "0" ]; then
+    echo "❌ Refusing to start: this checkout was installed with --hosted, and the dev stack cannot see its database." >&2
+    echo "" >&2
+    echo "   Found: ${_data_abs}/trinity.db (the bind mount docker-compose.hosted.yml uses)" >&2
+    echo "   Wanted: docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)" >&2
+    echo "" >&2
+    echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
+    echo "   one stays in ${_data_abs} — and Redis is shared between the two stacks, so you" >&2
+    echo "   would get a half-migrated install rather than a clean one." >&2
+    echo "" >&2
+    echo "   If you meant to stay on the prebuilt images, re-run with the flag:" >&2
+    echo "       ./scripts/deploy/start.sh --hosted" >&2
+    echo "" >&2
+    echo "   To move BACK to a source build, copy the data into the dev volume first" >&2
+    echo "   (with the stack stopped):" >&2
+    echo "       docker compose -f docker-compose.hosted.yml stop" >&2
+    echo "       docker volume create ${_project}_trinity-data" >&2
+    echo "       docker run --rm -v \"${_data_abs}\":/from -v ${_project}_trinity-data:/to \\" >&2
+    echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
+    echo "       ./scripts/deploy/start.sh" >&2
+    echo "" >&2
+    echo "   Or, to deliberately start fresh, move ${_data_abs} aside." >&2
+    exit 1
 fi
 
 # Check base image before starting — without it, agent creation will silently fail.
@@ -467,7 +607,26 @@ fi
 
 if [ "$HOSTED" = "1" ]; then
     echo "Pulling platform images (tag: ${TRINITY_IMAGE_TAG})..."
-    docker compose "${COMPOSE_FILES[@]}" pull
+    # Tailored fatal, matching the agent-base pull one screen above. Bare, this
+    # died on `set -e` with a raw Compose error on precisely the install least
+    # equipped to read one — and its two likeliest causes (a tag not published
+    # yet, GHCR denying an anonymous pull because a package is still private)
+    # both surface as messages that name neither.
+    if ! docker compose "${COMPOSE_FILES[@]}" pull; then
+        echo ""
+        echo "ERROR: could not pull the platform images at tag '${TRINITY_IMAGE_TAG}'."
+        echo "       Most likely one of:"
+        echo "         • the tag does not exist — check TRINITY_IMAGE_TAG against"
+        echo "           https://github.com/abilityai/trinity/releases (both 'v0.9.0'"
+        echo "           and '0.9.0' are published for the same digest);"
+        echo "         • 'denied' / 'unauthorized' — the GHCR package is not public;"
+        echo "           report it, it is a publishing fault, not yours;"
+        echo "         • no network route to ghcr.io."
+        echo "       Hosted mode does not fall back to building — that is the 5-10"
+        echo "       minute first boot it exists to avoid. Drop --hosted to build"
+        echo "       from source instead."
+        exit 1
+    fi
     echo ""
 fi
 
@@ -475,7 +634,7 @@ echo "Starting services..."
 docker compose "${COMPOSE_FILES[@]}" up -d
 
 # Read FRONTEND_PORT from .env or use default (needed for the serving check + URL).
-FRONTEND_PORT=${FRONTEND_PORT:-$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "80")}
+FRONTEND_PORT=${FRONTEND_PORT:-$(env_value FRONTEND_PORT)}
 FRONTEND_PORT=${FRONTEND_PORT:-80}
 
 # Verify the stack is actually SERVING, not just "containers started" (#39).

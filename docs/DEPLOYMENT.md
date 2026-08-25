@@ -65,6 +65,13 @@ which is `docker-compose.prod.yml` with the `build:` blocks replaced by GHCR
 `tests/unit/test_2280_hosted_compose_parity.py`, fails the build if the two ever
 disagree on a service, port, volume, network or environment variable).
 
+If a pull fails with `denied` or `unauthorized` rather than `manifest unknown`,
+the tag exists but its GHCR package is not public. That is a publishing fault,
+not a local one — the release workflow verifies anonymous pullability for every
+image it pushes (`Verify anonymous pull` in
+[`publish-images.yml`](../.github/workflows/publish-images.yml)), so a red step
+there is the signal; report it rather than working around it with a login.
+
 **Minimum size: 8 GB RAM.** Below that the agent containers and the platform
 services contend and turns start failing under load.
 
