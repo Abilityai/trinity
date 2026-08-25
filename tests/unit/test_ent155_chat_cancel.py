@@ -202,3 +202,25 @@ def test_an_agent_side_failure_is_worded_for_a_client(monkeypatch):
     assert e.value.status_code == 503
     assert "scribe" not in e.value.detail
     assert "stop" in e.value.detail.lower()
+
+
+def test_a_public_link_can_only_cancel_what_a_public_link_produced():
+    """Review finding: the link+agent pair is the right scope for a READ and the
+    wrong one for a destructive write.
+
+    `status` and `stream` let a link holder observe; this route lets them KILL,
+    and every execution on that agent shares the agent name — the owner's own
+    Agent Detail turn, a scheduled run, a loop iteration. Ids are 128-bit so
+    this is not blind-guessable, but one leaked id (a screenshot, a log, a
+    shared browser session) would otherwise let a visitor stop the owner's
+    scheduled work. The symmetry-with-reading argument is sound for a read and
+    does not carry to a write.
+    """
+    import inspect
+    from routers import public as public_router
+    src = inspect.getsource(public_router.public_terminate_execution)
+    assert 'triggered_by' in src
+    assert '"public"' in src
+    # ...and it refuses with the SAME uniform 404 as an unknown execution, so
+    # the route is not an oracle for "this id exists on this agent".
+    assert src.count('detail="Execution not found"') >= 2

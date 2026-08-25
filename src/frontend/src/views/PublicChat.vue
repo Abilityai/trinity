@@ -298,7 +298,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { ChatMessages, ChatInput, ChatEmptyState, ChatHistoryDropdown } from '../components/chat'
-import { shouldCancelOnEscape, restoreDraft, cancelOutcome } from '../utils/turnCancel'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 import { useAuthStore } from '../stores/auth'
 
@@ -862,12 +862,17 @@ const cancelTurn = async () => {
     const res = await axios.post(
       `/api/public/executions/${token.value}/${executionId}/terminate`
     )
-    const alreadyTerminal = res.data?.status === 'already_terminal'
+    const alreadyTerminal = isNoopCancel(res.data?.status)
     const outcome = cancelOutcome({ ok: true, alreadyTerminal })
     if (outcome.kind === 'cancelled') {
       message.value = restoreDraft(restoreText, message.value)
     }
   } catch (err) {
+    // A 404 is the lost race (the agent no longer has the turn), not a refusal.
+    if (err?.response?.status === 404) {
+      cancelling.value = false
+      return
+    }
     chatError.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
     cancelling.value = false
   }

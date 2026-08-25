@@ -18,6 +18,26 @@ export function isTerminalStatus(status) {
 }
 
 /**
+ * Cancel responses that mean "there was nothing left to stop".
+ *
+ * Review finding: the DB pre-check on the two new routes answers
+ * `already_terminal`, but the AGENT answers `already_finished` — HTTP **200**,
+ * from `agent_server/routers/chat.py`, when its process registry finds the turn
+ * already gone — and `_proxy_terminate_and_finalize` passes that dict straight
+ * through. Testing only for `already_terminal` therefore treated the
+ * agent-level race, which is the one this feature actually races, as a
+ * successful cancel: the reply arrived AND the message was prepended back into
+ * the composer as though it had been stopped.
+ *
+ * One predicate, so a third spelling has one place to be added.
+ */
+export const NOOP_CANCEL_STATUSES = Object.freeze(['already_terminal', 'already_finished'])
+
+export function isNoopCancel(status) {
+  return NOOP_CANCEL_STATUSES.includes(status)
+}
+
+/**
  * Whether an Escape keydown should cancel the turn.
  *
  * Escape is heavily overloaded in this app — it closes modals, dismisses the

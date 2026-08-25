@@ -1111,6 +1111,19 @@ async def public_terminate_execution(
     if not execution or execution.agent_name != agent_name:
         raise HTTPException(status_code=404, detail="Execution not found")
 
+    # Review finding: the link + agent pair is the right scope for a READ, and
+    # the wrong one for a destructive write. `status` and `stream` only let a
+    # link holder observe; this route lets them KILL — and every execution on
+    # that agent shares the agent name: the owner's own Agent Detail turn, a
+    # scheduled run, a loop iteration. Ids are 128-bit so this is not
+    # blind-guessable, but one leaked id (a screenshot, a log, a shared browser)
+    # would let a visitor stop the owner's scheduled work.
+    #
+    # A public link can therefore only cancel what a public link produced. The
+    # symmetry-with-reading argument is sound for a read and does not carry.
+    if getattr(execution, "triggered_by", None) != "public":
+        raise HTTPException(status_code=404, detail="Execution not found")
+
     # Already finished: a no-op success, never a 4xx. The client races its own
     # poll, and a cancel that lost that race is not an error the visitor did
     # anything about — the reply is on screen.

@@ -172,11 +172,11 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
-import { shouldCancelOnEscape, restoreDraft, cancelOutcome } from '../utils/turnCancel'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import VoiceOverlay from './chat/VoiceOverlay.vue'
 import ModelSelector from './ModelSelector.vue'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
@@ -747,7 +747,7 @@ const cancelTurn = async () => {
       {},
       { headers: authStore.authHeader }
     )
-    const alreadyTerminal = res.data?.status === 'already_terminal'
+    const alreadyTerminal = isNoopCancel(res.data?.status)
     const outcome = cancelOutcome({ ok: true, alreadyTerminal })
     if (outcome.kind === 'cancelled') {
       // The poll sees the CANCELLED terminal and renders it; the words come
@@ -756,9 +756,17 @@ const cancelTurn = async () => {
       message.value = restoreDraft(restoreText, message.value)
     }
   } catch (err) {
-    // The turn is still running and still spending — say so, and leave the
-    // input alone: restoring the text here would imply a stop that did not
-    // happen (AC: honest status).
+    // Review finding: this route has no DB pre-check, so a turn that finished
+    // between the click and the terminate reaches the agent, which answers 404
+    // ("Execution not found in agent") — and reporting "it's still running"
+    // there is exactly backwards. A 404 IS the lost race; say nothing.
+    if (err?.response?.status === 404) {
+      cancelling.value = false
+      return
+    }
+    // Anything else: the turn is still running and still spending — say so, and
+    // leave the input alone. Restoring the text here would imply a stop that
+    // did not happen (AC: honest status).
     error.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
     cancelling.value = false
   }
@@ -829,9 +837,22 @@ watch(() => props.agentName, () => {
 })
 
 // Initialize
+// Review finding: `App.vue` wraps the router view in
+// `<KeepAlive :include="['AgentDetail']">`, so `onUnmounted` does NOT fire when
+// the user navigates away — only `onDeactivated` does. Left on `onMounted`
+// alone, the document listener outlived the page while a turn was still in
+// flight (the send closure outlives the navigation, so `loading` and
+// `activeExecutionId` stay set), and an Escape pressed on the Dashboard
+// silently cancelled a turn from a page showing no chat at all.
+function bindEscape() { document.addEventListener('keydown', onEscapeKeydown) }
+function unbindEscape() { document.removeEventListener('keydown', onEscapeKeydown) }
+
+onActivated(bindEscape)
+onDeactivated(unbindEscape)
+
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
-  document.addEventListener('keydown', onEscapeKeydown)
+  bindEscape()
   if (props.agentStatus === 'running') {
     loadSessions()
     checkVoiceAvailability()
@@ -841,7 +862,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
-  document.removeEventListener('keydown', onEscapeKeydown)
+  unbindEscape()
   closeSSE()
   // End voice session on unmount
   if (voice.isActive.value) {

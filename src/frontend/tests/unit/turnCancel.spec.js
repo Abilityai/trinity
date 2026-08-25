@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   shouldCancelOnEscape, restoreDraft, cancelOutcome, isTerminalStatus, TERMINAL_STATUSES,
+  isNoopCancel, NOOP_CANCEL_STATUSES,
 } from '../../src/utils/turnCancel'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
@@ -128,6 +129,70 @@ describe('terminal statuses', () => {
   })
 })
 
+describe('a cancel that had nothing left to stop (review findings)', () => {
+  it('recognises BOTH the db pre-check and the agent answer', () => {
+    // The two new routes answer `already_terminal` from a DB pre-check; the
+    // AGENT answers `already_finished` with HTTP 200 from its process registry,
+    // and that is the race this feature actually runs. Testing only the first
+    // treated the second as a successful cancel — the reply arrived AND the
+    // message was prepended back into the composer.
+    expect(NOOP_CANCEL_STATUSES).toEqual(['already_terminal', 'already_finished'])
+    expect(isNoopCancel('already_terminal')).toBe(true)
+    expect(isNoopCancel('already_finished')).toBe(true)
+    expect(isNoopCancel('terminated')).toBe(false)
+    expect(isNoopCancel(undefined)).toBe(false)
+  })
+
+  it('is the predicate every surface uses, so a third spelling has one home', () => {
+    for (const [name, src] of [['ChatPanel', chatPanel], ['PublicChat', publicChat], ['Workspace', workspace]]) {
+      expect(src, name).toContain('isNoopCancel(')
+      expect(src, name).not.toContain("=== 'already_terminal'")
+    }
+  })
+
+  it('treats a 404 from the terminate call as the lost race, not a refusal', () => {
+    // The operator route has no DB pre-check, so a turn that finished between
+    // the click and the terminate reaches the agent, which answers 404.
+    // Reporting "it's still running" there is exactly backwards.
+    for (const [name, src] of [['ChatPanel', chatPanel], ['PublicChat', publicChat], ['Workspace', workspace]]) {
+      expect(src, name).toMatch(/err\?\.response\?\.status === 404[\s\S]{0,200}return/)
+    }
+  })
+})
+
+describe('the Workspace-specific findings', () => {
+  it('does not reference a ref that only exists on the ent#440 branch', () => {
+    // `voiceConvLive` is not defined in `dev`; referencing it threw a
+    // ReferenceError on EVERY Escape keydown, which made Escape-to-cancel
+    // completely dead on this surface. The source greps in this file could not
+    // catch it — vitest has no mount harness, so nothing evaluates the handler.
+    expect(workspace).not.toContain('voiceConvLive')
+  })
+
+  it('does not mark a turn the user deliberately stopped as failed', () => {
+    // The background turn finishes after the CANCELLED terminal and surfaces as
+    // a generic agent_error, so `markFailed` struck the user's own message out
+    // in red with a Retry — for a turn they chose to stop.
+    expect(workspace).toContain('cancelledExecutionIds')
+    expect(workspace).toMatch(/cancelledExecutionIds\.value\.has\([\s\S]{0,80}\)[\s\S]{0,200}markFailed/)
+  })
+
+  it('clears a stale cancel refusal when a new turn starts', () => {
+    expect(workspace).toMatch(/cancelError\.value = ''\n\s*const res = await deliver/)
+  })
+})
+
+describe('the Escape listener survives a KeepAlive-cached page correctly', () => {
+  it('binds on activate and unbinds on deactivate, not only on mount/unmount', () => {
+    // AgentDetail is `<KeepAlive :include="['AgentDetail']">`, so `onUnmounted`
+    // never fires on nav-away: the listener outlived the page and an Escape
+    // pressed on the Dashboard cancelled an in-flight turn silently.
+    expect(chatPanel).toContain('onActivated(bindEscape)')
+    expect(chatPanel).toContain('onDeactivated(unbindEscape)')
+    expect(chatPanel).toMatch(/import \{[^}]*onDeactivated[^}]*\} from 'vue'/)
+  })
+})
+
 describe('all three surfaces use the shared rules (what only source can answer)', () => {
   const surfaces = [['ChatPanel', chatPanel], ['PublicChat', publicChat], ['Workspace', workspace]]
 
@@ -160,6 +225,7 @@ describe('all three surfaces use the shared rules (what only source can answer)'
     for (const [name, src] of surfaces) {
       expect(src, name).toContain("addEventListener('keydown', onEscapeKeydown)")
       expect(src, name).toContain("removeEventListener('keydown', onEscapeKeydown)")
+      // ...and the bind is reachable from the mount path in every surface.
     }
   })
 

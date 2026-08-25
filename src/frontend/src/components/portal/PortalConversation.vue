@@ -358,7 +358,7 @@ import {
   speechErrorMessage,
   transcriptionErrorMessage,
 } from './portalUtils'
-import { shouldCancelOnEscape, restoreDraft, cancelOutcome } from '../../utils/turnCancel'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
 
 const props = defineProps({
   // `stt_available` (#2212) is the platform's ability to transcribe server-side
@@ -393,6 +393,20 @@ const activeExecutionId = ref(null)
 const pendingUserText = ref('')
 const cancelling = ref(false)
 const cancelError = ref('')
+// Review finding: `terminate_portal_turn` writes the CANCELLED terminal, and
+// the still-running background turn then finishes — `portal_chat` sees a
+// non-success status, matches no `error_code` branch, and raises the generic
+// `agent_error` 502. `deliver` reports failed, `send()` calls `markFailed`, and
+// the user who pressed Stop sees their own message struck out in red under
+// "Something went wrong while the agent was working on this."
+// A cancel the user ASKED FOR is not a failure, so the client remembers which
+// executions it cancelled and declines to mark those. Client-side on purpose:
+// the portal outcome path has no `cancelled` category, and inventing one would
+// change a shared contract for one surface.
+const cancelledExecutionIds = ref(new Set())
+// Survives `deliver`'s finally, which clears the live id — `send()` needs to
+// know which execution the turn it is about to judge actually ran under.
+const lastDeliveredExecutionId = ref(null)
 const canCancelTurn = computed(() => sending.value && !!activeExecutionId.value)
 const attachments = ref([])
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
@@ -860,6 +874,7 @@ async function deliver(text) {
       // ent#155: this is the first moment a Stop is possible — before it there
       // is no turn to stop, and a control offered earlier would be a lie.
       activeExecutionId.value = started.execution_id || null
+      lastDeliveredExecutionId.value = started.execution_id || null
       pendingUserText.value = text
       // Stamp the dispatch instant: the server's marker TTL starts here, so the
       // client's ceiling must too (see awaitPersistedReply).
@@ -965,7 +980,12 @@ function onEscapeKeydown(event) {
   if (!shouldCancelOnEscape(event, {
     inFlight: canCancelTurn.value,
     cancelling: cancelling.value,
-    overlays: [typeaheadOpen.value, voiceConvLive.value],
+    // Only the typeahead owns Escape on this surface today. (The voice-loop
+    // overlay belongs to ent#440, which is not in `dev` — referencing it here
+    // threw a ReferenceError on every Escape keydown, in flight or not, which
+    // made Escape-to-cancel completely dead in the Workspace. Re-add that entry
+    // when ent#440 lands.)
+    overlays: [typeaheadOpen.value],
   })) return
   event.preventDefault()
   cancelTurn()
@@ -979,12 +999,19 @@ async function cancelTurn() {
   const restoreText = pendingUserText.value
   try {
     const res = await store.cancelPortalTurn(props.agent.name, executionId)
-    const outcome = cancelOutcome({ ok: true, alreadyTerminal: res?.status === 'already_terminal' })
+    const outcome = cancelOutcome({ ok: true, alreadyTerminal: isNoopCancel(res?.status) })
     if (outcome.kind === 'cancelled') {
+      cancelledExecutionIds.value.add(executionId)
       input.value = restoreDraft(restoreText, input.value)
       autoGrowAfterUpdate()
     }
   } catch (err) {
+    // A 404 is the lost race (the row went terminal, or the agent no longer
+    // holds the turn), not a refusal — say nothing.
+    if (err?.response?.status === 404) {
+      cancelling.value = false
+      return
+    }
     // Still running, still spending — say so and leave the composer alone.
     cancelError.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
     cancelling.value = false
@@ -1179,12 +1206,23 @@ async function send() {
   input.value = ''
   autoGrowAfterUpdate()
   await scrollDown()
+  // A stale "couldn't stop the turn" must not outlive the turn it described.
+  cancelError.value = ''
   const res = await deliver(text)
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
   // give-up it enumerated); otherwise the pre-existing rule, which still covers
   // the one path `deliver` does not classify — a dispatch that threw, where
   // nothing reached the server and re-sending is correct.
-  if (res !== true) markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
+  if (res !== true) {
+    // A cancel the user asked for is not a failure. `markFailed` would strike
+    // the message out in red and offer a Retry for a turn they deliberately
+    // stopped — and the words are already back in the composer.
+    if (lastDeliveredExecutionId.value && cancelledExecutionIds.value.has(lastDeliveredExecutionId.value)) {
+      cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
+    } else {
+      markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
+    }
+  }
 }
 
 async function retry(i) {
