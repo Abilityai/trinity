@@ -415,39 +415,58 @@ def test_a_minted_ops_key_carries_no_agent_name(tmp_path, monkeypatch):
 
     Three sweeps filter on `scope IN ('agent','connector')`, so an ops key
     holding an agent name would be invisible to all of them and outlive its
-    agent forever."""
+    agent forever.
+
+    Isolation follows the repo's established temp-DB shape (`test_918`,
+    `test_idempotency`), and both halves of it are load-bearing under
+    `pytest-randomly`. `DATABASE_URL` is set rather than `TRINITY_DB_PATH`
+    alone: `db.engine.resolve_database_url()` prefers `DATABASE_URL`, so a
+    `TRINITY_DB_PATH`-only test silently writes into whatever DB a previously
+    ordered test left selected. The engine cache is keyed by URL and disposed on
+    both sides so this file's engine is the one created and is not left holding
+    a handle on a temp file that is about to be deleted. `McpKeyOperations` is
+    instantiated directly instead of importing `database`, whose module-level
+    singleton runs the entire migration chain inside `__init__` — against
+    whichever URL happens to be active at first import, which is exactly the
+    ordering-dependent coupling this file exists to argue against."""
     db_file = tmp_path / "trinity-ops-key.db"
     monkeypatch.setenv("TRINITY_DB_PATH", str(db_file))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
     try:
-        import db.connection as conn_mod
-        monkeypatch.setattr(conn_mod, "DB_PATH", str(db_file))
-        from db.engine import get_engine
+        import db.engine as engine_mod
         from db.tables import metadata as m, users, mcp_api_keys
+        from db.users import UserOperations
+        from db.mcp_keys import McpKeyOperations
+        from db_models import McpApiKeyCreate
         from sqlalchemy import insert, select
     except ImportError:  # pragma: no cover - backend venv required
         pytest.skip("backend venv required")
 
-    m.create_all(get_engine(), tables=[users, mcp_api_keys])
-    with get_engine().begin() as conn:
-        conn.execute(insert(users).values(
-            id=1, username="admin", role="admin", email="admin@example.com",
-            created_at="t", updated_at="t"))
+    engine_mod.dispose_engines()
+    try:
+        engine = engine_mod.get_engine()
+        m.create_all(engine, tables=[users, mcp_api_keys])
+        with engine.begin() as conn:
+            conn.execute(insert(users).values(
+                id=1, username="admin", role="admin", email="admin@example.com",
+                created_at="t", updated_at="t"))
 
-    from database import db as core_db, McpApiKeyCreate
+        ops = McpKeyOperations(UserOperations())
+        created = ops.create_mcp_api_key(
+            "admin", McpApiKeyCreate(name="obs", description=None, scope="ops")
+        )
+        assert created is not None, "ops must be mintable at the db layer"
+        assert created.scope == "ops"
 
-    created = core_db.create_mcp_api_key(
-        "admin", McpApiKeyCreate(name="obs", description=None, scope="ops")
-    )
-    assert created is not None, "ops must be mintable at the db layer"
-    assert created.scope == "ops"
-
-    with get_engine().connect() as conn:
-        row = conn.execute(
-            select(mcp_api_keys.c.scope, mcp_api_keys.c.agent_name)
-            .where(mcp_api_keys.c.id == created.id)
-        ).mappings().first()
-    assert row["scope"] == "ops"
-    assert row["agent_name"] is None, "an ops key must never bind an agent"
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(mcp_api_keys.c.scope, mcp_api_keys.c.agent_name)
+                .where(mcp_api_keys.c.id == created.id)
+            ).mappings().first()
+        assert row["scope"] == "ops"
+        assert row["agent_name"] is None, "an ops key must never bind an agent"
+    finally:
+        engine_mod.dispose_engines()
 
 
 def test_durable_execution_provenance_is_not_taken_from_a_client_header():
