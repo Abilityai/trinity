@@ -74,8 +74,15 @@ def parse_declaration(body: Optional[str]) -> Declaration:
         return Declaration()
     # Last wins: an edited body keeps the correction, not the draft above it.
     raw = matches[-1].strip()
-    # Strip a trailing HTML comment or template hint on the same line.
-    raw = re.sub(r"<!--.*?-->", "", raw).strip()
+    # Cut at the comment opener rather than matching a `<!-- ... -->` pair.
+    # `_DECL_RE` is line-bounded (`.+?` never crosses a newline), so `raw` is
+    # one line and everything from `<!--` on is comment — including the
+    # UNCLOSED case, which a pair-matching regex silently leaves in the reason
+    # (`none: fine <!-- todo` would have been read as the reason "fine <!--
+    # todo"). This is also why CodeQL's py/bad-tag-filter fires on the pair
+    # form: it cannot handle a comment spanning newlines. Truncating removes
+    # the construct and is strictly more correct for this input.
+    raw = raw.split("<!--", 1)[0].strip()
     if not raw or raw.lower() in {"new:", "extends:", "none:", "_none_", "tbd"}:
         return Declaration(raw=raw, error="the declaration is present but empty")
 

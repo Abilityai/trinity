@@ -76,6 +76,17 @@ def test_an_unfilled_template_placeholder_is_malformed_not_absent():
     assert parse_declaration("Journey Impact: <!-- pick one -->").error
 
 
+@pytest.mark.parametrize("body,reason", [
+    ("Journey Impact: none: fine <!-- todo -->", "fine"),
+    # The unclosed case is the one a pair-matching `<!--.*?-->` regex silently
+    # leaves in — it would read the reason as "fine <!-- todo". It is also why
+    # CodeQL flags that form (py/bad-tag-filter): it cannot span newlines.
+    ("Journey Impact: none: fine <!-- todo", "fine"),
+])
+def test_a_trailing_comment_is_cut_closed_or_not(body, reason):
+    assert parse_declaration(body).reason == reason
+
+
 def test_an_edited_body_keeps_the_correction_not_the_draft():
     body = "Journey Impact: none\n\n...later...\n\nJourney Impact: new: J05"
     d = parse_declaration(body)
