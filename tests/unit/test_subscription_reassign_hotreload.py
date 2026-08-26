@@ -60,6 +60,7 @@ def owner_user():
     u.role = "user"
     u.connector_agent = None  # #1310: not a connector principal
     u.agent_name = None  # ent#293: not an agent-scoped key
+    u.mcp_scope = None  # #2323: the admin gate allowlists `mcp_scope`; an absent field fails CLOSED (a `None` default would make it the privileged JWT value). None = interactive human.
     return u
 
 
@@ -70,6 +71,7 @@ def admin_user():
     u.role = "admin"
     u.connector_agent = None  # #1310: not a connector principal
     u.agent_name = None  # ent#293: not an agent-scoped key
+    u.mcp_scope = None  # #2323: the admin gate allowlists `mcp_scope`; an absent field fails CLOSED (a `None` default would make it the privileged JWT value). None = interactive human.
     return u
 
 

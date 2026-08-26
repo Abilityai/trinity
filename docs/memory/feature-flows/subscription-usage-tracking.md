@@ -236,7 +236,42 @@ assigned to them answered normally.
 rejected token and a transport error — none of which are evidence the
 subscription is usable — so all three fall through to the db predicate instead of
 clearing it. Only a fresh `ok` snapshot with at least one window, every reported
-window `allowed`, is positive proof of headroom.
+window **non-blocking**, is positive proof of headroom.
+
+#### 1a. What "non-blocking" means — the window-status vocabulary (#2396)
+
+Both predicates judge a window against ONE named constant,
+`NON_BLOCKING_WINDOW_STATUSES = {"allowed", "allowed_warning"}`. It is an
+**allowlist of statuses meaning "requests are being served"**, never a blocklist
+of blockers — the provider does not publish this vocabulary, so an unrecognised
+status must still read as blocking. (The inverse mistake, a deny-check that
+silently admits every future value, is the #848 lesson in `learnings.md`; here
+the safe default runs the other way.)
+
+It shipped as the bare literal `("allowed",)` in one predicate and
+`(None, "allowed")` in the other — two homes, one vocabulary — and the provider's
+own near-the-limit tier `allowed_warning` was in neither. So a **healthy**
+subscription approaching its weekly window was reported rate-limited on every
+surface that reads `resolve_rate_limited_now`. Observed live on a running
+instance: a stored snapshot recording `seven_day: 90.0 / allowed_warning` with
+`overage_status: allowed` sat beside 47 successful executions in the same two
+hours and **zero** `subscription_rate_limit_events` — the provider said allowed
+and meant it.
+
+`allowed_warning` also counts as **positive proof of headroom**, which is a
+decision rather than a side effect: the quota was reached, the answer was "yes",
+and the request was served. The states this predicate excludes are stale /
+rejected-token / transport-error, none of which is evidence of usability — a
+served request plainly is. Excluding it would keep a stale `LIMIT` badge on a
+working subscription for the db predicate's full two hours, i.e. the #447 bug
+returning in a narrower window. `abilityai/trinity-enterprise#434` consumes this
+predicate as its "is this reading assessable" gate, so the rule is settled here
+rather than re-derived there.
+
+**The window arm is the weakest of three independent detectors**, which is what
+bounds the blast radius of getting the vocabulary wrong: a real HTTP 429 sets the
+top-level snapshot `status` and is checked BEFORE any window is inspected, and
+the 2h db predicate is a third path that this change does not touch.
 
 **Scope:** this is the DISPLAY predicate. Candidate selection reads the
 kind-blind `has_recent_subscription_failures` (#2352's split), so a just-recovered

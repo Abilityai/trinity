@@ -178,6 +178,8 @@ class PlatformAuditOperations:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         request_id: Optional[str] = None,
+        mcp_key_id: Optional[str] = None,
+        mcp_scope: Optional[str] = None,
     ) -> List[Any]:
         """Build a list of Core WHERE conditions from optional filters."""
         conditions: List[Any] = []
@@ -201,6 +203,15 @@ class PlatformAuditOperations:
         # the backend `git_operation` row it triggered can be retrieved together.
         if request_id:
             conditions.append(audit_log.c.request_id == request_id)
+        # #2323: WHICH credential, and of what kind. Before #2323 these columns
+        # were populated only on MCP-tool rows, so filtering on them was
+        # pointless; now every key-authenticated REST call carries them, and
+        # "what did that leaked key touch?" is a question an operator can
+        # actually ask. `idx_audit_log_mcp_key` already covers the first.
+        if mcp_key_id:
+            conditions.append(audit_log.c.mcp_key_id == mcp_key_id)
+        if mcp_scope:
+            conditions.append(audit_log.c.mcp_scope == mcp_scope)
         return conditions
 
     def get_audit_entries(
@@ -214,6 +225,8 @@ class PlatformAuditOperations:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         request_id: Optional[str] = None,
+        mcp_key_id: Optional[str] = None,
+        mcp_scope: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
@@ -221,6 +234,7 @@ class PlatformAuditOperations:
         conditions = self._filter_conditions(
             event_type, actor_type, actor_id, target_type,
             target_id, source, start_time, end_time, request_id,
+            mcp_key_id=mcp_key_id, mcp_scope=mcp_scope,
         )
         stmt = (
             select(audit_log)
@@ -243,11 +257,14 @@ class PlatformAuditOperations:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         request_id: Optional[str] = None,
+        mcp_key_id: Optional[str] = None,
+        mcp_scope: Optional[str] = None,
     ) -> int:
         """Return total count for a filter (independent of limit/offset)."""
         conditions = self._filter_conditions(
             event_type, actor_type, actor_id, target_type,
             target_id, source, start_time, end_time, request_id,
+            mcp_key_id=mcp_key_id, mcp_scope=mcp_scope,
         )
         stmt = select(func.count()).select_from(audit_log).where(and_(*conditions))
         with get_engine().connect() as conn:

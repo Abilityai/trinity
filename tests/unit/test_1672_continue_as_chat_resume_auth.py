@@ -192,8 +192,6 @@ class TestTaskEndpointResumeGate:
                         current_user=user,
                         x_source_agent=x_source_agent,
                         x_via_mcp=None,
-                        x_mcp_key_id=None,
-                        x_mcp_key_name=None,
                         idempotency_key=None,
                     )
                 )

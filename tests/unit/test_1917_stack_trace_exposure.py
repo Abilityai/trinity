@@ -43,6 +43,11 @@ def _run(coro):
 def _human_caller():
     caller = MagicMock()
     caller.agent_name = None
+    caller.connector_agent = None
+    # #2323: the admin gate allowlists `mcp_scope`, and MagicMock auto-creates a
+    # truthy one. None = an interactive human, which is what this stands in for.
+    caller.mcp_scope = None
+    caller.role = "admin"
     return caller
 
 
@@ -59,7 +64,7 @@ def _blob(obj) -> str:
 def ops(monkeypatch):
     import routers.ops as mod
 
-    monkeypatch.setattr(mod, "assert_admin", lambda user: None)
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)  # **kw: #2323 added allow_scopes=
     monkeypatch.setattr(mod, "db", MagicMock())
     # Mirrors the test_1860 fixture: a bare MagicMock reads as "this agent is an
     # ephemeral ghost / system agent", which makes the loop SKIP and the test
@@ -169,7 +174,7 @@ def test_system_agent_health_error_carries_no_raw_message(monkeypatch):
     container host (`agent-trinity-system:8000`)."""
     import routers.system_agent as mod
 
-    monkeypatch.setattr(mod, "assert_admin", lambda user: None, raising=False)
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None, raising=False)  # **kw: #2323 added allow_scopes=
     monkeypatch.setattr(mod, "db", MagicMock())
     monkeypatch.setattr(mod, "get_agent_container", lambda name: MagicMock(status="running"))
 

@@ -37,8 +37,6 @@ async def fan_out(
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
-    x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
 ):
     """
@@ -107,8 +105,9 @@ async def fan_out(
             source_user_id=current_user.id,
             source_user_email=current_user.email,
             source_agent_name=source_agent,
-            source_mcp_key_id=x_mcp_key_id,
-            source_mcp_key_name=x_mcp_key_name,
+            # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
+            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
         )
     except Exception:
         idempotency_service.fail(idem)

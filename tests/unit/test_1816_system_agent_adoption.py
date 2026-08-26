@@ -960,7 +960,7 @@ def rsa(monkeypatch):
     """The real ``routers.system_agent`` with its auth + Docker surface patched."""
     import routers.system_agent as mod
 
-    monkeypatch.setattr(mod, "assert_admin", lambda user: None)
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
     # `reject_agent_principal` is deliberately NOT stubbed — the #1816 human-only
     # gate should be exercised for real. Callers pass `_human_caller()`.
     monkeypatch.setattr(mod, "container_reload", AsyncMock())
