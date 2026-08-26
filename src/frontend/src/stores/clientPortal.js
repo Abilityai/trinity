@@ -962,7 +962,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
         const { data } = await portalHttp.post(
           `/api/enterprise/client-portal/agents/${agentName}/tts`,
           { text },
-          { headers: this.authHeader, responseType: 'blob' }
+          // ent#440 review: `portalHttp` is created with no `timeout`, and this
+          // call is awaited in SPEAKING — the one live state with no timer of
+          // its own (barge-in and Stop are its only exits). A hung /tts
+          // therefore holds the mic stream open indefinitely with nothing
+          // counting, which is the same hot-mic outcome FR-9 forbids that the
+          // /stt timeout was added to close. Same 60s bound, same reason.
+          { headers: this.authHeader, responseType: 'blob', timeout: 60000 }
         )
         return URL.createObjectURL(data)
       } catch {

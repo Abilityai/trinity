@@ -416,6 +416,30 @@ describe('ent#440 review — the mic is bounded on every live path', () => {
     }
   })
 
+  it('discards a transcript that belongs to an abandoned loop', () => {
+    // Review finding. `transcribeToken` was captured but consulted only in the
+    // catch; the success path guarded on `voiceState !== VOICE_TRANSCRIBING`,
+    // which is generation-BLIND. Stop, restart, and the abandoned /stt — up to
+    // its 60s timeout — resolves into a NEW loop legitimately back in
+    // TRANSCRIBING: it would send the previous conversation's words as a real
+    // turn, clobber the live convChunks, and disarm the live watchdog.
+    const body = sfc.slice(sfc.indexOf('async function finishUtterance'))
+    const fn = body.slice(0, body.indexOf('\n}\n'))
+    const awaitAt = fn.indexOf('await store.transcribeStt')
+    const genAt = fn.indexOf('transcribeToken !== voiceStartToken')
+    expect(genAt).toBeGreaterThan(awaitAt)
+    // ...and BEFORE anything that touches shared loop state.
+    expect(genAt).toBeLessThan(fn.indexOf('clearTranscribeWatchdog()', awaitAt))
+    expect(genAt).toBeLessThan(fn.indexOf('voiceDispatch', awaitAt))
+  })
+
+  it('gives the /tts call a transport timeout too', () => {
+    // SPEAKING is the one live state with no timer of its own — barge-in and
+    // Stop are its only exits — and it awaits synthesis on the same untimed
+    // axios instance. A hung /tts holds the mic with nothing counting.
+    expect(store).toMatch(/tts`[\s\S]{0,900}?timeout: \d+/)
+  })
+
   it('gives the /stt call a transport timeout', () => {
     // The root cause: `portalHttp` is created with no `timeout`, so the promise
     // could never settle. Two layers now, not one.

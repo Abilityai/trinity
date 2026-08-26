@@ -1635,6 +1635,14 @@ async function finishUtterance() {
   }
   try {
     const text = await store.transcribeStt(props.agent.name, blob)
+    // Generation FIRST, state second (review). `transcribeToken` was captured
+    // above but only consulted in the catch, and the state check below is
+    // generation-BLIND: stop the loop, start it again, and the abandoned
+    // `/stt` — which can take up to its 60s timeout — resolves into a NEW loop
+    // that is legitimately back in TRANSCRIBING. It would then send the
+    // previous conversation's words as a real turn, clobber the live
+    // `convChunks`, and disarm the live watchdog. Return before any of that.
+    if (transcribeToken !== voiceStartToken) return
     clearTranscribeWatchdog()
     if (voiceState.value !== VOICE_TRANSCRIBING) return
     if (text) voiceDispatch('transcript', text)

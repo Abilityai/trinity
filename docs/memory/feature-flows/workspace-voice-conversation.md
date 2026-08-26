@@ -171,15 +171,18 @@ never a mode that can trap the surface.
   completes. The turn's live activity trail (ent#286) still renders throughout.
 - Rooms (`PortalRoom.vue`) are out of scope — turn-taking with several agents is a
   different problem from turn-taking with one.
-- **THINKING is bounded only by the agent's own timeout.** Every other live state
-  has a timer — the utterance cap, the silence hold, the no-speech idle stop, and
-  (since the review) a watchdog spanning the `/stt` call plus a transport timeout
-  on it. While the agent is working there is none: the bound is
-  `execution_timeout_seconds`, up to 7200s, with the mic tracks live the whole
-  time. Releasing the stream there would end a conversation that is legitimately
-  waiting for a reply it intends to speak, so the fix is a chosen cap and a
-  spoken "still working" rather than a teardown — deliberately not in this
-  change. FR-9's enumeration names this explicitly.
+- **THINKING is bounded only by the agent's own timeout.** Every other live
+  state is bounded by *something* — a timer of its own, or a transport deadline.
+  LISTENING has the utterance cap and the silence hold; IDLE has the no-speech
+  stop; TRANSCRIBING has the watchdog spanning `/stt` plus that call's own
+  timeout; SPEAKING has no timer at all — barge-in and Stop are its only exits —
+  so the `/tts` transport timeout is what stops a hung synthesis holding the mic
+  (both timeouts added in review; `portalHttp` is created with `timeout: 0`).
+  THINKING has none of these: the bound is `execution_timeout_seconds`, up to
+  7200s, with the mic tracks live the whole time. Releasing the stream there
+  would end a conversation that is legitimately waiting for a reply it intends
+  to speak, so the fix is a chosen cap and a spoken "still working" rather than
+  a teardown — deliberately not in this change. FR-9's enumeration names it.
 - **A thread switch on the SAME agent does not stop the loop.** Only an agent
   change does. So a turn dispatched by voice can land in the thread the user has
   just left: `deliver`'s tail pushes into the current `messages`, which
