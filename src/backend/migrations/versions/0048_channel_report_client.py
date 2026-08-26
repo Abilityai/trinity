@@ -11,14 +11,22 @@ fails CLOSED on NULL rather than delivering unverified.
 
 Mirrors the SQLite `channel_report_client` migration.
 
-Revision ID: 0047_channel_report_client
+Numbered 0048, not 0047: #2384 (ent#366) also mints an 0047 off this same
+parent. Ids are strings, so the prefix is only a human ordering cue — but a
+duplicate one is exactly what makes a two-head graph hard to read afterwards
+(the ent#443 hotfix precedent). NOTE both revisions still declare
+`down_revision = "0046_report_audience"`, so whichever of the two merges SECOND
+forks the graph and needs an `alembic merge` revision; `check_alembic_heads`
+fails loudly at that point rather than silently applying nothing.
+
+Revision ID: 0048_channel_report_client
 Revises: 0046_report_audience
 """
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0047_channel_report_client"
+revision = "0048_channel_report_client"
 down_revision = "0046_report_audience"
 branch_labels = None
 depends_on = None

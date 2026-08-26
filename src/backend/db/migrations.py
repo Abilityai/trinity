@@ -3559,7 +3559,7 @@ def _migrate_channel_report_client(cursor, conn):
     Nullable, no default: every pre-existing row reports NULL, and the portal
     resolver fails CLOSED on NULL rather than delivering unverified.
 
-    Mirrored by Alembic 0047_channel_report_client for PostgreSQL.
+    Mirrored by Alembic 0048_channel_report_client for PostgreSQL.
     """
     _safe_add_column(
         cursor,
