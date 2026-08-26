@@ -785,6 +785,41 @@ def _inherited_channel_context(request, *, current_user=None, x_source_agent=Non
                 current_user.username, parent_agent, parent_id, x_source_agent,
             )
             return _NO_INHERITED_CONTEXT
+        # --- The parent must be work that is STILL HAPPENING (ent#457 review) --
+        #
+        # Everything inherited below is read off `parent`, which the CALLER
+        # names. So any check that compares two inherited values is a tautology:
+        # the first version of this guard compared the inherited client against
+        # the inherited session and could not fail, because both came from this
+        # same row. That is the defect it was written to fix, one level up.
+        #
+        # The only thing here the caller does not choose is TIME. ent#265's
+        # premise is that A delegates *during* a turn it is currently serving,
+        # so a parent that has already finished is not that. Requiring `running`
+        # removes "any historical execution of any client of this agent" from
+        # the attack surface, which is what made the portal case reachable: an
+        # agent shared with clients X and Y could cite any of X's past portal
+        # turns while serving Y and file a report into X's thread.
+        #
+        # HONEST RESIDUAL: this does not make the portal leg airtight. If X has
+        # a turn genuinely in flight at the same moment, A can still name it.
+        # The window shrinks from "all history" to "a concurrent live turn",
+        # which is a real narrowing and not a proof. Closing it properly needs
+        # the child to learn its own client from something other than the
+        # caller's argument — a trusted runtime injection of the executing
+        # turn's identity, which is the #1084 `execution_id` work and is not
+        # this change.
+        parent_status = str(getattr(parent, "status", "") or "").lower()
+        if parent_status != "running":
+            logger.info(
+                "[ent#457] channel-context inheritance refused: parent "
+                "execution %s is '%s', not running — inheritance is for work "
+                "delegated DURING a live turn, and an already-finished parent "
+                "is how a past turn's destination gets reused",
+                parent_id, parent_status or "unknown",
+            )
+            return _NO_INHERITED_CONTEXT
+
         src_channel = getattr(parent, "source_channel", None)
         if not src_channel:
             return _NO_INHERITED_CONTEXT
