@@ -1,4 +1,7 @@
-"""Background recovery probe for rate-limited subscriptions (#447).
+"""Background subscription sweep: recovery probing (#447) + headroom sampling (ent#434).
+
+The module keeps its `recovery` name because `main.py` and `test_447_*` bind
+the symbol; the sweep now carries a second job.
 
 ## Why this loop exists
 
@@ -35,22 +38,50 @@ and an operator who switched it off has said no to exactly this. Interval is
 env-tunable (`SUBSCRIPTION_RECOVERY_PROBE_SECONDS`, default 300s).
 
 Cross-worker leader-locked (the #1464 `monitoring:leader` shape) so `--workers 2`
-does not double-probe. Fail-open on Redis for *leadership* — a duplicated probe
-is a dozen wasted tokens, whereas failing closed would silently stop recovery
-detection, the mode the operator cannot see — while the probe itself stays
-fail-CLOSED on Redis inside `recover_probe`.
+does not double-probe. Leadership is fail-OPEN on Redis, and ent#434 re-prices
+that choice, so the reasoning is restated rather than left as it was:
+
+- Under #447 alone the probed set was normally EMPTY, so "a duplicated probe is
+  a dozen wasted tokens" was true and failing closed would have silently stopped
+  the only signal that clears a stale `LIMIT` badge.
+- With the sampler the probed set is EVERY subscription, so the honest worst
+  case is now `workers x N subscriptions` per cycle, not a dozen tokens.
+
+It stays fail-open anyway, for a reason that survives the change: both halves
+of the sweep are fail-CLOSED on Redis one level down (`recover_probe` and
+`ensure_reading` each return early when `_read_snapshot` reports the server did
+not answer), so a genuine Redis outage yields ZERO probes regardless of how
+many workers believe they are the leader. The multiplier only applies when
+Redis is reachable for reads and unreachable for the lease, which is a narrow
+window — and failing the lease closed would stop recovery detection outright,
+which is the failure the operator cannot see.
+
+## ent#434 — headroom sampling
+
+The sweep additionally refreshes each subscription's provider snapshot when it
+is older than `SAMPLE_INTERVAL_SECONDS` and evaluates the weekly-window alert.
+Sampling and evaluating are separate: evaluating is a cached read plus
+arithmetic and happens every cycle, while probing is gated on its own elapsed
+interval. That split is why the loop period stays at `RECOVERY_PROBE_SECONDS`
+— raising it to "hourly" to match the sampler would raise the lease TTL with
+it (`interval * 3`), leaving recovery detection dead for up to three hours
+after a leader crash.
 """
 
 import asyncio
 import logging
 import os
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import subscription_headroom_alerts as alerts
 from services.subscription_headroom_service import (
     RECOVERY_PROBE_SECONDS,
+    SAMPLE_INTERVAL_SECONDS,
+    classify_headroom,
+    ensure_reading,
     is_auto_refresh_enabled,
     recover_probe,
 )
@@ -68,6 +99,20 @@ _DISABLED_POLL_SECONDS = int(
 # An outcome worth an INFO line. Everything else is the steady state (no limited
 # subscriptions at all), and logging that every 5 minutes forever is noise.
 _NOTEWORTHY = ("recovered",)
+
+
+# ent#434: the sweep now touches EVERY subscription, not just the (normally
+# empty) believed-limited set, so its wall-clock is no longer negligible.
+# N subscriptions x a 15s probe timeout, run serially, can outlive the leader
+# lease and let a sibling worker start probing concurrently — #1881's lesson
+# one subsystem over. Bounded concurrency plus a between-chunk lease refresh
+# keeps a cycle short and the lease continuously owned.
+_MAX_CONCURRENT_PROBES = max(1, int(os.getenv("SUBSCRIPTION_SWEEP_CONCURRENCY", "4")))
+
+
+def _chunks(items: List[Any], size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 class SubscriptionRecoveryService:
@@ -160,32 +205,222 @@ class SubscriptionRecoveryService:
 
             await asyncio.sleep(max(1, sleep_for))
 
-    async def run_cycle(self) -> Dict[str, Any]:
-        """One sweep over every subscription. Never raises."""
+    async def _sweep_one(
+        self, sub: Any, *, threshold: int, alerting: bool
+    ) -> Dict[str, Any]:
+        """Recovery, then headroom sampling, for ONE subscription.
+
+        The two try/excepts are SIBLINGS, and that is load-bearing rather than
+        tidiness: a bug in the ent#434 evaluation must never stop #447's
+        recovery detection, which is the only mechanism that clears a stale
+        `LIMIT` badge (nothing clears a failure row on success).
+
+        Recovery runs FIRST. `_probe_floor_ok` bounds probes at 60s per
+        subscription, so whichever consumer probes first floors the other out.
+        Ordered this way a believed-limited subscription is refreshed by the
+        path that wants the tight cadence, and `ensure_reading` then serves
+        that zero-age snapshot without spending a second probe. Reversed,
+        `recover_probe` would answer "floored" and #447 would quietly stop
+        working — which is exactly the kind of failure nobody notices.
+        """
+        sid = sub.id
+        result: Dict[str, Any] = {
+            "sid": sid, "outcome": "error", "classification": None, "reading": None,
+        }
+
         try:
+            result["outcome"] = await recover_probe(sid)
+        except Exception as e:  # noqa: BLE001 — one bad subscription must not
+            # end the sweep; its siblings are independent.
+            logger.warning("Recovery probe failed for %s: %s", sid, e)
+
+        if not alerting:
+            return result
+
+        try:
+            reading, _probed = await ensure_reading(
+                sid, max_age_seconds=SAMPLE_INTERVAL_SECONDS
+            )
+            result["reading"] = reading
+            result["classification"] = classify_headroom(
+                reading,
+                threshold_pct=threshold,
+                max_age_seconds=alerts.MAX_READING_AGE_SECONDS,
+            )
+        except Exception as e:  # noqa: BLE001 — see above; the recovery outcome
+            # recorded a moment ago still stands.
+            logger.warning("Headroom sampling failed for %s: %s", sid, e)
+
+        return result
+
+    async def run_cycle(self) -> Dict[str, Any]:
+        """One sweep over every subscription. Never raises.
+
+        Two jobs share the sweep: #447 recovery probing and ent#434 headroom
+        sampling + alert evaluation. They share it deliberately — a second loop
+        would mean a second leader lease over the same probe budget, and the
+        only thing between two leases and a double probe is a 60s per-worker
+        floor, which is not a coordination primitive.
+        """
+        try:
+            # `list_subscriptions`, deliberately NOT the with-agents variant:
+            # that one issues a query per subscription, and the agent names are
+            # needed only in the body of an alert that rarely fires. They are
+            # fetched lazily in `_evaluate_alerts` instead, so a quiet fleet
+            # pays one query per cycle rather than N+1.
             subs = await asyncio.to_thread(db.list_subscriptions)
         except Exception as e:  # noqa: BLE001
-            logger.warning("Subscription recovery could not list subscriptions: %s", e)
-            return {"probed": 0, "error": str(type(e).__name__)}
+            logger.warning("Subscription sweep could not list subscriptions: %s", e)
+            return {"probed": 0, "outcomes": {}, "error": str(type(e).__name__)}
+
+        subs = [s for s in (subs or []) if getattr(s, "id", None)]
+        if not subs:
+            # Structurally important, not just an optimisation: `all([])` is
+            # True, so a fleet-saturation verdict over an empty fleet would be
+            # vacuously "every subscription is saturated" and alert an install
+            # that has no subscriptions at all.
+            return {"probed": 0, "outcomes": {}, "subscriptions": 0}
+
+        try:
+            threshold = await asyncio.to_thread(alerts.effective_threshold_pct)
+        except Exception:  # noqa: BLE001
+            threshold = alerts.DEFAULT_THRESHOLD_PCT
+        alerting = threshold > 0
+
+        results: List[Dict[str, Any]] = []
+        lease_ttl = max(60, RECOVERY_PROBE_SECONDS) * 3
+        for chunk in _chunks(subs, _MAX_CONCURRENT_PROBES):
+            results.extend(await asyncio.gather(*[
+                self._sweep_one(sub, threshold=threshold, alerting=alerting)
+                for sub in chunk
+            ]))
+            # Re-assert the lease between chunks rather than only at the top of
+            # the loop. Losing it mid-sweep means a sibling is already probing
+            # the same fleet, so stop and let the partial results stand.
+            if not self._try_acquire_leadership(lease_ttl):
+                logger.info(
+                    "Subscription sweep yielded the lease mid-cycle after %d/%d "
+                    "subscriptions (worker %s)", len(results), len(subs), self._worker_id,
+                )
+                self._is_leader = False
+                break
 
         outcomes: Dict[str, int] = {}
-        for sub in subs or []:
-            sid = getattr(sub, "id", None)
-            if not sid:
-                continue
-            try:
-                outcome = await recover_probe(sid)
-            except Exception as e:  # noqa: BLE001 — one bad subscription must not
-                # end the sweep; its siblings are independent.
-                logger.warning("Recovery probe failed for %s: %s", sid, e)
-                outcome = "error"
-            outcomes[outcome] = outcomes.get(outcome, 0) + 1
-            if outcome in _NOTEWORTHY:
+        for r in results:
+            outcomes[r["outcome"]] = outcomes.get(r["outcome"], 0) + 1
+            if r["outcome"] in _NOTEWORTHY:
                 logger.info(
-                    "Subscription %s is out of its rate limit — badge will clear", sid
+                    "Subscription %s is out of its rate limit — badge will clear",
+                    r["sid"],
                 )
 
-        return {"probed": sum(outcomes.values()), "outcomes": outcomes}
+        # Additional keys only — `probed`/`outcomes` are an asserted contract.
+        summary: Dict[str, Any] = {
+            "probed": sum(outcomes.values()),
+            "outcomes": outcomes,
+            "subscriptions": len(subs),
+        }
+        if alerting:
+            summary.update(await self._evaluate_alerts(subs, results, threshold))
+        else:
+            # Same SHAPE as the alerting branches. It was a bare string, which
+            # would have broken any consumer reading `summary["alerts"]["fleet"]`
+            # the moment the threshold was set to 0.
+            summary["alerts"] = {
+                "fleet": False, "subscriptions": 0, "disabled": True,
+            }
+        return summary
+
+    async def _evaluate_alerts(
+        self, subs: List[Any], results: List[Dict[str, Any]], threshold: int
+    ) -> Dict[str, Any]:
+        """Decide and emit. Never raises — it runs after the recovery half has
+        already done its job, and must not be able to undo it."""
+        escalate_at = alerts.escalation_pct(threshold)
+        by_sid = {s.id: s for s in subs}
+        classifications = {
+            r["sid"]: r["classification"] for r in results if r.get("classification")
+        }
+        verdict = alerts.fleet_verdict(classifications)
+
+        # The fleet alert names every saturated subscription, so emitting the
+        # individual ones beside it would be N+1 operator items for one event.
+        if verdict["saturated"]:
+            names = {s.id: (getattr(s, "name", None) or s.id) for s in subs}
+            emitted = await asyncio.to_thread(
+                alerts.emit_fleet_alert,
+                verdict=verdict,
+                names=names,
+                threshold_pct=threshold,
+                earliest_reset=_earliest_reset(results),
+            )
+            return {
+                "alerts": {"fleet": bool(emitted), "subscriptions": 0},
+                "fleet_blocked_reason": None,
+            }
+
+        emitted = 0
+        capped = 0
+        for r in results:
+            if r.get("classification") != alerts.SATURATED:
+                continue
+            if emitted >= alerts.MAX_PER_SUBSCRIPTION_ALERTS_PER_CYCLE:
+                capped += 1
+                continue
+            week = getattr(r.get("reading"), "seven_day", None)
+            util = getattr(week, "utilization_pct", None)
+            resets = getattr(week, "resets_at", None)
+            tier = alerts.decide_tier(util, threshold, escalate_at)
+            if tier is None:
+                # Saturated with no comparable number — a probe 429, or a
+                # window the provider reports as blocking with no figure. It
+                # still counts toward the fleet claim (that is why it is
+                # SATURATED), but a percentage-crossing alert cannot name a
+                # percentage it does not have.
+                continue
+            sub = by_sid.get(r["sid"])
+            try:
+                agents = await asyncio.to_thread(
+                    db.get_agents_by_subscription, r["sid"]
+                )
+            except Exception:  # noqa: BLE001 — the alert is worth more than
+                # its agent list; degrade to naming none rather than not firing.
+                agents = []
+            ok = await asyncio.to_thread(
+                alerts.emit_subscription_alert,
+                subscription_id=r["sid"],
+                subscription_name=getattr(sub, "name", None),
+                tier=tier,
+                utilization_pct=util,
+                projected_end=alerts.project_end_utilization(util, resets),
+                resets_at=resets,
+                threshold_pct=threshold,
+                agents=list(agents or []),
+            )
+            if ok:
+                emitted += 1
+        if capped:
+            logger.warning(
+                "[headroom-alert] %d further subscriptions crossed the threshold "
+                "this cycle and were not alerted (per-cycle cap %d)",
+                capped, alerts.MAX_PER_SUBSCRIPTION_ALERTS_PER_CYCLE,
+            )
+        return {
+            "alerts": {"fleet": False, "subscriptions": emitted, "capped": capped},
+            "fleet_blocked_reason": verdict["blocked_reason"],
+        }
+
+
+def _earliest_reset(results: List[Dict[str, Any]]) -> Optional[str]:
+    """The first wall the fleet hits — used as the fleet episode key so the
+    alert re-arms once per window rather than once per day."""
+    resets = []
+    for r in results:
+        week = getattr(r.get("reading"), "seven_day", None)
+        value = getattr(week, "resets_at", None)
+        if value:
+            resets.append(str(value))
+    return min(resets) if resets else None
 
 
 subscription_recovery_service = SubscriptionRecoveryService()

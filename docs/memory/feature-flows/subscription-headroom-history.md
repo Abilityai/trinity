@@ -96,8 +96,11 @@ no consumer may present a gap as any one of them.
 
 Three independent arguments, any one of which is sufficient:
 
-1. **Observer effect.** Probes are demand-driven — they fire only on an HTTP request —
-   so samples-per-bucket is proportional to operator attention. `E[max of n]` rises
+1. **Observer effect.** Probes were demand-driven when this was written — they fired
+   only on an HTTP request — so samples-per-bucket was proportional to operator
+   attention. ent#434's sampler adds a background floor (one probe per subscription per
+   `SAMPLE_INTERVAL_SECONDS`), which RAISES coverage on an unwatched instance but does
+   not remove the bias: a watched hour still out-samples an unwatched one. `E[max of n]` rises
    monotonically with `n`, so an hour watched during an incident out-reads an identical
    unwatched hour. The bias runs the wrong way twice: the unattended overnight burn,
    the thing most worth seeing, gets the fewest samples and therefore the lowest max.

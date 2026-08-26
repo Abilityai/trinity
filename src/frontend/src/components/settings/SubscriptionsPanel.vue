@@ -451,12 +451,15 @@
           <div class="flex items-center justify-between">
             <div class="flex-1 mr-4">
               <label for="headroom-refresh-toggle" class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                Keep live headroom fresh automatically
+                Check subscription quota automatically
               </label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 Reads actual utilization from Anthropic by sending a minimal (~1-token) probe on each subscription's own quota,
-                at most every {{ Math.round((subsStore.headroomAutoRefresh.refresh_seconds || 900) / 60) }} minutes and only while a dashboard is open.
-                Probes appear as tiny messages in the Anthropic console. When off, headroom updates only via the Refresh button.
+                at most every {{ Math.round((subsStore.headroomAutoRefresh.refresh_seconds || 900) / 60) }} minutes per subscription.
+                Trinity checks in the background whether or not anyone is watching &mdash; to keep this page current, to notice a
+                rate-limited subscription recovering, and to watch weekly limits for the alert below.
+                Probes appear as tiny messages in the Anthropic console. When off, headroom updates only via the Refresh button
+                and weekly-limit alerts stop.
               </p>
             </div>
             <button

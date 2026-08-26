@@ -166,9 +166,11 @@ OPS_SETTINGS_DEFAULTS = {
     # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
     "agent_reminders_retention_days": "90",
     # ent#433: subscription headroom probe history. Volume is bounded by #471's
-    # own floors (ambient <=1 probe/15min/subscription, demand-driven; the click
-    # path is floored at 60s), so 30 days is a few thousand rows per
-    # subscription. "0" disables the sweep. Wide/safe per the #1638 floor rule.
+    # own floors (<=1 probe/15min/subscription; the click path is floored at
+    # 60s), so 30 days is a few thousand rows per subscription. It is no longer
+    # purely demand-driven: ent#434's sampler adds a background floor of one
+    # probe per subscription per SAMPLE_INTERVAL_SECONDS, which raises the row
+    # count on an unwatched instance while staying well inside the same floors. "0" disables the sweep. Wide/safe per the #1638 floor rule.
     "subscription_headroom_retention_days": "30",
     # ent#433: subscription_rate_limit_events. This table was swept at a
     # HARDCODED 24 hours before ent#433 — widening to 30 is the #1638-SAFE

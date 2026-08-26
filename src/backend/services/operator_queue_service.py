@@ -154,6 +154,7 @@ _RESERVED_ID_PREFIXES = (
                          # on-conflict dedup from being agent-pre-suppressible)
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
+    "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
