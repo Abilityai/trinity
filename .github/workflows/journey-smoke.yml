@@ -52,7 +52,15 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version-file: docker/backend/Dockerfile
+          # Literal, matching every sibling workflow. #1891's rule is that this
+          # must EQUAL the image pin in docker/{backend,scheduler,base-image}/
+          # Dockerfile, and `tests/unit/test_1891_python_version_parity.py`
+          # scans all workflows and fails on a stale one — so the parity is
+          # enforced by that test, not by pointing setup-python at a Dockerfile
+          # it cannot parse (it read the literal string "FROM python:3.13-slim"
+          # as a version and failed the job in 8 seconds).
+          python-version: '3.13'
+
 
       - name: Install test dependencies
         run: pip install -r tests/requirements-test.txt
