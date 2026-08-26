@@ -1570,7 +1570,12 @@ function startUtterance() {
   try { convRec = new MediaRecorder(convStream) }
   catch (e) { failVoice(recorderErrorMessage(e)); return }
   convRec.ondataavailable = (e) => { if (e.data && e.data.size) convChunks.push(e.data) }
-  convRec.onerror = (e) => failVoice(recorderErrorMessage(e?.error || e))
+  // ent#440 review (NEW-2): capture the generation token like the other two
+  // async failure paths. `releaseVoiceHardware` nulls `convRec` but never
+  // clears its handlers, so a late `error` from a torn-down recorder was
+  // tearing down a RESTARTED loop with a message about the abandoned one.
+  const recorderToken = voiceStartToken
+  convRec.onerror = (e) => failVoice(recorderErrorMessage(e?.error || e), recorderToken)
   convRec.onstop = () => { void finishUtterance() }
   // Timesliced so a stop always has data to flush, even for a short utterance.
   try { convRec.start(200) } catch (e) { failVoice(recorderErrorMessage(e)) }
@@ -1603,7 +1608,14 @@ function armTranscribeWatchdog() {
 }
 
 async function finishUtterance() {
-  clearTranscribeWatchdog()
+  // The watchdog stays ARMED across the `/stt` await below (review NEW-1). It
+  // used to be cleared on the first line, so it bounded only the
+  // recorder-cannot-stop window — and `transcribeStt` rides `portalHttp`, an
+  // axios instance with no `timeout`, i.e. `timeout: 0`. A hung /stt therefore
+  // left voiceState in TRANSCRIBING showing "Got it…", the mic tracks live and
+  // the browser's recording indicator on, until the user pressed Stop: the same
+  // hot-mic outcome FR-9 says this feature must not ship, reached by the exact
+  // cause the watchdog was added for.
   const transcribeToken = voiceStartToken
   const heard = sawSpeech
   // Firefox leaves `mimeType` empty and puts the real type on the chunks;
@@ -1614,14 +1626,21 @@ async function finishUtterance() {
   // The recorder stops for three reasons — an ended utterance, a barge-in, and
   // teardown. Only the first is still waiting on a transcript; acting on the
   // others would send audio the user has already moved past.
-  if (voiceState.value !== VOICE_TRANSCRIBING) return
-  if (!heard || blob.size < MIN_RECORDING_BYTES) { voiceDispatch('silence'); return }
+  // Both early exits disarm: neither is waiting for a transcript any more, and
+  // an armed watchdog would fire `failVoice` into a loop that has legitimately
+  // moved on.
+  if (voiceState.value !== VOICE_TRANSCRIBING) { clearTranscribeWatchdog(); return }
+  if (!heard || blob.size < MIN_RECORDING_BYTES) {
+    clearTranscribeWatchdog(); voiceDispatch('silence'); return
+  }
   try {
     const text = await store.transcribeStt(props.agent.name, blob)
+    clearTranscribeWatchdog()
     if (voiceState.value !== VOICE_TRANSCRIBING) return
     if (text) voiceDispatch('transcript', text)
     else voiceDispatch('transcript-empty')
   } catch (e) {
+    clearTranscribeWatchdog()
     // /stt answers with a user-facing `detail`; a provider outage stops the
     // loop with that sentence rather than looping silently on nothing (AC 6).
     failVoice(transcriptionErrorMessage(e), transcribeToken)

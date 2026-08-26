@@ -856,8 +856,21 @@ schema change.
   unlistenable and burns the TTS character cap.
 - **FR-9 — The microphone is given back**: no speech within the idle window ends
   the conversation with a sentence; a stop, an error, an agent switch and unmount
-  all release the stream, the recorder and the audio context. A hot mic left open
-  on a client's own device is the failure mode this feature must not ship.
+  all release the stream, the recorder and the audio context. Transcription is
+  bounded twice — a client-side watchdog spanning the `/stt` call and a transport
+  timeout on it — because an unbounded await there holds the mic open with no
+  timer running at all. A hot mic left open on a client's own device is the
+  failure mode this feature must not ship.
+
+  **Two windows this enumeration does NOT cover, stated so the requirement and
+  the code agree** (review, ent#440): (a) while the agent is THINKING the only
+  bound is the agent's own `execution_timeout_seconds`, up to 7200s, and the mic
+  tracks stay live throughout — the loop is waiting for a reply it will speak,
+  so releasing the stream would end the conversation, but 2 hours is not a bound
+  anyone chose; (b) switching to a DIFFERENT THREAD on the SAME agent does not
+  stop the loop — only an agent change does — so a dispatch in flight lands in
+  the thread the user has left. Both are real, both are outside the release
+  triggers above, and neither is fixed in the shipping change.
 - **Known limits (stated, not hidden)**: the ~350 ms of speech that establishes a
   barge-in is not captured (the recorder starts after the interrupt is confirmed),
   so an interruption's first word may be lost; utterance boundaries are

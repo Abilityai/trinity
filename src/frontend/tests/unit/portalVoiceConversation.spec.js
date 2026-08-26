@@ -318,10 +318,13 @@ describe('the component consumes the machine (what only source can answer)', () 
     // never fires and `finishUtterance` never runs — reachable when the mic is
     // unplugged or permission revoked mid-conversation, and when `/stt` hangs
     // (no transport timeout). The 15s no-speech guard covers `listening` only.
-    expect(component).toContain('armTranscribeWatchdog()')
+    // Review: this used to assert `finishUtterance` OPENS with the clear, which
+    // pinned the defect rather than the fix — that ordering is exactly what
+    // left the /stt await unbounded. The rule is asserted structurally in the
+    // "the mic is bounded on every live path" block below; here we only check
+    // the watchdog is armed and torn down.
+    expect(component).toMatch(/armTranscribeWatchdog\(\)\s*$/m)   // called, not just declared
     expect(component).toMatch(/voiceState\.value !== VOICE_TRANSCRIBING\) return[\s\S]{0,200}failVoice/)
-    // Cleared on every legitimate exit, or it fires over a working loop.
-    expect(component).toMatch(/async function finishUtterance\(\) \{\s*clearTranscribeWatchdog\(\)/)
     expect(component).toMatch(/function releaseVoiceHardware\(\) \{\s*clearTranscribeWatchdog\(\)/)
   })
 
@@ -385,5 +388,44 @@ describe('the component consumes the machine (what only source can answer)', () 
 
   it('releases the microphone on unmount', () => {
     expect(component).toMatch(/function cleanupVoice\(\)\s*\{\s*releaseVoiceHardware\(\)/)
+  })
+})
+
+describe('ent#440 review — the mic is bounded on every live path', () => {
+  const sfc = component
+  const store = read('../../src/stores/clientPortal.js')
+
+  it('keeps the transcribe watchdog armed ACROSS the /stt await', () => {
+    // NEW-1: it was cleared on finishUtterance's first line, so it bounded only
+    // the recorder-cannot-stop window — while `transcribeStt` rides an axios
+    // instance with `timeout: 0`. A hung /stt held TRANSCRIBING, and the mic,
+    // open until the user pressed Stop: the hot mic FR-9 forbids, reached by the
+    // exact cause the watchdog exists for.
+    const body = sfc.slice(sfc.indexOf('async function finishUtterance'))
+    const fn = body.slice(0, body.indexOf('\n}\n'))
+    const awaitAt = fn.indexOf('await store.transcribeStt')
+    const clears = [...fn.matchAll(/clearTranscribeWatchdog\(\)/g)].map((m) => m.index)
+    expect(awaitAt).toBeGreaterThan(-1)
+    expect(clears.some((i) => i > awaitAt)).toBe(true)
+    // ...and nothing disarms it before the call it is meant to bound.
+    const beforeAwait = clears.filter((i) => i < awaitAt)
+    for (const i of beforeAwait) {
+      // the only permitted pre-await clears are the two early exits, which are
+      // no longer waiting for a transcript
+      expect(fn.slice(Math.max(0, i - 120), i)).toMatch(/return|MIN_RECORDING_BYTES|VOICE_TRANSCRIBING/)
+    }
+  })
+
+  it('gives the /stt call a transport timeout', () => {
+    // The root cause: `portalHttp` is created with no `timeout`, so the promise
+    // could never settle. Two layers now, not one.
+    expect(store).toMatch(/stt`[\s\S]{0,600}?timeout: \d+/)
+  })
+
+  it('passes the generation token from the recorder error handler', () => {
+    // NEW-2: `releaseVoiceHardware` nulls `convRec` but never clears its
+    // handlers, so a late error from a torn-down recorder tore down a RESTARTED
+    // loop with a message about the abandoned one.
+    expect(sfc).toMatch(/convRec\.onerror = [\s\S]{0,120}?recorderToken\)/)
   })
 })

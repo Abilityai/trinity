@@ -979,7 +979,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/stt`,
         form,
-        { headers: this.authHeader }
+        // ent#440 review (NEW-1): `portalHttp` is created with no `timeout`,
+        // i.e. axios's `timeout: 0` — a hung /stt never settles. That is the
+        // root cause behind the hot mic: the hands-free loop sat in
+        // TRANSCRIBING with the microphone tracks live until the user pressed
+        // Stop. The caller's watchdog now spans this await too, so this is a
+        // second layer — but a promise that can never settle is the wrong
+        // primitive to hand a UI regardless of who is watching it. Comfortably
+        // above a real transcription of a bounded utterance (MAX_UTTERANCE_MS
+        // is 30s).
+        { headers: this.authHeader, timeout: 60000 }
       )
       return data.text || ''
     },
