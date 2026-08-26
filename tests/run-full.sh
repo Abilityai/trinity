@@ -173,6 +173,12 @@ run_tier git-sync    300 git_sync/
 run_tier security    300 security/
 run_tier scheduler   300 scheduler_tests/
 run_tier agent-server 300 agent_server/
+# Journey tier (#2335, Rail R1). Live-stack by definition: these drive the
+# public API against a running instance the way a person does. Longer per-test
+# timeout than any other tier because a journey legitimately waits on a
+# container coming up — 90s to `running` is the platform's own bound, not this
+# harness's impatience.
+run_tier journeys 900 journeys/
 
 # Root-level live-backend tests (everything not owned by a tier above).
 run_tier api 900 . \

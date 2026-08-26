@@ -459,12 +459,6 @@ async def bind_agent_to_own_repo(
         # same. Slots are deliberately NOT cleared: `force_clear_slots` would
         # drop capacity accounting for an in-flight execution.
         clear_agent_breakers(agent_name)
-        # #2186 re-confirmed: this path is running-only — the
-        # `status != "running"` gate above refuses a stopped agent before
-        # reaching here — so the `require_running=True` DEFAULT is correct and is
-        # left implicit. Passing it explicitly was tried and reverted: three test
-        # doubles stub this helper with a fixed 3-arg signature, and a P0 hotfix
-        # is the wrong place to churn them.
         await recreate_container_with_updated_config(
             agent_name, container, owner_username
         )

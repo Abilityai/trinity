@@ -412,22 +412,8 @@ async def start_agent_internal(agent_name: str) -> dict:
 
         # Recreate container with updated config
         # Use system user for internal operations
-        #
-        # #2186: `require_running=False` because THIS caller recreates stopped
-        # containers by design — it calls `container_start` on the very next
-        # line. #2092 added the guard with a `True` default and the note that
-        # every caller already enforced the precondition; that held for the two
-        # running-only callers and not for this one, so a stopped agent with any
-        # drift 500'd on start. The #1809 base-image branch made it worse than
-        # occasional: that predicate is gated on `not was_already_running`, so it
-        # fires ONLY for a stopped container — cold-start image adoption was
-        # 100% unreachable.
-        #
-        # `preserve_run_state` stays False: leaving the replacement stopped would
-        # be wrong on the one path whose whole purpose is to start it.
         await recreate_container_with_updated_config(
-            agent_name, container, "system", env_overrides=mcp_env_overrides,
-            require_running=False,
+            agent_name, container, "system", env_overrides=mcp_env_overrides
         )
         container = get_agent_container(agent_name)
 
