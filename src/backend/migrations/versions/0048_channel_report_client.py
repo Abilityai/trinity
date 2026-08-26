@@ -23,7 +23,6 @@ Revision ID: 0048_channel_report_client
 Revises: 0046_report_audience
 """
 from alembic import op
-import sqlalchemy as sa
 
 
 revision = "0048_channel_report_client"
@@ -33,11 +32,16 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "schedule_executions",
-        sa.Column("source_channel_client", sa.Text(), nullable=True),
+    # `IF NOT EXISTS`, matching 0046 and the rest of this line: a fresh PostgreSQL
+    # database is built from `db/schema.py`'s DDL — which now declares this
+    # column — and only THEN runs the revisions, so a bare `add_column` raises
+    # DuplicateColumn on every fresh install. Caught by pg-migrations, which
+    # exists to exercise exactly that boot path.
+    op.execute(
+        "ALTER TABLE schedule_executions "
+        "ADD COLUMN IF NOT EXISTS source_channel_client TEXT"
     )
 
 
 def downgrade() -> None:
-    op.drop_column("schedule_executions", "source_channel_client")
+    op.execute("ALTER TABLE schedule_executions DROP COLUMN IF EXISTS source_channel_client")
