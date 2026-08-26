@@ -471,8 +471,34 @@ async def recover_probe(subscription_id: str) -> str:
     return "recovered" if status == "ok" else f"still_{status}"
 
 
+# THE provider window-status vocabulary (#2396). One constant, two predicates —
+# they disagreed for exactly one value and that was the bug.
+#
+# This is an ALLOWLIST of statuses observed to mean "requests are being served",
+# never a blocklist of statuses that mean "blocked". The direction is deliberate
+# and load-bearing: the provider does not publish this vocabulary, so an
+# unrecognised status MUST read as blocking. (The inverse mistake — a deny-check
+# that silently admits every future value — is the #848 lesson in
+# docs/memory/learnings.md; here the safe default runs the other way.)
+#
+# `allowed_warning` is the provider's own near-the-limit tier and was absent
+# from this set, so every subscription approaching its weekly window was
+# reported rate-limited while the provider was still serving it. Verified on a
+# live instance: a snapshot recording `seven_day: 90%, allowed_warning` sat
+# beside 47 successful executions, zero `subscription_rate_limit_events`, and
+# `overage_status: allowed` — the provider said allowed, and meant it.
+NON_BLOCKING_WINDOW_STATUSES = frozenset({"allowed", "allowed_warning"})
+
+
 def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> bool:
-    """Fresh provider verdict only — a stale snapshot never drives the badge."""
+    """Fresh provider verdict only — a stale snapshot never drives the badge.
+
+    Window statuses are judged against ``NON_BLOCKING_WINDOW_STATUSES``, so an
+    unrecognised status still reads as limited. Note the ordering: an actual
+    HTTP 429 sets the top-level ``status`` and is caught FIRST, above any window
+    status — so the window arm is the weaker, secondary signal, and the db
+    predicate in ``resolve_rate_limited_now`` is a third, independent one.
+    """
     if headroom is None:
         return False
     age = headroom.snapshot_age_seconds
@@ -481,7 +507,7 @@ def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> boo
     if headroom.status == "rate_limited":
         return True
     for w in (headroom.five_hour, headroom.seven_day):
-        if w and w.status and w.status not in ("allowed",):
+        if w and w.status and w.status not in NON_BLOCKING_WINDOW_STATUSES:
             return True
     return False
 
@@ -493,7 +519,20 @@ def _headroom_indicates_healthy(headroom: Optional[SubscriptionHeadroom]) -> boo
     negation: "not limited" is also true for a stale snapshot, a rejected token
     and a transport error, none of which are evidence the subscription is
     usable. Only a fresh ``ok`` snapshot carrying at least one window, every
-    reported window ``allowed``, is positive proof of headroom.
+    reported window non-blocking, is positive proof of headroom.
+
+    **``allowed_warning`` counts as headroom (#2396), and that is a decision,
+    not an accident.** It is the provider's near-the-limit tier: the quota was
+    reached, the answer was "yes", and the request was served. The states this
+    predicate deliberately excludes are stale / rejected-token / transport
+    error — "none of which are evidence the subscription is usable" (#447) — and
+    a warning-tier reading plainly IS such evidence. Excluding it would keep a
+    stale ``LIMIT`` badge on a working subscription for up to the db predicate's
+    two hours, which is the #447 bug returning in a narrower window.
+
+    ``abilityai/trinity-enterprise#434`` consumes this predicate as its
+    "is this subscription's reading assessable" gate, so the rule is stated here
+    rather than re-derived there.
     """
     if headroom is None:
         return False
@@ -505,7 +544,9 @@ def _headroom_indicates_healthy(headroom: Optional[SubscriptionHeadroom]) -> boo
     windows = [w for w in (headroom.five_hour, headroom.seven_day) if w is not None]
     if not windows:
         return False
-    return all(w.status in (None, "allowed") for w in windows)
+    return all(
+        w.status is None or w.status in NON_BLOCKING_WINDOW_STATUSES for w in windows
+    )
 
 
 def resolve_rate_limited_now(
