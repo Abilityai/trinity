@@ -331,6 +331,11 @@ services:
       # #1039 packaging-gap class) and the owner-facing PUT .../circuit-breaker
       # toggle silently no-ops (#1487). Default false.
       - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
+      # ent#434: how many subscriptions the background headroom sweep probes
+      # concurrently. Bounded so an N-subscription fleet x a 15s probe timeout
+      # cannot outlive the sweep's leader lease. A real operator lever (fleet
+      # size dependent), so it is forwarded rather than left inert.
+      - SUBSCRIPTION_SWEEP_CONCURRENCY=${SUBSCRIPTION_SWEEP_CONCURRENCY:-4}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
       # max concurrent Docker stat fetches per refresh. Mirrors docker-compose.yml;
       # without these lines the .env knobs are inert in prod (the #1039

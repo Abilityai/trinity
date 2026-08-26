@@ -470,9 +470,14 @@ onto a 99% subscription. Teaching it about headroom is
 
 ### Cadence, cost, and the toggle
 
-`SAMPLE_INTERVAL_SECONDS` (default 3600, floored at `REFRESH_SECONDS`) is a
+`SAMPLE_INTERVAL_SECONDS` (3600, floored at `REFRESH_SECONDS`) is a
 **constant, not an operator knob** — the operator cannot reason about the right
-value, and a mutable constant gating provider spend is the #1638 shape. At
+value, and a mutable constant gating provider spend is the #1638 shape. It reads
+no env var at all: neither compose uses `env_file`, so an unforwarded read would
+be permanently inert while still *looking* configurable, which is the state that
+invites a later "packaging fix" creating the knob. The one genuine lever is
+`SUBSCRIPTION_SWEEP_CONCURRENCY` (probes per sweep chunk, fleet-size dependent),
+forwarded in both composes and documented in `.env.example`. At
 hourly this is ~24 probes/day/subscription of `max_tokens=1` Haiku, which is
 **4× less than a watched instance already spends** through the 900s ambient
 refresh.

@@ -632,3 +632,36 @@ class TestReviewRegressions:
         import services.subscription_headroom_alerts as alerts
         assert hasattr(alerts, "MAX_READING_AGE_SECONDS")
         assert not hasattr(alerts, "FLEET_MAX_READING_AGE_SECONDS")
+
+    def test_sample_interval_is_a_constant_not_an_inert_env_read(self):
+        """Caught by /validate-pr's config-packaging gate.
+
+        `SAMPLE_INTERVAL_SECONDS` documents itself as a constant, not an
+        operator knob (#1644) — but it was reading
+        `SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS` from the environment, which
+        neither compose forwards. Since neither compose uses `env_file`, an
+        unlisted var never reaches the container: the read was inert AND it
+        contradicted its own comment, which is the combination that invites a
+        later "packaging fix" creating exactly the knob the comment argues
+        against. Either it is a constant or it is a wired lever; it cannot be
+        a third thing.
+
+        Pattern note: this asserts on the CODE shape (`os.getenv("<name>"`),
+        not the bare name. An unanchored name match would also hit the comment
+        explaining the bug — the `debt:2026-08-24-source-regex-guard-governs-prose`
+        trap, where the previous fix degraded the prose to satisfy the regex.
+        The pattern must be as specific as the code it forbids.
+        """
+        src = (_BACKEND / "services" / "subscription_headroom_service.py").read_text()
+        assert 'os.getenv("SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS"' not in src
+        # the explanatory comment must survive — it is why the constant is a constant
+        assert "SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS" in src
+
+    def test_sweep_concurrency_lever_reaches_the_container(self):
+        """The other half of the same gate: this one IS a real operator lever
+        (fleet-size dependent), so it must be forwarded in BOTH composes —
+        prod launches standalone with no base merge and no `env_file`, so
+        dev-only wiring does not carry over (#1056 class)."""
+        for name in ("docker-compose.yml", "docker-compose.prod.yml", ".env.example"):
+            text = (_REPO / name).read_text()
+            assert "SUBSCRIPTION_SWEEP_CONCURRENCY" in text, name

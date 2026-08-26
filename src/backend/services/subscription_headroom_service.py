@@ -76,10 +76,14 @@ RECOVERY_PROBE_SECONDS = int(os.getenv("SUBSCRIPTION_RECOVERY_PROBE_SECONDS", "3
 # constant read at action time gating provider spend is the shape #1638 warns
 # about. Hourly is ample for a window that spans a week, and it is 4x LESS
 # than a watched instance already spends via REFRESH_SECONDS.
-SAMPLE_INTERVAL_SECONDS = max(
-    REFRESH_SECONDS,
-    int(os.getenv("SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS", "3600")),
-)
+# Not env-readable, deliberately. An earlier revision read
+# `SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS` here, which contradicted the sentence
+# above AND could never be set: neither compose uses `env_file`, so a var that
+# is not an explicit `environment:` entry never reaches the container. An env
+# read that cannot be satisfied is the worst of both — it reads as configurable,
+# is inert, and invites a later "packaging fix" that creates exactly the knob
+# this comment argues against.
+SAMPLE_INTERVAL_SECONDS = max(REFRESH_SECONDS, 3600)
 
 AUTO_REFRESH_SETTING = "subscription_headroom_auto_refresh"
 
