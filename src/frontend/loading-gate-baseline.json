@@ -1,6 +1,6 @@
 {
-  "generated": "2026-08-21",
-  "commit": "75cf605da3a50cefdbbd5116521811cb02d078c1",
+  "generated": "2026-08-24",
+  "commit": "b7bac09da08d293b2d8e50f588ad66ffbf1bc37c",
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
@@ -16,16 +16,13 @@
     "src/frontend/src/components/CreateAgentModal.vue": 2,
     "src/frontend/src/components/CredentialSetupChecklist.vue": 1,
     "src/frontend/src/components/CredentialsPanel.vue": 2,
-    "src/frontend/src/components/DashboardPanel.vue": 1,
     "src/frontend/src/components/FilesPanel.vue": 1,
     "src/frontend/src/components/FoldersPanel.vue": 1,
     "src/frontend/src/components/GitPanel.vue": 1,
     "src/frontend/src/components/GuardrailsPanel.vue": 1,
     "src/frontend/src/components/HelpChatWidget.vue": 1,
     "src/frontend/src/components/McpExposedPanel.vue": 1,
-    "src/frontend/src/components/MetricsPanel.vue": 1,
     "src/frontend/src/components/NeverminedPanel.vue": 1,
-    "src/frontend/src/components/ObservabilityPanel.vue": 1,
     "src/frontend/src/components/PermissionsPanel.vue": 1,
     "src/frontend/src/components/PlaybooksPanel.vue": 1,
     "src/frontend/src/components/PublicLinksPanel.vue": 2,
@@ -68,7 +65,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 80,
-    "files_with_gates": 63
+    "bare_loading_gates": 77,
+    "files_with_gates": 60
   }
 }
