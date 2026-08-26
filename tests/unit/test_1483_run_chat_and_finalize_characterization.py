@@ -108,7 +108,6 @@ def _run(env_capacity, *, collaboration_activity_id=None, session=None):
         request=ChatMessageRequest(message="hi"),
         current_user=_user(),
         x_source_agent=None,
-        x_mcp_key_name=None,
         triggered_by="chat",
         task_execution_id="te1",
         _chat_subscription_id=None,

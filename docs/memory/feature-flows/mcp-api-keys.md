@@ -14,6 +14,69 @@ MCP API Keys enable authentication for the Trinity MCP server, allowing Claude C
 | MCP-004 | As a user, I want to delete an API key so that I can permanently remove it | Implemented |
 | MCP-005 | As a user, I want to copy my MCP configuration so that I can easily configure Claude Code | Implemented |
 | MCP-006 | As a first-time user, I want a default key created automatically so that I can start using MCP immediately | Implemented |
+| MCP-007 | As an operator, I want a **read-only machine credential** for monitoring and ops tooling, so that enabling enforced 2FA does not cost me observability and I never have to hand a dashboard an unlimited admin key (#2323) | Implemented |
+
+## Key scopes — and which one is a machine identity (#2323)
+
+A key's `scope` decides what it can reach. The two an operator mints by hand:
+
+| Scope | Reach | Mint |
+|---|---|---|
+| `user` | **The owner's full role.** On an admin owner that is every admin gate in the platform, plus every write. Never expires. Already exempt from interactive 2FA — the MFA gate sits on the two login routes and key validation never passes through it | any user, for themselves |
+| `ops` | **Read-only, route-fenced**: fleet health, host/container telemetry, the agent roster and capacity, execution history and the live log relay, subscription reads. Every write 403s | admin only, and human-only (an interactive session — a key cannot mint one) |
+
+Trinity always had a machine identity for admin/ops surfaces: `user` is one. What
+it lacked was bounds, attribution and expiry, so the only 2FA-surviving option was
+a permanent, unattributable, unlimited admin credential — a worse posture than the
+control it worked around. `ops` is the bounded alternative; `user` is unchanged
+(narrowing it in place would break every existing integration).
+
+Two properties make `ops` a machine identity rather than a human's proxy:
+
+* It is **fenced at the single auth entry point**, not per-endpoint, so an
+  endpoint doing its own inline access check cannot be reached by it either.
+* It is kept **out of the admin-gate allowlist**, so an admin-gated ops route
+  must opt it in explicitly (`assert_admin(..., allow_scopes={"ops"})`, or
+  `Depends(require_admin_allowing("ops"))` on a route gated that way). The opt-in
+  flips the failure direction: a new ops route is inaccessible until someone
+  grants it, rather than silently reachable.
+
+**It does not survive its owner's offboarding, and an earlier revision of this
+document said it did.** The opt-in ADMITS the scope; `role == "admin"` is still
+enforced afterwards, so demoting the owner 403s the key at every admin-gated ops
+read — and `get_current_user` rejects a principal whose owner carries
+`suspended_at` (#995), so suspension kills the key at the auth entry point
+before any of this runs. Dropping the role check for an opted-in scope was
+considered and refused: it would make this bounded tier *harder* to revoke than
+the unbounded `user`-scoped key it exists to displace. #2323 asked for a
+credential that survives enforced **2FA** — which it does, key validation never
+passing through the MFA gate — not one that survives its **owner**.
+
+*Operator consequence, for the offboarding runbook:* an ops key is bound to the
+account that minted it. Mint it under a dedicated service-admin account that is
+not offboarded with people, and treat revoke-and-re-mint as part of offboarding
+any admin who holds one. Pinned by `test_2323_machine_identities.py` so the
+claim cannot drift back.
+
+Every fence entry is a `GET`, asserted by a test that imports the constant. The
+route set was derived from the **measured** read set of the real consumer; the
+issue's own wording named only `/api/ops/*`, which would have shipped a
+credential unable to run the dashboard it exists for.
+
+The keys page badges the scope, because an unbadged ops key is visually identical
+to an unbounded personal one on the page where credentials are audited.
+
+## Attribution (#2323)
+
+Every key-authenticated call now records **which** key acted (`mcp_key_id`,
+`mcp_key_name`, `mcp_scope` on `audit_log`), derived from the presented bearer.
+Before this, an admin action taken with a machine key was byte-identical in the
+audit log to the owner clicking in a browser, so a leaked key could not be scoped
+after the fact. `GET /api/audit-log` filters on both, which is what makes "what
+did that key touch?" answerable.
+
+`actor_type` stays `user`: the owner is the accountable party, is the only branch
+that yields an email, and the enterprise user-activity view matches on it.
 
 ## Entry Points
 

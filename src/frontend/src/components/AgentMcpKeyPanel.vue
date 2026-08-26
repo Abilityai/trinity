@@ -157,6 +157,9 @@ const dotClass = computed(() => {
 const VERIFY_LABELS = {
   ok: 'The container uses this agent’s own key',
   foreign_user_key: 'The container authenticates as a person, not as this agent',
+  // #2323 — a bounded read-only ops key belongs to a monitoring integration;
+  // it is not a person's key and must not be described as one.
+  foreign_ops_key: 'The container authenticates with a read-only ops key, not as this agent',
   foreign_agent_key: 'The container uses another agent’s key',
   unknown_key: 'The container’s key is not known to Trinity',
   not_configured: 'The container has no Trinity MCP entry',

@@ -83,7 +83,7 @@ def ops(monkeypatch):
     """
     import routers.ops as mod
 
-    monkeypatch.setattr(mod, "assert_admin", lambda user: None)
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
     monkeypatch.setattr(mod, "db", MagicMock())
     mod.db.get_agent_owner.return_value = {"is_system": False}
     mod.db.get_agent_ephemeral_info.return_value = None

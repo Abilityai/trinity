@@ -121,8 +121,8 @@ _BACKEND_ONLY_KEYS = (
     "user_email",
     "subscription_id",
     "x_source_agent",
-    "x_mcp_key_id",
-    "x_mcp_key_name",
+    # #2389 removed `x_mcp_key_id`/`x_mcp_key_name` from the producer: they were
+    # forgeable header values the drain never read back.
     "triggered_by",
     "collaboration_activity_id",
     "is_self_task",
@@ -191,8 +191,6 @@ def enqueued_metadata(monkeypatch) -> Dict[str, Any]:
             user_email="u@example.com",
             subscription_id="sub-1",
             x_source_agent="beta",
-            x_mcp_key_id="key-1",
-            x_mcp_key_name="key-name",
             triggered_by="agent",
             collaboration_activity_id="act-1",
             is_self_task=False,
