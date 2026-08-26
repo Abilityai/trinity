@@ -54,7 +54,11 @@ SENSITIVE_KEY_PATTERNS = [
 
 # Compiled patterns
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
-_sensitive_key_re = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_KEY_PATTERNS]
+# (#2398) The compiled `_sensitive_key_re` list lived here and is gone with
+# the quadratic test it fed — nothing referenced it any more. Leaving it
+# would have kept the removed regexes compiled and reachable by name, which
+# is exactly the artifact that let this bug survive #1670: something that
+# looks like the live check and is not.
 
 # --- #1661: linear KEY=value redaction -------------------------------------
 # The patterns above describe KEY NAMES (`.*TOKEN.*` means "a name containing
@@ -81,14 +85,96 @@ _KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
 # composed regex could start matching mid-token, so `DB_.*` redacted
 # `MY_DB_PASS=x`. Anchoring with \Z reproduces exactly that (a `fullmatch`
 # rewrite would silently redact LESS — a leak, not a speedup).
-_SENSITIVE_KEY_SUFFIX_RE = [
-    re.compile(r'(?:' + p + r')\Z', re.IGNORECASE) for p in SENSITIVE_KEY_PATTERNS
-]
+#
+# --- #2398: the same quadratic shape, one call deeper -----------------------
+# #1670 made the LINE scan linear (#1661) and left THIS test quadratic:
+# `re.search(r'(?:.*TOKEN.*)\Z', key)` retries the leading `.*` from every
+# offset, so cost is O(len(key)^2). Measured on 3.13: 4 KB key = 0.32s,
+# 44 KB key = 40s — for ONE key, per match, per line, on a thread holding the
+# GIL. A py-spy watchdog caught it 14 times across three agents, every dump on
+# this stack:
+#
+#     <genexpr> (credential_sanitizer.py)      <- the `any(...)` below
+#     _is_sensitive_kv_key
+#     _redact_kv_match  ->  sanitize_text  ->  sanitize_dict (recursive)
+#     sanitize_subprocess_line  ->  read_stdout  (headless_executor)
+#
+# The old docstring called `key` "a short KEY= name". It is not: the key is
+# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=]+)`, which is
+# UNBOUNDED — and the stack above reaches here from stream-json tool RESULTS
+# via recursive `sanitize_dict`, so multi-KB "keys" are the normal case rather
+# than an adversarial one. That wrong assumption is what made a quadratic test
+# look harmless.
+#
+# Every pattern is `.*LITERAL.*` or `LITERAL.*`, and under `.search()` with a
+# trailing `\Z` both mean exactly "the key CONTAINS this literal". So the test
+# is substring containment: linear, C-level, no backtracking, and byte-for-byte
+# the same verdicts (pinned against the old implementation as an oracle over
+# thousands of keys in tests/unit/test_2398_sanitizer_key_redos.py).
+#
+# The literals are DERIVED from the patterns rather than restated, and the
+# derivation REFUSES anything that is not a plain literal. A future pattern
+# needing real regex semantics therefore fails loudly at import instead of
+# being silently reduced to a check that redacts less — the guard #1670 should
+# have carried.
+# Characters that carry no regex meaning, so a body made only of these is a
+# literal and containment is exactly equivalent to the old anchored search.
+_PLAIN_LITERAL_RE = re.compile(r'[A-Za-z0-9_-]+')
+
+
+def _literal_from_pattern(pattern: str) -> str:
+    body = pattern
+    if body.startswith(".*"):
+        body = body[2:]
+    # The TRAILING `.*` is what makes containment equivalent, so its absence is
+    # refused rather than tolerated (self-review, second pass). Under
+    # `.search()` the old form was `(?:BODY)\Z` — anchored at the END — so a
+    # pattern with no trailing `.*` meant "the key ENDS WITH this", and
+    # containment is wider: a bare `TOKEN` would stop matching only `MYTOKEN`
+    # and start matching `TOKEN_SUFFIX` too. That direction redacts MORE, so it
+    # is not a leak — but this function exists to refuse SILENT changes of
+    # meaning, and accepting one would be the same internal inconsistency that
+    # produced #2398: a stated contract that no longer described the code
+    # beneath it.
+    if not body.endswith(".*"):
+        raise ValueError(
+            f"sensitive-key pattern {pattern!r} has no trailing `.*`, so it "
+            f"meant 'the key ENDS WITH {body!r}'. #2398's containment test is "
+            f"WIDER than that — it would also match keys carrying {body!r} in "
+            f"the middle. Write it as `{body}.*` if containment is what you "
+            f"want, or handle the suffix case explicitly."
+        )
+    body = body[:-2]
+    # An explicit safe set, NOT `re.escape(body) != body`. That was the first
+    # form and it is wrong in the dangerous direction for a module imported
+    # everywhere: `re.escape` also escapes `-`, which is not a metacharacter
+    # outside a character class — so adding a perfectly literal `.*API-KEY.*`
+    # would have raised at import and taken the whole process down at boot.
+    # `.` IS special, so `A.B` is still (correctly) refused.
+    if not body or not _PLAIN_LITERAL_RE.fullmatch(body):
+        raise ValueError(
+            f"sensitive-key pattern {pattern!r} is not a plain `.*LITERAL.*` / "
+            f"`LITERAL.*` form. #2398 replaced the quadratic regex test with "
+            f"substring containment; a pattern needing real regex semantics "
+            f"must be handled explicitly rather than silently reduced to "
+            f"{body!r}."
+        )
+    return body.upper()
+
+
+_SENSITIVE_KEY_LITERALS = tuple(
+    _literal_from_pattern(p) for p in SENSITIVE_KEY_PATTERNS
+)
 
 
 def _is_sensitive_kv_key(key: str) -> bool:
-    """True if `key` (a short `KEY=` name) names a credential."""
-    return any(r.search(key) for r in _SENSITIVE_KEY_SUFFIX_RE)
+    """True if `key` names a credential.
+
+    `key` is whatever preceded an `=` in the scanned text — NOT necessarily a
+    short env-var name (#2398). Containment, not regex: see the note above.
+    """
+    upper = key.upper()
+    return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
 
 
 def _redact_kv_match(match: "re.Match") -> str:
