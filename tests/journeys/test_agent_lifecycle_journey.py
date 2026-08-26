@@ -42,6 +42,10 @@ def test_a_stopped_agent_can_be_started_again(journey_client, journey_agent):
     Both directions are polled to a deadline, and each failure names which half
     of the round trip broke — "stopped but never restarted" and "never stopped"
     send you to different code.
+
+    The restart is deliberately made to require a CONTAINER RECREATE, because
+    that is the condition the regression needed. Without it this journey passes
+    against the broken code (measured, not assumed).
     """
     name = journey_agent["name"]
 
@@ -53,6 +57,24 @@ def test_a_stopped_agent_can_be_started_again(journey_client, journey_agent):
         lambda: _status(journey_client, name) in ("stopped", "exited"),
         deadline_s=AGENT_STOPPED_DEADLINE_S,
         describe=f"agent '{name}' was asked to stop but never left 'running'",
+    )
+
+    # Force the condition the 08-14 regression actually needed. #2186's title
+    # says it exactly: "starting a stopped agent no longer 500s WHEN A RECREATE
+    # IS NEEDED". A fresh agent stopped and started immediately has no config
+    # drift, so `start_agent_internal` takes the plain-start path and the bug is
+    # unreachable — verified empirically: replaying the regression with this
+    # step absent left the gate GREEN, which is the whole reason AC #3 exists.
+    #
+    # Changing the resource limits while stopped makes `check_resource_limits_match`
+    # false, so the next start must recreate the container — the exact path that
+    # raised 500 for five of six agents.
+    drift = journey_client.put(
+        f"/api/agents/{name}/resources", json={"memory": "2g", "cpu": "1"},
+    )
+    assert drift.status_code in (200, 202), (
+        f"could not change resources on stopped agent '{name}' to force a "
+        f"recreate: {drift.status_code} {drift.text[:200]}"
     )
 
     start = journey_client.post(f"/api/agents/{name}/start")
