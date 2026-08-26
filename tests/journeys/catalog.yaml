@@ -1,0 +1,162 @@
+# The journey catalog — what Trinity promises, in the words of whoever it is
+# promised to (#2338, Rail R4).
+#
+# WHY THIS FILE EXISTS, and why it is not the epic. An epic is a delivery
+# vehicle: it closes, and its % is burn-down on one wave. The list of promises
+# has to outlive that, and it has to be QUERYABLE — coverage debt you can read
+# off a file rather than rediscover in an exploratory sweep six months later.
+#
+# TWO RULES THIS FILE DOES NOT BEND
+#
+# 1. NO STATUS IS EVER COMMITTED HERE. No `last_green`, no `green`/`red`, no
+#    pass counts. A status field in git has exactly two futures: a human owns it
+#    and it rots, or a bot owns it and every CI run writes a commit — history
+#    spam plus merge conflicts on a file everyone touches. Git holds INTENT;
+#    CI holds STATE. Coverage % is computed at report time from CI artifacts by
+#    `scripts/ci/generate_journeys_md.py`, never read from here.
+#    Enforced by `tests/unit/test_2338_journey_catalog.py`, which fails on any
+#    status-shaped key.
+#
+# 2. ONE INVARIANT NAMESPACE. `invariants:` holds REFERENCES into
+#    `docs/testing/orchestration-invariant-catalog.md` — never a restatement.
+#    Every id is checked to resolve there. A journey whose invariants do not
+#    exist yet carries an EMPTY list rather than an invented id: the gap is the
+#    information, and #2337 (Rail R3) is what fills it.
+#
+# `built: false` is legal, and visible. That is the point of declaring all ten
+# before any of them exists.
+version: 1
+
+# Lanes a journey must hold on. Named here so a record cannot invent one.
+lanes:
+  - local          # a developer's own stack
+  - digitalocean   # supported: must be green to cut a release (epic decision 4)
+  - vultr          # best-effort
+  - hostinger      # best-effort
+
+journeys:
+  - id: J01
+    issue: 2340
+    promise: "I can install Trinity on a clean machine and log in."
+    actor: operator
+    lanes: [local, digitalocean]
+    # Needs a fresh host, so it gates the release cut rather than every PR
+    # (#2336's split-by-cost rule).
+    tier: live-stack
+    harness: null
+    built: false
+    owner: operator
+    invariants: []
+
+  - id: J02
+    issue: 2341
+    promise: "I can upgrade my instance and keep my agents, data and schedules."
+    actor: operator
+    lanes: [local, digitalocean]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: operator
+    invariants: [G-01]
+
+  - id: J03
+    issue: 2342
+    promise: "I can create an agent with no configuration and get a useful answer."
+    actor: user
+    lanes: [local, digitalocean]
+    tier: journey-smoke
+    # PARTIALLY built (#2336): the create/stop/start half runs on every PR; the
+    # first-turn half is credential-bound and skips with an allowlisted reason.
+    # `built` stays false because the promise is "a useful ANSWER", and the half
+    # that asserts an answer is the half that does not run.
+    # No path yet ON THIS BRANCH: the harness lands with #2403 (Rails R1+R2),
+    # which is open. Recording a path that resolves nowhere is the same lie as
+    # an invented invariant id, and the validator caught exactly that on its
+    # first run — so the field stays null until the file is here, and gains the
+    # path in the commit that merges it.
+    harness: null
+    built: false
+    owner: operator
+    invariants: [E-05]
+
+  - id: J04
+    issue: 2343
+    promise: "My agents keep working when several things run at once, and nothing silently stalls."
+    actor: operator
+    lanes: [local]
+    tier: soak
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [S-01, S-02, S-03, E-01, E-02, B-01, B-02, R-01]
+
+  - id: J05
+    issue: 2344
+    promise: "I can schedule work, walk away, and find out what happened."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [E-01, E-05]
+
+  - id: J06
+    issue: 2345
+    promise: "I can give an agent a credential and it can use the tools that credential unlocks."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: []
+
+  - id: J07
+    issue: 2346
+    promise: "A skill I add shows up in the agent's head and it uses it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: []
+
+  - id: J08
+    issue: 2347
+    promise: "I can install a marketplace plugin and the agent can use it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: []
+
+  - id: J09
+    issue: 2348
+    promise: "I can point Trinity at my repo and get a working agent from it."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: []
+
+  - id: J10
+    issue: 2349
+    promise: "My agents can call each other, and I can see what they said."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    invariants: [L-03]
+
+# The agent-lifecycle journey #2336 shipped is NOT a journey of its own — it is
+# J03's first half. Recording it here rather than minting a J11 keeps the
+# catalog a list of PROMISES; "an agent can be restarted" is a step inside
+# "I get a useful answer", not something a user asks for on its own.
