@@ -255,6 +255,10 @@ class _Admin:
     role: str = "admin"
     agent_name: Optional[str] = None
     connector_agent: Optional[str] = None
+    # #2323: the admin gate allowlists `mcp_scope`; a stand-in lacking it
+    # fails CLOSED, because a `None` default would make an absent
+    # authorization discriminator the privileged JWT value.
+    mcp_scope: Optional[str] = None
 
 
 class _Req:

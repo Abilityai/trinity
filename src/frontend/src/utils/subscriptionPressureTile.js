@@ -15,6 +15,8 @@ import {
   failureKindLabel,
   formatResetTime,
   headroomIsFresh,
+  isWindowBlocking,
+  providerWarnsNearLimit,
   usageSourceLabel,
 } from './subscriptionPressure'
 
@@ -165,8 +167,11 @@ const CLAIM_LABELS = { five_hour: '5h', seven_day: '7d' }
  *     outright: on a live instance both windows reported the SAME utilization
  *     (32% / 32%), so a "fullest wins" tiebreak has no answer there and would
  *     silently pick by array order.
- *  2. A window the provider marks anything other than `allowed` is the one
- *     currently blocking, whatever the percentages say.
+ *  2. A window the provider marks BLOCKING is the one currently blocking,
+ *     whatever the percentages say. Judged by the shared vocabulary (#2396):
+ *     `allowed_warning` is near the limit, not blocked by it, so it does not
+ *     qualify here — it is still commonly the binding window, but it gets
+ *     there on the merits below rather than by being mistaken for a block.
  *  3. Otherwise the fullest window that actually carries a reset.
  */
 function bindingWindow(headroom) {
@@ -180,7 +185,7 @@ function bindingWindow(headroom) {
     const hit = cands.find((w) => w.label === claimed && w.resets_at)
     if (hit) return hit
   }
-  const blocked = cands.find((w) => w.status && w.status !== 'allowed' && w.resets_at)
+  const blocked = cands.find((w) => isWindowBlocking(w.status) && w.resets_at)
   if (blocked) return blocked
 
   const withReset = cands.filter((w) => w.resets_at)
@@ -237,13 +242,42 @@ export function resetText(usage, now = Date.now()) {
 }
 
 /**
+ * Is this subscription approaching its wall — from EITHER source of evidence?
+ *
+ * Two independent signals, deliberately OR'd (#2396):
+ *  - the provider's own `allowed_warning` tier, which can fire BELOW our band
+ *    and is better evidence than our constant precisely because it is theirs;
+ *  - the `UTILIZATION_HIGH_PCT` band over a fresh percentage, which still fires
+ *    when the provider ships no warning status at all.
+ *
+ * One predicate, three consumers (`subscriptionSeverity`, `warnReason`,
+ * `pressureHeadline`) so they cannot disagree about the same row — the failure
+ * this whole issue is about, one layer up.
+ */
+function isNearingLimit(usage, windows = windowReadings(usage)) {
+  if (providerWarnsNearLimit(usage)) return true
+  return !!(windows && windows.some((w) => w.level === 'high'))
+}
+
+/**
  * Should this row spend space on a reset at all?
  *
  * Only under pressure. A reset time on a subscription at 12% is noise — the
  * quota is not what anyone is waiting for.
+ *
+ * `nearing` is #2396's arm and exists to repair a regression that fix itself
+ * introduced: a provider-warned row at 78% used to be (wrongly) `crit`, which
+ * showed its reset. Demoting it to `warn` without this would have taken the
+ * reset away — silently removing the one actionable fact from the row whose
+ * whole message is "this is about to matter", and only for utilizations BELOW
+ * our own 85% band, where the provider is the sole source of the warning.
  */
-export function showsReset(severity, windows) {
-  return severity === 'crit' || !!(windows && windows.some((w) => w.level === 'high'))
+export function showsReset(severity, windows, nearing = false) {
+  return (
+    severity === 'crit' ||
+    nearing ||
+    !!(windows && windows.some((w) => w.level === 'high'))
+  )
 }
 
 /**
@@ -268,7 +302,7 @@ export function subscriptionSeverity(usage) {
   // pushed into the overflow by a subscription whose only problem is that its
   // usage read failed, which is precisely backwards.
   const windows = windowReadings(usage)
-  if (windows && windows.some((w) => w.level === 'high')) return 'warn'
+  if (isNearingLimit(usage, windows)) return 'warn'
   return 'ok'
 }
 
@@ -298,7 +332,7 @@ export function warnReason(usage) {
   if (auth > 0 && auth === total) return 'auth'
   if (total > 0) return 'events'
   const windows = windowReadings(usage)
-  if (windows && windows.some((w) => w.level === 'high')) return 'utilization'
+  if (isNearingLimit(usage, windows)) return 'utilization'
   return null
 }
 
@@ -347,7 +381,10 @@ export function formatApproxCost(n) {
  *     200 with no unified headers). Ranked below the failure states, since a
  *     failed probe says nothing about the subscription, but ABOVE `ok`, which
  *     would assert health this row has no evidence for.
- *  6. `ok`.
+ *  6. `nearing limit` — the provider's own warning tier, or our high band. A
+ *     forecast, not a failure, so it ranks below everything that has actually
+ *     gone wrong — and above `ok`, which this row is not (#2396).
+ *  7. `ok`.
  */
 export function pressureHeadline(usage) {
   if (isUnavailable(usage)) return 'unavailable'
@@ -357,6 +394,18 @@ export function pressureHeadline(usage) {
   if (events > 0) return `${events}× 429`
   if ((usage.failure_events_24h || 0) > 0) return 'failures'
   if (headroomStatus(usage) === 'error') return 'no provider data'
+  // Directly above `ok`: nothing has gone wrong yet, but this row is not
+  // healthy either.
+  //
+  // Scope, stated honestly: the SFC renders `meta` only when `row.windows` is
+  // null (the bars ARE the reading otherwise), so on the tile this branch is
+  // reached only by a fresh warning-tier snapshot that carries a status but no
+  // utilization figure. It is kept because that state is real and because
+  // `pressureHeadline` must stay coherent with `subscriptionSeverity` for every
+  // input — a headline saying `ok` for a row this module scores `warn` is the
+  // same class of disagreement #2396 is about. The operator-visible fix for the
+  // ordinary windowed row is the lead chip (red `limit` → amber `near`).
+  if (isNearingLimit(usage)) return 'nearing limit'
   return 'ok'
 }
 
@@ -496,7 +545,7 @@ export function subscriptionPressureRows(subscriptions, usageBySub, options = {}
     //   • windows present (the near-limit row) → `meta` is full of fixed-width
     //     bars and cannot take more without overflowing a row that clips
     //     silently, so the reset leads the second line instead.
-    const pressured = showsReset(severity, windows)
+    const pressured = showsReset(severity, windows, isNearingLimit(usage, windows))
     const reset = pressured ? resetText(usage, now) : null
 
     let meta = pressureHeadline(usage)

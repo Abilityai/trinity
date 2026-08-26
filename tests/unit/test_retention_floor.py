@@ -109,6 +109,10 @@ def _admin():
     u.role = "admin"
     u.connector_agent = None  # #1310: not a connector principal
     u.agent_name = None  # ent#293: not an agent-scoped key
+    # #2323: MagicMock auto-creates a truthy `.mcp_scope`, which the admin
+    # gate's allowlist rejects — the same trap this helper already works around
+    # for `connector_agent` and `agent_name`. None = an interactive human.
+    u.mcp_scope = None
     return u
 
 

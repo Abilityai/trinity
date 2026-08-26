@@ -591,6 +591,12 @@ def _entry_verdict(row: Optional[Dict[str, Any]], agent_name: str) -> str:
         return "ok" if row.get("is_active") else "unknown_key"
     if scope == "agent":
         return "foreign_agent_key"
+    # #2323 — an `ops` key is a bounded read-only machine credential, not a
+    # person's key. Reporting it as "a personal, user-scoped key" on a security
+    # surface is simply false, and the remediation that message prescribes
+    # (revoke it in Settings → MCP Keys) would break a monitoring integration.
+    if scope == "ops":
+        return "foreign_ops_key"
     # ALLOWlist, matching `reject_non_interactive_principal`: everything that is
     # not this agent's own agent-scoped key is foreign. `scope` is free-text with
     # no CHECK constraint, so an explicit ("user","system","portal_delegate")
@@ -614,6 +620,14 @@ def _verdict_message(entry: AgentMcpKeyVerifyEntry) -> Optional[str]:
             f"({entry.key_prefix or 'unknown'}…) rather than its own — so it acts "
             "as that person and the permissions matrix is not in effect. "
             "Regenerate the key here, then revoke that one in Settings → MCP Keys."
+        )
+    if entry.verdict == "foreign_ops_key":
+        return (
+            "This agent authenticates with a bounded read-only ops key "
+            f"({entry.key_prefix or 'unknown'}…) rather than its own. That key "
+            "cannot reach this agent's own surfaces, so tool calls will fail. "
+            "Regenerate this agent's key here; leave the ops key alone — it "
+            "belongs to a monitoring integration."
         )
     if entry.verdict == "foreign_agent_key":
         return (
@@ -867,7 +881,11 @@ async def _regenerate_locked(
             source="api",
             actor_user=actor,
             actor_ip=actor_ip,
-            mcp_scope=getattr(actor, "mcp_scope", None),
+            # #2323 — the manual `mcp_scope=getattr(actor, "mcp_scope", None)`
+            # that used to sit here is gone: `platform_audit_service.log` now
+            # derives all three `mcp_*` columns from `actor_user` itself. Two
+            # spellings of one derivation is the ent#297 "third spelling" trap,
+            # and this one covered only `mcp_scope`.
             target_type="mcp_key",
             target_id=target_id,
             endpoint=endpoint,

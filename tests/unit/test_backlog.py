@@ -496,8 +496,6 @@ class TestBacklogEnqueue:
             user_email="u@example.com",
             subscription_id="sub-1",
             x_source_agent=None,
-            x_mcp_key_id=None,
-            x_mcp_key_name=None,
             triggered_by="manual",
             collaboration_activity_id=None,
         )
@@ -528,8 +526,6 @@ class TestBacklogEnqueue:
             user_email=None,
             subscription_id=None,
             x_source_agent=None,
-            x_mcp_key_id=None,
-            x_mcp_key_name=None,
             triggered_by="manual",
             collaboration_activity_id=None,
         )
@@ -563,8 +559,6 @@ class TestBacklogEnqueue:
             user_email="u@example.com",
             subscription_id="sub-1",
             x_source_agent="alpha",  # source == target = self-task
-            x_mcp_key_id=None,
-            x_mcp_key_name=None,
             triggered_by="self_task",
             collaboration_activity_id=None,
             is_self_task=True,

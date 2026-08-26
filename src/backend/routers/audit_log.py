@@ -200,6 +200,8 @@ async def list_audit_log(
     start_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive lower bound"),
     end_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive upper bound"),
     request_id: Optional[str] = Query(None, description="Filter by request correlation id (joins MCP + backend rows, #905)"),
+    mcp_key_id: Optional[str] = Query(None, description="Filter by the MCP API key that performed the action (#2323)"),
+    mcp_scope: Optional[str] = Query(None, description="Filter by credential kind: user/agent/system/connector/portal_delegate/ops (#2323)"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _admin: User = Depends(require_admin),
@@ -215,6 +217,12 @@ async def list_audit_log(
         "start_time": start_time,
         "end_time": end_time,
         "request_id": request_id,
+        # #2323 — answers "what did that leaked key touch?". `actor_type` stays
+        # "user" for a key-authenticated call (the owner is the accountable
+        # party and is the only branch that yields an email), so without these
+        # two the credential dimension is recorded but unqueryable.
+        "mcp_key_id": mcp_key_id,
+        "mcp_scope": mcp_scope,
     }
     entries = db.get_audit_entries(limit=limit, offset=offset, **filters)
     total = db.count_audit_entries(**filters)

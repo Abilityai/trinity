@@ -163,7 +163,12 @@ async def get_subscription_usage(
     behind `headroom` is governed by `subscription_headroom_auto_refresh`
     (default ON) and fail-closed rules — see subscription_headroom_service.
     """
-    assert_admin(current_user)
+    # #2323 — the ops fence admits this route, so the gate must too. It did
+    # not: `ADMIN_GATE_SCOPES` excludes "ops", so an ops key passed
+    # `_enforce_ops_key_fence` and was then refused here — the subscription-
+    # pressure read the fence was measured for could not work. Caught in
+    # review; the admit-set test exercised only the fence, never the gate.
+    assert_admin(current_user, allow_scopes={"ops"})
 
     # Resolve by ID or name
     subscription = db.get_subscription(subscription_id)

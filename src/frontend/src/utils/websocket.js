@@ -5,6 +5,7 @@ import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
 import { useLoopsStore } from '../stores/loops'
+import { usePortalLoopsStore } from '../stores/portalLoops'
 import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 import { useRoomsStore } from '../stores/rooms'
 
@@ -28,6 +29,7 @@ export function useWebSocket() {
   const executionsStore = useExecutionsStore()
   const roomsStore = useRoomsStore()
   const loopsStore = useLoopsStore()
+  const portalLoopsStore = usePortalLoopsStore()
   const reportsStore = useReportsStore()
   const fleetReportsStore = useFleetReportsStore()
 
@@ -171,6 +173,12 @@ export function useWebSocket() {
         // The store filters by the agent currently shown in LoopsPanel.
         if (data.type === 'loop_run_completed' || data.type === 'loop_completed') {
           loopsStore.handleWebSocketEvent(data)
+          // ent#458: the Workspace panel is a second consumer of the same
+          // fleet-wide broadcast, scoped to the chat's participants instead of
+          // the agent on Agent Detail. Two stores, one event — the
+          // reportsStore + fleetReportsStore shape above. Each is a no-op when
+          // its surface is not mounted.
+          portalLoopsStore.handleWebSocketEvent(data)
         }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
         // The agent store filters by the agent on screen; the fleet store does a

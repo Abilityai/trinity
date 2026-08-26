@@ -26,9 +26,10 @@ from db_harness import db_backend, seed_user, seed_agent  # noqa: E402,F401
 pytestmark = pytest.mark.unit
 
 
-def _user(connector_agent=None, role="creator"):
+def _user(connector_agent=None, mcp_scope=None, role="creator"):
     from models import User
-    return User(id=1, username="owner", role=role, connector_agent=connector_agent)
+    return User(id=1, username="owner", role=role, connector_agent=connector_agent,
+                mcp_scope=mcp_scope)  # #2323: forwarded, not swallowed — a helper that accepts a discriminator and drops it lets a test assert a pass the real principal would never get.
 
 
 def _fake_request(method, path):
