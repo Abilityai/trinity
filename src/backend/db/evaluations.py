@@ -248,6 +248,17 @@ class EvaluationOperations:
             .where(and_(
                 agent_evaluations.c.agent_name == agent_name,
                 agent_evaluations.c.target_id.isnot(None),
+                # ent#366 review — CLIENT ratings only. `include_owned` lets an
+                # operator reach the Workspace and rate their own agent, which
+                # is right; counting it here is not. This number is shown to
+                # every client of the agent and answers "how did this land with
+                # people" — an owner test-clicking is not that audience, and
+                # once counted the click was unrecoverable (the agent-principal
+                # redaction anonymises both kinds to the bare word `workspace`).
+                # Prefix-matched rather than NOT-LIKE'd on the operator form, so
+                # a future evaluator kind is excluded by default instead of
+                # silently joining the client tally.
+                agent_evaluations.c.evaluator.like("workspace:%"),
             ))
             .group_by(agent_evaluations.c.quality)
         )

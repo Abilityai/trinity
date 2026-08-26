@@ -794,21 +794,30 @@ def portal_submit_rating(agent_name: str, body: PortalRatingRequest,
             # idempotent through the partial UNIQUE; without this the SIDE
             # EFFECT was not, so re-rating the same target with a tweaked
             # comment re-fired a full agent turn each time.
-            if service.claim_capture_feedback_dispatch(
+            _claim = service.claim_capture_feedback_dispatch(
                 agent_name, email,
                 target_kind=body.target_kind, target_id=body.target_id,
-            ):
+            )
+            if _claim is not None:
                 background.add_task(
                     service.dispatch_capture_feedback,
                     agent_name, email,
                     target_kind=body.target_kind, target_id=body.target_id,
                     comment=body.comment or "",
+                    claim=_claim,
                 )
                 result["capture_feedback"] = "dispatched"
             else:
                 # Honest, and distinct from "no skill": the words ARE recorded
-                # (the update landed above) and the agent was already told about
-                # this target — it reads the row, not this message.
+                # (the update landed above), and this person has already spent
+                # a handoff for this exact target inside the dedup window.
+                #
+                # It deliberately does NOT claim the agent can read the row —
+                # `routers/evaluations.py` nulls `comment` for every machine
+                # principal, so it cannot (review finding). What is true is that
+                # the comment is stored and a second turn is not being spent.
+                # A dispatch that FAILED releases its claim, so this branch now
+                # means "already delivered", not "already attempted".
                 result["capture_feedback"] = "already_dispatched"
         else:
             # Not a failure: the comment is recorded either way, and saying so

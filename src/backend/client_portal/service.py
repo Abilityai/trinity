@@ -2236,13 +2236,37 @@ def search_chats(email: str, query: str, limit: int = 30) -> dict:
 # evaluator agent, and so `agent_evaluations` readers can tell at a glance which
 # scores came from a person using the product.
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
+# ent#366 review — an operator previewing their own agent is not the audience
+# the tally measures. `include_owned` (ent#357) lets a platform principal reach
+# the Workspace and rate, which is right — being able to try the affordance is
+# part of operating the thing. But `workspace_rating_tally` answers "how did
+# this land with people", and an owner test-clicking "Not what I needed" moved
+# the number EVERY client of that agent sees, permanently and unrecoverably
+# (the agent-principal redaction then anonymises both kinds to the bare word
+# `workspace`, so the two could not be told apart downstream either).
+#
+# The kind is recorded ON THE ROW rather than filtered by guesswork, because
+# nothing else on `agent_evaluations` can distinguish them: same shape, same
+# email. A distinct prefix also means the partial UNIQUE treats an operator's
+# rating and a client's as different rows, which is correct — they are
+# different principals, even when the address matches.
+OPERATOR_EVALUATOR_PREFIX = "operator:"
 
 
-def workspace_evaluator(email: str) -> str:
-    return f"{WORKSPACE_EVALUATOR_PREFIX}{(email or '').strip().lower()}"
+def workspace_evaluator(email: str, *, is_platform: bool = False) -> str:
+    """The evaluator identity a rating is stored under.
+
+    `is_platform` selects the OPERATOR prefix (ent#366 review) so the
+    client-facing tally can exclude an operator's own preview clicks. Defaults
+    to the client form: a caller that has not thought about the distinction
+    gets the counted one, which is the safe direction for a tally that must not
+    silently drop real client feedback.
+    """
+    prefix = OPERATOR_EVALUATOR_PREFIX if is_platform else WORKSPACE_EVALUATOR_PREFIX
+    return f"{prefix}{(email or '').strip().lower()}"
 
 
-def _attach_own_ratings(messages: list, email: str) -> None:
+def _attach_own_ratings(messages: list, email: str, *, is_platform: bool = False) -> None:
     """Fold each message's own rating (by THIS caller) into the history rows.
 
     Fail-soft: ratings are an overlay on a conversation, so a ratings read that
@@ -2254,7 +2278,9 @@ def _attach_own_ratings(messages: list, email: str) -> None:
     try:
         from database import db as platform_db
         mine = platform_db.list_workspace_ratings_for_targets(
-            workspace_evaluator(email), "message", ids,
+            # Same prefix the write used, or an operator's own rating would be
+            # invisible to them the moment it stopped being counted.
+            workspace_evaluator(email, is_platform=is_platform), "message", ids,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("portal: own-rating read failed: %s", e)
@@ -2283,7 +2309,7 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # ent#366: attach the caller's OWN rating to each message, so a reload shows
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
-    _attach_own_ratings(messages, email)
+    _attach_own_ratings(messages, email, is_platform=include_owned)
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.
@@ -3066,7 +3092,10 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
     try:
         row = platform_db.upsert_workspace_rating(
             agent_name,
-            evaluator=workspace_evaluator(email),
+            # ent#366 review: `include_owned` is set only for a platform session
+            # (ent#357), so it IS the principal-kind bit — recorded on the row
+            # so the client-facing tally can exclude an operator's preview.
+            evaluator=workspace_evaluator(email, is_platform=include_owned),
             target_kind=target_kind,
             target_id=target_id,
             quality=RATING_VALUES[rating],
@@ -3105,7 +3134,7 @@ def agent_has_capture_feedback(agent_name: str) -> bool:
 
 
 def claim_capture_feedback_dispatch(agent_name: str, email: str, *,
-                                    target_kind: str, target_id: str) -> bool:
+                                    target_kind: str, target_id: str):
     """Whether THIS rating is entitled to spend a turn (ent#366 review).
 
     The partial UNIQUE makes the ROW idempotent — re-rating updates in place —
@@ -3125,6 +3154,9 @@ def claim_capture_feedback_dispatch(agent_name: str, email: str, *,
     Fail-OPEN, like every other consumer of this layer: a dedup hiccup must not
     swallow feedback the agent was meant to see. The rate limits on the route
     are the bound that survives that.
+
+    Returns the in-flight claim to settle, or ``None`` when this is a replay.
+    The CALLER settles it — see `dispatch_capture_feedback`.
     """
     from services import idempotency_service
 
@@ -3135,13 +3167,36 @@ def claim_capture_feedback_dispatch(agent_name: str, email: str, *,
     )
     decision = idempotency_service.begin(scope, key)
     if decision.replay:
-        return False
-    # Completed immediately: the effect being deduped is the HANDOFF, and the
-    # dispatched turn's own outcome is observable as an execution row. Leaving
-    # the claim `in_flight` until the background task finished would block a
-    # legitimate later re-rate for the TTL window on any crash.
-    idempotency_service.complete(decision, None, {"dispatched": True})
-    return True
+        return None
+    # The claim is left IN-FLIGHT and handed to the caller, which settles it —
+    # `complete()` once the turn is actually away, `fail()` if the dispatch
+    # raised (review finding). Completing it here made the one case that
+    # provably did not reach the agent unretryable for the whole window: a stop
+    # or a full queue raised, the claim stood, and every later re-rate answered
+    # `already_dispatched`, which the UI renders as "passed on to the agent".
+    # `effect_guard` is this shape; this is that lifecycle, hand-rolled only
+    # because the claim spans a `BackgroundTasks` boundary.
+    return decision
+
+
+def _settle_capture_feedback_claim(claim, *, delivered: bool) -> None:
+    """Close out a `claim_capture_feedback_dispatch` handle (ent#366 review).
+
+    Never raises: this runs in a `BackgroundTasks` task after the client has
+    already been answered, and an idempotency-layer hiccup must not become an
+    unhandled error in a background task. A claim that cannot be settled decays
+    with its own TTL, which is the same fail-open the rest of this layer has.
+    """
+    if claim is None:
+        return
+    from services import idempotency_service
+    try:
+        if delivered:
+            idempotency_service.complete(claim, None, {"dispatched": True})
+        else:
+            idempotency_service.fail(claim)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: could not settle capture-feedback claim: %s", e)
 
 
 def build_capture_feedback_prompt(target_kind: str, target_id: str, comment: str,
@@ -3169,7 +3224,7 @@ def build_capture_feedback_prompt(target_kind: str, target_id: str, comment: str
 
 
 async def dispatch_capture_feedback(agent_name: str, email: str, *, target_kind: str,
-                                    target_id: str, comment: str) -> None:
+                                    target_id: str, comment: str, claim=None) -> None:
     """Hand the free text to the agent's capture-feedback skill (ent#366 AC #2).
 
     Runs as its OWN execution, never as a turn in the client's thread: injecting
@@ -3205,3 +3260,9 @@ async def dispatch_capture_feedback(agent_name: str, email: str, *, target_kind:
             "portal: capture-feedback dispatch failed for %s (%s %s): %s",
             agent_name, target_kind, target_id, e,
         )
+        # Release the claim so a later re-rate can actually retry (review
+        # finding). Without this the one case that provably did NOT reach the
+        # agent was the case that could never be retried.
+        _settle_capture_feedback_claim(claim, delivered=False)
+    else:
+        _settle_capture_feedback_claim(claim, delivered=True)

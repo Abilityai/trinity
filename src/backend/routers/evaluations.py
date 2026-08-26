@@ -37,6 +37,7 @@ from models import EvaluationCreate, EvaluationResponse, User
 # a router→portal-module dependency for one constant; the two are pinned
 # together by `test_ent366_workspace_ratings.py` instead.
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
+OPERATOR_EVALUATOR_PREFIX = "operator:"
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
 logger = logging.getLogger(__name__)
@@ -125,8 +126,15 @@ def _redact_for_agent_principal(row: dict, current_user: User,
     # is in a better position to change its behaviour toward that person than
     # one that read the text. The KIND survives (`workspace` vs a Tier-0 pass
     # name), because "a person rated this" is the signal; "which person" is not.
-    if str(row.get("evaluator") or "").startswith(WORKSPACE_EVALUATOR_PREFIX):
-        redacted["evaluator"] = WORKSPACE_EVALUATOR_PREFIX.rstrip(":")
+    _evaluator = str(row.get("evaluator") or "")
+    # ent#366 review: the operator form is anonymised on the same terms. An
+    # agent must not learn WHO rated it either way — and leaving the new prefix
+    # out would have made an operator's address the one identity that still
+    # reached the graded agent.
+    for _prefix in (WORKSPACE_EVALUATOR_PREFIX, OPERATOR_EVALUATOR_PREFIX):
+        if _evaluator.startswith(_prefix):
+            redacted["evaluator"] = _prefix.rstrip(":")
+            break
     return redacted
 
 

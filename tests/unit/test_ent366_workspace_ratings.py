@@ -490,8 +490,10 @@ def test_re_rating_one_target_does_not_re_fire_the_turn(svc, monkeypatch):
     second = svc.claim_capture_feedback_dispatch(
         AGENT, CLIENT, target_kind="message", target_id=MSG)
 
-    assert first is True
-    assert second is False
+    # Returns the in-flight claim to settle, `None` on replay (review finding:
+    # the caller must be able to `fail()` it when the dispatch raises).
+    assert first is not None
+    assert second is None
 
 
 def test_the_dispatch_key_ignores_the_comment(svc, monkeypatch):
@@ -536,8 +538,68 @@ def test_a_dedup_hiccup_never_swallows_feedback(svc, monkeypatch):
     monkeypatch.setattr(idempotency_service, "begin", lambda scope, key: _Disabled())
     monkeypatch.setattr(idempotency_service, "complete", lambda *a, **k: None)
 
-    assert svc.claim_capture_feedback_dispatch(
-        AGENT, CLIENT, target_kind="message", target_id=MSG) is True
+    claim = svc.claim_capture_feedback_dispatch(
+        AGENT, CLIENT, target_kind="message", target_id=MSG)
+    assert claim is not None, "a disabled decision must still dispatch"
+
+    # And settling a disabled claim is a no-op that cannot raise — the settle
+    # runs in a BackgroundTasks task after the client was already answered.
+    svc._settle_capture_feedback_claim(claim, delivered=False)
+    svc._settle_capture_feedback_claim(claim, delivered=True)
+
+
+def test_an_operator_preview_is_recorded_but_not_counted(svc):
+    """Review finding: `include_owned` lets a platform principal rate, and the
+    tally is shown to EVERY client of that agent. An owner test-clicking "Not
+    what I needed" moved the number those clients see, permanently — and the
+    agent-principal redaction then anonymises both kinds to the bare word
+    `workspace`, so it could not be separated downstream either.
+
+    Recorded under a distinct evaluator so it is not lost, excluded from the
+    number that answers "how did this land with people".
+    """
+    assert svc.workspace_evaluator("a@b.com") == "workspace:a@b.com"
+    assert svc.workspace_evaluator("a@b.com", is_platform=True) == "operator:a@b.com"
+    # The default is the COUNTED form: a caller that has not thought about the
+    # distinction must not silently drop real client feedback.
+    assert svc.workspace_evaluator("a@b.com").startswith("workspace:")
+
+
+def test_the_tally_prefix_matches_clients_rather_than_excluding_operators():
+    """Prefix-MATCH, not NOT-LIKE. A future evaluator kind (a Tier-1 judge, a
+    second portal surface) is then excluded by default rather than silently
+    joining a number labelled as client feedback."""
+    import inspect
+    from db import evaluations as mod
+    src = inspect.getsource(mod.EvaluationOperations.workspace_rating_tally)
+    assert 'like("workspace:%")' in src
+    assert "notlike" not in src.lower()
+
+
+def test_the_operator_evaluator_is_anonymised_to_the_agent_too():
+    """The redaction must cover the new prefix, or an operator's address becomes
+    the one identity that still reaches the graded agent."""
+    import inspect
+    from routers import evaluations as mod
+    src = inspect.getsource(mod)
+    assert "OPERATOR_EVALUATOR_PREFIX" in src
+    fn = inspect.getsource(mod._redact_for_agent_principal)
+    assert "OPERATOR_EVALUATOR_PREFIX" in fn
+
+
+def test_the_uniqueness_rule_is_declared_on_the_model_not_only_in_ddl():
+    """Review finding: `migrations/env.py` autogenerates against tables.py's
+    MetaData, so an index the model does not know about is proposed for DROP by
+    the first `--autogenerate` run. For THIS index that turns "one rating per
+    person per thing" into "one row per click" — no error, no failing test.
+
+    It is also what gives the race test a constraint to violate: the fixture
+    creates the table from this MetaData.
+    """
+    from db.tables import agent_evaluations
+    idx = {i.name: i for i in agent_evaluations.indexes}
+    assert "idx_agent_evaluations_rating_target" in idx
+    assert idx["idx_agent_evaluations_rating_target"].unique is True
 
 
 def test_the_rating_route_is_bounded_in_two_tiers_like_chat():
