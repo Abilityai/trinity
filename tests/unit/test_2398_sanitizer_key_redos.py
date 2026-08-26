@@ -92,6 +92,30 @@ def test_a_long_kv_line_sanitizes_quickly_end_to_end():
     assert "abc123" not in out
 
 
+def test_a_pattern_with_no_trailing_wildcard_is_refused():
+    """Self-review, second pass. The guard validated the LITERAL but not the
+    FORM, so a bare `TOKEN` was accepted — and under `.search()` the old form
+    was `(?:TOKEN)\\Z`, i.e. "the key ENDS WITH token". Containment is wider:
+    `TOKEN_SUFFIX` was not sensitive and would have become sensitive.
+
+    Redacting more is not a leak, so this is not urgent. It is refused anyway
+    because this function's whole job is to refuse SILENT changes of meaning —
+    tolerating one here would be the same internal inconsistency that produced
+    #2398: a stated contract that no longer describes the code beneath it.
+
+    No shipped pattern is affected: all 13 backend and 30 agent patterns end
+    in `.*` (asserted below).
+    """
+    with pytest.raises(ValueError, match="no trailing"):
+        _literal_from_pattern(r'TOKEN')
+    with pytest.raises(ValueError, match="no trailing"):
+        _literal_from_pattern(r'.*TOKEN')
+
+
+def test_every_shipped_pattern_has_the_trailing_wildcard():
+    assert all(p.endswith(".*") for p in SENSITIVE_KEY_PATTERNS)
+
+
 def test_a_hyphenated_literal_is_accepted():
     """Caught in self-review. The guard's first form was
     `re.escape(body) != body`, which ALSO escapes `-` — not a metacharacter

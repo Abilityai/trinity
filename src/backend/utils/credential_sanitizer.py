@@ -126,8 +126,25 @@ def _literal_from_pattern(pattern: str) -> str:
     body = pattern
     if body.startswith(".*"):
         body = body[2:]
-    if body.endswith(".*"):
-        body = body[:-2]
+    # The TRAILING `.*` is what makes containment equivalent, so its absence is
+    # refused rather than tolerated (self-review, second pass). Under
+    # `.search()` the old form was `(?:BODY)\Z` — anchored at the END — so a
+    # pattern with no trailing `.*` meant "the key ENDS WITH this", and
+    # containment is wider: a bare `TOKEN` would stop matching only `MYTOKEN`
+    # and start matching `TOKEN_SUFFIX` too. That direction redacts MORE, so it
+    # is not a leak — but this function exists to refuse SILENT changes of
+    # meaning, and accepting one would be the same internal inconsistency that
+    # produced #2398: a stated contract that no longer described the code
+    # beneath it.
+    if not body.endswith(".*"):
+        raise ValueError(
+            f"sensitive-key pattern {pattern!r} has no trailing `.*`, so it "
+            f"meant 'the key ENDS WITH {body!r}'. #2398's containment test is "
+            f"WIDER than that — it would also match keys carrying {body!r} in "
+            f"the middle. Write it as `{body}.*` if containment is what you "
+            f"want, or handle the suffix case explicitly."
+        )
+    body = body[:-2]
     # An explicit safe set, NOT `re.escape(body) != body`. That was the first
     # form and it is wrong in the dangerous direction for a module imported
     # everywhere: `re.escape` also escapes `-`, which is not a metacharacter
