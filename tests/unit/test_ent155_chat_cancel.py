@@ -284,3 +284,38 @@ def test_cancelling_one_turn_does_not_clear_the_whole_agents_capacity():
     # And `already_finished` releases nothing: the branch is terminated-only.
     assert 'if result.get("status") == "terminated" and task_execution_id:' in src
 
+
+def test_public_terminate_is_not_weaker_than_the_route_that_creates_the_turn():
+    """Re-review finding. On a `require_email` link `POST /chat` demands a
+    `session_token`, and `source_user_email` IS populated for the verified
+    visitor — so the identity the old docstring said did not exist does exist
+    on exactly those links. Without this, one visitor could stop another's turn
+    with the link token alone: a destructive write gated more weakly than the
+    write that created its target.
+
+    Open links are unchanged — there really is no visitor identity there.
+    """
+    import inspect
+    from routers import public as mod
+    src = inspect.getsource(mod.public_terminate_execution)
+    assert "session_token" in src, "no session gate on the terminate route"
+    assert "_agent_requires_email(agent_name)" in src, (
+        "the gate must apply only to links that HAVE a visitor identity"
+    )
+    assert "source_user_email" in src, "the turn is not bound to its own visitor"
+    # Uniform 404 on a mismatch, never a distinguishable 403 (Invariant #8).
+    body = src[src.index("_agent_requires_email(agent_name)"):]
+    assert "404" in body, "a mismatch must not be distinguishable from absence"
+
+
+def test_the_2320_cancelled_row_comment_matches_its_value():
+    """Re-review nit: the comment beside the cancelled row said retryable is
+    TRUE while the value is False. The value is right — a cancellation is not
+    one of the two verdicts where nothing reached the agent — so the comment
+    was the error."""
+    from pathlib import Path
+    body = Path(__file__).resolve().parents[1].joinpath(
+        "unit/test_2320_portal_failed_turn_visibility.py").read_text()
+    row = [l for l in body.splitlines() if "generic_cancelled" in l and "409" in l]
+    assert row, "the cancelled row moved"
+    assert "False" in row[0], "the cancelled verdict must not be retryable"

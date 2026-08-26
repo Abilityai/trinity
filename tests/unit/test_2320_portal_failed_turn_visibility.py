@@ -291,7 +291,10 @@ TERMINAL_SITES = [
     # that DURABLY — so a client who stopped their own turn saw "Something went
     # wrong" again on the next reload. The classifier now answers it ahead of
     # the failure arms, and retryable is TRUE: re-asking is exactly what someone
-    # who changed their mind may want.
+    # who changed their mind may want — EXCEPT that it is not: retryable stays
+    # False, because the surface's rule is that only the two verdicts where
+    # nothing reached the agent are retryable, and something did reach it here.
+    # (Re-review: this comment previously said TRUE beside a False value.)
     ("generic_cancelled", {"error_code": None, "error": None, "status": "cancelled"},      409,  "cancelled",   False),
     # AGENT_ERROR is a real code with no branch of its own — it must land on the
     # generic arm rather than fall through the classifier untagged.

@@ -1082,6 +1082,7 @@ async def public_terminate_execution(
     token: str,
     execution_id: str,
     request: Request,
+    session_token: str = None,
 ):
     """Cancel a public-chat turn the visitor started (ent#155).
 
@@ -1090,12 +1091,17 @@ async def public_terminate_execution(
     link. There is no JWT and no `users` row — the token is the credential, and
     it is the same one that was required to start the turn.
 
-    Deliberately no cross-visitor gate beyond the link: a public link has no
-    per-visitor identity to check against (`source_user_email` is only set when
-    the visitor verified an email), so scoping is per-link, exactly as the
-    `status` and `stream` routes already are. Anyone holding the link can
-    already read a turn's stream; being able to stop one is the same authority,
-    not a wider one.
+    Scoping is per-link on an OPEN link, where there genuinely is no
+    per-visitor identity to check. On a `require_email` link there IS one —
+    `source_user_email` is populated for a verified visitor, and `POST /chat`
+    already demands a `session_token` there — so this route demands the same and
+    additionally requires the turn to be the CALLER'S OWN.
+
+    That asymmetry was the review finding: without it, terminate was weaker than
+    the route that creates the thing it destroys, and one visitor on a
+    verified-email link could stop another's turn with the link token alone.
+    The earlier docstring claimed the identity did not exist; on exactly these
+    links it does.
 
     Cancellation semantics are the platform's existing ones — CANCELLED, not
     FAILED (#679/#1332), and CAS-guarded, so a cancel that arrives after the
@@ -1123,6 +1129,27 @@ async def public_terminate_execution(
     # symmetry-with-reading argument is sound for a read and does not carry.
     if getattr(execution, "triggered_by", None) != "public":
         raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Per-VISITOR gate, on the links that have a visitor identity (review).
+    # Mirrors `status`/`stream`'s session handling, and then goes one step
+    # further than they do — they only let a holder OBSERVE, this one kills —
+    # by requiring the turn to be this visitor's own.
+    if _agent_requires_email(agent_name):
+        if not session_token:
+            raise HTTPException(
+                status_code=401, detail="Session token required for this link"
+            )
+        session_valid, email = db.validate_session(link["id"], session_token)
+        if not session_valid:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired session. Please verify your email again.",
+            )
+        owner = (getattr(execution, "source_user_email", None) or "").strip().lower()
+        # Uniform 404, not 403: a distinguishable refusal would confirm that
+        # this execution id exists on this link (Invariant #8).
+        if not owner or owner != (email or "").strip().lower():
+            raise HTTPException(status_code=404, detail="Execution not found")
 
     # Already finished: a no-op success, never a 4xx. The client races its own
     # poll, and a cancel that lost that race is not an error the visitor did
