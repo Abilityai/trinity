@@ -1694,17 +1694,36 @@ async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, c
                 response.status_code, result.get("detail", "Termination failed")
             )
 
-        # Clear capacity state if termination succeeded (CAPACITY-CONSOLIDATE #428).
-        if result.get("status") in ["terminated", "already_finished"]:
+        # Release capacity for THIS execution (CAPACITY-CONSOLIDATE #428).
+        #
+        # ent#155 review (N1): this was `force_release(name)`, documented in
+        # `capacity_manager` as "Emergency: clear all running slots and the
+        # in-memory queue" — it DELs `agent:slots:{name}` wholesale, every
+        # per-slot metadata key, and the overflow LIST. That was tolerable while
+        # the only caller was an operator terminating from Agent Detail. ent#155
+        # gives the same code path to a public-link visitor and a Workspace
+        # client, so on an agent with `max_parallel_tasks > 1` one person
+        # stopping THEIR OWN turn dropped slot accounting for every other
+        # in-flight execution on that agent and discarded the queued overflow.
+        #
+        # `release_if_matches` is the per-execution form, and TOCTOU-safe: the
+        # ZSET model is keyed by execution_id, so it is a no-op if this turn no
+        # longer holds the slot. Nothing else's accounting is touched.
+        #
+        # `already_finished` no longer releases at all: nothing was cancelled,
+        # the agent's own terminal already ran its own release, and firing an
+        # emergency clear on a no-op branch was the part with no defensible
+        # reading at all.
+        if result.get("status") == "terminated" and task_execution_id:
             try:
                 capacity = get_capacity_manager()
-                fr = await capacity.force_release(name)
+                released = await capacity.release_if_matches(name, task_execution_id)
                 logger.info(
-                    f"[Terminate] Force-released capacity for agent '{name}' "
-                    f"(was_running={fr.was_running}, slots_cleared={fr.slots_cleared})"
+                    "[Terminate] Released capacity for execution %s on '%s' (released=%s)",
+                    task_execution_id, name, released,
                 )
             except Exception as e:
-                logger.warning(f"[Terminate] Failed to force-release capacity for {name}: {e}")
+                logger.warning(f"[Terminate] Failed to release capacity for {name}: {e}")
 
             # #679: write CANCELLED only when we actually terminated a running
             # turn. On `already_finished` the agent's genuine terminal already

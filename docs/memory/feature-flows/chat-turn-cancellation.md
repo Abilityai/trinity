@@ -29,13 +29,21 @@ so its successor takes its place rather than the AC being quietly dropped.
 | Public link | the link token | new `POST /api/public/executions/{token}/{id}/terminate` |
 | Workspace | portal session token (or a platform JWT) | new `POST /api/enterprise/client-portal/agents/{name}/executions/{id}/terminate` |
 
-**The public link scopes per LINK.** Its token is the credential — the same one
-that was required to start the turn — and the route sits beside `status` and
-`stream`, which are scoped identically. There is deliberately no per-visitor
-gate: a public link has no per-visitor identity to check against
-(`source_user_email` is populated only when the visitor verified an email).
-Anyone holding the link can already read a turn's stream; being able to stop one
-is the same authority, not a wider one.
+**The public link scopes per LINK, and per TRIGGER.** Its token is the
+credential — the same one that was required to start the turn — and the route
+sits beside `status` and `stream`, which are scoped identically. There is
+deliberately no per-visitor gate: a public link has no per-visitor identity to
+check against (`source_user_email` is populated only when the visitor verified
+an email).
+
+The "anyone holding the link can already read the stream, so stopping one is the
+same authority" argument was the original reasoning and it does NOT carry
+(review finding): reading is passive and cancelling destroys work, and the two
+are not the same power just because the same credential opens both. So the route
+additionally requires `triggered_by == "public"` — a link-holder can stop turns
+that came from a public link, and cannot reach a scheduled run, an operator's
+chat, or a Workspace turn on the same agent. Two links on one agent can still
+cross-cancel; that residual is named and accepted.
 
 **The Workspace scopes per CALLER**, behind the same three gates as its stream
 route and using the *same function*, not a second copy of the predicate:
@@ -92,7 +100,7 @@ cannot stack two copies.
 - A successful cancel renders as **cancelled**, not as an error. The surfaces
   already rendered the `cancelled` terminal from their polls; nothing there
   changed.
-- A cancel that lost the race answers `already_terminal` and says **nothing at
+- A cancel that lost the race answers `already_terminal` / `already_finished` and says **nothing at
   all** — the client is racing its own poll, the reply is on screen, and there
   is no action to offer. Not a 4xx: the person did not do anything wrong.
 - A **refused** terminate leaves the input untouched and says the turn is still
@@ -136,7 +144,7 @@ the same swap inline.
   `actor_kind` record; that **neither** new route re-implements cancellation (no
   status write, no CAS, no breaker call of its own); the public route's
   link+agent scoping; the Workspace route's caller scoping and its reuse of the
-  stream route's own gate function; `already_terminal` for all four terminal
+  stream route's own gate function; `already_terminal` / `already_finished` for all four terminal
   statuses and real termination for `running`/`queued`; a missing execution as
   404; and an agent-side failure reworded for a client without naming the agent
   host.
@@ -173,3 +181,35 @@ the same swap inline.
 - 2026-08-25 (ent#155): Escape + Stop on all three conversation surfaces; two
   new credential-scoped terminate routes; `terminate_execution` made
   principal-agnostic
+
+## Two things the review changed after the first pass
+
+**A cancellation is classified as a cancellation, server-side.** `portal_chat`
+answers a `cancelled` status with `409 / category="cancelled"` ahead of the
+failure ladder. It used to fall through to the generic `502 / agent_error`, and
+`_run` recorded that verdict DURABLY — so a client who stopped their own turn
+saw "Something went wrong while the agent was working on this" again the moment
+they switched threads or reloaded. The browser kept an in-memory set of
+executions it had cancelled, which shielded exactly one tab until its next load.
+That set survives, but only for the millisecond window the durable verdict
+cannot cover: `terminate_execution` writes the CANCELLED CAS before
+`cancelPortalTurn()` resolves, so a poll landing in between reads a cancelled
+turn with no recorded outcome yet. In-memory is the right lifetime for that
+race and the wrong one for a verdict a reload re-reads.
+
+`retryable` is **False** for this category, keeping the surface's existing rule
+that the only retryable verdicts are the ones where nothing reached the agent.
+The flag is inert here anyway — the client returns early on the category and
+renders neither a failure nor a Retry button.
+
+**Cancelling releases ONE execution's slot, not the agent's.** The terminate
+path called `capacity.force_release(name)`, documented in `capacity_manager` as
+"Emergency: clear all running slots and the in-memory queue". That was tolerable
+while the only caller was an operator on Agent Detail; this feature hands the
+same path to a public-link visitor and a Workspace client, so on an agent with
+`max_parallel_tasks > 1` one person stopping their own turn dropped slot
+accounting for every other in-flight execution and discarded the queued
+overflow. It now calls `release_if_matches(name, execution_id)` — per-execution
+and TOCTOU-safe — and `already_finished` releases nothing at all, since nothing
+was cancelled. `force_release` survives only on the explicit operator
+force-release endpoint, which is where an emergency clear belongs.

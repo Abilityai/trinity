@@ -286,7 +286,13 @@ TERMINAL_SITES = [
     ("timeout_code",      {"error_code": "TIMEOUT", "error": "gave up"},                   504,  "timeout",   False),
     ("timeout_substr",    {"error_code": None, "error": "Execution timed out"},            504,  "timeout",   False),
     ("generic_failed",    {"error_code": None, "error": "something went wrong"},           502,  "agent_error", False),
-    ("generic_cancelled", {"error_code": None, "error": None, "status": "cancelled"},      502,  "agent_error", False),
+    # ent#155 review (NEW-1): a cancellation is not a failure. It used to fall
+    # through this ladder to the generic 502/agent_error, and `_run` recorded
+    # that DURABLY — so a client who stopped their own turn saw "Something went
+    # wrong" again on the next reload. The classifier now answers it ahead of
+    # the failure arms, and retryable is TRUE: re-asking is exactly what someone
+    # who changed their mind may want.
+    ("generic_cancelled", {"error_code": None, "error": None, "status": "cancelled"},      409,  "cancelled",   False),
     # AGENT_ERROR is a real code with no branch of its own — it must land on the
     # generic arm rather than fall through the classifier untagged.
     ("agent_error_code",  {"error_code": "AGENT_ERROR", "error": "exit 1"},                502,  "agent_error", False),

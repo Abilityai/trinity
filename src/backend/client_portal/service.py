@@ -93,6 +93,7 @@ PORTAL_FAILURE_CATEGORIES = (
     "auth",                # subscription/credential exhausted — retry re-fails
     "timeout",             # the turn RAN and hit the agent's bound
     "agent_error",         # the turn RAN and did not come back
+    "cancelled",           # the PERSON stopped it — not a failure at all
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -1464,7 +1465,32 @@ async def portal_chat(agent_name: str, message: str, email: str,
     result = turn.result
 
     status = getattr(result, "status", None)
-    if status in ("failed", "cancelled"):
+    if status == "cancelled":
+        # ent#155 review (NEW-1): a cancellation is not a failure, and saying so
+        # only in the browser was not enough. The client-side suppression shields
+        # exactly one tab until its next load — `loadThread` and `reattach` both
+        # call `markLastUserTurnFailed(last_turn_outcome)`, and the outcome is
+        # recorded DURABLY by `_run`'s handler. So a client who stopped their own
+        # turn, then switched threads or reloaded, saw their message struck out in
+        # red with "Something went wrong while the agent was working on this" and
+        # a Retry button — for something they did on purpose.
+        #
+        # The classifier is where it belongs: this arm runs BEFORE the failure
+        # branch below, so `cancelled` never reaches the AUTH/BILLING/agent_error
+        # ladder at all. `retryable=True` because re-asking is exactly what a
+        # person who changed their mind may want; the UI decides whether to offer
+        # it from the category, which now says what happened.
+        raise ClientPortalError(
+            409, "You stopped this message before the agent finished.",
+            # retryable=False keeps the rule this surface already states: the
+            # only retryable verdicts are the ones where nothing reached the
+            # agent. Something DID reach it here — the person stopped it. The
+            # flag is inert for this category anyway, because the client returns
+            # early on it and never renders a failure or a Retry button; making
+            # it True would have weakened a real invariant to no visible effect.
+            category="cancelled", retryable=False,
+        )
+    if status == "failed":
         err = (getattr(result, "error", "") or "").lower()
         # #2320: the execution engine already answered "what kind of failure was
         # this" — `TaskExecutionResult.error_code`. This branch was matching

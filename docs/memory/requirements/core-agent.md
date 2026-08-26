@@ -707,7 +707,10 @@
     the token is the credential, exactly as for the `status` and `stream` routes
     it sits beside, and scoping is per LINK because a public link has no
     per-visitor identity to check against. Anyone holding the link can already
-    watch a turn's stream; stopping one is the same authority, not a wider one.
+    watch a turn's stream — but reading is passive and cancelling destroys work, so
+    that is NOT the same authority (review finding). The route additionally
+    requires `triggered_by == "public"`, so a link-holder cannot reach a
+    scheduled run, an operator's chat, or a Workspace turn on the same agent.
   - The Workspace gets `POST /api/enterprise/client-portal/agents/{name}/executions/{id}/terminate`
     behind the **same three gates as its stream route**, using the same
     `execution_belongs_to_caller` function rather than a second copy of the
@@ -728,7 +731,7 @@
   prepended to whatever was typed while waiting, and the merge is idempotent, so
   pressing Escape and then Stop cannot stack two copies.
 - **Honest status**: a successful cancel renders as cancelled, not as an error;
-  a cancel that lost the race to a finished turn answers `already_terminal` and
+  a cancel that lost the race to a finished turn answers `already_terminal` / `already_finished` and
   says nothing at all, because the reply is already on screen; a *refused*
   terminate leaves the input untouched and says the turn is still running —
   restoring the text there would imply a stop that did not happen.

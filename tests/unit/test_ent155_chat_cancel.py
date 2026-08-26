@@ -224,3 +224,63 @@ def test_a_public_link_can_only_cancel_what_a_public_link_produced():
     # ...and it refuses with the SAME uniform 404 as an unknown execution, so
     # the route is not an oracle for "this id exists on this agent".
     assert src.count('detail="Execution not found"') >= 2
+
+# --------------------------------------------------------------------------
+# Review findings (@obasilakis) — the durable verdict and the blast radius
+# --------------------------------------------------------------------------
+
+def test_a_cancelled_portal_turn_is_classified_as_cancelled_not_failed():
+    """NEW-1: the suppression was client-side and in-memory, so it shielded
+    exactly one tab until its next load. `loadThread` and `reattach` both call
+    `markLastUserTurnFailed(last_turn_outcome)`, and `_run` records that verdict
+    durably — so stopping a turn and then switching threads (or reloading) put
+    the user's own message back in red under "Something went wrong", for
+    something they did on purpose.
+
+    The arm belongs in the classifier, ahead of the failure ladder.
+    """
+    import inspect
+    from client_portal import service as mod
+    src = inspect.getsource(mod.portal_chat)
+    cancelled_at = src.index('status == "cancelled"')
+    failed_at = src.index('status == "failed"')
+    assert cancelled_at < failed_at, (
+        "the cancelled arm must precede the failure ladder, or a cancellation "
+        "is classified as an agent error"
+    )
+    assert 'category="cancelled"' in src
+
+
+def test_the_client_keys_on_the_durable_category_not_its_own_memory():
+    """The point of moving it server-side: the browser arm must read the
+    recorded verdict, which survives a reload, rather than the in-memory set,
+    which does not."""
+    from pathlib import Path
+    sfc = Path(__file__).resolve().parents[2] / "src/frontend/src/components/portal/PortalConversation.vue"
+    body = sfc.read_text()
+    assert "outcome.category === 'cancelled'" in body
+
+
+def test_cancelling_one_turn_does_not_clear_the_whole_agents_capacity():
+    """N1: `force_release(name)` is documented in-tree as "Emergency: clear all
+    running slots and the in-memory queue" — it DELs the agent's whole slot
+    ZSET plus the overflow list. ent#155 hands that path to a public-link
+    visitor and a Workspace client, so on an agent with max_parallel_tasks > 1
+    one person stopping their own turn dropped slot accounting for every other
+    in-flight execution.
+
+    It also fired on `already_finished`, where nothing was cancelled at all.
+    """
+    import inspect
+    from services import chat_execution_service as mod
+    # The public `terminate_execution` is a thin wrapper; the capacity
+    # handling lives in the implementation it delegates to.
+    src = inspect.getsource(mod._proxy_terminate_and_finalize)
+    # The emergency clear is gone from this path entirely — it survives only on
+    # the explicit operator force-release endpoint, which is where "clear
+    # everything" belongs.
+    assert "capacity.force_release(" not in src
+    assert "release_if_matches" in src
+    # And `already_finished` releases nothing: the branch is terminated-only.
+    assert 'if result.get("status") == "terminated" and task_execution_id:' in src
+

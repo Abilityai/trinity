@@ -399,10 +399,16 @@ const cancelError = ref('')
 // `agent_error` 502. `deliver` reports failed, `send()` calls `markFailed`, and
 // the user who pressed Stop sees their own message struck out in red under
 // "Something went wrong while the agent was working on this."
-// A cancel the user ASKED FOR is not a failure, so the client remembers which
-// executions it cancelled and declines to mark those. Client-side on purpose:
-// the portal outcome path has no `cancelled` category, and inventing one would
-// change a shared contract for one surface.
+// A cancel the user ASKED FOR is not a failure. The DURABLE half of that lives
+// in the server classifier now (`category: "cancelled"`, ent#155 review NEW-1)
+// — the argument for keeping it client-side was that the portal outcome path
+// had no such category, and the answer was to add one rather than to accept a
+// verdict that outlived the tab. This set remains for the WINDOW that verdict
+// cannot cover: `terminate_execution` writes the CANCELLED CAS before
+// `cancelPortalTurn()` resolves, so a poll landing in between reads a turn that
+// has already been cancelled but has no recorded outcome yet. In-memory is the
+// right lifetime for a race that closes in milliseconds; it is the wrong one
+// for a verdict a reload re-reads.
 const cancelledExecutionIds = ref(new Set())
 // Survives `deliver`'s finally, which clears the live id — `send()` needs to
 // know which execution the turn it is about to judge actually ran under.
@@ -472,6 +478,13 @@ async function loadThread(sessionId) {
 // where the row came from history rather than from this tab's own `send()`.
 function markLastUserTurnFailed(outcome) {
   if (!outcome?.message) return
+  // ent#155 review (NEW-1): a cancellation is not a failure, and the server now
+  // says so durably (`category: "cancelled"`). Keying on that rather than on
+  // `cancelledExecutionIds` is the whole point of the server-side fix — that set
+  // lives in ONE tab's memory, so switching threads or reloading brought the red
+  // "Something went wrong" back for something the person did on purpose. This
+  // arm survives a reload because the verdict does.
+  if (outcome.category === 'cancelled') return
   const last = messages.value[messages.value.length - 1]
   // Only ever the UNANSWERED tail. Two raise sites (`portal_chat`'s roster 404
   // and its availability refusal) fire BEFORE `_persist_user_turn`, so they
