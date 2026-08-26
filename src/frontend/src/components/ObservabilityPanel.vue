@@ -165,8 +165,9 @@
     <!-- ent#253: a refresh that failed with metrics on screen. The numbers
          stay (the store no longer discards them); this line says the reading is
          no longer live, so nothing here presents stale data as fresh. -->
-    <p v-if="isStale" class="mt-2 text-xs text-status-warning-600 dark:text-status-warning-400">
-      Couldn't refresh — showing the reading from {{ staleReadingTime }}.
+    <p v-if="isStale" role="alert"
+       class="mt-2 text-xs text-status-warning-600 dark:text-status-warning-400">
+      {{ staleReadingTime }}
     </p>
 
     <!-- First load only (ent#253). This used to gate on `loading`, i.e. "a
@@ -183,6 +184,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useObservabilityStore } from '@/stores/observability'
+import { staleBannerMessage } from '@/utils/loadingState'
 
 const observabilityStore = useObservabilityStore()
 const isExpanded = ref(false)
@@ -214,10 +216,16 @@ const isStale = computed(() => (
 // claim this banner exists to prevent. The banner therefore prints an ABSOLUTE
 // time, like `DashboardPanel`'s `staleBannerMessage` does; the "Updated …" line
 // keeps the relative form, where it is refreshed by every successful poll.
+// ent#253 review: the SHARED helper, not a local sentence. Skipping
+// `ScanlineReveal` on a 192px chip is a justified call and is argued above;
+// skipping the shared banner copy was a separate decision that was never
+// argued, and it is what produced the stale-as-fresh bug this comment
+// describes. `staleBannerMessage` prints an absolute time by construction, so
+// the defect is unreachable from here, and every other adopter of this pass now
+// renders the same words. `role="alert"` on the element for the same reason —
+// the bare <p> announced nothing.
 const staleReadingTime = computed(() => (
-  observabilityStore.lastUpdated
-    ? observabilityStore.lastUpdated.toLocaleTimeString()
-    : 'an earlier check'
+  staleBannerMessage('metrics', observabilityStore.lastUpdated)
 ))
 
 const formatLastUpdated = computed(() => {

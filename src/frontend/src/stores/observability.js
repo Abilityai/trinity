@@ -182,7 +182,14 @@ export const useObservabilityStore = defineStore('observability', {
         }
 
         this.lastUpdated = new Date()
-        this.hasLoaded = true
+        // ent#253 review: `hasLoaded` means WE HAVE A READING, not "the request
+        // returned 200". It gates `isStale`, so setting it on every success
+        // made an OTel-disabled install — which answers 200 with
+        // `{enabled: false}` and no metrics — render "Couldn't refresh —
+        // showing the reading from …" on the next transport failure, when
+        // there had never been a reading to show. Derived from the payload so
+        // the name is true.
+        this.hasLoaded = this.hasData
         this.refreshError = null
 
       } catch (error) {

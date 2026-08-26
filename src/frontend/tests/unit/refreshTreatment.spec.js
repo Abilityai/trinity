@@ -229,9 +229,16 @@ describe('the three fixed surfaces (what only source can answer)', () => {
     // The relative helper's only reactive dependency is `lastUpdated`, which a
     // FAILED refresh does not change — so it kept serving its cached string for
     // the whole outage, which is stale-as-fresh in the one line that exists to
-    // deny it. The banner prints an absolute time; "Updated …" keeps relative.
-    expect(observability).toContain('showing the reading from {{ staleReadingTime }}')
-    expect(observability).toMatch(/staleReadingTime = computed[\s\S]{0,200}toLocaleTimeString/)
+    // deny it. "Updated …" keeps the relative form; the BANNER must not.
+    //
+    // Pinned as the RULE, not as the sentence: the banner now comes from the
+    // shared `staleBannerMessage`, which prints an absolute time by
+    // construction, and an assertion on the old wording failed for a change
+    // that made the guarantee stronger. What has to stay true is that the
+    // banner's own time is not the relative computed.
+    expect(observability).toMatch(/v-if="isStale"[\s\S]{0,160}staleReadingTime/)
+    expect(observability).not.toMatch(/v-if="isStale"[\s\S]{0,200}formatLastUpdated/)
+    expect(observability).toMatch(/staleReadingTime = computed[\s\S]{0,200}staleBannerMessage\(/)
   })
 
   it('shows a failed FIRST fetch instead of a claim about the platform config', () => {
@@ -261,5 +268,30 @@ describe('the three fixed surfaces (what only source can answer)', () => {
     }
     // ...and the chip's overlay spinner, which was also a raw-palette color.
     expect(observability).not.toContain('animate-spin h-5 w-5 text-blue-600')
+  })
+})
+
+describe('ent#253 review — the chip tells the truth about what it has', () => {
+  const panel = read('../../src/components/ObservabilityPanel.vue')
+  const store = read('../../src/stores/observability.js')
+
+  it('derives hasLoaded from the payload, not from the status code', () => {
+    // An OTel-disabled install answers 200 with `{enabled: false}` and no
+    // metrics. Setting `hasLoaded` there made the next transport failure render
+    // "showing the reading from …" when there had never been a reading.
+    expect(store).toMatch(/this\.hasLoaded = this\.hasData/)
+    expect(store).not.toMatch(/this\.hasLoaded = true/)
+  })
+
+  it('uses the shared banner helper rather than a local sentence', () => {
+    // The local version interpolated a relative time whose only reactive
+    // dependency was `lastUpdated` — so during an outage it kept serving
+    // "just now", which is the stale-as-fresh claim the banner exists to stop.
+    expect(panel).toMatch(/staleBannerMessage\(/)
+    expect(panel).toMatch(/from '@\/utils\/loadingState'/)
+  })
+
+  it('announces the stale banner', () => {
+    expect(panel).toMatch(/v-if="isStale" role="alert"/)
   })
 })
