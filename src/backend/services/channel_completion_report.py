@@ -151,6 +151,7 @@ def _channel_allows_proactive(agent_name: str, channel_id: str) -> tuple[bool, O
 def _resolve_slack(
     *,
     binding_agent: str,
+    context_client: Optional[str] = None,   # ent#457 review: portal-only, ignored here
     executing_agent: str,
     chat_id: str,
     thread: Optional[str],
@@ -199,6 +200,7 @@ def _resolve_slack(
 def _resolve_telegram(
     *,
     binding_agent: str,
+    context_client: Optional[str] = None,   # ent#457 review: portal-only, ignored here
     executing_agent: str,
     chat_id: str,
     thread: Optional[str],
@@ -287,11 +289,19 @@ def _resolve_telegram(
     return _deliver
 
 
+def _norm_email(value) -> str:
+    """Compare-form for an email. Empty for anything unusable, so a NULL on
+    either side can never match a NULL on the other and "unknown == unknown"
+    is never read as agreement."""
+    return value.strip().lower() if isinstance(value, str) and value.strip() else ""
+
+
 def _resolve_portal(
     *,
     binding_agent: str,
     executing_agent: str,
     chat_id: str,
+    context_client: Optional[str],
     thread: Optional[str],
     status: str,
     summary_or_error: Optional[str],
@@ -358,6 +368,29 @@ def _resolve_portal(
         logger.info(
             "[ent#457] portal completion suppressed: session %s has no client "
             "(execution %s)", chat_id, execution_id,
+        )
+        return None
+
+    # ent#457 review — the recipient check, and the reason the column exists.
+    #
+    # The session id says WHICH thread; it does not say the work was FOR the
+    # person who owns it. The inheritance guard that let a child carry this
+    # context checks only the AGENT (`parent_agent != agent_principal`), so an
+    # agent shared with clients X and Y could cite one of X's portal executions
+    # while serving Y: same agent, guard passes, and the terminal would file a
+    # body the agent chose into X's permanent thread. One agent holds both
+    # clients' data, so that is a disclosure between two different people.
+    #
+    # `source_channel_client` rides down the inheritance chain with the rest of
+    # the context, and the two must agree. Fails CLOSED on a missing value:
+    # every row created before this column reports NULL, and an unverifiable
+    # recipient is exactly the case that must not deliver.
+    if _norm_email(context_client) != _norm_email(client_email):
+        logger.warning(
+            "[ent#457] portal completion suppressed: execution %s carries a "
+            "channel context for a different client than session %s belongs to "
+            "(context_client_set=%s)",
+            execution_id, chat_id, bool(context_client),
         )
         return None
 
@@ -497,6 +530,13 @@ async def report_completion(
             status=status,
             summary_or_error=summary_or_error,
             execution_id=execution_id,
+            # ent#457 review: WHICH client the context belongs to. Passed to
+            # every resolver rather than to the portal one alone — a per-channel
+            # call shape is how a resolver ends up silently not receiving a
+            # field that was added for it. The channel legs ignore it: their
+            # destination is a chat id on someone else's server, not a
+            # per-person thread this platform owns.
+            context_client=getattr(row, "source_channel_client", None),
         )
         if deliver is None:
             return False        # consent / destination / token suppressed (logged)

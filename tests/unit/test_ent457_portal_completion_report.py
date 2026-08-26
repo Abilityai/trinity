@@ -63,13 +63,21 @@ def test_portal_is_a_resolver_entry_not_a_special_case(ccr):
 # Who receives it
 # ---------------------------------------------------------------------------
 
+_UNSET = object()
+
+
 def _resolve(ccr, monkeypatch, session, *, executing=AGENT, status="success",
-             summary="all done"):
+             summary="all done", context_client=_UNSET):
     from client_portal import db as portal_db
     monkeypatch.setattr(portal_db, "get_portal_session_by_id", lambda sid: session)
+    # Default to the session's own client so every pre-existing case still
+    # exercises the happy path; the recipient-check tests pass it explicitly.
+    if context_client is _UNSET:
+        context_client = (session or {}).get("client_email")
     return ccr._resolve_portal(
         binding_agent=AGENT, executing_agent=executing, chat_id=SESSION,
         thread=None, status=status, summary_or_error=summary, execution_id=EXEC,
+        context_client=context_client,
     )
 
 
@@ -114,6 +122,49 @@ def test_delivery_moves_the_thread_in_the_sidebar(ccr, monkeypatch):
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(deliver())
 
     assert touched == {"session": SESSION, "added": 1}
+
+
+def test_a_report_for_another_client_is_refused(ccr, monkeypatch):
+    """The cross-client routing finding (review, blocking #2).
+
+    The inheritance guard that lets a child carry a portal context checks the
+    AGENT only. So an agent shared with clients X and Y can cite one of X's
+    portal executions while serving Y — same agent, guard passes — and without
+    this check the terminal would file a body the agent chose into X's
+    permanent thread. One agent holds both clients' data, so it is a disclosure
+    between two different people.
+    """
+    deliver = _resolve(
+        ccr, monkeypatch,
+        {"agent_name": AGENT, "client_email": "x@example.com"},
+        context_client="y@example.com",
+    )
+    assert deliver is None
+
+
+def test_a_context_with_no_recorded_client_fails_closed(ccr, monkeypatch):
+    """Every row created before the column exists reports NULL, and an
+    unverifiable recipient is precisely the case that must not deliver.
+    `_norm_email` maps both sides of a missing value to '', so the check can
+    never read "unknown == unknown" as agreement."""
+    deliver = _resolve(
+        ccr, monkeypatch,
+        {"agent_name": AGENT, "client_email": CLIENT},
+        context_client=None,
+    )
+    assert deliver is None
+
+
+def test_the_recipient_check_ignores_case_and_padding(ccr, monkeypatch):
+    """A legitimate report must not be refused over the shape of an address —
+    the portal lowercases at sign-in, but the stamp rides an inheritance chain.
+    """
+    deliver = _resolve(
+        ccr, monkeypatch,
+        {"agent_name": AGENT, "client_email": CLIENT},
+        context_client=f"  {CLIENT.upper()} ",
+    )
+    assert deliver is not None
 
 
 def test_a_vanished_session_suppresses_rather_than_guessing(ccr, monkeypatch):

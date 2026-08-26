@@ -1452,6 +1452,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # somewhere to go. This row itself is never reported (it replies
             # inline — see INLINE_CHANNEL_TRIGGERS).
             source_channel_chat_id=session_id,
+            # ent#457 review: WHICH client this context belongs to. The session
+            # id alone says which thread; it does not say that the work was for
+            # the person who owns it, and the inheritance guard checks only the
+            # AGENT. Carried so `_resolve_portal` can refuse a report whose
+            # chain does not belong to the thread's client.
+            source_channel_client=email,
             on_resume_failure=_on_resume_failure,
             source_user_email=email,
             timeout_seconds=turn_timeout,   # #2214: the agent's own bound, resolved above
@@ -2044,6 +2050,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # ent#457: and the destination, for the same reason (both creation sites
         # or the stamp is a coin flip depending on which path made the row).
         source_channel_chat_id=session_id,
+        # ent#457 review: see the sibling site above.
+        source_channel_client=email,
     )
     execution_id = execution.id if execution else None
     if not execution_id:

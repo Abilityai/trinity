@@ -88,6 +88,7 @@ class ScheduleExecutionsMixin:
             source_channel_thread=row["source_channel_thread"] if "source_channel_thread" in row_keys else None,
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
+            source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
         )
 
     # =========================================================================
@@ -112,6 +113,7 @@ class ScheduleExecutionsMixin:
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
         source_channel_agent: str = None,
+        source_channel_client: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -129,6 +131,9 @@ class ScheduleExecutionsMixin:
             loop_id: Parent loop ID (#740) — iterations of a sequential loop
             subscription_id: Subscription active at record time (SUB-004)
             source_channel_agent: Binding-agent for channel report-back (ent#265).
+            source_channel_client: WHICH client the context belongs to — the
+                portal recipient check (ent#457 review). NULL on every
+                pre-existing row; the resolver fails closed on NULL.
                 Set ONLY when channel context is inherited from a parent
                 execution; None for direct rows (reporter falls back to the
                 executing agent).
@@ -159,6 +164,7 @@ class ScheduleExecutionsMixin:
                     source_channel_chat_id=source_channel_chat_id,
                     source_channel_thread=source_channel_thread,
                     source_channel_agent=source_channel_agent,
+                    source_channel_client=source_channel_client,
                 )
             )
 
@@ -183,6 +189,7 @@ class ScheduleExecutionsMixin:
                 source_channel_chat_id=source_channel_chat_id,
                 source_channel_thread=source_channel_thread,
                 source_channel_agent=source_channel_agent,
+                source_channel_client=source_channel_client,
             )
 
     def create_schedule_execution(

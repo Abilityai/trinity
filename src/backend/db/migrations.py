@@ -3535,6 +3535,40 @@ def _migrate_operator_queue_addressed_to(cursor, conn):
     conn.commit()
 
 
+def _migrate_channel_report_client(cursor, conn):
+    """ent#457 review — WHICH client a portal channel context belongs to.
+
+    ``source_channel_agent`` (ent#265) records the agent whose binding owns the
+    context; nothing recorded the HUMAN. That was fine while every channel leg
+    delivered to a chat identified only by a chat id, but the portal leg files
+    into a per-client thread, and its authorization to do so came from a guard
+    that checks the AGENT — ``_inherited_channel_context`` refuses only when
+    ``parent_agent != agent_principal``.
+
+    So for an agent A shared with clients X and Y, A could pass the execution id
+    of one of X's portal turns while serving Y: the guard passes (same agent),
+    the child inherits X's session, and its terminal reports into X's thread
+    with a body A chose. A is a single agent holding both clients' data, so that
+    is a cross-client disclosure between two different people.
+
+    The client identity therefore has to ride WITH the channel context rather
+    than be re-derived from it. ``source_user_email`` was rejected as a carrier:
+    ``routers/public_memory.py`` reads it to decide whose MEM-001 memory blob a
+    turn writes into, so overloading it would silently redirect memory writes.
+
+    Nullable, no default: every pre-existing row reports NULL, and the portal
+    resolver fails CLOSED on NULL rather than delivering unverified.
+
+    Mirrored by Alembic 0047_channel_report_client for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "source_channel_client",
+        "ALTER TABLE schedule_executions ADD COLUMN source_channel_client TEXT",
+    )
+
+
 def _migrate_report_audience(cursor, conn):
     """Reports gain an audience and the chat that produced them (ent#365).
 
@@ -3895,4 +3929,5 @@ MIGRATIONS = [
     ("subscription_headroom_history_table", _migrate_subscription_headroom_history_table),
     ("shared_sessions_tables_to_oss", _migrate_shared_sessions_tables_to_oss),
     ("report_audience", _migrate_report_audience),
+    ("channel_report_client", _migrate_channel_report_client),
 ]

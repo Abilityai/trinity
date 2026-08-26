@@ -689,7 +689,7 @@ _TaskDerivation = namedtuple(
 
 
 
-_NO_INHERITED_CONTEXT = (None, None, None, None)
+_NO_INHERITED_CONTEXT = (None, None, None, None, None)
 
 
 def _inherited_channel_context(request, *, current_user=None, x_source_agent=None) -> tuple:
@@ -793,6 +793,15 @@ def _inherited_channel_context(request, *, current_user=None, x_source_agent=Non
             getattr(parent, "source_channel_chat_id", None),
             getattr(parent, "source_channel_thread", None),
             getattr(parent, "source_channel_agent", None) or parent_agent,
+            # ent#457 review: the client the context belongs to, carried down
+            # with it. The guard above establishes that the CALLER owns the
+            # parent agent — it cannot establish which of that agent's clients
+            # the work is for, and for the portal leg the destination is a
+            # per-client thread. Falling back to the parent's own
+            # `source_user_email` covers the root turn, whose row predates the
+            # column being set by anything but the portal creation sites.
+            getattr(parent, "source_channel_client", None)
+            or getattr(parent, "source_user_email", None),
         )
     except Exception:  # noqa: BLE001 — never fail a dispatch over provenance
         return _NO_INHERITED_CONTEXT
@@ -1099,7 +1108,7 @@ async def create_task_execution_and_activities(
     # through, and persist it on the row itself. The provenance guard evaluates
     # the AUTHENTICATED principal (current_user) — x_source_agent is passed for
     # logging only, because for a human caller it is unvalidated client input.
-    src_channel, src_chat_id, src_thread, src_channel_agent = _inherited_channel_context(
+    src_channel, src_chat_id, src_thread, src_channel_agent, src_channel_client = _inherited_channel_context(
         request, current_user=current_user, x_source_agent=x_source_agent,
     )
 
@@ -1118,6 +1127,7 @@ async def create_task_execution_and_activities(
         source_channel_chat_id=src_chat_id,
         source_channel_thread=src_thread,
         source_channel_agent=src_channel_agent,
+        source_channel_client=src_channel_client,
     )
     execution_id = execution.id if execution else None
     idempotency_service.attach_execution(idem, execution_id)
