@@ -54,7 +54,11 @@ SENSITIVE_KEY_PATTERNS = [
 
 # Compiled patterns
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
-_sensitive_key_re = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_KEY_PATTERNS]
+# (#2398) The compiled `_sensitive_key_re` list lived here and is gone with
+# the quadratic test it fed — nothing referenced it any more. Leaving it
+# would have kept the removed regexes compiled and reachable by name, which
+# is exactly the artifact that let this bug survive #1670: something that
+# looks like the live check and is not.
 
 # --- #1661: linear KEY=value redaction -------------------------------------
 # The patterns above describe KEY NAMES (`.*TOKEN.*` means "a name containing
@@ -113,13 +117,24 @@ _KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
 # needing real regex semantics therefore fails loudly at import instead of
 # being silently reduced to a check that redacts less — the guard #1670 should
 # have carried.
+# Characters that carry no regex meaning, so a body made only of these is a
+# literal and containment is exactly equivalent to the old anchored search.
+_PLAIN_LITERAL_RE = re.compile(r'[A-Za-z0-9_-]+')
+
+
 def _literal_from_pattern(pattern: str) -> str:
     body = pattern
     if body.startswith(".*"):
         body = body[2:]
     if body.endswith(".*"):
         body = body[:-2]
-    if not body or re.escape(body) != body:
+    # An explicit safe set, NOT `re.escape(body) != body`. That was the first
+    # form and it is wrong in the dangerous direction for a module imported
+    # everywhere: `re.escape` also escapes `-`, which is not a metacharacter
+    # outside a character class — so adding a perfectly literal `.*API-KEY.*`
+    # would have raised at import and taken the whole process down at boot.
+    # `.` IS special, so `A.B` is still (correctly) refused.
+    if not body or not _PLAIN_LITERAL_RE.fullmatch(body):
         raise ValueError(
             f"sensitive-key pattern {pattern!r} is not a plain `.*LITERAL.*` / "
             f"`LITERAL.*` form. #2398 replaced the quadratic regex test with "

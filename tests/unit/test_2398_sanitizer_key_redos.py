@@ -92,6 +92,20 @@ def test_a_long_kv_line_sanitizes_quickly_end_to_end():
     assert "abc123" not in out
 
 
+def test_a_hyphenated_literal_is_accepted():
+    """Caught in self-review. The guard's first form was
+    `re.escape(body) != body`, which ALSO escapes `-` — not a metacharacter
+    outside a character class. So adding a perfectly literal `.*API-KEY.*`
+    would have raised at import, and this module is imported everywhere: a
+    benign pattern addition would have crash-looped the platform at boot.
+
+    Fails in the loud direction rather than the silent one, but "loud" here
+    means "nothing starts".
+    """
+    assert _literal_from_pattern(r'.*API-KEY.*') == "API-KEY"
+    assert _literal_from_pattern(r'X-AUTH-TOKEN.*') == "X-AUTH-TOKEN"
+
+
 def test_a_pattern_that_is_not_a_plain_literal_fails_loudly():
     """The derivation is only safe while every pattern is `.*LITERAL.*`.
 
@@ -103,6 +117,12 @@ def test_a_pattern_that_is_not_a_plain_literal_fails_loudly():
         _literal_from_pattern(r'.*(TOKEN|SECRET).*')
     with pytest.raises(ValueError, match="not a plain"):
         _literal_from_pattern(r'.*.*')
+    # `.` IS special, so this stays refused — the guard narrowed to accept
+    # hyphens must not have gone on to accept real metacharacters.
+    with pytest.raises(ValueError, match="not a plain"):
+        _literal_from_pattern(r'.*A.B.*')
+    with pytest.raises(ValueError, match="not a plain"):
+        _literal_from_pattern(r'.*TOKEN+.*')
 
 
 def test_every_shipped_pattern_derives_a_literal():
@@ -130,3 +150,16 @@ def test_the_vendored_agent_copy_got_the_same_fix():
     )
     assert "_literal_from_pattern" in body
     assert "any(r.search(key) for r in" not in body
+
+
+def test_the_removed_quadratic_regexes_are_not_left_compiled():
+    """Self-review finding: `_sensitive_key_re` compiled the very patterns this
+    change stopped using, and nothing referenced it any more.
+
+    Dead code would be a style note anywhere else. Here it is the specific
+    artifact that let this bug survive #1670 — a module-level name that looks
+    like the live check and is not, sitting next to the one that is.
+    """
+    from utils import credential_sanitizer as mod
+    assert not hasattr(mod, "_sensitive_key_re")
+    assert not hasattr(mod, "_SENSITIVE_KEY_SUFFIX_RE")
