@@ -375,32 +375,54 @@ def test_access_gate_still_admits_accessible_caller(client):
 # --------------------------------------------------------------------------- #
 # messageId dedup scoping (cross-caller disclosure)
 # --------------------------------------------------------------------------- #
+def _principal(**kw):
+    """A real `models.User`, so these tests cannot pass on a field the live
+    principal lacks (#2323). Building it from the actual model is the point:
+    drop `mcp_key_id` from `User` again and every assertion below goes red."""
+    from models import User
+    return User(id=1, role="user", **kw)
+
+
+def test_idem_scope_falls_back_to_username_only_without_a_key():
+    """A JWT principal carries no key id — the fallback is correct there, and
+    only there. This pins WHICH branch is meant to be exercised, so the
+    key-id branch cannot silently become unreachable again (#2323)."""
+    jwt_user = _principal(username="alice")
+    assert a2a._a2a_idem_scope("bot", jwt_user).endswith(":alice")
+    keyed = _principal(username="alice", mcp_key_id="k-alice")
+    assert a2a._a2a_idem_scope("bot", keyed).endswith(":k-alice")
+
+
 def test_idem_scope_is_per_caller_not_just_per_agent():
     """`messageId` is peer-controlled and only unique *per client* — the A2A
     spec's own examples use "req-1". Two callers sharing an agent-only scope
     means caller B replays caller A's snapshot (A's full response text) and B's
     task never runs. The scope must carry the caller principal."""
-    a = types.SimpleNamespace(username="alice", mcp_key_id="k-alice")
-    b = types.SimpleNamespace(username="bob", mcp_key_id="k-bob")
+    # #2323 — a REAL `models.User`, not a SimpleNamespace. The stub carried
+    # `mcp_key_id`, which `User` did not have until #2323, so this file asserted
+    # a distinction production has never made: `_a2a_idem_scope` fell through to
+    # `username` on every real request.
+    a = _principal(username="alice", mcp_key_id="k-alice")
+    b = _principal(username="bob", mcp_key_id="k-bob")
     assert a2a._a2a_idem_scope("bot", a) != a2a._a2a_idem_scope("bot", b)
 
 
 def test_idem_scope_distinguishes_agent_scoped_keys_of_one_owner():
     """Agent-scoped keys all resolve to the same owner user, so username alone
     would collapse two calling agents into one namespace."""
-    one = types.SimpleNamespace(username="owner", mcp_key_id="k-agent-1")
-    two = types.SimpleNamespace(username="owner", mcp_key_id="k-agent-2")
+    one = _principal(username="owner", mcp_key_id="k-agent-1")
+    two = _principal(username="owner", mcp_key_id="k-agent-2")
     assert a2a._a2a_idem_scope("bot", one) != a2a._a2a_idem_scope("bot", two)
 
 
 def test_idem_scope_is_stable_for_same_caller():
     """Dedup must still work — the same caller's repeat must land in one scope."""
-    u = types.SimpleNamespace(username="alice", mcp_key_id="k-alice")
+    u = _principal(username="alice", mcp_key_id="k-alice")
     assert a2a._a2a_idem_scope("bot", u) == a2a._a2a_idem_scope("bot", u)
 
 
 def test_idem_scope_separates_agents_for_same_caller():
-    u = types.SimpleNamespace(username="alice", mcp_key_id="k-alice")
+    u = _principal(username="alice", mcp_key_id="k-alice")
     assert a2a._a2a_idem_scope("bot", u) != a2a._a2a_idem_scope("other", u)
 
 

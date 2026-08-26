@@ -128,8 +128,6 @@ async def chat_with_agent(
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
-    x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
 ):
     """
@@ -169,8 +167,6 @@ async def chat_with_agent(
             current_user=current_user,
             x_source_agent=x_source_agent,
             x_via_mcp=x_via_mcp,
-            x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name,
             idempotency_key=idempotency_key,
         )
     except CircuitOpen as e:
@@ -221,8 +217,6 @@ async def chat_with_agent(
         current_user=current_user,
         x_source_agent=x_source_agent,
         x_via_mcp=x_via_mcp,
-        x_mcp_key_id=x_mcp_key_id,
-        x_mcp_key_name=x_mcp_key_name,
         idem=idem,
         chat_execution_id=chat_execution_id,
         capacity_result=capacity_result,
@@ -249,7 +243,6 @@ async def chat_with_agent(
             request=request,
             current_user=current_user,
             x_source_agent=x_source_agent,
-            x_mcp_key_name=x_mcp_key_name,
             triggered_by=triggered_by,
             task_execution_id=task_execution_id,
             _chat_subscription_id=_chat_subscription_id,
@@ -285,8 +278,6 @@ async def execute_parallel_task(
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
-    x_mcp_key_id: Optional[str] = Header(None),
-    x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
     x_event_trigger: Optional[str] = Header(None),
     x_internal_secret: Optional[str] = Header(None),
@@ -379,8 +370,6 @@ async def execute_parallel_task(
             container=container,
             x_source_agent=x_source_agent,
             x_via_mcp=x_via_mcp,
-            x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name,
             idempotency_key=idempotency_key,
             x_event_trigger=x_event_trigger,
             x_internal_secret=x_internal_secret,

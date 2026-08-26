@@ -42,11 +42,12 @@ def _load():
     return None
 
 
-def _user(agent_name=None, uid=1, email="u@example.com", connector_agent=None):
+def _user(agent_name=None, uid=1, email="u@example.com", connector_agent=None, mcp_scope=None):
     return SimpleNamespace(
         id=uid,
         agent_name=agent_name,
         connector_agent=connector_agent,
+        mcp_scope=mcp_scope,
         email=email,
         username="u",
     )
@@ -65,7 +66,7 @@ def _create(a, user, data, *, idem=None, src=None, keyid=None):
     return asyncio.run(
         reminders.create_reminder_endpoint(
             data, name=a, current_user=user,
-            idempotency_key=idem, x_source_agent=src, x_mcp_key_id=keyid,
+            idempotency_key=idem, x_source_agent=src,
         )
     )
 

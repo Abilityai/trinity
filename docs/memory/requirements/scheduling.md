@@ -1285,3 +1285,85 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   Loops panel UI. Unset = `abort`, a strict no-op for existing callers.
 
 ---
+
+### 38.6 Per-run timeout is bounded by the agent's own ceiling (ent#338)
+- **Status**: ✅ Implemented
+- **Implements**: trinity-enterprise#338
+- **Description**: `agent_ownership.execution_timeout_seconds` is the per-agent
+  ceiling, and **nothing downstream re-applied it** for loops:
+  `task_execution_service` reads the cap only when the caller passed no
+  `timeout_seconds`, so an explicit `timeout_per_run` went straight to dispatch.
+  A loop could therefore run iterations *longer* than the ceiling its owner set —
+  a bypass rather than a number displayed wrongly, and one that multiplies,
+  since `max_runs` reaches 100.
+- **Behaviour**: `POST /api/agents/{name}/loops` refuses `timeout_per_run > cap`
+  with **400** and a structured `detail`
+  (`error: "loop_timeout_exceeds_agent_cap"`, `agent_cap_seconds`,
+  `requested_seconds`) so a UI can show the real bound instead of guessing.
+  Equal to the cap is allowed.
+- **Refuse, not clamp** — mirroring #929 for schedules, the closest sibling
+  (explicit, human-set config). ent#458 puts these guardrails on screen *before*
+  Start, so a silent clamp would begin a loop whose bounds differ from the ones
+  the user was shown. Reminders (§10.14, #1296) clamp instead, deliberately: there
+  the timeout comes from an agent's own mid-turn request with no human reading a
+  form.
+- **Ordering**: the cap check runs **before** #1156's deadline comparison, so
+  that comparison can never quote a per-run timeout the caller is not allowed to
+  have. Pinned in `tests/unit/test_ent338_loop_timeout_cap.py`.
+- **Fail-open on an unreadable cap**: a settings-read failure skips the check
+  rather than blocking the loop. This is a resource ceiling, not a security
+  gate, and the pre-ent#338 behaviour was no check at all — so degrading to that
+  on a DB blip costs nothing that was not already true, while failing closed
+  would take loops down whenever the settings read did.
+
+### 38.7 Loops in the Workspace — run and watch from chat (ent#458)
+- **Status**: ✅ Implemented (AC #3 deferred — see below)
+- **Implements**: trinity-enterprise#458
+- **Description**: A workspace user starts, watches and stops loops from the
+  conversation they belong to. A collapsed strip above the composer stays quiet
+  until an agent in this chat is looping, then shows each participating agent's
+  active loops, how much of each guardrail is left, and a Stop that is always
+  available.
+- **No new backend surface.** ent#458 scopes this to the **platform-authenticated
+  door** (ent#78's auth-path invariant), so the panel calls the existing operator
+  loop endpoints with the operator's own JWT. An external client holding a portal
+  token never mounts it — hidden, not disabled, because a disabled control
+  advertises a capability that credential can never satisfy.
+- **Guardrails are visible before Start** (AC #1): the form shows the run limit
+  and cost budget as fields, and states the self-stopping defaults it does not
+  ask about (`no_progress_threshold`, `max_consecutive_failures`). Those values
+  mirror `models.StartLoopRequest` and are **pinned against it** by
+  `portalLoops.spec.js`, since they are cross-language and cannot be imported.
+  `max_runs` is deliberately excluded from that mirror: it is REQUIRED on the
+  server, so the form's `10` is a suggestion, and pinning it as a "default"
+  would enshrine a fiction.
+- **Honest terminal words** (AC #3's vocabulary, applied to the live panel):
+  `stop_reason` is never flattened to "Stopped" — cost budget, time limit,
+  no-progress, agent-reported-done, user-stopped and max-runs-reached are six
+  different situations with six different next actions, and `max_runs_reached`
+  reads as **Done** rather than "Stopped" on both the completed and stopped rows.
+- **Headroom reports `null` for a guardrail that was never set**, never 0% or
+  100%: "no budget" and "budget untouched" are different facts and a bar drawn
+  at either extreme asserts the wrong one. An overshoot clamps to the end of the
+  track, because the runtime lets the current run finish and cost can legitimately
+  exceed its budget (§38.3).
+- **Live, degrading to poll** (AC #4): loop events are already broadcast
+  fleet-wide and the Workspace runs inside the same app shell, so the existing
+  global WebSocket carries them — the one handler now routes each event to
+  **two** stores, the operator one filtered to the agent on Agent Detail and the
+  workspace one filtered to the chat's participants (the `reportsStore` +
+  `fleetReportsStore` shape, #918). A 12s backstop poll runs **only while
+  something is active**, so an idle tab issues no traffic, and an unknown status
+  is treated as NOT active so the panel can never sit claiming work is in flight
+  forever.
+- **Partial failure keeps the data**: one unreachable agent in a room degrades to
+  "this list may be incomplete" rather than blanking the panel (#2382's rule).
+- **State**: `stores/portalLoops.js`, participant-scoped — deliberately a second
+  store rather than a reuse of the agent-at-a-time `stores/loops.js`, which the
+  operator panel owns; a shared singleton would have each surface clearing the
+  other's list on navigation (the `skillsLibrary` vs `skills` split, ent#263).
+- **Deferred**: AC #3 (loop history in the Activity tab) waits on ent#457, which
+  builds that tab. Stated rather than silently dropped: this issue explicitly
+  says history "lives in #457's Activity tab" and must not grow a parallel
+  surface, so the honest sequencing is to render there once it exists.
+
