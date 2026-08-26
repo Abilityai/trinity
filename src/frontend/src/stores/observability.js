@@ -182,14 +182,25 @@ export const useObservabilityStore = defineStore('observability', {
         }
 
         this.lastUpdated = new Date()
-        // ent#253 review: `hasLoaded` means WE HAVE A READING, not "the request
-        // returned 200". It gates `isStale`, so setting it on every success
-        // made an OTel-disabled install — which answers 200 with
-        // `{enabled: false}` and no metrics — render "Couldn't refresh —
-        // showing the reading from …" on the next transport failure, when
-        // there had never been a reading to show. Derived from the payload so
-        // the name is true.
-        this.hasLoaded = this.hasData
+        // `hasLoaded` means A REQUEST COMPLETED — deliberately, and it is
+        // MONOTONIC. A re-review pass changed it to `this.hasData` to stop the
+        // stale banner claiming "showing the reading from …" on an install
+        // that never had a reading; that was wrong twice over.
+        //
+        // Redundant: `isStale` in the panel already carries `&& hasData`, so
+        // the banner was guarded at the point that makes the claim.
+        //
+        // And harmful: `firstLoad` is `loading && !hasLoaded`, so a flag that
+        // goes false again on every no-data poll re-arms the first-load
+        // placeholder every 60 seconds — the exact "disturbs on every tick"
+        // gate this branch exists to delete. It also breaks the catch below,
+        // whose `if (!this.hasLoaded)` is meant to mean "before any first
+        // success" and would start meaning "no metrics right now".
+        //
+        // Two different questions: "have we completed a request" (placement,
+        // placeholders) and "do we have data to show" (claims about data). One
+        // flag cannot answer both, and `hasData` already answers the second.
+        this.hasLoaded = true
         this.refreshError = null
 
       } catch (error) {

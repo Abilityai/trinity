@@ -275,12 +275,14 @@ describe('ent#253 review — the chip tells the truth about what it has', () => 
   const panel = read('../../src/components/ObservabilityPanel.vue')
   const store = read('../../src/stores/observability.js')
 
-  it('derives hasLoaded from the payload, not from the status code', () => {
-    // An OTel-disabled install answers 200 with `{enabled: false}` and no
-    // metrics. Setting `hasLoaded` there made the next transport failure render
-    // "showing the reading from …" when there had never been a reading.
-    expect(store).toMatch(/this\.hasLoaded = this\.hasData/)
-    expect(store).not.toMatch(/this\.hasLoaded = true/)
+  it('does not let the stale banner claim a reading that never existed', () => {
+    // SUPERSEDED by the re-review, and worth recording why. This first asserted
+    // `hasLoaded = hasData`, which was redundant AND harmful: `isStale` already
+    // carries `&& hasData` — the guard belongs at the claim — while `firstLoad`
+    // is `loading && !hasLoaded`, so a payload-derived flag re-armed the
+    // first-load placeholder on every no-data poll. The rule that matters is
+    // that the BANNER gates on data; where `hasLoaded` is set is not the rule.
+    expect(panel).toMatch(/isStale = computed[\s\S]{0,200}?hasData/)
   })
 
   it('uses the shared banner helper rather than a local sentence', () => {
@@ -293,5 +295,30 @@ describe('ent#253 review — the chip tells the truth about what it has', () => 
 
   it('announces the stale banner', () => {
     expect(panel).toMatch(/v-if="isStale" role="alert"/)
+  })
+})
+
+describe('ent#253 re-review — an error must not outlive its request', () => {
+  const dash = read('../../src/components/DashboardPanel.vue')
+  const metrics = read('../../src/components/MetricsPanel.vue')
+  const store = read('../../src/stores/observability.js')
+
+  it.each([['DashboardPanel', dash], ['MetricsPanel', metrics]])(
+    '%s drops a failure that landed after the agent stopped', (_name, sfc) => {
+      // The watcher clears `loadError` synchronously on the stop transition,
+      // but the catch lands LATER and used to write unconditionally — so
+      // stopping an agent mid-fetch reproduced the blocking symptom by
+      // ordering alone, on exactly the wedged-agent case an operator hits.
+      expect(sfc).toMatch(/catch \(error\) \{[\s\S]{0,1200}?agentStatus !== 'running'\) return[\s\S]{0,400}?loadError\.value = error/)
+    })
+
+  it('keeps hasLoaded monotonic, so the placeholder cannot re-arm each poll', () => {
+    // `firstLoad` is `loading && !hasLoaded`. A flag derived from the payload
+    // goes false again on every no-data poll, re-arming the first-load
+    // placeholder every 60s — the "disturbs on every tick" gate this branch
+    // deletes. The stale banner is guarded by `hasData` in the panel instead,
+    // which is where the claim about data is actually made.
+    expect(store).toMatch(/this\.hasLoaded = true/)
+    expect(store).not.toMatch(/this\.hasLoaded = this\.hasData/)
   })
 })

@@ -468,6 +468,13 @@ const loadDashboard = async () => {
   } catch (error) {
     // Keep what the agent last published; a failed refresh does not unpublish
     // it. The banner above says the reading is stale and offers the retry.
+    // Review: a request that resolves AFTER the agent stopped must not
+    // write its error. The `agentStatus` watcher clears `loadError`
+    // synchronously on the transition, but this catch lands later and used to
+    // write unconditionally — so stopping an agent mid-fetch reproduced the
+    // blocking symptom by ordering alone, which is exactly the wedged-agent
+    // case an operator is most likely to hit.
+    if (props.agentStatus !== 'running') return
     loadError.value = error?.response?.data?.detail || error?.message || 'Request failed'
   } finally {
     loading.value = false
