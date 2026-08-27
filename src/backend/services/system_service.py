@@ -51,6 +51,12 @@ _KNOWN_MANIFEST_KEYS = frozenset({
     "default_tags", "system_view",
 })
 
+# #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
+# dropped everything else silently.
+_KNOWN_AGENT_KEYS = frozenset({
+    "template", "resources", "folders", "schedules", "tags",
+})
+
 
 # --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
 #
@@ -133,11 +139,21 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
 
     # Parse agents
     agents = {}
+    # #2373: per-agent unknown keys, collected the way top-level ones already are
+    # (ent#126). Five keys are read and everything else was dropped in SILENCE —
+    # `credentials:`, `skills:`, `display_label:` all vanished without a word,
+    # and those are precisely the fields people try first. A manifest that half
+    # works while saying nothing is worse than one that is refused.
+    unknown_agent_keys = {}
     for agent_name, agent_config in data["agents"].items():
         if not isinstance(agent_config, dict):
             raise ValueError(f"Agent '{agent_name}' config must be an object")
         if "template" not in agent_config:
             raise ValueError(f"Agent '{agent_name}' missing required field: template")
+
+        extra = sorted(str(k) for k in set(agent_config.keys()) - _KNOWN_AGENT_KEYS)
+        if extra:
+            unknown_agent_keys[str(agent_name)] = extra
 
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
@@ -191,6 +207,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         # single non-string key fails the List[str] field with a raw Pydantic
         # dump. Both are exactly the unnamed-500 this warning exists to prevent.
         unknown_keys=sorted(str(k) for k in set(data.keys()) - _KNOWN_MANIFEST_KEYS),
+        unknown_agent_keys=unknown_agent_keys,
     )
 
 
@@ -319,6 +336,14 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     # rejecting would break manifests that deploy today. The common case is a
     # near-miss key name (`trinity_prompt` for `prompt`) whose intent is lost
     # with no signal anywhere.
+    if manifest.unknown_agent_keys:
+        for _agent, _keys in sorted(manifest.unknown_agent_keys.items()):
+            warnings.append(
+                f"Agent '{_agent}': ignored unknown key(s): {', '.join(_keys)}. "
+                f"Recognised per-agent keys are: "
+                f"{', '.join(sorted(_KNOWN_AGENT_KEYS))}."
+            )
+
     if manifest.unknown_keys:
         warnings.append(
             "Ignored unknown top-level key(s): "
@@ -733,6 +758,73 @@ def create_schedules(
 # ORG-001 Phase 4: Tags and System View Functions
 # ============================================================================
 
+def _manifest_default_resources() -> dict:
+    """The default resources a manifest agent gets when it declares none (#2373).
+
+    Deploy hardcoded `{"cpu": "2", "memory": "4g"}` while `_preflight_template`
+    validated against `settings_service.get_agent_default_resources()`, so
+    preview and deploy disagreed the moment an admin moved the fleet default.
+    Both now resolve through the create path's own `_get_default_resource`.
+
+    Imported lazily for the same reason `_default_create_agent_fn` is:
+    `agent_service.crud` imports back into this module's neighbourhood.
+    """
+    from services.agent_service.crud import _get_default_resource
+    return {"cpu": _get_default_resource("cpu"),
+            "memory": _get_default_resource("memory")}
+
+
+def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
+    """Which agents belong to `system_name` (#2373).
+
+    THE ONE membership predicate. `get_system`, `restart_system` and
+    `export_manifest` each matched `startswith(f"{system_name}-")`, so an
+    operation on `acme` also captured every agent of a system named
+    `acme-extra` — including `restart`, which stops and starts containers. Three
+    copies of a wrong rule; this is one rule, and it is also the prerequisite
+    for the system teardown verb, where the same collision would delete.
+
+    Tags first, because `deploy_manifest` already applies the system name as a
+    tag to every member (`configure_tags`) — that is a RECORD of membership,
+    where a name prefix is an inference from a naming convention.
+
+    The prefix is kept only as a fallback for systems deployed before tagging,
+    and it is narrowed: an agent is excluded when it carries some other tag `T`
+    whose own prefix claims it (`name.startswith(f"{T}-")`). So an `acme-extra`
+    agent, tagged by its own deploy, is never captured by an operation on
+    `acme` even on the fallback path.
+
+    Residual, stated rather than hidden: two systems deployed BEFORE tagging,
+    where one name is a prefix of the other, remain ambiguous — neither carries
+    a tag to distinguish them. Tagging is what removes the ambiguity, and every
+    system deployed since ent#124 has it.
+    """
+    if not system_name or not agent_names:
+        return []
+    try:
+        tags_by_agent = db.get_tags_for_agents(list(agent_names)) or {}
+    except Exception as e:  # noqa: BLE001 — membership must not 500 on a tag read
+        logger.warning("system membership: tag read failed (%s); using prefix", e)
+        tags_by_agent = {}
+
+    tagged = [n for n in agent_names if system_name in (tags_by_agent.get(n) or [])]
+    if tagged:
+        return tagged
+
+    prefix = f"{system_name}-"
+    out = []
+    for name in agent_names:
+        if not name.startswith(prefix):
+            continue
+        claimed_elsewhere = any(
+            t != system_name and name.startswith(f"{t}-")
+            for t in (tags_by_agent.get(name) or [])
+        )
+        if not claimed_elsewhere:
+            out.append(name)
+    return out
+
+
 def configure_tags(
     system_name: str,
     agent_names: Dict[str, str],  # {short_name: final_name}
@@ -880,6 +972,13 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     Returns:
         YAML string representing the system configuration
     """
+    # #2373: the members, resolved ONCE through the shared predicate. The
+    # permission branches below decide what is "inside the system", and they
+    # must agree with `get_system`/`restart_system` about that — the caller
+    # already filtered `agents`, so this is the same set, named so the
+    # comprehensions can test membership instead of re-deriving it from a prefix.
+    member_names = set(system_member_names(system_name, [a['name'] for a in agents]))
+
     # Extract short names (remove system prefix)
     agent_configs = {}
     # Agents with no template label, whose manifest entry is inferred (#1759).
@@ -1004,13 +1103,21 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                         manifest_dict["permissions"] = {"preset": "full-mesh"}
                     else:
                         # Export explicit permissions
+                        # #2373: the sibling branch below filters on membership
+                        # and this one did not — a permission edge pointing
+                        # OUTSIDE the system was blind-sliced into a garbage
+                        # short name, which then failed validate_manifest's
+                        # "unknown agent in permissions" check on re-deploy. The
+                        # round trip was broken by the export, not the import.
                         explicit_perms = {}
+                        _member_set = set(member_names)
                         for agent in agents:
                             short_name = agent['name'][len(system_name) + 1:]
                             agent_perms = db.get_agent_permissions(agent['name'])
                             targets = [
                                 p["target_agent"][len(system_name) + 1:]
                                 for p in agent_perms
+                                if p["target_agent"] in _member_set
                             ]
                             if targets:
                                 explicit_perms[short_name] = targets
@@ -1023,10 +1130,13 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                     for agent in agents:
                         short_name = agent['name'][len(system_name) + 1:]
                         agent_perms = db.get_agent_permissions(agent['name'])
+                        # #2373: membership, not the prefix — `acme` must not
+                        # export an edge to an `acme-extra` agent as though it
+                        # were its own member.
                         targets = [
                             p["target_agent"][len(system_name) + 1:]
                             for p in agent_perms
-                            if p["target_agent"].startswith(f"{system_name}-")
+                            if p["target_agent"] in set(member_names)
                         ]
                         if targets:
                             explicit_perms[short_name] = targets
@@ -1037,13 +1147,15 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     except Exception as e:
         logger.warning(f"Failed to export permissions for system {system_name}: {e}")
 
-    # Get global trinity_prompt if it exists
-    try:
-        trinity_prompt = db.get_setting_value("trinity_prompt")
-        if trinity_prompt:
-            manifest_dict["prompt"] = trinity_prompt
-    except Exception as e:
-        logger.warning(f"Failed to get trinity_prompt: {e}")
+    # #2373: the instance-global `trinity_prompt` is NOT exported.
+    #
+    # It was injected as the manifest's `prompt:`, so deploying an exported
+    # manifest on another instance overwrote THAT instance's platform-wide
+    # prompt with this one's — a fleet-wide side effect from what reads like a
+    # copy of one system. Nothing records whether the source system ever set a
+    # prompt, so there is no honest way to tell "this system's prompt" from
+    # "whatever this instance happens to have configured"; the only correct
+    # export of an unknown is to omit it.
 
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -1610,7 +1722,14 @@ async def deploy_manifest(
                 agent_config = AgentConfig(
                     name=final_name,
                     template=config.template,
-                    resources=config.resources or {"cpu": "2", "memory": "4g"}
+                    # #2373: the ADMIN-CONFIGURABLE default, same resolver the
+                    # preflight validates against. This was hardcoded
+                    # `{"cpu": "2", "memory": "4g"}`, so preview validated one
+                    # value and deploy created another the moment an admin moved
+                    # the fleet default through
+                    # `PUT /api/settings/agent-defaults/resources` — the one spot
+                    # that escaped ent#126's pure-resolver no-drift pattern.
+                    resources=config.resources or _manifest_default_resources()
                 )
 
                 # Create agent using existing internal function

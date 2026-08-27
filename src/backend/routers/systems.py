@@ -18,6 +18,7 @@ from models import (
 from database import db
 from dependencies import get_current_user, require_role
 from services.system_service import (
+    system_member_names,
     deploy_manifest,
     list_bundled_manifests,
     read_bundled_manifest,
@@ -212,10 +213,12 @@ async def get_system(
         agents = get_accessible_agents(current_user)
 
         # Filter agents by system prefix
-        system_agents = [
-            agent for agent in agents
-            if agent['name'].startswith(f"{system_name}-")
-        ]
+        # #2373: membership by TAG (deploy records it), prefix only as a
+        # narrowed fallback. `startswith(f"{system_name}-")` also captured every
+        # agent of a system named `acme-extra` — including on `restart`, which
+        # stops and starts containers.
+        _members = set(system_member_names(system_name, [a['name'] for a in agents]))
+        system_agents = [agent for agent in agents if agent['name'] in _members]
 
         if not system_agents:
             raise HTTPException(
@@ -247,9 +250,14 @@ async def get_system(
                         "consume": folder_config["consume_enabled"]
                     }
 
-                # Get schedules
-                schedules = db.get_agent_schedules(agent['name'])
-                agent_detail["schedules"] = schedules
+                # #2373: `db.get_agent_schedules` DOES NOT EXIST — the facade
+                # exposes `list_agent_schedules`, and `database.py` deliberately
+                # has no `__getattr__` fallback. The AttributeError was swallowed
+                # by the `except Exception` below, so every response omitted
+                # `schedules` for every agent and logged one warning each, while
+                # `tests/test_systems.py` never asserted on the key. Exactly the
+                # failure mode the db facade's own comment warns about.
+                agent_detail["schedules"] = db.list_agent_schedules(agent['name'])
 
             except Exception as e:
                 logger.warning(f"Failed to get details for agent {agent['name']}: {e}")
@@ -273,13 +281,21 @@ async def get_system(
 async def restart_system(
     system_name: str,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role("creator"))
 ):
     """
     Restart all agents in a system.
 
-    Finds all agents with the given system prefix and stops then starts them.
-    Useful after configuration changes.
+    Stops and starts every member. Useful after configuration changes.
+
+    #2373: gated on `require_role("creator")`. It was bare `get_current_user` —
+    below the gate on `POST /deploy` and below even the READ-ONLY
+    bundled-catalog routes — so any authenticated principal, including
+    `role: user`, could stop and start every container in any system whose
+    agents it could see. A mutating fleet-wide verb under a lighter gate than
+    the catalog it reads is an oversight, not a decision. `require_role` also
+    rejects agent principals since #1890, which matters here because an
+    agent-scoped MCP key resolves to its owner carrying the owner's role.
     """
     try:
         from routers.agents import get_accessible_agents, start_agent_internal
@@ -289,10 +305,12 @@ async def restart_system(
         agents = get_accessible_agents(current_user)
 
         # Filter agents by system prefix
-        system_agents = [
-            agent for agent in agents
-            if agent['name'].startswith(f"{system_name}-")
-        ]
+        # #2373: membership by TAG (deploy records it), prefix only as a
+        # narrowed fallback. `startswith(f"{system_name}-")` also captured every
+        # agent of a system named `acme-extra` — including on `restart`, which
+        # stops and starts containers.
+        _members = set(system_member_names(system_name, [a['name'] for a in agents]))
+        system_agents = [agent for agent in agents if agent['name'] in _members]
 
         if not system_agents:
             raise HTTPException(
@@ -353,10 +371,12 @@ async def get_system_manifest(
         agents = get_accessible_agents(current_user)
 
         # Filter agents by system prefix
-        system_agents = [
-            agent for agent in agents
-            if agent['name'].startswith(f"{system_name}-")
-        ]
+        # #2373: membership by TAG (deploy records it), prefix only as a
+        # narrowed fallback. `startswith(f"{system_name}-")` also captured every
+        # agent of a system named `acme-extra` — including on `restart`, which
+        # stops and starts containers.
+        _members = set(system_member_names(system_name, [a['name'] for a in agents]))
+        system_agents = [agent for agent in agents if agent['name'] in _members]
 
         if not system_agents:
             raise HTTPException(

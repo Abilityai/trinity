@@ -2258,6 +2258,60 @@ CLAUDE.md may name its collaborators literally (`acme-scout`,
 deployed names are `f"{manifest.name}-{short}"`, a renamed system or short name
 deploys a healthy fleet that cannot talk to itself.
 
+## Post-deploy endpoints (#2373)
+
+The four post-deploy endpoints were essentially untouched since 2025 while every
+commit since ent#124 hardened the *deploy* half. What changed:
+
+**Membership is one predicate — `system_service.system_member_names`.**
+`get_system`, `restart_system` and `export_manifest` each matched
+`startswith(f"{system_name}-")`, so an operation on `acme` also captured every
+agent of a system named `acme-extra` — including `restart`, which stops and
+starts containers. Tags come first, because `configure_tags` already applies the
+system name to every member: a tag is a **record** of membership where a prefix
+is an inference from a naming convention. The prefix survives only as a fallback
+for pre-tag deployments, and it is narrowed — an agent carrying some other tag
+`T` whose own prefix claims it (`name.startswith(f"{T}-")`) is excluded, so a
+tagged `acme-extra` agent is never captured by `acme` even on that path. A tag
+read that fails degrades to the prefix rather than 500ing. Residual, stated
+rather than hidden: two systems deployed BEFORE tagging where one name is a
+prefix of the other stay ambiguous — nothing distinguishes them. This predicate
+is also the prerequisite for the teardown verb, where the same collision would
+delete rather than restart.
+
+**`GET /{name}` returns real schedules.** It called `db.get_agent_schedules`,
+which does not exist — the facade exposes `list_agent_schedules`, and
+`database.py` deliberately has no `__getattr__` fallback. The `AttributeError`
+was swallowed by the surrounding `except Exception`, so every response omitted
+`schedules` for every agent and logged one warning each, while the suite never
+asserted on the key. Exactly the failure mode the db facade's own comment warns
+about.
+
+**`POST /{name}/restart` is `require_role("creator")`.** It was bare
+`get_current_user` — below `POST /deploy` and below even the read-only
+bundled-catalog routes — so any authenticated principal could stop and start
+every container in a system whose agents it could see. `require_role` also
+rejects agent principals (#1890), which matters because an agent-scoped MCP key
+resolves to its owner carrying the owner's role.
+
+**Export round-trips.** The non-full-mesh permissions branch sliced
+`target_agent[len(system_name)+1:]` with no membership filter, so an edge
+pointing outside the system exported as a garbage short name that then failed
+`validate_manifest`'s unknown-agent check on re-deploy — the export broke its
+own round trip. Both branches now test membership. And the export no longer
+embeds the instance-global `trinity_prompt` as the manifest's `prompt:`:
+deploying that elsewhere overwrote *that* instance's platform-wide prompt, and
+since nothing records whether the source system ever set one, the only honest
+export of an unknown is to omit it.
+
+**Preview hardenings.** Unknown PER-AGENT keys now warn like top-level ones
+(ent#126) — `credentials:`, `skills:`, `display_label:` are the fields users try
+first and they vanished in silence. And preview and deploy resolve the identical
+resource default through `_manifest_default_resources()` → the create path's
+`_get_default_resource`; deploy hardcoded `{"cpu": "2", "memory": "4g"}` while
+the preflight validated against the admin-configurable value, so they disagreed
+the moment an admin moved the fleet default.
+
 ## Revision History
 
 | Date | Changes |

@@ -961,6 +961,11 @@ class SystemManifest(BaseModel):
     # nothing. Warned, never rejected — rejecting would 400 manifests that
     # deploy today.
     unknown_keys: List[str] = []
+    # #2373: the same record, one level down. `parse_manifest` reads five
+    # per-agent keys and dropped the rest in silence, so `agents.x.credentials:`
+    # / `skills:` / `display_label:` vanished with no warning while a top-level
+    # typo already warned. {agent short name: [unknown keys]}
+    unknown_agent_keys: Dict[str, List[str]] = {}
 
 
 class SystemDeployRequest(BaseModel):
