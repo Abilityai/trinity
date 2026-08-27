@@ -28,6 +28,8 @@ from dependencies import get_current_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.agent_auth import agent_httpx_client
+from services.chat_execution_service import terminate_execution as _terminate_execution
+from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
@@ -1073,6 +1075,98 @@ async def public_execution_status(
         "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
         "error": execution.error if execution.status in ("failed", "cancelled") else None,
     }
+
+
+@router.post("/executions/{token}/{execution_id}/terminate")
+async def public_terminate_execution(
+    token: str,
+    execution_id: str,
+    request: Request,
+    session_token: str = None,
+):
+    """Cancel a public-chat turn the visitor started (ent#155).
+
+    Same access scoping as every other public execution route: rate limit,
+    token validation, and the execution must belong to the agent behind THIS
+    link. There is no JWT and no `users` row — the token is the credential, and
+    it is the same one that was required to start the turn.
+
+    Scoping is per-link on an OPEN link, where there genuinely is no
+    per-visitor identity to check. On a `require_email` link there IS one —
+    `source_user_email` is populated for a verified visitor, and `POST /chat`
+    already demands a `session_token` there — so this route demands the same and
+    additionally requires the turn to be the CALLER'S OWN.
+
+    That asymmetry was the review finding: without it, terminate was weaker than
+    the route that creates the thing it destroys, and one visitor on a
+    verified-email link could stop another's turn with the link token alone.
+    The earlier docstring claimed the identity did not exist; on exactly these
+    links it does.
+
+    Cancellation semantics are the platform's existing ones — CANCELLED, not
+    FAILED (#679/#1332), and CAS-guarded, so a cancel that arrives after the
+    turn finished loses and the reply stands.
+    """
+    client_ip = _get_client_ip(request)
+    check_public_link_rate_limit(client_ip)
+    link = _validate_public_link(token)
+
+    agent_name = link["agent_name"]
+
+    execution = db.get_execution(execution_id)
+    if not execution or execution.agent_name != agent_name:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Review finding: the link + agent pair is the right scope for a READ, and
+    # the wrong one for a destructive write. `status` and `stream` only let a
+    # link holder observe; this route lets them KILL — and every execution on
+    # that agent shares the agent name: the owner's own Agent Detail turn, a
+    # scheduled run, a loop iteration. Ids are 128-bit so this is not
+    # blind-guessable, but one leaked id (a screenshot, a log, a shared browser)
+    # would let a visitor stop the owner's scheduled work.
+    #
+    # A public link can therefore only cancel what a public link produced. The
+    # symmetry-with-reading argument is sound for a read and does not carry.
+    if getattr(execution, "triggered_by", None) != "public":
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Per-VISITOR gate, on the links that have a visitor identity (review).
+    # Mirrors `status`/`stream`'s session handling, and then goes one step
+    # further than they do — they only let a holder OBSERVE, this one kills —
+    # by requiring the turn to be this visitor's own.
+    if _agent_requires_email(agent_name):
+        if not session_token:
+            raise HTTPException(
+                status_code=401, detail="Session token required for this link"
+            )
+        session_valid, email = db.validate_session(link["id"], session_token)
+        if not session_valid:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired session. Please verify your email again.",
+            )
+        owner = (getattr(execution, "source_user_email", None) or "").strip().lower()
+        # Uniform 404, not 403: a distinguishable refusal would confirm that
+        # this execution id exists on this link (Invariant #8).
+        if not owner or owner != (email or "").strip().lower():
+            raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Already finished: a no-op success, never a 4xx. The client races its own
+    # poll, and a cancel that lost that race is not an error the visitor did
+    # anything about — the reply is on screen.
+    if execution.status not in ("running", "queued"):
+        return {"status": "already_terminal", "execution_id": execution_id}
+
+    try:
+        return await _terminate_execution(
+            name=agent_name,
+            execution_id=execution_id,
+            task_execution_id=execution_id,
+            current_user=None,
+            actor_kind="public_link",
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
 @router.get("/sessions/{token}")

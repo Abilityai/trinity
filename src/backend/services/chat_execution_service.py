@@ -1599,7 +1599,8 @@ async def dispatch_parallel_task(
 # ===========================================================================
 
 
-async def _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user):
+async def _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user,
+                                  actor_kind="operator"):
     """BACKLOG-001: if the execution is still queued in the backlog, cancel it
     directly (no container interaction, no slot to release) and return the
     cancelled-while-queued payload. Returns None if not queued (fall through to
@@ -1617,13 +1618,18 @@ async def _cancel_queued_if_queued(name, execution_id, task_execution_id, curren
             await activity_service.track_activity(
                 agent_name=name,
                 activity_type=ActivityType.EXECUTION_CANCELLED,
-                user_id=current_user.id,
+                user_id=getattr(current_user, "id", None),
                 triggered_by="user",
                 related_execution_id=task_execution_id,
                 details={
                     "execution_id": execution_id,
                     "task_execution_id": task_execution_id,
                     "status": "cancelled_while_queued",
+                    # ent#155: a public-link visitor and a Workspace client are
+                    # both real people cancelling their own turn, and neither
+                    # has a `users` row — so `user_id` is legitimately NULL and
+                    # this is what says who acted.
+                    "actor_kind": actor_kind,
                 },
             )
             return {"status": "cancelled_while_queued", "execution_id": execution_id}
@@ -1667,7 +1673,8 @@ async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
         )
 
 
-async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user):
+async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user,
+                                       actor_kind="operator"):
     """Proxy the terminate to the agent container, force-release capacity on a
     terminal outcome, write the #679 CANCELLED CAS (only when we actually
     terminated a running turn), close the #1332 dispatch activity, and track the
@@ -1687,17 +1694,36 @@ async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, c
                 response.status_code, result.get("detail", "Termination failed")
             )
 
-        # Clear capacity state if termination succeeded (CAPACITY-CONSOLIDATE #428).
-        if result.get("status") in ["terminated", "already_finished"]:
+        # Release capacity for THIS execution (CAPACITY-CONSOLIDATE #428).
+        #
+        # ent#155 review (N1): this was `force_release(name)`, documented in
+        # `capacity_manager` as "Emergency: clear all running slots and the
+        # in-memory queue" — it DELs `agent:slots:{name}` wholesale, every
+        # per-slot metadata key, and the overflow LIST. That was tolerable while
+        # the only caller was an operator terminating from Agent Detail. ent#155
+        # gives the same code path to a public-link visitor and a Workspace
+        # client, so on an agent with `max_parallel_tasks > 1` one person
+        # stopping THEIR OWN turn dropped slot accounting for every other
+        # in-flight execution on that agent and discarded the queued overflow.
+        #
+        # `release_if_matches` is the per-execution form, and TOCTOU-safe: the
+        # ZSET model is keyed by execution_id, so it is a no-op if this turn no
+        # longer holds the slot. Nothing else's accounting is touched.
+        #
+        # `already_finished` no longer releases at all: nothing was cancelled,
+        # the agent's own terminal already ran its own release, and firing an
+        # emergency clear on a no-op branch was the part with no defensible
+        # reading at all.
+        if result.get("status") == "terminated" and task_execution_id:
             try:
                 capacity = get_capacity_manager()
-                fr = await capacity.force_release(name)
+                released = await capacity.release_if_matches(name, task_execution_id)
                 logger.info(
-                    f"[Terminate] Force-released capacity for agent '{name}' "
-                    f"(was_running={fr.was_running}, slots_cleared={fr.slots_cleared})"
+                    "[Terminate] Released capacity for execution %s on '%s' (released=%s)",
+                    task_execution_id, name, released,
                 )
             except Exception as e:
-                logger.warning(f"[Terminate] Failed to force-release capacity for {name}: {e}")
+                logger.warning(f"[Terminate] Failed to release capacity for {name}: {e}")
 
             # #679: write CANCELLED only when we actually terminated a running
             # turn. On `already_finished` the agent's genuine terminal already
@@ -1720,14 +1746,15 @@ async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, c
         await activity_service.track_activity(
             agent_name=name,
             activity_type=ActivityType.EXECUTION_CANCELLED,
-            user_id=current_user.id,
+            user_id=getattr(current_user, "id", None),
             triggered_by="user",
             related_execution_id=task_execution_id,
             details={
                 "execution_id": execution_id,
                 "task_execution_id": task_execution_id,
                 "status": result.get("status"),
-                "returncode": result.get("returncode")
+                "returncode": result.get("returncode"),
+                "actor_kind": actor_kind,
             }
         )
         return result
@@ -1738,11 +1765,27 @@ async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, c
         raise ChatDispatchError(504, f"Timeout connecting to agent '{name}'")
 
 
-async def terminate_execution(*, name, execution_id, task_execution_id, current_user):
+async def terminate_execution(*, name, execution_id, task_execution_id, current_user=None,
+                              actor_kind="operator"):
     """Terminate a running execution: cancel-if-queued (BACKLOG-001), else
     container-gate then proxy-terminate + finalize. Returns the result dict
-    (or the cancelled-while-queued payload); raises ChatDispatchError."""
-    queued = await _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user)
+    (or the cancelled-while-queued payload); raises ChatDispatchError.
+
+    ent#155: `current_user` is OPTIONAL because the cancel trigger is no longer
+    operator-only. A public-link visitor and a Workspace client are both people
+    stopping a turn they themselves started, and neither has a `users` row — so
+    the caller-identity gate belongs to the ROUTE (the public link token, or the
+    portal roster + started-by-this-caller check), and this function only needs
+    to know that someone authorised got here. It records `actor_kind` on the
+    activity so a NULL `user_id` is legible rather than mysterious.
+
+    The cancel SEMANTICS are unchanged and deliberately so: CANCELLED, not
+    FAILED (#679/#1332), neutral for the dispatch breaker, and CAS-guarded — a
+    cancel that lands after the row is already terminal loses and leaves the
+    real terminal alone.
+    """
+    queued = await _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user,
+                                            actor_kind=actor_kind)
     if queued is not None:
         return queued
 
@@ -1752,4 +1795,5 @@ async def terminate_execution(*, name, execution_id, task_execution_id, current_
     if container.status != "running":
         raise ChatDispatchError(503, "Agent is not running")
 
-    return await _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user)
+    return await _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user,
+                                               actor_kind=actor_kind)

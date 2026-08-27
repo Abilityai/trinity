@@ -1,0 +1,843 @@
+# Hosted Docker Compose for Trinity — PULL-ONLY (#2280)
+#
+# Identical to docker-compose.prod.yml in every respect except one: it carries
+# NO `build:` blocks. Every service resolves a prebuilt image from GHCR, so a
+# fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
+# the agent base image on first boot. That build time is what fails the
+# "one click" bar for every marketplace channel (#2281 DigitalOcean, #2282
+# Vultr) and what makes managed hosts and template catalogues (Elestio,
+# Dokploy, Coolify, Hostinger Docker Manager) reject the prod file outright —
+# they only accept compose files that pull.
+#
+# The `.env` contract is the SAME file docker-compose.prod.yml reads. That is
+# not a coincidence to be preserved by hand: this file is generated from the
+# prod one and `tests/unit/test_2280_hosted_compose_parity.py` fails CI when
+# the two drift on services, ports, volumes, networks, or environment keys.
+# Trinity has shipped the "the knob never reached prod" bug often enough to
+# name it (#1039, #1056, #1707, #1871, and #2381's own ADMIN_USERNAME) — a
+# second compose file is exactly the shape that bug likes, so it is guarded
+# rather than trusted.
+#
+# Pick the image set with TRINITY_IMAGE_TAG (default `latest`):
+#
+#     TRINITY_IMAGE_TAG=v0.9.0 ./scripts/deploy/start.sh --hosted
+#
+# Every release publishes `v0.9.0`, `0.9.0`, `0.9`, `latest` and `sha-<short>`
+# for the same digest, so either spelling of the version works. Pin one on any
+# install you intend to keep: `latest` moves on every release, so an unpinned
+# pull is an unscheduled upgrade. `start.sh` reads the value from `.env` too,
+# which is where an unattended or marketplace install persists it.
+#
+# THE AGENT BASE IMAGE IS NOT A SERVICE HERE, and pulling it is not optional.
+# The backend creates agent containers through the Docker SDK from the literal
+# local tag `trinity-agent-base:latest` (hardcoded in
+# services/agent_service/lifecycle.py, and allowlisted as `trinity-agent-base:*`
+# by SEC-172). Compose cannot retag, so `./scripts/deploy/start.sh --hosted`
+# pulls the GHCR copy and tags it locally before bringing the stack up. Use
+# that — a bare `docker compose -f docker-compose.hosted.yml up -d` starts a
+# platform that cannot create a single agent, and does not fail until the first
+# agent-create.
+#
+# THIS FILE IS NOT STANDALONE. It needs the repository checked out beside it:
+# the backend mounts `./config/agent-templates`, `./config/process-templates`,
+# `./config/process-docs` and `./config/manifests`, Vector mounts
+# `./config/vector.yaml`, the OTel collector mounts
+# `./config/otel-collector.yaml`, and `/data` is the `${TRINITY_DATA_PATH:-
+# ./trinity-data}` bind mount. Handed to a catalogue or a managed host WITHOUT
+# the repo, Docker silently creates every one of those as an empty directory:
+# the local template catalog is empty and the ent#124 first-run system seed
+# finds no manifests to deploy — with no error at install time. Packaging the
+# config into the images so the file can travel alone is a follow-up; until
+# then, "pull-only" means "does not BUILD", not "needs nothing on disk".
+#
+# Minimum size: 8 GB RAM. Below that the agent containers and the platform
+# services contend and turns start failing under load.
+#
+# Ports, volumes, networks, and the security posture (non-root, cap_drop,
+# no-new-privileges, two-network isolation) are inherited verbatim from
+# docker-compose.prod.yml — see that file's comments for the reasoning.
+
+# #1871: bound every container's json-file log. Docker's json-file driver has
+# NO max-size and NO max-file by default, so each container's log under
+# /var/lib/docker/containers/ grows forever — silently, until the Docker data
+# root hits 100% and dockerd wedges. Agent containers are created through the
+# Docker SDK, not compose, so they are capped separately by AGENT_LOG_CONFIG in
+# src/backend/services/agent_service/capabilities.py.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CONTAINER_LOG_MAX_SIZE:-10m}"
+    max-file: "${CONTAINER_LOG_MAX_FILE:-3}"
+
+services:
+  backend:
+    image: ghcr.io/abilityai/trinity-backend:${TRINITY_IMAGE_TAG:-latest}
+    container_name: trinity-backend
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - SECRET_KEY=${SECRET_KEY}
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
+      # #2381: present in docker-compose.yml and .env.example but missing here,
+      # so setting ADMIN_USERNAME never reached a production container. The
+      # backend then provisioned `admin` while the operator believed otherwise —
+      # and `routers/setup.py` hardcoded the same literal, so the mismatch was
+      # invisible until it wasn't.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - SLACK_CLIENT_ID=${SLACK_CLIENT_ID}
+      - SLACK_CLIENT_SECRET=${SLACK_CLIENT_SECRET}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      # Socket Mode concurrent WebSocket count (#244); clamped to [1,10], default 2.
+      # Mirrors docker-compose.yml — without this line the .env knob is inert in
+      # prod (the #1039 packaging-gap class).
+      - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
+      - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
+      - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
+      # Agent auth master (#1159) - backend derives each agent's in-container
+      # :8000 auth token from this; .env alone is inert in prod, so forward it
+      # explicitly. Backend hard-fails on first agent call if unset.
+      - AGENT_AUTH_SECRET=${AGENT_AUTH_SECRET:-}
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
+      # SMTP transport (EMAIL_PROVIDER=smtp) — read by src/backend/config.py (#771)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      # SendGrid transport (EMAIL_PROVIDER=sendgrid) — read by src/backend/config.py (#771)
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - NOTION_CLIENT_ID=${NOTION_CLIENT_ID}
+      - NOTION_CLIENT_SECRET=${NOTION_CLIENT_SECRET}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
+      # Gemini model overrides (#1130) — mirrors docker-compose.yml; without these
+      # lines the env knobs are inert in prod (#1039 packaging-gap class). Non-empty
+      # defaults so an unset var doesn't inject "" (#1076).
+      - GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL:-gemini-3.5-flash}              # image-gen prompt refinement
+      - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
+      # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
+      # tune/disable voice in prod (code default is ON; without these lines the
+      # knobs are inert — the #1039 packaging-gap class).
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
+      - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Default-OFF means
+      # the master switch MUST reach the container or voip_available stays false;
+      # omitting it here was the prod packaging gap (same class as #1039 LOG_*).
+      - VOIP_ENABLED=${VOIP_ENABLED:-false}
+      - VOIP_MAX_CALL_DURATION=${VOIP_MAX_CALL_DURATION:-600}      # per-call cap (s)
+      - VOIP_DEFAULT_DAILY_CALL_CAP=${VOIP_DEFAULT_DAILY_CALL_CAP:-50}  # per-agent/day spend bound
+      - VOIP_CALL_RATE_LIMIT=${VOIP_CALL_RATE_LIMIT:-5}           # calls per owner+destination window
+      - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
+      - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
+      - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+      # Opt-in, default OFF. The DB row (system_settings) is the primary leg, so a
+      # gap here cannot make the feature unreachable — but the env leg still has to
+      # be forwarded or an operator setting it in .env silently does nothing.
+      - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
+      # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
+      # gates the feature (empty ⇒ adapters deliver text). Prod compose launches
+      # standalone (no base merge / env_file), so wire it here too (#1056 class).
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}  # non-empty default (#1076)
+      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-1500}                      # shared synth cost cap (chars)
+      # Workspace / client portal (ent#356), now OSS core. Rate limits are enforced
+      # at these defaults whether or not they are wired, so the gap is an inert
+      # tuning lever rather than a dead feature — but prod compose launches
+      # standalone (no base merge / env_file), so wire them here too (#1056 class).
+      - PORTAL_CHAT_BURST_LIMIT=${PORTAL_CHAT_BURST_LIMIT:-20}     # portal chat sends per email+agent per 60s
+      - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
+      - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
+      - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
+      - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
+      # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Skills library lifecycle automation (ent#236).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - SKILLS_RECONCILE_MAX_REMOVALS=${SKILLS_RECONCILE_MAX_REMOVALS:-10}   # per-agent blast-radius cap
+      - SKILLS_FLEET_INJECT_CONCURRENCY=${SKILLS_FLEET_INJECT_CONCURRENCY:-5}  # parallel agents per sweep
+      # Public webhook trigger hardening (#1023, #1424) — 60s windows fixed in code.
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
+      - WEBHOOK_IP_RATE_LIMIT=${WEBHOOK_IP_RATE_LIMIT:-60}       # pre-auth requests per IP per 60s
+      - WEBHOOK_MAX_BODY_BYTES=${WEBHOOK_MAX_BODY_BYTES:-16384}  # request-body cap (413 over)
+      # Agent self-reminders (#1296) — tunable caps (working code defaults).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - REMINDER_MESSAGE_MAX_CHARS=${REMINDER_MESSAGE_MAX_CHARS:-4000}          # max reminder message length
+      - REMINDER_MIN_DELAY_SECONDS=${REMINDER_MIN_DELAY_SECONDS:-60}            # earliest fire (floor)
+      - REMINDER_MAX_DELAY_SECONDS=${REMINDER_MAX_DELAY_SECONDS:-2592000}       # latest fire (30d ceiling)
+      - MAX_PENDING_REMINDERS_PER_AGENT=${MAX_PENDING_REMINDERS_PER_AGENT:-25}  # concurrent pending per agent
+      - MAX_REMINDERS_PER_AGENT_PER_DAY=${MAX_REMINDERS_PER_AGENT_PER_DAY:-100} # rolling 24h creation cap
+      - REMINDER_RATE_LIMIT=${REMINDER_RATE_LIMIT:-30}                          # set_reminder calls per agent per 60s
+      # Operator-queue agent ingestion caps (#1632) — bound a compromised/runaway
+      # agent flooding the queue. Prod launches standalone (no base merge), so wire here too.
+      - OPERATOR_QUEUE_MAX_PENDING_PER_AGENT=${OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:-25}       # per-agent pending-DEPTH cap (primary)
+      - OPERATOR_QUEUE_CREATE_RATE_LIMIT=${OPERATOR_QUEUE_CREATE_RATE_LIMIT:-60}               # per-agent creates / window
+      - OPERATOR_QUEUE_CREATE_RATE_WINDOW=${OPERATOR_QUEUE_CREATE_RATE_WINDOW:-60}             # rate-limit window (s)
+      - OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT=${OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT:-300}  # fleet-wide creates / window
+      - OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE=${OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE:-500}            # requests scanned / agent / cycle
+      - OPERATOR_QUEUE_MAX_FILE_BYTES=${OPERATOR_QUEUE_MAX_FILE_BYTES:-2097152}                # skip a queue file over this (bytes)
+      - OPERATOR_QUEUE_TITLE_MAX=${OPERATOR_QUEUE_TITLE_MAX:-300}                              # title char cap (truncate)
+      - OPERATOR_QUEUE_QUESTION_MAX=${OPERATOR_QUEUE_QUESTION_MAX:-4000}                       # question char cap (truncate)
+      - OPERATOR_QUEUE_CONTEXT_MAX_BYTES=${OPERATOR_QUEUE_CONTEXT_MAX_BYTES:-8192}             # context byte cap (marker over)
+      - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
+      - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
+      - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
+      - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
+      - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
+      - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
+      - GITHUB_PAT=${GITHUB_PAT}
+      # Log Retention & Archival Configuration (#1039)
+      # These were MISSING from prod — prod launches standalone (no base-compose
+      # merge), so an operator-set LOG_RETENTION_DAYS never reached the
+      # container and retention silently fell back to the code default. Default
+      # is the 5-day community floor; enterprise `retention` unlocks longer.
+      # LOG_ARCHIVE_PATH is intentionally omitted: the code default
+      # (/data/archives) already lands in the TRINITY_DATA_PATH bind mount
+      # (/data), so no new volume is needed.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
+      - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
+      - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
+      # Automatic database backups (#2216) — daily backend job, default ON,
+      # artifacts under /data/backups (the TRINITY_DATA_PATH bind mount).
+      # Prod launches standalone (no base-compose merge), so these MUST be
+      # wired here too or the .env knobs are inert (#1486/#1488 class) —
+      # mirrors docker-compose.yml.
+      - DB_BACKUP_ENABLED=${DB_BACKUP_ENABLED:-true}
+      - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
+      - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
+      - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
+      # Host paths for volumes (used when creating agent containers)
+      - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
+      # First-run default system seed (trinity-enterprise#124): a path to an
+      # operator manifest, or `disabled` to skip seeding. Empty = bundled
+      # config/manifests/default-system.yaml.
+      - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#237 — the community skills catalog seed. BARE pass-through, NOT
+      # `${VAR:-}`: an empty value is the DOCUMENTED disable for this setting
+      # ("Set the URL to \"\" to disable the seed entirely"), so `${VAR:-}` would
+      # send "" on every install and silently turn the catalog off for everyone.
+      # `${VAR:-github.com/...}` is wrong the other way — it swallows the
+      # operator's explicit disable. Rendered with `docker compose config`:
+      #   bare, unset          -> null (not set) -> config.py default applies
+      #   bare, set to a URL   -> the URL
+      #   bare, set to ""      -> "" -> seed disabled, as documented
+      - TRINITY_DEFAULT_SKILL_SOURCE
+      - TRINITY_DEFAULT_SKILL_SOURCE_REF
+      # ent#126: directory the bundled-manifest catalog
+      # (GET /api/systems/manifests) reads. Empty = the image's own
+      # config/manifests (already bind-mounted :ro below). Point it at another
+      # bind-mounted directory to offer your own curated fleet manifests; an
+      # unreadable path is an EMPTY catalog, not an error, so mount the
+      # directory too — setting this alone silently lists nothing.
+      - TRINITY_MANIFESTS_DIR=${TRINITY_MANIFESTS_DIR:-}
+      # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
+      # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Agent container log cap (#1871) — read by capabilities.py to build the
+      # agent container's json-file log_config. The x-logging anchor above bounds
+      # the PLATFORM services; agents are SDK-created, so these must reach the
+      # backend process itself or the knobs are inert (#1039 class).
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_LOG_MAX_SIZE=${AGENT_LOG_MAX_SIZE:-10m}
+      - AGENT_LOG_MAX_FILE=${AGENT_LOG_MAX_FILE:-3}
+      # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
+      # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
+      # it must reach the backend here or the .env lever is inert (#1039 class).
+      # Default (1800s) lives agent-side; 0/negative disables. Recreate to apply.
+      - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
+      - AGENT_IDLE_FINALIZE_S=${AGENT_IDLE_FINALIZE_S:-}
+      # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
+      - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — read by BOTH processes from this one key. The
+      # backend gates the /api/internal/mcp-auth/* surface on it (404 when off)
+      # and gates the keyless connector snippet. Prod compose launches standalone
+      # (no env_file merge), so without this the .env lever never reaches the
+      # container and the feature is un-flippable (#1056/#1039 class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
+      # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
+      # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
+      # Prod compose launches standalone (no env_file merge), so these must be
+      # wired here or the .env levers never reach the container (#1056 class).
+      - PULL_MODE_PILOT_AGENTS=${PULL_MODE_PILOT_AGENTS:-}
+      - MAX_REDELIVERY=${MAX_REDELIVERY:-3}
+      # Correlated-failure / thundering-herd controls (#1085) — re-delivery
+      # governor. Backend-only; all fail-open and inert until the master flag is
+      # on. Prod compose launches standalone (no env_file merge), so the .env
+      # levers only reach the container when wired here.
+      - REDELIVERY_GOVERNOR_ENABLED=${REDELIVERY_GOVERNOR_ENABLED:-false}
+      - REDELIVERY_FLEET_LIMIT=${REDELIVERY_FLEET_LIMIT:-600}
+      - REDELIVERY_FLEET_WINDOW_SECONDS=${REDELIVERY_FLEET_WINDOW_SECONDS:-60}
+      - REDELIVERY_AGENT_LIMIT=${REDELIVERY_AGENT_LIMIT:-20}
+      - REDELIVERY_AGENT_WINDOW_SECONDS=${REDELIVERY_AGENT_WINDOW_SECONDS:-60}
+      - CORRELATED_FAILURE_THRESHOLD=${CORRELATED_FAILURE_THRESHOLD:-20}
+      - CORRELATED_FAILURE_WINDOW_SECONDS=${CORRELATED_FAILURE_WINDOW_SECONDS:-120}
+      - CORRELATED_PAUSE_TTL_SECONDS=${CORRELATED_PAUSE_TTL_SECONDS:-300}
+      - REDELIVERY_PAUSE_RETRY_AFTER_SECONDS=${REDELIVERY_PAUSE_RETRY_AFTER_SECONDS:-30}
+      # OpenTelemetry Configuration (Optional)
+      - OTEL_ENABLED=${OTEL_ENABLED:-0}
+      - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}
+      - OTEL_METRICS_EXPORTER=${OTEL_METRICS_EXPORTER:-otlp}
+      - OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER:-otlp}
+      - OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
+      - OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-60000}
+      # Public external access URL (Tailscale Funnel, Cloudflare Tunnel, etc.)
+      - PUBLIC_CHAT_URL=${PUBLIC_CHAT_URL:-}
+      # Frontend URL for post-OAuth redirects
+      - FRONTEND_URL=${FRONTEND_URL:-}
+      # CORS — comma-separated extra allowed origins (read by config.py via
+      # EXTRA_CORS_ORIGINS). Mirrors docker-compose.yml; without this line the
+      # .env value is inert in prod (the #1039 packaging-gap class).
+      - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
+      # Backend's own public origin — used to build OAuth redirect URIs
+      # ({BACKEND_URL}/api/oauth/{provider}/callback, read by config.py). Mirrors
+      # docker-compose.yml; without this line the .env value is inert in prod (the
+      # #1039 packaging-gap class) and OAuth callbacks fall back to localhost — set
+      # this to your public backend URL. The scheduler reads BACKEND_URL too but
+      # keeps its own internal default (http://backend:8000); intentionally not
+      # wired here so it still reaches the backend over the Docker network.
+      - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
+      # Self-signup + operator-intake privacy levers. Read by config.py; mirrors
+      # docker-compose.yml. Prod compose launches standalone (no env_file merge),
+      # so wire it here too — without these lines the .env values are inert (the
+      # #1039 packaging-gap class). PUBLIC_ACCESS_REQUESTS_ENABLED gates
+      # POST /api/access/request (secure default false); OPERATOR_INTAKE_* /
+      # DO_NOT_TRACK is the air-gapped opt-out for the first-run intake POST
+      # (#1486/#1488). OPERATOR_INTAKE_URL keeps its FULL non-empty default — a
+      # bare :- would arrive set-but-empty and shadow the code default (#1076 class).
+      - PUBLIC_ACCESS_REQUESTS_ENABLED=${PUBLIC_ACCESS_REQUESTS_ENABLED:-false}
+      - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
+      - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
+      - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
+      # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
+      # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
+      # (DO_NOT_TRACK also disables). URL keeps its FULL non-empty default —
+      # a bare :- would arrive set-but-empty and shadow the code default (#1076).
+      - TELEMETRY_SHARING_ENABLED=${TELEMETRY_SHARING_ENABLED:-true}
+      - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
+      - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
+      - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
+      # Remote template registry (ent#14). Mirrors docker-compose.yml; prod
+      # compose launches standalone (no base merge / env_file), so wire it here
+      # too — without these lines the .env values are inert (the #1039 /
+      # #1056 packaging-gap class). TEMPLATE_REGISTRY_ENABLED=false is the HARD
+      # kill switch and is the only air-gap answer, so an inert one is the
+      # failure that matters. URL keeps its FULL non-empty default — a bare :-
+      # would arrive set-but-empty and shadow the code default (#1076 class).
+      - TEMPLATE_REGISTRY_ENABLED=${TEMPLATE_REGISTRY_ENABLED:-true}
+      - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
+      # Internal API shared secret (C-003) - for scheduler/agent communication
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+      # Configurable database backend (#300, experimental) — mirrors
+      # docker-compose.yml; without these lines the .env lever is inert in prod
+      # (the #1039/#1056 packaging-gap class). Unset → SQLite at /data/trinity.db.
+      # Prod compose ships no postgres service: a postgresql:// URL must point at
+      # an operator-managed PostgreSQL instance (see docs/POSTGRESQL_SETUP.md).
+      - DATABASE_URL=${DATABASE_URL:-}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
+      # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
+      # ({schedule, webhook}) are dispatched 202 + finalized via callback so a
+      # wedged turn holds zero backend coroutine/slot beyond its lease. Mirrors
+      # docker-compose.yml; without this line the .env lever is inert in prod
+      # (the #1039 packaging-gap class). Default false; safe to flip early
+      # (non-202 agent responses fall back to sync). Backend-only.
+      - DISPATCH_ASYNC=${DISPATCH_ASYNC:-false}
+      # Dispatch circuit breaker global gate (RELIABILITY-007, #526). Producer-side
+      # per-agent breaker; engages ONLY when this AND the per-agent
+      # agent_ownership.circuit_breaker_enabled toggle are both on. Mirrors
+      # docker-compose.yml; without this line the .env lever is inert in prod (the
+      # #1039 packaging-gap class) and the owner-facing PUT .../circuit-breaker
+      # toggle silently no-ops (#1487). Default false.
+      - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
+      # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
+      # max concurrent Docker stat fetches per refresh. Mirrors docker-compose.yml;
+      # without these lines the .env knobs are inert in prod (the #1039
+      # packaging-gap class).
+      - TELEMETRY_CONTAINER_STATS_TTL=${TELEMETRY_CONTAINER_STATS_TTL:-10}
+      - TELEMETRY_DOCKER_POOL_SIZE=${TELEMETRY_DOCKER_POOL_SIZE:-16}
+      # Canary invariant harness (CANARY-001 / Issue #411). Mirrors
+      # docker-compose.yml; without these lines the .env knobs are inert in prod
+      # (the #1039 packaging-gap class). Load-bearing here specifically: the
+      # harness is documented as "CANARY_ENABLED=1 on staging/dev", and the dev
+      # instance deploys via THIS file (.github/workflows/deploy-dev.yml,
+      # scripts/deploy/gcp-deploy.sh) — so omitting them made the watcher
+      # un-enableable on the very instance it exists to watch.
+      # Default 0 — production users see no canary activity.
+      - CANARY_ENABLED=${CANARY_ENABLED:-0}
+      # Slack alert sink for canary green→red transitions. URL is the
+      # credential — leaking it lets anyone post to that one channel.
+      # Unset = canary cycles run silently (still persists violations).
+      - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Mirrors
+      # docker-compose.yml. Unset is the norm — services/instance_identity.py
+      # derives one from FRONTEND_URL's host (already forwarded above), which is
+      # why alert attribution improves on every managed instance without an .env
+      # rollout. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
+      # SSH access host override (read by services/ssh_service.py). Mirrors
+      # docker-compose.yml; without this line the .env value is inert in prod (the
+      # #1039 packaging-gap class) and SSH host detection falls back to localhost.
+      - SSH_HOST=${SSH_HOST:-}
+      # NOTE (#1799): a duplicate LOG_ARCHIVE_ENABLED / LOG_RETENTION_DAYS /
+      # LOG_CLEANUP_HOUR trio lived here. Two separate #1039-class "mirror
+      # docker-compose.yml" fixes each appended the same three vars, which broke
+      # this file two different ways:
+      #   * LOG_ARCHIVE_ENABLED and LOG_CLEANUP_HOUR were byte-identical in both
+      #     blocks, and Compose requires array items to be unique — so
+      #     `docker compose -f docker-compose.prod.yml config` failed outright.
+      #   * LOG_RETENTION_DAYS was duplicated with a DIFFERENT value (5 vs 90).
+      #     Differing strings are not caught by the uniqueness check, and Docker
+      #     resolves a repeated env key by last-wins — so prod would silently run
+      #     90 while this file's own block above, docker-compose.yml, and
+      #     config.py (COMMUNITY_RETENTION_FLOOR_DAYS = 5) all say 5.
+      # Resolved in favour of the block above; keep the LOG_* trio defined ONCE.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/agent-templates:/agent-configs/templates:ro
+      - ./config/process-templates:/agent-configs/process-templates:ro
+      - ./config/process-docs:/app/config/process-docs:ro
+      - ./config/manifests:/app/config/manifests:ro  # Bundled system manifests (first-run seed, ent#124)
+      - agent-configs:/agent-configs
+      # #2205: `/data/archives` lives INSIDE this bind mount in prod — there is no
+      # `trinity-archives` named volume here, which is why prod needs no
+      # `archives-init` while dev does. `scripts/deploy/start.sh` chowns
+      # `$TRINITY_DATA_PATH` to 1000:1000 recursively (Linux) before `up`, so the
+      # directory the app creates under it is already writable by UID 1000.
+      # Adding a named volume for archives here without an ownership one-shot
+      # would reintroduce the dev bug — `tests/unit/test_2205_volume_ownership.py`
+      # fails loudly if that happens.
+      - ${TRINITY_DATA_PATH:-./trinity-data}:/data
+      # Read-only access to Vector's logs so log_archive_service.py (reads
+      # /data/logs) can run in prod. Mirrors docker-compose.yml; without it the
+      # forwarded LOG_* knobs are inert (LOG_DIR not found) — the #1039 class.
+      # #1478: MUST be read-WRITE — log_archive_service archives then unlink()s
+      # the originals. A ':ro' mount lets archiving succeed but every delete fail
+      # (Errno 30), so the volume grows unbounded (~900MB/day on a busy instance).
+      # Vector is still the sole writer of new log lines; the backend only reads
+      # + deletes archived originals.
+      - trinity-logs:/data/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      vector:
+        condition: service_healthy  # Ensure Vector is ready before backend starts agents
+      logs-init:
+        condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
+    networks:
+      - trinity-platform   # Redis, scheduler, vector, OTel
+      - trinity-agent      # Frontend, mcp-server, agent containers, cloudflared
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # No cap_add: backend listens on 8000 (>=1024, no NET_BIND_SERVICE needed)
+    # and reaches /var/run/docker.sock via group_add below — not capabilities.
+    # Issue #874 / #1131: backend runs as UID 1000 (non-root) but still needs to
+    # talk to /var/run/docker.sock. The GID to join is the socket's group as a
+    # container sees it: a Linux bind mount exposes the host `docker` group
+    # (Debian/Ubuntu 999, RHEL ~991, Arch 990); Docker Desktop / Colima / Rancher
+    # present it root-group-owned (GID 0). Docker Desktop does NOT ignore
+    # group_add — the wrong assumption it does was the #1131 regression.
+    # start.sh auto-detects the right GID into DOCKER_GID; :-999 is the
+    # Debian/Ubuntu fallback used only when .env carries no value.
+    group_add:
+      - "${DOCKER_GID:-999}"
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    # Production: no --reload flag
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-worker-healthcheck 120
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      # #1230: relaxed so the probe tolerates transient load without hiding a
+      # real outage. With only 2 uvicorn workers, scheduled-batch windows make
+      # them GIL-contended; a /health probe then waits out the old 10s timeout,
+      # and 3 consecutive aborts flipped the container to `unhealthy` even
+      # though /health served 200s throughout (false negative). Any consumer of
+      # Docker health (autoheal, depends_on: service_healthy, LB drain) could
+      # act on that and restart the backend mid-batch, orphaning in-flight
+      # executions. Higher timeout + start_period + retries absorb the spike;
+      # a genuine outage (all probes fail) still trips after ~5 intervals.
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+
+  frontend:
+    image: ghcr.io/abilityai/trinity-frontend:${TRINITY_IMAGE_TAG:-latest}
+    container_name: trinity-frontend
+    logging: *default-logging
+    restart: unless-stopped
+    # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
+    # preserved so external URLs do not change.
+    # #2280: FRONTEND_PORT was inert here — hardcoded "80". start.sh offers it
+    # as the remedy for a port conflict and prints the resulting URL in its
+    # summary, so an operator who set it got a working suggestion that changed
+    # nothing and an access URL pointing at a port nothing listened on. The
+    # container side stays 8080 (unprivileged nginx, #874).
+    ports:
+      - "${FRONTEND_PORT:-80}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - trinity-agent      # Frontend talks to backend on agent network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # NET_BIND_SERVICE / CHOWN / SETGID / SETUID removed (#874):
+    # unprivileged nginx binds 8080 and does no master-process worker drop.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: trinity-redis
+    logging: *default-logging
+    restart: unless-stopped
+    # Redis not exposed externally in production
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - trinity-platform   # Issue #589: Redis is NOT on agent network
+    environment:
+      # Two passwords by design — see docs/migrations/REDIS_AUTH.md.
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+      - "REDIS_BACKEND_PASSWORD=${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+    # Additive ACL — start from zero, allow only what the runtime needs.
+    # `+@all -X` is rejected: it includes commands Redis hasn't shipped yet.
+    # NB: each `--user` rule must be its own argv (Redis CLI parser).
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      # default — admin user, full access (used for ACL bootstrap and ad-hoc ops)
+      - --user
+      - default
+      - "on"
+      - ">${REDIS_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@all"
+      # backend — runtime user for backend container
+      - --user
+      - backend
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+      # scheduler — same access pattern as backend; separate user for traceability
+      - --user
+      - scheduler
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+    # Healthcheck pings as the `backend` ACL user so a typo'd ACL keeps
+    # Redis unhealthy and gates dependent services.
+    # Password passed via REDISCLI_AUTH env var (not -a flag) so it does
+    # not appear in /proc/<pid>/cmdline during the healthcheck (CSO OBS-3).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_BACKEND_PASSWORD" redis-cli --user backend --no-auth-warning ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # Scheduler - dedicated service for cron-based agent task execution
+  # Prevents duplicate executions that occurred with multiple backend workers
+  scheduler:
+    image: ghcr.io/abilityai/trinity-scheduler:${TRINITY_IMAGE_TAG:-latest}
+    container_name: trinity-scheduler
+    logging: *default-logging
+    restart: unless-stopped
+    environment:
+      - DATABASE_PATH=/data/trinity.db
+      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
+      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
+      - DATABASE_URL=${DATABASE_URL:-}
+      # Scheduler uses the same `backend` ACL user (identical access patterns).
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
+      - HEALTH_PORT=8001
+      - LOG_LEVEL=${SCHEDULER_LOG_LEVEL:-INFO}
+      - LOCK_TIMEOUT=600
+      - AGENT_TIMEOUT=900
+      # #1022: scheduler→backend dispatch + pre-check deadlines (operator-tunable).
+      - DISPATCH_TIMEOUT=${DISPATCH_TIMEOUT:-30}
+      - PRE_CHECK_TIMEOUT=${PRE_CHECK_TIMEOUT:-70}
+      - MISFIRE_GRACE_TIME=3600
+      - PUBLISH_EVENTS=true
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+    volumes:
+      - ${TRINITY_DATA_PATH:-./trinity-data}:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks:
+      - trinity-platform   # Scheduler talks only to Redis + backend; never to agents
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # #1478: one-shot that makes the shared logs volume dir owned by UID 1000 so the
+  # backend (non-root) can unlink retention-archived originals. Vector writes new
+  # log files as root; deleting a file needs write on the *directory*, not the file,
+  # so chowning just the dir (fast, not -R) is enough. Runs as root (needs CAP_CHOWN,
+  # so no cap_drop); exits immediately; backend waits on completion.
+  logs-init:
+    image: alpine:3.20
+    container_name: trinity-logs-init
+    logging: *default-logging
+    command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
+    volumes:
+      - trinity-logs:/data/logs
+    restart: "no"
+    networks:
+      - trinity-platform
+
+  # Vector - centralized log aggregation from all containers
+  vector:
+    image: timberio/vector:0.43.1-alpine
+    container_name: trinity-vector
+    logging: *default-logging
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/vector.yaml:/etc/vector/vector.yaml:ro
+      - trinity-logs:/data/logs
+    ports:
+      - "8686:8686"  # Vector API (health checks)
+    networks:
+      - trinity-platform   # Vector reads via Docker socket, not network — platform side
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # #1799: #1478 chowns /data/logs to 1000:1000 (chmod 775) so the UID-1000
+    # backend's retention sweep can delete archived originals. Vector runs as
+    # root, but cap_drop: ALL strips CAP_DAC_OVERRIDE — the capability that lets
+    # root ignore file permissions — so root is neither owner nor group and
+    # falls through to "other" (r-x) on that 775 dir. EVERY sink write then
+    # fails with "Permission denied", silently: a file-sink error does not fail
+    # the :8686 healthcheck, so Vector reports healthy while writing nothing.
+    #
+    # Joining GID 1000 uses the dir's existing group-write bit instead of
+    # restoring a capability, so the cap_drop posture is preserved. Vector must
+    # stay ROOT for the uid: raw container logs under /var/lib/docker/containers
+    # are 0640 root:root, so user: "1000:1000" would swap a write failure for a
+    # read failure.
+    group_add:
+      - "1000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8686/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s  # Give Vector time to start before health checks
+
+  mcp-server:
+    image: ghcr.io/abilityai/trinity-mcp-server:${TRINITY_IMAGE_TAG:-latest}
+    container_name: trinity-mcp-server
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
+      - MCP_PORT=8080
+      - TRINITY_API_URL=http://backend:8000
+      - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
+      # MCP server uses ADMIN_PASSWORD for legacy non-API-key auth path.
+      # Fail-loud at compose render rather than silently use a well-known fallback (issue #692).
+      - "TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"
+      - MCP_REQUIRE_API_KEY=${MCP_REQUIRE_API_KEY:-true}
+      # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
+      # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
+      - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — THIS is the session-tier gate: with it OFF a
+      # keyless MCP connection is refused outright and no login tools register.
+      # Same packaging-gap class as the line above; the backend reads the same key
+      # to gate /api/internal/mcp-auth/*.
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # #848 ceiling for the four backend relay fetches on the inline-auth path.
+      # Functional via its 15000ms default; wired so the lever is not inert.
+      - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #736 ceiling for the mcp-server's own outbound-A2A fetches. Must stay
+      # below the MCP client's gateway abort — see docker-compose.yml.
+      # Functional via its 40000ms default; wired so the lever is not inert.
+      - MCP_A2A_TIMEOUT_MS=${MCP_A2A_TIMEOUT_MS:-40000}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client.
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
+      # INTERNAL_API_SECRET (SEC-001) — shared secret for POST /api/internal/audit
+      # so MCP tool-call audit reaches the backend. Mirrors docker-compose.yml;
+      # without it audit.ts (postAudit) early-returns and ALL MCP tool-call audit
+      # is silently dropped in prod (the #1039 packaging-gap class). No default —
+      # matches the backend/scheduler prod style.
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+      # No REDIS_URL: src/mcp-server/ (TypeScript) has zero Redis imports.
+      # Don't hand a credential to a process that has no use for it.
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      # MCP server straddles both networks: agents call http://mcp-server:8080/mcp
+      # via Docker DNS on the agent network; backend reaches it on platform network.
+      - trinity-platform
+      - trinity-agent
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Cloudflare Tunnel - public endpoint access (Telegram webhooks, public chat, Slack OAuth)
+  # Only starts when explicitly enabled via: docker compose --profile tunnel up -d
+  # Requires TUNNEL_TOKEN from Cloudflare Zero Trust dashboard
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: trinity-cloudflared
+    logging: *default-logging
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    networks:
+      # Cloudflared proxies to backend (platform side) and public agents (agent side).
+      - trinity-platform
+      - trinity-agent
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    profiles:
+      - tunnel
+
+  # OpenTelemetry Collector - receives metrics from Claude Code agents
+  # Using contrib image for deltatocumulative processor (required for Prometheus export)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    container_name: trinity-otel-collector
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "4317:4317"   # gRPC receiver (OTLP)
+      - "4318:4318"   # HTTP receiver (OTLP)
+      - "8889:8889"   # Prometheus metrics exporter
+      - "13133:13133" # Health check endpoint
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      - trinity-platform
+      - trinity-agent      # Agents push metrics directly to the collector
+    labels:
+      - "trinity.platform=infrastructure"
+      - "trinity.service=otel-collector"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # NOTE: No healthcheck - distroless image has no shell/curl
+    # Collector health can be checked externally via :13133 if health_check extension is enabled
+
+volumes:
+  agent-configs:
+  redis-data:
+  trinity-logs:  # Vector log storage
+  # trinity-data: using bind mount via TRINITY_DATA_PATH env var
+
+networks:
+  # Platform-internal network: Redis, scheduler, backend, mcp-server, vector, otel.
+  # Agents NEVER join this network — Issue #589 (Redis lockdown).
+  trinity-platform:
+    driver: bridge
+    name: trinity-platform-network
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+  # Agent-facing network: agents, frontend, plus the bridges that need to reach
+  # them (backend, mcp-server, otel-collector, cloudflared). Name preserved so
+  # the three agent-creation sites in services/agent_service/* and
+  # system_agent_service.py need zero code changes.
+  trinity-agent:
+    driver: bridge
+    name: trinity-agent-network
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

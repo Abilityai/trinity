@@ -1568,6 +1568,15 @@ class EvaluationResponse(BaseModel):
     judge: Optional[Any] = None
     evaluator: str
     created_at: str
+    # ent#366 — a one-click Workspace rating carries what was rated and, for a
+    # negative one, the person's words. `comment_withheld` says the text exists
+    # but was not shown to THIS caller (the rated agent), so a reader can tell
+    # "no comment" from "not yours to read".
+    target_kind: Optional[str] = None
+    target_id: Optional[str] = None
+    comment: Optional[str] = None
+    comment_withheld: bool = False
+    updated_at: Optional[str] = None
 
 
 class CircuitBreakerConfigUpdate(BaseModel):

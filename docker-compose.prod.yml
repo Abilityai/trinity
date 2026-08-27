@@ -463,8 +463,13 @@ services:
     restart: unless-stopped
     # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
     # preserved so external URLs do not change.
+    # #2280: FRONTEND_PORT was inert here — hardcoded "80". start.sh offers it
+    # as the remedy for a port conflict and prints the resulting URL in its
+    # summary, so an operator who set it got a working suggestion that changed
+    # nothing and an access URL pointing at a port nothing listened on. The
+    # container side stays 8080 (unprivileged nginx, #874).
     ports:
-      - "80:8080"
+      - "${FRONTEND_PORT:-80}:8080"
     depends_on:
       backend:
         condition: service_healthy

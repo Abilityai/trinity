@@ -64,10 +64,37 @@ jobs:
     runs-on: ubuntu-latest
     # The suite runs ~7-8 min on a normal runner, but GitHub's shared runners
     # vary ~2-2.5x; a slow one was hitting the old 15-min cap at ~78% done and
-    # getting killed (a spurious red — the tests were all passing). 25 gives real
+    # getting killed (a spurious red — the tests were all passing). 25 gave real
     # headroom for the slow tail without masking a genuine hang (pytest-timeout
     # still bounds any single test).
-    timeout-minutes: 25
+    #
+    # 2026-08-25: raised 25 -> 45, because the premise above expired. The
+    # baseline is no longer 7-8 min. Measured across three consecutive runs of
+    # this workflow, same six-shard matrix:
+    #
+    #     13m  13m  14m  14m  16m  23m   (all SUCCESS)
+    #
+    # plus repeated `The operation was canceled` at exactly 25m on both sides.
+    # So the suite roughly doubled while the cap stood still: 25 was ~3x the
+    # baseline when it was chosen and is ~1.8x now, and a 23-minute shard clears
+    # it by two minutes. That is not headroom, and the resulting red lands on
+    # whichever PR is open — including the `base` side, which is plain `dev` and
+    # has nothing to do with the PR it reddens (the #2019 symptom, unchanged).
+    #
+    # 45 restores the ~3x the original comment was reasoning about. It does NOT
+    # weaken hang detection in the way the number suggests: `--timeout=300
+    # --timeout-method=signal` below is what turns a stalled TEST into a named
+    # failure, and this cap only ever catches what that cannot — a stall the
+    # signal handler cannot interrupt (a C call holding the GIL, or a process in
+    # uninterruptible I/O). Those were anonymous cancels at 25m and will be
+    # anonymous cancels at 45m; the only thing that changes is that a merely
+    # slow runner stops producing one.
+    #
+    # The honest alternative is to make the suite faster (or shard it with
+    # xdist) rather than keep buying minutes. That is worth doing and is not
+    # this change; raising the cap stops the bleeding without hiding the trend,
+    # since the durations above are recorded here for the next reader.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -233,7 +260,9 @@ jobs:
     # job is meant to be cheap enough that nobody is tempted to delete it.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Same suite, same runner variance, same reasoning as the matrix job above
+    # (2026-08-25: 25 -> 45).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
