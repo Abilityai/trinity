@@ -1,0 +1,455 @@
+/**
+ * ent#440 — voice in the agent Workspace: one conversation, two modalities.
+ *
+ * The feature's whole claim is that a spoken turn IS an ordinary Workspace turn,
+ * so the rules worth guarding are the ones that decide when to listen, when to
+ * send, when to speak, and when to stop. They live in `voiceConversation.js`
+ * rather than inside the component for the reason this project's other portal
+ * specs record: there is no component-mount harness (no @vue/test-utils, jsdom
+ * or happy-dom), so a rule expressed in a `.vue` file can only be guarded by
+ * regexing source — which catches deletion but never a wrong rule.
+ *
+ * The source-regex assertions at the bottom are therefore scoped to what only
+ * source can answer: that the component dispatches through the machine instead
+ * of hand-rolling transitions, and that a spoken turn goes through the SAME
+ * submit path a typed one does.
+ */
+import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+
+import {
+  ACT_CAPTURE,
+  ACT_NARRATE,
+  ACT_RELEASE,
+  ACT_SEND,
+  ACT_STOP_CAPTURE,
+  ACT_STOP_NARRATION,
+  BARGE_IN_RMS,
+  MAX_SPOKEN_CHARS,
+  SPEECH_RMS,
+  SPOKEN_CODE_PLACEHOLDER,
+  SPOKEN_TRUNCATION_NOTICE,
+  VOICE_LISTENING,
+  VOICE_NO_MIC_REASON,
+  VOICE_NO_STT_REASON,
+  VOICE_OFF,
+  VOICE_SPEAKING,
+  VOICE_TEXT_REPLIES_NOTICE,
+  VOICE_THINKING,
+  VOICE_TRANSCRIBING,
+  isSpeech,
+  isVoiceLive,
+  nextVoiceState,
+  spokenReply,
+  utteranceVerdict,
+  voiceConversationMode,
+  voiceStateLabel,
+} from '../../src/components/portal/voiceConversation'
+
+const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
+const component = read('../../src/components/portal/PortalConversation.vue')
+
+const FULL = { canRecord: true, secureContext: true, serverStt: true, voiceAvailable: true }
+
+describe('availability — a named reason, never a dead control (AC 6)', () => {
+  it('is available when the browser can record and the platform can transcribe', () => {
+    expect(voiceConversationMode(FULL)).toEqual({ available: true, narrates: true, reason: '' })
+  })
+
+  it('runs with text replies when the agent has no voice — and says so', () => {
+    const mode = voiceConversationMode({ ...FULL, voiceAvailable: false })
+    expect(mode.available).toBe(true)
+    expect(mode.narrates).toBe(false)
+    expect(mode.reason).toBe(VOICE_TEXT_REPLIES_NOTICE)
+  })
+
+  it('refuses with the microphone reason off a secure origin', () => {
+    expect(voiceConversationMode({ ...FULL, secureContext: false }))
+      .toEqual({ available: false, narrates: false, reason: VOICE_NO_MIC_REASON })
+    expect(voiceConversationMode({ ...FULL, canRecord: false }).reason).toBe(VOICE_NO_MIC_REASON)
+  })
+
+  it('refuses with the provider reason when the platform cannot transcribe', () => {
+    expect(voiceConversationMode({ ...FULL, serverStt: false }))
+      .toEqual({ available: false, narrates: false, reason: VOICE_NO_STT_REASON })
+  })
+
+  it('defaults to unavailable rather than promising a loop it cannot run', () => {
+    expect(voiceConversationMode().available).toBe(false)
+    expect(voiceConversationMode({}).reason).toBeTruthy()
+  })
+
+  it('every reason points at the surface that still works', () => {
+    for (const reason of [VOICE_NO_MIC_REASON, VOICE_NO_STT_REASON]) {
+      expect(reason.toLowerCase()).toContain('type')
+    }
+  })
+})
+
+describe('the loop', () => {
+  it('starts by listening', () => {
+    expect(nextVoiceState(VOICE_OFF, 'start')).toEqual({
+      state: VOICE_LISTENING, actions: [ACT_CAPTURE],
+    })
+  })
+
+  it('is idempotent on start — a second press opens no second recorder', () => {
+    expect(nextVoiceState(VOICE_LISTENING, 'start')).toEqual({ state: VOICE_LISTENING, actions: [] })
+    expect(nextVoiceState(VOICE_THINKING, 'start').actions).toEqual([])
+  })
+
+  it('runs listen → transcribe → send → speak → listen', () => {
+    const a = nextVoiceState(VOICE_LISTENING, 'utterance')
+    expect(a).toEqual({ state: VOICE_TRANSCRIBING, actions: [] })
+    const b = nextVoiceState(a.state, 'transcript')
+    expect(b).toEqual({ state: VOICE_THINKING, actions: [ACT_SEND] })
+    const c = nextVoiceState(b.state, 'reply')
+    expect(c).toEqual({ state: VOICE_SPEAKING, actions: [ACT_NARRATE] })
+    const d = nextVoiceState(c.state, 'narration-ended')
+    expect(d).toEqual({ state: VOICE_LISTENING, actions: [ACT_CAPTURE] })
+  })
+
+  it('skips narration and re-opens the mic when the agent has no voice', () => {
+    expect(nextVoiceState(VOICE_THINKING, 'reply', { canNarrate: false }))
+      .toEqual({ state: VOICE_LISTENING, actions: [ACT_CAPTURE] })
+  })
+
+  it('re-listens without spending a transcription on room tone', () => {
+    // Raised from TRANSCRIBING in practice: the recorder has already stopped by
+    // the time its clip is found to hold no speech. A LISTENING-only edge
+    // wedged the loop in TRANSCRIBING with the microphone open and nothing
+    // ever advancing it.
+    expect(nextVoiceState(VOICE_TRANSCRIBING, 'silence'))
+      .toEqual({ state: VOICE_LISTENING, actions: [ACT_CAPTURE] })
+    expect(nextVoiceState(VOICE_LISTENING, 'silence'))
+      .toEqual({ state: VOICE_LISTENING, actions: [ACT_CAPTURE] })
+  })
+
+  it('leaves no live state without an edge that can advance it', () => {
+    // The wedge above, generalised: from every live state at least one event
+    // this loop actually raises must move it somewhere.
+    const raised = ['utterance', 'silence', 'transcript', 'transcript-empty',
+      'reply', 'narration-ended', 'barge-in', 'stop', 'error']
+    for (const state of [VOICE_LISTENING, VOICE_TRANSCRIBING, VOICE_THINKING, VOICE_SPEAKING]) {
+      const moves = raised.filter((e) => nextVoiceState(state, e).state !== state)
+      expect(moves.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('re-listens when the transcript comes back empty', () => {
+    expect(nextVoiceState(VOICE_TRANSCRIBING, 'transcript-empty'))
+      .toEqual({ state: VOICE_LISTENING, actions: [ACT_CAPTURE] })
+  })
+
+  it('interrupts the agent mid-utterance and hears the user out (AC 5)', () => {
+    expect(nextVoiceState(VOICE_SPEAKING, 'barge-in'))
+      .toEqual({ state: VOICE_LISTENING, actions: [ACT_STOP_NARRATION, ACT_CAPTURE] })
+  })
+
+  it('ignores a barge-in that is not over speech', () => {
+    for (const state of [VOICE_LISTENING, VOICE_THINKING, VOICE_TRANSCRIBING]) {
+      expect(nextVoiceState(state, 'barge-in')).toEqual({ state, actions: [] })
+    }
+  })
+
+  it('always gives the microphone back when it stops', () => {
+    for (const state of [VOICE_LISTENING, VOICE_TRANSCRIBING, VOICE_THINKING, VOICE_SPEAKING]) {
+      for (const event of ['stop', 'error']) {
+        const out = nextVoiceState(state, event)
+        expect(out.state).toBe(VOICE_OFF)
+        expect(out.actions).toContain(ACT_RELEASE)
+      }
+    }
+    expect(nextVoiceState(VOICE_LISTENING, 'stop').actions).toContain(ACT_STOP_CAPTURE)
+    expect(nextVoiceState(VOICE_SPEAKING, 'stop').actions).toContain(ACT_STOP_NARRATION)
+  })
+
+  it('ignores every late callback once the loop is off', () => {
+    for (const event of ['utterance', 'silence', 'transcript', 'transcript-empty', 'reply',
+      'narration-ended', 'barge-in', 'nonsense']) {
+      expect(nextVoiceState(VOICE_OFF, event)).toEqual({ state: VOICE_OFF, actions: [] })
+    }
+  })
+
+  it('never sends a transcript twice — the send edge exists once', () => {
+    // A replayed `transcript` (a slow /stt answering after the state moved on)
+    // must not dispatch a second turn against the same words.
+    expect(nextVoiceState(VOICE_THINKING, 'transcript').actions).toEqual([])
+    expect(nextVoiceState(VOICE_SPEAKING, 'transcript').actions).toEqual([])
+  })
+
+  it('knows which states hold the microphone', () => {
+    expect(isVoiceLive(VOICE_OFF)).toBe(false)
+    for (const s of [VOICE_LISTENING, VOICE_TRANSCRIBING, VOICE_THINKING, VOICE_SPEAKING]) {
+      expect(isVoiceLive(s)).toBe(true)
+    }
+  })
+
+  it('labels every state, and falls back rather than rendering undefined', () => {
+    for (const s of [VOICE_OFF, VOICE_LISTENING, VOICE_TRANSCRIBING, VOICE_THINKING, VOICE_SPEAKING]) {
+      expect(voiceStateLabel(s)).toBeTruthy()
+    }
+    expect(voiceStateLabel('nope')).toBe(voiceStateLabel(VOICE_OFF))
+  })
+})
+
+describe('utterance detection', () => {
+  it('treats sustained level as speech and room tone as silence', () => {
+    expect(isSpeech(SPEECH_RMS)).toBe(true)
+    expect(isSpeech(SPEECH_RMS - 0.001)).toBe(false)
+    expect(isSpeech(NaN)).toBe(false)
+    expect(isSpeech(undefined)).toBe(false)
+  })
+
+  it('asks for more level to interrupt than to hear', () => {
+    // The mic hears the agent's own narration; a barge-in bar at the listening
+    // threshold makes the agent interrupt itself.
+    expect(BARGE_IN_RMS).toBeGreaterThan(SPEECH_RMS)
+  })
+
+  it('keeps listening through a mid-sentence pause', () => {
+    expect(utteranceVerdict({ sawSpeech: true, msSinceSpeech: 400, elapsedMs: 3000 })).toBe('continue')
+  })
+
+  it('ends the utterance once the pause holds', () => {
+    expect(utteranceVerdict({ sawSpeech: true, msSinceSpeech: 1200, elapsedMs: 3000 })).toBe('end')
+  })
+
+  it('ends a monologue at the cap rather than uploading forever', () => {
+    expect(utteranceVerdict({ sawSpeech: true, msSinceSpeech: 0, elapsedMs: 30000 })).toBe('end')
+  })
+
+  it('gives the microphone back when nothing was ever said', () => {
+    expect(utteranceVerdict({ sawSpeech: false, elapsedMs: 3000 })).toBe('continue')
+    expect(utteranceVerdict({ sawSpeech: false, elapsedMs: 15000 })).toBe('idle')
+  })
+
+  it('never reports idle once speech has been heard — that clip is worth sending', () => {
+    expect(utteranceVerdict({ sawSpeech: true, msSinceSpeech: 0, elapsedMs: 20000 })).toBe('continue')
+  })
+})
+
+describe('what gets spoken', () => {
+  it('reads a plain reply as-is', () => {
+    expect(spokenReply('All three checks passed.')).toBe('All three checks passed.')
+  })
+
+  it('never pronounces a code block', () => {
+    const out = spokenReply('Run this:\n\n```bash\nnpm run build\n```\n\nThen refresh.')
+    expect(out).toContain(SPOKEN_CODE_PLACEHOLDER)
+    expect(out).not.toContain('npm run build')
+    expect(out).not.toContain('```')
+  })
+
+  it('swallows an unterminated fence rather than reading backticks aloud', () => {
+    const out = spokenReply('Here:\n```python\nprint(1)')
+    expect(out).not.toContain('```')
+    expect(out).not.toContain('print(1)')
+  })
+
+  it('reads link text, never the URL', () => {
+    expect(spokenReply('See [the report](https://example.com/a/b?x=1).'))
+      .toBe('See the report.')
+  })
+
+  it('drops markdown furniture', () => {
+    const out = spokenReply('## Summary\n\n- **one**\n- _two_\n\n> quoted')
+    expect(out).not.toMatch(/[#*_>]/)
+    expect(out).toContain('one')
+    expect(out).toContain('two')
+  })
+
+  it('caps a long reply and says where the rest is', () => {
+    const out = spokenReply('word '.repeat(1000))
+    expect(out.length).toBeLessThanOrEqual(MAX_SPOKEN_CHARS + SPOKEN_TRUNCATION_NOTICE.length)
+    expect(out.endsWith(SPOKEN_TRUNCATION_NOTICE)).toBe(true)
+  })
+
+  it('cuts a capped reply at a sentence end when there is one near the limit', () => {
+    const body = `${'a'.repeat(MAX_SPOKEN_CHARS - 40)}. ${'b'.repeat(200)}`
+    const out = spokenReply(body)
+    expect(out).toBe(`${'a'.repeat(MAX_SPOKEN_CHARS - 40)}.${SPOKEN_TRUNCATION_NOTICE}`)
+  })
+
+  it('has nothing to say about nothing', () => {
+    expect(spokenReply('')).toBe('')
+    expect(spokenReply(null)).toBe('')
+    expect(spokenReply(undefined)).toBe('')
+    expect(spokenReply(42)).toBe('')
+  })
+})
+
+describe('the component consumes the machine (what only source can answer)', () => {
+  it('dispatches through nextVoiceState instead of hand-rolling transitions', () => {
+    expect(component).toContain('nextVoiceState(voiceState.value, event')
+    // Exactly one writer of the state, so no path can move the loop behind the
+    // machine's back.
+    // `[^=]` so a comparison (`voiceState.value === …`) is not counted as a write.
+    expect(component.match(/voiceState\.value = [^=]/g) || []).toHaveLength(2) // dispatch + unmount reset
+  })
+
+  it('sends a spoken turn through the same submit path a typed one uses', () => {
+    // The claim of AC 2/3 in one line: if this ever becomes its own call to
+    // `deliver` or the store, voice has become a parallel conversation.
+    expect(component).toContain('const res = await submitUserText(text)')
+    expect(component.match(/await submitUserText\(/g) || []).toHaveLength(2) // send() + the voice turn
+  })
+
+  it('does not narrate a reply twice while the loop is running', () => {
+    expect(component).toMatch(/!voiceConvLive\.value[\s\S]{0,60}speak\(data\.response\)/)
+  })
+
+  it('does not speak the raw reply for a loop the user already stopped', () => {
+    // Review finding: the #2157 branch is evaluated AFTER the turn's await, so
+    // a Stop pressed while the agent was thinking left `voiceConvLive` false by
+    // the time it ran — and the un-cleaned reply (code fences, URLs, markdown)
+    // played anyway, contradicting "explicit Stop ends the loop". The user
+    // could not mute it either: the speaker button is hidden for the whole
+    // duration of a conversation.
+    expect(component).toContain('!voiceLoopEndedDuringTurn')
+    expect(component).toMatch(/function releaseVoiceHardware[\s\S]{0,400}voiceLoopEndedDuringTurn = true/)
+    // ...and it describes ONE turn, so a later ordinary turn still speaks.
+    expect(component).toMatch(/async function deliver\(text\) \{\s*voiceLoopEndedDuringTurn = false/)
+  })
+
+  it('bounds the transcribing state, so the mic cannot stay hot forever', () => {
+    // `stopUtterance()` no-ops on an already-inactive recorder, so `onstop`
+    // never fires and `finishUtterance` never runs — reachable when the mic is
+    // unplugged or permission revoked mid-conversation, and when `/stt` hangs
+    // (no transport timeout). The 15s no-speech guard covers `listening` only.
+    // Review: this used to assert `finishUtterance` OPENS with the clear, which
+    // pinned the defect rather than the fix — that ordering is exactly what
+    // left the /stt await unbounded. The rule is asserted structurally in the
+    // "the mic is bounded on every live path" block below; here we only check
+    // the watchdog is armed and torn down.
+    expect(component).toMatch(/armTranscribeWatchdog\(\)\s*$/m)   // called, not just declared
+    expect(component).toMatch(/voiceState\.value !== VOICE_TRANSCRIBING\) return[\s\S]{0,200}failVoice/)
+    expect(component).toMatch(/function releaseVoiceHardware\(\) \{\s*clearTranscribeWatchdog\(\)/)
+  })
+
+  it('yields to a typed turn instead of racing it', () => {
+    // `send()` guards on `sending`; this path did not, and the textarea stays
+    // enabled while the loop is listening. Two concurrent `deliver()` calls
+    // share `elapsedTimer`, `sending`, `attachments` and `awaitPersistedReply`'s
+    // baseline count — so the second turn's poll returns the first turn's reply.
+    expect(component).toMatch(/async function runVoiceTurn[\s\S]{0,700}if \(sending\.value\) \{[\s\S]{0,200}return/)
+  })
+
+  it('a stale turn\u2019s failure cannot tear down a restarted conversation', () => {
+    // `nextVoiceState` handles stop/error BEFORE its OFF short-circuit, so
+    // `failVoice` always returned OFF + ACT_RELEASE. A user who stopped a slow
+    // turn and restarted had the NEW loop released when the abandoned one
+    // finally rejected.
+    expect(component).toMatch(/function failVoice\(message, token = null\)[\s\S]{0,120}token !== voiceStartToken\) return/)
+    expect(component).toMatch(/failVoice\([^)]*, token\)/)
+    expect(component).toContain('failVoice(transcriptionErrorMessage(e), transcribeToken)')
+  })
+
+  it('only renders the control when the loop can actually run', () => {
+    expect(component).toContain('v-if="conversationMode.available"')
+  })
+
+  it('asks for echo cancellation — the agent must not interrupt itself', () => {
+    expect(component).toContain('echoCancellation: true')
+  })
+
+  it('cannot open two microphones while a permission prompt is open', () => {
+    // The loop is not live until getUserMedia resolves, so a second press, a
+    // press after Stop, or a nav-away would otherwise install a second stream
+    // and a second timer and orphan the first pair — a hot mic with no control
+    // pointing at it.
+    expect(component).toContain('if (voiceConvLive.value || voiceStarting) return')
+    expect(component).toContain('const token = ++voiceStartToken')
+    // Teardown invalidates an in-flight start rather than trusting it to notice.
+    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,900}voiceStartToken\+\+/)
+    // A superseded start stops the tracks it just acquired.
+    expect(component).toMatch(/token !== voiceStartToken[\s\S]{0,120}getTracks\(\)\.forEach/)
+  })
+
+  it('cannot narrate into a loop that moved on during synthesis', () => {
+    // Review of this PR: `speak()` awaits a real 1-3 s TTS round trip while the
+    // machine is already SPEAKING, so barge-in or an explicit Stop can land
+    // mid-await. Without a generation token the function then COMMITS playback
+    // anyway — narrating over the user's fresh utterance, or playing after
+    // Stop released the hardware. `narrateReply`'s trailing guard suppresses
+    // only the dispatch; the element is committed before it runs, so the check
+    // has to be inside `speak`, before `src` is assigned.
+    expect(component).toMatch(/async function speak\([\s\S]{0,200}const token = \+\+narrationToken/)
+    expect(component).toMatch(
+      /await store\.synthesizeTts[\s\S]{0,400}token !== narrationToken[\s\S]{0,200}return/)
+    // The abandoning paths bump the token — a pause cannot reach audio that has
+    // not been assigned yet.
+    expect(component).toMatch(/function stopSpeaking\(\)\s*\{\s*narrationToken\+\+/)
+    // ...and releasing the hardware tears narration down itself rather than
+    // relying on the machine happening to emit ACT_STOP_NARRATION first.
+    expect(component).toMatch(/function releaseVoiceHardware\(\)[\s\S]{0,1200}stopSpeaking\(\)/)
+  })
+
+  it('releases the microphone on unmount', () => {
+    expect(component).toMatch(/function cleanupVoice\(\)\s*\{\s*releaseVoiceHardware\(\)/)
+  })
+})
+
+describe('ent#440 review — the mic is bounded on every live path', () => {
+  const sfc = component
+  const store = read('../../src/stores/clientPortal.js')
+
+  it('keeps the transcribe watchdog armed ACROSS the /stt await', () => {
+    // NEW-1: it was cleared on finishUtterance's first line, so it bounded only
+    // the recorder-cannot-stop window — while `transcribeStt` rides an axios
+    // instance with `timeout: 0`. A hung /stt held TRANSCRIBING, and the mic,
+    // open until the user pressed Stop: the hot mic FR-9 forbids, reached by the
+    // exact cause the watchdog exists for.
+    const body = sfc.slice(sfc.indexOf('async function finishUtterance'))
+    const fn = body.slice(0, body.indexOf('\n}\n'))
+    const awaitAt = fn.indexOf('await store.transcribeStt')
+    const clears = [...fn.matchAll(/clearTranscribeWatchdog\(\)/g)].map((m) => m.index)
+    expect(awaitAt).toBeGreaterThan(-1)
+    expect(clears.some((i) => i > awaitAt)).toBe(true)
+    // ...and nothing disarms it before the call it is meant to bound.
+    const beforeAwait = clears.filter((i) => i < awaitAt)
+    for (const i of beforeAwait) {
+      // the only permitted pre-await clears are the two early exits, which are
+      // no longer waiting for a transcript
+      expect(fn.slice(Math.max(0, i - 120), i)).toMatch(/return|MIN_RECORDING_BYTES|VOICE_TRANSCRIBING/)
+    }
+  })
+
+  it('discards a transcript that belongs to an abandoned loop', () => {
+    // Review finding. `transcribeToken` was captured but consulted only in the
+    // catch; the success path guarded on `voiceState !== VOICE_TRANSCRIBING`,
+    // which is generation-BLIND. Stop, restart, and the abandoned /stt — up to
+    // its 60s timeout — resolves into a NEW loop legitimately back in
+    // TRANSCRIBING: it would send the previous conversation's words as a real
+    // turn, clobber the live convChunks, and disarm the live watchdog.
+    const body = sfc.slice(sfc.indexOf('async function finishUtterance'))
+    const fn = body.slice(0, body.indexOf('\n}\n'))
+    const awaitAt = fn.indexOf('await store.transcribeStt')
+    const genAt = fn.indexOf('transcribeToken !== voiceStartToken')
+    expect(genAt).toBeGreaterThan(awaitAt)
+    // ...and BEFORE anything that touches shared loop state.
+    expect(genAt).toBeLessThan(fn.indexOf('clearTranscribeWatchdog()', awaitAt))
+    expect(genAt).toBeLessThan(fn.indexOf('voiceDispatch', awaitAt))
+  })
+
+  it('gives the /tts call a transport timeout too', () => {
+    // SPEAKING is the one live state with no timer of its own — barge-in and
+    // Stop are its only exits — and it awaits synthesis on the same untimed
+    // axios instance. A hung /tts holds the mic with nothing counting.
+    expect(store).toMatch(/tts`[\s\S]{0,900}?timeout: \d+/)
+  })
+
+  it('gives the /stt call a transport timeout', () => {
+    // The root cause: `portalHttp` is created with no `timeout`, so the promise
+    // could never settle. Two layers now, not one.
+    expect(store).toMatch(/stt`[\s\S]{0,600}?timeout: \d+/)
+  })
+
+  it('passes the generation token from the recorder error handler', () => {
+    // NEW-2: `releaseVoiceHardware` nulls `convRec` but never clears its
+    // handlers, so a late error from a torn-down recorder tore down a RESTARTED
+    // loop with a message about the abandoned one.
+    expect(sfc).toMatch(/convRec\.onerror = [\s\S]{0,120}?recorderToken\)/)
+  })
+})

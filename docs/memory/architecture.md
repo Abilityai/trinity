@@ -1558,6 +1558,37 @@ CLAUDE.md's default for an enterprise-tracker feature is gated unless ruled othe
 the ruling must never be inferred later from the mere fact that it merged.** See
 [workspace-composer-typeahead.md](feature-flows/workspace-composer-typeahead.md).
 
+**Voice conversation — one conversation, two modalities (ent#440).** The Workspace's
+two manual voice controls — hold-to-dictate (#2212) and the speaker toggle (#2157)
+— become one hands-free loop: the mic listens, the utterance is submitted as an
+**ordinary Workspace turn**, the reply is spoken, the mic reopens. The load-bearing
+property is that a spoken turn takes the SAME path a typed one does
+(`submitUserText` → `deliver` → `POST .../chat/stream`), so shared context, history
+parity and permission parity are true by construction rather than by
+synchronisation — same portal session, same resumed Claude session, same
+`enterprise_portal_messages` row, no new route and therefore no new gate. Bridging
+the platform's Gemini Live session (VOICE-001, `routers/voice.py`) was **rejected**:
+it answers with a different model holding a *summarised copy* of the thread and
+writes its transcript back afterwards (a parallel conversation wearing the same
+page), it cannot reach the agent's own tools/canvas, and its JWT-only WebSocket
+cannot authenticate a portal client, which holds no `users` row. All decidable
+rules are pure in `components/portal/voiceConversation.js` — transition table
+(`start` idempotent; every event inert in `off`, so a `/stt` answer arriving after
+teardown cannot restart a loop the user ended; `transcript` sends from exactly one
+state; every exit releases the microphone), an RMS level meter for utterance
+boundaries (1.2 s silence hold, 30 s cap, 15 s no-speech → stop **with a
+sentence**; room tone re-listens rather than spending a transcription), barge-in at
+a **higher** threshold than listening plus `echoCancellation` on capture (without
+both, the mic hears the agent's narration through the speakers and it interrupts
+itself), and `spokenReply()`, which cleans a reply for the ear (code fences → one
+spoken sentence, links read as text, sentence-boundary cap) while the rendered
+message is untouched. The control renders only where the loop can run; an agent
+with no configured voice still converses, in text, and says so. **OSS-core by
+decision (ent#440): deliberately ungated** — recorded explicitly because the
+default for an enterprise-tracker feature is gated-unless-ruled-otherwise (the
+ent#326/ent#384/ent#392 discipline). **No backend change, no new endpoint, no
+migration.** See [workspace-voice-conversation.md](feature-flows/workspace-voice-conversation.md).
+
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
 cannot read `GET /api/settings/feature-flags` — that endpoint is `get_current_user`-gated
 and the frontend store behind it returns `[]` for any caller without a platform JWT, i.e.
