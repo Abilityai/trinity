@@ -2547,8 +2547,10 @@ class DatabaseManager:
     def get_agent_subscription_id(self, agent_name: str):
         return self._subscription_ops.get_agent_subscription_id(agent_name)
 
-    def get_least_used_subscription(self):
-        return self._subscription_ops.get_least_used_subscription()
+    def list_assignable_subscriptions(self):
+        """#2409: the new-agent auto-assign candidate list — filter only,
+        load-balance order; ranking lives in `services.subscription_service`."""
+        return self._subscription_ops.list_assignable_subscriptions()
 
     # --- SUB-003: Rate-Limit Tracking ---
 
@@ -2601,8 +2603,10 @@ class DatabaseManager:
             retention_days, limit
         )
 
-    def select_best_alternative_subscription(self, current_subscription_id: str):
-        return self._subscription_ops.select_best_alternative_subscription(current_subscription_id)
+    def list_viable_alternative_subscriptions(self, current_subscription_id: str):
+        """#2409: the auto-switch candidate list — filter only, load-balance
+        order; ranking lives in `services.subscription_auto_switch`."""
+        return self._subscription_ops.list_viable_alternative_subscriptions(current_subscription_id)
 
     def get_subscription_usage(self, subscription_id: str):
         """Return rolling usage totals for a subscription (SUB-004)."""

@@ -72,12 +72,16 @@ Admin's Machine                  Trinity Backend                    Agent Contai
 
 ### Auto-Assign on Agent Creation (#74)
 
-New agents are automatically assigned the subscription with fewest agents (round-robin). Subscriptions that failed within the last 2h — rate-limit OR auth (#2352) — are skipped. Falls back to platform API key if no viable subscription exists.
+New agents are automatically assigned a subscription: since #2409 the one with the most cached provider headroom (the auto-switch ranker — furthest from the nearest wall, a fresh provider refusal dropped), with fewest-agents round-robin as the order among candidates that have no usable reading. Subscriptions that failed within the last 2h — rate-limit OR auth (#2352) — are skipped first. Falls back to platform API key if no viable subscription exists.
 
 ```
 create_agent_internal()
-  ├── db.get_least_used_subscription()       ← SQL: COUNT + ORDER BY agent_count ASC, name ASC
-  │     └── skip recently-failed, any kind (has_recent_subscription_failures)
+  ├── subscription_service.select_subscription_for_new_agent()   (#2409)
+  │     ├── db.list_assignable_subscriptions()   ← SQL: COUNT + ORDER BY agent_count ASC, name ASC
+  │     │     └── skip recently-failed, any kind (has_recent_subscription_failures) — filter only
+  │     ├── headroom.cached_headroom_readings()  ← one MGET of subscription:headroom:{id}, never a probe
+  │     ├── headroom.rank_subscriptions()        ← nearest wall first, 10-pt bands, agent_count in-band
+  │     └── first candidate whose token decrypts (#340) — one decrypt in the common case
   ├── db.get_subscription_token(id)          ← AES-256 decrypt
   ├── env_vars['CLAUDE_CODE_OAUTH_TOKEN'] = token
   ├── env_vars.pop('ANTHROPIC_API_KEY')
@@ -87,7 +91,8 @@ create_agent_internal()
 ```
 
 **Files:**
-- `src/backend/db/subscriptions.py:540` — `get_least_used_subscription()` (iterates candidates, skips rate-limited)
+- `src/backend/db/subscriptions.py` — `list_assignable_subscriptions()` (2h failure filter, load-balance order — filter only)
+- `src/backend/services/subscription_service.py` — `select_subscription_for_new_agent()` (headroom ranking + token viability, #2409)
 - `src/backend/services/agent_service/crud.py:301` — lookup + env var injection before container creation
 - `src/backend/services/agent_service/crud.py:507` — DB persist after `register_agent_owner()`
 

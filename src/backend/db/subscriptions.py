@@ -1156,16 +1156,16 @@ class SubscriptionOperations:
                 window_7d=_window_rows(conn, iso_cutoff(168)),
             )
 
-    def get_least_used_subscription(self) -> Optional[SubscriptionCredential]:
-        """
-        Get subscription with fewest assigned agents (round-robin).
+    def _list_unfailed_subscriptions(self, exclude_id: Optional[str] = None) -> List[SubscriptionCredential]:
+        """Subscriptions that have NOT failed in the 2h window, in load-balance
+        order (`agent_count ASC, name ASC`), optionally excluding one id.
 
-        Tie-break: alphabetical by name.
-        Skips subscriptions that failed recently (any kind) or have invalid tokens.
-        Used for auto-assignment on agent creation (#74).
-
-        Returns:
-            SubscriptionCredential with fewest agents, or None if no viable subscription
+        The shared body of the two candidate listings below. Kind-BLIND by
+        design (#2352): the display predicate `is_subscription_rate_limited`
+        was narrowed to real 429s so a dead token stops reading as quota
+        exhaustion; candidate selection must NOT inherit that narrowing, or
+        agents get moved onto subscriptions the platform just watched fail to
+        authenticate. See #444 for what a forgetful candidate filter does.
         """
         agent_count = self._agent_count_subquery()
         stmt = (
@@ -1175,69 +1175,46 @@ class SubscriptionOperations:
                     users, subscription_credentials.c.owner_id == users.c.id
                 )
             )
-            .order_by(agent_count.asc(), subscription_credentials.c.name.asc())
         )
+        if exclude_id is not None:
+            stmt = stmt.where(subscription_credentials.c.id != exclude_id)
+        # The name tiebreak makes this order deterministic (SQLite leaves ties
+        # unspecified) — it is what the #2409 ranker degrades to when no
+        # headroom reading is usable, so "today's order" has to BE an order.
+        stmt = stmt.order_by(agent_count.asc(), subscription_credentials.c.name.asc())
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
+        subs = [self._row_to_subscription(row) for row in rows]
+        return [sub for sub in subs if not self.has_recent_subscription_failures(sub.id)]
 
-        for row in rows:
-            sub = self._row_to_subscription(row)
-            # Skip any subscription that failed recently — for ANY reason
-            # (#2352). Kind-blind on purpose: assigning a new agent to a
-            # subscription whose token just got rejected is worse than assigning
-            # it to a busy one.
-            if self.has_recent_subscription_failures(sub.id):
-                continue
-            # Skip subscriptions with invalid/legacy tokens (#340)
-            token = self.get_subscription_token(sub.id)
-            if not token:
-                continue
-            return sub
-        return None
+    def list_assignable_subscriptions(self) -> List[SubscriptionCredential]:
+        """The new-agent auto-assign candidate list (#74): every subscription
+        that has NOT failed recently, load-balance order.
 
-    def select_best_alternative_subscription(
-        self,
-        current_subscription_id: str
-    ) -> Optional[SubscriptionCredential]:
+        FILTER ONLY. Which candidate is best — and whether its token still
+        decrypts (#340) — is decided by
+        `services.subscription_service.select_subscription_for_new_agent`
+        over the cached provider headroom (#2409); this layer holds no Redis
+        edge (Invariant #1).
         """
-        Select the best alternative subscription for auto-switch.
+        return self._list_unfailed_subscriptions()
 
-        Strategy:
-        - Exclude the current subscription
-        - Skip subscriptions that failed in the last 2 hours (rate-limit OR auth)
-        - Prefer subscriptions with fewer assigned agents (load-balance)
+    def list_viable_alternative_subscriptions(
+        self, current_subscription_id: str
+    ) -> List[SubscriptionCredential]:
+        """The auto-switch candidate list (SUB-003): every subscription except
+        the current one that has NOT failed recently, load-balance order.
 
-        Returns:
-            Best alternative SubscriptionCredential, or None if no viable option
+        FILTER ONLY, never a ranking — it used to be both (first survivor
+        wins), which is how an agent got moved onto a subscription at 99% of
+        its weekly window, and how an UNUSED dead-token subscription (no
+        agents ⇒ no failure rows) sorted first. Which survivor is best is
+        decided by `services.subscription_auto_switch.
+        select_best_alternative_subscription` over the cached provider
+        headroom (#2409); this layer holds no Redis edge (Invariant #1). An
+        empty list means what `None` used to: no viable alternative.
         """
-        agent_count = self._agent_count_subquery()
-        # Get all subscriptions except current, ordered by agent count (ascending)
-        stmt = (
-            select(*self._subscription_select_columns(), agent_count)
-            .select_from(
-                subscription_credentials.join(
-                    users, subscription_credentials.c.owner_id == users.c.id
-                )
-            )
-            .where(subscription_credentials.c.id != current_subscription_id)
-            .order_by(agent_count.asc())
-        )
-        with get_engine().connect() as conn:
-            rows = conn.execute(stmt).mappings().all()
-
-        for row in rows:
-            sub = self._row_to_subscription(row)
-            # Skip anything that failed in the last 2 hours, rate-limit or auth
-            # (#2352 — kind-BLIND by design). The display predicate
-            # `is_subscription_rate_limited` was narrowed to real 429s so a dead
-            # token stops reading as quota exhaustion; candidate selection must
-            # NOT inherit that narrowing, or auto-switch would start moving
-            # agents onto subscriptions it has just watched fail to
-            # authenticate. See #444 for what a forgetful candidate filter does.
-            if not self.has_recent_subscription_failures(sub.id):
-                return sub
-
-        return None
+        return self._list_unfailed_subscriptions(exclude_id=current_subscription_id)
 
     # =========================================================================
     # Usage Tracking (SUB-004: Per-subscription usage windows)

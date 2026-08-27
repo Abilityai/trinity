@@ -115,8 +115,11 @@ def _sub(sub_id: str) -> MagicMock:
 def _build_db(initial_sub: str, alt_map: dict) -> MagicMock:
     """A ``db`` stub whose current subscription is mutable.
 
-    ``alt_map`` maps current-sub-id → the subscription
-    ``select_best_alternative_subscription`` returns for it (or absent → None).
+    ``alt_map`` maps current-sub-id → the one candidate
+    ``list_viable_alternative_subscriptions`` lists for it (or absent → []).
+    #2409: the db lists, the service ranks — with ``services`` stubbed as a
+    bare module here the ranking import fails open to the db's order, which
+    is exactly the old first-match pick.
     """
     state = {"current": initial_sub}
     db = MagicMock()
@@ -124,8 +127,8 @@ def _build_db(initial_sub: str, alt_map: dict) -> MagicMock:
     db.get_agent_subscription_id.side_effect = lambda _agent: state["current"]
     db.record_rate_limit_event.return_value = 1
     db.get_subscription.side_effect = lambda sub_id: _sub(sub_id)
-    db.select_best_alternative_subscription.side_effect = (
-        lambda cur: alt_map.get(cur)
+    db.list_viable_alternative_subscriptions.side_effect = (
+        lambda cur: [alt_map[cur]] if alt_map.get(cur) is not None else []
     )
     db._state = state  # expose for assertions / the perform spy
     return db
@@ -137,7 +140,8 @@ def _install_perform_spy(mod, db):
     calls: list[str] = []
 
     async def spy(*, agent_name, old_subscription_id, old_subscription_name,
-                  new_subscription, failure_kind, event_count):
+                  new_subscription, failure_kind, event_count,
+                  destination_headroom=None):
         calls.append(new_subscription.id)
         db._state["current"] = new_subscription.id  # the real assign side effect
         return {
@@ -208,7 +212,7 @@ async def test_concurrent_failures_no_cascade_three_subs():
     assert db._state["current"] == "B"
     assert len([r for r in results if r is None]) == 1, "loser must no-op"
     # The guard short-circuits BEFORE alternative selection for the new sub:
-    selected = [c.args[0] for c in db.select_best_alternative_subscription.call_args_list]
+    selected = [c.args[0] for c in db.list_viable_alternative_subscriptions.call_args_list]
     assert "B" not in selected, (
         f"loser reached alternative selection for the post-switch sub — the "
         f"stale-failure guard did not fire (selected={selected!r})"
