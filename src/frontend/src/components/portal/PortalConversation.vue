@@ -213,6 +213,23 @@
             @click="voiceError = ''"
           >Dismiss</button>
         </p>
+        <!-- ent#155: a cancel that was REFUSED. Deliberately not `markFailed` —
+             the turn is still running and still spending, so calling it failed
+             would be the dishonest half of "honest status". -->
+        <p
+          v-if="cancelError"
+          class="mb-2 text-xs text-status-danger-600 dark:text-status-danger-400 flex items-start gap-1.5"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="mt-1 w-1.5 h-1.5 rounded-full bg-status-danger-500 shrink-0"></span>
+          <span class="flex-1">{{ cancelError }}</span>
+          <button
+            type="button"
+            class="shrink-0 underline hover:no-underline text-gray-500 dark:text-gray-400"
+            @click="cancelError = ''"
+          >Dismiss</button>
+        </p>
         <!-- ent#440: what the loop is doing right now, and the one control that
              ends it. `aria-live` because the state changes with no keystroke —
              a screen-reader user otherwise cannot tell listening from thinking.
@@ -317,7 +334,26 @@
               @select="onComposerCaret"
             ></textarea>
           </div>
+          <!-- ent#155: Send becomes Stop while a turn is live. Send is disabled
+               for that whole period anyway, so this is the same control doing
+               the only thing it usefully can. -->
           <button
+            v-if="canCancelTurn"
+            type="button"
+            @click="cancelTurn"
+            :disabled="cancelling"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-status-danger-600 hover:bg-status-danger-700 text-white disabled:opacity-40 transition"
+            :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
+            aria-label="Stop this turn"
+          >
+            <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" /></svg>
+          </button>
+          <button
+            v-else
             type="submit"
             class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
             :disabled="sending || !input.trim()"
@@ -378,6 +414,7 @@ import {
   speechErrorMessage,
   transcriptionErrorMessage,
 } from './portalUtils'
+import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
 // ent#440: the voice-conversation loop's rules live in their own pure module —
 // this component is the dispatcher over it (vitest runs `environment: 'node'`
 // with no mount harness, so a rule kept in here is a rule no test can reach).
@@ -432,6 +469,34 @@ const currentSessionId = ref(props.sessionId)
 const loadingHistory = ref(false)
 const input = ref('')
 const sending = ref(false)
+// ent#155 — stopping an in-flight turn. The id arrives with the 202, so Stop is
+// offered only once there is something to stop; a turn that fell back to the
+// synchronous send has no id and correctly offers nothing.
+const activeExecutionId = ref(null)
+const pendingUserText = ref('')
+const cancelling = ref(false)
+const cancelError = ref('')
+// Review finding: `terminate_portal_turn` writes the CANCELLED terminal, and
+// the still-running background turn then finishes — `portal_chat` sees a
+// non-success status, matches no `error_code` branch, and raises the generic
+// `agent_error` 502. `deliver` reports failed, `send()` calls `markFailed`, and
+// the user who pressed Stop sees their own message struck out in red under
+// "Something went wrong while the agent was working on this."
+// A cancel the user ASKED FOR is not a failure. The DURABLE half of that lives
+// in the server classifier now (`category: "cancelled"`, ent#155 review NEW-1)
+// — the argument for keeping it client-side was that the portal outcome path
+// had no such category, and the answer was to add one rather than to accept a
+// verdict that outlived the tab. This set remains for the WINDOW that verdict
+// cannot cover: `terminate_execution` writes the CANCELLED CAS before
+// `cancelPortalTurn()` resolves, so a poll landing in between reads a turn that
+// has already been cancelled but has no recorded outcome yet. In-memory is the
+// right lifetime for a race that closes in milliseconds; it is the wrong one
+// for a verdict a reload re-reads.
+const cancelledExecutionIds = ref(new Set())
+// Survives `deliver`'s finally, which clears the live id — `send()` needs to
+// know which execution the turn it is about to judge actually ran under.
+const lastDeliveredExecutionId = ref(null)
+const canCancelTurn = computed(() => sending.value && !!activeExecutionId.value)
 const attachments = ref([])
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
@@ -501,6 +566,13 @@ async function loadThread(sessionId) {
 // where the row came from history rather than from this tab's own `send()`.
 function markLastUserTurnFailed(outcome) {
   if (!outcome?.message) return
+  // ent#155 review (NEW-1): a cancellation is not a failure, and the server now
+  // says so durably (`category: "cancelled"`). Keying on that rather than on
+  // `cancelledExecutionIds` is the whole point of the server-side fix — that set
+  // lives in ONE tab's memory, so switching threads or reloading brought the red
+  // "Something went wrong" back for something the person did on purpose. This
+  // arm survives a reload because the verdict does.
+  if (outcome.category === 'cancelled') return
   const last = messages.value[messages.value.length - 1]
   // Only ever the UNANSWERED tail. Two raise sites (`portal_chat`'s roster 404
   // and its availability refusal) fire BEFORE `_persist_user_turn`, so they
@@ -586,6 +658,7 @@ onMounted(async () => {
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onEscapeKeydown)
   window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
   if (props.sessionId) await loadThread(props.sessionId)
@@ -604,6 +677,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('online', onNet)
   window.removeEventListener('offline', onNet)
   document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onEscapeKeydown)
   window.removeEventListener('resize', onViewportResize)
   cleanupVoice()
 })
@@ -899,6 +973,11 @@ async function deliver(text) {
     }
 
     if (started) {
+      // ent#155: this is the first moment a Stop is possible — before it there
+      // is no turn to stop, and a control offered earlier would be a lie.
+      activeExecutionId.value = started.execution_id || null
+      lastDeliveredExecutionId.value = started.execution_id || null
+      pendingUserText.value = text
       // Stamp the dispatch instant: the server's marker TTL starts here, so the
       // client's ceiling must too (see awaitPersistedReply).
       const dispatchedAt = Date.now()
@@ -996,7 +1075,75 @@ async function deliver(text) {
   } finally {
     sending.value = false
     clearInterval(elapsedTimer)
+    activeExecutionId.value = null
+    pendingUserText.value = ''
+    cancelling.value = false
     await scrollDown()
+  }
+}
+
+// ent#155: stop the turn, give the words back. The server keeps the cancel
+// semantics the rest of the platform uses (CANCELLED, CAS-guarded), and the
+// in-flight marker + resume lock are released by the turn's own `finally`, so
+// there is nothing to unwind here.
+// Escape stops the turn — but only when nothing else owns Escape. The rule
+// itself is pure and lives in `utils/turnCancel.js`; what belongs here is the
+// list of things on THIS surface that Escape would otherwise be dismissing.
+// (An earlier version of this comment described the voice loop as one of them.
+// It is not: `voiceMode` is a speak-replies TTS toggle, and the ent#440
+// conversation overlay is not in `dev` at all — naming its ref here is what
+// threw a ReferenceError on every Escape keydown and made Escape-to-cancel dead
+// in the Workspace. That entry stays out until the overlay actually exists; a
+// spec assertion pins the identifier's absence so it cannot come back by
+// comment either.)
+function onEscapeKeydown(event) {
+  if (!shouldCancelOnEscape(event, {
+    inFlight: canCancelTurn.value,
+    cancelling: cancelling.value,
+    // Review finding NEW-3: this list was `[typeaheadOpen]` alone, narrower
+    // than ChatPanel's for no reason anyone had argued. Two other things on
+    // this surface own Escape while a turn can be in flight, and both are
+    // reachable mid-turn:
+    //
+    //   - the agent picker (`pickerOpen`) closes on outside-click only, so a
+    //     user pressing Escape to dismiss it killed the turn instead;
+    //   - dictation (`listening`) is disabled only while `transcribing`, so
+    //     the mic can be live during a turn and Escape is how you stop it.
+    //
+    // The module's own bias decides the direction: a missed cancel costs one
+    // click on the Stop button, a wrong one destroys a turn the user is still
+    // waiting for. So an overlay is added whenever it plausibly owns Escape,
+    // not only when it provably does.
+    overlays: [typeaheadOpen.value, pickerOpen.value, listening.value],
+  })) return
+  event.preventDefault()
+  cancelTurn()
+}
+
+async function cancelTurn() {
+  const executionId = activeExecutionId.value
+  if (!executionId || cancelling.value) return
+  cancelling.value = true
+  cancelError.value = ''
+  const restoreText = pendingUserText.value
+  try {
+    const res = await store.cancelPortalTurn(props.agent.name, executionId)
+    const outcome = cancelOutcome({ ok: true, alreadyTerminal: isNoopCancel(res?.status) })
+    if (outcome.kind === 'cancelled') {
+      cancelledExecutionIds.value.add(executionId)
+      input.value = restoreDraft(restoreText, input.value)
+      autoGrowAfterUpdate()
+    }
+  } catch (err) {
+    // A 404 is the lost race (the row went terminal, or the agent no longer
+    // holds the turn), not a refusal — say nothing.
+    if (err?.response?.status === 404) {
+      cancelling.value = false
+      return
+    }
+    // Still running, still spending — say so and leave the composer alone.
+    cancelError.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
+    cancelling.value = false
   }
 }
 
@@ -1197,16 +1344,41 @@ async function send() {
 async function submitUserText(text) {
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   await scrollDown()
+  // A stale "couldn't stop the turn" must not outlive the turn it described.
+  cancelError.value = ''
   const res = await deliver(text)
+  return settleDelivery(index, text, res)
+}
+
+// Both `deliver()` callers have to settle a turn the same way, so they share
+// one function rather than one of them carrying the rules. Review finding:
+// `send()` grew the cancel-aware handling and `retry()` did not, so a cancelled
+// RETRY still struck the message out in red with a Retry button — reproducing,
+// on the other caller, the exact defect this change exists to remove — and a
+// refused cancel's error stayed pinned above the composer across every later
+// turn because only `send()` cleared it.
+function settleDelivery(index, text, res) {
+  if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
   // give-up it enumerated); otherwise the pre-existing rule, which still covers
   // the one path `deliver` does not classify — a dispatch that threw, where
   // nothing reached the server and re-sending is correct.
-  if (res !== true) {
-    markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
-    return { ok: false, error: res?.error, lost: res?.lost }
+  //
+  // A cancel the user asked for is not a failure. `markFailed` would strike the
+  // message out in red and offer a Retry for a turn they deliberately stopped —
+  // and the words are already back in the composer.
+  //
+  // ent#440 merge: the outcome is RETURNED, because the caller is no longer
+  // always a person watching the screen — the voice loop reads `{ok}` to decide
+  // whether to keep listening. A cancel reports `ok: false` like any other
+  // non-delivery (the turn did not produce an answer) but carries `cancelled`
+  // so the loop can tell "the user stopped this" from "this broke".
+  if (lastDeliveredExecutionId.value && cancelledExecutionIds.value.has(lastDeliveredExecutionId.value)) {
+    cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
+    return { ok: false, cancelled: true }
   }
-  return { ok: true }
+  markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
+  return { ok: false, error: res?.error, lost: res?.lost }
 }
 
 async function retry(i) {
@@ -1215,8 +1387,11 @@ async function retry(i) {
   const content = msg.content
   msg.failed = false
   msg.error = null
+  // A stale "couldn't stop the turn" must not outlive the turn it described —
+  // and `retry` is a new turn, so it clears it for the same reason `send` does.
+  cancelError.value = ''
   const res = await deliver(content)
-  if (res !== true) markFailed(i, content, res?.error, { retryable: res?.retryable ?? !res?.lost })
+  settleDelivery(i, content, res)
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------

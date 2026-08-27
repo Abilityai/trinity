@@ -509,6 +509,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data   // {execution_id, session_id}
     },
 
+    // ent#155: stop one of my own in-flight turns. Roster-scoped and
+    // started-by-this-caller-scoped server-side; a turn that already ended
+    // answers `already_terminal` rather than an error, because losing that
+    // race is not something the person can act on.
+    async cancelPortalTurn(agentName, executionId) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/executions/${executionId}/terminate`,
+        {},
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     // Read one turn's live log. `fetch` + ReadableStream rather than
     // EventSource: EventSource cannot send an Authorization header, which would
     // force the portal token into the query string — the same credential-in-URL

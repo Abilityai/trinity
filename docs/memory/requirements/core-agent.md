@@ -683,6 +683,74 @@
   this issue does not specify.
 - **Flow**: [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md)
 
+### 5.14 Stopping an in-flight turn — Escape and a Stop control (ent#155)
+- **Status**: ✅ Implemented (2026-08-25)
+- **Description**: A sent message that is still processing can be stopped from
+  every conversation surface, and the text comes back into the composer so it
+  can be edited and re-sent. Previously the only options were to wait for the
+  turn or for its timeout, and the words were gone either way.
+- **Scope**: the Agent Detail **Chat** tab, the **public link** chat, and the
+  **Workspace**. The issue's AC named Session mode as a fourth; ent#358 retired
+  that surface (`SessionPanel.vue` is deleted and `?tab=session` redirects), so
+  the Workspace — its successor — takes its place in the list rather than the
+  AC being dropped.
+- **The machinery is not new, and is deliberately not re-implemented**: the
+  cancel path (backend terminate → agent-server process-registry SIGINT →
+  CANCELLED terminal, #679/#1332, CAS-guarded and neutral for the dispatch
+  breaker) already existed and was already used by the Tasks panel. What ent#155
+  adds is a trigger on the three surfaces, two new routes to reach it from the
+  two credentials that are not a JWT, and the restore rule.
+- **Authorization is per surface, because the principal differs**:
+  - Agent Detail uses the existing `POST /api/agents/{name}/executions/{id}/terminate`
+    with the operator's JWT.
+  - The public link gets `POST /api/public/executions/{token}/{id}/terminate` —
+    the token is the credential, exactly as for the `status` and `stream` routes
+    it sits beside, and scoping is per LINK because a public link has no
+    per-visitor identity to check against. Anyone holding the link can already
+    watch a turn's stream — but reading is passive and cancelling destroys work, so
+    that is NOT the same authority (review finding). The route additionally
+    requires `triggered_by == "public"`, so a link-holder cannot reach a
+    scheduled run, an operator's chat, or a Workspace turn on the same agent.
+  - The Workspace gets `POST /api/enterprise/client-portal/agents/{name}/executions/{id}/terminate`
+    behind the **same three gates as its stream route**, using the same
+    `execution_belongs_to_caller` function rather than a second copy of the
+    predicate: roster, execution-belongs-to-agent, and **started-by-this-caller**.
+    The third is load-bearing — executions are agent-scoped, so without it a
+    client of a shared agent could stop another client's turn by guessing an id.
+- **`terminate_execution` became principal-agnostic**: `current_user` is optional
+  and the activity row records an `actor_kind` (`operator` / `public_link` /
+  `workspace_client`). A public visitor and a Workspace client are real people
+  with no `users` row, so a NULL `user_id` is correct and the kind is what keeps
+  it legible.
+- **Escape is conservative by construction**: it cancels only when a turn is in
+  flight, no cancel is already running, the key is not a composed IME candidate,
+  no other handler has claimed it, and nothing else currently owns Escape.
+  What owns it is declared PER SURFACE and declared generously — Agent Detail
+  lists the voice overlay and the session menu, the Workspace lists the composer
+  typeahead, the agent picker and dictation — because a missed cancel costs one
+  click on Stop while a wrong one destroys work the user is still waiting for.
+  Escape with nothing running is a no-op that never clears the input.
+- **Restoring the words never destroys a draft**: the cancelled text is
+  prepended to whatever was typed while waiting, and the merge is idempotent, so
+  pressing Escape and then Stop cannot stack two copies.
+- **Honest status**: a successful cancel renders as cancelled, not as an error;
+  a cancel that lost the race to a finished turn answers `already_terminal` / `already_finished` and
+  says nothing at all, because the reply is already on screen; a *refused*
+  terminate leaves the input untouched and says the turn is still running —
+  restoring the text there would imply a stop that did not happen.
+- **Rules are pure** (`utils/turnCancel.js`) and shared by all three surfaces,
+  because `vitest.config.js` runs `environment: 'node'` with no mount harness: a
+  rule decided inside an SFC is a rule no test can reach. The Stop control lives
+  in the shared `ChatInput` for the two chat surfaces — one control, not a
+  second hand-built copy (#2370's lesson).
+- **OSS-core by decision (ent#155)**: deliberately ungated — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because CLAUDE.md's default for an enterprise-tracker feature is *gated unless
+  ruled otherwise*, so the ruling must never be inferred later from the mere
+  fact that it merged. Rationale: two of the three surfaces are OSS-core chat,
+  the cancel machinery is OSS-core, and Workspace ships OSS-core throughout.
+- **Flow**: [chat-turn-cancellation.md](../feature-flows/chat-turn-cancellation.md)
+
 ---
 
 ### 5.14 Workspace deliverables — reports gain an audience and a place to appear (trinity-enterprise#365)

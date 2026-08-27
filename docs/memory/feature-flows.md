@@ -370,6 +370,7 @@
 | Workspace composer typeahead | [workspace-composer-typeahead.md](feature-flows/workspace-composer-typeahead.md) | ent#392 — `/` playbooks and `@` agents in the composer; why the trigger rule is stricter than the parser, why un-mentionable slugs are excluded, and why Enter never accepts implicitly |
 | Workspace session identity | [workspace-session-signout.md](feature-flows/workspace-session-signout.md) | ent#357 + #2258 — two ways of being signed in, one way out; why sign-out destroys the credential rather than suppressing a derivation of it |
 | Workspace loops | [workspace-loops.md](feature-flows/workspace-loops.md) | ent#458 + ent#338 — running and watching a bounded loop from the chat that started it; why it needed no new endpoint, and why the per-run timeout refuses rather than clamps |
+| Chat turn cancellation | [chat-turn-cancellation.md](feature-flows/chat-turn-cancellation.md) | ent#155 — Escape and Stop on all three conversation surfaces; why the authorization differs per surface, and why a refused cancel must not restore the text |
 | Web Terminal | [web-terminal.md](feature-flows/web-terminal.md) | Browser-based terminal for System Agent |
 | Self-Execute | [self-execute.md](feature-flows/self-execute.md) | Agent background task during chat (SELF-EXEC-001) |
 

@@ -180,8 +180,31 @@
         </svg>
       </button>
 
-      <!-- Send button -->
+      <!-- Send / Stop (ent#155). One control, not two: while a turn is in
+           flight Send is disabled anyway (`disabled` is the panel's `loading`),
+           so a second always-present button would be a dead control most of the
+           time and a competing target the rest. The swap also makes the
+           affordance impossible to miss — it occupies the place the user's
+           hand is already going. -->
       <button
+        v-if="cancellable"
+        type="button"
+        @click="$emit('cancel')"
+        :disabled="cancelling"
+        class="p-2 bg-status-danger-600 hover:bg-status-danger-700 disabled:bg-status-danger-400 text-white rounded-lg transition-colors shrink-0"
+        :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
+        aria-label="Stop this turn"
+      >
+        <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" />
+        </svg>
+      </button>
+      <button
+        v-else
         type="submit"
         :disabled="disabled || (!localMessage.trim() && pendingFiles.length === 0)"
         class="p-2 bg-action-primary-600 hover:bg-action-primary-700 disabled:bg-action-primary-400 text-white rounded-lg transition-colors shrink-0"
@@ -247,6 +270,15 @@ const props = defineProps({
     type: String,
     default: 'stopped'
   },
+  // ent#155: a turn is in flight and this composer owns the Stop control.
+  cancellable: {
+    type: Boolean,
+    default: false
+  },
+  cancelling: {
+    type: Boolean,
+    default: false
+  },
   publicToken: {
     type: String,
     default: null
@@ -276,7 +308,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'submit', 'voice'])
+const emit = defineEmits(['update:modelValue', 'submit', 'voice', 'cancel'])
 
 const authStore = useAuthStore()
 const ac = usePlaybookAutocomplete()

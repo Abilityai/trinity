@@ -76,6 +76,7 @@ def _drive_terminate(agent_status: str):
     capacity.force_release = AsyncMock(
         return_value=SimpleNamespace(was_running=True, slots_cleared=1)
     )
+    capacity.release_if_matches = AsyncMock(return_value=True)
 
     activity = MagicMock(track_activity=AsyncMock())
     agent_resp = _FakeAgentResponse(200, {"status": agent_status, "returncode": 0})
@@ -110,12 +111,20 @@ def _cancelled_writes(mock_db):
 def test_terminated_writes_cancelled():
     result, mock_db, capacity = _drive_terminate("terminated")
     assert len(_cancelled_writes(mock_db)) == 1
-    capacity.force_release.assert_awaited_once()  # capacity released
+    # ent#155 review (N1): a per-EXECUTION release, not the emergency clear.
+    # `force_release` DELs the agent's whole slot ZSET and the overflow list,
+    # which on max_parallel_tasks > 1 dropped accounting for every other
+    # in-flight turn — now reachable by any public-link visitor.
+    capacity.force_release.assert_not_awaited()
+    capacity.release_if_matches.assert_awaited_once()
 
 
 def test_already_finished_does_not_write_cancelled():
     """Issue 7: the agent's genuine terminal stands — no CANCELLED overwrite."""
     result, mock_db, capacity = _drive_terminate("already_finished")
     assert _cancelled_writes(mock_db) == []
-    # Capacity is still force-released on already_finished (unchanged behavior).
-    capacity.force_release.assert_awaited_once()
+    # ent#155 review (N1): and `already_finished` releases NOTHING. Nothing was
+    # cancelled, the agent's own terminal already released its slot, and firing
+    # an emergency clear on a no-op branch had no defensible reading at all.
+    capacity.force_release.assert_not_awaited()
+    capacity.release_if_matches.assert_not_awaited()
