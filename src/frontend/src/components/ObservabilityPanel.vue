@@ -42,8 +42,20 @@
       </div>
     </div>
 
+    <!-- Review finding: a failed FIRST fetch leaves `enabled` at its `false`
+         default, and this arm used to be first — so a dropped request rendered
+         as a claim about the platform's CONFIGURATION ("set OTEL_ENABLED=1"),
+         the #1926 class this pass exists to remove, one arm further up. The
+         store records the real reason (`hasLoaded === false` → `error`), and
+         the spec asserted it was truthy, but no arm could ever display it.
+         The request-shaped arm therefore goes first. -->
+    <div v-if="!observabilityStore.hasLoaded && observabilityStore.error"
+         class="text-xs text-status-warning-600 dark:text-status-warning-400">
+      {{ observabilityStore.error }}
+    </div>
+
     <!-- Not enabled message -->
-    <div v-if="!observabilityStore.enabled" class="text-xs text-gray-500 dark:text-gray-400">
+    <div v-else-if="!observabilityStore.enabled" class="text-xs text-gray-500 dark:text-gray-400">
       OTel not enabled. Set OTEL_ENABLED=1.
     </div>
 
@@ -150,12 +162,21 @@
       No metrics data yet. Start chatting with agents to generate data.
     </div>
 
-    <!-- Loading -->
-    <div v-if="observabilityStore.loading" class="absolute inset-0 bg-white/50 dark:bg-gray-800/50 flex items-center justify-center rounded-lg">
-      <svg class="animate-spin h-5 w-5 text-blue-600" fill="none" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-      </svg>
+    <!-- ent#253: a refresh that failed with metrics on screen. The numbers
+         stay (the store no longer discards them); this line says the reading is
+         no longer live, so nothing here presents stale data as fresh. -->
+    <p v-if="isStale" role="alert"
+       class="mt-2 text-xs text-status-warning-600 dark:text-status-warning-400">
+      {{ staleReadingTime }}
+    </p>
+
+    <!-- First load only (ent#253). This used to gate on `loading`, i.e. "a
+         fetch is in flight", so the whole panel dimmed behind an overlay
+         spinner on EVERY poll. A static placeholder rather than a bespoke
+         spinner: this panel is a 192px floating chip, too small for the
+         scanline primitive to read as anything but noise. -->
+    <div v-if="firstLoad" class="absolute inset-0 bg-white/50 dark:bg-gray-800/50 flex items-center justify-center rounded-lg">
+      <span class="text-xs text-gray-500 dark:text-gray-400">Loading…</span>
     </div>
   </div>
 </template>
@@ -163,9 +184,49 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useObservabilityStore } from '@/stores/observability'
+import { staleBannerMessage } from '@/utils/loadingState'
 
 const observabilityStore = useObservabilityStore()
 const isExpanded = ref(false)
+
+// "No data yet", never "fetch in flight" (#1927 / ent#253). Deliberately not
+// `viewState()`: this panel's terminals are the store's own `enabled` /
+// `available` verdicts rather than a row count, so only the loading half of
+// the rule applies here.
+const firstLoad = computed(() => observabilityStore.loading && !observabilityStore.hasLoaded)
+// Review finding: `hasLoaded` means "a request succeeded", not "we have a
+// reading" — it is set on any HTTP 200, including `{enabled: false}` and
+// `{available: false, error: …}` responses that carry no metrics at all. Gated
+// on that alone, a later transport failure on such an install asserted
+// "showing the reading from …" when there had never been a reading to show.
+//
+// The banner is a claim about DATA, so it gates on data. `hasLoaded` is
+// deliberately left as-is: it also retires the first-load placeholder, and an
+// OTel-disabled install would otherwise sit behind that placeholder forever —
+// which is the bug this branch fixed one commit ago, by a new route.
+const isStale = computed(() => (
+  Boolean(observabilityStore.refreshError) && observabilityStore.hasLoaded && observabilityStore.hasData
+))
+
+// Review finding: the relative form below has ONE reactive dependency,
+// `lastUpdated` — and the elapsed time comes from a non-reactive `Date.now()`.
+// On a failed refresh `lastUpdated` does not change, so the computed is never
+// invalidated and keeps serving its cached string: a reading from 10:00 renders
+// as "just now" for the entire outage, which is precisely the stale-as-fresh
+// claim this banner exists to prevent. The banner therefore prints an ABSOLUTE
+// time, like `DashboardPanel`'s `staleBannerMessage` does; the "Updated …" line
+// keeps the relative form, where it is refreshed by every successful poll.
+// ent#253 review: the SHARED helper, not a local sentence. Skipping
+// `ScanlineReveal` on a 192px chip is a justified call and is argued above;
+// skipping the shared banner copy was a separate decision that was never
+// argued, and it is what produced the stale-as-fresh bug this comment
+// describes. `staleBannerMessage` prints an absolute time by construction, so
+// the defect is unreachable from here, and every other adopter of this pass now
+// renders the same words. `role="alert"` on the element for the same reason —
+// the bare <p> announced nothing.
+const staleReadingTime = computed(() => (
+  staleBannerMessage('metrics', observabilityStore.lastUpdated)
+))
 
 const formatLastUpdated = computed(() => {
   if (!observabilityStore.lastUpdated) return 'never'
