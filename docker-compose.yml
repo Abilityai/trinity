@@ -302,6 +302,11 @@ services:
       # without this line the owner-facing PUT .../circuit-breaker toggle silently
       # no-ops (#1487, the #1039 packaging-gap class).
       - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
+      # ent#434: how many subscriptions the background headroom sweep probes
+      # concurrently. Bounded so an N-subscription fleet x a 15s probe timeout
+      # cannot outlive the sweep's leader lease. A real operator lever (fleet
+      # size dependent), so it is forwarded rather than left inert.
+      - SUBSCRIPTION_SWEEP_CONCURRENCY=${SUBSCRIPTION_SWEEP_CONCURRENCY:-4}
       # Issue #874: uvicorn --reload writes __pycache__/ next to source files
       # in the ./src/backend bind mount. On Linux dev hosts the host dir is
       # owned by the developer UID, not container UID 1000, so the writes

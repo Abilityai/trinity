@@ -2453,6 +2453,18 @@
         "unit"
       ],
       "description": "TrinityClient.authenticate() checked only response.ok, so a 200 carrying a 2FA challenge and no access_token set this.token = undefined and every later request 401'd with nothing pointing back at the login \u2014 Trinity shipping the exact broken-machine-client pattern #2322 describes. Pins that a session-less 200 throws at the login call (distinct message when a second factor is the cause) and that a real grant still authenticates."
+    },
+    {
+      "file": "unit/test_ent434_headroom_alerts.py",
+      "feature": "abilityai/trinity-enterprise#434",
+      "added": "2026-08-26",
+      "categories": [
+        "backend",
+        "subscriptions",
+        "monitoring",
+        "unit"
+      ],
+      "description": "Weekly-subscription-headroom alerts. Pins the three-state classifier (a genuinely saturated subscription must not read as 'no evidence' the way _headroom_indicates_healthy does \u2014 #2396's docstring wrongly named this feature as that predicate's consumer), the projection that decides urgency from the operator's own burn rate rather than a configured time gap, and the deterministic reset-day alert id that IS the state machine (edge-trigger, cross-worker dedup and re-arm with no durable memo, possible because the 7d window was measured fixed-with-reset, not rolling). Also pins the empty-fleet guard (all([]) is True), that an alert-path bug cannot stop #447 recovery detection, and the three registries a platform emitter must appear in."
     }
   ]
 }

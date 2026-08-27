@@ -451,12 +451,15 @@
           <div class="flex items-center justify-between">
             <div class="flex-1 mr-4">
               <label for="headroom-refresh-toggle" class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                Keep live headroom fresh automatically
+                Check subscription quota automatically
               </label>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 Reads actual utilization from Anthropic by sending a minimal (~1-token) probe on each subscription's own quota,
-                at most every {{ Math.round((subsStore.headroomAutoRefresh.refresh_seconds || 900) / 60) }} minutes and only while a dashboard is open.
-                Probes appear as tiny messages in the Anthropic console. When off, headroom updates only via the Refresh button.
+                at most every {{ Math.round((subsStore.headroomAutoRefresh.refresh_seconds || 900) / 60) }} minutes per subscription.
+                Trinity checks in the background whether or not anyone is watching &mdash; to keep this page current, to notice a
+                rate-limited subscription recovering, and to watch weekly limits for the alert below.
+                Probes appear as tiny messages in the Anthropic console. When off, headroom updates only via the Refresh button
+                and weekly-limit alerts stop.
               </p>
             </div>
             <button
@@ -478,17 +481,77 @@
             </button>
           </div>
         </div>
+
+        <!-- Weekly-limit alert threshold (ent#434) -->
+        <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+          <div class="flex items-start justify-between gap-4">
+            <div class="flex-1">
+              <label
+                for="headroom-alert-threshold"
+                class="text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                Warn me before the weekly limit
+              </label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Raises an operator alert when a subscription passes this share of its 7-day
+                window, so there is still time to stagger schedules or move agents. Urgency
+                follows your own burn rate: at this threshold but on track to finish the week
+                under 100%, the alert is filed low priority. Set to 0 to turn the alerts off.
+              </p>
+              <p class="mt-2 text-xs" :class="alertStatusClass">
+                {{ alertStatusText }}
+              </p>
+            </div>
+            <div class="w-40 flex-shrink-0">
+              <BaseInput
+                id="headroom-alert-threshold"
+                v-model="thresholdDraft"
+                type="number"
+                :min="0"
+                :max="weeklyAlert.max_pct || 99"
+                :error="thresholdError"
+                :disabled="savingThreshold"
+                @keyup.enter="saveThreshold"
+              />
+              <BaseButton
+                class="mt-2 w-full"
+                variant="secondary"
+                size="sm"
+                :disabled="!thresholdChanged || savingThreshold"
+                :loading="savingThreshold"
+                @click="saveThreshold"
+              >
+                Save
+              </BaseButton>
+            </div>
+          </div>
+          <InlineError
+            v-if="thresholdSaveError"
+            class="mt-3"
+            :message="thresholdSaveError"
+            @dismiss="thresholdSaveError = ''"
+          />
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../../stores/auth'
 import { useAgentsStore } from '../../stores/agents'
 import { useSubscriptionsStore } from '../../stores/subscriptions'
+import BaseInput from '../base/BaseInput.vue'
+import BaseButton from '../base/BaseButton.vue'
+import InlineError from '../InlineError.vue'
+import {
+  thresholdValidationError,
+  thresholdChanged as isThresholdChanged,
+  alertStatusLine,
+  describeSaveFailure,
+} from '../../utils/headroomAlertSettings'
 import { agentOptionLabel } from '../../utils/agentName'
 import { formatCost } from '../../composables/useFormatters'
 import {
@@ -501,6 +564,65 @@ import {
 const authStore = useAuthStore()
 const agentsStore = useAgentsStore()
 const subsStore = useSubscriptionsStore()
+
+// ── ent#434: weekly-limit alert threshold ────────────────────────────────────
+// Decidable rules live in utils/headroomAlertSettings.js — vitest runs
+// `environment: 'node'` with no mount harness, so a rule expressed here would
+// be untestable (the ent#392 precedent).
+const thresholdDraft = ref('')
+const savingThreshold = ref(false)
+const thresholdSaveError = ref('')
+
+const weeklyAlert = computed(() => subsStore.headroomAutoRefresh.weekly_alert || {})
+
+const thresholdChanged = computed(() =>
+  isThresholdChanged(thresholdDraft.value, weeklyAlert.value.threshold_pct)
+)
+
+const thresholdError = computed(() =>
+  thresholdValidationError(thresholdDraft.value, {
+    min: weeklyAlert.value.min_pct,
+    max: weeklyAlert.value.max_pct,
+  })
+)
+
+const alertStatus = computed(() =>
+  alertStatusLine(weeklyAlert.value, subsStore.headroomAutoRefresh.loaded)
+)
+const alertStatusText = computed(() => alertStatus.value.text)
+const alertStatusClass = computed(() =>
+  alertStatus.value.tone === 'active'
+    ? 'text-status-success-700 dark:text-status-success-300'
+    : 'text-gray-500 dark:text-gray-400'
+)
+
+// Seeded from the server, never left blank (principle 3 — the operator edits a
+// working proposal). Guarded on `thresholdChanged` so a background refetch
+// cannot clobber a half-typed edit.
+watch(
+  () => weeklyAlert.value.threshold_pct,
+  (v) => {
+    if (v !== undefined && v !== null && !thresholdChanged.value) {
+      thresholdDraft.value = String(v)
+    }
+  },
+  { immediate: true }
+)
+
+async function saveThreshold() {
+  if (thresholdError.value || !thresholdChanged.value || savingThreshold.value) return
+  savingThreshold.value = true
+  thresholdSaveError.value = ''
+  try {
+    await subsStore.setHeadroomAlertThreshold(Number(String(thresholdDraft.value).trim()))
+  } catch (e) {
+    // A failed verb gets a home next to its control (principle 18) — never a
+    // bare console.error, never an alert().
+    thresholdSaveError.value = describeSaveFailure(e)
+  } finally {
+    savingThreshold.value = false
+  }
+}
 
 // --- State moved verbatim from Settings.vue (SUB-002; #471 extraction) ---
 const subscriptions = ref([])

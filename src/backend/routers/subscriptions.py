@@ -9,6 +9,7 @@ Claude Code prioritizes ANTHROPIC_API_KEY over the OAuth token, so when a
 subscription is assigned, ANTHROPIC_API_KEY is removed from the container.
 """
 
+import asyncio
 import logging
 import os
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -606,10 +607,89 @@ async def get_headroom_auto_refresh_setting(
     from services.subscription_headroom_service import (
         is_auto_refresh_enabled,
         REFRESH_SECONDS,
+        SAMPLE_INTERVAL_SECONDS,
     )
+    from services import subscription_headroom_alerts as alerts
+
+    # Off the event loop: the sweep already threads the same `list_subscriptions`
+    # call, and this handler is `async`. Admin-only and low-traffic, so the cost
+    # is small either way — but a sync DB read on an async path is the shape
+    # `_record_history` documents at length, and there is no reason to add one.
+    # One threaded call, not three: the status helper already resolves the
+    # toggle and the threshold, and reading them twice invites the two answers
+    # to disagree across the gap.
+    status = await asyncio.to_thread(_weekly_alert_status_blocking)
+    enabled = status.pop("_auto_refresh_enabled")
     return {
-        "enabled": is_auto_refresh_enabled(),
+        "enabled": enabled,
         "refresh_seconds": REFRESH_SECONDS,
+        "sample_interval_seconds": SAMPLE_INTERVAL_SECONDS,
+        # ent#434 — the weekly-headroom alert rides this same toggle, so its
+        # state belongs on this payload rather than a second endpoint.
+        "weekly_alert": status,
+    }
+
+
+def _weekly_alert_status_blocking() -> dict:
+    """Report the weekly-headroom alert's real state, including WHY it is off.
+
+    AC #4 (and #2217's lesson) is that "no alerts" must be distinguishable from
+    "not checking". A bare boolean cannot say that, so every inactive path
+    names itself. The reasons are ordered by how much they dominate: no
+    subscriptions is silence by design, a disabled threshold is an explicit
+    operator choice, the toggle governs all autonomous probing, and an
+    unreachable Redis means the sampler fails closed and evaluates nothing.
+    """
+    from redis_breaker_util import get_breaker_redis
+    from services import subscription_headroom_alerts as alerts
+    from services.subscription_headroom_service import is_auto_refresh_enabled
+
+    auto_refresh_enabled = is_auto_refresh_enabled()
+    threshold = alerts.effective_threshold_pct()
+
+    reason = None
+    try:
+        subscription_count = len(db.list_subscriptions() or [])
+    except Exception:  # noqa: BLE001
+        subscription_count = None
+
+    redis_ok = False
+    try:
+        client = get_breaker_redis()
+        # A client object existing is not Redis being reachable
+        # (learnings 2026-08-19) — ping, do not just check for None.
+        redis_ok = bool(client is not None and client.ping())
+    except Exception:  # noqa: BLE001
+        redis_ok = False
+
+    if subscription_count is None:
+        # `None` means the list could not be READ, which is not zero and is
+        # certainly not health. Without its own arm it fell through every
+        # branch below (`None == 0` is False) and returned `active: true` —
+        # this function's whole job is naming why it is off, so claiming
+        # health from a failed read was the one dishonest path in it.
+        reason = "count_unavailable"
+    elif subscription_count == 0:
+        reason = "no_subscriptions"
+    elif threshold == 0:
+        reason = "threshold_disabled"
+    elif not auto_refresh_enabled:
+        reason = "auto_refresh_off"
+    elif not redis_ok:
+        reason = "redis_unavailable"
+
+    return {
+        "active": reason is None,
+        "inactive_reason": reason,
+        "threshold_pct": threshold,
+        "escalation_pct": alerts.escalation_pct(threshold) if threshold else None,
+        "default_pct": alerts.DEFAULT_THRESHOLD_PCT,
+        "min_pct": alerts.MIN_THRESHOLD_PCT,
+        "max_pct": alerts.MAX_THRESHOLD_PCT,
+        "subscription_count": subscription_count,
+        # consumed by the caller for the top-level `enabled` field, so the
+        # toggle and the alert status can never disagree about it
+        "_auto_refresh_enabled": auto_refresh_enabled,
     }
 
 
@@ -618,10 +698,17 @@ async def set_headroom_auto_refresh_setting(
     enabled: bool,
     current_user: User = Depends(get_current_user)
 ):
-    """Enable/disable ambient headroom probing. Each ambient refresh sends one
-    minimal (~a dozen tokens) message on the subscription's own token, at most
-    every 15 minutes per subscription and only while a dashboard is watching;
-    click-to-refresh in Settings works regardless of this toggle."""
+    """Enable/disable autonomous headroom probing.
+
+    Each probe sends one minimal (~a dozen tokens) message on the
+    subscription's own token, floored per subscription. It governs ALL
+    autonomous probing, not just the dashboard-driven kind: the ambient
+    refresh behind an open dashboard (#471), the recovery probe that notices a
+    rate-limited subscription coming back (#447), and the weekly-window
+    sampler behind the headroom alert (ent#434) — the last two run whether or
+    not anyone is watching. An earlier version of this docstring said probing
+    happened "only while a dashboard is watching", which stopped being true at
+    #447. Click-to-refresh works regardless of this toggle."""
     assert_admin(current_user)
     from services.subscription_headroom_service import AUTO_REFRESH_SETTING
     db.set_setting(AUTO_REFRESH_SETTING, "true" if enabled else "false")
@@ -630,3 +717,47 @@ async def set_headroom_auto_refresh_setting(
         f"by {current_user.username}"
     )
     return {"enabled": enabled}
+
+
+@router.put("/settings/headroom-alert-threshold")
+async def set_headroom_alert_threshold(
+    threshold_pct: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Set the weekly-window alert threshold (ent#434).
+
+    `0` disables the alerts (the `operator_queue_retention_days` idiom).
+    Otherwise the value must be in `[MIN, MAX]` — below the minimum a weekly
+    window is barely started and every fleet would alarm; at 100 the alert is
+    unreachable given the provider's 1-decimal rounding.
+
+    There is deliberately ONE knob: the escalation tier is derived from it
+    (`escalation_pct`). Two independently-settable thresholds are an
+    oscillator — a fixed escalation under a higher threshold fires below the
+    warning — and `validate_ops_setting` is per-key, so a cross-field
+    invariant could not be expressed where the other write path enforces it.
+    """
+    assert_admin(current_user)
+    from services import subscription_headroom_alerts as alerts
+
+    if threshold_pct != 0 and not (
+        alerts.MIN_THRESHOLD_PCT <= threshold_pct <= alerts.MAX_THRESHOLD_PCT
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"threshold_pct must be 0 (disabled) or between "
+                f"{alerts.MIN_THRESHOLD_PCT} and {alerts.MAX_THRESHOLD_PCT}; "
+                f"got {threshold_pct}"
+            ),
+        )
+    db.set_setting(alerts.THRESHOLD_SETTING, str(threshold_pct))
+    logger.info(
+        "Subscription weekly-headroom alert threshold set to %s%% by %s",
+        threshold_pct, current_user.username,
+    )
+    return {
+        "threshold_pct": threshold_pct,
+        "escalation_pct": alerts.escalation_pct(threshold_pct) if threshold_pct else None,
+        "enabled": threshold_pct > 0,
+    }
