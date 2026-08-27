@@ -40,12 +40,41 @@ def load_catalog() -> dict:
     return yaml.safe_load(CATALOG.read_text())
 
 
+def _norm_test_path(value: str | None) -> str:
+    """One spelling for a test path, so three sources can be compared.
+
+    They disagree by construction and every pair of them was mismatched:
+
+      * the catalog stores REPO-relative   — `tests/journeys/test_x.py`
+      * `tests/registry.json` stores TESTS-relative — `journeys/test_x.py`
+      * JUnit `file` attributes are ROOTDIR-relative — `journeys/test_x.py`
+
+    Normalising to the tests-relative form makes the joins in
+    `harness_is_indexed` and `green_harnesses` actually match. Without it both
+    silently answered "no" for every journey — invisible while every harness was
+    still `null`, and permanently wrong the moment one was named.
+    """
+    if not value:
+        return ""
+    norm = str(value).strip().replace("\\", "/").lstrip("./")
+    if norm.startswith("tests/"):
+        norm = norm[len("tests/"):]
+    return norm
+
+
 def harness_is_indexed(harness: str | None) -> bool:
     """Does the registry know this harness file?
 
     The catalog LINKS to `tests/registry.json` rather than merging with it: the
     registry indexes tests, the catalog indexes promises. Joining them here — at
     report time — is what keeps both files single-purpose.
+
+    The join reads `test_files[].file`. It previously did `str(f)` over the list,
+    but `test_files` is a list of DICTS — so `str(f)` was a dict repr and
+    `Path(str(f)).name` was nonsense. Combined with the tests/-vs-repo prefix
+    mismatch above, the link AC #6 asks for was inert: the generated doc would
+    have carried "Harnesses not present in tests/registry.json" for every journey,
+    permanently and wrongly.
     """
     if not harness or not REGISTRY.exists():
         return False
@@ -53,34 +82,57 @@ def harness_is_indexed(harness: str | None) -> bool:
         data = json.loads(REGISTRY.read_text())
     except Exception:
         return False
+    want = _norm_test_path(harness)
+    if not want:
+        return False
     files = data.get("test_files")
     if isinstance(files, dict):
-        return harness in files or Path(harness).name in files
+        return any(_norm_test_path(k) == want for k in files)
     if isinstance(files, list):
-        return any(harness in str(f) or Path(harness).name == Path(str(f)).name
-                   for f in files)
+        for f in files:
+            entry = f.get("file") if isinstance(f, dict) else f
+            if _norm_test_path(entry) == want:
+                return True
     return False
 
 
 def green_harnesses(junit_dir: str) -> set[str]:
-    """Harness files with zero failures/errors across every JUnit file given.
+    """Harness files with at least one PASSING case and zero failures/errors.
 
-    Absence of evidence is not green: a harness that appears in no artifact is
-    simply not counted, which is why coverage is reported with its denominator.
+    Absence of evidence is not green, and that has two shapes, not one. The
+    docstring used to state the first and be silent about the second:
+
+      1. A harness in no artifact at all is not counted — that is why coverage
+         is reported with its denominator.
+      2. A harness whose every case SKIPPED is also not green. `skipped` is
+         neither `failure` nor `error`, so the old rule recorded it as green. It
+         would have gone wrong on the very first journey to carry a path: J03's
+         harness is the credential-bound one that skips on every PR-triggered
+         run, so the first harness named would also have been the first
+         misreported.
+
+    Keys are normalised (`_norm_test_path`), because JUnit `file` attributes are
+    rootdir-relative (`journeys/test_x.py`) while the catalog is repo-relative
+    (`tests/journeys/test_x.py`) — compared raw, every journey read `no
+    evidence` forever.
     """
     seen: dict[str, bool] = {}
+    passed: set[str] = set()
     for path in glob.glob(os.path.join(junit_dir, "**", "*.xml"), recursive=True):
         try:
             root = ET.parse(path).getroot()
         except ET.ParseError:
             continue
         for case in root.iter("testcase"):
-            f = case.get("file") or ""
+            f = _norm_test_path(case.get("file"))
             if not f:
                 continue
             bad = any(case.find(t) is not None for t in ("failure", "error"))
+            skipped = case.find("skipped") is not None
             seen[f] = seen.get(f, True) and not bad
-    return {f for f, ok in seen.items() if ok}
+            if not bad and not skipped:
+                passed.add(f)
+    return {f for f, ok in seen.items() if ok and f in passed}
 
 
 def render(catalog: dict, junit_dir: str | None) -> str:
@@ -93,7 +145,7 @@ def render(catalog: dict, junit_dir: str | None) -> str:
             built += 1
         state = ""
         if junit_dir:
-            if j["harness"] and j["harness"] in greens:
+            if j["harness"] and _norm_test_path(j["harness"]) in greens:
                 state = " · green"
                 green += 1
             elif j["built"]:

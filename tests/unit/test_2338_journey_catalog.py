@@ -31,11 +31,39 @@ REGISTRY = REPO / "tests/registry.json"
 
 # Anything that smells like a run RESULT. Matched against every key at every
 # depth, so a nested `status:` cannot slip in under a new parent.
-_STATUS_KEY_RE = re.compile(
-    r"(last_green|last_run|green|red|passing|failing|status|result|"
-    r"coverage|pass_rate|last_seen|flaky)",
-    re.IGNORECASE,
-)
+# Status vocabulary, matched by TOKEN rather than by substring.
+#
+# This was one unanchored alternation applied with `.search()` to every key at
+# every depth, and `red` is a substring of **`credential`** and of
+# **`required`** — so the moment any record gained a `credentials:` key, or
+# anyone added `required:` to the schema, this rule would have failed accusing
+# the author of committing run status. J06 is literally *"I can give an agent a
+# credential…"*, so that key was coming. `green` had the same shape
+# (`evergreen`, `greenfield`) and `result` matched `results`/`resultant`. A rule
+# whose whole value is that it fails CLEARLY cannot afford a false positive that
+# lands on someone who did nothing wrong.
+#
+# Word boundaries alone are not enough either: `_` is a word character, so
+# `\bstatus\b` does NOT match `journey_status` — the rule would have gone quiet
+# on the exact keys it exists to catch. Splitting the key into tokens catches
+# `journey_status` and `last_green` while leaving `credential` alone.
+_STATUS_TOKENS = frozenset({
+    "green", "red", "passing", "failing", "status",
+    "result", "results", "coverage", "flaky",
+})
+# Multi-token names whose parts are individually innocent (`last`, `run`, `rate`).
+_STATUS_KEYS = frozenset({
+    "last_green", "last_run", "last_seen", "pass_rate", "passrate",
+})
+
+
+def _is_status_key(key: str) -> bool:
+    """True when a key names RUN STATE rather than intent."""
+    norm = str(key).strip().lower()
+    if norm in _STATUS_KEYS:
+        return True
+    tokens = {t for t in re.split(r"[^a-z0-9]+", norm) if t}
+    return bool(tokens & _STATUS_TOKENS)
 
 REQUIRED_FIELDS = {"id", "issue", "promise", "actor", "lanes", "tier",
                    "harness", "built", "owner", "invariants"}
@@ -57,9 +85,38 @@ def _walk_keys(node, path=""):
             yield from _walk_keys(v, f"{path}[{i}]")
 
 
+@pytest.mark.parametrize("key", [
+    # The two that actually broke it: `red` is inside both.
+    "credentials", "credential", "required",
+    # Same shape, different word.
+    "evergreen", "greenfield", "resultant", "predicate", "hundred",
+    # Ordinary catalog vocabulary that must never trip the rule.
+    "id", "issue", "promise", "actor", "lanes", "tier", "harness",
+    "built", "owner", "invariants", "test_files",
+])
+def test_ordinary_keys_are_not_read_as_status(key):
+    """The rule's value is that it fails clearly, so a false positive is worse
+    than most true ones — it lands on an author who did nothing wrong, on a
+    schema addition the catalog explicitly anticipates (J06 is about giving an
+    agent a credential)."""
+    assert not _is_status_key(key)
+
+
+@pytest.mark.parametrize("key", [
+    "status", "green", "red", "passing", "failing", "coverage", "flaky",
+    "result", "results",
+    "last_green", "last_run", "last_seen", "pass_rate",
+    # Compound forms a `\b`-anchored regex would have missed, because `_` is a
+    # word character: `\bstatus\b` does not match `journey_status`.
+    "journey_status", "run_status", "last_result", "ci_coverage",
+])
+def test_status_keys_are_still_caught(key):
+    assert _is_status_key(key)
+
+
 def test_no_status_field_is_committed(catalog):
     """AC #3. The whole reason coverage is computed at report time."""
-    offenders = [p for p, k in _walk_keys(catalog) if _STATUS_KEY_RE.search(k)]
+    offenders = [p for p, k in _walk_keys(catalog) if _is_status_key(k)]
     assert not offenders, (
         f"status-shaped keys committed to the catalog: {offenders}. Git holds "
         f"INTENT; CI holds STATE. Coverage is computed at report time by "
@@ -181,3 +238,73 @@ def test_the_generated_doc_carries_no_run_status():
             f"the committed JOURNEYS.md contains {word!r} — status must not be "
             f"committed; regenerate without --junit"
         )
+
+
+# ---------------------------------------------------------------------------
+# The generator's JOIN functions (review findings 2-4)
+#
+# These were unreachable by the PR's own verification, and the review said why:
+# the generator was checked against a real downloaded artifact set, but that set
+# contains no journey harness at all — so the run exercised the PARSE path and
+# never the MATCH path. The verification was real; it could not reach the code
+# the findings were in. Every case below is a match-path case, and each fails
+# against the shape that shipped.
+# ---------------------------------------------------------------------------
+
+def _gen():
+    sys.path.insert(0, str(REPO / "scripts/ci"))
+    import generate_journeys_md as mod
+    return mod
+
+
+def test_the_registry_join_matches_a_real_registry_entry():
+    """Finding 2. `test_files` is a list of DICTS and its paths are
+    tests/-relative, while catalog harnesses are repo-relative — so `str(f)` was
+    a dict repr and the join could never match. AC #6 is 'link to the registry',
+    and the link was inert: the doc would have carried 'Harnesses not present in
+    tests/registry.json' for every journey, permanently and wrongly. Invisible
+    only because all ten harnesses are still null."""
+    import json
+    mod = _gen()
+    registry = json.loads((REPO / "tests/registry.json").read_text())
+    sample = registry["test_files"][0]["file"]          # e.g. unit/test_x.py
+    assert mod.harness_is_indexed(f"tests/{sample}") is True
+    assert mod.harness_is_indexed(sample) is True       # either spelling
+    assert mod.harness_is_indexed("tests/journeys/test_does_not_exist.py") is False
+
+
+def test_junit_paths_join_against_repo_relative_harnesses(tmp_path):
+    """Finding 3. JUnit `file` attributes are rootdir-relative
+    (`journeys/test_x.py`); the catalog is repo-relative
+    (`tests/journeys/test_x.py`). Compared raw, every journey reads 'no
+    evidence' forever."""
+    mod = _gen()
+    (tmp_path / "r.xml").write_text(
+        '<testsuites><testsuite name="p">'
+        '<testcase file="journeys/test_a.py" name="t"/>'
+        '</testsuite></testsuites>'
+    )
+    greens = mod.green_harnesses(str(tmp_path))
+    assert mod._norm_test_path("tests/journeys/test_a.py") in greens
+
+
+def test_a_harness_whose_every_case_skipped_is_not_green(tmp_path):
+    """Finding 4. `skipped` is neither `failure` nor `error`, so an all-skipped
+    file was recorded green — and J03's harness is precisely the
+    credential-bound one that skips on every PR-triggered run, so the first
+    journey to carry a path would also have been the first misreported. The
+    docstring already said 'absence of evidence is not green'; this is the shape
+    it was silent about."""
+    mod = _gen()
+    (tmp_path / "r.xml").write_text(
+        '<testsuites><testsuite name="p">'
+        '<testcase file="journeys/test_skipped.py" name="s"><skipped/></testcase>'
+        '<testcase file="journeys/test_mixed.py" name="s"><skipped/></testcase>'
+        '<testcase file="journeys/test_mixed.py" name="p"/>'
+        '<testcase file="journeys/test_failed.py" name="f"><failure/></testcase>'
+        '</testsuite></testsuites>'
+    )
+    greens = mod.green_harnesses(str(tmp_path))
+    assert "journeys/test_skipped.py" not in greens, "all-skipped is not evidence of green"
+    assert "journeys/test_mixed.py" in greens, "one real pass and no failure is green"
+    assert "journeys/test_failed.py" not in greens
