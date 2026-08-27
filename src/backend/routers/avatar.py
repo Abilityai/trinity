@@ -365,14 +365,46 @@ async def _generate_emotions_background(
 
 @router.get("/{agent_name}/avatar/emotions")
 async def get_avatar_emotions(agent_name: str):
-    """Return which emotion variant PNGs exist on disk for an agent. No auth required."""
+    """Which emotion variant images exist for an agent, and their version.
+
+    #2374: the `version` is the cache key the client MUST build emotion URLs
+    with. Variants are served from a stable URL under
+    `Cache-Control: public, max-age=86400`, so without a version tied to the
+    actual files a regenerated avatar keeps showing the OLD face for up to 24
+    hours. The client used to parse `?v=` out of `avatar_url` and fall back to
+    the constant `'1'` — which pins every emotion URL to one cache entry
+    forever, so regeneration was invisible until the entry expired.
+
+    The stamp is the newest mtime among the files being returned, not
+    `avatar_updated_at`. It tracks the VARIANTS rather than the base avatar,
+    which is what these URLs actually serve: regeneration replaces them one at a
+    time in the background, and each replacement moves the stamp, so a client
+    polling this endpoint re-keys its URLs as the new set lands instead of
+    holding whatever it cached on the first poll.
+
+    `0` means no variants exist — there is nothing to cache-bust.
+    """
     available = []
+    newest = 0.0
     for emotion in AVATAR_EMOTIONS:
-        if (AVATAR_DIR / f"{agent_name}_emotion_{emotion}.webp").exists():
+        for path in (AVATAR_DIR / f"{agent_name}_emotion_{emotion}.webp",
+                     AVATAR_DIR / f"{agent_name}_emotion_{emotion}.png"):
+            if not path.exists():
+                continue
             available.append(emotion)
-        elif (AVATAR_DIR / f"{agent_name}_emotion_{emotion}.png").exists():
-            available.append(emotion)
-    return {"agent_name": agent_name, "emotions": available}
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                # A file that vanished between exists() and stat() is mid-
+                # regeneration. Skipping its mtime only understates the version,
+                # and the next poll picks it up — never fail the listing over it.
+                pass
+            break
+    return {
+        "agent_name": agent_name,
+        "emotions": available,
+        "version": str(int(newest)),
+    }
 
 
 @router.get("/{agent_name}/avatar/emotion/{emotion}")
