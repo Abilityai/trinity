@@ -772,6 +772,18 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
 - **Completion relabel**: Overview (#1107), schedules rollup (#1115) and fleet stats
   (EXEC-022) now say "Completion", not "Success rate". Additive — the `success_rate`
   API field is unchanged; only the label moved.
+- **Workspace ratings amend the write fence (ent#366)**: a one-click thumb (message) or
+  Useful/Not-what-I-needed (deliverable) writes here under `evaluator = workspace:<email>`
+  — the fence exists so the graded agent never writes its own grade, and a user rating is
+  precisely the score that must not pass through the thing being scored, so a Workspace
+  principal is admitted rather than the rule bent. Targets are checked against the READER
+  (ids are global) with a uniform 404; `UNIQUE(evaluator, target_kind, target_id) WHERE
+  target_id IS NOT NULL` makes a re-rate a correction, so a tally counts people not
+  clicks. **The rated agent reads tallies and never the comment**
+  (`_redact_for_agent_principal` → `comment_withheld`): a readable score is a loop an
+  agent may optimise for, and client free text handed verbatim to the agent being
+  criticised is a prompt-injection path into it. See
+  [workspace-ratings.md](feature-flows/workspace-ratings.md).
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.

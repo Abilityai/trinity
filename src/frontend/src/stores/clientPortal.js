@@ -662,6 +662,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data.reports || []
     },
 
+    // ent#366 — one click on a message or a deliverable. Deliberately NOT
+    // fail-soft like the deliverables read: a rating that silently did not
+    // record would leave the person believing they were heard, so the caller
+    // gets the error and shows it next to the control.
+    async submitRating(agentName, body) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/ratings`,
+        body,
+        { headers: this.authHeader },
+      )
+      return data
+    },
+
     // ent#365 — deliverables produced in ONE chat, for the inline cards. Same
     // endpoint, narrowed server-side: the audience condition is applied
     // regardless, so a session id belonging to someone else returns nothing

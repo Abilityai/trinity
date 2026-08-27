@@ -19,6 +19,7 @@ from typing import Optional
 
 import httpx
 from fastapi import (
+    BackgroundTasks,
     APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,6 +39,8 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 
 from . import agent_page, service
 from .models import (
+    PortalRatingRequest,
+    PortalRatingResult,
     PortalAuthRequest,
     PortalAuthVerify,
     PortalBlockRequest,
@@ -103,8 +106,21 @@ PORTAL_CHAT_HOURLY_LIMIT = int(os.getenv("PORTAL_CHAT_HOURLY_LIMIT", "300"))
 PORTAL_UPLOAD_BURST_LIMIT = int(os.getenv("PORTAL_UPLOAD_BURST_LIMIT", "20"))
 PORTAL_UPLOAD_HOURLY_LIMIT = int(os.getenv("PORTAL_UPLOAD_HOURLY_LIMIT", "100"))
 
+# Ratings take the same TWO tiers, for the same reason and with the same shape
+# (ent#366 review). A rating is one click, so the burst tier stays generous —
+# but this route dispatches a full `execute_task` on a down-rating with a
+# comment, i.e. the same expensive resource `portal_chat` is metered on, and a
+# single 60/min tier permits ~3600 turns an hour against that client's stated
+# 300. The hourly ceiling is the tier that actually bounds it; the per-target
+# dispatch claim in the service is what stops one target being re-rated into a
+# turn generator. Env-tunable, because the right ceiling depends on the
+# licensee's clients.
+PORTAL_RATING_BURST_LIMIT = int(os.getenv("PORTAL_RATING_BURST_LIMIT", "60"))
+PORTAL_RATING_HOURLY_LIMIT = int(os.getenv("PORTAL_RATING_HOURLY_LIMIT", "300"))
+
 _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
+_RATING_LIMIT_DETAIL = "Too many ratings for this agent."
 
 
 def _require_roster(agent_name: str, email: str, include_owned: bool = False) -> None:
@@ -716,6 +732,99 @@ async def portal_chat(
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
+
+
+@router.post("/agents/{agent_name}/ratings", response_model=PortalRatingResult)
+def portal_submit_rating(agent_name: str, body: PortalRatingRequest,
+                         background: BackgroundTasks,
+                         principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Rate one agent message or deliverable (ent#366).
+
+    Writes to `agent_evaluations` — the ent#206 referee surface — under a
+    `workspace:<email>` evaluator. This is the **amendment to that write fence**
+    the issue calls for: the fence exists so the graded agent never writes its
+    own grade, and a Workspace principal is exactly the kind of writer it was
+    built to admit. The rated agent still has no write path, and the route is
+    roster-scoped with the target checked against the reader (an id alone proves
+    nothing — see `_rating_target_is_visible`).
+
+    Idempotent per person per target, so changing your mind updates rather than
+    appends and a tally counts people, not clicks.
+
+    Rate-limited per (client, agent) in TWO tiers, like `portal_chat`: the row
+    is cheap, but a down-rating with a comment dispatches a full agent turn, so
+    the hourly tier is what keeps this route inside the same budget the client
+    has through chat. The dispatch itself is claimed per (evaluator, target) in
+    the service, so re-rating one target is an update, never a new turn.
+    """
+    email = principal.email
+    include_owned = principal.is_platform
+    from services import rate_limiter
+    # Burst first, so a client held at the per-minute limit does not also burn
+    # their hourly budget (the `portal_chat` ordering and its rationale).
+    rate_limiter.enforce(
+        f"portal_rating:{email}:{agent_name}", PORTAL_RATING_BURST_LIMIT, 60,
+        detail=_RATING_LIMIT_DETAIL,
+    )
+    rate_limiter.enforce(
+        f"portal_rating_hourly:{email}:{agent_name}", PORTAL_RATING_HOURLY_LIMIT, 3600,
+        detail=_RATING_LIMIT_DETAIL,
+    )
+    try:
+        result = service.submit_rating(
+            agent_name, email,
+            target_kind=body.target_kind, target_id=body.target_id,
+            rating=body.rating, comment=body.comment,
+            include_owned=include_owned,
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # AC #2/#6: the words go further only when the agent can actually take them.
+    # The rating is already durable at this point, so everything below is
+    # additive — no branch here can lose the feedback.
+    #
+    # Dispatched as a BACKGROUND task: it is a whole agent turn, and a person
+    # clicking "not what I needed" should not wait on the agent that just
+    # disappointed them. `dispatched` therefore means "handed off", which is the
+    # honest claim — the turn's own outcome is observable as an execution row.
+    if result["comment_recorded"] and body.rating == "down":
+        if service.agent_has_capture_feedback(agent_name):
+            # One turn per person per target (ent#366 review). The row is
+            # idempotent through the partial UNIQUE; without this the SIDE
+            # EFFECT was not, so re-rating the same target with a tweaked
+            # comment re-fired a full agent turn each time.
+            _claim = service.claim_capture_feedback_dispatch(
+                agent_name, email,
+                target_kind=body.target_kind, target_id=body.target_id,
+            )
+            if _claim is not None:
+                background.add_task(
+                    service.dispatch_capture_feedback,
+                    agent_name, email,
+                    target_kind=body.target_kind, target_id=body.target_id,
+                    comment=body.comment or "",
+                    claim=_claim,
+                )
+                result["capture_feedback"] = "dispatched"
+            else:
+                # Honest, and distinct from "no skill": the words ARE recorded
+                # (the update landed above), and this person has already spent
+                # a handoff for this exact target inside the dedup window.
+                #
+                # It deliberately does NOT claim the agent can read the row —
+                # `routers/evaluations.py` nulls `comment` for every machine
+                # principal, so it cannot (review finding). What is true is that
+                # the comment is stored and a second turn is not being spent.
+                # A dispatch that FAILED releases its claim, so this branch now
+                # means "already delivered", not "already attempted".
+                result["capture_feedback"] = "already_dispatched"
+        else:
+            # Not a failure: the comment is recorded either way, and saying so
+            # lets the UI thank the person for words that landed rather than
+            # imply a follow-up that will not happen.
+            result["capture_feedback"] = "skill_not_installed"
+    return PortalRatingResult(**result)
 
 
 @router.post("/agents/{agent_name}/tts")
