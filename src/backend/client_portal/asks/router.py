@@ -30,8 +30,10 @@ router = APIRouter(
 
 
 def _raise(e: AskError):
+    # #2376: merge any structured fields the refusal carries (the offered
+    # options, today) beside the code and message rather than only in prose.
     raise HTTPException(status_code=e.status_code,
-                        detail={"code": e.code, "message": e.detail})
+                        detail={"code": e.code, "message": e.detail, **e.data})
 
 
 @router.get("", response_model=List[WorkspaceAsk])

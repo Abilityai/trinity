@@ -191,6 +191,30 @@ Event handling in the store (`handleWebSocketEvent`, line 177-200):
 
 The type pill text comes from `utils/operatorQueue.js::queueTypeLabel` (`Needs approval` / `Question` / `Heads up`), shared with `/m` (#2370). **The `/m` mobile admin mirrors this table** — approval: select → restated consequence → optional note → `Cancel` + `Send: <option>` (nothing sends on one tap); question: text + Send; alert: `Got it` — and builds the identical body via `buildQueueResponse` (see [mobile-admin-pwa.md](mobile-admin-pwa.md)). The Workspace asks panel posts to its own endpoint/model and is **not** yet a consumer of the shared builder (#2375).
 
+**An approval's decision must be one it OFFERED (#2376).** `OperatorResponse.response`
+is a bare `str` and every layer passed it through verbatim — router, DB write,
+and the write-back into the agent's own queue file — so no layer checked
+membership. #2370 recorded `response: "approved"` against
+`options: ["Approve", "Deny"]` for five months without a single 4xx, and the
+agent read back a decision string it never offered.
+`services/operator_queue_choices.py` is the one rule: for `type == "approval"`
+with a usable options list, a non-empty `response` outside it is a named **422**
+`response_not_an_offered_option` **carrying the offered list** — a refusal that
+does not name agent-authored strings leaves the operator guessing. Matching is
+**exact**: only the agent knows whether `approve` and `Approve` mean the same
+thing to it, so normalising here would answer that on its behalf. Exempt, all
+spelled as the same absence rather than as special cases at the call site:
+questions, alerts, approvals that offered nothing, a non-list or non-string
+blob, and one whose options were replaced by the #1632 size-cap marker (that
+placeholder RECORDS that the choices were dropped, so it is neither binding nor
+selectable). A text-only answer is untouched — an empty `response` means the
+field was never filled in, not that it is wrong. The rule sits at the SINK
+rather than in a router because this is the approval channel for irreversible
+actions (#1402, ent#329) with four producers today; both writers
+(`routers/operator_queue.py`, `client_portal/asks/service.py`) call it, and an
+AST caller-parity guard (`tests/unit/test_2376_approval_response_membership.py`,
+the #1677 shape) fails CI if a third writer appears without it.
+
 ### NavBar Badge
 
 `src/frontend/src/components/NavBar.vue`:
