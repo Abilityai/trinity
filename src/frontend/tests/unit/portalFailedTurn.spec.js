@@ -241,18 +241,54 @@ describe('#2320 — where the verdict is read in the poll loop', () => {
 // "May the user re-send?" — the real expression, evaluated
 // ---------------------------------------------------------------------------
 
-/** Lift the `retryable:` resolution out of `send()`/`retry()` and compile it. */
+/** Lift the `retryable:` resolution out of the settle path and compile it.
+ *
+ * THE RULE is that `send()` and `retry()` cannot disagree about retryability —
+ * a Retry offered on the first send and withheld on the retry (or the reverse)
+ * is worse than either rule applied consistently.
+ *
+ * This guard used to encode that rule as "there are at least two `retryable:`
+ * expressions and they are textually identical", which is one SHAPE that
+ * satisfies it, not the rule itself. ent#155 made both callers settle through a
+ * single `settleDelivery`, so there is now exactly one expression — the rule
+ * holds *by construction*, and the old assertion failed on the change that made
+ * it unbreakable. A guard pinned to one literal source shape rejects the next
+ * legitimate edit, and the tempting fix is to delete the rule; so the rule is
+ * kept and the shape widened.
+ *
+ * Both shapes are admissible, and each carries its own proof obligation:
+ *
+ *   - **shared** (today): one expression, and every `deliver()` caller reaches
+ *     it through the same settle function — checked here, because with one
+ *     expression the textual-agreement check is vacuous and something has to
+ *     take over its job.
+ *   - **duplicated** (pre-ent#155): two or more expressions, all identical.
+ */
 function retryRules() {
-  const exprs = code()
+  const src = code()
+  const exprs = src
     .split('\n')
     .filter((l) => l.includes('markFailed(') && l.includes('retryable:') && l.includes('res?'))
     .map((l) => l.match(/retryable:\s*(.+?)\s*\}\)/)[1])
-  expect(exprs.length, 'send() and retry() must both resolve retryability')
-    .toBeGreaterThanOrEqual(2)
-  // Both call sites must agree — a Retry offered on the first send and withheld
-  // on the retry (or the reverse) is worse than either rule consistently.
-  expect(new Set(exprs).size, `send()/retry() disagree: ${[...new Set(exprs)].join(' | ')}`)
+  expect(exprs.length, 'the retryability resolution must exist in source')
+    .toBeGreaterThanOrEqual(1)
+  // Whatever the shape, no two resolutions may differ.
+  expect(new Set(exprs).size, `retryability resolutions disagree: ${[...new Set(exprs)].join(' | ')}`)
     .toBe(1)
+
+  if (exprs.length === 1) {
+    // Shared shape: agreement is structural, so prove the structure. Both
+    // `deliver()` callers must hand off to the one settle function — if a third
+    // caller appeared, or `retry()` went back to marking failure itself, the
+    // single expression would silently stop covering it.
+    const settles = src.match(/const res = await deliver\([^)]*\)\n\s*settleDelivery\(/g) || []
+    const delivers = src.match(/await deliver\(/g) || []
+    expect(settles.length, 'every deliver() caller must settle through settleDelivery')
+      .toBe(delivers.length)
+    expect(delivers.length, 'send() and retry() are the two deliver() callers')
+      .toBeGreaterThanOrEqual(2)
+  }
+
   // eslint-disable-next-line no-new-func
   return new Function('res', `return (${exprs[0]})`)
 }
