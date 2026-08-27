@@ -281,7 +281,7 @@ function retryRules() {
     // `deliver()` callers must hand off to the one settle function — if a third
     // caller appeared, or `retry()` went back to marking failure itself, the
     // single expression would silently stop covering it.
-    const settles = src.match(/const res = await deliver\([^)]*\)\n\s*settleDelivery\(/g) || []
+    const settles = src.match(/const res = await deliver\([^)]*\)\n\s*(?:return )?settleDelivery\(/g) || []
     const delivers = src.match(/await deliver\(/g) || []
     expect(settles.length, 'every deliver() caller must settle through settleDelivery')
       .toBe(delivers.length)

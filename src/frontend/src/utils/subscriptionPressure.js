@@ -4,6 +4,41 @@
 // drift on what a reading means.
 
 /**
+ * THE provider window-status vocabulary, mirroring
+ * `services/subscription_headroom_service.py::NON_BLOCKING_WINDOW_STATUSES`
+ * (#2396). The two are pinned together by
+ * `tests/unit/test_2396_provider_warning_tier.py` — two homes for one
+ * vocabulary is exactly how this bug happened, so they may not drift.
+ *
+ * An ALLOWLIST of "requests are being served", never a blocklist of blockers:
+ * the provider does not publish this vocabulary, so an unrecognised status must
+ * read as blocking.
+ */
+export const NON_BLOCKING_WINDOW_STATUSES = Object.freeze([
+  'allowed',
+  'allowed_warning',
+])
+
+/** Is this window's status one the provider is currently refusing on? */
+export function isWindowBlocking(status) {
+  return !!status && !NON_BLOCKING_WINDOW_STATUSES.includes(status)
+}
+
+/**
+ * Does a FRESH reading carry the provider's own near-the-limit tier (#2396)?
+ *
+ * Distinct from the `UTILIZATION_HIGH_PCT` band, which is our own threshold
+ * over a percentage. This is the provider saying so itself, and it can fire
+ * below our band — which is the point: it is better evidence than our constant.
+ * Freshness-gated like every other claim derived from a percentage.
+ */
+export function providerWarnsNearLimit(usage) {
+  if (!headroomIsFresh(usage)) return false
+  const h = usage?.headroom || {}
+  return [h.five_hour, h.seven_day].some((w) => w && w.status === 'allowed_warning')
+}
+
+/**
  * Badge decision for one agent's pressure entry (the batch endpoint row).
  * Returns null (no badge) or { level: 'crit'|'warn', text, title }.
  *

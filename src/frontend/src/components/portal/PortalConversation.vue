@@ -51,8 +51,28 @@
           :starred="starred"
           @toggle="$emit('toggle-star', { id: currentSessionId, is_room: false, starred })"
         />
+        <!-- ent#440: one control starts a hands-free conversation with the
+             agent in THIS thread — mic in, the same turn out, spoken back. It
+             renders only when the loop can actually run (a microphone this
+             browser can reach plus a platform that can transcribe), so it is
+             never a control that explains itself by failing. -->
         <button
-          v-if="ttsEnabled"
+          v-if="conversationMode.available"
+          class="p-2 rounded-lg transition"
+          :class="voiceConvLive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
+          :title="voiceConvLive ? 'End the voice conversation' : 'Start a voice conversation'"
+          :aria-label="voiceConvLive ? 'End the voice conversation' : 'Start a voice conversation'"
+          :aria-pressed="voiceConvLive"
+          @click="toggleVoiceConversation"
+        >
+          <svg v-if="voiceConvLive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+          <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
+        </button>
+        <!-- Hidden while a conversation is live: the loop owns playback then, and
+             a second control that pauses the audio without telling the machine
+             leaves it waiting on an `ended` event that will never arrive. -->
+        <button
+          v-if="ttsEnabled && !voiceConvLive"
           class="p-2 rounded-lg transition"
           :class="voiceMode ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
           :title="voiceMode ? 'Voice replies on — click to mute' : 'Speak replies aloud'"
@@ -99,11 +119,23 @@
               Not delivered · Retry
             </button>
           </div>
-          <div
-            v-else
-            class="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal"
-            v-html="render(m.content)"
-          ></div>
+          <div v-else class="max-w-[85%]">
+            <div
+              class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal"
+              v-html="render(m.content)"
+            ></div>
+            <!-- ent#366: one click, on the answer being judged. Only on a
+                 PERSISTED agent message — a reply composed locally during the
+                 live turn has no row id yet, and a thumb needs something to
+                 point at. It becomes rateable on the next load. -->
+            <PortalRating
+              v-if="m.id"
+              :agent-name="agent.name"
+              target-kind="message"
+              :target-id="m.id"
+              :initial-rating="m.myRating"
+            />
+          </div>
         </div>
 
         <!-- Long-turn status: elapsed-aware, not just bouncing dots -->
@@ -198,6 +230,29 @@
             @click="cancelError = ''"
           >Dismiss</button>
         </p>
+        <!-- ent#440: what the loop is doing right now, and the one control that
+             ends it. `aria-live` because the state changes with no keystroke —
+             a screen-reader user otherwise cannot tell listening from thinking.
+             The notice beside it is the degrade path (AC 6): the conversation
+             still runs, the agent just answers in text, and it says so. -->
+        <div
+          v-if="voiceConvLive"
+          class="mb-2 flex items-center gap-2 text-xs"
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            class="w-1.5 h-1.5 rounded-full shrink-0 motion-safe:animate-pulse"
+            :class="voiceListening ? 'bg-status-danger-500' : 'bg-action-primary-500'"
+          ></span>
+          <span class="text-gray-600 dark:text-gray-300">{{ voiceStatus }}</span>
+          <span v-if="voiceNotice" class="min-w-0 truncate text-gray-500 dark:text-gray-400">{{ voiceNotice }}</span>
+          <button
+            type="button"
+            class="ml-auto shrink-0 underline hover:no-underline text-gray-500 dark:text-gray-400"
+            @click="stopVoiceConversation()"
+          >Stop</button>
+        </div>
         <!-- Attached (uploaded to the agent inbox) file chips -->
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
@@ -236,7 +291,7 @@
             :title="micTitle"
             :aria-label="micTitle"
             :aria-pressed="listening"
-            :disabled="transcribing"
+            :disabled="transcribing || voiceConvLive"
             @click="toggleMic"
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
@@ -310,7 +365,7 @@
       </div>
     </div>
 
-    <audio ref="audioEl" class="hidden" @ended="speaking = false" @error="speaking = false"></audio>
+    <audio ref="audioEl" class="hidden" @ended="onNarrationDone" @error="onNarrationDone"></audio>
   </div>
 </template>
 
@@ -325,6 +380,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
+import PortalRating from './PortalRating.vue'
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -359,6 +415,33 @@ import {
   transcriptionErrorMessage,
 } from './portalUtils'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
+// ent#440: the voice-conversation loop's rules live in their own pure module —
+// this component is the dispatcher over it (vitest runs `environment: 'node'`
+// with no mount harness, so a rule kept in here is a rule no test can reach).
+import {
+  ACT_CAPTURE,
+  ACT_NARRATE,
+  ACT_RELEASE,
+  ACT_SEND,
+  ACT_STOP_CAPTURE,
+  ACT_STOP_NARRATION,
+  BARGE_IN_HOLD_MS,
+  BARGE_IN_RMS,
+  VOICE_IDLE_STOP_REASON,
+  VOICE_OFF,
+  VOICE_LISTENING,
+  VOICE_SPEAKING,
+  VOICE_THINKING,
+  VOICE_TRANSCRIBING,
+  isSpeech,
+  isVoiceLive,
+  nextVoiceState,
+  spokenReply,
+  utteranceVerdict,
+  voiceConversationMode,
+  voiceStateLabel,
+  TRANSCRIBE_TIMEOUT_MS,
+} from './voiceConversation'
 
 const props = defineProps({
   // `stt_available` (#2212) is the platform's ability to transcribe server-side
@@ -451,7 +534,12 @@ async function loadThread(sessionId) {
     // the (possibly long) reattached stream later ends.
     budgetReadAt = Date.now()
     currentSessionId.value = sessionId || resolved || null
-    messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
+    // ent#366: `id` and the caller's OWN rating ride along, so a reload shows
+    // the thumb they already gave. A message composed locally during a live turn
+    // has no row yet and therefore no id — it becomes rateable on the next load.
+    messages.value = (msgs || []).map((m) => ({
+      role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
+    }))
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -846,6 +934,7 @@ const statusLabel = computed(() => {
 })
 
 async function deliver(text) {
+  voiceLoopEndedDuringTurn = false
   sending.value = true
   elapsed.value = 0
   clearInterval(elapsedTimer)
@@ -952,7 +1041,19 @@ async function deliver(text) {
     }
 
     messages.value.push({ role: 'assistant', content: data.response || '(no response)' })
-    if (voiceMode.value && ttsEnabled.value && data.response) speak(data.response)
+    // ent#440: the spoken half of a voice turn is driven by the loop's state
+    // machine, not by this branch — narrating here as well would speak every
+    // reply twice, once raw and once cleaned for the ear.
+    lastAssistantReply.value = data.response || ''
+    // Review finding: this is evaluated AFTER the turn's await, so a user who
+    // pressed Stop while the agent was thinking had `voiceConvLive` already
+    // false by the time it ran — and the un-cleaned reply (code fences, URLs,
+    // markdown) was synthesized and played, contradicting "explicit Stop ends
+    // the loop". They could not have muted it either: the speaker button is
+    // hidden for the whole duration of a conversation. `voiceLoopEndedDuringTurn`
+    // remembers that this turn belonged to a loop the user stopped.
+    if (voiceMode.value && ttsEnabled.value && data.response
+        && !voiceConvLive.value && !voiceLoopEndedDuringTurn) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
       currentSessionId.value = data.session_id
       emit('session-adopted', data.session_id)
@@ -1230,14 +1331,23 @@ async function send() {
     }
   }
 
-  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   input.value = ''
   autoGrowAfterUpdate()
+  await submitUserText(text)
+}
+
+// The tail every user utterance shares, typed or spoken (ent#440). Extracted
+// rather than cloned: a voice turn that appended its message a second way would
+// be a second conversation wearing the same thread, which is the whole thing
+// this feature exists not to be. Returns the outcome so a caller that is not a
+// person watching the screen — the voice loop — can decide what to do next.
+async function submitUserText(text) {
+  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   await scrollDown()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text)
-  settleDelivery(index, text, res)
+  return settleDelivery(index, text, res)
 }
 
 // Both `deliver()` callers have to settle a turn the same way, so they share
@@ -1248,7 +1358,7 @@ async function send() {
 // refused cancel's error stayed pinned above the composer across every later
 // turn because only `send()` cleared it.
 function settleDelivery(index, text, res) {
-  if (res === true) return
+  if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
   // give-up it enumerated); otherwise the pre-existing rule, which still covers
   // the one path `deliver` does not classify — a dispatch that threw, where
@@ -1257,11 +1367,18 @@ function settleDelivery(index, text, res) {
   // A cancel the user asked for is not a failure. `markFailed` would strike the
   // message out in red and offer a Retry for a turn they deliberately stopped —
   // and the words are already back in the composer.
+  //
+  // ent#440 merge: the outcome is RETURNED, because the caller is no longer
+  // always a person watching the screen — the voice loop reads `{ok}` to decide
+  // whether to keep listening. A cancel reports `ok: false` like any other
+  // non-delivery (the turn did not produce an answer) but carries `cancelled`
+  // so the loop can tell "the user stopped this" from "this broke".
   if (lastDeliveredExecutionId.value && cancelledExecutionIds.value.has(lastDeliveredExecutionId.value)) {
     cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
-    return
+    return { ok: false, cancelled: true }
   }
   markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
+  return { ok: false, error: res?.error, lost: res?.lost }
 }
 
 async function retry(i) {
@@ -1310,7 +1427,13 @@ watch(voiceMode, (on) => {
   try { localStorage.setItem(voiceModeKey.value, on ? '1' : '0') } catch { /* private mode: session-only */ }
 })
 // Switching agents adopts that agent's own remembered choice.
-watch(() => props.agent?.name, () => { stopSpeaking(); voiceError.value = ''; voiceMode.value = loadVoiceMode() })
+watch(() => props.agent?.name, () => {
+  // ent#440: a conversation belongs to the agent it was started with — carrying
+  // an open microphone across a switch would send the next utterance to someone
+  // the user never chose to talk to.
+  if (voiceConvLive.value) stopVoiceConversation()
+  stopSpeaking(); voiceError.value = ''; voiceMode.value = loadVoiceMode()
+})
 const speaking = ref(false)
 const listening = ref(false)
 const transcribing = ref(false)
@@ -1324,19 +1447,37 @@ let recog = null, mediaRec = null, mediaStream = null, recChunks = [], lastAudio
 let speechWatchdog = null
 
 function revokeAudio() { if (lastAudioUrl) { URL.revokeObjectURL(lastAudioUrl); lastAudioUrl = null } }
+// ent#440 review: synthesis is a real 1-3 s round trip, and the loop keeps
+// running through it — `voiceState` is already SPEAKING, so `monitorTick` is
+// evaluating barge-in, and Stop is one click away. Without a generation token
+// `speak` COMMITS playback after the await regardless of what happened during
+// it: barge-in pauses an element that has no new src yet, the mic reopens, and
+// the agent then narrates over the user's fresh utterance; explicit Stop
+// releases the hardware and the audio plays anyway, contradicting "Stop ends
+// the loop". `narrateReply`'s trailing guard suppresses only the DISPATCH —
+// by then the element is already committed, so the check has to live here,
+// where the commit happens. `voiceStartToken` is the precedent for the shape.
+let narrationToken = 0
 async function speak(text) {
   if (!text) return
+  const token = ++narrationToken
   speaking.value = true
   try {
     const url = await store.synthesizeTts(props.agent.name, text)
+    // Abandoned mid-synthesis (barge-in, Stop, agent switch, unmount). Discard
+    // the audio rather than playing it into a conversation that moved on; the
+    // URL is ours and nothing else holds it, so revoke it here.
+    if (token !== narrationToken) { if (url) URL.revokeObjectURL(url); return }
     // The store answers `null` for every failure shape, so this is the only
     // place narration can report that it did not happen (#2212).
     if (!url) { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE; return }
     revokeAudio(); lastAudioUrl = url
     if (audioEl.value) { audioEl.value.src = url; await audioEl.value.play() } else speaking.value = false
-  } catch { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE }
+  } catch { if (token === narrationToken) { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE } }
 }
-function stopSpeaking() { if (audioEl.value) audioEl.value.pause(); speaking.value = false }
+// Bumping the token is what makes an in-flight synthesis abandon itself; the
+// pause alone cannot reach audio that has not been assigned yet.
+function stopSpeaking() { narrationToken++; if (audioEl.value) audioEl.value.pause(); speaking.value = false }
 // Dictated text lands at the end of whatever is already typed — one place, so
 // the two mic paths cannot drift on how a transcript is applied.
 function appendTranscript(text) {
@@ -1443,11 +1584,358 @@ async function toggleRecord() {
 }
 function stopStream() { try { mediaStream?.getTracks().forEach((t) => t.stop()) } catch { /* noop */ } mediaStream = null }
 function cleanupVoice() {
+  releaseVoiceHardware()
+  voiceState.value = VOICE_OFF
   clearSpeechWatchdog()
   try { recog?.stop() } catch { /* noop */ }
   try { if (mediaRec && mediaRec.state !== 'inactive') mediaRec.stop() } catch { /* noop */ }
   stopStream(); stopSpeaking(); revokeAudio()
 }
+
+// ---- ent#440: hands-free voice conversation ---------------------------------
+// The Workspace already had both halves — dictation in (#2212) and spoken
+// replies out (#2157) — as two manual controls the user had to drive turn by
+// turn. This closes the loop between them: one button, and thereafter the mic
+// listens, the utterance becomes an ORDINARY portal turn, the reply is spoken,
+// and the mic reopens. No mode switch, no second surface, no second transcript:
+// the turn goes through `submitUserText` exactly like a typed one, so history,
+// the resumed Claude session, permissions and the files/canvas beside it are all
+// the same conversation by construction (AC 1, 2, 3, 4, 7).
+const lastAssistantReply = ref('')
+const voiceState = ref(VOICE_OFF)
+const voiceConvLive = computed(() => isVoiceLive(voiceState.value))
+const voiceStatus = computed(() => voiceStateLabel(voiceState.value))
+// The mic-open half of the loop reads red, like the push-to-talk button does,
+// so "it is hearing me right now" is one visual language on this surface.
+const voiceListening = computed(() => voiceState.value === VOICE_LISTENING)
+// The degrade notice (no voice configured → replies stay text). Held apart from
+// `voiceError` because it is not a failure and must not be dismissible noise.
+const voiceNotice = ref('')
+const conversationMode = computed(() => voiceConversationMode({
+  canRecord,
+  // A microphone is unreachable off a secure origin; the browser's own refusal
+  // arrives as a bare NotAllowedError, which reads as "you denied permission".
+  secureContext: typeof window === 'undefined' ? true : window.isSecureContext !== false,
+  serverStt: !!props.agent.stt_available,
+  voiceAvailable: !!props.agent.voice_available,
+}))
+
+// One microphone stream for the whole conversation, one recorder per utterance:
+// re-acquiring the stream each turn re-runs the browser's gain ramp and clips
+// the first word of every reply-to-a-reply.
+let convStream = null, convRec = null, convChunks = []
+let convCtx = null, convAnalyser = null, convData = null, convTimer = null
+let uttStart = 0, lastSpeechAt = 0, sawSpeech = false, bargeSince = 0
+// Startup re-entrancy (see `startVoiceConversation`): a flag for the overlapping
+// press, a token for the start whose hardware was released while it was awaiting.
+let voiceStarting = false, voiceStartToken = 0
+// True while a turn dispatched BY the voice loop is still in flight after the
+// loop itself ended (Stop, an error, teardown). The #2157 speaker branch is
+// evaluated after that await and would otherwise speak the raw reply.
+let voiceLoopEndedDuringTurn = false
+
+function toggleVoiceConversation() {
+  if (voiceConvLive.value) stopVoiceConversation()
+  else void startVoiceConversation()
+}
+
+async function startVoiceConversation() {
+  // Startup is not instant and the loop is not live until it finishes: a
+  // permission prompt can sit open for seconds. Without these two guards a
+  // second press — or a press after Stop, or a nav-away — opens a SECOND stream
+  // and a second 100 ms timer while the first of each is still owned by nobody:
+  // a microphone left hot with no control pointing at it. `voiceStarting`
+  // rejects the re-entry; the token abandons a start whose hardware has already
+  // been released (`releaseVoiceHardware` bumps it), which is the unmount case.
+  if (voiceConvLive.value || voiceStarting) return
+  voiceStarting = true
+  const token = ++voiceStartToken
+  try {
+    voiceError.value = ''
+    const mode = conversationMode.value
+    // Re-checked at click even though the control only renders when available:
+    // the roster refreshes in the background, so the capability can flip between
+    // render and press, and the answer then has to be words rather than silence.
+    if (!mode.available) { voiceError.value = mode.reason; return }
+    voiceNotice.value = mode.narrates ? '' : mode.reason
+    // Push-to-talk and the loop would otherwise hold two recorders on one device.
+    if (listening.value) { try { recog?.stop() } catch { /* noop */ } try { mediaRec?.stop() } catch { /* noop */ } }
+    let stream = null
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        // Echo cancellation is load-bearing, not polish: without it the mic hears
+        // the agent's own narration through the speakers and interrupts itself.
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
+    } catch (e) { voiceError.value = recorderErrorMessage(e); return }
+    // Superseded while the prompt was open — the tracks are live NOW, so they
+    // are stopped here rather than left to a teardown that already ran.
+    if (token !== voiceStartToken) { try { stream.getTracks().forEach((t) => t.stop()) } catch { /* noop */ } return }
+    convStream = stream
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      convCtx = new Ctx()
+      if (convCtx.state === 'suspended') await convCtx.resume()
+      if (token !== voiceStartToken) { releaseVoiceHardware(); return }
+      convAnalyser = convCtx.createAnalyser()
+      convAnalyser.fftSize = 1024
+      convData = new Uint8Array(convAnalyser.fftSize)
+      convCtx.createMediaStreamSource(convStream).connect(convAnalyser)
+    } catch {
+      // Without a level meter nothing can decide when an utterance ended, so the
+      // loop cannot run at all. Say so and give the microphone back rather than
+      // holding it open behind a control that will never advance.
+      releaseVoiceHardware()
+      voiceError.value = "Couldn't listen on this device — use the mic button to dictate instead."
+      return
+    }
+    convTimer = setInterval(monitorTick, 100)
+    voiceDispatch('start')
+  } finally {
+    voiceStarting = false
+  }
+}
+
+// `reason` is shown when the loop stopped itself; a user-pressed Stop is silent.
+function stopVoiceConversation({ reason = '' } = {}) {
+  if (reason) voiceError.value = reason
+  voiceDispatch('stop')
+}
+
+// Review finding: `failVoice` dispatched unconditionally, and `nextVoiceState`
+// handles `stop`/`error` BEFORE its `state === VOICE_OFF` short-circuit — so it
+// always returned OFF + ACT_RELEASE. A user who pressed Stop on a slow turn and
+// then restarted the loop had the NEW conversation torn down when the abandoned
+// turn finally rejected, with an error about a turn they had already abandoned.
+// The success paths already guard with a state re-check; the failure paths take
+// the same generation token `speak`/`startVoiceConversation` use.
+function failVoice(message, token = null) {
+  if (token !== null && token !== voiceStartToken) return
+  voiceError.value = message || 'Voice stopped — you can keep typing.'
+  voiceDispatch('error')
+}
+
+function releaseVoiceHardware() {
+  clearTranscribeWatchdog()
+  // A turn dispatched by this loop may still be in flight; mark it so the
+  // #2157 branch does not speak its reply after the loop is gone.
+  if (sending.value) voiceLoopEndedDuringTurn = true
+  // Abandons any start still awaiting a permission prompt or an AudioContext:
+  // it will find its token stale and stop the stream it just acquired instead
+  // of installing it into a loop that has already been torn down.
+  voiceStartToken++
+  // Narration is torn down HERE too, not left to the machine's SPEAKING exit:
+  // releasing the hardware while a synthesis is in flight would otherwise let
+  // it play after the loop is gone (ent#440 review). `stopSpeaking` bumps the
+  // narration token, which is what actually abandons it.
+  stopSpeaking()
+  if (convTimer) { clearInterval(convTimer); convTimer = null }
+  try { if (convRec && convRec.state !== 'inactive') convRec.stop() } catch { /* noop */ }
+  convRec = null; convChunks = []
+  try { convStream?.getTracks().forEach((t) => t.stop()) } catch { /* noop */ }
+  convStream = null
+  try { convCtx?.close() } catch { /* noop */ }
+  convCtx = null; convAnalyser = null; convData = null
+  sawSpeech = false; bargeSince = 0; lastSpeechAt = 0; uttStart = 0
+  voiceNotice.value = ''
+}
+
+// Every transition goes through the pure machine; this function only performs
+// what it decides, so no caller can invent an edge of its own.
+function voiceDispatch(event, payload) {
+  const { state, actions } = nextVoiceState(voiceState.value, event, {
+    canNarrate: conversationMode.value.narrates,
+  })
+  voiceState.value = state
+  for (const act of actions) {
+    switch (act) {
+      case ACT_CAPTURE: startUtterance(); break
+      case ACT_STOP_CAPTURE: stopUtterance(); break
+      case ACT_SEND: void runVoiceTurn(payload); break
+      case ACT_NARRATE: void narrateReply(payload); break
+      case ACT_STOP_NARRATION: stopSpeaking(); break
+      case ACT_RELEASE: releaseVoiceHardware(); break
+      default: break
+    }
+  }
+}
+
+function startUtterance() {
+  if (!convStream) return
+  convChunks = []
+  sawSpeech = false
+  lastSpeechAt = 0
+  uttStart = Date.now()
+  try { convRec = new MediaRecorder(convStream) }
+  catch (e) { failVoice(recorderErrorMessage(e)); return }
+  convRec.ondataavailable = (e) => { if (e.data && e.data.size) convChunks.push(e.data) }
+  // ent#440 review (NEW-2): capture the generation token like the other two
+  // async failure paths. `releaseVoiceHardware` nulls `convRec` but never
+  // clears its handlers, so a late `error` from a torn-down recorder was
+  // tearing down a RESTARTED loop with a message about the abandoned one.
+  const recorderToken = voiceStartToken
+  convRec.onerror = (e) => failVoice(recorderErrorMessage(e?.error || e), recorderToken)
+  convRec.onstop = () => { void finishUtterance() }
+  // Timesliced so a stop always has data to flush, even for a short utterance.
+  try { convRec.start(200) } catch (e) { failVoice(recorderErrorMessage(e)) }
+}
+
+function stopUtterance() {
+  try { if (convRec && convRec.state !== 'inactive') convRec.stop() } catch { /* noop */ }
+}
+
+// Review finding: nothing bounded `transcribing`. `stopUtterance()` no-ops on an
+// already-`inactive` recorder, so `onstop` never fires and `finishUtterance`
+// never runs — reachable when the mic is unplugged or permission is revoked
+// mid-conversation, and again when `/stt` hangs (no transport timeout). Either
+// way the loop sits at "Got it…" forever with the tracks live and the browser
+// mic indicator on. The 15s no-speech guard covers `listening` only.
+let transcribeWatchdog = null
+function clearTranscribeWatchdog() {
+  if (transcribeWatchdog) { clearTimeout(transcribeWatchdog); transcribeWatchdog = null }
+}
+function armTranscribeWatchdog() {
+  clearTranscribeWatchdog()
+  transcribeWatchdog = setTimeout(() => {
+    transcribeWatchdog = null
+    // Only if we are STILL waiting — a transcript that landed in the meantime
+    // has already moved the machine on, and re-checking is what keeps this a
+    // backstop rather than a competing terminal.
+    if (voiceState.value !== VOICE_TRANSCRIBING) return
+    failVoice("I couldn't hear that one back — the loop stopped. Tap the voice button to start again.")
+  }, TRANSCRIBE_TIMEOUT_MS)
+}
+
+async function finishUtterance() {
+  // The watchdog stays ARMED across the `/stt` await below (review NEW-1). It
+  // used to be cleared on the first line, so it bounded only the
+  // recorder-cannot-stop window — and `transcribeStt` rides `portalHttp`, an
+  // axios instance with no `timeout`, i.e. `timeout: 0`. A hung /stt therefore
+  // left voiceState in TRANSCRIBING showing "Got it…", the mic tracks live and
+  // the browser's recording indicator on, until the user pressed Stop: the same
+  // hot-mic outcome FR-9 says this feature must not ship, reached by the exact
+  // cause the watchdog was added for.
+  const transcribeToken = voiceStartToken
+  const heard = sawSpeech
+  // Firefox leaves `mimeType` empty and puts the real type on the chunks;
+  // mislabelling Ogg as WebM is a silent upload bug (#2212).
+  const type = resolveRecordingMimeType(convRec?.mimeType, convChunks)
+  const blob = new Blob(convChunks, { type })
+  convChunks = []
+  // The recorder stops for three reasons — an ended utterance, a barge-in, and
+  // teardown. Only the first is still waiting on a transcript; acting on the
+  // others would send audio the user has already moved past.
+  // Both early exits disarm: neither is waiting for a transcript any more, and
+  // an armed watchdog would fire `failVoice` into a loop that has legitimately
+  // moved on.
+  if (voiceState.value !== VOICE_TRANSCRIBING) { clearTranscribeWatchdog(); return }
+  if (!heard || blob.size < MIN_RECORDING_BYTES) {
+    clearTranscribeWatchdog(); voiceDispatch('silence'); return
+  }
+  try {
+    const text = await store.transcribeStt(props.agent.name, blob)
+    // Generation FIRST, state second (review). `transcribeToken` was captured
+    // above but only consulted in the catch, and the state check below is
+    // generation-BLIND: stop the loop, start it again, and the abandoned
+    // `/stt` — which can take up to its 60s timeout — resolves into a NEW loop
+    // that is legitimately back in TRANSCRIBING. It would then send the
+    // previous conversation's words as a real turn, clobber the live
+    // `convChunks`, and disarm the live watchdog. Return before any of that.
+    if (transcribeToken !== voiceStartToken) return
+    clearTranscribeWatchdog()
+    if (voiceState.value !== VOICE_TRANSCRIBING) return
+    if (text) voiceDispatch('transcript', text)
+    else voiceDispatch('transcript-empty')
+  } catch (e) {
+    clearTranscribeWatchdog()
+    // /stt answers with a user-facing `detail`; a provider outage stops the
+    // loop with that sentence rather than looping silently on nothing (AC 6).
+    failVoice(transcriptionErrorMessage(e), transcribeToken)
+  }
+}
+
+async function runVoiceTurn(text) {
+  // Review finding: `send()` opens with `if (!text || sending.value) return`;
+  // this path had no such check, and the textarea stays enabled while the loop
+  // is `listening`. A user who typed and sent, then spoke, put the utterance
+  // into a SECOND concurrent `deliver()` — and the two share `elapsedTimer`,
+  // `sending`, `attachments` and, worst, `awaitPersistedReply`'s baseline
+  // assistant count, so the second turn's poll returns the first turn's reply.
+  // The spoken turn yields to the typed one rather than racing it.
+  const token = voiceStartToken
+  if (sending.value) {
+    failVoice("I couldn't send that — a message was already on its way. Tap the voice button to start again.", token)
+    return
+  }
+  const res = await submitUserText(text)
+  // A failed turn already renders on its own message bubble with a retry; the
+  // loop stops rather than talking over an error the user needs to read.
+  if (!res.ok) { failVoice(res.error || "That didn't send — try again or type it.", token); return }
+  // The user may have pressed Stop while the agent was thinking. The turn still
+  // ran and is in the thread; it just is not spoken.
+  if (voiceState.value !== VOICE_THINKING) return
+  voiceDispatch('reply', lastAssistantReply.value)
+}
+
+async function narrateReply(text) {
+  const spoken = spokenReply(text)
+  if (!spoken) { voiceDispatch('narration-ended'); return }
+  await speak(spoken)
+  // `speak` resolves when playback STARTS; the audio element advances the loop
+  // on `ended`. When it never started (synthesis failed — `speak` has already
+  // named that in `voiceError`), nothing else will, so advance here.
+  if (!speaking.value && voiceState.value === VOICE_SPEAKING) voiceDispatch('narration-ended')
+}
+
+function onNarrationDone() {
+  speaking.value = false
+  if (voiceState.value === VOICE_SPEAKING) voiceDispatch('narration-ended')
+}
+
+// RMS of the analyser's time-domain window — a level meter, not recognition.
+function readRms() {
+  if (!convAnalyser || !convData) return 0
+  convAnalyser.getByteTimeDomainData(convData)
+  let sum = 0
+  for (let i = 0; i < convData.length; i++) {
+    const v = (convData[i] - 128) / 128
+    sum += v * v
+  }
+  return Math.sqrt(sum / convData.length)
+}
+
+function monitorTick() {
+  const now = Date.now()
+  const rms = readRms()
+  if (voiceState.value === VOICE_LISTENING) {
+    if (isSpeech(rms)) { sawSpeech = true; lastSpeechAt = now }
+    const verdict = utteranceVerdict({
+      sawSpeech,
+      msSinceSpeech: lastSpeechAt ? now - lastSpeechAt : 0,
+      elapsedMs: now - uttStart,
+    })
+    if (verdict === 'end') {
+      // Dispatch first, stop second: `onstop` fires on a later tick and reads
+      // the state this sets, so the reverse order races its own recorder.
+      voiceDispatch('utterance')
+      armTranscribeWatchdog()
+      stopUtterance()
+    } else if (verdict === 'idle') {
+      // A hot mic nobody is talking into is given back, with words — not left
+      // open indefinitely against a client's own microphone.
+      stopVoiceConversation({ reason: VOICE_IDLE_STOP_REASON })
+    }
+    bargeSince = 0
+  } else if (voiceState.value === VOICE_SPEAKING) {
+    // AC 5: talking over the agent cuts it off. Sustained and louder than the
+    // listening threshold, so a cough or leaked narration cannot interrupt.
+    if (isSpeech(rms, BARGE_IN_RMS)) {
+      if (!bargeSince) bargeSince = now
+      if (now - bargeSince >= BARGE_IN_HOLD_MS) { bargeSince = 0; voiceDispatch('barge-in') }
+    } else bargeSince = 0
+  } else bargeSince = 0
+}
+
 
 defineExpose({ focusComposer: () => textarea.value?.focus() })
 </script>

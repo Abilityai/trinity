@@ -161,12 +161,41 @@ describe('a cancel that had nothing left to stop (review findings)', () => {
 })
 
 describe('the Workspace-specific findings', () => {
-  it('does not reference a ref that only exists on the ent#440 branch', () => {
-    // `voiceConvLive` is not defined in `dev`; referencing it threw a
-    // ReferenceError on EVERY Escape keydown, which made Escape-to-cancel
-    // completely dead on this surface. The source greps in this file could not
-    // catch it — vitest has no mount harness, so nothing evaluates the handler.
-    expect(workspace).not.toContain('voiceConvLive')
+  it('lists only overlays that are actually defined in the component', () => {
+    // The original defect: the overlay list named `voiceConvLive`, a ref that
+    // existed only on the ent#440 branch, so the options object threw a
+    // ReferenceError on EVERY Escape keydown — in flight or not — and
+    // Escape-to-cancel was completely dead on this surface. vitest has no mount
+    // harness, so nothing here evaluates the handler and only a source rule can
+    // catch it.
+    //
+    // This used to assert the ABSENCE of that one identifier, which was only
+    // ever a proxy: ent#440 has since landed on `dev`, so the component now
+    // contains `voiceConvLive` legitimately (its own status row and toggle) and
+    // the old assertion would fail on a file that is perfectly correct. The
+    // durable rule is the one the bug actually broke — every identifier the
+    // list names must be defined in this file — and it holds whichever branch
+    // lands next.
+    const list = workspace.match(/overlays: \[([^\]]*)\]/)
+    expect(list, 'the Escape rule must be given an overlay list').not.toBeNull()
+    const refs = list[1].split(',').map((r) => r.trim().replace(/\.value$/, '')).filter(Boolean)
+    expect(refs.length).toBeGreaterThan(0)
+    for (const ref of refs) {
+      expect(
+        new RegExp(`(?:const|let|function)\\s+${ref}\\b`).test(workspace),
+        `overlay \`${ref}\` is referenced but never defined — this is the ReferenceError`,
+      ).toBe(true)
+    }
+  })
+
+  it('does not treat the ent#440 voice conversation as an Escape overlay', () => {
+    // Now verifiable against landed code rather than against its absence: the
+    // voice conversation binds NO Escape handler — it is started and stopped by
+    // an explicit toggle and a Stop button. Listing it would suppress
+    // Escape-to-cancel for the whole time a voice conversation is live, which
+    // is exactly when a runaway turn most needs stopping.
+    const list = workspace.match(/overlays: \[([^\]]*)\]/)
+    expect(list[1]).not.toContain('voiceConv')
   })
 
   it('does not mark a turn the user deliberately stopped as failed', () => {
@@ -188,7 +217,7 @@ describe('the Workspace-specific findings', () => {
     // other caller. The asymmetry is only possible while the rules live at the
     // call site, so the fix is one `settleDelivery` both callers use.
     expect(workspace).toContain('function settleDelivery(')
-    const callers = workspace.match(/const res = await deliver\([^)]*\)\n\s*settleDelivery\(/g) || []
+    const callers = workspace.match(/const res = await deliver\([^)]*\)\n\s*(?:return )?settleDelivery\(/g) || []
     expect(callers.length).toBe(2)
     // ...and neither caller keeps its own copy of the branch.
     expect(workspace.match(/markFailed\(/g).length).toBeLessThanOrEqual(3)

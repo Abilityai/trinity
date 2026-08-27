@@ -302,6 +302,27 @@ def reports(agent_name: str, client_email: str, *, limit: int = 20, offset: int 
     } for r in rows]
 
 
+def _rating_tally(agent_name: str) -> dict:
+    """Up/down counts of this agent's Workspace ratings (ent#366).
+
+    Fleet-wide for the agent, not per-reader: "how did this land with people"
+    is the question a tally answers, and a per-reader count of your own two
+    clicks answers nothing. It is counts only — no comments and no evaluator
+    identities cross to this surface, so nothing here says who rated what.
+
+    Fail-soft to zeros with `unavailable`, so the page renders for an agent
+    whose ratings cannot be read rather than failing whole; the flag keeps the
+    UI from presenting an unread tally as a real zero.
+    """
+    from database import db as platform_db
+    try:
+        tally = platform_db.workspace_rating_tally(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("agent page: rating tally failed for %s: %s", agent_name, e)
+        return {"up": 0, "down": 0, "total": 0, "unavailable": True}
+    return {**tally, "unavailable": False}
+
+
 def build_page(email: str, agent_name: str, card: Optional[dict],
                window: str = DEFAULT_WINDOW) -> dict:
     """Assemble the page. `card` is the caller's roster entry (identity + what
@@ -339,6 +360,12 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
         "capabilities": card.get("playbooks") or [],
         "stats": _stats(agent_name, window),
         "asks": _asks(agent_name, email),
+        # ent#366 AC #4: a RAW TALLY, never a percentage. At the volumes this
+        # page sees, one thumbs-down out of one rating renders as "100%
+        # negative" — a number that looks like evidence and is not. Both
+        # figures cross so the denominator, which is the honest part, is on
+        # screen with them.
+        "ratings": _rating_tally(agent_name),
         "recent_work": _recent_work(agent_name),
     }
 

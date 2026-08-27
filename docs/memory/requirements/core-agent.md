@@ -808,6 +808,59 @@ is existing output gaining an audience.
   because the Workspace reads by audience on a table retention lets grow to 90 days.
 - **Flow**: `docs/memory/feature-flows/workspace-deliverables.md`
 
+### 5.15 Workspace ratings — thumbs on a message, Useful on a deliverable (trinity-enterprise#366)
+
+**Description**: One-click feedback in the Workspace. Thumbs up/down on an agent
+message, Useful / Not what I needed on a deliverable card (the affordance §5.14
+left that card as the surface for). A negative rating opens an optional comment
+box; the words are recorded either way and handed to the agent's
+`capture-feedback` skill when it has one.
+
+- **FR-1 — A rating is a platform primitive, not a skill**: it writes to
+  `agent_evaluations` (§ ent#206's referee surface) under an evaluator of
+  `workspace:<email>`. A capture-feedback skill runs *inside* the agent, so it
+  can summarise charitably, omit, or fail silently — and a user rating is the one
+  score that must not pass through the thing being scored. The rated agent has no
+  write path to this table; ent#366 **amends** that write fence to admit a
+  Workspace principal rather than widening it for anyone else.
+- **FR-2 — The target is checked against the reader**: message and report ids are
+  global, so an id alone proves nothing. A **message** must belong to this agent
+  AND this client and be the *agent's* message (rating your own is refused — it
+  would put a self-rating in the agent's tally); a **deliverable** reuses §5.14's
+  audience gate, so "can rate" and "was addressed to you" are one question
+  answered in one place. A target that fails either check returns the **same 404**
+  a missing one does (Invariant #8).
+- **FR-3 — Idempotent per person per target**: `UNIQUE(evaluator, target_kind,
+  target_id) WHERE target_id IS NOT NULL`. A second thumb is a correction, which
+  is what makes a tally count **people rather than clicks**. Partial, so the
+  graded-run rows a Tier-0 pass writes (no target) are untouched.
+- **FR-4 — A raw tally, never a percentage** (agent page): one thumbs-down out of
+  one rating renders as "100% negative" — a number that looks like evidence and
+  is not. Both counts cross to the page; an unreadable tally is flagged
+  `unavailable` so it cannot render as a real zero.
+- **FR-5 — The rated agent reads tallies, never the words** (the issue's open
+  grooming question, decided): `_redact_for_agent_principal` strips `comment` for
+  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
+  comment" from "not yours to read". Two reasons: a score an agent can read is a
+  loop it may optimise for, and the comment is untrusted text written by an
+  annoyed stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces see the text.
+- **FR-6 — Degrades without the skill**: the rating and comment are durable
+  **before** anything is dispatched. With the skill, a background turn runs
+  `capture-feedback` with the client's words **fenced as data** (the
+  `routers/webhooks.py` framing) and never in the client's own thread; without
+  it, the response says `skill_not_installed` and the UI thanks the person for
+  words that were recorded rather than promising a follow-up.
+- **FR-7 — A failed rating is shown, not swallowed**: unlike the fail-soft
+  deliverables read, the store surfaces the error next to the control — a rating
+  that silently did not record leaves the person believing they were heard.
+- **Not NPS**: a promoter percentage from a handful of users is a number that
+  looks like evidence and is not. The free text was the valuable part.
+- **Migrations**: dual-track — `_migrate_workspace_ratings` + Alembic
+  `0047_workspace_ratings`; four nullable columns (`target_kind`, `target_id`,
+  `comment`, `updated_at`) and the partial UNIQUE above.
+- **Flow**: `docs/memory/feature-flows/workspace-ratings.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
