@@ -86,6 +86,24 @@ character), no other handler has called `preventDefault`, and none of the
 caller's declared overlays is open. Escape with nothing in flight is a no-op
 that never touches the input.
 
+**The overlay list is per surface, and it is declared generously.** The rule is
+shared; what owns Escape is not. ChatPanel declares `[voice.isActive,
+showSessionDropdown]`; the Workspace declares `[typeaheadOpen, pickerOpen,
+listening]` — the composer typeahead, the agent picker (which closes on
+outside-click only, so Escape is how a user dismisses it) and dictation (the mic
+is disabled only while *transcribing*, so it can be live during a turn). The
+Workspace list originally carried the typeahead alone, which made pressing
+Escape to close the picker or stop the mic cancel the turn instead. The
+asymmetry with ChatPanel was the tell. Since the module's stated bias is that a
+missed cancel costs one click on Stop while a wrong one destroys work the user
+is still waiting for, an overlay is listed whenever it *plausibly* owns Escape
+on that surface — the conservative direction is to under-cancel. The voice loop
+is deliberately absent from the Workspace list: `voiceMode` is a speak-replies
+TTS toggle that does not own Escape, and the ent#440 conversation overlay is not
+in `dev` — naming its ref here once threw a `ReferenceError` on every Escape
+keydown and made the whole feature dead on that surface, so `turnCancel.spec.js`
+pins the identifier's absence.
+
 ## The words come back without destroying a draft
 
 The AC asks that a restore "prepends or merges sensibly". Prepend is the
@@ -148,13 +166,18 @@ the same swap inline.
   statuses and real termination for `running`/`queued`; a missing execution as
   404; and an agent-side failure reworded for a client without naming the agent
   host.
-- `src/frontend/tests/unit/turnCancel.spec.js` (30) — every arm of the Escape
+- `src/frontend/tests/unit/turnCancel.spec.js` (40) — every arm of the Escape
   rule including IME and `defaultPrevented`; the restore/merge including
   idempotence and whitespace-only drafts; the three outcome shapes; and, from
   source, that all three surfaces import the shared rules rather than
   re-deciding them, capture and clear the id and the text together, register and
   remove the listener, guard against a double cancel, and do **not** restore the
-  words when the cancel was refused.
+  words when the cancel was refused. Since the review it also pins the three
+  Workspace-specific rules that source alone can answer: that both `deliver()`
+  callers settle through one `settleDelivery` (so a cancelled *retry* cannot
+  drift back into being marked failed), that `retry()` clears a stale cancel
+  refusal like `send()` does, and that the overlay list names the picker and
+  dictation alongside the typeahead.
 
 ## Known gaps, stated
 

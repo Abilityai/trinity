@@ -985,20 +985,35 @@ async function deliver(text) {
 // semantics the rest of the platform uses (CANCELLED, CAS-guarded), and the
 // in-flight marker + resume lock are released by the turn's own `finally`, so
 // there is nothing to unwind here.
-// Escape stops the turn — but only when nothing else owns Escape. The
-// typeahead uses it to dismiss (`resolveComposerKey` → 'dismiss'/'close') and
-// the voice loop uses it to leave, so both are listed as overlays; the rule
-// itself is pure and lives in `utils/turnCancel.js`.
+// Escape stops the turn — but only when nothing else owns Escape. The rule
+// itself is pure and lives in `utils/turnCancel.js`; what belongs here is the
+// list of things on THIS surface that Escape would otherwise be dismissing.
+// (An earlier version of this comment described the voice loop as one of them.
+// It is not: `voiceMode` is a speak-replies TTS toggle, and the ent#440
+// conversation overlay is not in `dev` at all — naming its ref here is what
+// threw a ReferenceError on every Escape keydown and made Escape-to-cancel dead
+// in the Workspace. That entry stays out until the overlay actually exists; a
+// spec assertion pins the identifier's absence so it cannot come back by
+// comment either.)
 function onEscapeKeydown(event) {
   if (!shouldCancelOnEscape(event, {
     inFlight: canCancelTurn.value,
     cancelling: cancelling.value,
-    // Only the typeahead owns Escape on this surface today. (The voice-loop
-    // overlay belongs to ent#440, which is not in `dev` — referencing it here
-    // threw a ReferenceError on every Escape keydown, in flight or not, which
-    // made Escape-to-cancel completely dead in the Workspace. Re-add that entry
-    // when ent#440 lands.)
-    overlays: [typeaheadOpen.value],
+    // Review finding NEW-3: this list was `[typeaheadOpen]` alone, narrower
+    // than ChatPanel's for no reason anyone had argued. Two other things on
+    // this surface own Escape while a turn can be in flight, and both are
+    // reachable mid-turn:
+    //
+    //   - the agent picker (`pickerOpen`) closes on outside-click only, so a
+    //     user pressing Escape to dismiss it killed the turn instead;
+    //   - dictation (`listening`) is disabled only while `transcribing`, so
+    //     the mic can be live during a turn and Escape is how you stop it.
+    //
+    // The module's own bias decides the direction: a missed cancel costs one
+    // click on the Stop button, a wrong one destroys a turn the user is still
+    // waiting for. So an overlay is added whenever it plausibly owns Escape,
+    // not only when it provably does.
+    overlays: [typeaheadOpen.value, pickerOpen.value, listening.value],
   })) return
   event.preventDefault()
   cancelTurn()
@@ -1222,20 +1237,31 @@ async function send() {
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text)
+  settleDelivery(index, text, res)
+}
+
+// Both `deliver()` callers have to settle a turn the same way, so they share
+// one function rather than one of them carrying the rules. Review finding:
+// `send()` grew the cancel-aware handling and `retry()` did not, so a cancelled
+// RETRY still struck the message out in red with a Retry button — reproducing,
+// on the other caller, the exact defect this change exists to remove — and a
+// refused cancel's error stayed pinned above the composer across every later
+// turn because only `send()` cleared it.
+function settleDelivery(index, text, res) {
+  if (res === true) return
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
   // give-up it enumerated); otherwise the pre-existing rule, which still covers
   // the one path `deliver` does not classify — a dispatch that threw, where
   // nothing reached the server and re-sending is correct.
-  if (res !== true) {
-    // A cancel the user asked for is not a failure. `markFailed` would strike
-    // the message out in red and offer a Retry for a turn they deliberately
-    // stopped — and the words are already back in the composer.
-    if (lastDeliveredExecutionId.value && cancelledExecutionIds.value.has(lastDeliveredExecutionId.value)) {
-      cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
-    } else {
-      markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
-    }
+  //
+  // A cancel the user asked for is not a failure. `markFailed` would strike the
+  // message out in red and offer a Retry for a turn they deliberately stopped —
+  // and the words are already back in the composer.
+  if (lastDeliveredExecutionId.value && cancelledExecutionIds.value.has(lastDeliveredExecutionId.value)) {
+    cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
+    return
   }
+  markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
 }
 
 async function retry(i) {
@@ -1244,8 +1270,11 @@ async function retry(i) {
   const content = msg.content
   msg.failed = false
   msg.error = null
+  // A stale "couldn't stop the turn" must not outlive the turn it described —
+  // and `retry` is a new turn, so it clears it for the same reason `send` does.
+  cancelError.value = ''
   const res = await deliver(content)
-  if (res !== true) markFailed(i, content, res?.error, { retryable: res?.retryable ?? !res?.lost })
+  settleDelivery(i, content, res)
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------

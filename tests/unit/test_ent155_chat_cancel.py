@@ -215,15 +215,64 @@ def test_a_public_link_can_only_cancel_what_a_public_link_produced():
     shared browser session) would otherwise let a visitor stop the owner's
     scheduled work. The symmetry-with-reading argument is sound for a read and
     does not carry to a write.
+
+    Review finding NEW-7: this was `inspect.getsource` plus `assert
+    'triggered_by' in src`, which a guard inverted to `== "public"` satisfies
+    just as happily. A security narrowing has to be exercised, so this drives
+    the route with a `triggered_by="schedule"` row and asserts the refusal.
     """
-    import inspect
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+    from fastapi import HTTPException
     from routers import public as public_router
-    src = inspect.getsource(public_router.public_terminate_execution)
-    assert 'triggered_by' in src
-    assert '"public"' in src
-    # ...and it refuses with the SAME uniform 404 as an unknown execution, so
+
+    def _row(triggered_by):
+        return SimpleNamespace(
+            id="exec-1", agent_name="scribe", triggered_by=triggered_by,
+            status="running", source_user_email=None,
+        )
+
+    def _arrange(monkeypatch, row, *, terminated):
+        monkeypatch.setattr(public_router, "_get_client_ip", lambda request: "1.2.3.4")
+        monkeypatch.setattr(public_router, "check_public_link_rate_limit", lambda ip: None)
+        monkeypatch.setattr(
+            public_router, "_validate_public_link",
+            lambda token: {"id": "link-1", "agent_name": "scribe"},
+        )
+        monkeypatch.setattr(public_router, "_agent_requires_email", lambda name: False)
+        monkeypatch.setattr(public_router.db, "get_execution", lambda eid: row)
+
+        async def _term(**kwargs):
+            terminated.append(kwargs)
+            return {"status": "terminated", "execution_id": kwargs["execution_id"]}
+        monkeypatch.setattr(public_router, "_terminate_execution", _term)
+
+    def _call():
+        return asyncio.run(public_router.public_terminate_execution(
+            token="tok", execution_id="exec-1", request=object(), session_token=None,
+        ))
+
+    # A scheduled run on the same agent — the owner's autonomous work — is
+    # refused, and refused with the SAME uniform 404 as an unknown execution, so
     # the route is not an oracle for "this id exists on this agent".
-    assert src.count('detail="Execution not found"') >= 2
+    with _pytest.MonkeyPatch.context() as mp:
+        terminated = []
+        _arrange(mp, _row("schedule"), terminated=terminated)
+        with _pytest.raises(HTTPException) as e:
+            _call()
+        assert e.value.status_code == 404
+        assert e.value.detail == "Execution not found"
+        assert terminated == [], "a scheduled run must never reach the terminator"
+
+    # ...while the turn the link itself produced still cancels, so the guard
+    # cannot be satisfied by refusing everything.
+    with _pytest.MonkeyPatch.context() as mp:
+        terminated = []
+        _arrange(mp, _row("public"), terminated=terminated)
+        assert _call()["status"] == "terminated"
+        assert len(terminated) == 1
 
 # --------------------------------------------------------------------------
 # Review findings (@obasilakis) — the durable verdict and the blast radius

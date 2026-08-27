@@ -180,6 +180,40 @@ describe('the Workspace-specific findings', () => {
   it('clears a stale cancel refusal when a new turn starts', () => {
     expect(workspace).toMatch(/cancelError\.value = ''\n\s*const res = await deliver/)
   })
+
+  it('settles both deliver() callers through one function, so retry cannot drift', () => {
+    // Review finding: `send()` grew the cancel-aware handling and `retry()` did
+    // not, so a cancelled RETRY still struck the message out in red with a
+    // Retry button — the exact defect this feature removes, reproduced on the
+    // other caller. The asymmetry is only possible while the rules live at the
+    // call site, so the fix is one `settleDelivery` both callers use.
+    expect(workspace).toContain('function settleDelivery(')
+    const callers = workspace.match(/const res = await deliver\([^)]*\)\n\s*settleDelivery\(/g) || []
+    expect(callers.length).toBe(2)
+    // ...and neither caller keeps its own copy of the branch.
+    expect(workspace.match(/markFailed\(/g).length).toBeLessThanOrEqual(3)
+  })
+
+  it('clears a stale cancel refusal on the retry path too', () => {
+    // `retry(i)` calls `deliver` directly rather than going through `send()`,
+    // so a refused cancel outlived every later Retry and described a turn that
+    // had ended long ago.
+    expect(workspace).toMatch(/async function retry\(i\)[\s\S]{0,400}cancelError\.value = ''/)
+  })
+
+  it('treats everything on this surface that owns Escape as an overlay', () => {
+    // Review finding NEW-3: the list was `[typeaheadOpen]` alone — narrower
+    // than ChatPanel's for no argued reason. The agent picker closes on
+    // outside-click only, and dictation is disabled only while transcribing, so
+    // both can own Escape mid-turn; pressing it to dismiss either killed the
+    // turn. The module's bias decides the direction: a missed cancel costs one
+    // click, a wrong one destroys work the user is still waiting for.
+    const overlays = workspace.match(/overlays: \[([^\]]*)\]/)
+    expect(overlays).not.toBeNull()
+    expect(overlays[1]).toContain('typeaheadOpen')
+    expect(overlays[1]).toContain('pickerOpen')
+    expect(overlays[1]).toContain('listening')
+  })
 })
 
 describe('the Escape listener survives a KeepAlive-cached page correctly', () => {

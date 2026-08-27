@@ -724,9 +724,12 @@
   it legible.
 - **Escape is conservative by construction**: it cancels only when a turn is in
   flight, no cancel is already running, the key is not a composed IME candidate,
-  no other handler has claimed it, and nothing else currently owns Escape (the
-  composer typeahead, an open menu, the voice loop). Escape with nothing running
-  is a no-op that never clears the input.
+  no other handler has claimed it, and nothing else currently owns Escape.
+  What owns it is declared PER SURFACE and declared generously — Agent Detail
+  lists the voice overlay and the session menu, the Workspace lists the composer
+  typeahead, the agent picker and dictation — because a missed cancel costs one
+  click on Stop while a wrong one destroys work the user is still waiting for.
+  Escape with nothing running is a no-op that never clears the input.
 - **Restoring the words never destroys a draft**: the cancelled text is
   prepended to whatever was typed while waiting, and the merge is idempotent, so
   pressing Escape and then Stop cannot stack two copies.
