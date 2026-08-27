@@ -657,14 +657,56 @@ class TestReviewRegressions:
         # the explanatory comment must survive — it is why the constant is a constant
         assert "SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS" in src
 
-    def test_sweep_concurrency_lever_reaches_the_container(self):
-        """The other half of the same gate: this one IS a real operator lever
-        (fleet-size dependent), so it must be forwarded in BOTH composes —
-        prod launches standalone with no base merge and no `env_file`, so
-        dev-only wiring does not carry over (#1056 class)."""
-        for name in ("docker-compose.yml", "docker-compose.prod.yml", ".env.example"):
-            text = (_REPO / name).read_text()
-            assert "SUBSCRIPTION_SWEEP_CONCURRENCY" in text, name
+    def test_sweep_concurrency_lever_reaches_every_deployment_compose(self):
+        """The other half of the packaging gate: this one IS a real operator
+        lever (fleet-size dependent), so it must reach every container that
+        runs the sweep.
+
+        There are THREE deployment composes, not two. #2280 added
+        `docker-compose.hosted.yml` — the pull-only twin of prod — while this
+        branch was open, and its parity guard caught the omission on CI. My own
+        packaging check had verified two files because the third did not exist
+        when I ran it, which is precisely why this is enumerated rather than
+        asserted from memory.
+
+        The list is the three STANDALONE targets. It deliberately excludes the
+        other five `docker-compose*.yml` files: `gitea` and the two `override`
+        files are overlays merged onto the base (`-f base -f overlay`), so they
+        inherit its environment; `sibling` is the verify-local harness; and
+        `prod.enterprise` declares no backend environment block. Requiring the
+        var in an overlay would be requiring it twice.
+        """
+        targets = [
+            "docker-compose.yml",          # dev / base
+            "docker-compose.prod.yml",     # standalone: no base merge, no env_file
+            "docker-compose.hosted.yml",   # standalone pull-only twin of prod (#2280)
+            ".env.example",                # documented for the operator
+        ]
+        for name in targets:
+            path = _REPO / name
+            assert path.exists(), f"{name} is gone — has the deployment set changed?"
+            assert "SUBSCRIPTION_SWEEP_CONCURRENCY" in path.read_text(), name
+
+    def test_no_fourth_deployment_compose_has_appeared_unnoticed(self):
+        """A guard on the guard: if a new standalone compose lands, the list
+        above silently stops being complete — the exact way #2280 caught me.
+        Overlays and harnesses are excluded by name WITH a reason, so a genuinely
+        new deployment target fails here and has to be classified deliberately.
+        """
+        known = {
+            "docker-compose.yml", "docker-compose.prod.yml", "docker-compose.hosted.yml",
+            "docker-compose.gitea.yml",            # dev-only overlay onto the base
+            "docker-compose.override.yml",         # local Docker Desktop log source
+            "docker-compose.override.example.yml", # its committed template
+            "docker-compose.sibling.yml",          # /verify-local isolated stack
+            "docker-compose.prod.enterprise.yml",  # overlay; no backend environment block
+        }
+        found = {p.name for p in _REPO.glob("docker-compose*.yml")}
+        assert found <= known, (
+            f"unclassified compose file(s): {sorted(found - known)} — decide whether "
+            "each is a standalone deployment target (add it to the target list above) "
+            "or an overlay (add it here with the reason)."
+        )
 
 
 # =============================================================================
