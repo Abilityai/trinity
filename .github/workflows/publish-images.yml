@@ -139,11 +139,33 @@ jobs:
           # `workflow_dispatch` with `ref:` is the dispatching branch's head,
           # not the tree that was checked out and built. The raw value below
           # comes from the actual HEAD (see the provenance step).
+          #
+          # `flavor: latest=false` is load-bearing, not decoration. The action's
+          # default is `latest=auto`, which applies `latest` on ANY semver tag
+          # ref on its own — so gating the explicit `type=raw` line below would
+          # have been inert, and the comment above it would have described a
+          # rule the workflow did not enforce.
+          flavor: latest=false
+          #
+          # Every mutable/version tag is gated on `github.event_name == 'push'`,
+          # i.e. on a real `git push` of a `v*` tag. `github.ref` alone answers
+          # "is this a tag ref", not "is this a release" — a `workflow_dispatch`
+          # started from a tag (the natural way to smoke-test this workflow)
+          # carries `refs/tags/v0.9.0` too. Dispatching an OLD tag then rebuilds
+          # at a new digest (the agent base bakes `Claude Code (latest)`, so the
+          # content genuinely differs), republishes `0.9.0`/`v0.9.0`/`0.9` over
+          # an immutable version, and walks `latest` BACKWARDS — silently
+          # downgrading every unpinned hosted install on its next
+          # `start.sh --hosted`.
+          #
+          # A dispatch therefore publishes `sha-<short>` and nothing else, which
+          # is exactly what a smoke build needs. Re-cutting a release is done by
+          # re-pushing the git tag, which fires `push` and takes the full set.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern=v{{version}},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=sha-${{ steps.prov.outputs.short_sha }}
 
       - name: Select build args for this image
@@ -218,10 +240,21 @@ jobs:
       # package visibility to Public once, which is a first-publish-only chore.
       - name: Verify anonymous pull
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ matrix.image }}
           TAG: sha-${{ steps.prov.outputs.short_sha }}
         run: |
           set -uo pipefail
+          # Lowercased here because this owner is literally `Abilityai` and a
+          # GHCR repository name must be lowercase: docker rejects the mixed-case
+          # reference LOCALLY, before any network call ("repository name must be
+          # lowercase"), so the loop below would burn its five retries and fail
+          # on EVERY publish — reporting a perfectly public package as private
+          # and destroying the one signal this step exists to give. The push
+          # itself is unaffected: docker/metadata-action lowercases its `images:`
+          # input, and start.sh hardcodes `ghcr.io/abilityai/`. A hand-written
+          # reference has to do it itself.
+          IMAGE="ghcr.io/$(printf '%s/%s' "$IMAGE_OWNER" "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
           cfg=$(mktemp -d)
           # GHCR visibility/propagation is not instant on a first publish.
           for attempt in 1 2 3 4 5; do
