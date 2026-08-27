@@ -550,6 +550,7 @@ import {
   thresholdValidationError,
   thresholdChanged as isThresholdChanged,
   alertStatusLine,
+  describeSaveFailure,
 } from '../../utils/headroomAlertSettings'
 import { agentOptionLabel } from '../../utils/agentName'
 import { formatCost } from '../../composables/useFormatters'
@@ -617,9 +618,7 @@ async function saveThreshold() {
   } catch (e) {
     // A failed verb gets a home next to its control (principle 18) — never a
     // bare console.error, never an alert().
-    thresholdSaveError.value =
-      e?.response?.data?.detail ||
-      'Could not save the threshold. Check your connection and try again.'
+    thresholdSaveError.value = describeSaveFailure(e)
   } finally {
     savingThreshold.value = false
   }

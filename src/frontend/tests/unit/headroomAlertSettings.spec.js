@@ -20,6 +20,7 @@ import {
   INACTIVE_COPY,
   FALLBACK_MIN_PCT,
   FALLBACK_MAX_PCT,
+  describeSaveFailure,
 } from '../../src/utils/headroomAlertSettings'
 
 describe('thresholdValidationError', () => {
@@ -128,5 +129,41 @@ describe('alertStatusLine', () => {
   it('never throws on a missing payload', () => {
     expect(() => alertStatusLine(undefined, true)).not.toThrow()
     expect(alertStatusLine(undefined, true).tone).toBe('muted')
+  })
+})
+
+describe('describeSaveFailure', () => {
+  // Found live: the first version blamed the connection for a stale-Pinia-store
+  // TypeError after HMR, sending a real operator to debug their network.
+  it("does not blame the connection when nothing was ever sent", () => {
+    const msg = describeSaveFailure(new TypeError('x is not a function'))
+    expect(msg).toContain('not sent')
+    expect(msg).toContain('Reload the page')
+    expect(msg).toContain('not a connection problem')
+  })
+
+  it('blames the connection only when a request got no response', () => {
+    const msg = describeSaveFailure({ request: {} })
+    expect(msg).toContain('No response from the server')
+  })
+
+  it("prefers the server's own named reason", () => {
+    const msg = describeSaveFailure({
+      response: { status: 422, data: { detail: 'threshold_pct must be 0 or 50-99; got 20' } },
+    })
+    expect(msg).toBe('threshold_pct must be 0 or 50-99; got 20')
+  })
+
+  it('reports the status when the server refused in an unparsed shape', () => {
+    expect(describeSaveFailure({ response: { status: 500, data: '<html>' } }))
+      .toContain('HTTP 500')
+  })
+
+  it('ignores a non-string detail rather than rendering [object Object]', () => {
+    // FastAPI's own 422 body is `{detail: [...]}` — an array is truthy and
+    // would have rendered as "[object Object]" straight into the banner.
+    const msg = describeSaveFailure({ response: { status: 422, data: { detail: [{ msg: 'x' }] } } })
+    expect(msg).toContain('HTTP 422')
+    expect(msg).not.toContain('object Object')
   })
 })

@@ -94,3 +94,34 @@ export function alertStatusLine(weeklyAlert, loaded) {
     tone: 'muted',
   }
 }
+
+
+/**
+ * Turn a save failure into a message that claims only what was observed.
+ *
+ * The first version of this said "Check your connection and try again" for
+ * ANY thrown value, which sent a real operator hunting a network problem when
+ * the actual cause was a stale Pinia store after HMR (the action was
+ * `undefined`, so the call threw a TypeError that never reached the network).
+ * A message that diagnoses a cause it has not observed is worse than a vague
+ * one — principle 25 wants what happened, what it means, what to do.
+ */
+export function describeSaveFailure(err) {
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim() !== '') {
+    return detail
+  }
+  if (err?.response) {
+    // The server answered and refused, but not in the shape we parse.
+    return `The server refused the change (HTTP ${err.response.status}).`
+  }
+  if (err?.request) {
+    // A request went out and nothing came back — this IS the connection case.
+    return 'No response from the server. Check your connection and try again.'
+  }
+  // Never reached the network at all: a client-side bug, most often a stale
+  // module after a hot reload. Say that, and name the reliable remedy.
+  const kind = err?.name || 'Error'
+  return `The change was not sent (${kind}). Reload the page and try again; ` +
+    'if it persists this is a bug, not a connection problem.'
+}
