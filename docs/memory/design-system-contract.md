@@ -41,6 +41,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - Key the animation off store state (`loading → loaded`), never a timer. Cache hits skip it entirely.
 - Loading means "no data yet", never "fetch in flight".
 - First load animates; **scheduled background refresh is invisible**: stale-while-revalidate, in-place value swap, no skeleton re-flash, no spinner, no layout shift, no scroll reset.
+- A **failed** refresh keeps the data on screen and raises the stale banner (ent#253). Never overwrite the data with a synthetic empty payload in a `catch` — that turns "the request failed" into "this agent has none", which is a different and much worse claim.
 - `prefers-reduced-motion: reduce` → static placeholder, instant reveal.
 - No new spinners or skeletons. The only sanctioned spinner is the 16px in-flight indicator inside BaseButton.
 

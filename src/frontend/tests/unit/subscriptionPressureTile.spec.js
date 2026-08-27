@@ -696,3 +696,111 @@ describe('subscriptionPressureRows — where the reset lands on the row face', (
     expect(rows[0].reset).toBeNull()
   })
 })
+
+// ===========================================================================
+// #2396 — the provider's own warning tier is not a rate limit
+// ===========================================================================
+describe('#2396 provider warning tier', () => {
+  const warned = (pct, status = 'allowed_warning', rateLimited = false) => ({
+    subscription_id: 's',
+    source: 'anthropic',
+    rate_limited_now: rateLimited,
+    failure_events_24h: 0,
+    failure_events_by_kind: {},
+    headroom: {
+      status: 'ok',
+      snapshot_age_seconds: 5,
+      representative_claim: 'seven_day',
+      five_hour: { utilization_pct: 30, resets_at: '2026-09-01T00:00:00Z', status: 'allowed' },
+      seven_day: { utilization_pct: pct, resets_at: '2026-09-01T00:00:00Z', status },
+    },
+  })
+
+  it('a warning-tier row is warn, not crit', () => {
+    // The backend no longer sets rate_limited_now for this state, so the tile
+    // must not invent a limit of its own.
+    expect(subscriptionSeverity(warned(78))).toBe('warn')
+  })
+
+  it('a warning-tier row says so, instead of falling silent as ok', () => {
+    // Without the headline tier, removing the false `rate-limited` leaves the
+    // row reading `ok` — trading a wrong word for a missing one.
+    expect(pressureHeadline(warned(78))).toBe('nearing limit')
+    expect(warnReason(warned(78))).toBe('utilization')
+  })
+
+  it('the provider warning fires BELOW our own high band', () => {
+    // 78 < UTILIZATION_HIGH_PCT: this row is only visible because the provider
+    // said so. Our constant alone would rank it `ok`.
+    const u = warned(78)
+    expect(u.headroom.seven_day.utilization_pct).toBeLessThan(85)
+    expect(subscriptionSeverity(u)).toBe('warn')
+  })
+
+  it('headline and severity agree for a high-band row', () => {
+    // `pressureHeadline` used to return `ok` for a row this module scores
+    // `warn`. On the tile that disagreement is usually invisible (the SFC
+    // renders `meta` only when `row.windows` is null — the bars are the
+    // reading), so this pins the pure functions, not a pixel.
+    const u = warned(90, 'allowed')
+    expect(subscriptionSeverity(u)).toBe('warn')
+    expect(pressureHeadline(u)).toBe('nearing limit')
+  })
+
+  it('a provider-warned row keeps its reset time', () => {
+    // The regression this fix nearly shipped: 78% `allowed_warning` was
+    // (wrongly) `crit`, and `crit` is what put the reset on the row. Demoting
+    // it to `warn` without the `nearing` arm would have removed the one
+    // actionable fact — when the limit clears — from the row whose entire
+    // message is "this is about to matter". 78 < UTILIZATION_HIGH_PCT, so the
+    // high-band arm cannot cover it.
+    const windows = windowReadings(warned(78))
+    expect(windows.some((w) => w.level === 'high')).toBe(false)
+    expect(showsReset('warn', windows, true)).toBe(true)
+    expect(showsReset('warn', windows, false)).toBe(false)
+  })
+
+  it('the row a person actually sees: limit chip becomes near chip', () => {
+    // The operator-visible half, asserted at the row level rather than on a
+    // predicate: severity drives the lead chip, and `warnReason` picks its word.
+    const usage = warned(78)
+    const [row] = subscriptionPressureRows(
+      [{ id: 's', name: 'sub' }],
+      { s: usage },
+    ).rows
+    expect(row.severity).toBe('warn')
+    expect(row.warnReason).toBe('utilization')
+    expect(row.reset).toBeTruthy()
+  })
+
+  it('a healthy row is untouched', () => {
+    const u = warned(30, 'allowed')
+    expect(subscriptionSeverity(u)).toBe('ok')
+    expect(pressureHeadline(u)).toBe('ok')
+    expect(warnReason(u)).toBe(null)
+  })
+
+  it('an unrecognised status still reads as blocking', () => {
+    // The allowlist must not have become a blocklist.
+    expect(pressureHeadline(warned(50, 'blocked', true))).toBe('rate-limited')
+    expect(subscriptionSeverity(warned(50, 'blocked', true))).toBe('crit')
+  })
+
+  it('a stale warning reading claims nothing', () => {
+    // `providerWarnsNearLimit` is freshness-gated like every percentage claim.
+    const u = warned(90)
+    u.headroom.snapshot_age_seconds = 10_000
+    expect(subscriptionSeverity(u)).toBe('ok')
+    expect(pressureHeadline(u)).toBe('ok')
+  })
+
+  it('bindingWindow does not treat a warning window as the blocking one', () => {
+    // It is still usually the binding window — but via representative_claim /
+    // fullest, not by being mistaken for a block.
+    const u = warned(78)
+    u.headroom.representative_claim = null
+    u.headroom.five_hour.utilization_pct = 95
+    // 5h is fuller and neither window is blocking, so the fullest one wins.
+    expect(resetText(u)).toBeTruthy()
+  })
+})
