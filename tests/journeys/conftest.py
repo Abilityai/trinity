@@ -127,16 +127,6 @@ def journey_agent(journey_client, journey_agent_name):
     # it surfaced as `httpx.ReadTimeout` at fixture setup, which reads as harness
     # breakage rather than as the platform being slow. The deadline that matters
     # is still the poll below; this only stops the CALL from giving up first.
-    resp = journey_client.post(
-        "/api/agents", json={"name": name}, timeout=AGENT_CREATE_CALL_TIMEOUT_S,
-    )
-    if resp.status_code not in (200, 201):
-        raise AssertionError(
-            f"creating agent '{name}' through POST /api/agents answered "
-            f"{resp.status_code}: {resp.text[:400]}. Creating an agent is the "
-            f"first thing anyone does with Trinity."
-        )
-
     def is_running():
         check = journey_client.get(f"/api/agents/{name}")
         if check.status_code != 200:
@@ -144,7 +134,27 @@ def journey_agent(journey_client, journey_agent_name):
         state = check.json()
         return state if state.get("status") == "running" else None
 
+    # The CREATE is inside the try, so the finally reaches a partial one.
+    #
+    # It used to sit above, with its `raise AssertionError` outside the block —
+    # so a create that provisioned the ownership row and THEN failed (a 500
+    # after the row is written, or a read timeout on a request the backend went
+    # on to complete) left an agent teardown never touched. That breaks this
+    # tier's own rule that it is re-runnable after a crash with no manual
+    # cleanup, and it breaks it on the path where cleanup matters most: the
+    # failure case. Moving it in costs nothing — `delete_agent_idempotent` is
+    # already safe on an agent that was never created.
     try:
+        resp = journey_client.post(
+            "/api/agents", json={"name": name}, timeout=AGENT_CREATE_CALL_TIMEOUT_S,
+        )
+        if resp.status_code not in (200, 201):
+            raise AssertionError(
+                f"creating agent '{name}' through POST /api/agents answered "
+                f"{resp.status_code}: {resp.text[:400]}. Creating an agent is the "
+                f"first thing anyone does with Trinity."
+            )
+
         agent = poll_until(
             is_running,
             deadline_s=AGENT_RUNNING_DEADLINE_S,

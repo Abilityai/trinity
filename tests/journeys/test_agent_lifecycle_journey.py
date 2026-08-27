@@ -69,12 +69,44 @@ def test_a_stopped_agent_can_be_started_again(journey_client, journey_agent):
     # Changing the resource limits while stopped makes `check_resource_limits_match`
     # false, so the next start must recreate the container — the exact path that
     # raised 500 for five of six agents.
+    # The values are DERIVED from what the agent currently has, not hardcoded.
+    # This step read `{"memory": "2g", "cpu": "1"}`, which forced a recreate only
+    # because `AGENT_DEFAULT_MEMORY == "4g"` and `AGENT_DEFAULT_CPU == "2"` at the
+    # time — constants this test never reads, and which an operator can move at
+    # runtime through `PUT /api/settings/agent-defaults/resources`. Set the fleet
+    # default to 2g/1 and the PUT becomes a no-op, `check_resource_limits_match`
+    # stays true, no recreate happens, and this journey silently loses its teeth
+    # in exactly the way it already lost them twice.
+    before = journey_client.get(f"/api/agents/{name}/resources")
+    assert before.status_code == 200, (
+        f"could not read current resources for stopped agent '{name}': "
+        f"{before.status_code} {before.text[:200]}"
+    )
+    cur = before.json()
+    cur_mem = cur.get("memory") or cur.get("current_memory")
+    cur_cpu = str(cur.get("cpu") or cur.get("current_cpu") or "")
+    # Any other legal value will do; the point is only that it DIFFERS.
+    want_mem = "1g" if str(cur_mem).startswith("2") else "2g"
+    want_cpu = "2" if cur_cpu.startswith("1") else "1"
+
     drift = journey_client.put(
-        f"/api/agents/{name}/resources", json={"memory": "2g", "cpu": "1"},
+        f"/api/agents/{name}/resources", json={"memory": want_mem, "cpu": want_cpu},
     )
     assert drift.status_code in (200, 202), (
         f"could not change resources on stopped agent '{name}' to force a "
         f"recreate: {drift.status_code} {drift.text[:200]}"
+    )
+
+    # Assert the drift actually took, so "could not force a recreate" fails with
+    # its own name instead of surfacing later as "the restart 500'd" — or worse,
+    # as a green run that exercised the plain-start path.
+    after = journey_client.get(f"/api/agents/{name}/resources").json()
+    assert (after.get("memory"), str(after.get("cpu"))) == (want_mem, want_cpu), (
+        f"resources did not change on '{name}': asked for {want_mem}/{want_cpu}, "
+        f"read back {after.get('memory')}/{after.get('cpu')} (was {cur_mem}/{cur_cpu}). "
+        f"Without a real change there is no config drift, `start_agent_internal` "
+        f"takes the plain-start path, and the #2186 regression this journey "
+        f"exists to catch is unreachable"
     )
 
     start = journey_client.post(f"/api/agents/{name}/start")

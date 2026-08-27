@@ -27,6 +27,28 @@ name: Journey smoke
 # what runs HERE is the lifecycle journey, which is where the 08-14 regression
 # actually was.
 
+# NO `paths-ignore` HERE, deliberately — see the review note below before adding
+# one. Every PR to `dev` boots the stack, which is the 5-12 min tax a reviewer
+# rightly flagged for docs-only PRs. The obvious fix is the wrong one.
+#
+# A `paths-ignore` that filters out a PR means the workflow never runs, so the
+# check is never REPORTED. For a check this PR intends to make required, "never
+# reported" is not "skipped" — it is a PR that can never merge, waiting forever
+# on a status that will not arrive. That exact failure was diagnosed on
+# trinity#2384 on 2026-08-27: three required workflows produced no run, and the
+# PR sat green-but-unmergeable until someone pushed again.
+#
+# The safe shape is the one `frontend-e2e.yml` already uses: keep the trigger
+# unconditional, put the decision in a cheap `changes` job, and gate the heavy
+# job with `if: needs.changes...`. A job skipped by `if:` still reports a
+# conclusion, so the required check is satisfied. That job also has to FAIL OPEN
+# — being unable to determine the changed files must mean "run", never "skip"
+# and never a red X (#1782, where `gh pr diff` 406s on PRs over 300 files).
+#
+# Not done here because it is a ~50-line gate with subtle semantics and
+# `frontend-e2e.yml` says of its own sibling implementation that the two "differ
+# ON PURPOSE. Don't 'unify' them" — so this wants its own deliberate copy, in
+# its own change, not a rushed third one appended to this PR.
 on:
   pull_request:
     branches: [dev]
@@ -106,9 +128,25 @@ jobs:
           TRINITY_TEST_CLEANUP_SWEEP: '1'
         run: |
           set -uo pipefail
+          # `|| rc=$?` rather than a bare call then `rc=$?`.
+          #
+          # GitHub's default shell for `run:` is `bash --noprofile --norc -e -o
+          # pipefail {0}`, and `set -uo pipefail` adds `-u` without clearing the
+          # `-e` that is already in force. So with a bare call a non-zero pytest
+          # aborted the step on the pytest line itself: `rc=$?` never ran, the
+          # `if` never ran, and the "No journeys collected" annotation could
+          # never appear. The job still went red on exit 5 — via `-e`, not via
+          # the code documenting the guarantee — so the #2029 protection this
+          # gate exists to provide was resting on an implicit shell flag while
+          # the lines asserting it were unreachable. A later editor reshaping
+          # this step, or adding `continue-on-error`, would have got no signal.
+          #
+          # `|| rc=$?` is chosen over `set +e` because the command is part of a
+          # condition, which `-e` does not apply to — the exit code is captured
+          # by construction rather than by remembering to disable a flag.
+          rc=0
           python -m pytest tests/journeys/ -v -rs --tb=short \
-            --timeout=300 --timeout-method=thread
-          rc=$?
+            --timeout=300 --timeout-method=thread || rc=$?
           # A tier that collected nothing is a FAILURE, not a pass — the #2029
           # class this gate is required precisely to prevent. pytest exits 5 on
           # "no tests collected".
