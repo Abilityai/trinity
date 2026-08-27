@@ -180,6 +180,15 @@
             <TelemetrySharingPanel />
           </div>
 
+          <!-- ent#463 — Operator-intake Settings home. Identified contact
+               capture (email + optional profile), NOT anonymous telemetry.
+               First-run form (SetupPassword.vue) is the other producer; both
+               converge on the same at-most-once service. Admin-only + human-
+               only, audit-logged. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <OperatorIntakePanel />
+          </div>
+
           <!-- Workspace session policy (ent#375). On the Retention tab because it
                is the same question that tab already answers — how long something
                is kept — and an operator reasoning about client data lifetime is
@@ -2096,6 +2105,7 @@ import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
