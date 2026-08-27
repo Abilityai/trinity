@@ -28,7 +28,12 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # MUST stay above the ssh-action's `command_timeout` (35m). The inner
+    # timeout ends the SSH command and reports which stage was running; this
+    # one cancels the job with no such message, so if it fires first every
+    # slow-build failure becomes unreadable. Raised alongside the serialized
+    # build, keeping that ordering.
+    timeout-minutes: 45
 
     steps:
       - name: Connect to Tailscale
@@ -46,7 +51,13 @@ jobs:
           host: ${{ secrets.DEV_HOST }}
           username: ${{ secrets.DEV_USER }}
           key: ${{ secrets.DEV_SSH_KEY }}
-          command_timeout: 25m
+          # 25m until the build was serialized. A green deploy ran ~8 min
+          # end to end while the four images built in PARALLEL; built one at a
+          # time the build stage is the sum rather than the max, and this
+          # bound would become the new way the deploy dies — on the same slow
+          # host that made serializing necessary. Raised with margin; it is a
+          # ceiling on a hung SSH command, not a target.
+          command_timeout: 35m
           script: |
             set -e
             cd ~/trinity
@@ -215,14 +226,43 @@ jobs:
             SHORT_SHA=$(git rev-parse --short=8 HEAD)
             git diff --quiet HEAD 2>/dev/null || SHORT_SHA="${SHORT_SHA}.dirty"
             VERSION="${BASE_VER}+g${SHORT_SHA}"
-            sudo env \
-              VERSION="${VERSION}" \
-              GIT_COMMIT="${GIT_COMMIT}" \
-              GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT}" \
-              GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP}" \
-              GIT_BRANCH="${GIT_BRANCH}" \
-              BUILD_DATE="${BUILD_DATE}" \
-              docker compose ${COMPOSE_FILES} build --no-cache backend frontend mcp-server scheduler
+            # Build the four images ONE AT A TIME.
+            #
+            # This was a single `build --no-cache backend frontend mcp-server
+            # scheduler`, and compose runs those in PARALLEL. With `--no-cache`
+            # nothing is reused, so it is four simultaneous dependency
+            # downloads on one small VM: two `npm ci`, and two `apt-get
+            # install` of which the backend's pulls ffmpeg and
+            # postgresql-client-17. The host stopped absorbing that burst on
+            # 2026-08-24 and every deploy since has died here.
+            #
+            # Measured, not inferred. On the failing run `mcp-server`'s npm ci
+            # ran 142s before dying with npm's generic "Exit handler never
+            # called!"; the frontend's ran 144s without finishing; apt needed
+            # 61s and then 121s merely to time out fetching Debian's
+            # InRelease. The same `npm ci`, same lockfile, same base-image
+            # digest (node:22-alpine @ c610fcdf) completes in 2s off that host,
+            # and neither `docker/` nor `src/mcp-server/` changed between the
+            # last green deploy and the first red one. The images are not the
+            # regression; the concurrent burst is what the host can no longer
+            # take.
+            #
+            # Serial costs wall-clock and buys determinism: identical images,
+            # one dependency download at a time, and a failure names the
+            # service that failed instead of whichever of four lost the race.
+            # `--no-cache` stays — it is the clean-build guarantee and it is
+            # not what broke.
+            for SVC in backend frontend mcp-server scheduler; do
+              echo "--- build ${SVC} ---"
+              sudo env \
+                VERSION="${VERSION}" \
+                GIT_COMMIT="${GIT_COMMIT}" \
+                GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT}" \
+                GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP}" \
+                GIT_BRANCH="${GIT_BRANCH}" \
+                BUILD_DATE="${BUILD_DATE}" \
+                docker compose ${COMPOSE_FILES} build --no-cache "${SVC}"
+            done
 
             echo "=== Reap stale compose backup containers (#2204) ==="
             # Compose renames the outgoing container to <12-hex>_<name> before
@@ -420,6 +460,59 @@ jobs:
   # cancel-in-progress:false a superseded PENDING run is cancelled, and that is
   # not a deploy failure. (See learnings.md 2026-07-28 on `if: always()` +
   # a cancelled clause silently defeating cancel-in-progress.)
+  notify-recovery:
+    # The dedup in `notify-failure` is one-way: ONE open `deploy-failure` issue
+    # is the signal, and while it is open every further failure is a deliberate
+    # no-op. Nothing closed it, so the reset was a human step the issue body
+    # asked for in prose — "do not leave it open after the deploy recovers -- a
+    # stale open issue suppresses the alert for the next outage".
+    #
+    # That is exactly what happened. #2267 opened 2026-08-17, the deploy
+    # recovered on 2026-08-21 and nobody closed it, and when `dev` broke again
+    # on 2026-08-24 the next TEN consecutive failed deploys each logged
+    # "already tracked at #2267 -- not re-filing" and alerted no one. An
+    # alerting rule whose reset is a human habit is a rule that silences itself
+    # on its second outage.
+    #
+    # So the recovery closes it, and the dedup becomes self-resetting.
+    needs: deploy
+    if: success()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close the open deploy-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+
+          # Close EVERY open one, not just the first: two can exist if the
+          # label was applied by hand, and leaving one behind restores the
+          # suppression this job exists to remove.
+          OPEN=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label deploy-failure --state open \
+            --json number --jq '.[].number' 2>/dev/null || true)
+
+          if [ -z "$OPEN" ]; then
+            echo "Deploy is green and no deploy-failure issue is open -- nothing to close."
+            exit 0
+          fi
+
+          for N in $OPEN; do
+            echo "Closing #${N} -- deploy is green at ${COMMIT_SHA}."
+            # Never fail the workflow over the notification: the deploy itself
+            # already succeeded, and reporting a red run for a bookkeeping
+            # error would be its own false alarm.
+            gh issue comment "$N" --repo "$GITHUB_REPOSITORY" \
+              --body "✅ \`Deploy to Dev\` is green again at \`${COMMIT_SHA}\` — ${RUN_URL}
+
+          Closed automatically so the one-open-issue dedup in \`notify-failure\` re-arms; while this stayed open, a further failure would not have filed or notified anything." || true
+            gh issue close "$N" --repo "$GITHUB_REPOSITORY" --reason completed || true
+          done
+
   notify-failure:
     needs: deploy
     if: failure()
