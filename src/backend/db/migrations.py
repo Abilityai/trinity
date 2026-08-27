@@ -3567,6 +3567,43 @@ def _migrate_channel_report_client(cursor, conn):
         "source_channel_client",
         "ALTER TABLE schedule_executions ADD COLUMN source_channel_client TEXT",
     )
+def _migrate_workspace_ratings(cursor, conn):
+    """One-click Workspace ratings land in `agent_evaluations` (ent#366).
+
+    Not a new table: ent#206 built this surface precisely so a score is written
+    by someone other than the agent being scored, and a user rating is the one
+    score that must never pass through the thing it grades. What it lacked was a
+    way to say WHAT was rated — `execution_id` names a run, and a person clicks
+    a message or a deliverable.
+
+    `comment` is client-authored free text and is treated as untrusted: the read
+    path strips it for an agent principal, so the rated agent sees its tallies
+    and never a stranger's verbatim words (the ent#366 grooming decision).
+
+    The UNIQUE index is what makes "changing your mind updates rather than
+    appends" a property of the table rather than a race between two clicks. It
+    is partial on `target_id IS NOT NULL` so the graded-run rows a Tier-0 pass
+    writes — all of which have no target — are untouched.
+    """
+    for column, ddl in (
+        ("target_kind", "ALTER TABLE agent_evaluations ADD COLUMN target_kind TEXT"),
+        ("target_id", "ALTER TABLE agent_evaluations ADD COLUMN target_id TEXT"),
+        ("comment", "ALTER TABLE agent_evaluations ADD COLUMN comment TEXT"),
+        ("updated_at", "ALTER TABLE agent_evaluations ADD COLUMN updated_at TEXT"),
+    ):
+        _safe_add_column(
+            cursor, "agent_evaluations", column, ddl,
+            log_msg=f"Adding {column} to agent_evaluations for Workspace ratings (ent#366)",
+        )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_evaluations_rating_target "
+        "ON agent_evaluations(evaluator, target_kind, target_id) WHERE target_id IS NOT NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_target "
+        "ON agent_evaluations(agent_name, target_kind, target_id)"
+    )
+    conn.commit()
 
 
 def _migrate_report_audience(cursor, conn):
@@ -3930,4 +3967,5 @@ MIGRATIONS = [
     ("shared_sessions_tables_to_oss", _migrate_shared_sessions_tables_to_oss),
     ("report_audience", _migrate_report_audience),
     ("channel_report_client", _migrate_channel_report_client),
+    ("workspace_ratings", _migrate_workspace_ratings),
 ]

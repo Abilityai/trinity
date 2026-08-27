@@ -692,6 +692,18 @@ TABLES = {
             judge_json TEXT,
             evaluator TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            -- ent#366: what was rated, when the evaluation is a one-click
+            -- workspace rating rather than a graded run. NULL on every row
+            -- written before this — a Tier-0 pass grades an execution, not an
+            -- object someone clicked.
+            target_kind TEXT,
+            target_id TEXT,
+            -- The optional free text on a negative rating. Client-authored and
+            -- therefore untrusted: the read path strips it for an agent
+            -- principal (ent#366 — tallies are a signal, a stranger's verbatim
+            -- words in the rated agent's context are an injection surface).
+            comment TEXT,
+            updated_at TEXT,
             FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
         )
     """,
@@ -1656,6 +1668,14 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
+    # ent#366 — one rating per person per thing. The UNIQUE is what makes
+    # "changing your mind updates rather than appends" a property of the
+    # table instead of a race between two clicks. Partial, so the millions
+    # of NULL-target evaluator rows a Tier-0 pass writes are unaffected.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_evaluations_rating_target "
+    "ON agent_evaluations(evaluator, target_kind, target_id) WHERE target_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_target "
+    "ON agent_evaluations(agent_name, target_kind, target_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",

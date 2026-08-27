@@ -183,13 +183,32 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
         where += " AND session_id = :session"
         params["session"] = session_id
     stmt = text(
-        f"SELECT role, content, cost, created_at FROM enterprise_portal_messages "
+        # ent#366: `id` rides along so a message can be RATED. The row has always
+        # had a primary key; the client just never saw it, which is why a thumb
+        # had nothing to point at.
+        f"SELECT id, role, content, cost, created_at FROM enterprise_portal_messages "
         f"WHERE {where} ORDER BY created_at DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
     rows.reverse()  # oldest-first for the chat view
     return rows
+
+
+def get_portal_message(message_id: str) -> Optional[dict]:
+    """One message row by id (ent#366) — for verifying a rating target.
+
+    Returns the owning `agent_name`/`client_email` so the caller can prove the
+    message is one the rater can actually see. A rating route that trusted the
+    id alone would let anyone rate anyone's conversation.
+    """
+    stmt = text(
+        "SELECT id, agent_name, client_email, session_id, role, created_at "
+        "FROM enterprise_portal_messages WHERE id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"id": message_id}).mappings().first()
+    return dict(row) if row else None
 
 
 # --- Portal chat sessions (#78): one conversation thread per row --------------

@@ -240,8 +240,17 @@ the text rather than silently attributing its work. Failure is stated
 ("Didn't finish — <status>"), never a silent vanish, and the detail is capped at
 `_MAX_REPORT_CHARS`.
 
-No new transport: the Workspace polls its threads, so "degrades to poll" holds
-by construction. The deliver closure also calls `touch_portal_session(...,
+No new transport, and — stated honestly — **no poll either**. An earlier version
+of this paragraph said the Workspace polls its threads so AC #7's "degrades to
+poll" holds by construction. It does not: `PortalConversation.vue` loads history
+on mount and on an agent/session prop change, `stores/clientPortal.js` says
+outright that `refreshThreads()` is event-driven rather than periodic, and the
+only interval in the Workspace is the 20s asks poll in `views/Portal.vue`, which
+calls `fetchAsks()` and nothing else. So the row is durable and never lost, but a
+client sitting on the thread sees it at their next reload or thread switch rather
+than while they watch. An idle history poll is the tracked follow-up; until it
+exists this doc does not claim the delivery it would provide. The deliver closure
+also calls `touch_portal_session(...,
 added=1)` — every other writer of a portal message does, and `last_message_at`
 is what orders the sidebar; a report filed into a thread that never moved is a
 notification pointing at the middle of a list, which is the same silence this

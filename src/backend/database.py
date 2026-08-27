@@ -2360,6 +2360,27 @@ class DatabaseManager:
     def get_agent_evaluation(self, eval_id):
         return self._evaluation_ops.get_evaluation(eval_id)
 
+    # ent#366 — Workspace ratings. Keyword-forwarded: this facade re-declares
+    # signatures, so a parameter added only at the ops layer never arrives (the
+    # `create_report` lesson, hit as a 500 on the first live publish).
+    def upsert_workspace_rating(self, agent_name, *, evaluator, target_kind,
+                                target_id, quality, comment=None, execution_id=None):
+        return self._evaluation_ops.upsert_workspace_rating(
+            agent_name, evaluator=evaluator, target_kind=target_kind,
+            target_id=target_id, quality=quality, comment=comment,
+            execution_id=execution_id,
+        )
+
+    def get_workspace_rating(self, evaluator, target_kind, target_id):
+        return self._evaluation_ops.get_workspace_rating(evaluator, target_kind, target_id)
+
+    def list_workspace_ratings_for_targets(self, evaluator, target_kind, target_ids):
+        return self._evaluation_ops.list_workspace_ratings_for_targets(
+            evaluator, target_kind, target_ids)
+
+    def workspace_rating_tally(self, agent_name):
+        return self._evaluation_ops.workspace_rating_tally(agent_name)
+
     def list_agent_evaluations(self, agent_name, limit=50):
         return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
 

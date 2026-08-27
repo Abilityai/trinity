@@ -1,14 +1,61 @@
-# Production Docker Compose for Trinity Agent Platform
+# Hosted Docker Compose for Trinity — PULL-ONLY (#2280)
 #
-# Port allocation:
-#   - 8000: Trinity backend
-#   - 80: Trinity frontend (standard HTTP)
-#   - 8080: Trinity MCP server
-#   - 8001: Scheduler service (internal health check)
-#   - 8686: Vector log aggregator
-#   - 4317: OTel Collector gRPC (OTLP)
-#   - 4318: OTel Collector HTTP (OTLP)
-#   - 8889: OTel Prometheus metrics
+# Identical to docker-compose.prod.yml in every respect except one: it carries
+# NO `build:` blocks. Every service resolves a prebuilt image from GHCR, so a
+# fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
+# the agent base image on first boot. That build time is what fails the
+# "one click" bar for every marketplace channel (#2281 DigitalOcean, #2282
+# Vultr) and what makes managed hosts and template catalogues (Elestio,
+# Dokploy, Coolify, Hostinger Docker Manager) reject the prod file outright —
+# they only accept compose files that pull.
+#
+# The `.env` contract is the SAME file docker-compose.prod.yml reads. That is
+# not a coincidence to be preserved by hand: this file is generated from the
+# prod one and `tests/unit/test_2280_hosted_compose_parity.py` fails CI when
+# the two drift on services, ports, volumes, networks, or environment keys.
+# Trinity has shipped the "the knob never reached prod" bug often enough to
+# name it (#1039, #1056, #1707, #1871, and #2381's own ADMIN_USERNAME) — a
+# second compose file is exactly the shape that bug likes, so it is guarded
+# rather than trusted.
+#
+# Pick the image set with TRINITY_IMAGE_TAG (default `latest`):
+#
+#     TRINITY_IMAGE_TAG=v0.9.0 ./scripts/deploy/start.sh --hosted
+#
+# Every release publishes `v0.9.0`, `0.9.0`, `0.9`, `latest` and `sha-<short>`
+# for the same digest, so either spelling of the version works. Pin one on any
+# install you intend to keep: `latest` moves on every release, so an unpinned
+# pull is an unscheduled upgrade. `start.sh` reads the value from `.env` too,
+# which is where an unattended or marketplace install persists it.
+#
+# THE AGENT BASE IMAGE IS NOT A SERVICE HERE, and pulling it is not optional.
+# The backend creates agent containers through the Docker SDK from the literal
+# local tag `trinity-agent-base:latest` (hardcoded in
+# services/agent_service/lifecycle.py, and allowlisted as `trinity-agent-base:*`
+# by SEC-172). Compose cannot retag, so `./scripts/deploy/start.sh --hosted`
+# pulls the GHCR copy and tags it locally before bringing the stack up. Use
+# that — a bare `docker compose -f docker-compose.hosted.yml up -d` starts a
+# platform that cannot create a single agent, and does not fail until the first
+# agent-create.
+#
+# THIS FILE IS NOT STANDALONE. It needs the repository checked out beside it:
+# the backend mounts `./config/agent-templates`, `./config/process-templates`,
+# `./config/process-docs` and `./config/manifests`, Vector mounts
+# `./config/vector.yaml`, the OTel collector mounts
+# `./config/otel-collector.yaml`, and `/data` is the `${TRINITY_DATA_PATH:-
+# ./trinity-data}` bind mount. Handed to a catalogue or a managed host WITHOUT
+# the repo, Docker silently creates every one of those as an empty directory:
+# the local template catalog is empty and the ent#124 first-run system seed
+# finds no manifests to deploy — with no error at install time. Packaging the
+# config into the images so the file can travel alone is a follow-up; until
+# then, "pull-only" means "does not BUILD", not "needs nothing on disk".
+#
+# Minimum size: 8 GB RAM. Below that the agent containers and the platform
+# services contend and turns start failing under load.
+#
+# Ports, volumes, networks, and the security posture (non-root, cap_drop,
+# no-new-privileges, two-network isolation) are inherited verbatim from
+# docker-compose.prod.yml — see that file's comments for the reasoning.
 
 # #1871: bound every container's json-file log. Docker's json-file driver has
 # NO max-size and NO max-file by default, so each container's log under
@@ -24,20 +71,7 @@ x-logging: &default-logging
 
 services:
   backend:
-    build:
-      context: .
-      dockerfile: docker/backend/Dockerfile
-      # Build-time provenance (#926 / #958). Forwarded to Dockerfile ARGs
-      # → ENV vars → `GET /api/version` payload. The deploy-dev workflow
-      # exports these from the checked-out repo before `docker compose
-      # build`; absent that, the Dockerfile defaults to "unknown".
-      args:
-        VERSION: ${VERSION:-unknown}
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
-        GIT_COMMIT_SUBJECT: ${GIT_COMMIT_SUBJECT:-unknown}
-        GIT_COMMIT_TIMESTAMP: ${GIT_COMMIT_TIMESTAMP:-unknown}
-        GIT_BRANCH: ${GIT_BRANCH:-unknown}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: ghcr.io/abilityai/trinity-backend:${TRINITY_IMAGE_TAG:-latest}
     container_name: trinity-backend
     logging: *default-logging
     restart: unless-stopped
@@ -445,14 +479,7 @@ services:
       start_period: 60s
 
   frontend:
-    build:
-      context: ./src/frontend
-      dockerfile: ../../docker/frontend/Dockerfile.prod
-      args:
-        - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
-        - VITE_BUG_REPORTING_ENABLED=${VITE_BUG_REPORTING_ENABLED:-true}
-        - VITE_BUG_INTAKE_URL=${VITE_BUG_INTAKE_URL:-https://intake.abilityai.dev/v1/report-bug}
-    image: trinity-frontend:prod
+    image: ghcr.io/abilityai/trinity-frontend:${TRINITY_IMAGE_TAG:-latest}
     container_name: trinity-frontend
     logging: *default-logging
     restart: unless-stopped
@@ -575,9 +602,7 @@ services:
   # Scheduler - dedicated service for cron-based agent task execution
   # Prevents duplicate executions that occurred with multiple backend workers
   scheduler:
-    build:
-      context: .
-      dockerfile: docker/scheduler/Dockerfile
+    image: ghcr.io/abilityai/trinity-scheduler:${TRINITY_IMAGE_TAG:-latest}
     container_name: trinity-scheduler
     logging: *default-logging
     restart: unless-stopped
@@ -675,9 +700,7 @@ services:
       start_period: 10s  # Give Vector time to start before health checks
 
   mcp-server:
-    build:
-      context: ./src/mcp-server
-      dockerfile: Dockerfile
+    image: ghcr.io/abilityai/trinity-mcp-server:${TRINITY_IMAGE_TAG:-latest}
     container_name: trinity-mcp-server
     logging: *default-logging
     restart: unless-stopped

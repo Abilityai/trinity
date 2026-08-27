@@ -8,9 +8,16 @@ ONLY to build dialect-agnostic queries in the migrated db/*.py modules
 (init_schema for sqlite, init_schema_postgres for PostgreSQL). Column
 types are coarse (Integer/Float/Text) — sufficient for query building and
 matching the sqlite storage classes. Regenerate when schema.py changes.
+
+ONE deliberate exception (ent#366 review): an index that carries a RULE rather
+than a performance characteristic is declared here too. `migrations/env.py`
+autogenerates against this MetaData, so an index it does not know about is
+proposed for DROP by the first `--autogenerate` run — harmless for a
+performance index, and for `idx_agent_evaluations_rating_target` it would
+silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import Column, Float, MetaData, Table, Text
+from sqlalchemy import Column, Float, Index, MetaData, Table, Text, text
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -613,6 +620,29 @@ agent_evaluations = Table(
     Column("judge_json", Text),
     Column("evaluator", Text),
     Column("created_at", Text),
+    # ent#366 — the rated object, the client's optional words, and when the
+    # rating last changed. All nullable: every row written before this is a
+    # graded run, not a click.
+    Column("target_kind", Text),
+    Column("target_id", Text),
+    Column("comment", Text),
+    Column("updated_at", Text),
+    # ent#366 review — declared HERE, not only in schema.py/Alembic, because
+    # this one is not a performance index: it IS the "one rating per person per
+    # thing" rule, and `upsert_workspace_rating` relies on the IntegrityError it
+    # raises. `migrations/env.py` autogenerates against this MetaData, so an
+    # index the model does not know about is proposed for DROP by the first
+    # `alembic revision --autogenerate` anyone runs — and accepting that turns
+    # the rule into "one row per click": no error, no failing test, just a tally
+    # that counts clicks. Partial, matching the DDL exactly, so the NULL-target
+    # rows a Tier-0 grading pass writes are unaffected.
+    Index(
+        "idx_agent_evaluations_rating_target",
+        "evaluator", "target_kind", "target_id",
+        unique=True,
+        sqlite_where=text("target_id IS NOT NULL"),
+        postgresql_where=text("target_id IS NOT NULL"),
+    ),
 )
 
 agent_notifications = Table(

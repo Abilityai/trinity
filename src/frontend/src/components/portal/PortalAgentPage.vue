@@ -58,6 +58,18 @@
             <div class="text-xl font-semibold tabular-nums">{{ pct(stats.first_try?.rate) }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400" title="Succeeded without needing a retry">first try</div>
           </div>
+          <!-- ent#366 AC #4: a RAW TALLY, never a percentage. One thumbs-down
+               out of one rating renders as "100% negative" — a number that looks
+               like evidence and is not — so both figures show and the
+               denominator, the honest part, is on screen with them. -->
+          <div v-if="ratings.total || ratings.unavailable">
+            <div class="text-xl font-semibold tabular-nums">
+              <span class="text-status-success-600 dark:text-status-success-400">{{ ratings.up }}</span>
+              <span class="text-gray-300 dark:text-gray-600"> / </span>
+              <span class="text-status-warning-600 dark:text-status-warning-400">{{ ratings.down }}</span>
+            </div>
+            <div class="text-xs text-gray-500 dark:text-gray-400">{{ ratingsCaption }}</div>
+          </div>
 
           <!-- The activity chart used to live here as a bespoke full-bleed bar
                strip. It is now a bounded card on the Overview tab using the same
@@ -447,6 +459,11 @@ const allAsks = ref(false)
 
 const stats = computed(() => page.value?.stats || { total_executions: 0, timeline: [] })
 const asks = computed(() => page.value?.asks || [])
+// ent#366 — raw counts of how this agent's work landed with people.
+const ratings = computed(() => page.value?.ratings || { up: 0, down: 0, total: 0, unavailable: false })
+const ratingsCaption = computed(() => (
+  ratings.value.unavailable ? 'ratings unavailable' : 'helpful / not helpful'
+))
 const visibleAsks = computed(() => (allAsks.value ? asks.value : asks.value.slice(0, ASKS_PREVIEW)))
 // The service caps asks at MAX_ASKS, so a full list is a floor, not a count —
 // rendering a bare "20" against 50 pending would be a wrong number, not a

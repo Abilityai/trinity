@@ -306,9 +306,19 @@ def test_portal_source_channel_is_not_a_messaging_channel():
 
     What "not a messaging channel" still means, and is asserted below: the portal
     has no outbound transport and no bot token. Its report is a persisted
-    assistant message the client reads on the next poll — the same history it
-    already reads — which is why it needs no consent flag (there is no third
-    party) and no push (AC #7's "degrades to poll" is the only mode it has)."""
+    assistant message in the same history the client already reads, which is why
+    it needs no consent flag — there is no third party.
+
+    It is also not pushed, and NOT polled. An earlier version of this docstring
+    said the client reads it "on the next poll" and that AC #7's "degrades to
+    poll" is the mode it has. Neither is true: `PortalConversation.vue` loads
+    history on mount and on a prop change, `stores/clientPortal.js` states that
+    `refreshThreads()` is event-driven rather than periodic, and the Workspace's
+    only interval is the 20s asks poll, which fetches asks alone. The row is
+    durable and arrives at the client's next reload or thread switch. Said here
+    because a sentence in a test docstring reads as VERIFIED rather than as
+    claimed, and a green suite beside a false one is what makes the gap
+    permanent."""
     import services.voice_reply_service as vrs
     from services.channel_completion_report import _CHANNEL_RESOLVERS, INLINE_CHANNEL_TRIGGERS
 
