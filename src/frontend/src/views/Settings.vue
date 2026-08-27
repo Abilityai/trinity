@@ -2085,6 +2085,7 @@ import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
+import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
@@ -3529,7 +3530,14 @@ async function loadOpsSettings() {
     const response = await axios.get('/api/settings/ops/config', {
       headers: authStore.authHeader
     })
-    sshAccessEnabled.value = response.data.ssh_access_enabled === 'true'
+    // #2411: the payload is nested TWICE — `{settings: {key: {value: "..."}}}`
+    // — and this read it flat, so it was `undefined === 'true'` on every load.
+    // The switch rendered OFF whatever was stored, and since the click handler
+    // negates that state, the first click always sent `true`: an operator with
+    // ephemeral SSH enabled, clicking to DISABLE it, turned it back on. The
+    // rule lives in `utils/opsSettings.js` because this SFC cannot be mounted
+    // in our test setup, and an unreachable rule is how this survived.
+    sshAccessEnabled.value = readOpsBool(response.data, 'ssh_access_enabled')
   } catch (e) {
     console.error('Failed to load ops settings:', e)
   }
@@ -3543,7 +3551,7 @@ async function toggleSshAccess() {
     const newValue = !sshAccessEnabled.value
     await axios.put('/api/settings/ops/config', {
       settings: {
-        ssh_access_enabled: newValue ? 'true' : 'false'
+        ssh_access_enabled: opsBoolValue(newValue)
       }
     }, {
       headers: authStore.authHeader
