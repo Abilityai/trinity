@@ -161,6 +161,13 @@ def escalation_pct(threshold_pct: int) -> int:
     a fixed floor above the threshold re-arms on every cycle. `validate_ops_setting`
     is per-key and structurally cannot express a cross-field invariant, so the
     only way to make the pair un-misconfigurable is to not have a pair.
+
+    **Consequence worth knowing: at a threshold of 90 or above the two bounds
+    coincide and the warning tier is unreachable** — `decide_tier` tests
+    `>= escalate_at` first, so every crossing files as `crit`/`high`. That is
+    the correct behaviour (at 90%+ of a weekly window there is no "gentle"
+    tier left to offer) but it is a real behaviour change across the 90
+    boundary and nothing else announces it.
     """
     return max(threshold_pct, 90)
 

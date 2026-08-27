@@ -9,6 +9,7 @@ Claude Code prioritizes ANTHROPIC_API_KEY over the OAuth token, so when a
 subscription is assigned, ANTHROPIC_API_KEY is removed from the container.
 """
 
+import asyncio
 import logging
 import os
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -610,19 +611,26 @@ async def get_headroom_auto_refresh_setting(
     )
     from services import subscription_headroom_alerts as alerts
 
-    enabled = is_auto_refresh_enabled()
-    threshold = alerts.effective_threshold_pct()
+    # Off the event loop: the sweep already threads the same `list_subscriptions`
+    # call, and this handler is `async`. Admin-only and low-traffic, so the cost
+    # is small either way — but a sync DB read on an async path is the shape
+    # `_record_history` documents at length, and there is no reason to add one.
+    # One threaded call, not three: the status helper already resolves the
+    # toggle and the threshold, and reading them twice invites the two answers
+    # to disagree across the gap.
+    status = await asyncio.to_thread(_weekly_alert_status_blocking)
+    enabled = status.pop("_auto_refresh_enabled")
     return {
         "enabled": enabled,
         "refresh_seconds": REFRESH_SECONDS,
         "sample_interval_seconds": SAMPLE_INTERVAL_SECONDS,
         # ent#434 — the weekly-headroom alert rides this same toggle, so its
         # state belongs on this payload rather than a second endpoint.
-        "weekly_alert": _weekly_alert_status(enabled, threshold),
+        "weekly_alert": status,
     }
 
 
-def _weekly_alert_status(auto_refresh_enabled: bool, threshold: int) -> dict:
+def _weekly_alert_status_blocking() -> dict:
     """Report the weekly-headroom alert's real state, including WHY it is off.
 
     AC #4 (and #2217's lesson) is that "no alerts" must be distinguishable from
@@ -634,6 +642,10 @@ def _weekly_alert_status(auto_refresh_enabled: bool, threshold: int) -> dict:
     """
     from redis_breaker_util import get_breaker_redis
     from services import subscription_headroom_alerts as alerts
+    from services.subscription_headroom_service import is_auto_refresh_enabled
+
+    auto_refresh_enabled = is_auto_refresh_enabled()
+    threshold = alerts.effective_threshold_pct()
 
     reason = None
     try:
@@ -650,7 +662,14 @@ def _weekly_alert_status(auto_refresh_enabled: bool, threshold: int) -> dict:
     except Exception:  # noqa: BLE001
         redis_ok = False
 
-    if subscription_count == 0:
+    if subscription_count is None:
+        # `None` means the list could not be READ, which is not zero and is
+        # certainly not health. Without its own arm it fell through every
+        # branch below (`None == 0` is False) and returned `active: true` —
+        # this function's whole job is naming why it is off, so claiming
+        # health from a failed read was the one dishonest path in it.
+        reason = "count_unavailable"
+    elif subscription_count == 0:
         reason = "no_subscriptions"
     elif threshold == 0:
         reason = "threshold_disabled"
@@ -668,6 +687,9 @@ def _weekly_alert_status(auto_refresh_enabled: bool, threshold: int) -> dict:
         "min_pct": alerts.MIN_THRESHOLD_PCT,
         "max_pct": alerts.MAX_THRESHOLD_PCT,
         "subscription_count": subscription_count,
+        # consumed by the caller for the top-level `enabled` field, so the
+        # toggle and the alert status can never disagree about it
+        "_auto_refresh_enabled": auto_refresh_enabled,
     }
 
 

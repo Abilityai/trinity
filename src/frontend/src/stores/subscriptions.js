@@ -138,5 +138,17 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
       await api.put(`/api/subscriptions/settings/headroom-auto-refresh?enabled=${enabled}`)
       this.headroomAutoRefresh = { ...this.headroomAutoRefresh, enabled }
     },
+
+    // ent#434. Refetches rather than patching state locally: `weekly_alert`
+    // is a DERIVED block (active / inactive_reason / escalation_pct all follow
+    // from the threshold plus live conditions the client cannot see, such as
+    // Redis reachability), so echoing back only the value we sent would leave
+    // the panel asserting a status the server never computed.
+    async setHeadroomAlertThreshold(thresholdPct) {
+      await api.put(
+        `/api/subscriptions/settings/headroom-alert-threshold?threshold_pct=${thresholdPct}`
+      )
+      await this.fetchHeadroomAutoRefresh()
+    },
   },
 })

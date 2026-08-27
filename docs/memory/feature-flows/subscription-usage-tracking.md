@@ -462,6 +462,16 @@ and is named instead — a positive fleet-wide claim needs positive evidence fro
 every member. When it fires, the per-subscription alerts are suppressed for
 that cycle; the fleet item names them all.
 
+The denominator is built from the subscription **roster**, never from the
+sweep's results: a member whose sampling raised carries `classification: None`
+by design (the swallow is what protects #447) and a mid-cycle lease yield
+`break`s with a short result list, so filtering results on truthiness dropped
+exactly the members the ent#100 rule requires to block the claim. A
+3-subscription instance emitted *"All 2 registered subscriptions are at or past
+75%"* with the per-subscription alerts suppressed by the early return, making
+the false claim the only emission. `fleet_verdict` was always correct; the
+caller had narrowed its input.
+
 It says *what was measured*, not "auto-switch has nowhere to go". That sentence
 would be underived: `select_best_alternative_subscription` filters on recent
 failures and reads **no headroom at all**, so it will happily relocate agents
@@ -496,8 +506,23 @@ cross-field invariant.
 
 `GET /api/subscriptions/settings/headroom-auto-refresh` carries the honest
 status: `active` plus an `inactive_reason` of `no_subscriptions` /
-`threshold_disabled` / `auto_refresh_off` / `redis_unavailable`, so "no alerts"
-is distinguishable from "not checking" (#2217's lesson).
+`threshold_disabled` / `auto_refresh_off` / `redis_unavailable` /
+`count_unavailable`, so "no alerts" is distinguishable from "not checking"
+(#2217's lesson). An unreadable subscription list is its **own** reason — it
+previously fell through every arm (`None == 0` is False) and returned
+`active: true`, claiming health from a failure in the one function whose whole
+job is naming why it is off.
+
+**It is rendered.** The threshold input and the status line live in
+`SubscriptionsPanel.vue` beside the auto-refresh toggle, over the `BaseInput` /
+`BaseButton` / `InlineError` primitives. The backend shipped first with no
+client at all, which left AC #1's "Settings-surfaced value" API-only and AC #4's
+"reports itself inactive **on the Settings surface**" reaching nobody — the
+exact #2217 failure this design cites throughout. Decidable rules (validation
+copy, the changed-check, the status line) live in
+`utils/headroomAlertSettings.js` rather than the SFC: vitest runs
+`environment: 'node'` with no mount harness, so a rule expressed inside a
+component is one no test can reach (the ent#392 precedent).
 
 ### Residual
 

@@ -90,11 +90,31 @@ logger = logging.getLogger(__name__)
 
 _LEADER_KEY = "subscription:recovery:leader"
 
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, degrading to `default` on garbage.
+
+    These constants are resolved at MODULE SCOPE, so a bare `int(os.getenv(...))`
+    turns `SUBSCRIPTION_SWEEP_CONCURRENCY=eight` into a `ValueError` during
+    import — the backend crash-loops instead of running with the default. The
+    `${VAR:-4}` form in both composes covers unset and empty but not
+    non-numeric, and this one is now advertised in `.env.example`, so a human
+    types it. Unguarded `int()` on operator input is the #1197 shape.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not an integer; using default %d", name, raw, default
+        )
+        return default
+
+
 # Idle poll while the toggle is off — short enough that flipping it back on
 # takes effect without a backend restart, long enough to cost nothing.
-_DISABLED_POLL_SECONDS = int(
-    os.getenv("SUBSCRIPTION_RECOVERY_DISABLED_POLL_SECONDS", "300")
-)
+_DISABLED_POLL_SECONDS = _env_int("SUBSCRIPTION_RECOVERY_DISABLED_POLL_SECONDS", 300)
 
 # An outcome worth an INFO line. Everything else is the steady state (no limited
 # subscriptions at all), and logging that every 5 minutes forever is noise.
@@ -107,7 +127,7 @@ _NOTEWORTHY = ("recovered",)
 # lease and let a sibling worker start probing concurrently — #1881's lesson
 # one subsystem over. Bounded concurrency plus a between-chunk lease refresh
 # keeps a cycle short and the lease continuously owned.
-_MAX_CONCURRENT_PROBES = max(1, int(os.getenv("SUBSCRIPTION_SWEEP_CONCURRENCY", "4")))
+_MAX_CONCURRENT_PROBES = max(1, _env_int("SUBSCRIPTION_SWEEP_CONCURRENCY", 4))
 
 
 def _chunks(items: List[Any], size: int):
@@ -338,8 +358,23 @@ class SubscriptionRecoveryService:
         already done its job, and must not be able to undo it."""
         escalate_at = alerts.escalation_pct(threshold)
         by_sid = {s.id: s for s in subs}
+        # Built from `subs`, NOT from `results` — a member that produced no
+        # classification is UNASSESSABLE, not ABSENT, and only a member can
+        # block the fleet claim.
+        #
+        # Two reachable paths drop one otherwise, and both are by design
+        # elsewhere: `_sweep_one` swallows a sampling exception and leaves
+        # `classification: None` (that is the isolation property protecting
+        # #447), and the chunk loop `break`s on a mid-cycle lease yield with
+        # `results` shorter than `subs`. Filtering on truthiness then handed
+        # `fleet_verdict` a smaller denominator, so it could assert fleet-wide
+        # saturation over partial evidence and — because the fleet branch
+        # returns early — suppress the per-subscription alerts too, making the
+        # wrong claim the only thing emitted. `fleet_verdict` itself was always
+        # correct; the caller had narrowed its input (AC #3 / the ent#100 rule).
+        by_result = {r["sid"]: r.get("classification") for r in results}
         classifications = {
-            r["sid"]: r["classification"] for r in results if r.get("classification")
+            s.id: by_result.get(s.id) or alerts.UNASSESSABLE for s in subs
         }
         verdict = alerts.fleet_verdict(classifications)
 

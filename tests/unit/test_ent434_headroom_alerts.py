@@ -665,3 +665,162 @@ class TestReviewRegressions:
         for name in ("docker-compose.yml", "docker-compose.prod.yml", ".env.example"):
             text = (_REPO / name).read_text()
             assert "SUBSCRIPTION_SWEEP_CONCURRENCY" in text, name
+
+
+# =============================================================================
+# L — findings from the PR review (dolho, PR #2410)
+# =============================================================================
+
+class _Sub:
+    def __init__(self, sid, name):
+        self.id, self.name = sid, name
+
+
+def _wire_sweep(monkeypatch, subs, *, raises_for=(), classification=None):
+    """Common wiring: every subscription saturated except those in `raises_for`,
+    whose SAMPLING blows up (which `_sweep_one` swallows by design)."""
+    import services.subscription_recovery_service as svc
+    import services.subscription_headroom_alerts as alerts
+    emitted = []
+
+    async def _recovered(sid):
+        return "not_limited"
+
+    async def _ensure(sid, *, max_age_seconds):
+        if sid in raises_for:
+            raise RuntimeError("sampling blew up")
+
+        class W:
+            utilization_pct, resets_at, status = 88.0, "2026-09-01T00:00:00Z", "allowed_warning"
+
+        class H:
+            seven_day, five_hour = W(), None
+            snapshot_age_seconds, status = 10, "ok"
+
+        return H(), True
+
+    monkeypatch.setattr(svc, "recover_probe", _recovered)
+    monkeypatch.setattr(svc, "ensure_reading", _ensure)
+    monkeypatch.setattr(
+        svc, "classify_headroom",
+        lambda h, **kw: classification or alerts.SATURATED,
+    )
+    monkeypatch.setattr(svc.db, "list_subscriptions", lambda: subs)
+    monkeypatch.setattr(svc.db, "get_agents_by_subscription", lambda sid: [])
+    monkeypatch.setattr(alerts.db, "get_setting_value", lambda k, default=None: "75")
+    monkeypatch.setattr(
+        alerts, "_emit",
+        lambda item_id, **kw: (emitted.append((item_id, kw)), True)[1],
+    )
+    monkeypatch.setattr(
+        svc.SubscriptionRecoveryService, "_try_acquire_leadership",
+        lambda self, ttl: True,
+    )
+    return svc, emitted
+
+
+class TestFleetClaimDenominator:
+    """[C1] The pure predicate was right; the CALLER had narrowed its input."""
+
+    def test_an_unclassified_member_blocks_the_fleet_claim(self, monkeypatch):
+        """THE bug. Three subscriptions registered, `s3`'s sampling raises (which
+        `_sweep_one` swallows BY DESIGN to protect #447), and the claim used to
+        read "All 2 registered subscriptions" — asserting fleet-wide saturation
+        over two thirds of the evidence, with the per-subscription alerts
+        suppressed so the wrong claim was the only thing emitted.
+
+        `fleet_verdict` always honoured the ent#100 rule; the caller filtered
+        the blocking member out before handing it over.
+        """
+        subs = [_Sub("s1", "one"), _Sub("s2", "two"), _Sub("s3", "three")]
+        svc, emitted = _wire_sweep(monkeypatch, subs, raises_for={"s3"})
+        out = asyncio.run(svc.SubscriptionRecoveryService().run_cycle())
+
+        assert out["alerts"]["fleet"] is False
+        assert out["fleet_blocked_reason"] == "unassessable_members"
+        assert not [i for i, _ in emitted if "fleet" in i]
+
+    def test_a_fully_assessed_saturated_fleet_still_fires(self, monkeypatch):
+        """The fix must not make the alert unreachable — the failure direction
+        that would be invisible, because a silent alert looks like a calm fleet."""
+        subs = [_Sub("s1", "one"), _Sub("s2", "two")]
+        svc, emitted = _wire_sweep(monkeypatch, subs)
+        out = asyncio.run(svc.SubscriptionRecoveryService().run_cycle())
+
+        assert out["alerts"]["fleet"] is True
+        assert [i for i, _ in emitted if "fleet" in i]
+
+    def test_a_partial_sweep_cannot_produce_a_positive_fleet_claim(self, monkeypatch):
+        """The second reachable path: the chunk loop `break`s on a mid-cycle
+        lease yield, so `results` is shorter than `subs` while `_evaluate_alerts`
+        still runs. Building the map from `subs` makes that self-correcting."""
+        subs = [_Sub(f"s{i}", f"n{i}") for i in range(1, 7)]
+        svc, emitted = _wire_sweep(monkeypatch, subs)
+        # Yield on the FIRST re-assert, i.e. before the final chunk. Yielding
+        # after the last chunk drops nothing (every subscription is already in
+        # `results`), so a test that does that proves nothing — it passed
+        # against the unfixed code.
+        monkeypatch.setattr(
+            svc.SubscriptionRecoveryService, "_try_acquire_leadership",
+            lambda self, ttl: False,
+        )
+        out = asyncio.run(svc.SubscriptionRecoveryService().run_cycle())
+
+        assert out["alerts"]["fleet"] is False
+        assert not [i for i, _ in emitted if "fleet" in i]
+
+
+class TestTierCollapse:
+
+    def test_warning_tier_is_unreachable_at_or_above_ninety(self):
+        """[I2] `escalation_pct` returns `max(threshold, 90)` and `decide_tier`
+        tests `>= escalate_at` first, so from a threshold of 90 up the two
+        bounds coincide and every crossing files as `crit`. Correct behaviour —
+        there is no gentle tier left at 90% of a weekly window — but a real
+        change across that boundary, pinned so it is a decision and not a
+        surprise."""
+        from services.subscription_headroom_alerts import (
+            TIER_CRIT, TIER_WARN, decide_tier, escalation_pct,
+        )
+        assert decide_tier(88.0, 75, escalation_pct(75)) == TIER_WARN
+        for threshold in (90, 95, 99):
+            reachable = {
+                decide_tier(u, threshold, escalation_pct(threshold))
+                for u in (threshold, threshold + 0.5, 100.0)
+            }
+            assert reachable == {TIER_CRIT}, threshold
+
+
+class TestStatusHonesty:
+
+    def test_an_unreadable_subscription_list_is_not_reported_as_active(self, monkeypatch):
+        """[I6] `None == 0` is False, so a failed read fell through every reason
+        arm and returned `active: true` — the one path in a function whose whole
+        job is naming why it is off that claimed health from a failure."""
+        import routers.subscriptions as rs
+
+        def _boom():
+            raise RuntimeError("db unreadable")
+
+        monkeypatch.setattr(rs.db, "list_subscriptions", _boom)
+        status = rs._weekly_alert_status_blocking()
+        assert status["active"] is False
+        assert status["inactive_reason"] == "count_unavailable"
+        assert status["subscription_count"] is None
+
+
+class TestEnvIntGuard:
+
+    def test_garbage_concurrency_degrades_instead_of_crashing_import(self):
+        """[I4] These constants resolve at MODULE SCOPE, so a bare `int()` on a
+        non-numeric value raises during import and crash-loops the backend
+        rather than degrading. The var is now advertised in `.env.example`, so
+        a human types it (#1197's shape)."""
+        from services.subscription_recovery_service import _env_int
+        assert _env_int("ENT434_DEFINITELY_UNSET_VAR", 4) == 4
+        import os
+        os.environ["ENT434_TEST_GARBAGE"] = "eight"
+        try:
+            assert _env_int("ENT434_TEST_GARBAGE", 4) == 4
+        finally:
+            del os.environ["ENT434_TEST_GARBAGE"]
