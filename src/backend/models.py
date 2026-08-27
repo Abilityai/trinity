@@ -704,6 +704,32 @@ class TelemetrySharingUpdate(BaseModel):
     backfill_days: Optional[int] = Field(None, ge=0, le=3650)
 
 
+class OperatorIntakeUpdate(BaseModel):
+    """PUT body for the operator-intake Settings surface (ent#463).
+
+    Three intents share the endpoint, distinguished by ``enabled`` and the
+    presence of contact fields:
+
+    * **Opt-in and submit** — ``enabled=true`` with an ``email``: writes the
+      durable consent flag and, on a fresh install, fires the at-most-once
+      hosted intake POST via the existing service.
+    * **Opt-in without submitting** — ``enabled=true`` on an install that has
+      already submitted: records durable consent, no re-send (marker preserved).
+    * **Opt-out** — ``enabled=false``: records durable decline, no rollback of a
+      prior submission (the record was sent; contact support to request
+      deletion).
+
+    Field constraints mirror ``SetupPasswordRequest`` for the operator-profile
+    fields so the two producers can't diverge on shape.
+    """
+    enabled: bool
+    email: Optional[str] = Field(None, max_length=254)
+    company: Optional[str] = Field(None, max_length=200)
+    name: Optional[str] = Field(None, max_length=200)
+    role: Optional[str] = Field(None, max_length=200)
+    use_case: Optional[str] = Field(None, max_length=500)
+
+
 class ProductEventCreate(BaseModel):
     """Request body for a local product-event beacon (ent#184).
 

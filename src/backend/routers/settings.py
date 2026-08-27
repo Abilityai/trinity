@@ -33,6 +33,7 @@ from models import (
     OpsSettingsUpdate,
     RetentionAcknowledge,
     SkillsLibraryAutomationUpdate,
+    OperatorIntakeUpdate,
     SlackConnectRequest,
     SlackSettingsUpdate,
     TelemetrySharingUpdate,
@@ -41,7 +42,7 @@ from models import (
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import telemetry_sharing_service
+from services import operator_intake_service, telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
@@ -330,6 +331,111 @@ async def set_telemetry_sharing(
     if body.enabled and not was_enabled:
         asyncio.create_task(telemetry_sharing_service.share_now(backfill=True))
 
+    return status
+
+
+@router.get("/operator-intake")
+async def get_operator_intake(current_user: User = Depends(get_current_user)):
+    """Operator-intake Settings status (ent#463).
+
+    Admin-only. The status is honest across the three orthogonal axes the panel
+    renders: `hard_disabled` (env kill), `already_submitted` (+ `submitted_at`),
+    and `enabled` (durable consent flag). A legacy install that had the marker
+    set before ent#463 shipped reports `already_submitted=true` with
+    `submitted_at=None`; the panel renders "date unknown" rather than lying.
+    """
+    assert_admin(current_user)
+    return operator_intake_service.get_status()
+
+
+@router.put("/operator-intake")
+async def set_operator_intake(
+    body: OperatorIntakeUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Set or revoke the operator-intake consent (ent#463). Admin + human-only.
+
+    Three intents share the endpoint (see `OperatorIntakeUpdate`):
+
+    * ``enabled=true`` + ``email`` on a fresh install → durable consent recorded
+      AND the at-most-once intake POST is scheduled as a background task
+      (converges on the same ``submit_operator_intake`` path the welcome form
+      uses, AC #3).
+    * ``enabled=true`` on a submitted install → consent recorded, no re-send
+      (at-most-once marker preserved, AC #4 = no-op).
+    * ``enabled=false`` → durable decline recorded; the submitted marker is NOT
+      rolled back (AC #5: retracting the record itself requires contacting
+      support — the hosted endpoint has no local delete authority).
+
+    ``OPERATOR_INTAKE_ENABLED=false`` / ``DO_NOT_TRACK=1`` continue to win over
+    this Settings control (AC #6): an attempted enable-and-submit while
+    hard-disabled returns 409 rather than silently failing.
+
+    Audit-logged with a distinct action so a Settings-driven consent change is
+    distinguishable from a first-run one in the audit log.
+    """
+    from dependencies import reject_agent_principal
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    # Hard-disabled 409 mirrors the telemetry-sharing shape (ent#12). A silent
+    # accept-then-drop would fail AC #2 (state shown honestly) — the panel is
+    # entitled to a distinguishable error to render the disabled banner.
+    submit_intent = bool(
+        body.enabled
+        and (body.email or "").strip()
+        and not operator_intake_service.is_already_submitted()
+    )
+    if operator_intake_service.is_hard_disabled() and submit_intent:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Operator intake is disabled by configuration "
+                "(OPERATOR_INTAKE_ENABLED / DO_NOT_TRACK); consent cannot submit."
+            ),
+        )
+
+    was_enabled = operator_intake_service.is_consent_enabled()
+    status = operator_intake_service.set_consent(body.enabled)
+
+    # Fire the at-most-once submission only on the fresh consent-and-email path.
+    # If the install has already submitted, we deliberately no-op (AC #4). If the
+    # operator is opting OUT, no submission fires. If they enable without an
+    # email, we record consent as intent but nothing goes out — a subsequent PUT
+    # with an email will complete the submission, still at-most-once.
+    submit_outcome = None
+    if submit_intent:
+        submit_outcome = await operator_intake_service.submit_from_settings(
+            email=body.email,
+            company=body.company,
+            name=body.name,
+            role=body.role,
+            use_case=body.use_case,
+        )
+        # Refresh status after the fire so the response reflects the submitted
+        # marker + timestamp the caller's UI needs to switch to terminal state.
+        status = operator_intake_service.get_status()
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="operator_intake_consent",
+            source="api",
+            actor_user=current_user,
+            details={
+                "enabled": body.enabled,
+                "was_enabled": was_enabled,
+                "submit_outcome": submit_outcome,
+                # Never log the email or profile fields — the local no-PII
+                # invariant matches the service's rule.
+                "has_email": bool((body.email or "").strip()),
+            },
+        )
+    except Exception:  # audit is best-effort
+        logger.debug("[operator-intake] audit log failed", exc_info=True)
+
+    if submit_outcome is not None:
+        status["submit_outcome"] = submit_outcome
     return status
 
 
@@ -2834,6 +2940,22 @@ async def update_setting(
             detail=(
                 "telemetry_sharing_* must be set via "
                 "PUT /api/settings/telemetry-sharing (admin + human-only, audit-logged)"
+            ),
+        )
+
+    # ent#463: operator-intake consent (identified contact record — email,
+    # optional company/name/role/use_case) is human-only and audit-logged, same
+    # rationale as telemetry_sharing_* one block up. The dedicated PUT enforces
+    # reject_agent_principal, the hard-disabled 409, at-most-once semantics, and
+    # the dedicated `operator_intake_consent` audit action; none of that
+    # replays here. Also cover the pre-ent#463 `operator_intake_submitted`
+    # marker so a raw PUT can't be used to fake the at-most-once claim.
+    if key.startswith("operator_intake_"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "operator_intake_* must be set via "
+                "PUT /api/settings/operator-intake (admin + human-only, audit-logged)"
             ),
         )
 

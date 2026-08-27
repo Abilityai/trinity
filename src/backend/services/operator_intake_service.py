@@ -1,15 +1,26 @@
 """
 Operator intake (trinity-enterprise#38).
 
-At first-run setup the operator may opt in to "occasionally receive important
-security & product updates". On that affirmative consent, their email + company
-(+ a few optional basics) are submitted ONCE to an Ability.ai-operated hosted
-intake endpoint — a sibling endpoint on the same Cloudflare-fronted intake app
-as #1116's in-app bug reporter (`/v1/report-bug` → here `/v1/operator-intake`).
+The operator may opt in to "occasionally receive important security & product
+updates". On that affirmative consent, their email + company (+ a few optional
+basics) are submitted ONCE to an Ability.ai-operated hosted intake endpoint — a
+sibling endpoint on the same Cloudflare-fronted intake app as #1116's in-app
+bug reporter (`/v1/report-bug` → here `/v1/operator-intake`).
 
 This is identifiable, explicit opt-in contact capture — NOT anonymous telemetry
 (that is #758 / trinity-enterprise#12). It therefore fires only on an
-affirmative consent checkbox, and never silently.
+affirmative consent action, and never silently.
+
+Two consent surfaces:
+  1. First-run welcome form (`routers/setup.py`) — the original surface. Since
+     abilityai/trinity#2385 refuses that form on any install with a
+     pre-provisioned admin, this covers only fresh empty-admin installs.
+  2. Settings home (ent#463) — a durable admin-only surface added so an operator
+     can opt in (or out) after first-run, on installs where the welcome form
+     never renders.
+
+Both routes converge on `submit_operator_intake` and preserve the at-most-once
+marker, so the two surfaces cannot double-submit.
 
 Discipline:
   * Fire-and-forget — a blocked/failed/air-gapped POST never delays or breaks
@@ -18,6 +29,10 @@ Discipline:
     BEFORE the POST, so restarts / re-runs / concurrent uvicorn workers can't
     double-submit. Delivery itself is best-effort; we prefer at-most-once over
     at-least-once (a duplicate lead is worse than a missed one).
+  * Opt-out (ent#463) does NOT roll back the submitted marker. It sets a durable
+    consent-off setting; if a future feature ever adds a re-send path, it must
+    gate on the marker independently, so an operator who later opts out cannot
+    have a fresh record silently re-sent.
   * No PII in logs — the email is the payload, never logged. The credential
     sanitizer (Vector) would mask tokens but not arbitrary emails, so we simply
     never write it to a log line.
@@ -26,7 +41,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Optional
+from typing import Dict, Optional
 
 import httpx
 
@@ -39,6 +54,19 @@ logger = logging.getLogger(__name__)
 # system_settings keys
 _INSTALLATION_ID_KEY = "installation_id"
 _INTAKE_SUBMITTED_KEY = "operator_intake_submitted"
+# ent#463: additional keys for the Settings surface. Timestamped so the panel
+# can show honest state (when it was submitted / when consent was recorded).
+# `operator_intake_submitted_at` is written on ANY successful submission path
+# from this point forward; legacy markers set before this key existed report as
+# NULL and the UI shows "date unknown" rather than lying.
+KEY_SUBMITTED_AT = "operator_intake_submitted_at"
+# ent#463: durable consent state — true when the operator has opted in via
+# Settings (or first-run) and NOT subsequently opted out. Default-off. A
+# submitted install with `consent_enabled=false` is the "declined future
+# updates" state — the record was sent, but any hypothetical future re-send
+# path must gate on this.
+KEY_CONSENT_ENABLED = "operator_intake_consent_enabled"
+KEY_CONSENT_AT = "operator_intake_consent_at"
 
 _HTTP_TIMEOUT_SECONDS = 5.0
 
@@ -119,7 +147,12 @@ async def submit_operator_intake(
         # effectively single-shot, so this is sufficient.)
         if db.get_setting_value(_INTAKE_SUBMITTED_KEY, "false") == "true":
             return
+        submitted_at = utc_now_iso()
         db.set_setting(_INTAKE_SUBMITTED_KEY, "true")
+        # ent#463: timestamp the submission so the Settings panel can show honest
+        # "opted in on {date}" state. Written beside the marker so the two can't
+        # drift for a caller that only reads this file.
+        db.set_setting(KEY_SUBMITTED_AT, submitted_at)
 
         payload = {
             "installation_id": get_or_create_installation_id(),
@@ -130,7 +163,7 @@ async def submit_operator_intake(
             "use_case": use_case or None,
             "consent": "security_and_product_updates",
             "trinity_version": os.getenv("GIT_COMMIT_SHORT", "unknown"),
-            "submitted_at": utc_now_iso(),
+            "submitted_at": submitted_at,
         }
 
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
@@ -159,3 +192,120 @@ async def submit_operator_intake(
         # install, without WARNING's "platform broken" semantics or alarming a
         # deliberately-offline install. Only the exception TYPE, never the email.
         logger.info("Operator intake submission skipped (ignored): %s", type(e).__name__)
+
+
+# ---------------------------------------------------------------------------
+# ent#463 — Settings surface (durable consent + status readback)
+# ---------------------------------------------------------------------------
+
+def is_hard_disabled() -> bool:
+    """Config/air-gap kill switch (``OPERATOR_INTAKE_ENABLED`` / ``DO_NOT_TRACK``).
+
+    Same shape as the telemetry-sharing hard-disable so the Settings panels agree
+    on how to render an air-gapped install.
+    """
+    return not OPERATOR_INTAKE_ENABLED
+
+
+def is_consent_enabled() -> bool:
+    """Does the operator currently consent to being contacted? Default-off.
+
+    NOT the same as `is_already_submitted()`. A submitted install with
+    `consent_enabled=false` is the "declined future updates" state — the record
+    was sent (and cannot be locally recalled), but any hypothetical future
+    re-send path must gate on this flag independently.
+    """
+    try:
+        return db.get_setting_value(KEY_CONSENT_ENABLED, "false") == "true"
+    except Exception:  # pragma: no cover — read failure ⇒ safe default
+        return False
+
+
+def is_already_submitted() -> bool:
+    """Has the at-most-once intake POST already fired for this install?"""
+    try:
+        return db.get_setting_value(_INTAKE_SUBMITTED_KEY, "false") == "true"
+    except Exception:  # pragma: no cover — read failure ⇒ safe default
+        return False
+
+
+def get_status() -> Dict:
+    """Operator-facing status for the Settings panel (ent#463).
+
+    Combines the three orthogonal state axes the UI needs to render an honest
+    view:
+      * `hard_disabled` — the env kill switch overrides everything else
+      * `already_submitted` (+ `submitted_at`) — has the at-most-once fired?
+      * `enabled` (+ `consent_at`) — durable consent flag
+
+    A legacy install that had the marker set before ent#463 shipped will report
+    `already_submitted=true` with `submitted_at=None`; the panel must render
+    "date unknown" rather than lie.
+    """
+    return {
+        "enabled": is_consent_enabled(),
+        "hard_disabled": is_hard_disabled(),
+        "already_submitted": is_already_submitted(),
+        "submitted_at": db.get_setting_value(KEY_SUBMITTED_AT, None),
+        "consent_at": db.get_setting_value(KEY_CONSENT_AT, None),
+        "intake_url": OPERATOR_INTAKE_URL,
+    }
+
+
+def set_consent(enabled: bool) -> Dict:
+    """Record (or revoke) the durable consent flag (ent#463).
+
+    Writing consent=true here is intent only: it does NOT itself submit — the
+    caller is responsible for scheduling the submission when the operator has
+    also provided an email and the install has not already submitted. Writing
+    consent=false is a durable decline; it does NOT roll back the
+    at-most-once marker, since the record has already been sent externally.
+    """
+    db.set_setting(KEY_CONSENT_ENABLED, "true" if enabled else "false")
+    db.set_setting(KEY_CONSENT_AT, utc_now_iso())
+    return get_status()
+
+
+class SettingsIntakeResult:
+    """Enum-ish outcome codes for the Settings submit path (ent#463).
+
+    Kept explicit instead of raising so the router can map outcomes to HTTP
+    status codes without a try/except pyramid, and so a test can assert the
+    exact code path without stubbing the network.
+    """
+    SUBMITTED = "submitted"                # POST scheduled successfully
+    HARD_DISABLED = "hard_disabled"        # env kill switch
+    ALREADY_SUBMITTED = "already_submitted"  # marker already set
+    MISSING_EMAIL = "missing_email"        # cannot submit without a contact
+
+
+async def submit_from_settings(
+    *,
+    email: str,
+    company: Optional[str] = None,
+    name: Optional[str] = None,
+    role: Optional[str] = None,
+    use_case: Optional[str] = None,
+) -> str:
+    """Settings-surface submit (ent#463) — the second producer, at-most-once.
+
+    Returns a `SettingsIntakeResult` code. Never raises. Delegates the actual
+    POST to `submit_operator_intake`, so both surfaces converge on the same
+    hosted intake, the same payload shape, and the same marker semantics — no
+    second intake client, no forked payload (AC #3).
+    """
+    if is_hard_disabled():
+        return SettingsIntakeResult.HARD_DISABLED
+    if is_already_submitted():
+        return SettingsIntakeResult.ALREADY_SUBMITTED
+    if not (email or "").strip():
+        return SettingsIntakeResult.MISSING_EMAIL
+
+    await submit_operator_intake(
+        email=email.strip(),
+        company=(company or "").strip() or None,
+        name=(name or "").strip() or None,
+        role=(role or "").strip() or None,
+        use_case=(use_case or "").strip() or None,
+    )
+    return SettingsIntakeResult.SUBMITTED
