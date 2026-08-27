@@ -330,7 +330,7 @@ whatsapp; consent fixture keyed on binding agent) and the
 `test_agent_cleanup_parity.py` locks (D1a). The read-back layer caught a real
 facade passthrough gap pre-merge — see `docs/memory/learnings.md` 2026-07-31.
 
-`tests/unit/test_ent457_portal_completion_report.py` (13) covers the Workspace
+`tests/unit/test_ent457_portal_completion_report.py` (27) covers the Workspace
 leg: the `"public"` inline-trigger addition and the proof that public links /
 x402 are untouched by it; session-missing and client-less suppression; filing
 under the session's agent with the executing agent named in the body when they
@@ -338,6 +338,20 @@ differ; the failure wording; the `touch_portal_session(..., added=1)` paired
 write (one message, not a user+assistant pair); and the resolver's presence in
 the dispatch map. `tests/unit/test_2157_portal_narration.py` gains the cases
 where this supersedes that PR's stamp-only behaviour.
+
+**Six of those drive `report_completion` itself** (review finding 8). The rest
+reach `_portal_body` / `_resolve_portal` directly, or assert the review fixes by
+`inspect.getsource` — which is precisely why two real defects, an unsanitized
+body and a raise that released the effect claim, both survived a green suite:
+nothing exercised the entry point, so nothing exercised the gate ordering, the
+recipient guard and the sanitizer *together*. The end-to-end cases stub only the
+two edges the module does not own (the execution row and the portal DB) and let
+everything between run for real: a delegated terminal reaching the thread, a
+credential-shaped failure string proven absent from what is persisted, a report
+whose inherited client does not match the session's refusing before any write,
+a NULL client failing closed, the inline turn still refused at the gate, and a
+vanished session writing nothing. Each was verified to fail against a mutant
+(sanitizer removed; recipient guard removed).
 
 ## Related Flows
 

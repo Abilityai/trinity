@@ -97,11 +97,25 @@ PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT = 30  # hard ceiling from first sign-in
 # #2157: the `schedule_executions.source_channel` stamp identifying a Workspace
 # turn. `triggered_by="public"` is shared with public links and x402 chat, so it
 # cannot answer "did this turn arrive from the Workspace?" — and that answer
-# decides what `send_voice_reply` tells an agent that tries to speak there. It is
-# NOT a messaging channel: portal rows carry no `source_channel_chat_id`, so every
-# channel consumer (the completion-report resolver map, `voice_reply_service`'s
-# supported set) already ignores it. It lives here so the writer (client_portal)
-# and the reader (routers/agents) share one spelling without importing each other.
+# decides what `send_voice_reply` tells an agent that tries to speak there. It
+# lives here so the writer (client_portal) and the reader (routers/agents) share
+# one spelling without importing each other.
+#
+# ent#457 CHANGED WHAT THIS VALUE MEANS, and this comment used to say the
+# opposite — that it is "NOT a messaging channel: portal rows carry no
+# `source_channel_chat_id`, so every channel consumer already ignores it". Both
+# halves are now false. Portal rows DO carry `source_channel_chat_id` (the
+# session id, stamped at both turn-creation sites), and
+# `channel_completion_report._CHANNEL_RESOLVERS` carries a `"portal"` entry, so
+# a delegated terminal is delivered into the Workspace thread as a persisted
+# assistant message. `voice_reply_service` still declines it, but for its own
+# reason — the Workspace narrates client-side (#2157) — not because the stamp
+# is inert.
+#
+# So the honest statement is: this is a real destination for the
+# completion-report leg and NOT one for outbound voice. A consumer that wants
+# "is this a messaging channel?" must ask its own resolver map rather than
+# assume from the name; there is no longer one answer that covers both.
 PORTAL_SOURCE_CHANNEL = "portal"
 
 # Bounds enforced on READ, so a bad row cannot widen the window (#506).

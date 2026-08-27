@@ -320,3 +320,165 @@ def test_the_docstring_no_longer_claims_the_workspace_polls():
     assert "does not hold by construction here" in doc
     # And the known limitation is written down where the next reader will hit it.
     assert "answer" in doc and "Known limitation" in doc
+
+
+# ---------------------------------------------------------------------------
+# End-to-end through `report_completion` (review finding 8)
+#
+# Every assertion above reaches `_portal_body` or `_resolve_portal` directly,
+# and the three fixes from the first review round are pinned by
+# `inspect.getsource`. That is why two real defects — an unsanitized body and a
+# raise that released the effect claim — were both invisible to a green suite:
+# nothing drove the actual entry point with a portal row, so nothing exercised
+# the gate ordering, the recipient guard and the sanitizer together.
+#
+# These tests do. They stub only the two edges the module does not own (the
+# execution row and the portal DB) and let everything between run for real.
+# ---------------------------------------------------------------------------
+
+class _Row:
+    """A `schedule_executions` row as `report_completion` reads it."""
+
+    def __init__(self, **kw):
+        self.id = EXEC
+        self.agent_name = AGENT
+        self.triggered_by = "mcp"          # delegated, NOT the inline turn
+        self.source_channel = "portal"
+        self.source_channel_chat_id = SESSION
+        self.source_channel_thread = None
+        self.source_channel_agent = None
+        self.source_channel_client = CLIENT
+        self.__dict__.update(kw)
+
+
+def _drive(ccr, monkeypatch, row, *, status="success", summary_or_error="done",
+           session=None):
+    """Run the real `report_completion` against stubbed edges.
+
+    Returns `(result, written)` where `written` collects every
+    `add_portal_message` call the run produced.
+    """
+    import asyncio
+
+    written = []
+
+    class _PortalDb:
+        @staticmethod
+        def get_portal_session_by_id(sid):
+            if session is None:
+                return None
+            return dict(session, id=sid) if "id" not in session else session
+
+        @staticmethod
+        def add_portal_message(*args, **kwargs):
+            written.append({"args": args, "kwargs": kwargs})
+
+        @staticmethod
+        def touch_portal_session(*args, **kwargs):
+            pass
+
+    # `_resolve_portal` does `from client_portal import db as portal_db` at call
+    # time, so the stub has to be installed on the package attribute.
+    import client_portal
+    monkeypatch.setattr(client_portal, "db", _PortalDb, raising=False)
+    monkeypatch.setitem(
+        __import__("sys").modules, "client_portal.db", _PortalDb,
+    )
+
+    import database
+    monkeypatch.setattr(database.db, "get_execution", lambda eid: row)
+
+    # The effect guard is #1084's, tested there; here it must not require Redis.
+    from services import idempotency_service
+
+    class _Guard:
+        replay = False
+        snapshot = None
+
+    def _fake_guard(*a, **kw):
+        class _Ctx:
+            async def __aenter__(self):
+                return _Guard()
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Ctx()
+
+    monkeypatch.setattr(idempotency_service, "effect_guard", _fake_guard)
+
+    result = asyncio.run(ccr.report_completion(
+        execution_id=EXEC,
+        agent_name=AGENT,
+        status=status,
+        summary_or_error=summary_or_error,
+    ))
+    return result, written
+
+
+_SESSION = {"agent_name": AGENT, "client_email": CLIENT}
+
+
+def test_end_to_end_a_delegated_terminal_reaches_the_clients_thread(ccr, monkeypatch):
+    """The happy path nothing exercised: row → gates → resolver → write."""
+    ok, written = _drive(ccr, monkeypatch, _Row(), session=_SESSION)
+    assert ok is True
+    assert len(written) == 1
+    body = written[0]["args"][5 - 1] if len(written[0]["args"]) >= 5 else None
+    assert body and "Finished" in body
+
+
+def test_end_to_end_the_body_is_sanitized_before_it_is_persisted(ccr, monkeypatch):
+    """Review finding 1, through the real entry point.
+
+    `_write_terminal_and_gate` passes `error` and `apply_result`'s failure
+    branch passes `envelope.error` — both raw, and `_extract_agent_error` falls
+    back to the agent's raw HTTP body. The destination is a persisted row an
+    external client reads indefinitely, so a secret that reaches it is
+    permanent. The direct `_portal_body` test cannot prove the sanitizer is on
+    the path callers actually take; this one can.
+    """
+    secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ok, written = _drive(
+        ccr, monkeypatch, _Row(), status="failed",
+        summary_or_error=f"boom: {secret}", session=_SESSION,
+    )
+    assert ok is True
+    blob = repr(written)
+    assert secret not in blob, "a credential reached an external client's thread"
+
+
+def test_end_to_end_a_report_for_another_client_never_writes(ccr, monkeypatch):
+    """Review finding 2, through the real entry point.
+
+    The inheritance guard checks the AGENT, not the client, so an agent shared
+    with X and Y can cite one of X's portal executions while serving Y. The
+    recipient check is what stops it, and it has to stop it before any write.
+    """
+    row = _Row(source_channel_client="someone-else@example.com")
+    ok, written = _drive(ccr, monkeypatch, row, session=_SESSION)
+    assert ok is False
+    assert written == []
+
+
+def test_end_to_end_a_row_with_no_recorded_client_fails_closed(ccr, monkeypatch):
+    """Every row created before the column exists reports NULL, and an
+    unverifiable recipient is exactly the case that must not deliver."""
+    ok, written = _drive(ccr, monkeypatch, _Row(source_channel_client=None),
+                         session=_SESSION)
+    assert ok is False
+    assert written == []
+
+
+def test_end_to_end_the_inline_turn_is_still_refused_at_the_gate(ccr, monkeypatch):
+    """The no-double-post rule, proven where it actually runs rather than by
+    asserting the constant's membership."""
+    ok, written = _drive(ccr, monkeypatch, _Row(triggered_by="public"),
+                         session=_SESSION)
+    assert ok is False
+    assert written == []
+
+
+def test_end_to_end_a_vanished_session_writes_nothing(ccr, monkeypatch):
+    ok, written = _drive(ccr, monkeypatch, _Row(), session=None)
+    assert ok is False
+    assert written == []
