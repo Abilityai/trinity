@@ -145,7 +145,14 @@ async function loadPayload(d) {
 function shownRows(id) {
   const meta = rowMeta[id]
   if (!meta) return 0
-  return Math.max(0, Math.min(meta.limit ?? 0, (meta.total ?? 0) - (meta.offset ?? 0)))
+  // ent#365 review: `meta.limit ?? 0` rendered "Showing the first 0 of N rows"
+  // when the server omitted `limit` — zero shown while `hasMoreRows` stayed
+  // true, which is a sentence that cannot be right. An absent limit means the
+  // server did not bound the slice, so what is shown is everything after the
+  // offset.
+  const remaining = Math.max(0, (meta.total ?? 0) - (meta.offset ?? 0))
+  const limit = typeof meta.limit === 'number' && meta.limit > 0 ? meta.limit : remaining
+  return Math.max(0, Math.min(limit, remaining))
 }
 
 function hasMoreRows(id) {

@@ -314,3 +314,77 @@ def test_the_create_response_reports_the_audience_it_stored():
     src = inspect.getsource(mod.create_report)
     assert "addressed_to_email" in src
     assert 'projected["addressed_to"]' in src
+
+
+# ---------------------------------------------------------------------------
+# The strip is at the REST read too, not only in the MCP tool (review finding)
+# ---------------------------------------------------------------------------
+
+class TestAudienceIsWithheldFromMachinePrincipals:
+    """An agent-scoped MCP key is a valid bearer token against this API
+    directly — that is how the heartbeat, the #1083 result callback and the
+    reports WRITE path all authenticate. So stripping `addressed_to` only in
+    `stripAudienceFromReports` left an agent able to `curl` the same routes and
+    read the audience for every agent its owner can access: strictly wider than
+    the `{self} u permitted` scope the MCP layer enforces.
+
+    The PR's own rationale was "a tool result is LLM context wherever it lands",
+    which applies at least as strongly to a shell result — the threat model is a
+    prompt-injected agent, and such an agent has Bash.
+    """
+
+    @staticmethod
+    def _row():
+        return {"id": "r1", "agent_name": "scribe", "addressed_to": "client@example.com"}
+
+    def test_a_jwt_human_still_sees_the_audience(self):
+        """The UI reads over a JWT; withholding it there would break the
+        surface the field exists for."""
+        from models import User
+        from routers.reports import _hide_audience
+        human = User(id=1, username="op", role="admin", mcp_scope=None)
+        assert _hide_audience(self._row(), human)["addressed_to"] == "client@example.com"
+
+    @pytest.mark.parametrize("scope", ["agent", "user", "system", "connector",
+                                       "portal_delegate", "ops", "a_scope_from_2027"])
+    def test_every_key_authenticated_caller_is_stripped(self, scope):
+        """An ALLOWLIST, not a denylist. `mcp_api_keys.scope` is free text with
+        no CHECK constraint, so naming `agent` and `connector` would silently
+        admit the next scope that ships (#2323)."""
+        from models import User
+        from routers.reports import _hide_audience
+        machine = User(id=1, username="op", role="admin", mcp_scope=scope)
+        assert "addressed_to" not in _hide_audience(self._row(), machine)
+
+    def test_a_principal_with_no_scope_attribute_fails_closed(self):
+        """`getattr(..., None)` would make an absent attribute the PRIVILEGED
+        value — the #2323 getattr-discriminator trap."""
+        from routers.reports import _hide_audience
+
+        class _Odd:
+            pass
+
+        assert "addressed_to" not in _hide_audience(self._row(), _Odd())
+
+    def test_the_row_is_not_mutated(self):
+        """The caller's dict is reused elsewhere; redaction must copy."""
+        from models import User
+        from routers.reports import _hide_audience
+        row = self._row()
+        _hide_audience(row, User(id=1, username="op", role="admin", mcp_scope="agent"))
+        assert row["addressed_to"] == "client@example.com"
+
+    def test_all_three_read_routes_go_through_it(self):
+        """A strip two of three routes apply is the same hole one hop over —
+        which is exactly how it shipped in the MCP tool the first time."""
+        import inspect
+        from routers import reports as mod
+        for fn in (mod.list_agent_reports, mod.list_fleet_reports, mod.get_report):
+            assert "_hide_audience" in inspect.getsource(fn), fn.__name__
+
+    def test_the_predicate_is_shared_with_its_raising_twin(self):
+        """One definition, so the redact and the refuse cannot drift."""
+        import inspect
+        from dependencies import is_interactive_principal, reject_non_interactive_principal
+        assert "is_interactive_principal" in inspect.getsource(reject_non_interactive_principal)
+        assert is_interactive_principal.__module__ == "dependencies"

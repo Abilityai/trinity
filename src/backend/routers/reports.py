@@ -25,7 +25,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
+from dependencies import (
+    get_current_user,
+    AuthorizedAgent,
+    OwnedAgent,
+    is_interactive_principal,
+)
 from models import (
     FleetReportStats,
     Report,
@@ -42,6 +47,38 @@ from services.agent_service.helpers import accessible_agent_names, narrow_to_age
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["reports"])
+
+
+def _hide_audience(row: dict, current_user: User) -> dict:
+    """Withhold `addressed_to` from any caller that is not an interactive human.
+
+    ent#365 review. The audience strip shipped in the MCP tool only
+    (`stripAudienceFromReports`), but an agent-scoped MCP key is a valid bearer
+    token against this API directly - that is how the heartbeat, the #1083
+    result callback and the reports WRITE path all authenticate. So an agent
+    could `curl` these routes and read `addressed_to` for every agent its owner
+    can access, which is strictly wider than the `{self} u permitted` scope the
+    MCP layer enforces.
+
+    The PR's own rationale for stripping at the tool was "a tool result is LLM
+    context wherever it lands". That argument applies at least as strongly to a
+    shell result, since the threat model is a prompt-injected agent and such an
+    agent has Bash. Closing it here rather than recording a residual, because
+    the alternative leaves code that READS as though the hole is shut.
+
+    The UI is unaffected: it reads over a JWT, which is exactly the allowlisted
+    case. The predicate is `dependencies.is_interactive_principal` - shared with
+    `reject_non_interactive_principal` so the two cannot drift, and an allowlist
+    rather than a denylist because `mcp_api_keys.scope` has no CHECK constraint
+    and the next scope to ship would otherwise be admitted silently (#2323).
+    """
+    if is_interactive_principal(current_user):
+        return row
+    if "addressed_to" not in row:
+        return row
+    redacted = dict(row)
+    redacted.pop("addressed_to", None)
+    return redacted
 
 
 def _resolve_portal_session(execution_id: str, agent_name: str) -> Optional[str]:
@@ -272,6 +309,7 @@ async def list_agent_reports(
     search: Optional[str] = Query(None, max_length=200),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
 ):
     """List one agent's reports (metadata only, newest first).
 
@@ -291,7 +329,7 @@ async def list_agent_reports(
         limit=limit,
         offset=offset,
     )
-    return [ReportSummary(**r) for r in rows]
+    return [ReportSummary(**_hide_audience(r, current_user)) for r in rows]
 
 
 @router.delete("/agents/{name}/reports/{report_id}", status_code=204)
@@ -344,7 +382,7 @@ async def list_fleet_reports(
         limit=limit,
         offset=offset,
     )
-    return [ReportSummary(**r) for r in rows]
+    return [ReportSummary(**_hide_audience(r, current_user)) for r in rows]
 
 
 @router.get("/reports/{report_id}/export")
@@ -456,4 +494,4 @@ async def get_report_rows(
 @router.get("/reports/{report_id}", response_model=Report)
 async def get_report(report_id: str, current_user: User = Depends(get_current_user)):
     """Full report incl. payload. 404 (not 403) on no-access to avoid id leak."""
-    return Report(**_report_or_404(report_id, current_user))
+    return Report(**_hide_audience(_report_or_404(report_id, current_user), current_user))

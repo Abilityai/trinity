@@ -1251,8 +1251,15 @@ def _precreate_sync_execution(agent_name: str, message: str, email: str) -> str 
     a report published from either can be joined back to its chat.
 
     Fail-soft to None: this exists so an addressed report finds its session, and
-    a turn must not be refused because that bookkeeping could not be done.
-    `run_resumable_turn` then creates the row itself, exactly as before.
+    a turn must not be refused because that bookkeeping could not be done. ONLY
+    on that None path does `run_resumable_turn` create the row itself, exactly
+    as before.
+
+    On the success path the id is threaded through to `run_resumable_turn`, which
+    ADOPTS the pre-created row rather than creating a second one — so this is not
+    an orphan `running` row per synchronous portal turn (ent#365 review: the
+    sentence above read as though the pre-created row went unused, and confirming
+    otherwise took longer than it should have).
     """
     from database import db as core_db
     try:
