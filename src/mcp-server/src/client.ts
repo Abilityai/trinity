@@ -722,7 +722,16 @@ export class TrinityClient {
       headers["X-Source-Agent"] = sourceAgent;
     }
 
-    // Add MCP key info headers for execution origin tracking (AUDIT-001)
+    // Add MCP key info headers for execution origin tracking (AUDIT-001).
+    // #2389 — INERT: the backend no longer reads these. No router declares
+    // `X-MCP-Key-Id`/`X-MCP-Key-Name` any more (a scan over the router tree
+    // asserts it), because `Header(None)` validated nowhere let any
+    // authenticated caller name someone else's credential in audit rows AND in
+    // durable execution provenance. Provenance now derives from the presented
+    // bearer. Kept only so a rolling deploy has one less moving part — the value
+    // sent is the same key the bearer already identifies, so dropping it is an
+    // MCP rebuild for zero behaviour change. Delete freely; never re-add a
+    // backend reader.
     if (mcpKeyInfo?.keyId) {
       headers["X-MCP-Key-ID"] = mcpKeyInfo.keyId;
     }
@@ -887,7 +896,16 @@ export class TrinityClient {
       headers["X-Source-Agent"] = sourceAgent;
     }
 
-    // Add MCP key info headers for execution origin tracking (AUDIT-001)
+    // Add MCP key info headers for execution origin tracking (AUDIT-001).
+    // #2389 — INERT: the backend no longer reads these. No router declares
+    // `X-MCP-Key-Id`/`X-MCP-Key-Name` any more (a scan over the router tree
+    // asserts it), because `Header(None)` validated nowhere let any
+    // authenticated caller name someone else's credential in audit rows AND in
+    // durable execution provenance. Provenance now derives from the presented
+    // bearer. Kept only so a rolling deploy has one less moving part — the value
+    // sent is the same key the bearer already identifies, so dropping it is an
+    // MCP rebuild for zero behaviour change. Delete freely; never re-add a
+    // backend reader.
     if (mcpKeyInfo?.keyId) {
       headers["X-MCP-Key-ID"] = mcpKeyInfo.keyId;
     }
@@ -1065,6 +1083,15 @@ export class TrinityClient {
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
     }
+    // #2389 — INERT: the backend no longer reads these. No router declares
+    // `X-MCP-Key-Id`/`X-MCP-Key-Name` any more (a scan over the router tree
+    // asserts it), because `Header(None)` validated nowhere let any
+    // authenticated caller name someone else's credential in audit rows AND in
+    // durable execution provenance. Provenance now derives from the presented
+    // bearer. Kept only so a rolling deploy has one less moving part — the value
+    // sent is the same key the bearer already identifies, so dropping it is an
+    // MCP rebuild for zero behaviour change. Delete freely; never re-add a
+    // backend reader.
     if (mcpKeyInfo?.keyId) {
       headers["X-MCP-Key-ID"] = mcpKeyInfo.keyId;
     }
@@ -1269,6 +1296,15 @@ export class TrinityClient {
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
     }
+    // #2389 — INERT: the backend no longer reads these. No router declares
+    // `X-MCP-Key-Id`/`X-MCP-Key-Name` any more (a scan over the router tree
+    // asserts it), because `Header(None)` validated nowhere let any
+    // authenticated caller name someone else's credential in audit rows AND in
+    // durable execution provenance. Provenance now derives from the presented
+    // bearer. Kept only so a rolling deploy has one less moving part — the value
+    // sent is the same key the bearer already identifies, so dropping it is an
+    // MCP rebuild for zero behaviour change. Delete freely; never re-add a
+    // backend reader.
     if (mcpKeyInfo?.keyId) {
       headers["X-MCP-Key-ID"] = mcpKeyInfo.keyId;
     }

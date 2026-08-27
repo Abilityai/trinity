@@ -236,7 +236,42 @@ assigned to them answered normally.
 rejected token and a transport error — none of which are evidence the
 subscription is usable — so all three fall through to the db predicate instead of
 clearing it. Only a fresh `ok` snapshot with at least one window, every reported
-window `allowed`, is positive proof of headroom.
+window **non-blocking**, is positive proof of headroom.
+
+#### 1a. What "non-blocking" means — the window-status vocabulary (#2396)
+
+Both predicates judge a window against ONE named constant,
+`NON_BLOCKING_WINDOW_STATUSES = {"allowed", "allowed_warning"}`. It is an
+**allowlist of statuses meaning "requests are being served"**, never a blocklist
+of blockers — the provider does not publish this vocabulary, so an unrecognised
+status must still read as blocking. (The inverse mistake, a deny-check that
+silently admits every future value, is the #848 lesson in `learnings.md`; here
+the safe default runs the other way.)
+
+It shipped as the bare literal `("allowed",)` in one predicate and
+`(None, "allowed")` in the other — two homes, one vocabulary — and the provider's
+own near-the-limit tier `allowed_warning` was in neither. So a **healthy**
+subscription approaching its weekly window was reported rate-limited on every
+surface that reads `resolve_rate_limited_now`. Observed live on a running
+instance: a stored snapshot recording `seven_day: 90.0 / allowed_warning` with
+`overage_status: allowed` sat beside 47 successful executions in the same two
+hours and **zero** `subscription_rate_limit_events` — the provider said allowed
+and meant it.
+
+`allowed_warning` also counts as **positive proof of headroom**, which is a
+decision rather than a side effect: the quota was reached, the answer was "yes",
+and the request was served. The states this predicate excludes are stale /
+rejected-token / transport-error, none of which is evidence of usability — a
+served request plainly is. Excluding it would keep a stale `LIMIT` badge on a
+working subscription for the db predicate's full two hours, i.e. the #447 bug
+returning in a narrower window. `abilityai/trinity-enterprise#434` consumes this
+predicate as its "is this reading assessable" gate, so the rule is settled here
+rather than re-derived there.
+
+**The window arm is the weakest of three independent detectors**, which is what
+bounds the blast radius of getting the vocabulary wrong: a real HTTP 429 sets the
+top-level snapshot `status` and is checked BEFORE any window is inspected, and
+the 2h db predicate is a third path that this change does not touch.
 
 **Scope:** this is the DISPLAY predicate. Candidate selection reads the
 kind-blind `has_recent_subscription_failures` (#2352's split), so a just-recovered
@@ -308,3 +343,191 @@ were always 30px, but landing at three x positions they read as three lengths.
 `min-width`, not `width`: an overage plan reporting >100% must overflow the cell
 rather than be clipped, the same report-honestly / clamp-only-geometry rule
 `barWidthPct` follows.
+
+---
+
+## Warning before the wall (ent#434)
+
+#471 made the weekly reading real and #447 made it self-refreshing for a
+subscription believed limited. Neither tells the operator anything *before* the
+limit is reached. ent#434 adds the alert, and the shape it ended up with is
+mostly a consequence of measuring the provider first.
+
+### The window is fixed-with-reset, and that deleted most of the design
+
+`subscription_headroom_history` on a live instance shows `seven_day_resets_at`
+holding **constant** at one midnight-UTC instant across five days of probes
+while utilization climbed 36 → 90, then **stepping exactly +7 days**. Under a
+rolling window with continuous usage it would have advanced continuously. So
+the weekly window accumulates and zeroes on a schedule, and utilization is
+monotonic non-decreasing inside a window.
+
+(`dashboard-grid-view.md` described these as rolling windows. That claim is
+corrected there; it predates anyone reading the history table.)
+
+Two consequences, each of which removes work the issue asked for:
+
+1. A **hysteresis floor is dead code** — utilization does not fall inside a
+   window, so the only real re-arm is the reset.
+2. `resets_at` **is** the window's identity, so putting it in the alert id makes
+   the id the entire state machine:
+
+   ```
+   sub-headroom-{sid}-{reset-day}-{tier}
+   ```
+
+   `create_item` maps `item["id"]` onto `request_id`, `UNIQUE(agent_name,
+   request_id)` with ON CONFLICT DO NOTHING. Same window ⇒ same id ⇒ one row
+   however many cycles re-emit it. A reset mints a new id, so the alert re-arms
+   by construction. Cross-worker and cross-restart dedup come free, with **no
+   durable memo** to leak, race, or clean up on `delete_subscription`.
+
+   The id is quantised to the **day**, not the instant — under the measured
+   semantics that is one episode per window, and if some future plan did behave
+   as rolling it degrades to one alert per day rather than one per probe.
+
+### The threshold fires; the projection decides urgency
+
+There is no configurable "alert if the reset is less than N hours away", and
+deliberately so — no such number is right for every operator. The window length
+is known and `resets_at` says how much is left, so the operator's own pace is
+already derivable:
+
+```
+projected_end = utilization_pct / fraction_of_window_elapsed
+```
+
+75% three days in projects to 175% and is an emergency; 75% with hours left
+projects to ~77% and is a normal week. The alert is **never withheld** at the
+threshold (operator ruling) — the projection sets `priority`: `low` when the
+window will finish under 100%, `high` when it will not. An unknowable
+projection is treated as not-on-pace, because a missing `resets_at` is not
+evidence of an emergency.
+
+### Three states, because two cannot express "we could not tell"
+
+`services/subscription_headroom_service.py::classify_headroom` →
+`saturated | has_headroom | unassessable`.
+
+`_headroom_indicates_healthy` is **not** usable as the assessability gate, and
+#2396's docstring wrongly said ent#434 would consume it as one. That predicate
+returns `False` for a stale snapshot, a rejected token, a transport error
+**and** a genuinely saturated subscription — so the most saturated subscription
+in a fleet is indistinguishable from an unreachable one, and the fleet
+escalation would be blocked by exactly the condition it exists to report. The
+docstring is corrected; the body is untouched, because `resolve_rate_limited_now`
+consumes it and a behavioural edit there moves every `LIMIT` badge.
+
+The classifier keys on **utilization, not window status**. `allowed_warning` is
+deliberately non-blocking (#2396) — correct for the badge, and catastrophic
+here: a status-driven classifier would file a live 90% warning-tier reading as
+`has_headroom`. Status still contributes, as the *stronger* signal: a blocking
+7d status or a probe 429 is `saturated` whether or not a number came with it,
+and such a reading counts toward the fleet claim but raises no
+percentage-crossing alert, because there is no percentage to name.
+
+### Where it runs
+
+Inside the existing `subscription_recovery_service` sweep — **not** a second
+loop. A second loop would mean a second leader lease over the same probe
+budget, and the only thing between two leases and a double probe is a 60s
+per-worker floor, which is not a coordination primitive.
+
+Per subscription, per cycle, in two sibling `try/except` blocks:
+
+1. `recover_probe(sid)` — #447, unchanged, **first**.
+2. `ensure_reading(sid, max_age=SAMPLE_INTERVAL_SECONDS)` then
+   `classify_headroom(...)`.
+
+The ordering is load-bearing. `_probe_floor_ok` bounds probes at 60s per
+subscription, so whichever consumer probes first floors the other out. This way
+a believed-limited subscription is refreshed by the path that wants the tight
+cadence and `ensure_reading` serves that zero-age snapshot for free; reversed,
+`recover_probe` would answer `"floored"` and #447 would quietly stop working.
+The sibling `try/except` is the same argument in the failure direction: an
+alert-path bug must not take down the only mechanism that clears a stale
+`LIMIT` badge.
+
+The sweep gained bounded concurrency and a between-chunk lease refresh. It now
+touches every subscription rather than the normally-empty believed-limited set,
+so `N × 15s` serial probes could otherwise outlive the lease TTL and let a
+sibling worker probe concurrently.
+
+### Fleet escalation, and the claim it does NOT make
+
+Every subscription saturated ⇒ one `high` item. It requires at least **two**
+subscriptions (with one, "this subscription is full" and "every subscription is
+full" are the same fact), and a single `unassessable` member blocks the claim
+and is named instead — a positive fleet-wide claim needs positive evidence from
+every member. When it fires, the per-subscription alerts are suppressed for
+that cycle; the fleet item names them all.
+
+The denominator is built from the subscription **roster**, never from the
+sweep's results: a member whose sampling raised carries `classification: None`
+by design (the swallow is what protects #447) and a mid-cycle lease yield
+`break`s with a short result list, so filtering results on truthiness dropped
+exactly the members the ent#100 rule requires to block the claim. A
+3-subscription instance emitted *"All 2 registered subscriptions are at or past
+75%"* with the per-subscription alerts suppressed by the early return, making
+the false claim the only emission. `fleet_verdict` was always correct; the
+caller had narrowed its input.
+
+It says *what was measured*, not "auto-switch has nowhere to go". That sentence
+would be underived: `select_best_alternative_subscription` filters on recent
+failures and reads **no headroom at all**, so it will happily relocate agents
+onto a 99% subscription. Teaching it about headroom is
+`abilityai/trinity#2409`, which consumes this classifier.
+
+### Cadence, cost, and the toggle
+
+`SAMPLE_INTERVAL_SECONDS` (3600, floored at `REFRESH_SECONDS`) is a
+**constant, not an operator knob** — the operator cannot reason about the right
+value, and a mutable constant gating provider spend is the #1638 shape. It reads
+no env var at all: neither compose uses `env_file`, so an unforwarded read would
+be permanently inert while still *looking* configurable, which is the state that
+invites a later "packaging fix" creating the knob. The one genuine lever is
+`SUBSCRIPTION_SWEEP_CONCURRENCY` (probes per sweep chunk, fleet-size dependent),
+forwarded in both composes and documented in `.env.example`. At
+hourly this is ~24 probes/day/subscription of `max_tokens=1` Haiku, which is
+**4× less than a watched instance already spends** through the 900s ambient
+refresh.
+
+It rides the existing `subscription_headroom_auto_refresh` toggle rather than
+adding a second switch (operator decision). That toggle's label and caption
+claimed probing happened *"only while a dashboard is open"* — false since #447
+and more so now — and both the UI copy and the route docstring are corrected
+here. The threshold itself is the on/off control: `0` disables (the
+`operator_queue_retention_days` idiom), default 75, range 50–99, on
+`PUT /api/subscriptions/settings/headroom-alert-threshold` with a named 422 and
+a 422 block on the generic settings catch-all. The escalation tier is
+**derived** (`max(threshold, 90)`) — two independently-settable thresholds are
+an oscillator, and `validate_ops_setting` is per-key so it could not express the
+cross-field invariant.
+
+`GET /api/subscriptions/settings/headroom-auto-refresh` carries the honest
+status: `active` plus an `inactive_reason` of `no_subscriptions` /
+`threshold_disabled` / `auto_refresh_off` / `redis_unavailable` /
+`count_unavailable`, so "no alerts" is distinguishable from "not checking"
+(#2217's lesson). An unreadable subscription list is its **own** reason — it
+previously fell through every arm (`None == 0` is False) and returned
+`active: true`, claiming health from a failure in the one function whose whole
+job is naming why it is off.
+
+**It is rendered.** The threshold input and the status line live in
+`SubscriptionsPanel.vue` beside the auto-refresh toggle, over the `BaseInput` /
+`BaseButton` / `InlineError` primitives. The backend shipped first with no
+client at all, which left AC #1's "Settings-surfaced value" API-only and AC #4's
+"reports itself inactive **on the Settings surface**" reaching nobody — the
+exact #2217 failure this design cites throughout. Decidable rules (validation
+copy, the changed-check, the status line) live in
+`utils/headroomAlertSettings.js` rather than the SFC: vitest runs
+`environment: 'node'` with no mount harness, so a rule expressed inside a
+component is one no test can reach (the ent#392 precedent).
+
+### Residual
+
+`create_item` has no UPDATE path, so a warning row keeps the number it was
+raised with — a 75% alert still reads 75% when the subscription later sits at
+92%. Same residual `retention_guard` documents for its own alarm. The
+escalation is a separate id with a self-contained body, so the newer figure
+arrives as a second item rather than an edit.

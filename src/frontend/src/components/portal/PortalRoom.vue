@@ -120,6 +120,11 @@
       </div>
     </div>
 
+    <!-- ent#458: loops any agent PARTICIPANT is running. Scoped to the room's
+         participants, so a loop on an agent that is not in this room does not
+         appear here. -->
+    <PortalLoops :participants="agentParticipants" />
+
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
       <div class="max-w-4xl mx-auto">
@@ -202,6 +207,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalLoops from './PortalLoops.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import {

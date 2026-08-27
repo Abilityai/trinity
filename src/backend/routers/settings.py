@@ -100,6 +100,13 @@ LEGACY_SKILLS_LIBRARY_KEYS = {
     "skills_library_branch",
 }
 
+# ent#434 — the catch-all blocks this key in favour of the dedicated route.
+from services.subscription_headroom_alerts import (
+    THRESHOLD_SETTING as HEADROOM_ALERT_THRESHOLD_KEY,
+    MIN_THRESHOLD_PCT as HEADROOM_THRESHOLD_MIN,
+    MAX_THRESHOLD_PCT as HEADROOM_THRESHOLD_MAX,
+)
+
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
@@ -2986,6 +2993,34 @@ async def update_setting(
         assert_plaintext_write_allowed(key)
     except SecretSettingWriteError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+    # ent#434: the weekly-headroom alert threshold has a dedicated,
+    # range-validated route. Blocked here for the same reason as every sibling
+    # above — this catch-all takes an unvalidated string, and a small VALID
+    # integer is the dangerous input, not garbage (#1644's lesson): "5" would
+    # be stored verbatim and alarm on every subscription forever.
+    if key == HEADROOM_ALERT_THRESHOLD_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via "
+                "PUT /api/subscriptions/settings/headroom-alert-threshold "
+                f"(0 to disable, else {HEADROOM_THRESHOLD_MIN}-{HEADROOM_THRESHOLD_MAX})"
+            ),
+        )
+
+    # T1 (ent#434 review): close the standing hole rather than adding a
+    # twelfth `if key == ...` arm. Every key in OPS_SETTINGS_VALIDATION is
+    # type- and range-checked on PUT /api/settings/ops/config and was checked
+    # NOWHERE on this route, so an ops key reachable here accepted "abc" or
+    # "-40" verbatim. Validating here makes the two write paths agree, and it
+    # covers ops keys added in future without anyone remembering to.
+    from config import OPS_SETTINGS_VALIDATION, validate_ops_setting
+    if key in OPS_SETTINGS_VALIDATION:
+        try:
+            body.value = validate_ops_setting(key, body.value)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     try:
         setting = db.set_setting(key, body.value)

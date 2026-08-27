@@ -331,6 +331,11 @@ services:
       # #1039 packaging-gap class) and the owner-facing PUT .../circuit-breaker
       # toggle silently no-ops (#1487). Default false.
       - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
+      # ent#434: how many subscriptions the background headroom sweep probes
+      # concurrently. Bounded so an N-subscription fleet x a 15s probe timeout
+      # cannot outlive the sweep's leader lease. A real operator lever (fleet
+      # size dependent), so it is forwarded rather than left inert.
+      - SUBSCRIPTION_SWEEP_CONCURRENCY=${SUBSCRIPTION_SWEEP_CONCURRENCY:-4}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
       # max concurrent Docker stat fetches per refresh. Mirrors docker-compose.yml;
       # without these lines the .env knobs are inert in prod (the #1039
@@ -458,8 +463,13 @@ services:
     restart: unless-stopped
     # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
     # preserved so external URLs do not change.
+    # #2280: FRONTEND_PORT was inert here — hardcoded "80". start.sh offers it
+    # as the remedy for a port conflict and prints the resulting URL in its
+    # summary, so an operator who set it got a working suggestion that changed
+    # nothing and an access URL pointing at a port nothing listened on. The
+    # container side stays 8080 (unprivileged nginx, #874).
     ports:
-      - "80:8080"
+      - "${FRONTEND_PORT:-80}:8080"
     depends_on:
       backend:
         condition: service_healthy

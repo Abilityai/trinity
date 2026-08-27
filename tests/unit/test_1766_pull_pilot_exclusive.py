@@ -157,8 +157,6 @@ def _payload(triggered_by: str):
         user_email="u@x",
         subscription_id=None,
         x_source_agent=None,
-        x_mcp_key_id=None,
-        x_mcp_key_name=None,
         triggered_by=triggered_by,
         collaboration_activity_id=None,
     )

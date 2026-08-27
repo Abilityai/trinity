@@ -683,6 +683,74 @@
   this issue does not specify.
 - **Flow**: [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md)
 
+### 5.14 Stopping an in-flight turn — Escape and a Stop control (ent#155)
+- **Status**: ✅ Implemented (2026-08-25)
+- **Description**: A sent message that is still processing can be stopped from
+  every conversation surface, and the text comes back into the composer so it
+  can be edited and re-sent. Previously the only options were to wait for the
+  turn or for its timeout, and the words were gone either way.
+- **Scope**: the Agent Detail **Chat** tab, the **public link** chat, and the
+  **Workspace**. The issue's AC named Session mode as a fourth; ent#358 retired
+  that surface (`SessionPanel.vue` is deleted and `?tab=session` redirects), so
+  the Workspace — its successor — takes its place in the list rather than the
+  AC being dropped.
+- **The machinery is not new, and is deliberately not re-implemented**: the
+  cancel path (backend terminate → agent-server process-registry SIGINT →
+  CANCELLED terminal, #679/#1332, CAS-guarded and neutral for the dispatch
+  breaker) already existed and was already used by the Tasks panel. What ent#155
+  adds is a trigger on the three surfaces, two new routes to reach it from the
+  two credentials that are not a JWT, and the restore rule.
+- **Authorization is per surface, because the principal differs**:
+  - Agent Detail uses the existing `POST /api/agents/{name}/executions/{id}/terminate`
+    with the operator's JWT.
+  - The public link gets `POST /api/public/executions/{token}/{id}/terminate` —
+    the token is the credential, exactly as for the `status` and `stream` routes
+    it sits beside, and scoping is per LINK because a public link has no
+    per-visitor identity to check against. Anyone holding the link can already
+    watch a turn's stream — but reading is passive and cancelling destroys work, so
+    that is NOT the same authority (review finding). The route additionally
+    requires `triggered_by == "public"`, so a link-holder cannot reach a
+    scheduled run, an operator's chat, or a Workspace turn on the same agent.
+  - The Workspace gets `POST /api/enterprise/client-portal/agents/{name}/executions/{id}/terminate`
+    behind the **same three gates as its stream route**, using the same
+    `execution_belongs_to_caller` function rather than a second copy of the
+    predicate: roster, execution-belongs-to-agent, and **started-by-this-caller**.
+    The third is load-bearing — executions are agent-scoped, so without it a
+    client of a shared agent could stop another client's turn by guessing an id.
+- **`terminate_execution` became principal-agnostic**: `current_user` is optional
+  and the activity row records an `actor_kind` (`operator` / `public_link` /
+  `workspace_client`). A public visitor and a Workspace client are real people
+  with no `users` row, so a NULL `user_id` is correct and the kind is what keeps
+  it legible.
+- **Escape is conservative by construction**: it cancels only when a turn is in
+  flight, no cancel is already running, the key is not a composed IME candidate,
+  no other handler has claimed it, and nothing else currently owns Escape.
+  What owns it is declared PER SURFACE and declared generously — Agent Detail
+  lists the voice overlay and the session menu, the Workspace lists the composer
+  typeahead, the agent picker and dictation — because a missed cancel costs one
+  click on Stop while a wrong one destroys work the user is still waiting for.
+  Escape with nothing running is a no-op that never clears the input.
+- **Restoring the words never destroys a draft**: the cancelled text is
+  prepended to whatever was typed while waiting, and the merge is idempotent, so
+  pressing Escape and then Stop cannot stack two copies.
+- **Honest status**: a successful cancel renders as cancelled, not as an error;
+  a cancel that lost the race to a finished turn answers `already_terminal` / `already_finished` and
+  says nothing at all, because the reply is already on screen; a *refused*
+  terminate leaves the input untouched and says the turn is still running —
+  restoring the text there would imply a stop that did not happen.
+- **Rules are pure** (`utils/turnCancel.js`) and shared by all three surfaces,
+  because `vitest.config.js` runs `environment: 'node'` with no mount harness: a
+  rule decided inside an SFC is a rule no test can reach. The Stop control lives
+  in the shared `ChatInput` for the two chat surfaces — one control, not a
+  second hand-built copy (#2370's lesson).
+- **OSS-core by decision (ent#155)**: deliberately ungated — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because CLAUDE.md's default for an enterprise-tracker feature is *gated unless
+  ruled otherwise*, so the ruling must never be inferred later from the mere
+  fact that it merged. Rationale: two of the three surfaces are OSS-core chat,
+  the cancel machinery is OSS-core, and Workspace ships OSS-core throughout.
+- **Flow**: [chat-turn-cancellation.md](../feature-flows/chat-turn-cancellation.md)
+
 ---
 
 ### 5.14 Workspace deliverables — reports gain an audience and a place to appear (trinity-enterprise#365)
@@ -739,6 +807,59 @@ is existing output gaining an audience.
   (`(addressed_to_email, agent_name, created_at)` and `(portal_session_id, created_at)`)
   because the Workspace reads by audience on a table retention lets grow to 90 days.
 - **Flow**: `docs/memory/feature-flows/workspace-deliverables.md`
+
+### 5.15 Workspace ratings — thumbs on a message, Useful on a deliverable (trinity-enterprise#366)
+
+**Description**: One-click feedback in the Workspace. Thumbs up/down on an agent
+message, Useful / Not what I needed on a deliverable card (the affordance §5.14
+left that card as the surface for). A negative rating opens an optional comment
+box; the words are recorded either way and handed to the agent's
+`capture-feedback` skill when it has one.
+
+- **FR-1 — A rating is a platform primitive, not a skill**: it writes to
+  `agent_evaluations` (§ ent#206's referee surface) under an evaluator of
+  `workspace:<email>`. A capture-feedback skill runs *inside* the agent, so it
+  can summarise charitably, omit, or fail silently — and a user rating is the one
+  score that must not pass through the thing being scored. The rated agent has no
+  write path to this table; ent#366 **amends** that write fence to admit a
+  Workspace principal rather than widening it for anyone else.
+- **FR-2 — The target is checked against the reader**: message and report ids are
+  global, so an id alone proves nothing. A **message** must belong to this agent
+  AND this client and be the *agent's* message (rating your own is refused — it
+  would put a self-rating in the agent's tally); a **deliverable** reuses §5.14's
+  audience gate, so "can rate" and "was addressed to you" are one question
+  answered in one place. A target that fails either check returns the **same 404**
+  a missing one does (Invariant #8).
+- **FR-3 — Idempotent per person per target**: `UNIQUE(evaluator, target_kind,
+  target_id) WHERE target_id IS NOT NULL`. A second thumb is a correction, which
+  is what makes a tally count **people rather than clicks**. Partial, so the
+  graded-run rows a Tier-0 pass writes (no target) are untouched.
+- **FR-4 — A raw tally, never a percentage** (agent page): one thumbs-down out of
+  one rating renders as "100% negative" — a number that looks like evidence and
+  is not. Both counts cross to the page; an unreadable tally is flagged
+  `unavailable` so it cannot render as a real zero.
+- **FR-5 — The rated agent reads tallies, never the words** (the issue's open
+  grooming question, decided): `_redact_for_agent_principal` strips `comment` for
+  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
+  comment" from "not yours to read". Two reasons: a score an agent can read is a
+  loop it may optimise for, and the comment is untrusted text written by an
+  annoyed stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces see the text.
+- **FR-6 — Degrades without the skill**: the rating and comment are durable
+  **before** anything is dispatched. With the skill, a background turn runs
+  `capture-feedback` with the client's words **fenced as data** (the
+  `routers/webhooks.py` framing) and never in the client's own thread; without
+  it, the response says `skill_not_installed` and the UI thanks the person for
+  words that were recorded rather than promising a follow-up.
+- **FR-7 — A failed rating is shown, not swallowed**: unlike the fail-soft
+  deliverables read, the store surfaces the error next to the control — a rating
+  that silently did not record leaves the person believing they were heard.
+- **Not NPS**: a promoter percentage from a handful of users is a number that
+  looks like evidence and is not. The free text was the valuable part.
+- **Migrations**: dual-track — `_migrate_workspace_ratings` + Alembic
+  `0047_workspace_ratings`; four nullable columns (`target_kind`, `target_id`,
+  `comment`, `updated_at`) and the partial UNIQUE above.
+- **Flow**: `docs/memory/feature-flows/workspace-ratings.md`
 
 ## 6. Activity Monitoring
 

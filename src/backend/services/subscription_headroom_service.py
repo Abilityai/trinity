@@ -70,6 +70,21 @@ FRESHNESS_SECONDS = REFRESH_SECONDS * 2
 # `resolve_rate_limited_now`).
 RECOVERY_PROBE_SECONDS = int(os.getenv("SUBSCRIPTION_RECOVERY_PROBE_SECONDS", "300"))
 
+# ent#434: how often the background sampler refreshes a subscription that
+# nobody is watching. Deliberately a FLOORED CONSTANT, not an operator knob
+# (#1644): the operator cannot reason about the right value, and a mutable
+# constant read at action time gating provider spend is the shape #1638 warns
+# about. Hourly is ample for a window that spans a week, and it is 4x LESS
+# than a watched instance already spends via REFRESH_SECONDS.
+# Not env-readable, deliberately. An earlier revision read
+# `SUBSCRIPTION_SAMPLE_INTERVAL_SECONDS` here, which contradicted the sentence
+# above AND could never be set: neither compose uses `env_file`, so a var that
+# is not an explicit `environment:` entry never reaches the container. An env
+# read that cannot be satisfied is the worst of both — it reads as configurable,
+# is inert, and invites a later "packaging fix" that creates exactly the knob
+# this comment argues against.
+SAMPLE_INTERVAL_SECONDS = max(REFRESH_SECONDS, 3600)
+
 AUTO_REFRESH_SETTING = "subscription_headroom_auto_refresh"
 
 _SNAPSHOT_KEY = "subscription:headroom:{sid}"
@@ -471,8 +486,34 @@ async def recover_probe(subscription_id: str) -> str:
     return "recovered" if status == "ok" else f"still_{status}"
 
 
+# THE provider window-status vocabulary (#2396). One constant, two predicates —
+# they disagreed for exactly one value and that was the bug.
+#
+# This is an ALLOWLIST of statuses observed to mean "requests are being served",
+# never a blocklist of statuses that mean "blocked". The direction is deliberate
+# and load-bearing: the provider does not publish this vocabulary, so an
+# unrecognised status MUST read as blocking. (The inverse mistake — a deny-check
+# that silently admits every future value — is the #848 lesson in
+# docs/memory/learnings.md; here the safe default runs the other way.)
+#
+# `allowed_warning` is the provider's own near-the-limit tier and was absent
+# from this set, so every subscription approaching its weekly window was
+# reported rate-limited while the provider was still serving it. Verified on a
+# live instance: a snapshot recording `seven_day: 90%, allowed_warning` sat
+# beside 47 successful executions, zero `subscription_rate_limit_events`, and
+# `overage_status: allowed` — the provider said allowed, and meant it.
+NON_BLOCKING_WINDOW_STATUSES = frozenset({"allowed", "allowed_warning"})
+
+
 def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> bool:
-    """Fresh provider verdict only — a stale snapshot never drives the badge."""
+    """Fresh provider verdict only — a stale snapshot never drives the badge.
+
+    Window statuses are judged against ``NON_BLOCKING_WINDOW_STATUSES``, so an
+    unrecognised status still reads as limited. Note the ordering: an actual
+    HTTP 429 sets the top-level ``status`` and is caught FIRST, above any window
+    status — so the window arm is the weaker, secondary signal, and the db
+    predicate in ``resolve_rate_limited_now`` is a third, independent one.
+    """
     if headroom is None:
         return False
     age = headroom.snapshot_age_seconds
@@ -481,7 +522,7 @@ def _headroom_indicates_limited(headroom: Optional[SubscriptionHeadroom]) -> boo
     if headroom.status == "rate_limited":
         return True
     for w in (headroom.five_hour, headroom.seven_day):
-        if w and w.status and w.status not in ("allowed",):
+        if w and w.status and w.status not in NON_BLOCKING_WINDOW_STATUSES:
             return True
     return False
 
@@ -493,7 +534,28 @@ def _headroom_indicates_healthy(headroom: Optional[SubscriptionHeadroom]) -> boo
     negation: "not limited" is also true for a stale snapshot, a rejected token
     and a transport error, none of which are evidence the subscription is
     usable. Only a fresh ``ok`` snapshot carrying at least one window, every
-    reported window ``allowed``, is positive proof of headroom.
+    reported window non-blocking, is positive proof of headroom.
+
+    **``allowed_warning`` counts as headroom (#2396), and that is a decision,
+    not an accident.** It is the provider's near-the-limit tier: the quota was
+    reached, the answer was "yes", and the request was served. The states this
+    predicate deliberately excludes are stale / rejected-token / transport
+    error — "none of which are evidence the subscription is usable" (#447) — and
+    a warning-tier reading plainly IS such evidence. Excluding it would keep a
+    stale ``LIMIT`` badge on a working subscription for up to the db predicate's
+    two hours, which is the #447 bug returning in a narrower window.
+
+    It is **not** an assessability gate, and an earlier revision of this
+    docstring wrongly said ent#434 would consume it as one. It returns
+    ``False`` for a stale snapshot, a rejected token, a transport error **and**
+    a genuinely saturated subscription — so it cannot tell "no evidence" from
+    "no headroom", and the most saturated subscription in a fleet is
+    indistinguishable from an unreachable one. The weekly-window alert path
+    needs exactly that distinction and uses ``classify_headroom`` below.
+
+    The BODY is deliberately unchanged: ``resolve_rate_limited_now`` consumes
+    this predicate, so a behavioural edit here moves every ``LIMIT`` badge in
+    the product (learnings 2026-08-25).
     """
     if headroom is None:
         return False
@@ -505,7 +567,118 @@ def _headroom_indicates_healthy(headroom: Optional[SubscriptionHeadroom]) -> boo
     windows = [w for w in (headroom.five_hour, headroom.seven_day) if w is not None]
     if not windows:
         return False
-    return all(w.status in (None, "allowed") for w in windows)
+    return all(
+        w.status is None or w.status in NON_BLOCKING_WINDOW_STATUSES for w in windows
+    )
+
+
+# ent#434 — the weekly-window verdict, three-state on purpose.
+#
+# `_headroom_indicates_limited` / `_headroom_indicates_healthy` above are a
+# BINARY pair over "is this subscription usable right now", and both collapse
+# every not-usable reason into one `False`. The alert path needs the third
+# state: a subscription can be *known saturated*, *known to have room*, or
+# *not assessable at all*, and conflating the last two is how a positive
+# fleet-wide claim gets made on absent evidence (the ent#100 rule).
+SATURATED = "saturated"
+HAS_HEADROOM = "has_headroom"
+UNASSESSABLE = "unassessable"
+
+
+def classify_headroom(
+    headroom: Optional[SubscriptionHeadroom],
+    *,
+    threshold_pct: float,
+    max_age_seconds: Optional[int] = None,
+) -> str:
+    """Classify one subscription's WEEKLY window as saturated / has-headroom /
+    unassessable (ent#434).
+
+    Keyed on **utilization**, not on window status — those axes are orthogonal
+    and conflating them reproduces #2396 in a new place. `allowed_warning` is
+    deliberately non-blocking (the provider is serving the request), so a
+    status-driven classifier would file a live 90% reading as `has_headroom`,
+    which is the exact reading this feature exists to alarm on.
+
+    Window status still carries information, just a *stronger* one: a 7d window
+    the provider reports as blocking is past warning, and a probe that came
+    back 429 is the provider refusing outright. Both are `saturated` regardless
+    of whether a number came with them.
+
+    Every "we could not tell" path returns `unassessable`, never
+    `has_headroom` — including the easily-missed one where the provider
+    reports a 5h window and no 7d window at all (`parse_unified_headers`
+    admits that shape: its top guard passes on `5h-utilization` alone). A gate
+    written as "ok status + non-blocking windows" would claim weekly headroom
+    on zero weekly evidence.
+
+    `utilization_pct` is `Optional` INDEPENDENTLY of status, so it is never
+    coerced: a missing number cannot be compared to a threshold, and coercing
+    it to 0 or 100 invents a reading in the direction of the coercion.
+    """
+    if headroom is None:
+        return UNASSESSABLE
+
+    age = headroom.snapshot_age_seconds
+    limit = FRESHNESS_SECONDS if max_age_seconds is None else max_age_seconds
+    if age is None or age > limit:
+        return UNASSESSABLE
+
+    # The provider refused the probe outright — the strongest saturation
+    # evidence there is, and it arrives with no utilization figure.
+    if headroom.status == "rate_limited":
+        return SATURATED
+    # invalid_token / error / no_windows / anything unrecognised: we learned
+    # nothing about the quota. Never a headroom claim.
+    if headroom.status != "ok":
+        return UNASSESSABLE
+
+    week = headroom.seven_day
+    if week is None:
+        return UNASSESSABLE
+    if week.status is not None and week.status not in NON_BLOCKING_WINDOW_STATUSES:
+        return SATURATED
+    if week.utilization_pct is None:
+        return UNASSESSABLE
+    return SATURATED if week.utilization_pct >= threshold_pct else HAS_HEADROOM
+
+
+async def ensure_reading(
+    subscription_id: str, *, max_age_seconds: int
+) -> tuple:
+    """ONE probe decision per subscription per cycle — returns `(headroom, probed)`.
+
+    The background loop calls this exactly once per subscription and hands the
+    SAME reading to every consumer. That matters because `_probe_floor_ok`
+    bounds probes at 60s per subscription: two consumers each deciding for
+    themselves means the second one is floored out and reads "no data" on
+    precisely the subscriptions the first one just refreshed.
+
+    Ordering with #447 is load-bearing and lives at the call site: recovery
+    runs FIRST, so for a believed-limited subscription its probe has already
+    written a zero-age snapshot by the time this is called, and this returns
+    that reading without spending a second probe. For everything else recovery
+    is a no-op and this one does the sampling.
+
+    Fail-CLOSED on Redis, exactly like `recover_probe`: a client object
+    existing is not Redis being reachable (learnings 2026-08-19), and without a
+    readable cache the result could not be stored for any surface to see, so it
+    would be quota spent for nothing.
+    """
+    redis_ok, snapshot = _read_snapshot(subscription_id)
+    if not redis_ok:
+        return None, False
+
+    age = _snapshot_age_seconds(snapshot) if snapshot else None
+    stale = snapshot is None or age is None or age > max_age_seconds
+    if stale and _probe_floor_ok(subscription_id, snapshot):
+        fresh = await _locked_probe(subscription_id)
+        if fresh is not None:
+            return _to_model(fresh), True
+        # `None` = single-flight contention or no resolvable token. Fall
+        # through and serve whatever we already had; the classifier decides
+        # whether that is still assessable.
+    return _to_model(snapshot), False
 
 
 def resolve_rate_limited_now(

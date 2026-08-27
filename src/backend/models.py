@@ -433,6 +433,16 @@ class User(BaseModel):
     # credential-rotation row cannot distinguish "the owner from a browser" from
     # "the owner's leaked MCP key".
     mcp_scope: Optional[str] = None
+    # #2323: WHICH credential this principal presented. `validate_mcp_api_key`
+    # has always returned these; `get_current_user` dropped them, so an admin
+    # action taken with a machine key audited byte-identically to the owner in a
+    # browser — and `routers/a2a.py` read `mcp_key_id` off this model via
+    # `getattr` in two places that have therefore never worked (one of them the
+    # A2A idempotency SCOPE, where the fallback to username collapses two
+    # agent-scoped keys of one owner into a shared `messageId` namespace).
+    # None on the JWT branch, which is the honest "no credential" answer.
+    mcp_key_id: Optional[str] = None
+    mcp_key_name: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -1558,6 +1568,15 @@ class EvaluationResponse(BaseModel):
     judge: Optional[Any] = None
     evaluator: str
     created_at: str
+    # ent#366 — a one-click Workspace rating carries what was rated and, for a
+    # negative one, the person's words. `comment_withheld` says the text exists
+    # but was not shown to THIS caller (the rated agent), so a reader can tell
+    # "no comment" from "not yours to read".
+    target_kind: Optional[str] = None
+    target_id: Optional[str] = None
+    comment: Optional[str] = None
+    comment_withheld: bool = False
+    updated_at: Optional[str] = None
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
@@ -1743,7 +1762,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
     here.
     """
     server_name: str
-    # ok | foreign_user_key | foreign_agent_key | unknown_key
+    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key
     verdict: str
     key_scope: Optional[str] = None
     key_prefix: Optional[str] = None
@@ -1753,7 +1772,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
 class AgentMcpKeyVerifyResult(BaseModel):
     """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
     agent_name: str
-    # ok | foreign_user_key | foreign_agent_key | unknown_key | not_configured
+    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key | not_configured
     # | shadow_entry | unavailable
     verdict: str
     message: Optional[str] = None

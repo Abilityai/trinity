@@ -31,6 +31,109 @@ cp .env.example .env
 # API Docs: http://localhost:8000/docs
 ```
 
+## Installing on a server — use the pull-only path (#2280)
+
+**On a server, `--hosted` is the default you want.** The Quick Start above builds
+every image from source, and the agent base image alone (Python + Node + Go +
+Claude Code, ~1.9 GB) takes 5-10 minutes and wants more RAM than a small VM has
+spare. Hosted mode pulls prebuilt images from GHCR instead, so a fresh VM is
+serving in roughly two minutes:
+
+```bash
+git clone https://github.com/abilityai/trinity.git && cd trinity
+cp .env.example .env          # set ADMIN_PASSWORD, ANTHROPIC_API_KEY, ...
+
+# Pin the release you want, in .env — `latest` moves on every Trinity release,
+# so an unpinned install turns your next upgrade into an unscheduled one.
+# Each release publishes v0.9.0, 0.9.0, 0.9, latest and sha-<short> for the
+# same digest, so either version spelling works.
+echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env
+
+./scripts/deploy/start.sh --hosted --unattended
+```
+
+`start.sh` reads `TRINITY_IMAGE_TAG` from `.env` (an explicit shell or CI value
+wins over it). Put it in the file rather than the environment: `.env` is where
+the pin survives a reboot, an unattended re-run, and whoever runs the upgrade
+next.
+
+This is the same script, the same `.env` contract and the same
+`ADMIN_PASSWORD` behaviour as a source install — only the image source differs.
+`--hosted` selects [`docker-compose.hosted.yml`](../docker-compose.hosted.yml),
+which is `docker-compose.prod.yml` with the `build:` blocks replaced by GHCR
+`image:` references and nothing else changed (a CI guard,
+`tests/unit/test_2280_hosted_compose_parity.py`, fails the build if the two ever
+disagree on a service, port, volume, network or environment variable).
+
+If a pull fails with `denied` or `unauthorized` rather than `manifest unknown`,
+the tag exists but its GHCR package is not public. That is a publishing fault,
+not a local one — the release workflow verifies anonymous pullability for every
+image it pushes (`Verify anonymous pull` in
+[`publish-images.yml`](../.github/workflows/publish-images.yml)), so a red step
+there is the signal; report it rather than working around it with a login.
+
+**Minimum size: 8 GB RAM.** Below that the agent containers and the platform
+services contend and turns start failing under load.
+
+**Converting an existing source install in place is not a drop-in.** The dev
+stack keeps `/data` in the named volume `trinity-data`; hosted (like prod) binds
+`${TRINITY_DATA_PATH:-./trinity-data}`. They are different stores, so `--hosted`
+in a checkout that has been running `docker-compose.yml` would come up on an
+empty database and migrate from zero while the real one sat in the volume —
+with Redis, which the two stacks share, not reset. `start.sh --hosted` detects
+this and refuses with the copy command rather than starting; run that, then
+re-run.
+
+**Run `start.sh --hosted` to upgrade, not a bare `docker compose pull`.** The
+agent base image is not a compose service — the backend creates agent containers
+through the Docker SDK from the local tag `trinity-agent-base:latest` — so the
+script pulls it and retags it separately. A plain `docker compose -f
+docker-compose.hosted.yml pull` updates the four platform images and silently
+leaves every agent on the old runtime.
+
+Useful commands on a hosted install (note the explicit `-f` — hosted opts out of
+compose's default file merge):
+
+```bash
+docker compose -f docker-compose.hosted.yml logs -f backend
+docker compose -f docker-compose.hosted.yml stop     # 'stop', never 'down'
+```
+
+### TLS on a bare VM
+
+Trinity serves plain HTTP and terminates TLS **outside** the application. There
+is no HTTPS listener in the compose file and no auto-certificate step, so pick
+one of these before putting an instance on a public address:
+
+| Path | What it gives you | When to use it |
+|---|---|---|
+| **Tunnel** (Cloudflare Tunnel — set `TUNNEL_TOKEN` in `.env`) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
+| **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | What the managed fleet runs. HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
+| **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
+
+Plain HTTP on a public IPv4 with none of the above is the one combination to
+avoid: credentials and JWTs cross the network in the clear.
+
+The `cloudflared` service is **profile-gated** (`profiles: ["tunnel"]`), so it
+does not start just because `TUNNEL_TOKEN` is set. `start.sh --hosted` activates
+the profile for you when the token is present; any other invocation needs it
+passed explicitly:
+
+```bash
+docker compose -f docker-compose.hosted.yml --profile tunnel up -d
+# or: COMPOSE_PROFILES=tunnel docker compose -f docker-compose.hosted.yml up -d
+```
+
+Check it actually came up — `docker ps | grep cloudflared`. A missing tunnel
+container is silent, and leaves the instance in exactly the plain-HTTP state
+this table says to avoid.
+
+A marketplace droplet (#2281) is a special case — it comes up on a bare public IP
+with no domain, which is why that channel provisions a Caddy sidecar using
+Let's Encrypt's short-lived IP certificates, and why Trinity shows a first-run
+hardening guide there (#2380) prompting for a real domain or a VPN. That guide is
+gated on install provenance and never appears on an install like this one.
+
 ## Configuration
 
 > **Database backend:** Trinity uses **SQLite by default** (zero-config). To run

@@ -217,6 +217,27 @@
 - **Consumer**: this ships the backend only. The realistic ent#259 consumer is a compact in-tile **sparkline**, not a labelled trend chart — FleetGrid v1 renders every tile in exactly one cell (`cells` is declared and deliberately ignored), the tile body is `overflow: hidden` with no scroll, and its row list silently drops anything past a hardcoded cap. `SubscriptionsPanel.vue` is the roomier second consumer.
 - **Storage shape**: a dedicated table, not the generic `product_events`. That table has no `subscription_id`, is bound to the activation-funnel's own retention window, and **egresses** — `telemetry_sharing_service.build_aggregate_payload` counts it by type and POSTs it on Tier-2 opt-in, so per-subscription quota telemetry does not belong there.
 
+### 20.5c Weekly Subscription-Limit Alert (ent#434)
+- **Status**: 🔨 In progress (2026-08-26)
+- **GitHub Issue**: abilityai/trinity-enterprise#434 (P2, `theme-monetization`, `complexity-medium`)
+- **Extends**: 20.5a (#471, the reading) and 20.5b (ent#433, the history that settled the window semantics)
+- **OSS-core by explicit decision** (team ruling 2026-08-26, recorded on the issue): the #471 gate ruling carries over — visibility is ungated, the paid layer is governance (ent#166). Rationale given: cost/price display already ships in OSS. Recorded here so it is never inferred backwards from the mere fact that it merged (the ent#326 discipline).
+- **Description**: 20.5a made the weekly reading real and 20.5b made it durable; neither tells the operator anything *before* the limit is reached. This adds the alert: a per-subscription warning when the 7-day window crosses a configurable threshold, and a fleet escalation when every registered subscription is saturated at once.
+- **The window is FIXED-with-reset, not rolling — measured, not assumed.** Querying 20.5b's own history table settled it: `seven_day_resets_at` held CONSTANT at one midnight-UTC instant across five days of probes while utilization climbed 36→90, then STEPPED exactly +7 days. Under a rolling window with continuous usage it would have advanced continuously. (`docs/memory/feature-flows/dashboard-grid-view.md` described these as rolling; that claim is corrected.) Two consequences, both of which REMOVE specified work:
+  1. Utilization is monotonic non-decreasing inside a window, so the specified **hysteresis floor is dead code** — the only real re-arm is the reset.
+  2. `resets_at` IS the window's identity, so the deterministic alert id `sub-headroom-{sid}-{reset-day}-{tier}` becomes the **entire state machine**: `create_item` maps `item["id"]` onto `request_id` under `UNIQUE(agent_name, request_id)` with ON CONFLICT DO NOTHING, so the same window re-emits into the same row (edge-trigger), a reset mints a new id (re-arm), and cross-worker/cross-restart dedup is free. **No durable memo** — nothing to leak, race, or clean up on `delete_subscription`. The id is quantised to the DAY as a belt: were some plan to behave as rolling, it degrades to one alert/day rather than one/probe.
+- **The threshold fires; the projection ranks.** There is deliberately no configurable "alert if the reset is less than N hours away" — no such constant is right for every operator. Window length is known and `resets_at` says how much is left, so `projected_end = utilization_pct / fraction_of_window_elapsed` derives the operator's own pace: 75% at day 3 projects to 175%, 75% with hours left to ~77%. Per the operator ruling the alert is **never withheld** at the threshold; the projection sets `priority` (`low` under 100% projected, `high` at or over). An unknowable projection is treated as not-on-pace — a missing `resets_at` is not evidence of an emergency.
+- **Assessability is a THIRD state, not the existing binary predicate.** `classify_headroom` → `saturated | has_headroom | unassessable`. `_headroom_indicates_healthy` returns `False` for a stale snapshot, a rejected token, a transport error **and** a genuinely saturated subscription, so it cannot distinguish "no evidence" from "no headroom" — used as the gate, the fleet escalation would be blocked by exactly the condition it exists to report. (#2396's docstring named this feature as that predicate's consumer; that was wrong and is corrected. Its BODY is untouched — `resolve_rate_limited_now` consumes it, so a behavioural edit moves every `LIMIT` badge.) The classifier keys on **utilization, not window status**: `allowed_warning` is deliberately non-blocking per #2396, so a status-driven classifier would file a live 90% reading as `has_headroom`. Status remains the *stronger* signal — a blocking 7d status or a probe 429 is `saturated` with or without a number, counting toward the fleet claim but raising no percentage-crossing alert, because there is no percentage to name. Every could-not-tell path returns `unassessable`, including a 5h-only snapshot (`parse_unified_headers` admits that shape).
+- **Fleet escalation, and the claim it does NOT make**: requires ≥2 subscriptions (with one, "this is full" and "every one is full" are the same fact) and every member assessable — one `unassessable` blocks the claim and is named instead (the ent#100 positive-evidence rule). When it fires the per-subscription alerts are suppressed for that cycle. It states what was **measured** and deliberately does **not** say "auto-switch has no viable target": `select_best_alternative_subscription` filters on recent failures and reads no headroom at all, so that claim would be underived. Teaching it headroom is abilityai/trinity#2409 (P1), which consumes this classifier.
+- **Cadence rides the existing sweep, not a new loop.** A second background loop would mean a second leader lease over the same probe budget, and the only thing between two leases and a double probe is a 60s per-worker floor, which is not a coordination primitive. Per subscription: `recover_probe` (#447) **first**, then `ensure_reading` + `classify_headroom`, in **sibling** try/excepts. Both orderings are load-bearing — `_probe_floor_ok` bounds probes at 60s/subscription, so whichever consumer probes first floors the other out; ordered this way recovery's zero-age snapshot is reused, reversed `recover_probe` answers `"floored"` and #447 silently stops clearing stale `LIMIT` badges. The sibling split keeps an alert-path bug from taking down that same mechanism.
+- **Probe cost, disclosed**: ~24 probes/day/subscription (`max_tokens=1` Haiku) — **4x less than a watched instance already spends** via the 900s ambient refresh. `SAMPLE_INTERVAL_SECONDS` (3600, floored at `REFRESH_SECONDS`) is a **code constant that reads no env var**: neither compose uses `env_file`, so an unforwarded read would be permanently inert while still reading as configurable, which invites a later "packaging fix" creating the knob #1644 argues against. The one genuine lever is `SUBSCRIPTION_SWEEP_CONCURRENCY` (probes per sweep chunk, fleet-size dependent), forwarded in both composes and documented in `.env.example`.
+- **Configuration + honest status**: threshold on `PUT /api/subscriptions/settings/headroom-alert-threshold` (`assert_admin`; `0` disables per the `operator_queue_retention_days` idiom, else 50–99 with a **named 422**; blocked on the generic settings catch-all). The escalation tier is **DERIVED** (`max(threshold, 90)`), never a second knob — two settable thresholds are an oscillator and `validate_ops_setting` is per-key, so it structurally cannot express the cross-field invariant. It rides the existing `subscription_headroom_auto_refresh` toggle rather than adding a switch (operator decision); that toggle's copy claimed probing happened "only while a dashboard is open", untrue since #447, and is corrected. `GET /api/subscriptions/settings/headroom-auto-refresh` carries `active` plus an `inactive_reason` of `no_subscriptions | threshold_disabled | auto_refresh_off | redis_unavailable`, so "no alerts" is distinguishable from "not checking" (#2217).
+- **Emitter hygiene**: platform-only, on sentinel `_sub-headroom` (uncreatable — `sanitize_agent_name` strips the leading `_`), registered in `_PLATFORM_ALARM_SENTINELS` (else every alert is a permanent L-03 orphan), `_RESERVED_ID_PREFIXES` (else an agent pre-creates the id and on-conflict-silences its own alarm), and the `test_1677` platform-only allowlist. `expires_at` is `None` — `mark_operator_queue_expired` flips any pending row past it fleet-wide every 5s. Context carries ids, names, percentages, timestamps and counts only (canary G-04); a per-cycle cap bounds a whole fleet crossing at once.
+- **Residual (stated, not hidden)**: `create_item` has no UPDATE path, so a warning row keeps the number it was raised with — a 75% alert still reads 75% when the subscription later sits at 92%. Same residual `retention_guard` documents for its own alarm. The escalation is a separate id with a self-contained body.
+- **Settings surface**: the threshold input and the honest status line render in `SubscriptionsPanel.vue` beside the auto-refresh toggle; decidable rules live in `utils/headroomAlertSettings.js` because vitest has no component-mount harness (ent#392). `count_unavailable` is a fifth `inactive_reason` — an unreadable subscription list must not fall through to `active: true`.
+- **The fleet denominator comes from the roster, not the results** — a member whose sampling raised is `UNASSESSABLE`, not absent. Filtering results on truthiness dropped exactly the members the ent#100 rule requires to block the claim, and the early return suppressed the per-subscription alerts, so the false claim was the only emission. Found in review of PR #2410; the durable class is in `learnings.md` (2026-08-26).
+- **No schema change, no migration** — the state machine is the alert id, and the threshold is a `system_settings` row.
+
 ### 20.6 Credential Rotation via Hot-Reload, not Container Recreate (#1089)
 - **Status**: ✅ Implemented (2026-06-13)
 - **GitHub Issue**: #1089
@@ -284,6 +305,122 @@
   `docs/memory/requirements/github.md` §11.10 — this section is the
   security-surface pointer; the resolution mechanics and the recreate-vs-create
   ladder distinction live there.
+
+### 20.10 Machine Identities for Admin/Ops APIs (#2323)
+- **Status**: ✅ Implemented.
+- **Premise correction (recorded, because the issue as filed says the opposite)**:
+  Trinity already had a machine identity for admin/ops surfaces. A `user`-scoped
+  MCP key owned by an admin reaches every admin gate, is **already exempt from
+  interactive 2FA** (the MFA gate is invoked only at the two login routes; key
+  validation never passes through it), is already revocable, and already rotates
+  by minting a second key while the first stays valid. What it lacked was
+  **bounds, attribution, and expiry** — so the only 2FA-surviving option was a
+  permanent, unattributable, unlimited admin credential, a worse posture than the
+  control it worked around.
+- **Admin gate is an allowlist (`ADMIN_GATE_SCOPES`)**: `require_admin` /
+  `assert_admin` require `mcp_scope ∈ {None, "user", "system"}`. A scope that
+  sets neither `agent_name` nor `connector_agent` previously walked both named
+  rejections and inherited the owner's role. A principal lacking the attribute
+  fails **closed** via a sentinel — never a `None` default, which is the
+  privileged JWT value. See `architecture.md` Invariant #8.
+- **`ops` scope — read-only, route-fenced, self-authorizing**:
+  - Admin-minted and **human-only** to mint (`reject_non_interactive_principal` —
+    the allowlist form; the guards used for `portal_delegate` are both no-ops for
+    an ops principal, so an ops key could otherwise mint ops keys).
+  - Fenced at the **single auth entry point** (`get_current_user`), beside the
+    connector / ephemeral / portal_delegate fences. **Every entry is a `GET`**,
+    asserted by a test that imports the constant; the method belt stops a future
+    `POST /api/ops/*` inheriting read access under a prefix.
+  - Kept **out** of `ADMIN_GATE_SCOPES`; an admin-gated ops route opts in with
+    `assert_admin(..., allow_scopes={"ops"})`, or `Depends(require_admin_allowing("ops"))`
+    for the `Depends` spelling (#2389 — `require_admin` took no `allow_scopes`, so
+    an allowlisted route gated that way was permanently dead to ops keys with no
+    opt-in available; the factory delegates the whole ladder to `assert_admin`
+    rather than restating it). The opt-in is what makes the grant **per route** —
+    a new ops route is inaccessible until someone adds it, rather than silently
+    reachable.
+  - **The opt-in is an ADDITIONAL gate, never a substitute one (#2389).** An ops
+    key is a *narrowing* of its owner, not a *decoupling* from them: the scope is
+    admitted and `role == "admin"` is still enforced afterwards. An earlier
+    revision of this section claimed the tier "stops every ops integration dying
+    when that admin is offboarded" — **it does not, and could not**: demoting the
+    owner 403s the key at every ops read, and `get_current_user` rejects a
+    principal whose owner carries `suspended_at` (#995) one layer above this gate,
+    so suspension — the usual offboarding action — kills it before any of this
+    runs. Dropping the role check for an opted-in scope was considered and
+    refused: it would make this bounded tier *harder* to revoke than the unbounded
+    `user`-scoped key it exists to displace, and it still could not deliver the
+    claim. #2323 asked for a credential that survives enforced **2FA** — which it
+    does — not one that survives its owner.
+    **Operator consequence:** an ops key is bound to the account that minted it.
+    Mint it under a dedicated service admin account that is not offboarded with
+    people, and put revoke-and-re-mint in the offboarding runbook for any ops key
+    held by a departing admin. Pinned by `test_2323_machine_identities.py` so the
+    claim cannot drift back.
+  - Never carries an `agent_name` (`_AGENTLESS_SCOPES`): three sweeps — the
+    canary orphan scan, the key orphan sweep, and the rename/purge cascade —
+    find their work by filtering `scope IN ('agent','connector')`, so a
+    non-agent scope holding an agent name is invisible to all three.
+  - Excluded from the MCP tool surface **by construction**: `OPERATOR_SCOPES` is
+    an allowlist pinned by its own test. This is a backend bearer credential.
+  - Fence set is derived from the **measured** read set of the real consumer, not
+    from the issue's wording (which named only `/api/ops/*` and would have
+    shipped a credential unable to run the dashboard it exists for).
+- **Audit attribution comes from the presented credential**: `models.User` carries
+  `mcp_key_id`/`mcp_key_name`; `platform_audit_service.log()` derives the three
+  `mcp_*` columns from `actor_user` when not passed explicitly, fixing ~70 call
+  sites with no diff at any of them. `actor_type` stays `"user"` — the owner is
+  the accountable party and is the only branch yielding an email, and the
+  enterprise user-activity view matches on it. `GET /api/audit-log` gains
+  `mcp_key_id` / `mcp_scope` filters so "what did that leaked key touch?" is
+  answerable.
+- **The `X-MCP-Key-Id` / `X-MCP-Key-Name` headers are gone from the backend**: they
+  were `Header(None)` on six routes, validated nowhere, and persisted into the
+  backlog replay blob — so honouring them let any authenticated caller forge the
+  credential named in the two highest-volume audit events, surfacing minutes later
+  on queue drain. The parameters were **removed**, not ignored. Review (#2389)
+  found the removal had covered the *audit* path only: five routers still declared
+  the headers and wrote them into **durable provenance columns** — `schedule_
+  executions.source_mcp_key_id` (`/chat`, `/task`, schedule trigger), `agent_loops`,
+  `agent_reminders`, the fan-out rows — and `backlog_service` still persisted both
+  into `backlog_metadata`, the longest-lived copy of a request and the one surface
+  canary G-04 scans and #1449 scrubs. One request therefore produced two provenance
+  records that disagreed, and the forged one outlived the honest one. Every writer
+  now derives from `current_user.mcp_key_id`/`mcp_key_name`; **no route declares
+  either header** (guarded by a router-tree scan, so the class cannot return one
+  endpoint at a time), and the blob no longer carries them — `_spawn_drain` never
+  read either key back, so they were stored and never reconstructed. A pre-existing
+  queued row still holding them drains unchanged (the drain reads the blob
+  key-by-key with `.get()`). The MCP server still *sends* the headers; nothing on
+  the backend reads them, and the values it sends are the same key the bearer
+  already identifies.
+- **Security fix carried by the same change**: the A2A inbound idempotency scope
+  reads `mcp_key_id` off the principal and fell back to `username` because the
+  field did not exist, so two agent-scoped keys of one owner shared a
+  peer-controlled `messageId` namespace — caller B received caller A's full
+  response text and B's task never ran. Reachable on an entitled install with ≥2
+  `a2a_exposed` agents under one owner. **Deploy note**: the scope string moves
+  from `a2a:{agent}:{username}` to `a2a:{agent}:{key_id}`, so a `messageId`
+  replayed across the deploy re-executes instead of replaying (bounded by the 24h
+  TTL).
+- **Explicitly NOT delivered**: key expiry (`mcp_api_keys` still has no
+  `expires_at`); narrowing the existing `user` scope (would break the fleet); a
+  **write-capable** ops tier — the human-driven ops toolkit's 24 writes stay on
+  password auth or a `user`-scoped key. The read fence does not retire the admin
+  password.
+- **Two costs inherited, not introduced** (flagged in review; stated so they are
+  not discovered): key validation writes `last_used_at`/`usage_count` on **every**
+  request, so a 10s poll takes a write lock every 10s; and
+  `GET /api/ops/fleet/status` issues one HTTP round-trip **per agent**, through
+  the client that hosts the transport circuit breaker. Neither is a regression —
+  the Observatory already polls exactly these endpoints on an admin JWT at the
+  same cadence, and this credential replaces that one rather than adding load.
+  A `track_usage=False` path exists (the heartbeat uses it) and is the obvious
+  lever if the write rate becomes a problem, at the cost of the key appearing
+  dormant; caching for the fleet-status fan-out is a separate change.
+- **Honest bound**: the credential narrows the **API** surface only. Ops tooling
+  that mutates containers over SSH never touches the API; SSH remains the real
+  privilege boundary on those hosts.
 
 ---
 

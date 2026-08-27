@@ -1158,7 +1158,7 @@ class TestAutomationSwitchIsHumanOnly:
         from fastapi import HTTPException
 
         # The real gate is deliberately NOT stubbed — that is what's under test.
-        monkeypatch.setattr(router_mod, "assert_admin", lambda user: None)
+        monkeypatch.setattr(router_mod, "assert_admin", lambda user, **kw: None)
         body = MagicMock(
             auto_sync_enabled=True, auto_sync_interval_seconds=None,
             auto_reinject_enabled=True,
@@ -1172,7 +1172,7 @@ class TestAutomationSwitchIsHumanOnly:
 
     def test_human_admin_still_passes_the_gate(self, router_mod, monkeypatch):
         """The guard must not lock out the operator it exists to protect."""
-        monkeypatch.setattr(router_mod, "assert_admin", lambda user: None)
+        monkeypatch.setattr(router_mod, "assert_admin", lambda user, **kw: None)
         monkeypatch.setattr(router_mod.db, "set_setting", MagicMock())
         monkeypatch.setattr(
             router_mod.platform_audit_service, "log", AsyncMock()
