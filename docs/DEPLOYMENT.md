@@ -134,6 +134,13 @@ Let's Encrypt's short-lived IP certificates, and why Trinity shows a first-run
 hardening guide there (#2380) prompting for a real domain or a VPN. That guide is
 gated on install provenance and never appears on an install like this one.
 
+Provenance is set by whatever builds the image — `TRINITY_INSTALL_SOURCE` in
+`.env` (`do-marketplace` / `vultr-marketplace` / `script`), read once at first
+boot and recorded permanently. Setting it by hand afterwards does nothing: the
+recorder never overwrites an existing value and the API refuses to write or
+clear it, because a gate that can be self-asserted is not a gate. Leave it unset
+on an ordinary install — the guide then renders nowhere, which is the intent.
+
 ## Configuration
 
 > **Database backend:** Trinity uses **SQLite by default** (zero-config). To run

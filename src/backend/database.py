@@ -183,6 +183,9 @@ def init_database():
         # itself as applied and never asks again). PostgreSQL had NO writer for
         # this key at all: no Alembic revision touches it.
         _mark_setup_completed_if_provisioned_engine()
+        # #2380: record install provenance. No ordering requirement —
+        # it needs only `system_settings`; placed last so none is implied.
+        _record_install_source_engine()
         return
 
     db_path = Path(DB_PATH)
@@ -240,6 +243,29 @@ def init_database():
             # above, while `users` is still empty on a fresh install, finds
             # nothing, and is then RECORDED as applied so it never asks again.
             _mark_setup_completed_if_provisioned(cursor, conn)
+
+            # #2380: record install provenance. No ordering requirement —
+            # it needs only `system_settings`; placed last so none is implied.
+            _record_install_source(cursor, conn)
+
+
+_INSTALL_SOURCE_RECORDED_NOTE = (
+    "[#2380] Install provenance recorded: install_source=%s (from "
+    "TRINITY_INSTALL_SOURCE). This is written once and never overwritten."
+)
+_INSTALL_SOURCE_INVALID_NOTE = (
+    "WARNING: [#2380] TRINITY_INSTALL_SOURCE=%r is not a recognised install "
+    "source; nothing recorded and provenance reads as 'unknown'. Valid values: "
+    "%s"
+)
+_INSTALL_SOURCE_CONFLICT_NOTE = (
+    "WARNING: [#2380] TRINITY_INSTALL_SOURCE=%s but this install is already "
+    "recorded as %s; keeping the recorded value (provenance is written once)."
+)
+_INSTALL_SOURCE_SKIPPED_NOTE = (
+    "WARNING: [#2380] install provenance not recorded (%s); provenance reads "
+    "as 'unknown' and the marketplace hardening guide stays hidden"
+)
 
 
 _FRESH_INSTALL_SEED_NOTE = (
@@ -524,6 +550,139 @@ def _mark_setup_completed_if_provisioned_engine():
         print(_SETUP_COMPLETED_RECONCILE_NOTE)
     except Exception as e:
         print(_SETUP_COMPLETED_RECONCILE_SKIPPED % e)
+
+
+def _record_install_source(cursor, conn):
+    """Record HOW this instance was installed, once, at first boot (#2380).
+
+    Reads `TRINITY_INSTALL_SOURCE` (written into `.env` by whatever provisioned
+    the box — a Marketplace Packer script, cloud-init, `start.sh`) and persists
+    it to `system_settings`. Every later read goes to the row, not the env, so
+    provenance survives an operator editing `.env`, a compose change, or a
+    migration to a different host.
+
+    **Write-once, first-writer-wins.** An already-recorded value is never
+    overwritten, only logged if it disagrees. Provenance is a historical fact
+    about an installation event, not a setting: if a later `.env` edit could
+    rewrite it, then it would answer "what does this box currently claim" rather
+    than "how was this box installed", and the marketplace gate would become
+    self-assertable by anyone who can edit a file.
+
+    **An unrecognised value records NOTHING** — not the value, and not
+    `unknown`. Recording `unknown` would combine with write-once to freeze a
+    typo permanently; leaving the row absent reads as `unknown` all the same
+    (see `settings_service.get_install_source`) while letting a corrected marker
+    land on the next boot.
+
+    Deliberately NOT a migration, for #2381's reason: a migration runs once and
+    records itself, so an instance provisioned before it — or one whose marker
+    was fixed afterwards — could never be answered. A boot-time recorder
+    converges on the next restart.
+
+    No ordering requirement against the seeds or `_ensure_admin_user`; it needs
+    only `system_settings` to exist. Do not add one.
+
+    Fails SAFE and never raises. `init_database` runs at import time, so a raise
+    here would crash-loop the backend permanently (the `_seed_fresh_install_*`
+    contract). The cost of a skip is a hidden guide; the cost of a raise is an
+    instance that does not start.
+    """
+    try:
+        # Imported inside the guard, like everything else here: an import that
+        # raised outside it would defeat the fail-safe contract this docstring
+        # promises, on a function that runs at import time.
+        from config import (
+            INSTALL_SOURCE_SETTING_KEY,
+            INSTALL_SOURCE_VALUES,
+            TRINITY_INSTALL_SOURCE,
+        )
+
+        declared = TRINITY_INSTALL_SOURCE
+        if not declared:
+            return
+        if declared not in INSTALL_SOURCE_VALUES:
+            print(_INSTALL_SOURCE_INVALID_NOTE % (
+                declared, ", ".join(sorted(INSTALL_SOURCE_VALUES))
+            ))
+            return
+
+        cursor.execute(
+            "SELECT value FROM system_settings WHERE key = ?",
+            (INSTALL_SOURCE_SETTING_KEY,),
+        )
+        row = cursor.fetchone()
+        existing = (row[0] or "").strip() if row is not None else ""
+        if existing:
+            if existing.lower() != declared:
+                print(_INSTALL_SOURCE_CONFLICT_NOTE % (declared, existing))
+            return
+
+        # INSERT OR IGNORE, matching the seeds beside this one — write-once is
+        # then enforced by the PRIMARY KEY rather than resting solely on the
+        # SELECT above, which is a separate statement and therefore a
+        # check-then-act. OR REPLACE would overwrite on any path that reached
+        # here with a row already present.
+        #
+        # A row holding an EMPTY value is the one case the two disagree about:
+        # the read above treats it as absent (it carries no provenance), so the
+        # INSERT is attempted and correctly ignored, leaving the empty row. That
+        # is deliberate — an empty row can only come from a direct DB write, and
+        # silently upgrading someone's manual edit into a recorded provenance
+        # value is exactly the self-assertion this design refuses.
+        cursor.execute(
+            "INSERT OR IGNORE INTO system_settings (key, value, updated_at) "
+            "VALUES (?, ?, ?)",
+            (INSTALL_SOURCE_SETTING_KEY, declared, utc_now_iso()),
+        )
+        conn.commit()
+        if cursor.rowcount:
+            print(_INSTALL_SOURCE_RECORDED_NOTE % declared)
+    except Exception as e:
+        print(_INSTALL_SOURCE_SKIPPED_NOTE % e)
+
+
+def _record_install_source_engine():
+    """Engine-based twin of `_record_install_source` (#2380).
+
+    Same write-once contract and the same fail-safe guarantee; see that
+    docstring for why each property is load-bearing.
+    """
+    try:
+        from config import (
+            INSTALL_SOURCE_SETTING_KEY,
+            INSTALL_SOURCE_VALUES,
+            TRINITY_INSTALL_SOURCE,
+        )
+
+        declared = TRINITY_INSTALL_SOURCE
+        if not declared:
+            return
+        if declared not in INSTALL_SOURCE_VALUES:
+            print(_INSTALL_SOURCE_INVALID_NOTE % (
+                declared, ", ".join(sorted(INSTALL_SOURCE_VALUES))
+            ))
+            return
+
+        settings_ops = SettingsOperations()
+        # `.strip()` so an empty-or-whitespace row reads as absent on BOTH
+        # backends — the SQLite twin's `row[0]` and this accessor's `""` default
+        # must not disagree about what counts as "already recorded". This read
+        # exists only to LOG a disagreement; the write below is what enforces
+        # write-once, so nothing rests on the gap between the two.
+        existing = (settings_ops.get_setting_value(INSTALL_SOURCE_SETTING_KEY, "") or "").strip()
+        if existing:
+            if existing.lower() != declared:
+                print(_INSTALL_SOURCE_CONFLICT_NOTE % (declared, existing))
+            return
+
+        # `insert_setting_if_absent`, never `set_setting` — the latter is an
+        # upsert and now refuses this key outright. Write-once is enforced by
+        # the PRIMARY KEY here exactly as `INSERT OR IGNORE` does on the SQLite
+        # arm, so neither backend rests it on the SELECT above.
+        if settings_ops.insert_setting_if_absent(INSTALL_SOURCE_SETTING_KEY, declared):
+            print(_INSTALL_SOURCE_RECORDED_NOTE % declared)
+    except Exception as e:
+        print(_INSTALL_SOURCE_SKIPPED_NOTE % e)
 
 
 def _ensure_admin_user_engine():
@@ -2140,6 +2299,10 @@ class DatabaseManager:
 
     def set_setting(self, key: str, value: str):
         return self._settings_ops.set_setting(key, value)
+
+    def insert_setting_if_absent(self, key: str, value: str) -> bool:
+        """Write-once setting insert; True when a row was written (#2380)."""
+        return self._settings_ops.insert_setting_if_absent(key, value)
 
     def delete_setting(self, key: str):
         return self._settings_ops.delete_setting(key)

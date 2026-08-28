@@ -1286,6 +1286,30 @@ Example:
                   <dd class="font-mono text-gray-900 dark:text-white text-xs">{{ buildInfo.info.value.build_date }}</dd>
                 </div>
               </dl>
+
+              <!-- Install provenance (#2380). Deliberately OUTSIDE the branch
+                   ladder above. That ladder ends in `isMissing`, which is true
+                   when every git field is the literal "unknown" — a build-time
+                   fact about the IMAGE. Install source is a DB row written at
+                   first boot; one being absent says nothing about the other, and
+                   nesting them meant a locally-built image hid its provenance
+                   from the one surface an operator is told to read for it.
+                   `unknown` renders as "Not recorded" rather than hiding the row:
+                   the absence of a marker IS the answer, and a missing row would
+                   read as a missing feature. Humanised label plus the dimmed raw
+                   value, matching the Commit row. -->
+              <dl
+                v-if="buildInfo.info.value && !buildInfo.loading.value && !buildInfo.error.value"
+                class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm mt-3 pt-3 border-t border-gray-200 dark:border-gray-700"
+              >
+                <div>
+                  <dt class="text-gray-500 dark:text-gray-400">Install source</dt>
+                  <dd class="text-gray-900 dark:text-white">
+                    <span>{{ installSourceLabel }}</span>
+                    <span class="ml-2 text-xs font-mono opacity-60">{{ installSourceRaw }}</span>
+                  </dd>
+                </div>
+              </dl>
             </div>
           </div>
 
@@ -2128,6 +2152,23 @@ const enterpriseStore = useEnterpriseStore()
 
 // #926: cached fetch of /api/version (singleton shared with NavBar).
 const buildInfo = useBuildInfo()
+
+// #2380: how this instance was installed, from the same /api/version payload.
+// The raw value is the machine truth and is always shown; the label exists
+// because "do-marketplace" means nothing to an operator reading a panel.
+const INSTALL_SOURCE_LABELS = {
+  'do-marketplace': 'DigitalOcean Marketplace',
+  'vultr-marketplace': 'Vultr Marketplace',
+  script: 'Install script',
+  unknown: 'Not recorded',
+}
+const installSourceRaw = computed(() => buildInfo.info.value?.install_source || 'unknown')
+// An unrecognised value falls through to itself rather than to "Not recorded":
+// a newer backend reporting a channel this bundle has not heard of is a fact
+// worth showing, not one to flatten into "we have no idea".
+const installSourceLabel = computed(
+  () => INSTALL_SOURCE_LABELS[installSourceRaw.value] || installSourceRaw.value
+)
 
 const loading = ref(true)
 const saving = ref(false)
@@ -3093,6 +3134,9 @@ async function savePublicUrl() {
     setTimeout(() => {
       publicUrlSaveSuccess.value = false
     }, 3000)
+    // Refresh the install_tls_posture flag this session gates on — what retires
+    // the #2380 hardening card in-session instead of on the next hard reload.
+    sessionsStore.loadFeatureFlags(true).catch(() => {})
   } catch (e) {
     error.value = e.response?.data?.detail || 'Failed to save public URL'
   } finally {
