@@ -293,6 +293,7 @@ _EXPECTED_UPDATE_SITES = {
     "prune_execution_logs",                # nulls execution_log AND tool_calls (#1741 — a transcript copy must not outlive the transcript)
     "resummarize_legacy_tool_calls",       # #1741: rewrites tool_calls to the summary shape; `status` untouched (no status in the WHERE either)
     "scrub_terminal_backlog_metadata",     # #1449: nulls backlog_metadata (reads status in a WHERE filter only)
+    "restamp_execution_dispatch",          # #2433: re-anchors started_at/queued_at at dispatch after a backend-queue park; CAS on status == RUNNING + NULL lease, `status` untouched
 }
 
 

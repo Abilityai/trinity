@@ -358,6 +358,15 @@ services:
       # (the #1039 packaging-gap class). Default false; safe to flip early
       # (non-202 agent responses fall back to sync). Backend-only.
       - DISPATCH_ASYNC=${DISPATCH_ASYNC:-false}
+      # Backend agent-call limiter (#904): concurrent outbound agent calls held
+      # per uvicorn worker, and how long a call may wait in that queue (0 = wait
+      # forever). Mirrors docker-compose.yml; without these lines the .env
+      # levers are inert in prod (the #1039 packaging-gap class) — #2433 found
+      # operators unable to raise the cap under a parallel load test. A parked
+      # call is now re-anchored at dispatch and visible to the watchdog, but the
+      # cap itself is still the fleet-wide fan-out bound.
+      - BACKEND_AGENT_CALL_LIMIT=${BACKEND_AGENT_CALL_LIMIT:-8}
+      - BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S=${BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S:-3600}
       # Dispatch circuit breaker global gate (RELIABILITY-007, #526). Producer-side
       # per-agent breaker; engages ONLY when this AND the per-agent
       # agent_ownership.circuit_breaker_enabled toggle are both on. Mirrors

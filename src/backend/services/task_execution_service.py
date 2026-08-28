@@ -35,7 +35,9 @@ from services.activity_service import activity_service
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.agent_call_limiter import (
     BackendAgentCallBudgetExhausted,
+    BackendAgentCallCancelled,
     acquire_agent_call_slot,
+    track_inflight_dispatch,
 )
 from services.agent_client import CircuitState
 from services.capacity_manager import (
@@ -524,6 +526,7 @@ async def agent_post_with_retry(
     max_retries: int = 3,
     retry_delay: float = 1.0,
     timeout: float = 600.0,
+    execution_id: Optional[str] = None,
 ) -> httpx.Response:
     """
     POST to an agent container with exponential-backoff retry.
@@ -540,39 +543,74 @@ async def agent_post_with_retry(
     connect-retry attempt independently — a `httpx.ConnectError` that
     triggers a retry briefly releases the slot so other callers aren't
     blocked while we sleep before the next attempt.
+
+    #2433: when ``execution_id`` names the ``schedule_executions`` row this
+    call serves, the whole call (queue wait, connect retries, the POST) is
+    registered as an in-flight dispatch — the proof-of-life the cleanup
+    watchdog consults before it orphans a row the agent does not know. A
+    park of ``DISPATCH_RESTAMP_THRESHOLD_SECONDS`` or more in the semaphore
+    queue re-anchors the row at grant (``started_at`` re-stamped, the
+    admission instant kept in ``queued_at``, the capacity-slot lease
+    renewed) so the park never spends the run's own budget; a cancel that
+    landed during the park raises ``BackendAgentCallCancelled`` at grant
+    instead of dispatching.
     """
     agent_url = f"http://agent-{agent_name}:8000{endpoint}"
 
-    last_error: Optional[Exception] = None
-    for attempt in range(max_retries):
+    async def _on_dispatch_granted(parked_seconds: float) -> None:
+        if not execution_id:
+            return
+        restamped = False
         try:
-            async with acquire_agent_call_slot(agent_name):
-                async with agent_httpx_client(agent_name, timeout=timeout) as client:
-                    response = await client.post(agent_url, json=payload)
-                    return response
-        except BackendAgentCallBudgetExhausted:
-            # Translate to a synthetic 503 ``httpx.HTTPStatusError`` so
-            # the caller's existing `httpx.HTTPError` except branch
-            # handles slot release, execution-row FAILED write, and
-            # SUB-003 short-circuit (the new error string contains the
-            # SIGKILL/OOM markers added by #907, so `is_auth_failure`
-            # rejects it). Carrying the exception detail through a
-            # `Request`-less synthetic Response keeps the caller's
-            # status-code branching code path identical.
-            raise
-        except httpx.ConnectError as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                delay = retry_delay * (2 ** attempt)
-                logger.debug(
-                    f"Agent {agent_name} connection failed (attempt {attempt + 1}/{max_retries}), "
-                    f"retrying in {delay}s..."
-                )
-                await asyncio.sleep(delay)
-            else:
-                logger.warning(
-                    f"Agent {agent_name} connection failed after {max_retries} attempts: {e}"
-                )
+            restamped = db.restamp_execution_dispatch(execution_id)
+        except Exception as e:  # noqa: BLE001 — bookkeeping never blocks the dispatch
+            logger.warning(f"[TaskExecService] restamp failed for {execution_id}: {e}")
+        renewed = False
+        try:
+            from services.slot_service import get_slot_service  # noqa: WPS433 — lazy on purpose
+
+            renewed = await asyncio.to_thread(get_slot_service().renew_slot, agent_name, execution_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[TaskExecService] slot renew failed for {execution_id}: {e}")
+        logger.info(
+            f"[TaskExecService] Execution {execution_id} on {agent_name} parked "
+            f"{int(parked_seconds)}s in the backend call queue — re-anchored at dispatch "
+            f"(started_at restamped={restamped}, slot lease renewed={renewed})"
+        )
+
+    last_error: Optional[Exception] = None
+    async with track_inflight_dispatch(execution_id, agent_name, http_timeout=timeout):
+        for attempt in range(max_retries):
+            try:
+                async with acquire_agent_call_slot(
+                    agent_name, execution_id=execution_id, on_granted=_on_dispatch_granted,
+                ):
+                    async with agent_httpx_client(agent_name, timeout=timeout) as client:
+                        response = await client.post(agent_url, json=payload)
+                        return response
+            except BackendAgentCallBudgetExhausted:
+                # Translate to a synthetic 503 ``httpx.HTTPStatusError`` so
+                # the caller's existing `httpx.HTTPError` except branch
+                # handles slot release, execution-row FAILED write, and
+                # SUB-003 short-circuit (the new error string contains the
+                # SIGKILL/OOM markers added by #907, so `is_auth_failure`
+                # rejects it). Carrying the exception detail through a
+                # `Request`-less synthetic Response keeps the caller's
+                # status-code branching code path identical.
+                raise
+            except httpx.ConnectError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    delay = retry_delay * (2 ** attempt)
+                    logger.debug(
+                        f"Agent {agent_name} connection failed (attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.warning(
+                        f"Agent {agent_name} connection failed after {max_retries} attempts: {e}"
+                    )
 
     raise last_error or httpx.ConnectError(f"Failed to connect to agent {agent_name}")
 
@@ -1380,6 +1418,7 @@ class TaskExecutionService:
                 max_retries=3,
                 retry_delay=1.0,
                 timeout=effective_timeout,
+                execution_id=execution_id,  # #2433: in-flight proof-of-life
             )
 
             execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -1465,6 +1504,7 @@ class TaskExecutionService:
                             max_retries=3,
                             retry_delay=1.0,
                             timeout=retry_http_timeout,
+                            execution_id=execution_id,  # #2433: in-flight proof-of-life
                         )
                         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
                         logger.info(
@@ -1560,6 +1600,7 @@ class TaskExecutionService:
                             max_retries=3,
                             retry_delay=1.0,
                             timeout=retry_http_timeout,
+                            execution_id=execution_id,  # #2433: in-flight proof-of-life
                         )
                         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
                         logger.info(
@@ -1731,22 +1772,36 @@ class TaskExecutionService:
             # row should be marked FAILED with a clear message, and
             # the slot will be released by the outer `finally`.
             error_msg = str(e)
-            logger.warning(
-                f"[TaskExecService] Rejecting task on {agent_name} — backend "
-                f"call budget exhausted: {error_msg}"
-            )
+            # #2433: a cancel that landed while the call was parked in the
+            # queue surfaces here too (subclass). Write CANCELLED ourselves —
+            # not FAILED — so the row reads the same whichever writer wins the
+            # CAS, this one or the terminate path's (which may still be a
+            # couple of awaits away from its own CANCELLED write); the loser's
+            # lost-CAS branch closes the activity in the standing state.
+            cancelled = isinstance(e, BackendAgentCallCancelled)
+            if cancelled:
+                logger.info(
+                    f"[TaskExecService] Execution {execution_id} on {agent_name} was "
+                    f"cancelled while queued in the backend call queue — not dispatched"
+                )
+            else:
+                logger.warning(
+                    f"[TaskExecService] Rejecting task on {agent_name} — backend "
+                    f"call budget exhausted: {error_msg}"
+                )
             # #671/H4: CAS-gate the terminal write; complete the activity only
             # if we won.
+            terminal = TaskExecutionStatus.CANCELLED if cancelled else TaskExecutionStatus.FAILED
             await _write_terminal_and_gate(
                 execution_id,
                 activity_id,
-                status=TaskExecutionStatus.FAILED,
+                status=terminal,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
-                status=TaskExecutionStatus.FAILED,
+                status=terminal,
                 response="",
                 error=error_msg,
             )

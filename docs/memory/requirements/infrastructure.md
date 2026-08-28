@@ -215,13 +215,38 @@
   - Back-compat: existing `/health` keys unchanged; new keys additive.
 
 ### 12.9 Cleanup Service for Stuck Resources
-- **Status**: ✅ Implemented (Updated 2026-03-25, Issue #129)
+- **Status**: ✅ Implemented (Updated 2026-08-28, Issue #2433)
 - **Requirement ID**: CLEANUP-001
-- **GitHub Issue**: #94, #129
+- **GitHub Issue**: #94, #129, #2433
 - **Description**: Background service that automatically recovers stuck intermediate states via active watchdog reconciliation and passive stale detection
 - **Key Features**:
   - **Active watchdog** (Issue #129): Reconciles DB execution state against agent process registries every 5 minutes
   - Orphan recovery: Executions marked "running" in DB but not found on agent are marked failed with descriptive error
+  - **Proof-of-life is two-sided (#2433)**: an admitted execution (row `running`, slot held) is an
+    orphan only when the agent does not know it **and** no live backend dispatcher owns it. The
+    agent side reports `executions` ∪ `recently_completed_ids` ∪ `pending_ids` (accepted at
+    `/api/task` / `/api/chat` / the async spawn but not yet spawned); the backend side is the
+    `agent_call_limiter` in-flight registry (in-process, exact) plus a cross-worker Redis marker
+    `execution:inflight:{execution_id}` refreshed by one per-process task (60s TTL / 15s tick —
+    liveness, not state: a dead worker's marker lapses and the row is recovered as before, so the
+    #408 dead-coroutine class is unchanged). Read tri-state per sweep (one `MGET`): `alive` →
+    withhold; `unknown` (Redis unreadable) → withhold while a dispatcher could still own the row
+    (bounded by `inflight_max_age_seconds()`), never fail-open; `absent` → orphan. Applied at the
+    periodic watchdog, the Phase-3 slot re-verify and the startup recovery. Withheld rows are
+    counted in `CleanupReport.dispatch_inflight_skipped` (observability, not a recovery) and logged
+    once per agent per cycle
+  - A parked call is **re-anchored at dispatch** (#2433): a park of ≥5s in the backend agent-call
+    queue re-stamps `started_at` (the admission instant is kept in `queued_at`, the drained-backlog
+    shape) and renews the capacity-slot lease at grant — and the refresher renews the slot every
+    tick while parked — so a park never spends the run's own budget through the registry-blind
+    stale sweep, the slot TTL, canary E-01 or `duration_ms`
+  - A parked execution is **cancellable** (#2433): `terminate` flags the owning dispatcher (this
+    worker, or via `execution:cancel:{execution_id}` the other) so the grant refuses to POST, and
+    finalizes CANCELLED with the #679 shape; a cancel requested while the agent still had the run
+    pending is consumed at spawn (`register()` kills the group and keeps the cancel marker)
+  - The orphan error string states what was **observed** (#2433): which agent-side sets were checked
+    (`not pending` only when the image reports `pending_ids`) and that no live dispatcher owned the
+    row — never "completed on agent" for a row the agent never received
   - Auto-terminate: Executions confirmed running on agent but exceeding `timeout_seconds` are terminated via agent API
   - Race-condition guard: Conditional DB update (`WHERE status='running'`) prevents overwriting normal completions
   - Capacity/queue release: Slots and queue state released on recovery; atomic Lua-script queue release prevents TOCTOU
@@ -244,7 +269,7 @@
   - Periodic cleanup every 5 minutes
   - Admin-only status endpoint: `GET /api/monitoring/cleanup-status`
   - Admin-only trigger endpoint: `POST /api/monitoring/cleanup-trigger`
-- **Constants**: Interval 300s, execution timeout 120min, activity timeout 120min, watchdog HTTP timeout 5s, dispatch grace 60s
+- **Constants**: Interval 300s, execution timeout 120min, activity timeout 120min, watchdog HTTP timeout 5s, dispatch grace 60s; in-flight marker TTL 60s / tick 15s / re-stamp threshold 5s (#2433)
 
 ### 12.10 Execution & Health-Check Retention (Issue #772)
 - **Status**: ✅ Implemented (2026-05-11, Issue #772)

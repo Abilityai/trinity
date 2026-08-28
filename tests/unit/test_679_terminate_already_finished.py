@@ -67,7 +67,7 @@ def _drive_terminate(agent_status: str):
     import services.chat_execution_service as ce
 
     mock_db = MagicMock()
-    mock_db.get_execution.return_value = SimpleNamespace(status="running")  # not QUEUED
+    mock_db.get_execution.return_value = SimpleNamespace(status="running", agent_name="agent-a")  # not QUEUED; own row (#2433 gate)
 
     container = MagicMock()
     container.status = "running"

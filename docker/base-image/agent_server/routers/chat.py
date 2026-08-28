@@ -31,6 +31,14 @@ async def chat(request: ChatRequest):
     at a time. This is a safety net - the platform-level execution queue
     should prevent parallel requests, but this provides defense-in-depth.
     """
+    # #2433: the backend's row is already `running` and its slot is held while
+    # this request waits on the execution lock below — and nothing registered
+    # it, so the watchdog's proof-of-life (running ∪ recently-completed) missed
+    # it and orphaned it after 60s. Register it as ACCEPTED before the wait;
+    # `register()` promotes the entry at spawn, the discard below is the belt.
+    registry = get_process_registry()
+    registry.register_pending(request.execution_id, metadata={"type": "chat"})
+
     # Acquire execution lock - only one execution at a time
     # The platform-level queue should prevent this, but this is a safety net
     async with get_execution_lock():
@@ -58,6 +66,9 @@ async def chat(request: ChatRequest):
         except BaseException:
             agent_state.record_task_finish(success=False)
             raise
+        finally:
+            # #2433: promoted at spawn; this only drops an entry that never spawned.
+            registry.discard_pending(request.execution_id)
         agent_state.record_task_finish(success=True)
 
         # Add assistant response to history
@@ -141,6 +152,18 @@ async def execute_task(request: ParallelTaskRequest):
 
     # Execute via runtime adapter in headless mode (no lock, no --continue)
     runtime = get_runtime()
+    # #2433: register as ACCEPTED before anything can queue. The headless
+    # executor's `Popen` + `registry.register()` run inside a pool thread, so a
+    # request beyond the pool size was counted in /health `active_tasks` but
+    # invisible to /api/executions/running — the watchdog orphaned it (false
+    # FAILED, released slot) and the turn ran anyway. `register()` promotes the
+    # entry; the `finally` below discards whatever never spawned.
+    registry = get_process_registry()
+    registry.register_pending(
+        request.execution_id,
+        timeout_seconds=request.timeout_seconds or 900,
+        metadata={"type": "task"},
+    )
     # #1020: feed the richer /health signal — count this execution and record
     # success/failure (drives consecutive_failures, consumed by #526).
     agent_state.record_task_start()
@@ -188,6 +211,10 @@ async def execute_task(request: ParallelTaskRequest):
     except BaseException:
         agent_state.record_task_finish(success=False)
         raise
+    finally:
+        # #2433: promoted entries are already gone; this only drops an entry
+        # that never spawned (pre-spawn cancel, spawn failure).
+        registry.discard_pending(request.execution_id)
 
     # #679 graceful path: Claude catches SIGINT, emits a final message, and exits
     # 0 — the return code can't distinguish that from genuine success. Cross-check
@@ -363,6 +390,11 @@ async def list_running_executions():
         # don't read this field still work — they just lose the race window
         # protection (pre-#921 behaviour).
         "recently_completed_ids": registry.list_recently_completed_ids(),
+        # #2433: ids ACCEPTED (handler entry, async spawn, chat-lock wait) but
+        # not yet spawned. The backend unions these too, so "accepted, not yet
+        # running" is proof of life instead of an orphan verdict. Older
+        # backends ignore the field (same degrade contract as #921).
+        "pending_ids": registry.list_pending_ids(),
     }
 
 

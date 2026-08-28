@@ -1,5 +1,35 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-08-28 (#2433, in-flight dispatch proof-of-life):** an execution that was
+> **admitted** (row `running`, capacity slot held, `claude_session_id='dispatched'`) could park in
+> the backend agent-call semaphore (`services/agent_call_limiter.py`, acquired inside
+> `agent_post_with_retry` *after* Step 3b) where the cleanup watchdog's proof-of-life
+> (`GET agent/api/executions/running`) could not see it — a false `failed` after the 60s grace,
+> a **released slot**, and a turn that then ran anyway (billed, overbooked, its late 200 silently
+> overwriting the row, #378). Canonical description: architecture.md → *In-Flight Dispatch
+> Proof-of-Life (#2433)*. This service's share: (1) `agent_post_with_retry(..., execution_id=None)`
+> wraps its **whole** retry loop in `track_inflight_dispatch` — the in-process `_INFLIGHT` registry
+> plus the refresher-maintained cross-worker Redis marker `execution:inflight:{execution_id}`
+> (60s TTL, 15s tick) — so `inflight_verdicts` reads *alive* for the queue wait, the connect-retry
+> sleeps and the POST alike; (2) it passes `on_granted=_on_dispatch_granted`, which fires once at
+> semaphore grant when the park reached `DISPATCH_RESTAMP_THRESHOLD_SECONDS` (5s) and re-anchors
+> the row at dispatch — `db.restamp_execution_dispatch(execution_id)` (CAS on `RUNNING` + NULL
+> lease: `started_at = now`, admission kept in `queued_at`) + `slot_service.renew_slot` via
+> `asyncio.to_thread` — because every age check (`mark_stale_executions_failed`, canary E-01, the
+> watchdog grace, `duration_ms`) and the slot TTL were measured from admission, so a long park
+> spent the run's own budget and `park + run > timeout+300` was bulk-FAILed mid-run; (3) all three
+> `/api/task` call sites in `execute_task` (first attempt, #678 reader-race retry, #792
+> switch-retry) pass `execution_id`, as does the `/api/chat` site in `chat_execution_service`;
+> (4) the `except BackendAgentCallBudgetExhausted` branch writes and returns **CANCELLED** for the
+> `BackendAgentCallCancelled` subclass — a cancel that landed while parked is also finalized by
+> `chat_execution_service._cancel_inflight_if_parked` (agent-scoped; see
+> [chat-turn-cancellation.md](chat-turn-cancellation.md)), and the row reads CANCELLED whichever
+> writer wins the CAS; the #1804 lost branch closes the activity in the standing state. No schema change, no flag.
+> `BACKEND_AGENT_CALL_LIMIT` / `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S` are now forwarded in prod +
+> hosted compose and documented in `.env.example` (they were dev-compose-only). Tests:
+> `tests/unit/test_2433_dispatch_wiring.py`, `test_2433_limiter_inflight.py`,
+> `test_2433_db_restamp.py`, `test_2433_limiter_packaging.py`.
+
 > **Updated 2026-08-16 (#1853, telemetry+transcript on the FAILED row):** the FAILED branch of
 > `apply_result` now **mirrors the SUCCESS branch's telemetry** so an `error_during_execution`
 > (502) / timeout (504) row is diagnosable via the same API as a SUCCESS row (the substrate for
@@ -139,11 +169,11 @@ class TaskExecutionResult:
 
 Callers inspect `result.status` to decide HTTP response. Status values come from `TaskExecutionStatus` enum (`models.py`). The service never raises for agent-level errors.
 
-#### agent_post_with_retry() (line 61)
+#### agent_post_with_retry() (line 522)
 
 Moved from `routers/chat.py`. Module-level async function. Used by:
-- `TaskExecutionService.execute_task()` internally (line 249)
-- `routers/chat.py` for `/chat` endpoint and `_run_async_task_with_persistence` (the async-mode wrapper introduced by #95; previously named `_execute_task_background`)
+- `TaskExecutionService.execute_task()` internally — three `/api/task` call sites: first attempt (`:1414`), the #678 reader-race retry (`:1500`), the #792 switch-retry (`:1596`)
+- `chat_execution_service.run_chat_turn` for the `/chat` endpoint (`:636`; the async `/task` wrapper `_run_async_task_with_persistence` delegates to `execute_task`, #95)
 
 ```python
 async def agent_post_with_retry(
@@ -153,10 +183,20 @@ async def agent_post_with_retry(
     max_retries: int = 3,
     retry_delay: float = 1.0,
     timeout: float = 600.0,
+    execution_id: Optional[str] = None,   # #2433: the schedule_executions row this call serves
 ) -> httpx.Response:
 ```
 
 Exponential backoff: delay = `retry_delay * (2 ** attempt)`. Handles `httpx.ConnectError` for agent servers still booting.
+
+**Backend agent-call limiter (#904 RC-1).** Each attempt is gated by `acquire_agent_call_slot` (`services/agent_call_limiter.py`): a per-agent semaphore (cap = the effective `max_parallel_tasks`, fallback 3, frozen at first access) then a global one (`BACKEND_AGENT_CALL_LIMIT`, default 8 per uvicorn worker). The queue wait is bounded by `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S` (default **3600**; `0` = wait forever, opt-in) — on timeout `BackendAgentCallBudgetExhausted` is raised and the callers' existing except branches write FAILED without firing SUB-003 (no Claude work started). The one-shot `> 5s` queue-wait warning fires on **both** acquire branches (before #2433 it fired only on the opt-in `0` branch, so the default configuration parked calls in silence). Both knobs are forwarded in `docker-compose.yml`, `docker-compose.prod.yml` and `docker-compose.hosted.yml` and documented in `.env.example` (#2433 — they were dev-compose-only, so production could not raise the cap: the #1039 packaging-gap class).
+
+**In-flight proof-of-life (#2433).** When `execution_id` is given, the whole retry loop runs inside `track_inflight_dispatch(execution_id, agent_name, http_timeout=timeout)` (`:582`), so the queue wait, the connect-retry sleeps and the POST itself are all owned by a live dispatcher as far as the cleanup watchdog is concerned:
+
+- **Registry.** The in-process `_INFLIGHT` entry (`InflightEntry{phase: parked|calling, parked_since, cancel_requested, deadline}`) is exact for the worker that owns the coroutine; ONE refresher task per process pipelines the cross-worker marker `execution:inflight:{execution_id}` (60s TTL, 15s tick, only for entries older than a 5s grace so a fast acquire never touches Redis) and is the marker's **sole writer/deleter** (an unregister only queues the DEL). The marker is liveness, not state — a dead worker stops refreshing and the row is orphaned as before (the #408 dead-coroutine class is unchanged). A Redis failure is negative-cached for 30s and logged once per episode; every Redis touch is fail-open. An entry past its deadline (`registered_at + queue-wait bound + http_timeout + 60s`) is invisible, so a leaked entry can never keep a `running` row alive forever.
+- **Verdicts.** `inflight_verdicts(ids)` (one `MGET`) answers `alive` / `absent` / `unknown` — `unknown` only when an *established* client raised (slow Redis), `absent` when no client exists at all (the in-process registry is then the whole truth). `cleanup_service` withholds recovery on `alive`, and on `unknown` only for rows younger than `inflight_max_age_seconds()` (queue-wait bound + widest HTTP timeout + slack). Watchdog side: [cleanup-service.md](cleanup-service.md).
+- **Re-anchor at grant.** `acquire_agent_call_slot(agent_name, *, execution_id, on_granted)` (`:585`) records the `parked → calling` phase flip; when the park reached `DISPATCH_RESTAMP_THRESHOLD_SECONDS` (5s) it awaits `on_granted(parked_seconds)` = the nested `_on_dispatch_granted` (`:560`): `db.restamp_execution_dispatch(execution_id)` — CAS on `status == RUNNING AND lease_expires_at IS NULL`, `started_at = now`, `queued_at = COALESCE(queued_at, old started_at)` (the drained-backlog shape, so the wait stays visible in the row) — then `slot_service.renew_slot(agent_name, execution_id)` via `asyncio.to_thread` (see [capacity-management.md](capacity-management.md)), and one INFO line naming the park. Every age check — the registry-blind Phase-1 `mark_stale_executions_failed`, canary E-01, the watchdog's 60s grace, `duration_ms` — and the slot TTL were measured from admission, so without this a `park + run > timeout+300` was bulk-FAILed **mid-run** with its slot TTL-reclaimed. The refresher additionally renews the slot every tick while the entry is `parked`. A raising `on_granted` never blocks the dispatch (logged, swallowed). Step 3b's `mark_execution_dispatched` deliberately stays *before* the park (E-05 needs the sentinel on rows >60s).
+- **Cancelled while parked.** At grant the limiter checks the in-process `cancel_requested` flag and — for a park past the marker grace — the cross-worker key `execution:cancel:{execution_id}`, and raises `BackendAgentCallCancelled` (a subclass of `BackendAgentCallBudgetExhausted`) instead of POSTing. `chat_execution_service.terminate_execution` sets that flag through `_cancel_inflight_if_parked` (`cancel_inflight(eid, agent_name=name)` locally, else `request_cross_worker_cancel(eid, agent_name=name)` — both scoped to the agent the caller is authorised on, plus a row-level `agent_name` belt) and finalizes the row CANCELLED right there — `release_if_matches`, CAS write, activity close, a `cancelled_while_parked` activity. The dispatcher's own terminal write in the `except BackendAgentCallBudgetExhausted` branch is **CANCELLED too, not FAILED** (`_write_terminal_and_gate(status=CANCELLED)`), so the row reads the same whichever writer wins the CAS; the loser's lost-CAS branch closes the activity in the standing state. A `calling` phase goes to the agent as before. In depth: [chat-turn-cancellation.md](chat-turn-cancellation.md).
 
 #### terminate_execution_on_agent() (line 120, Issue #61)
 
@@ -189,7 +229,11 @@ Step  Action                                    Line   Dependency
 2     Acquire capacity slot                      178    slot_service.acquire_slot()
 3     Track activity start (CHAT_START)          203    activity_service.track_activity()
 3b    Mark execution dispatched                  225    db.mark_execution_dispatched()
-4     POST to agent /api/task with retry         249    agent_post_with_retry()
+4     POST to agent /api/task with retry         1414   agent_post_with_retry(..., execution_id=execution_id)
+4a      register in-flight for the WHOLE call    582    track_inflight_dispatch() — _INFLIGHT + execution:inflight:{id} marker (#2433)
+4b      park in the agent-call semaphore         585    acquire_agent_call_slot(execution_id=…, on_granted=…) (#904)
+4c      grant after a park ≥5s → re-anchor       560    _on_dispatch_granted → db.restamp_execution_dispatch() + slot_service.renew_slot() (#2433)
+4d      cancel landed while parked → no POST     1766   BackendAgentCallCancelled → CANCELLED result (#2433)
 5     Sanitize response + execution log          267    sanitize_execution_log(), sanitize_response()
 6     Update execution record with result        283    db.update_execution_status()
 7     Complete activity                          297    activity_service.complete_activity()
@@ -199,6 +243,8 @@ Step  Action                                    Line   Dependency
 > **Step 3b**: Sets `claude_session_id='dispatched'` before the agent HTTP call. This prevents the cleanup service's no-session check from falsely marking long-running executions as "Silent launch failure". Only executions that never reach dispatch (backend crash before step 3b) will be caught by the 60-second no-session cleanup.
 >
 > **Parallel codepath (#686, 2026-05-11):** The `/chat` endpoint in `src/backend/routers/chat.py` (lines 313-321) now performs the equivalent inline dispatched-mark via `db.mark_execution_dispatched(task_execution_id)` immediately before its agent HTTP call — parallel of #279. On success it also computes the real `claude_session_id` from `response_data.get("session_id")` (falling back to `session_data` then `metadata`) and passes it to `db.update_execution_status()`, replacing the 'dispatched' sentinel with the actual Claude session UUID (#686 UC1 closes the observability gap). Net effect: the no-session sweep protection now applies to interactive chat executions too, even though `/chat` does not go through `TaskExecutionService.execute_task()`.
+
+> **Steps 4a–4d (#2433)**: between Step 3b and the agent receiving the turn sits the backend agent-call semaphore — a queue the agent has never heard of. The whole `agent_post_with_retry` call is registered as an in-flight dispatch (4a) so the watchdog reads it *alive*; a park ≥5s re-stamps `started_at` and renews the slot lease at grant (4c) so the park never spends the run's own budget; a cancel that landed during the park is honoured at grant (4d) and never reaches the agent. Mechanics under [agent_post_with_retry()](#agent_post_with_retry-line-522).
 
 > **Fix #90**: The try block starts at step 2 (slot acquisition) to ensure any exception updates execution status to FAILED. The `slot_acquired` flag ensures we only release slots that were successfully acquired.
 
@@ -316,6 +362,7 @@ Key behavioral change: public executions now get full tracking that was previous
 | Get max parallel tasks | `db.get_max_parallel_tasks()` | `src/backend/database.py:416` | Delegates to `_agent_ops` |
 | Update execution status | `db.update_execution_status()` | `src/backend/database.py:574` | Updates status, response, cost, context, logs |
 | Get execution (for cancel check) | `db.get_execution()` | `src/backend/database.py:596` | Checks if status is "cancelled" before overwriting |
+| Re-anchor a parked row at dispatch (#2433) | `db.restamp_execution_dispatch()` | `src/backend/db/schedules/executions.py:292` (facade `database.py:1542`) | CAS on `status == RUNNING AND lease_expires_at IS NULL`: `started_at = now`, `queued_at = COALESCE(queued_at, old started_at)`; `False` for terminal / pull-leased / unknown rows |
 
 ### Redis Operations
 
@@ -323,8 +370,11 @@ Key behavioral change: public executions now get full tracking that was previous
 |-----------|---------|-------------|
 | Acquire slot | `SlotService.acquire_slot()` | `agent:slots:{name}` (ZSET), `agent:slot:{name}:{exec_id}` (HASH) |
 | Release slot | `SlotService.release_slot()` | Same keys, ZREM + DELETE |
+| Renew slot lease (#2433) | `SlotService.renew_slot()` — sync, via `asyncio.to_thread` at grant and from the limiter refresher's worker thread | `ZADD XX CH` score=now on the ZSET + `EXPIRE` of the HASH to its stored `timeout_seconds + 300`, together; never resurrects a released member |
+| In-flight marker (#2433) | `agent_call_limiter` refresher (sole writer/deleter) | `execution:inflight:{execution_id}` — STRING JSON `{agent, phase, since, pid}`, 60s TTL, refreshed every 15s |
+| Cross-worker cancel flag (#2433) | `agent_call_limiter.request_cross_worker_cancel()` (set) / `acquire_agent_call_slot` at grant (read) | `execution:cancel:{execution_id}` — TTL = queue-wait bound + 60s |
 
-Slot TTL: Dynamic (agent timeout + 5 min buffer). See parallel-capacity.md for details.
+Slot TTL: Dynamic (agent timeout + 5 min buffer), set at admission — re-anchored at dispatch after a park ≥5s and every 15s while parked (`renew_slot`, #2433). See capacity-management.md / parallel-capacity.md for details.
 
 ## Side Effects
 
@@ -416,6 +466,8 @@ The service catches all errors and returns `TaskExecutionResult` with `status=Ta
 |------------|---------------|--------------|----------------|
 | Slot not acquired | `status=FAILED, error="Agent at capacity..."` | 429 | 429 |
 | Dispatch breaker open (#526) | `acquire()` raises `CircuitOpen` → `status=FAILED, error="circuit_open: agent unhealthy...", error_code=CIRCUIT_OPEN` (no agent call, nothing enqueued) | 503 + `X-Circuit-Open`/`Retry-After` | 503 |
+| Backend call budget exhausted (#904) | `BackendAgentCallBudgetExhausted` after `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S` (default 3600) in the agent-call semaphore → `_write_terminal_and_gate(FAILED)`, `status=FAILED, error="Backend call budget exhausted…"` (no Claude work started; SUB-003 never fires; the outer `finally` releases the slot) | `/chat`: 503 via `_finalize_budget_exhausted` | FAILED result (no `error_code`) |
+| Cancelled while parked (#2433) | `BackendAgentCallCancelled` (subclass) at semaphore grant — in-process `cancel_requested` or `execution:cancel:{id}` — the branch writes **CANCELLED** through `_write_terminal_and_gate` (wins if the terminate path has not written yet, loses to its identical CANCELLED otherwise; the #1804 lost branch closes the activity as `cancelled`) and returns `status=CANCELLED` | `/chat`: **409** via `_finalize_budget_exhausted` (CANCELLED row + `cancelled` activities; a real exhaustion keeps 503/FAILED) | CANCELLED result |
 | Agent timeout (#61) | Terminates agent process, then `status=FAILED, error="timed out...", error_code=TIMEOUT` | 504 | 504 |
 | Agent signal-killed (#516) | Agent classifies SIGINT/SIGKILL/SIGTERM exit and returns 504 with "Execution terminated by …" detail; service treats as `status=FAILED, error=detail` (no AUTH code) | 504 | 504 |
 | Agent empty result (#520) | Agent returns 502 when `return_code == 0` but `cost_usd` and `duration_ms` are both `None` (final `result` JSON line lost — typically a child subprocess inherited stdout); service treats as `status=FAILED, error=detail` (no AUTH code) | 502 | 502 |
@@ -476,13 +528,22 @@ execute_task()
   +-- 3b. db.mark_execution_dispatched()
   |       (sets claude_session_id='dispatched' to prevent false cleanup)
   |
-  +-- 4. agent_post_with_retry(agent_name, "/api/task", payload)
+  +-- 4. agent_post_with_retry(agent_name, "/api/task", payload, execution_id=execution_id)
   |      |
-  |      +-- Retries: 3 attempts, exponential backoff (1s, 2s, 4s)
+  |      +-- track_inflight_dispatch(execution_id) ...... #2433: _INFLIGHT entry + execution:inflight:{id}
+  |      |     |                                          marker (60s TTL / 15s refresher) for the WHOLE call
+  |      |     +-- acquire_agent_call_slot(execution_id, on_granted) ... #904 per-agent + global semaphore
+  |      |     |     +-- parked >= 5s --> on_granted: db.restamp_execution_dispatch() + slot_service.renew_slot()
+  |      |     |     +-- cancel flag / execution:cancel:{id} at grant --> BackendAgentCallCancelled (no POST)
+  |      |     |     +-- queue timeout (3600s) --> BackendAgentCallBudgetExhausted --> FAILED (no SUB-003)
+  |      |     |
+  |      |     +-- Retries: 3 attempts, exponential backoff (1s, 2s, 4s) — entry kept across the sleeps
+  |      |     |
+  |      |     +-- httpx.ConnectError --> retry or fail
+  |      |     +-- httpx.TimeoutException --> terminate_execution_on_agent() --> fail (#61)
+  |      |     +-- httpx.HTTPError --> fail
   |      |
-  |      +-- httpx.ConnectError --> retry or fail
-  |      +-- httpx.TimeoutException --> terminate_execution_on_agent() --> fail (#61)
-  |      +-- httpx.HTTPError --> fail
+  |      +-- [FINALLY] unregister_inflight() --> refresher DELs the marker
   |
   +-- 5. sanitize_execution_log() + sanitize_response()
   |
@@ -564,6 +625,23 @@ Expected response from agent:
    **Expected**: Execution log in Tasks tab has credentials redacted
    **Verify**: No `sk-*`, `ghp_*`, or Bearer tokens in execution_log column
 
+6. **Action** (#2433): Set `BACKEND_AGENT_CALL_LIMIT=2`, trigger four long-running tasks on one agent (`max_parallel_tasks` ≥ 4), wait past the 60s watchdog grace and one 5-min sweep
+   **Expected**: The two parked rows are never orphaned (`dispatch_inflight_skipped` in the cleanup report, zero `orphan_recovered`); all four finish `success`; `active_slots` never drops below the count actually running
+   **Verify**: Backend log shows `parked …ms in the backend call queue — re-anchoring at dispatch`; the parked rows carry `queued_at` = admission and `started_at` = grant; Redis `execution:inflight:{id}` exists (TTL ≤ 60) while a call is in flight and is gone afterwards
+
+7. **Action** (#2433): While a task is parked (log line `Agent-call queue wait > 5s`), terminate it via the Executions UI / `POST .../executions/{id}/terminate`
+   **Expected**: `{"status": "cancelled_while_parked"}` without any agent call; the row is `cancelled`, its slot released
+   **Verify**: No `/api/task` reaches the agent for that id; backend log shows `cancelled while queued … — not dispatching` at grant
+
+### Unit tests (#2433)
+
+| File | Pins |
+|------|------|
+| `tests/unit/test_2433_dispatch_wiring.py` | `agent_post_with_retry` registers the in-flight entry for the whole call (phase `calling` during the POST, unregistered after); no `execution_id` → nothing registered; a park at grant calls `db.restamp_execution_dispatch` + `renew_slot` exactly once; a cancel while parked raises `BackendAgentCallCancelled` and never POSTs; `terminate_execution` cancels a locally-parked and an other-worker-parked row without touching the agent (`release_if_matches` + CANCELLED CAS), and falls through to the agent proxy when not parked or already `calling` |
+| `tests/unit/test_2433_limiter_inflight.py` | registry lifecycle; one pipelined marker write per tick (fakeredis, 60s TTL, grace); slot renewal only while `parked`; refresher-flushed deletes; Redis `None`/raise never reaches the caller, negative-cached and logged once; tri-state `inflight_verdicts` incl. the MagicMock-leak guard; deadline invisibility; `on_granted` only past the threshold and a raising one never blocks dispatch; cross-worker cancel key honoured at grant; the `> 5s` warning on the default branch; docstring default = code default |
+| `tests/unit/test_2433_db_restamp.py` | `restamp_execution_dispatch` on the real schema (SQLite; PostgreSQL when `TEST_POSTGRES_URL` is set): moves `started_at`, keeps the admission instant in `queued_at` (an existing one is preserved), refuses terminal / pull-leased / unknown rows |
+| `tests/unit/test_2433_limiter_packaging.py` | `BACKEND_AGENT_CALL_LIMIT` / `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S` forwarded with equal defaults in dev, prod and hosted compose; documented in `.env.example`; the module docstring's default matches `os.getenv(..., "3600")` |
+
 ## Related Flows
 
 - [parallel-headless-execution.md](parallel-headless-execution.md) -- the `/task` endpoint this service backs
@@ -576,3 +654,6 @@ Expected response from agent:
 - [scheduler-service.md](scheduler-service.md) -- dedicated scheduler that calls this service via internal API
 - [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md) -- #526 per-agent dispatch breaker; this service is its outcome-recording producer (AUTH-only) and owns the drain-on-open backgrounding
 - [task-completion-events.md](task-completion-events.md) -- #1578 system-emitted `agent.task.completed`/`failed` at this service's CAS-won terminals (`apply_result` ×2 + `_write_terminal_and_gate`)
+- [capacity-management.md](capacity-management.md) -- #2433 `SlotService.renew_slot` beside acquire/release: why the slot lease is re-anchored at dispatch after a park
+- [cleanup-service.md](cleanup-service.md) -- #2433 watchdog side: the tri-state `inflight_verdicts` read (`alive`/`absent`/`unknown`), `dispatch_inflight_skipped`, the honest orphan string
+- [chat-turn-cancellation.md](chat-turn-cancellation.md) -- #2433 parked-cancel arm of `terminate_execution` (`_cancel_inflight_if_parked` → `BackendAgentCallCancelled` at grant)

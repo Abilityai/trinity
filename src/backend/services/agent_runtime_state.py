@@ -47,6 +47,16 @@ from typing import Dict, Tuple
 logger = logging.getLogger(__name__)
 
 
+# Keyspaces that are deliberately NOT agent-keyed and therefore outside this
+# registry by construction (the `session_inflight:{session_id}` precedent):
+#   execution:inflight:{execution_id}  — #2433 live-dispatcher marker, 60s TTL,
+#                                        refreshed by agent_call_limiter's
+#                                        refresher; liveness, not state.
+#   execution:cancel:{execution_id}    — #2433 cross-worker cancel flag for a
+#                                        parked dispatch, TTL-bounded.
+# Clearing either on an agent lifecycle event would strand (or un-cancel) a
+# call that is genuinely in flight; both expire on their own.
+
 # Per-agent Redis keyspaces this module clears. Written exactly as the prefix
 # literals appear in the backend source — the parity test greps for them.
 CLEARED_KEYSPACES: Tuple[str, ...] = (

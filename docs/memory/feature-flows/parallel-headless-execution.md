@@ -3,13 +3,14 @@
 > **Requirement**: 12.1 - Parallel Headless Execution
 > **Status**: Implemented
 > **Created**: 2025-12-22
-> **Updated**: 2026-08-16 (#1853: the `error_during_execution` 502 and timeout 504 bodies now carry `metadata` + the stream-json `execution_log`, with a UUID-validated `session_id` fallback, so the FAILED row is diagnosable; prior 2026-08-14 #2127: the #970 early-finalize is gated on the CLI's background-task ledger, so a fan-out turn is no longer killed mid-wait and recorded as success)
+> **Updated**: 2026-08-28 (#2433: the agent registers an execution as **pending** at handler entry — `/api/task`, `/api/chat` before the lock wait, and the #1083 async spawn — and reports `pending_ids` on `GET /api/executions/running`, so an accepted-but-not-yet-spawned turn is proof of life to the backend watchdog instead of an orphan; headless runs move to a dedicated 32-thread pool; a cancel that lands while pending is consumed at spawn; Gemini runs now register; prior 2026-08-16 #1853: the `error_during_execution` 502 and timeout 504 bodies now carry `metadata` + the stream-json `execution_log`, with a UUID-validated `session_id` fallback, so the FAILED row is diagnosable)
 > **Verified**: 2026-02-05
 
 ## Revision History
 
 | Date | Changes |
 |------|---------|
+| 2026-08-28 | **Issue #2433 - an accepted-but-not-yet-spawned turn is proof of life, not an orphan**: the backend cleanup watchdog reads `GET /api/executions/running` (running ∪ recently-completed, #921) as the agent's proof of life, but two parks were invisible there — a `/api/task` beyond the headless pool size (`Popen` **and** `registry.register()` both ran inside a thread of the event loop's CPU-sized default pool, `min(32, cpu_count+4)` = 6 on a 2-vCPU host, so the seventh concurrent request was counted in `/health active_tasks` and registered nowhere until a thread freed) and a `/api/chat` waiting on `get_execution_lock()`, which was acquired before anything registered it. After the 60s grace the sweep wrote a false FAILED, **released the capacity slot**, and the turn then ran anyway — billed, overbooked, its late SUCCESS silently overwriting the row (#378) or its late non-success discarded. Reproduced twice locally. This is the agent-server half; the backend half (a liveness-refreshed in-flight dispatch marker, the tri-state watchdog read, lease re-anchoring at grant) is in [cleanup-service.md](cleanup-service.md) and [task-execution-service.md](task-execution-service.md). **(1)** `process_registry.py` gains a PENDING state: `register_pending(execution_id, *, timeout_seconds=None, metadata=None)`, idempotent `discard_pending(id)`, and `list_pending_ids()` with lazy expiry at `accepted_at + timeout + PENDING_SLACK_SECONDS` (60s; default window `PENDING_DEFAULT_TIMEOUT_SECONDS` = 900s) so a leaked entry can never keep a `running` row alive past the run's own budget; `register()` promotes the entry (one id, one state) and **consumes** a cancel requested while pending — `_signal_process_tree(SIGKILL)` on the group it was just handed, the #679 `_terminated` marker **kept**; the C10 stale-marker clear now applies only to entries with no cancel flag, so the #678 same-id retry still starts clean; `terminate()` on a pending id sets `cancel_requested` + the marker, keeps the entry (popping it would let the next sweep orphan a row whose thread is about to raise) and returns `{"success": True, "returncode": None, "reason": "cancelled_before_start"}`; `unregister()` also discards pending; `list_recently_completed_ids()` additionally reports registered handles that have exited but are not yet unregistered (the post-exit drain window — "completed, not yet reported"). **(2)** `routers/chat.py`: the `/api/task` sync branch calls `register_pending(request.execution_id, timeout_seconds=request.timeout_seconds or 900, metadata={"type": "task"})` before `execute_headless` and `discard_pending` in `finally` (a no-op once promoted — it only drops an entry that never spawned); `/api/chat` registers pending **before** awaiting `get_execution_lock()` and discards after execute; `GET /api/executions/running` returns `pending_ids` beside `executions` and `recently_completed_ids` (older backends ignore it — the #921 degrade contract; the backend's `_extract_agent_known_ids` unions it and says "not pending" in the orphan string only when the field was observed). **(3)** `result_callback.try_spawn_async` registers pending synchronously **before** `asyncio.create_task` — the 202 goes out before the detached task's first tick — and `_run_and_report` discards in its own `finally` (a handler-level `finally` would delete the async entry right after the 202). **(4)** `headless_executor.py`: `HEADLESS_EXECUTOR_MAX_WORKERS = 32` and a dedicated `_HEADLESS_EXECUTOR = ThreadPoolExecutor(32, thread_name_prefix="headless-task")` replace `run_in_executor(None, …)`; the constant is pinned to the backend's `settings_service.MAX_PARALLEL_TASKS_CEILING_MAX` (#506) by `tests/unit/test_2433_headless_executor.py` so the pool can never be the throttle — the real brake on concurrent claude processes remains the backend's per-agent `max_parallel_tasks`; `_run_headless_subprocess` raises `HTTPException(409, "Execution cancelled before it started")` before `Popen` when `was_terminated(ctx.task_session_id)` — an optimisation only, `register()` is the authoritative consumer (it used to clear the marker unconditionally, so a cancel landing between the check and `Popen` was erased and the turn ran to a billed SUCCESS). **(5)** `gemini_runtime.py` registers/unregisters its subprocess at BOTH `Popen` sites (chat `execute` under `execution_id`, headless `execute_headless` under `session_id`, which is the backend execution id) — it never did, so every Gemini run longer than the 60s grace was false-orphaned, and a terminate-on-pending would otherwise have "succeeded" against a process nothing could kill. Requires a base-image rebuild + agent recreate to reach an agent; until then the backend's own in-flight marker covers the gap on the running image. Tests: `tests/unit/test_2433_process_registry_pending.py` (12), `test_2433_task_handler_pending.py` (8), `test_2433_headless_executor.py` (5), `test_2433_gemini_registers.py` (3). |
 | 2026-08-16 | **Issue #1853 - the failing `error_during_execution` 502 (and timeout 504) now carry telemetry + the transcript**: the `execution_error` 502 raised a bare `detail="Execution error: <msg>"`, discarding `ctx.metadata` (session_id/cost/context) and `ctx.raw_messages` (the full stream-json transcript) that were in scope — so the whole failure class was undiagnosable after the fact (measured: 26 SUCCESS rows carried log+session_id+cost, 6 FAILED rows carried none). Fix: new `_execution_error_502_detail(ctx, message)` mirrors `_timeout_504_detail`'s shape — `{message, metadata, execution_log}` — where `metadata = sanitize_dict(ctx.metadata.model_dump())` with `session_id` resolved as `metadata.session_id or ctx.claude_session_uuid` and **UUID-shape-validated** via new `_valid_session_id` (FI-1: the fallback can be an untrusted `resume_session_id`, a log-forging vector since `sanitize_dict` does not strip newlines), and `execution_log = ctx.raw_messages`. The `message` text is **byte-identical** to the pre-#1853 bare body, so #1938's error-string fix and the backend's resume-not-found self-heal (which reads `detail["message"]`) are preserved, and the larger structured body does **not** trip `_is_reader_race_signature` (it keys on `recovery_attempted`, which this body omits — no false #678 auto-retry). `_timeout_504_detail` gains the **same** validated `session_id` fallback + `execution_log`, so the 504 timeout path persists them for real too (previously session_id was null when the reader wedged, and it carried no transcript). Both route through the backend's `except httpx.HTTPError` salvage → `apply_result` FAILED branch, which now mirrors the SUCCESS branch (`sanitize_execution_log` + the #1741 `tool_calls` summary + `claude_session_id`) — see the sibling entry in [task-execution-service.md](task-execution-service.md). Approach B (inline the sanitized transcript into the `execution_log` column, retrievable via the same API as SUCCESS, surviving stop+delete under the 30-day retention window) was chosen over a JSONL-survival scheme: SUCCESS already inlines the full sanitized transcript on every run, so inlining on the rarer failures is strictly cheaper, needs no reaper keep-window, and captures short-timeout runs (`timeout ≤ 600s`, no JSONL) from in-memory `ctx.raw_messages`. Also corrects the stale "reaps these JSONLs after 24h" comment (real: 6h sweep / 1h age guard = 1–7h effective). Requires a base-image rebuild + cold agent recreate for the agent half (#1809); the backend half degrades gracefully on an old image (bare-string body → columns stay null). Tests: `tests/unit/test_1853_error_telemetry_salvage.py`. |
 | 2026-08-14 | **Issue #2127 - fan-out turn killed mid-wait and recorded SUCCESS**: `claude --print` emits one `{"type":"result"}` per turn *segment* and deliberately stays alive to await background subagents/workflows (exempt from the ~5s background-shell grace "because their result is part of the final output"), but #970's early-completion set `result_seen` on **any** result line and SIGTERMed the process group 2s later with `return_code = 0` — so a fan-out was killed mid-wait, the announcement ("I'll wait for the notification") was stored as the response, cost was billed, subagents were killed, and nothing logged a failure. Same root cause as #1870, which is the fast-notification branch of the identical race. Fix: early-finalize now requires `result_seen AND not waited_bg_tasks AND stream-idle ≥ _IDLE_FINALIZE_S`. The ledger half tracks the CLI's own `system/background_tasks_changed` (a **full snapshot** of in-flight work) into `HeadlessRunContext.waited_bg_tasks` via the pure `_count_waited_bg_tasks`. **The idle half is not optional** — the ledger alone misses the shape the issue actually reports: once the fan-out finishes the ledger drains to `[]` while the model is still composing the synthesis (measured: 5 subagents all reported by t+27.8s, real `FINAL REPORT` at t+55.9s), so a ledger-only gate stands aside and the kill lands on `"ECHO reported."`. Output idleness is what #970's failure *is* (claude alive, blocked on an MCP child, emitting nothing), so it separates the cases directly. `_IDLE_FINALIZE_S` = **300s** (`AGENT_IDLE_FINALIZE_S`, `<=0` refused) — set from the longest silence a healthy run produces, which is one long assistant message: without `--include-partial-messages` a message is a single stdout line emitted only when complete, measured at **40.54s of dead air for 9,840 chars** (vs a 7.33s worst gap across three fan-out runs), so 300s is ~7.4× with deliberately asymmetric bias (too large only delays the pathological #970 finalize and still returns the right answer; too small destroys a deliverable and calls it success). Costs nothing on the happy path — the branch is only reachable when the process does **not** exit. `effective_timeout` is untouched and remains the unconditional backstop, so the gate defers the kill and never removes it. `_NON_WAITED_BG_TASK_TYPES = {local_bash, local_shell}` is a **denylist** — a background shell is killed by the CLI after ~5s (measured 5.09s) rather than waited for, and gating on one re-opens #970's lingering-child class; the direction is chosen because an allowlist missing a future waited type restores #2127 silently while a denylist miss costs only a bounded wait. A malformed ledger counts 0 (degrades to pre-fix behaviour, never a new hang class), and the read takes `task_type` only — never `description`/`prompt`/`summary`, which carry subagent prompt text and output. `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is derived from the execution timeout at **both** spawn sites (`headless_executor` and `claude_code` — the chat path never had the kill but inherits the same 10-minute CLI truncation), applied via `build_execution_env`'s last-wins `extra` so `.env` cannot override it. When the CLI stops waiting on its own, finalize prepends `_BG_PENDING_NOTICE` and sets `metadata.background_tasks_pending_at_exit`, placed after the #160 empty-response branch so a notice cannot make an empty result look populated. Root-caused by direct instrumentation of Claude Code 2.1.220 in a live agent container (first result t+37.82s, real answer t+40.32s, exit t+40.72s — the 2s kill lands ≤t+39.82s); the issue's own stated root cause ("the classifier trusts a clean `end_turn`") was wrong, since the classifier never runs. ⚠️ Consequence: a fan-out now runs to completion, so it spends more tokens and can newly reach `--max-turns`. Requires a base-image rebuild + cold agent recreate. Tests: `tests/unit/test_2127_background_task_gate.py` (20, asserting end state — the late answer survives instead of the placeholder — verified failing without the gate, plus a both-spawn-sites parity guard). |
 | 2026-08-02 | **Issue #1870 - completed turn discarded on `error_during_execution`**: the #1673 branch treated an `is_error` result as terminal and raised 502 even when the session transcript showed the turn had reached `stop_reason: end_turn` — the reproduction being a fan-out turn whose background subagent `<task-notification>` lands after the answer, making the CLI's terminal-state check see a non-terminal last message. New additive `jsonl_recovery._recover_completed_turn_from_jsonl(session_id, since_iso)` consulted from `headless_executor._try_recover_completed_turn(ctx)` inside that branch; `_recover_response_from_jsonl` (#678) is unmodified, since its end-of-file boundary walk anchors on the `<task-notification>` itself and no `since` parameter could have fixed that. Three required gates — main-thread only (`isSidechain`/`isMeta` excluded from marker selection, boundary walk and text collection), turn-scoped (marker timestamp within `[task_start_iso, now+300s]`, fail-closed both ends), and finished (the **last** qualifying assistant record must **itself** be `end_turn`; `max_tokens`/`stop_sequence` rejected). The recovered answer is the marker message's **`message.id` group, fail-closed when it holds no text** — never a text window: a thinking-enabled final message is two records sharing one `message.id` and both carry `end_turn`, 40.6% of markers are thinking-only (measured over 1,075 transcripts / 6,663 markers), and `_read_jsonl_records` drops the final partial line on an interrupted write, so a window rule would store the turn's narration *without* the answer as a 200 SUCCESS. On a hit: `ctx.response_parts` is **replaced** (not appended — partial stdout survives on this subtype), `metadata.recovered_from_jsonl` and the new agent-side `metadata.recovered_terminal` are set, a `_RECOVERY_NOTICE` naming the partial-checkpoint risk is prepended, and the turn returns 200/SUCCESS with no new `TaskExecutionStatus`. On a miss the 502 raise is character-identical, preserving every #1673 pin. Both a hit and **every** decline are logged with a reason. ⚠️ Permanent coverage bound: agents with `execution_timeout_seconds <= 600` write no JSONL and are not fixed, with no fallback (stream-json's `message.stop_reason` is `None` in 179/179 real records). Requires a base-image rebuild + cold agent recreate. Tests: `tests/unit/test_1870_completed_turn_recovery.py` (81, driven off a committed real captured transcript tail) + 5 new #1673 pins. The `message.id`-less window fallback is itself guarded (the marker record must carry text before the window is consulted), so it cannot launder narration into an answer, and every decline reason is split by the action it implies. |
@@ -169,9 +170,32 @@ POST /api/task
        |
        v
 +---------------------------------------------+
+| routers/chat.py::execute_task               |
+|                                             |
+| 0. try_spawn_async() → 202 (#1083):         |
+|    register_pending() BEFORE create_task,   |
+|    _run_and_report discards in its finally  |
+| 1. registry.register_pending(execution_id,  |
+|    timeout_seconds or 900, {"type":"task"}) |
+|    → id now in `pending_ids` (#2433)        |
+| 2. runtime.execute_headless(...)            |
+| 3. finally: registry.discard_pending(id)    |
+|    (no-op once promoted; drops an entry     |
+|    that never spawned)                      |
++---------------------------------------------+
+       |
+       v
++---------------------------------------------+
 | execute_headless_task()                     |
+| (services/headless_executor.py)             |
 |                                             |
 | - NO execution lock acquired                |
+| - run_in_executor(_HEADLESS_EXECUTOR, ...)  |
+|   dedicated 32-thread pool (#2433), never   |
+|   the CPU-sized default; while queued here  |
+|   the id is still PENDING (visible)         |
+| - Thread top: was_terminated(id)?           |
+|   → HTTPException(409) before Popen         |
 | - Build command:                            |
 |   claude -p --output-format stream-json     |
 |   --verbose --dangerously-skip-permissions  |
@@ -181,6 +205,12 @@ POST /api/task
 |   [--append-system-prompt Z]                |
 |   [--max-turns N]                           |
 |   [--mcp-config ~/.mcp.json]                |
+| - Popen → registry.register(id, process)    |
+|   PENDING → RUNNING (one id, one state);    |
+|   a cancel flagged while pending is         |
+|   consumed here: SIGKILL the group, keep    |
+|   the #679 marker → handler relabels        |
+|   `cancelled`                               |
 |                                             |
 | - NO --continue flag (stateless)            |
 | - Session isolation flags prevent collision |
@@ -190,9 +220,16 @@ POST /api/task
 |   → kills process + HTTP 503 if not         |
 |   bypassPermissions                         |
 | - Parse streaming JSON output               |
+| - finally: registry.unregister(id)          |
+|   (also drops pending; stamps the #921      |
+|   recently-completed window — an exited     |
+|   handle not yet unregistered is reported   |
+|   there too)                                |
 | - Return response with session_id           |
 +---------------------------------------------+
 ```
+
+`POST /api/chat` is the same shape with one difference: `register_pending(request.execution_id, metadata={"type": "chat"})` runs **before** `async with get_execution_lock()` (the lock wait was an invisible park — the backend row was `running` and its slot held while nothing on the agent knew the id), and the entry is discarded after `runtime.execute` returns or raises. No `timeout_seconds` is passed, so the pending window is the 900s handler default + 60s slack.
 
 ## Key Files
 
@@ -202,10 +239,24 @@ POST /api/task
 |------|------|---------|
 | `models.py` | 77-93 | ExecutionMetadata model (includes `error_type`, `error_message` fields) |
 | `models.py` | 199-218 | ParallelTaskRequest, ParallelTaskResponse models |
-| `services/claude_code.py` | 729-1030 | execute_headless_task() — always generates UUID for `--session-id` |
-| `services/gemini_runtime.py` | 500-642 | execute_headless() for Gemini CLI |
+| `services/claude_code.py` | 729-1030 | execute_headless_task() — always generates UUID for `--session-id` (the function itself moved to `services/headless_executor.py` in #678) |
+| `services/headless_executor.py` | 75-90 | `HEADLESS_EXECUTOR_MAX_WORKERS = 32` + `_HEADLESS_EXECUTOR` — the dedicated headless pool (#2433); pinned cross-tree to `settings_service.MAX_PARALLEL_TASKS_CEILING_MAX` |
+| `services/headless_executor.py` | 808-841 | `_run_headless_subprocess()` thread top — `was_terminated(ctx.task_session_id)` → `HTTPException(409)` before `Popen` (optimisation; `register()` is the authority) |
+| `services/headless_executor.py` | 851-893 | `Popen` → `registry.register(ctx.task_session_id, process, {type, message_preview, pgid})` — promotes PENDING → RUNNING |
+| `services/headless_executor.py` | 1661 | `loop.run_in_executor(_HEADLESS_EXECUTOR, _run_headless_subprocess, ctx)` — never the default pool |
+| `services/headless_executor.py` | 1729 | `registry.unregister(ctx.task_session_id)` in `finally` (drops pending too; stamps the #921 window) |
+| `services/process_registry.py` | 54-62, 116-175 | `PENDING_SLACK_SECONDS` / `PENDING_DEFAULT_TIMEOUT_SECONDS`; `register_pending()`, `discard_pending()`, `list_pending_ids()` (#2433) |
+| `services/process_registry.py` | 177-231 | `register()` — pops pending; consumes `cancel_requested` (SIGKILL the group, keep `_terminated`); the C10 clear only without the flag |
+| `services/process_registry.py` | 262-298 | `terminate()` — pending id → `cancel_requested` + marker, entry kept, returns `{"success": True, "returncode": None, "reason": "cancelled_before_start"}` |
+| `services/process_registry.py` | 522-546 | `list_recently_completed_ids()` — #921 window ∪ exited-but-still-registered handles (#2433) |
+| `services/result_callback.py` | 380-425 | `try_spawn_async()` — `register_pending()` synchronously before `asyncio.create_task` (#2433) |
+| `services/result_callback.py` | 307-348 | `_run_and_report()` — `discard_pending()` in its own `finally`; a 409 misses `_STATUS_MAP` → `(None, "error")` → `_cancelled_override` via `was_terminated` |
+| `services/gemini_runtime.py` | 234-252, 307 | chat `execute()`: `Popen` → `register(execution_id, …, {"type": "chat", "runtime": "gemini"})` / `unregister()` in `finally` (#2433) |
+| `services/gemini_runtime.py` | 670-686, 747 | `execute_headless()`: `Popen` → `register(session_id, …, {"type": "task", "runtime": "gemini"})` / `unregister()` in `finally` (#2433 — it never registered before) |
 | `services/runtime_adapter.py` | 103-129 | AgentRuntime.execute_headless() interface |
-| `routers/chat.py` | 98-146 | POST /api/task endpoint |
+| `routers/chat.py` | 34-72 | POST /api/chat — `register_pending(execution_id, metadata={"type": "chat"})` **before** `async with get_execution_lock()`; `discard_pending` after execute (#2433) |
+| `routers/chat.py` | 118-240 | POST /api/task endpoint — `try_spawn_async` (202) else `register_pending` → `execute_headless` → `finally: discard_pending`; #679 cancel relabel |
+| `routers/chat.py` | 372-398 | GET /api/executions/running — `executions` + `recently_completed_ids` + `pending_ids` |
 
 ### Backend (src/backend/)
 
@@ -263,7 +314,9 @@ The router (`chat.py`) still handles: container validation, execution record cre
                                  //   agent's configured execution_timeout_seconds (TIMEOUT-001,
                                  //   default 900s / 15 min, max 7200s / 2h).
   "max_turns": 50,               // Optional: Max agentic turns (runaway prevention)
-  "execution_id": "uuid"         // Optional: Database execution ID for process registry
+  "execution_id": "uuid"         // Optional: Database execution ID — keys the process-registry
+                                 //   entry (pending at handler entry #2433 → running at spawn)
+                                 //   and termination. Absent → nothing is registered.
 }
 ```
 
@@ -289,6 +342,38 @@ The router (`chat.py`) still handles: container validation, execution record cre
 
 **Note**: The `execution_log` is persisted to the `schedule_executions` database table and can be retrieved via `GET /api/agents/{name}/executions/{execution_id}/log`.
 
+**Registry lifecycle (#2433)**: on the sync branch the handler calls `registry.register_pending(request.execution_id, timeout_seconds=request.timeout_seconds or 900, metadata={"type": "task"})` **before** `runtime.execute_headless(...)` and `registry.discard_pending(request.execution_id)` in `finally` — a no-op once `register()` has promoted the entry at spawn; it only drops an entry that never spawned (pre-spawn cancel, spawn failure). The async branch (`result_callback.try_spawn_async`, 202) registers pending synchronously before `asyncio.create_task`, and `_run_and_report` discards in its own `finally`. `register_pending` ignores an empty id, so a request without `execution_id` is invisible to the watchdog — which is why the backend always supplies one. A `409 "Execution cancelled before it started"` — or any non-503/429 terminal — raised for an id whose `was_terminated()` marker is set is relabelled by the handler's #679 branch to a `cancelled` 200:
+
+```json
+{"response": "", "execution_log": [], "metadata": {}, "session_id": null, "status": "cancelled", "timestamp": "..."}
+```
+
+### Agent Server: GET /api/executions/running
+
+**File**: `docker/base-image/agent_server/routers/chat.py:372-398` — the backend watchdog's proof-of-life read (parsed by `cleanup_service._extract_agent_known_ids`, the single parser shared by the periodic sweep and startup recovery).
+
+**Response**:
+```json
+{
+  "executions": [                        // registry.list_running(): registered handles with poll() is None
+    {"execution_id": "abc123", "pid": 4242, "started_at": "...",
+     "metadata": {"type": "task", "message_preview": "...", "pgid": 4242}}
+  ],
+  "recently_completed_ids": ["def456"],  // #921: unregistered within RECENTLY_COMPLETED_TTL_SECONDS (300s)
+                                         //   ∪ (#2433) registered handles that have exited but are not yet unregistered
+  "pending_ids": ["ghi789"]              // #2433: accepted at /api/task, /api/chat (before the lock wait) or the
+                                         //   #1083 async spawn, not yet spawned; ids only, never metadata
+}
+```
+
+| Field | Registry source | What the watchdog reads it as |
+|-------|-----------------|-------------------------------|
+| `executions` | `list_running()` | running |
+| `recently_completed_ids` | `list_recently_completed_ids()` | finished; the backend's terminal write may still be in flight |
+| `pending_ids` | `list_pending_ids()` | accepted — queued in the headless pool or waiting on the chat lock; lazily evicted at `accepted_at + timeout + PENDING_SLACK_SECONDS` (60s) with a WARNING naming the leaked ids |
+
+The backend unions all three into the agent-known set. An image without `pending_ids` degrades to the pre-#2433 (#921) behaviour, and the orphan error string says "not pending" only when the field was actually observed (`_KnownIds.reports_pending`). The route sits behind the #1159 `X-Trinity-Agent-Token` middleware like every non-`/health` route; an agent can only ever keep its **own** rows alive with it (the watchdog groups rows by agent and asks only that agent).
+
 ### Backend: POST /api/agents/{name}/task
 
 Same request/response as agent server, with additional parameters:
@@ -309,7 +394,7 @@ Same request/response as agent server, with additional parameters:
 - **Slot management** - Capacity-limited parallel execution via `SlotService` (CAPACITY-001)
 - **Execution log persistence** - Full transcript saved to `schedule_executions.execution_log`
 - **Credential sanitization** - `sanitize_execution_log()` and `sanitize_response()` applied to all results
-- **Process registry** - Passes `execution_id` to agent for termination tracking
+- **Process registry** - Passes `execution_id` to the agent; it keys the pending entry at handler entry (#2433), the `register()` promotion at spawn, and termination (`POST /api/executions/{id}/terminate` — honoured even while the id is still pending)
 - **Chat session persistence** - When `save_to_session=true`, persists to `chat_sessions` and `chat_messages` tables
 - **Service delegation** (EXEC-024) - Sync path delegates to `TaskExecutionService.execute_task()`
 
@@ -1101,7 +1186,7 @@ for agent in get_all_agents():
 
 1. **No streaming in async mode**: Cannot use SSE streaming with async; poll for final result only
 2. **Orphaned tasks**: If backend restarts, background tasks are lost (execution stays "running")
-3. **No cancellation via async**: Must use separate termination endpoint
+3. **No cancellation via async**: Must use the separate termination endpoint (`POST /api/agents/{name}/executions/{execution_id}/terminate`). Since #2433 a cancel that lands while the task is still **pending** on the agent (queued in the headless pool, not yet spawned) is honoured: `terminate()` answers `cancelled_before_start` and `register()` consumes the flag at spawn, so nothing runs and the turn is relabelled `cancelled`
 4. **Database required**: execution_id comes from database record; fails if DB unavailable
 5. **Activity completion async**: Activities complete after task finishes, not at request time
 
@@ -1178,6 +1263,17 @@ The process registry (`docker/base-image/agent_server/services/process_registry.
 - Tracking running executions
 - Terminating executions
 - Live log streaming via pub/sub
+- Since #2433, tracking **pending** executions — accepted but not yet spawned — so the backend watchdog can tell "queued on the agent" from "the agent never heard of it"
+
+**States (#2433)**:
+
+| State | Entered by | Left by | Reported on `GET /api/executions/running` as |
+|-------|-----------|---------|----------------------------------------------|
+| pending | `register_pending(id, *, timeout_seconds, metadata)` — `/api/task` sync branch, `/api/chat` before the lock wait, `try_spawn_async` before `create_task`. Re-registration refreshes the deadline and preserves a prior `cancel_requested` | `register()` (promotion), the owner's `finally: discard_pending()` (idempotent), `unregister()` (belt for a run that ends without ever spawning), or lazy expiry inside `list_pending_ids()` at `accepted_at + timeout + PENDING_SLACK_SECONDS` (60s; `PENDING_DEFAULT_TIMEOUT_SECONDS` = 900s when no budget is given) | `pending_ids` |
+| running | `register(id, process, metadata)` after `Popen` — Claude (`headless_executor`, `claude_code`), Codex, and since #2433 Gemini at both its `Popen` sites | `unregister()` in the executor's `finally` | `executions` while `poll() is None`; once the process has exited but before `unregister()`, `recently_completed_ids` |
+| recently completed | `unregister()` stamps `_recently_completed[id]` | lazy expiry after `RECENTLY_COMPLETED_TTL_SECONDS` (300s) | `recently_completed_ids` (#921) |
+
+**Cancel while pending (#679 + #2433)**. `terminate(id)` on a pending id finds no process; it sets `cancel_requested` on the entry **and** the #679 `_terminated` marker, keeps the entry (popping it would let the next sweep orphan a row whose thread is about to raise), and returns `{"success": True, "returncode": None, "reason": "cancelled_before_start"}`. Two consumers, one authoritative: `_run_headless_subprocess` checks `was_terminated(ctx.task_session_id)` at the top of the pool thread and raises `HTTPException(409, "Execution cancelled before it started")` before `Popen` — an optimisation; `register()` is the authority. It pops the pending entry and, if `cancel_requested` is set, SIGKILLs the process group it was just handed (`_signal_process_tree`, outside the registry lock, a kill failure logged and never raised) and **keeps** the marker. The pre-#2433 `register()` cleared the marker unconditionally (the C10 rule, so a #678 same-id retry cannot inherit a stale "cancelled" label), which meant a cancel landing between the thread-top check and `Popen` was erased and the turn ran to a billed SUCCESS that overwrote the watchdog's terminal; the clear now applies only to an entry with no cancel flag, so the retry case is unchanged. Downstream is the unchanged #679 relabel: the `/api/task` handler turns any non-503/429 terminal whose marker is set into a `cancelled` 200, and `_run_and_report` (#1083) maps the 409 through `_STATUS_MAP` (a miss → `(None, "error")`) and then `_cancelled_override`. `terminate()` on a **running** id is unchanged (SIGINT → SIGKILL, marker stamped after the SIGINT send). Runtime-agnostic by construction — every runtime promotes through `register()`; before #2433 `gemini_runtime` never registered at all, so every Gemini run longer than the watchdog's 60s grace was false-orphaned and a terminate against it had nothing to kill.
 
 ### SSE Message Format
 
@@ -1214,6 +1310,19 @@ cd tests && pytest test_parallel_task.py -v
 
 **`tests/test_execution_queue.py`**:
 - `TestQueueWithParallelTasks::test_parallel_task_does_not_show_in_queue` - Verifies parallel tasks bypass the execution queue. Uses `async_mode: True` to return immediately (avoids waiting for task completion which could timeout).
+
+### Pending State and Proof-of-Life Tests (#2433)
+
+Fast unit tests (no agent required); the agent-server modules are loaded via the `_STUBBED_MODULE_NAMES` shim shared with `test_recently_completed_buffer.py` / `test_679_terminated_marker.py`.
+
+| File | Covers |
+|------|--------|
+| `tests/unit/test_2433_process_registry_pending.py` (12) | `register_pending` is listed until `discard_pending`; an empty id is ignored; `register()` promotes pending → running; lazy expiry past the deadline, and the deadline covers the execution budget; `terminate()` on a pending id marks the cancel, keeps the entry and returns `cancelled_before_start` (an unknown id is still `not_found`); `register()` consumes the flag — kills the group, keeps the marker — while a no-cancel `register()` still clears a stale marker and a kill failure never raises; `list_recently_completed_ids()` includes exited-but-registered handles; `unregister()` discards pending |
+| `tests/unit/test_2433_task_handler_pending.py` (8) | `GET /api/executions/running` carries `pending_ids`; `/api/task` registers before `execute_headless` and discards after (also when execute raises); the pending window uses the handler's 900s default; a pre-spawn 409 is relabelled `cancelled` and discards; `/api/chat` registers before the lock wait and discards after; `try_spawn_async` registers synchronously before the task runs; `_run_and_report` discards in `finally` |
+| `tests/unit/test_2433_headless_executor.py` (5) | the pool is sized to the backend fleet ceiling (cross-tree pin: `HEADLESS_EXECUTOR_MAX_WORKERS == settings_service.MAX_PARALLEL_TASKS_CEILING_MAX`); it is its own named executor; headless runs go to the dedicated pool, not the default; a pre-spawn cancel raises 409 without spawning; an uncancelled run reaches `Popen` |
+| `tests/unit/test_2433_gemini_registers.py` (3) | `execute_headless` registers under the execution id and unregisters — also when the reader fails; chat `execute` registers under `execution_id` and unregisters |
+
+The backend half of #2433 (limiter in-flight registry + refresher, tri-state watchdog read, dispatch restamp + slot renew, packaging) is covered by the sibling `test_2433_limiter_inflight.py`, `test_2433_watchdog_inflight.py`, `test_2433_db_restamp.py`, `test_2433_slot_renew.py`, `test_2433_dispatch_wiring.py` and `test_2433_limiter_packaging.py` — see [cleanup-service.md](cleanup-service.md).
 
 ## Use Cases
 

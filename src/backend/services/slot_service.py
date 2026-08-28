@@ -205,6 +205,43 @@ class SlotService:
                         "[Slots] release callback skipped: no running event loop"
                     )
 
+    def renew_slot(self, agent_name: str, execution_id: str) -> bool:
+        """#2433: re-anchor a HELD slot's lease at 'now'.
+
+        The slot's TTL (``timeout_seconds + SLOT_TTL_BUFFER``) is set at
+        acquire, i.e. at admission. An execution parked in the backend
+        agent-call queue spends that lease without running, so a long park
+        (or park + run) got the slot reclaimed under a live execution —
+        Phase 3 then saw the agent still running it, skipped the FAILED
+        write, and the agent ran overbooked. The limiter's refresher calls
+        this every tick while an execution is parked, and once more at grant.
+
+        Moves the ZSET score AND the metadata-hash TTL **together**, so canary
+        S-03's reconstruction (``ttl_remaining + (read − score)``) stays exactly
+        at the floor. ``ZADD XX`` never resurrects a slot that was already
+        released/reclaimed — a renewal of a missing member is a no-op that
+        returns False.
+
+        Synchronous on purpose: it is called from the refresher's worker
+        thread (``asyncio.to_thread``), never on the event loop.
+        """
+        slots_key = self._slots_key(agent_name)
+        metadata_key = self._metadata_key(agent_name, execution_id)
+        try:
+            changed = self.redis.zadd(slots_key, {execution_id: time.time()}, xx=True, ch=True)
+            if not changed:
+                return False
+            stored_timeout = self.redis.hget(metadata_key, "timeout_seconds")
+            try:
+                effective_ttl = int(stored_timeout) + SLOT_TTL_BUFFER
+            except (ValueError, TypeError):
+                effective_ttl = DEFAULT_SLOT_TTL_SECONDS
+            self.redis.expire(metadata_key, effective_ttl)
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-open bookkeeping
+            logger.debug(f"[Slots] renew_slot failed for {execution_id} on '{agent_name}': {e}")
+            return False
+
     @staticmethod
     async def _safe_invoke(
         cb: Callable[[str], Awaitable[None]], agent_name: str
