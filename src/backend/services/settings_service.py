@@ -46,147 +46,22 @@ def is_valid_public_channel_model(model: str) -> bool:
 
 # Re-exported from config.py (a leaf module) — database.py seeds these during
 # init_database(), which runs at import, and this module imports `db` from
-# database, so defining them here would be a circular import (#1638). Importers
-# keep using `from services.settings_service import ...`.
+# database, so defining them HERE is a circular import (#1638). Importers keep
+# using `from services.settings_service import ...`.
+#
+# #2085 is the proof that this is a live trap and not historical trivia: the
+# retention windows and their defaults were defined in this file, #2085's
+# `_seed_retention_windows` imported them from here, and the resulting
+# ImportError was swallowed by that seed's fail-safe contract — so the feature
+# no-opped on every boot with a fully green unit suite. Anything
+# `init_database()` reads belongs in config.py and is re-exported below.
 from config import (  # noqa: E402
     COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
     COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
+    NON_ROW_RETENTION_OPS_KEYS,  # noqa: F401  (re-export)
+    OPS_SETTINGS_DEFAULTS,  # noqa: F401  (re-export)
+    RETENTION_OPS_KEYS,  # noqa: F401  (re-export)
 )
-
-# The operator-tunable retention OPS-settings keys reported by
-# `GET /api/settings/retention` (audit log excluded — separate env-driven
-# 365-day floor). Membership here means "is a retention window"; it does NOT
-# mean "gets the community floor" — that set is COMMUNITY_FRESH_INSTALL_SEED.
-RETENTION_OPS_KEYS = (
-    "execution_log_retention_days",
-    "execution_row_retention_days",
-    "health_check_retention_days",
-    "agent_soft_delete_retention_days",
-    "schedule_soft_delete_retention_days",
-    # #1644: these two ARE retention windows and were missing here, so three
-    # readers were silently blind to them:
-    #   - `POST /api/settings/ops/reset` skips only RETENTION_OPS_KEYS, so it
-    #     DELETED these two rows while reporting "retention windows unchanged";
-    #   - `GET /api/settings/retention` never reported them;
-    #   - `log_effective_retention_windows()` never logged them at boot — the
-    #     exact observability gap that made #1638 invisible.
-    # Membership means "is a retention window"; it does NOT mean "gets the
-    # community floor" (that set is COMMUNITY_FRESH_INSTALL_SEED, unchanged).
-    "agent_reports_retention_days",
-    "operator_queue_retention_days",
-    # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
-    # window (surfaced/logged/reset-protected), NOT a community-floor key.
-    "agent_reminders_retention_days",
-    # ent#433: the two subscription-telemetry windows.
-    #   - subscription_headroom_retention_days is the new probe-history table.
-    #   - subscription_failure_event_retention_days CONVERTS what used to be a
-    #     hardcoded 24h sweep of subscription_rate_limit_events — the platform's
-    #     only durable record of real agent work hitting a provider rate limit,
-    #     previously destroyed daily with no window, no #1644 guard, and no
-    #     GET /api/settings/retention entry while every sibling had all three.
-    # Neither is a community-floor key (that set is COMMUNITY_FRESH_INSTALL_SEED):
-    # the 5-day floor would silently truncate the 7-day default read window.
-    "subscription_headroom_retention_days",
-    "subscription_failure_event_retention_days",
-    # #2216: database-backup artifacts under /data/backups. Membership here
-    # buys the write-path protections (validated /ops/config only, generic
-    # PUT 422-blocked, /ops/reset skips) — but its READ is special-cased:
-    # every surface renders it through
-    # services.db_backup_service.effective_backup_retention_days(), whose
-    # coercion is INVERTED (garbage → 14, never → 0/keep-forever), and
-    # GET /api/settings/retention excludes it from the generic windows map.
-    # NOT a community-floor key (fewer days = the destructive direction here).
-    "backup_retention_days",
-)
-
-# The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
-# `backup_retention_days` prunes FILE artifacts from the backup job's own tail;
-# its bounded-destruction guarantee is structural (the fixed BACKUP_MIN_KEEP
-# floor in db/backup_primitives.py — never zero recovery points), NOT the
-# count-threshold/ack-gated `_guard_allows` refusal in cleanup_service: an
-# ack-gated refusal fails in the INVERTED direction for backups (refused prune
-# → backups fill the disk, #1871 class), so that prune must run unconditionally
-# within its floor. `tests/unit/test_1771a_retention_edges.py` asserts every
-# key in RETENTION_OPS_KEYS minus THIS set has exactly one `_guard_allows`
-# call site — add a second file-artifact window HERE, or the guard fires.
-NON_ROW_RETENTION_OPS_KEYS = frozenset({"backup_retention_days"})
-
-
-# Default values for ops settings (as specified in requirements)
-OPS_SETTINGS_DEFAULTS = {
-    "ops_context_warning_threshold": "75",  # Context % to trigger warning
-    "ops_context_critical_threshold": "90",  # Context % to trigger reset/action
-    "ops_idle_timeout_minutes": "30",  # Minutes before stuck detection
-    "ops_cost_limit_daily_usd": "50.0",  # Daily cost limit (0 = unlimited)
-    "ops_max_execution_minutes": "10",  # Max chat execution time
-    "ops_alert_suppression_minutes": "15",  # Suppress duplicate alerts
-    "ops_log_retention_days": "7",  # Days to keep container logs
-    "ops_health_check_interval": "60",  # Seconds between health checks
-    "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
-    # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
-    #
-    # These are the fallback used at PRUNE time for an install with no
-    # `system_settings` row, which is the default state for every install that
-    # never touched retention. Lowering one of them silently hard-DELETEs the
-    # existing data of every such install, ~seconds after its next boot, with no
-    # error and a green /health. That is #1638; it cost ~3 months of execution
-    # history on a real instance.
-    #
-    # So: these stay at the widest (safest) historical value. The #1039
-    # community floor is applied to NEW installs by seeding rows
-    # (COMMUNITY_FRESH_INSTALL_SEED), which only ever touches an empty DB.
-    # If you want to shrink a window for existing installs, that is a migration
-    # + a docs/migrations/ entry + an operator decision — not an edit here.
-    #
-    # Issue #772: retention policy for execution_log + agent_health_checks.
-    # "0" disables that prune step.
-    "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days (#772)
-    "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days (#772)
-    "health_check_retention_days": "7",    # DELETE agent_health_checks rows after N days (#772)
-    # Issue #834 Phase 1a: soft-delete retention for agents. After
-    # DELETE /api/agents/{name}, the agent_ownership row is marked
-    # `deleted_at = NOW` and child rows are preserved. The cleanup
-    # sweep hard-deletes rows older than this many days (cascading
-    # child tables via #816's purge primitive) AND removes the agent's
-    # data volumes (#1581). "0" disables the sweep entirely.
-    # #1638: EXEMPT from the community floor in every edition — this is a
-    # recovery window whose expiry destroys agent workspaces, not a log window.
-    "agent_soft_delete_retention_days": "180",
-    # Issue #834 Phase 1b: per-schedule soft-delete. "0" disables the sweep.
-    "schedule_soft_delete_retention_days": "30",
-    # Issue #918: retention for agent_reports. Rows older than this many days
-    # are deleted by the cleanup sweep. "0" disables the sweep.
-    "agent_reports_retention_days": "90",
-    # Issue #1142: retention for terminal operator_queue rows
-    # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
-    # get a more generous fixed floor (never deleted younger than #772's guard).
-    "operator_queue_retention_days": "90",
-    # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
-    # failed). Rows older than this many days are deleted; pending/firing never
-    # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
-    "agent_reminders_retention_days": "90",
-    # ent#433: subscription headroom probe history. Volume is bounded by #471's
-    # own floors (<=1 probe/15min/subscription; the click path is floored at
-    # 60s), so 30 days is a few thousand rows per subscription. It is no longer
-    # purely demand-driven: ent#434's sampler adds a background floor of one
-    # probe per subscription per SAMPLE_INTERVAL_SECONDS, which raises the row
-    # count on an unwatched instance while staying well inside the same floors. "0" disables the sweep. Wide/safe per the #1638 floor rule.
-    "subscription_headroom_retention_days": "30",
-    # ent#433: subscription_rate_limit_events. This table was swept at a
-    # HARDCODED 24 hours before ent#433 — widening to 30 is the #1638-SAFE
-    # direction (no install loses data) and changes no existing answer, because
-    # every consumer already filters by time itself (hours=24 at the pressure
-    # call site, a 2h predicate for rate_limited_now). Do not lower it.
-    "subscription_failure_event_retention_days": "30",
-    # Issue #2216: retention for database-backup artifacts. The #1638 "widest
-    # value" rule applies in spirit but the direction INVERTS: raising this
-    # default costs disk on every un-configured install (#1871 class), while
-    # lowering it deletes recovery points — NEVER lower it for existing
-    # installs without a migration note, and never raise it casually either.
-    # "0" is INVALID for this key (validated 1–3650): keep-forever is the
-    # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
-    "backup_retention_days": "14",
-}
 
 # Descriptions for each ops setting
 OPS_SETTINGS_DESCRIPTIONS = {
