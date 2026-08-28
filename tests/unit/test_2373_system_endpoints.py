@@ -300,3 +300,131 @@ def test_preview_and_deploy_resolve_the_same_resource_default():
 
     from services.agent_service import crud
     assert "get_agent_default_resources" in inspect.getsource(crud._get_default_resource)
+
+# ---------------------------------------------------------------------------
+# Review blocker: the schedules fix must not leak the webhook credential
+# ---------------------------------------------------------------------------
+def test_the_system_detail_never_ships_a_webhook_token():
+    """`webhook_token` is the bearer for the UNAUTHENTICATED `POST /api/webhooks/{token}`.
+
+    Fixing the `schedules` key turned a three-year no-op into a disclosure: the
+    accessor returns whole `db_models.Schedule` rows and the route declares no
+    `response_model`, so FastAPI serialized every column to any chat-level
+    `role: user` the system's agents are shared with. `db_models.py` says
+    outright that neither webhook field is ever surfaced in a response model,
+    and `ScheduleResponse` omits all four — which is why the projection is to
+    THAT model rather than a hand-picked dict that can drift from it.
+    """
+    import inspect
+    from routers import systems
+
+    body = _code_only(inspect.getsource(systems.get_system))
+    assert "list_agent_schedules" in body
+    assert "ScheduleResponse" in body, (
+        "project the rows; a bare accessor result carries webhook_token"
+    )
+
+
+def test_the_projection_drops_every_webhook_field():
+    """Asserted against the MODEL, not a list I maintain here — a fifth webhook
+    field added to `Schedule` tomorrow is covered without anyone remembering."""
+    from db_models import Schedule
+    from models import ScheduleResponse
+
+    leaky = {f for f in Schedule.model_fields if "webhook" in f}
+    assert leaky, "premise check: Schedule is supposed to carry webhook fields"
+    exposed = set(ScheduleResponse.model_fields)
+    assert not (leaky & exposed), f"ScheduleResponse exposes {sorted(leaky & exposed)}"
+
+# ---------------------------------------------------------------------------
+# Review blockers 2 & 3 — membership must not drop or over-capture
+# ---------------------------------------------------------------------------
+def test_partial_tagging_does_not_drop_the_untagged_members(monkeypatch):
+    """`if tagged: return tagged` made one tag hide every other member.
+
+    Reachable three ways, none exotic: `PUT /api/agents/{n}/tags` is a FULL-SET
+    replacement, an agent added after deploy is untagged, and `configure_tags`
+    sits in a try/except so a mid-loop raise still reports "deployed".
+    `restart_system` then restarts a subset and reports success, and
+    `export_manifest` writes an incomplete backup and calls it one.
+    """
+    from services import system_service as svc
+
+    monkeypatch.setattr(svc.db, "get_tags_for_agents",
+                        lambda names: {"acme-worker": ["acme"]}, raising=False)
+    out = svc.system_member_names("acme", ["acme-web", "acme-db", "acme-worker"])
+    assert sorted(out) == ["acme-db", "acme-web", "acme-worker"]
+
+
+def test_a_tag_still_wins_for_a_member_without_the_prefix(monkeypatch):
+    """The union must not cost the property the tag half exists for."""
+    from services import system_service as svc
+
+    monkeypatch.setattr(svc.db, "get_tags_for_agents",
+                        lambda names: {"helper": ["acme"]}, raising=False)
+    out = svc.system_member_names("acme", ["acme-web", "helper", "other"])
+    assert sorted(out) == ["acme-web", "helper"]
+
+
+def test_a_failed_tag_read_does_not_re_open_2373(monkeypatch):
+    """The `except` set `tags_by_agent = {}`, which makes `claimed_elsewhere`
+    unconditionally False — so membership degraded to the RAW prefix and
+    `restart_system("acme")` stopped and started `acme-extra`'s containers,
+    logging a WARNING and returning a byte-identical response.
+
+    The existing failure test used `["acme-web", "other"]`, which never reaches
+    the collision. This one does.
+    """
+    from services import system_service as svc
+
+    def _boom(names):
+        raise RuntimeError("tags table unavailable")
+
+    monkeypatch.setattr(svc.db, "get_tags_for_agents", _boom, raising=False)
+    out = svc.system_member_names("acme", ["acme-web", "acme-extra-worker"])
+    assert "acme-web" in out
+    assert "acme-extra-worker" not in out, (
+        "a tag-read failure must not capture a longer sibling system — that is "
+        "the bug #2373 exists to fix, re-entered through its own error path"
+    )
+
+# ---------------------------------------------------------------------------
+# Review blocker 4 — the export name slice on a tag-only member
+# ---------------------------------------------------------------------------
+def test_a_member_without_the_prefix_is_skipped_from_the_export_not_mangled(monkeypatch):
+    """`full_name[len(system_name)+1:]` assumes every member carries the prefix.
+
+    Tag-first membership broke that assumption, and this PR's own
+    `test_tags_win_over_the_prefix_...` asserts such members ARE members. So
+    `content-production` + `bot` and `assistant` both sliced to `''`, which
+    COLLIDES as a dict key — one agent silently overwrites the other — and `''`
+    fails `validate_manifest`'s name regex, so the export cannot re-deploy. The
+    same "export broke its own round trip" class this PR exists to fix.
+
+    Review finding: the first version of this test was a source grep that
+    matched a leftover variable declaration and survived deleting the skip. It
+    drives the real function now.
+    """
+    import yaml
+    from services import system_service as svc
+
+    monkeypatch.setattr(svc.db, "get_tags_for_agents",
+                        lambda names: {"bot": ["content-production"],
+                                       "assistant": ["content-production"]},
+                        raising=False)
+    monkeypatch.setattr(svc.db, "get_agent_permissions", lambda n: [], raising=False)
+    monkeypatch.setattr(svc.db, "list_agent_schedules", lambda n: [], raising=False)
+
+    agents = [
+        {"name": "content-production-writer", "template": "local:scribe"},
+        {"name": "bot", "template": "local:scout"},
+        {"name": "assistant", "template": "local:sage"},
+    ]
+    out = yaml.safe_load(svc.export_manifest("content-production", agents))
+    keys = set((out.get("agents") or {}).keys())
+
+    assert "writer" in keys, "the prefixed member must still export"
+    assert "" not in keys, "an empty agent key collides and fails validate_manifest"
+    assert len(keys) == 1, (
+        f"tag-only members must be omitted, not mangled into colliding keys; got {keys}"
+    )

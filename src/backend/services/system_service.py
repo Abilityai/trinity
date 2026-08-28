@@ -801,28 +801,52 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
     """
     if not system_name or not agent_names:
         return []
+    tags_readable = True
     try:
         tags_by_agent = db.get_tags_for_agents(list(agent_names)) or {}
     except Exception as e:  # noqa: BLE001 — membership must not 500 on a tag read
         logger.warning("system membership: tag read failed (%s); using prefix", e)
         tags_by_agent = {}
+        tags_readable = False
 
+    # UNION, not tag-exclusive (review blocker). `if tagged: return tagged` made
+    # ONE tagged member hide every other one: `[acme-web, acme-db, acme-worker]`
+    # with only `acme-worker` tagged resolved to a single agent. Reachable three
+    # ways, none exotic — `PUT /api/agents/{n}/tags` is a full-set replacement,
+    # an agent added after deploy is untagged, and `configure_tags` sits inside a
+    # try/except so a mid-loop raise still reports "deployed". `restart_system`
+    # then restarts a subset and calls it success; `export_manifest` writes an
+    # incomplete backup and calls it one. Silent partial success on a fleet-wide
+    # verb is worse than the prefix collision this function exists to fix.
     tagged = [n for n in agent_names if system_name in (tags_by_agent.get(n) or [])]
-    if tagged:
-        return tagged
 
     prefix = f"{system_name}-"
-    out = []
+    narrowed = []
     for name in agent_names:
-        if not name.startswith(prefix):
+        if not name.startswith(prefix) or name in tagged:
             continue
-        claimed_elsewhere = any(
-            t != system_name and name.startswith(f"{t}-")
-            for t in (tags_by_agent.get(name) or [])
-        )
-        if not claimed_elsewhere:
-            out.append(name)
-    return out
+        # A longer sibling system's member (`acme-extra-worker` under `acme`) is
+        # excluded by its own tag. With the tags UNREADABLE we cannot show that,
+        # and the old code's empty dict made `claimed_elsewhere` unconditionally
+        # False — degrading to the RAW prefix and re-opening #2373 through its
+        # own error path. So on that path the narrowing is done structurally
+        # instead: a name whose remainder still looks like `<something>-<rest>`
+        # may belong to a longer system, and membership we cannot justify is
+        # dropped rather than assumed.
+        if tags_readable:
+            excluded = any(
+                t != system_name and name.startswith(f"{t}-")
+                for t in (tags_by_agent.get(name) or [])
+            )
+        else:
+            excluded = "-" in name[len(prefix):]
+        if not excluded:
+            narrowed.append(name)
+
+    # Roster order, not tag-then-prefix: the caller renders and restarts in this
+    # order, and a membership set that reshuffles on a tag edit is a surprise.
+    members = set(tagged) | set(narrowed)
+    return [n for n in agent_names if n in members]
 
 
 def configure_tags(
@@ -983,8 +1007,25 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     agent_configs = {}
     # Agents with no template label, whose manifest entry is inferred (#1759).
     templateless: List[str] = []
+    # Members that carry no `<system>-` prefix — tag-only membership (review
+    # blocker). The slice below assumes the prefix, and tag-first membership
+    # broke that: `acme` + `helper` sliced to `'r'`, and `content-production` +
+    # `bot` and `assistant` BOTH sliced to `''`, colliding as a dict key so one
+    # agent silently overwrote the other — and `''` fails `validate_manifest`'s
+    # name regex, so the export could not re-deploy. That is the same "export
+    # broke its own round trip" class this change set out to fix.
+    #
+    # Skipped and REPORTED, following #1759's `templateless` precedent right
+    # here: a manifest that silently loses an agent is worse than one that names
+    # what it could not represent. Renaming them into the prefix would rewrite
+    # the fleet from an export path.
+    unprefixed: List[str] = []
+    prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
+        if not full_name.startswith(prefix):
+            unprefixed.append(full_name)
+            continue
         # Remove system prefix and hyphen
         short_name = full_name[len(system_name) + 1:]
 
@@ -1065,6 +1106,19 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
             "Exported system '%s': %d agent(s) have no template label; their "
             "manifest entry was inferred as 'local:default': %s",
             system_name, len(templateless), ", ".join(sorted(templateless)),
+        )
+
+    if unprefixed:
+        # Same channel and same reason as `templateless` above: the function
+        # returns a bare YAML string, so a log line is the only way to say this
+        # without breaking the contract. WARNING rather than INFO because the
+        # export is incomplete — an operator restoring from it gets a smaller
+        # system than the one they exported, and nothing else says so.
+        logger.warning(
+            "Exported system '%s': %d member(s) carry no '%s' prefix and were "
+            "OMITTED — a manifest agent key is the short name, which cannot be "
+            "derived for them: %s",
+            system_name, len(unprefixed), prefix, ", ".join(sorted(unprefixed)),
         )
 
     # Build manifest dict

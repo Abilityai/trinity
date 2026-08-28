@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from models import (
     BundledManifestDetail,
     BundledManifestSummary,
+    ScheduleResponse,
     User,
     SystemDeployRequest,
     SystemDeployResponse,
@@ -257,7 +258,29 @@ async def get_system(
                 # `schedules` for every agent and logged one warning each, while
                 # `tests/test_systems.py` never asserted on the key. Exactly the
                 # failure mode the db facade's own comment warns about.
-                agent_detail["schedules"] = db.list_agent_schedules(agent['name'])
+                # PROJECTED, never the raw rows. `list_agent_schedules` returns
+                # whole `db_models.Schedule` objects and this route declares no
+                # `response_model`, so FastAPI would serialize every column —
+                # including `webhook_token`, the bearer credential for the
+                # UNAUTHENTICATED `POST /api/webhooks/{token}`, and
+                # `webhook_secret_encrypted`. `db_models.py:182-189` states that
+                # neither is ever surfaced in an API response model, and
+                # `ScheduleResponse` deliberately omits all four.
+                #
+                # The route is `get_current_user` + `get_accessible_agents`, so
+                # without this any chat-level shared `role: user` received
+                # schedule-trigger credentials for every member agent. Fixing
+                # the long-broken `schedules` key is what made a three-year
+                # no-op reachable, so the projection lands in the same change.
+                #
+                # Projected through the RESPONSE MODEL rather than a hand-picked
+                # dict: a dict is a second field list, free to drift from the one
+                # every other schedule surface uses. Precedent:
+                # `get_agent_schedule_names` (#2161) projects for the same reason.
+                agent_detail["schedules"] = [
+                    ScheduleResponse.model_validate(s, from_attributes=True).model_dump()
+                    for s in db.list_agent_schedules(agent['name'])
+                ]
 
             except Exception as e:
                 logger.warning(f"Failed to get details for agent {agent['name']}: {e}")
