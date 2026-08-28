@@ -1517,6 +1517,23 @@ every existing install. Tables are versioned on the OSS two-track runner
 both `agent_name` columns are registered in `AGENT_REFS` (CASCADE) — which the enterprise
 track never was, so an agent rename used to strand a client's portal history.
 
+**A turn may ask for a NEW thread (ent#451).** `PortalChatRequest` carries
+`new_thread` on both `POST .../chat` (the ent#83-documented headless surface) and
+`POST .../chat/stream`; it defaults `False`, so no existing caller changes behaviour.
+It exists because an absent `session_id` meant two different things — *"I don't know
+which thread"* and *"I want a fresh one"* — and `_resolve_session_id` resolved it as
+the first, which is why the Workspace's **New chat** kept landing in the existing
+conversation. An explicit `session_id` WINS over the flag (the id is a fact, the flag
+an intent, and abandoning a named thread would strand a turn meant for a conversation
+the caller could see), and the ownership check runs first either way, so the flag is
+never a route past it. `ensure_thread_for_ask` deliberately does not set it — ent#429's
+rule reuses the latest thread so asks do not accumulate beside the conversation.
+**OSS-core by decision (ent#451): deliberately ungated — no `requires_entitlement`,
+logic stays in the OSS tree.** Recorded explicitly because CLAUDE.md's default for an
+enterprise-tracker feature is *gated unless ruled otherwise*, so the ruling must never
+be inferred later from the mere fact that it merged; it inherits ent#356's move of the
+whole client-portal surface into OSS core.
+
 **New-chat briefing hints (ent#138 / ent#380):** each roster card ships a briefing —
 description + capability hint cards `playbooks[]{title,description,starter_prompt}` —
 resolved best-effort at sign-in (`service.py::_agent_briefing`, from the agent's

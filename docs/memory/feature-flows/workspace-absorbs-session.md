@@ -126,6 +126,17 @@ cycle costs disk, reaping blind costs conversations.
   agent, or a fresh one; `?new=1` forces fresh; an agent not on the caller's
   roster is ignored rather than surfaced as an error.
 
+  **ent#451 — the landing is only half the answer.** Deciding *which thread to
+  show* and deciding *what the first send asks for* are two questions, and an
+  absent `session_id` could not distinguish "unresolved" from "deliberately
+  fresh". `resolveAgentQuery` reads `route.query.new` ONCE into a local that
+  feeds both `resolveAgentLanding` and `startingNewChat`, which rides to
+  `PortalConversation` as `:new-chat` and becomes `new_thread` on the turn.
+  Without the second half `?new=1` rendered an empty conversation and then
+  resumed the old thread on the first turn — the landing honoured the deep link
+  and the send did not. Every site that nulls `pendingSession` also settles the
+  intent, so the two bits cannot desync.
+
 `agent_sessions` rows, the six endpoints, and `stores/sessions.js` are all
 untouched — AC #3. Only the entry point went away.
 
@@ -195,6 +206,17 @@ resolved availability, placed after the roster check (so a state-dependent
 refusal cannot become an existence oracle) and before `_resolve_session_id` (so a
 refused turn does not even open a thread). `start_portal_turn` passes the state
 it already resolved, so a streamed turn still costs one Docker read.
+
+**`_resolve_session_id` has three states, not two (ent#451).** An explicit
+`session_id` must belong to (agent, client) — a miss is 404. With none given it
+resumes the client's latest, which is right for a deep link, a refresh and a
+headless caller that never held an id. `new_thread=True` is the third: open one
+even though a latest exists. An explicit id WINS over the flag — a caller
+sending both contradicts itself, and the id is a fact where the flag is an
+intent — and the ownership check runs first either way, so the flag is never a
+route past it. `ensure_thread_for_ask` deliberately does NOT pass it: ent#429's
+landing rule reuses the latest thread so asks do not accumulate beside the
+conversation, which matters more once several chats can exist, not less.
 
 **Reading a stream requires all three:** the agent on the caller's roster, the
 execution belonging to that agent, and the execution having been started by that

@@ -589,6 +589,12 @@ function openRoom(roomId) {
   markRead('room', roomId)
   activeRoomId.value = roomId
   pendingSession.value = null
+  // ent#451 review: every site that nulls `pendingSession` also settles the
+  // intent. Latent today because both consumers AND on "no session yet", but a
+  // flag whose meaning depends on a second variable is one refactor from being
+  // wrong, and the declaration at :441 claims it is cleared the moment a real
+  // thread exists.
+  startingNewChat.value = false
   convGen.value++
   router.push(`/workspace/r/${roomId}`)
 }
@@ -601,6 +607,7 @@ function openAgentPage(name) {
   if (!name) return
   unreachableAgent.value = null
   pendingSession.value = null
+  startingNewChat.value = false
   activeRoomId.value = null
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
@@ -777,7 +784,15 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (!sid || !store.isClientSignedIn) return
   if (pendingSession.value === sid && activeAgentName.value) return
   const known = threads.value.find((t) => (t.id || t.session_id) === sid)
-  if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
+  // ent#451 review: this is "the commonest way in — back/forward, a bookmark
+  // and a reload" (below), and it adopts a REAL thread, so any pending
+  // fresh-start intent is spent here too.
+  if (known) {
+    activeAgentName.value = known.agent_name
+    pendingSession.value = sid
+    startingNewChat.value = false
+    convGen.value++
+  }
   // Opening by ROUTE is an open. Back/forward, a bookmark and a reload all land
   // here rather than in `openThread`, and it is the commonest way in — without
   // this the sidebar badges the conversation on screen, through every reload.
@@ -789,9 +804,15 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // surface. The decision itself (which agent, which thread) is a pure function in
 // portalUtils so it can be tested without mounting the shell.
 function resolveAgentQuery() {
+  // ONE local, read twice: `resolveAgentLanding` decides which thread to land
+  // on, and `startingNewChat` decides what the first SEND asks for. Reading
+  // `route.query.new` separately in each place is how they drifted — the
+  // landing honoured `?new=1` and the send did not, so the deep link rendered
+  // an empty conversation and then resumed the old thread on the first turn.
+  const forceNew = !!route.query.new
   const landing = resolveAgentLanding({
     agent: route.query.agent,
-    forceNew: !!route.query.new,
+    forceNew,
     agents: store.agents,
     threads: threads.value,
   })
@@ -805,6 +826,7 @@ function resolveAgentQuery() {
       unreachableAgent.value = String(route.query.agent)
       activeAgentName.value = null
       pendingSession.value = null
+      startingNewChat.value = false
       convGen.value++
       return true
     }
@@ -816,6 +838,11 @@ function resolveAgentQuery() {
   prefill.value = ''
   convGen.value++
   pendingSession.value = landing.sessionId
+  // `landing.sessionId` is null under `forceNew`, but null alone is exactly the
+  // ambiguity ent#451 exists to remove — it also means "unresolved". AND-ed
+  // with the landing so a `?new=1` that still resolved a thread (it cannot
+  // today, but the two are independent functions) never claims a fresh start.
+  startingNewChat.value = forceNew && !landing.sessionId
   if (landing.sessionId) router.replace(`/workspace/c/${landing.sessionId}`)
   return true
 }

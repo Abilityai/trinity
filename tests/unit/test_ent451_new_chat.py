@@ -141,8 +141,10 @@ def test_an_ask_still_lands_in_the_latest_thread(svc):
 def test_history_without_a_session_is_unchanged(svc):
     """The other reader of the two-meaning value. It keeps resuming, because a
     refresh must still show the conversation; the FRONTEND stops asking for
-    history when it is deliberately starting fresh (see the spec in
-    tests/unit/... frontend suite)."""
+    history when it is deliberately starting fresh, which is pinned in
+    `src/frontend/tests/unit/workspaceNewChat.spec.js`. Review finding: that
+    reference used to point at "the spec in tests/unit/... frontend suite",
+    which asserted coverage that did not exist."""
     src = inspect.getsource(svc.get_history)
     assert "new_thread" not in src
 
@@ -163,9 +165,33 @@ def test_the_chat_request_carries_the_intent():
 def test_both_turn_entry_points_forward_it():
     """Sync `/chat` and streaming `/chat/stream` must agree — the Workspace uses
     the streaming one and falls back to the sync one, so a flag honoured by only
-    one makes the bug come back exactly when streaming fails."""
-    from client_portal import router
+    one makes the bug come back exactly when streaming fails.
 
+    Review finding: this was `inspect.getsource` plus a `"new_thread"` substring,
+    so it passed on a COMMENT or a misspelled kwarg — the weakest possible guard
+    on the property the PR calls load-bearing. It now BINDS the keyword against
+    each service signature, which is a real check: a rename, a typo or a dropped
+    parameter all fail, and a comment cannot satisfy it.
+    """
+    from client_portal import router, service
+
+    for fn in (service.portal_chat, service.start_portal_turn):
+        sig = inspect.signature(fn)
+        assert "new_thread" in sig.parameters, f"{fn.__name__} cannot receive it"
+        # Binds only if the name is exactly right.
+        sig.bind_partial(agent_name="a", message="m", email="e", new_thread=True)
+
+    # And the routes actually pass the body through rather than defaulting it.
     for fn in (router.portal_chat, router.portal_chat_stream):
-        src = inspect.getsource(fn)
-        assert "new_thread" in src, f"{fn.__name__} drops the new-thread intent"
+        body = _code_only(inspect.getsource(fn))
+        assert "new_thread=body.new_thread" in body, (
+            f"{fn.__name__} does not forward the caller's intent"
+        )
+
+
+def _code_only(src: str) -> str:
+    """Source with comment lines stripped — a comment naming `new_thread` must
+    not satisfy an assertion about the code (the #2415 lesson)."""
+    return "\n".join(
+        line for line in src.splitlines() if not line.strip().startswith("#")
+    )
