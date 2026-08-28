@@ -258,6 +258,7 @@ class ScheduleExecution(BaseModel):
     # transitive across A→B→C). NULL = direct row; reporter falls back to the
     # executing agent.
     source_channel_agent: Optional[str] = None
+    source_channel_client: Optional[str] = None
 
 
 # =========================================================================

@@ -279,6 +279,9 @@ schedule_executions = Table(
     # ent#265: binding-agent for channel report-back — the agent whose channel
     # binding owns this execution's INHERITED context (NULL = executing agent).
     Column("source_channel_agent", Text),
+    # ent#457 review: WHICH human the channel context belongs to. Only the
+    # portal leg reads it today — see `_resolve_portal`'s recipient check.
+    Column("source_channel_client", Text),
 )
 
 agent_loops = Table(

@@ -277,6 +277,7 @@ TABLES = {
             source_channel_chat_id TEXT,
             source_channel_thread TEXT,
             source_channel_agent TEXT,
+            source_channel_client TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

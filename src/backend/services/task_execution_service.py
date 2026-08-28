@@ -1033,6 +1033,11 @@ class TaskExecutionService:
         source_channel: Optional[str] = None,
         source_channel_chat_id: Optional[str] = None,
         source_channel_thread: Optional[str] = None,
+        # ent#457 review: WHICH client the channel context belongs to. Portal
+        # turns pass this through `run_resumable_turn(**execute_kwargs)`, which
+        # splats straight into this signature — an unaccepted keyword here is a
+        # TypeError on every Workspace turn, not a silently-dropped column.
+        source_channel_client: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1111,6 +1116,10 @@ class TaskExecutionService:
                 source_channel=source_channel,
                 source_channel_chat_id=source_channel_chat_id,
                 source_channel_thread=source_channel_thread,
+                # ent#457 review: the paired write. Accepting the kwarg without
+                # persisting it would leave `_resolve_portal` failing closed on
+                # every row this branch creates — the sync Workspace turn.
+                source_channel_client=source_channel_client,
             )
             execution_id = execution.id if execution else None
 
