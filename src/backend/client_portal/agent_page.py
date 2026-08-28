@@ -97,7 +97,94 @@ def _health(agent_name: str) -> dict:
     }
 
 
-def _stats(agent_name: str, window: str) -> dict:
+def _without_hidden_buckets(a: dict) -> dict:
+    """Drop the hidden buckets from the analytics payload, and RE-DERIVE the
+    counts that quoted them (#2423).
+
+    Removing a segment while leaving the day total is worse than not filtering:
+    a bar whose parts sum to 1 above a label reading 13 reports its own
+    filtering as missing data, and the headline would sit above a chart that
+    cannot account for it. `success_rate` is deliberately NOT recomputed — it is
+    a ratio over terminal rows this function cannot see, and a number derived
+    from a filtered numerator over an unfiltered denominator would be worse than
+    one that is merely broad.
+    """
+    out = dict(a)
+
+    # The two `by_type` fields have DIFFERENT shapes under one name: the
+    # top-level total is a LIST of `{"bucket", "total"}` rows, while each
+    # timeline day carries a DICT of `{bucket: count}` (`db/schedules/
+    # analytics.py`). Handling only one of them is how the first draft of this
+    # crashed the whole page on a real payload.
+    kept_totals = [row for row in (a.get("by_type") or [])
+                   if _bucket_of(row) not in _CLIENT_HIDDEN_BUCKETS]
+    out["by_type"] = kept_totals
+    out["buckets"] = [b for b in (a.get("buckets") or [])
+                      if b not in _CLIENT_HIDDEN_BUCKETS]
+
+    timeline = []
+    for day in (a.get("timeline") or []):
+        d = dict(day)
+        kept = {k: v for k, v in (day.get("by_type") or {}).items()
+                if k not in _CLIENT_HIDDEN_BUCKETS}
+        d["by_type"] = kept
+        # A day that had only hidden work becomes an empty day, not a missing
+        # one — the axis stays continuous (#1107's gap-fill convention).
+        d["total"] = sum(kept.values())
+        timeline.append(d)
+    out["timeline"] = timeline
+    out["total_executions"] = sum(_total_of(row) for row in kept_totals)
+    return out
+
+
+def _bucket_of(row) -> str:
+    """The bucket name of a top-level `by_type` entry, whichever shape it is.
+
+    Tolerant on purpose: the accessor emits `{"bucket", "total"}` rows, the
+    module's own unavailable-path default is `[]`, and a test double has used a
+    bare mapping. An unrecognised row keeps its place rather than being dropped
+    — hiding a row we failed to parse would be the opposite of this function's
+    job.
+    """
+    if isinstance(row, dict):
+        return row.get("bucket") or ""
+    return str(row)
+
+
+def _total_of(row) -> int:
+    if isinstance(row, dict):
+        try:
+            return int(row.get("total") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+# #2423: work a client can see but cannot open, control, or explain.
+#
+# The loops strip is `isPlatformSession`-gated (ent#458 — loops are an operator
+# capability, correctly), and this page has no Loops tab, so a client had the
+# COUNT of loop runs with the OUTPUT reachable only from Agent Detail. Twelve
+# rows saying "Loop" and a `Loops 12` legend entry, leading nowhere.
+#
+# This follows the module's existing rule rather than adding one: it already
+# reports rather than configures, already projects away spend and prompts, and
+# already drops `alert` asks as "operations telemetry, not something the agent
+# is asking a person". A loop run is the same kind of thing.
+#
+# Operators keep it — they can click through and read every run, so hiding it
+# from them removes real signal and fixes nothing. Same `is_platform` split the
+# roster and `_require_roster` already use.
+_CLIENT_HIDDEN_TRIGGERS = frozenset({"loop"})
+
+# The analytics bucket `_TRIGGER_BUCKETS` folds `loop` into (`db/schedules`).
+# Named separately because the two vocabularies are genuinely different — one is
+# a `triggered_by` value, the other a display label — and a single constant
+# would hide that a rename on either side breaks the pair.
+_CLIENT_HIDDEN_BUCKETS = frozenset({"Loops"})
+
+
+def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
     """Activity chart + headline numbers, from the existing analytics accessor.
 
     The issue's Technical Notes name that accessor specifically, so this adds no
@@ -114,6 +201,8 @@ def _stats(agent_name: str, window: str) -> dict:
             "first_try": {"terminal": 0, "first_try": 0, "rate": None},
             "unavailable": True,
         }
+    if not is_platform:
+        a = _without_hidden_buckets(a)
     return {
         "window": window,
         "window_hours": a.get("window_hours", hours),
@@ -225,7 +314,8 @@ def _schedule_names(agent_name: str, rows: list[dict]) -> dict:
     }
 
 
-def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK) -> list[dict]:
+def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK, *,
+                 is_platform: bool = False) -> list[dict]:
     """What the agent has been doing — shape, plus the schedule's name.
 
     The accessor returns `message`, `cost`, `model_used` and `source_user_email`
@@ -244,6 +334,12 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK) -> list[dict]:
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: executions read failed for %s: %s", agent_name, e)
         return []
+    # #2423: a client sees only work it can act on or understand. Filtered here
+    # rather than in the UI for the same reason the fields above are projected
+    # here — a row that never leaves the service cannot be surfaced by a later
+    # template change.
+    if not is_platform:
+        rows = [r for r in rows if r.get("triggered_by") not in _CLIENT_HIDDEN_TRIGGERS]
     names = _schedule_names(agent_name, rows)
     return [{
         "id": r.get("id"),
@@ -324,7 +420,7 @@ def _rating_tally(agent_name: str) -> dict:
 
 
 def build_page(email: str, agent_name: str, card: Optional[dict],
-               window: str = DEFAULT_WINDOW) -> dict:
+               window: str = DEFAULT_WINDOW, *, is_platform: bool = False) -> dict:
     """Assemble the page. `card` is the caller's roster entry (identity + what
     it can do), already resolved and access-checked by the caller.
 
@@ -358,7 +454,7 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
         # carries (#138 / ent#380), NOT a second mechanism. ent#178 is the
         # unified exposable-skills config this becomes a view of when it lands.
         "capabilities": card.get("playbooks") or [],
-        "stats": _stats(agent_name, window),
+        "stats": _stats(agent_name, window, is_platform=is_platform),
         "asks": _asks(agent_name, email),
         # ent#366 AC #4: a RAW TALLY, never a percentage. At the volumes this
         # page sees, one thumbs-down out of one rating renders as "100%
@@ -366,7 +462,7 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
         # figures cross so the denominator, which is the honest part, is on
         # screen with them.
         "ratings": _rating_tally(agent_name),
-        "recent_work": _recent_work(agent_name),
+        "recent_work": _recent_work(agent_name, is_platform=is_platform),
     }
 
 
