@@ -302,6 +302,16 @@ class TestSelectionVerdict:
                                         {"utilization_pct": bad, "status": "allowed"}))
         assert svc.selection_verdict(r)[0] == svc.SELECTION_UNKNOWN
 
+    @pytest.mark.parametrize("bad", [-0.1, -5.0, -100.0])
+    def test_a_negative_figure_is_no_figure(self, bad):
+        """The sanitiser is two-sided (PR #2422 review): a negative utilization
+        is malformed provider data, not a very empty subscription. Unbounded, it
+        would band to -1 and sort AHEAD of a genuinely empty one."""
+        svc = _svc()
+        r = svc.headroom_reading(_fresh({"utilization_pct": bad, "status": "allowed"},
+                                        {"utilization_pct": bad, "status": "allowed"}))
+        assert svc.selection_verdict(r)[0] == svc.SELECTION_UNKNOWN
+
 
 class TestRankSubscriptions:
 
@@ -318,6 +328,18 @@ class TestRankSubscriptions:
             c=_fresh({"utilization_pct": 45.0, "status": "allowed"}),
         )
         assert [s.id for s in svc.rank_subscriptions(cands, readings)] == ["b", "c", "a"]
+
+    def test_a_negative_figure_never_outranks_an_empty_subscription(self):
+        """A malformed negative reading must not beat a real 0% one — it is
+        UNKNOWN, so it sorts after every measured candidate."""
+        svc = _svc()
+        cands = [_sub("neg"), _sub("empty")]
+        readings = self._readings(
+            svc,
+            neg=_fresh({"utilization_pct": -5.0, "status": "allowed"}),
+            empty=_fresh({"utilization_pct": 0.0, "status": "allowed"}),
+        )
+        assert [s.id for s in svc.rank_subscriptions(cands, readings)] == ["empty", "neg"]
 
     def test_the_reviewers_example_a_full_five_hour_window_loses(self):
         """7d 20% / 5h 98% fails the #792 retry within the minute; 7d 25% / 5h 10% does not."""

@@ -808,13 +808,18 @@ SELECTION_REFUSED = "refused"     # the provider is refusing it right now — no
 
 
 def _finite_pct(w: Optional[WindowReading]) -> Optional[float]:
+    """A usable utilization figure, or None. Two-sided: finite AND non-negative.
+    A negative figure is malformed provider data, not a very empty
+    subscription — unbounded it would band to -1 and sort AHEAD of a genuinely
+    empty one. No upper bound: an overage window legitimately reads past 100%.
+    """
     if w is None or w.utilization_pct is None:
         return None
     try:
         v = float(w.utilization_pct)
     except (TypeError, ValueError):
         return None
-    return v if math.isfinite(v) else None
+    return v if math.isfinite(v) and v >= 0 else None
 
 
 def selection_verdict(reading: Optional[HeadroomReading]) -> tuple:
@@ -875,8 +880,9 @@ def rank_subscriptions(candidates, readings: Dict[str, Optional[HeadroomReading]
 
     Pure: a stable sort over `selection_sort_key`, so a set with no readings
     comes back in today's order. Never fewer than the input minus fresh
-    refusals — ranking IMPROVES a choice, it never prevents one. The refusal
-    filter is the one deliberate exception to #2409's literal AC #3 (recorded
+    refusals — ranking IMPROVES a choice; it never prevents one except when
+    every candidate is refusing. That refusal filter is the one deliberate
+    exception to #2409's literal AC #3 (recorded
     on the issue): moving an agent onto a subscription the provider is
     refusing is a guaranteed failed turn plus a failure row, and with several
     such subscriptions the agent walks through all of them (#444's class).
