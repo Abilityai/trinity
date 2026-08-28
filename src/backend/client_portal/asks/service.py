@@ -50,7 +50,7 @@ def _is_expired(item: dict) -> bool:
     return bool(expires_at) and expires_at <= utc_now_iso()
 
 
-def _project(item: dict) -> WorkspaceAsk:
+def _project(item: dict, *, resume_requested: Optional[bool] = None) -> WorkspaceAsk:
     """The explicit client-facing projection (see `WorkspaceAsk`).
 
     `chat_id` comes from platform-written context only — enforced since ent#429,
@@ -73,6 +73,7 @@ def _project(item: dict) -> WorkspaceAsk:
         expires_at=item.get("expires_at"),
         status="expired" if _is_expired(item) else "pending",
         chat_id=chat_id if isinstance(chat_id, str) else None,
+        resume_requested=resume_requested,
     )
 
 
@@ -204,4 +205,69 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         "[WorkspaceAsks] %s answered by %s (client=%s)",
         item_id, email, not is_platform,
     )
-    return _project(updated)
+
+    # ent#430 — the gate. Until this, an answer given here was recorded, reached
+    # the agent's queue file in about three seconds, and re-triggered nothing:
+    # the operator route dispatched, the client route returned. So ent#428/#429
+    # hosted a surface for answers nobody acted on, which is exactly what that
+    # issue says the flag defaulting OFF was standing in for.
+    #
+    # Hung off the CAS WIN only, like the operator route: the 409 above already
+    # returned for a lost race, so reaching here means THIS answer is the one
+    # that landed. Two people answering at once produce one resume.
+    #
+    # Nothing about the mechanism is re-decided here — the per-agent opt-in, the
+    # idempotency key, the audit row and the failure handling all live inside
+    # `maybe_dispatch_resume`. ent#430's body is explicit that a second dispatch
+    # surface "is how the cost, trigger-label and loop-prevention questions get
+    # answered twice, differently", so this path only reaches the first one.
+    #
+    # `updated`, never `item`: the pre-answer read still says `pending`, and a
+    # resume handed that row acts on an ask that does not yet carry its answer.
+    #
+    # Belt-and-braces on the raise: the spawn is fire-and-forget, but a failure
+    # ON THIS LINE would still propagate, and a 500 here would tell the client
+    # their answer failed when it is committed and already on its way to the
+    # agent. The answer is the thing that must not be lost.
+    try:
+        from services import operator_resume_service
+
+        operator_resume_service.spawn_resume_dispatch(
+            updated,
+            response=response or "",
+            response_text=response_text,
+            responded_by_email=email,
+        )
+    except Exception:  # noqa: BLE001 — never lose a committed answer
+        logger.exception(
+            "[WorkspaceAsks] resume dispatch could not be started for %s", item_id
+        )
+
+    # `updated` first, `item` as the fallback: both name the same agent, and the
+    # CAS result is the row this answer actually landed on.
+    agent = (updated.get("agent_name") or item.get("agent_name") or "")
+    return _project(updated, resume_requested=_resume_requested(agent))
+
+
+def _resume_requested(agent_name: str) -> bool:
+    """Whether answering this agent's ask sets work in motion (ent#430 AC #5).
+
+    A report of INTENT, not a promise of success: the dispatch is backgrounded,
+    so at this point the only honest thing to say is whether it will be
+    attempted. A failure after this lands as a FAILED execution row plus an
+    `operator_resume_dispatch` audit entry (ent#329) — operator-visible, which
+    is the surface that can act on it.
+
+    Read from the SAME accessor `maybe_dispatch_resume` gates on, so the two
+    cannot disagree about what is about to happen. Fails CLOSED: an unreadable
+    flag claims nothing, because over-claiming is precisely the failure AC #5
+    names — an ask that reads as acted upon while nothing happened.
+    """
+    try:
+        return bool(db.get_operator_resume_enabled(agent_name))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[WorkspaceAsks] could not read the resume opt-in for %s; "
+            "reporting no resume", agent_name, exc_info=True,
+        )
+        return False

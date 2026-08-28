@@ -26,6 +26,12 @@ class WorkspaceAsk(BaseModel):
     expires_at: Optional[str] = None
     status: str                     # pending | expired  (terminal ones are not listed)
     chat_id: Optional[str] = None   # the thread it was attached to, when known
+    # ent#430 AC #5: whether answering this ask sets work in motion, so a
+    # surface can say "answered" without implying the agent started working.
+    # Populated only on the ANSWER response — a pending ask has not been
+    # answered, so the question does not arise, and defaulting it to False on a
+    # listing would read as "answering this does nothing".
+    resume_requested: Optional[bool] = None
 
 
 class WorkspaceAskAnswer(BaseModel):
