@@ -334,6 +334,7 @@ import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
+import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -509,6 +510,7 @@ const avatarHasReference = ref(false)
 // Emotion avatar cycling state (AVATAR-002)
 const availableEmotions = ref([])
 const emotionAvatarUrl = ref(null)
+const emotionVersion = ref(null)   // #2374: stamp from GET /avatar/emotions
 const emotionCycleTimer = ref(null)
 
 const taskPrefillMessage = ref('')
@@ -1041,8 +1043,12 @@ async function loadAvailableEmotions() {
   try {
     const response = await axios.get(`/api/agents/${agent.value.name}/avatar/emotions`)
     availableEmotions.value = response.data.emotions || []
+    // #2374: carried alongside the list, so a regeneration landing between polls
+    // re-keys the URLs instead of being masked by the 24h cache.
+    emotionVersion.value = response.data.version || null
   } catch (err) {
     availableEmotions.value = []
+    emotionVersion.value = null
   }
 }
 
@@ -1052,8 +1058,19 @@ function cycleEmotion() {
     return
   }
   const emotion = availableEmotions.value[Math.floor(Math.random() * availableEmotions.value.length)]
-  const avatarVersion = agent.value.avatar_url?.split('v=')[1] || '1'
-  emotionAvatarUrl.value = `/api/agents/${agent.value.name}/avatar/emotion/${emotion}?v=${avatarVersion}`
+  // #2374: the version comes from the emotions endpoint's own stamp (the newest
+  // variant file's mtime), not from parsing `avatar_url` with a constant `'1'`
+  // fallback. That fallback pinned every emotion URL to ONE cache entry, and
+  // the variants are served `max-age=86400` — so a regenerated avatar kept
+  // showing the previous face for up to 24 hours.
+  emotionAvatarUrl.value = buildEmotionUrl(
+    agent.value.name,
+    emotion,
+    emotionCacheVersion({
+      emotionsVersion: emotionVersion.value,
+      avatarUrl: agent.value.avatar_url,
+    }),
+  )
 }
 
 function startEmotionCycling() {
