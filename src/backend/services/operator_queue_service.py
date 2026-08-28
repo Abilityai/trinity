@@ -26,6 +26,7 @@ from typing import Optional
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services import rate_limiter
+from services.operator_queue_choices import OPTIONS_DROPPED_MARKER
 from services.agent_client import AgentClient
 from utils.helpers import utc_now_iso
 
@@ -163,7 +164,10 @@ _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 # Inline truncation marker (kept short so the clamped field length stays ≤ cap).
 _TRUNC_MARKER = "…[truncated]"
-_OPTIONS_DROPPED_MARKER = "(options omitted: exceeded size cap)"
+# #2376: one definition, imported. The respond-side validator has to exempt
+# items wearing this marker, and a second literal would drift the day either
+# side is reworded — leaving the sink accepting a placeholder as a decision.
+_OPTIONS_DROPPED_MARKER = OPTIONS_DROPPED_MARKER
 
 # #1632: single Redis key for the operator-queue sync leader (mirror monitoring
 # #1464). Only the lease-holder runs a poll cycle, so `--workers 2` doesn't

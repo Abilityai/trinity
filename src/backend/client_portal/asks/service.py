@@ -12,6 +12,10 @@ import logging
 from typing import List, Optional
 
 from database import db
+from services.operator_queue_choices import (
+    ResponseNotOfferedError,
+    validate_response_choice,
+)
 from utils.helpers import utc_now_iso
 
 from .models import WorkspaceAsk
@@ -27,11 +31,18 @@ _VISIBLE_KINDS = ("question", "approval", "alert")
 class AskError(Exception):
     """A named, actionable refusal — never a bare 422 from a validator."""
 
-    def __init__(self, status_code: int, code: str, detail: str):
+    def __init__(self, status_code: int, code: str, detail: str,
+                 data: Optional[dict] = None):
         super().__init__(detail)
         self.status_code = status_code
         self.code = code
         self.detail = detail
+        # #2376: extra machine-readable fields for the refusals that have them
+        # (today: the options an approval actually offered). A client cannot act
+        # on "that is not a valid choice" without being told what the choices
+        # were, and re-deriving them by parsing the message is the thing that
+        # breaks the day the wording changes.
+        self.data = data or {}
 
 
 def _is_expired(item: dict) -> bool:
@@ -170,6 +181,14 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     # client has no row there. Writing one would be a lie in the audit trail, so
     # the responder KIND is recorded instead — "answered by a client" must stay
     # distinguishable from "answered by an operator whose account was deleted".
+    # #2376: same rule as the operator route, from the one shared validator —
+    # a copy per entry point is how the two drift, and this path answers the
+    # same rows.
+    try:
+        validate_response_choice(item, response)
+    except ResponseNotOfferedError as e:
+        raise AskError(422, e.code, str(e), {"offered_options": e.options})
+
     updated = db.respond_to_operator_queue_item(
         item_id=item_id,
         response=response or "",

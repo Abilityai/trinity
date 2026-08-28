@@ -15,6 +15,10 @@ from database import db
 from dependencies import get_current_user
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.operator_queue_choices import (
+    ResponseNotOfferedError,
+    validate_response_choice,
+)
 from services import operator_resume_service
 
 
@@ -213,6 +217,23 @@ async def respond_to_queue_item(
         raise HTTPException(
             status_code=400,
             detail=f"Cannot respond to item with status '{existing['status']}'"
+        )
+
+    # #2376: the decision has to be one the AGENT offered. Nothing checked this
+    # at any layer, so #2370 recorded `"approved"` against `["Approve", "Deny"]`
+    # for five months with no 4xx — the agent read back a string it never
+    # offered. Named 422 rather than a bare one: the options are agent-authored,
+    # so a refusal that does not list them leaves the operator guessing.
+    try:
+        validate_response_choice(existing, body.response)
+    except ResponseNotOfferedError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": e.code,
+                "message": str(e),
+                "offered_options": e.options,
+            },
         )
 
     item = db.respond_to_operator_queue_item(
