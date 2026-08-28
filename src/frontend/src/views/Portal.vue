@@ -221,6 +221,7 @@
           :agent="activeAgent"
           :roster="store.agents"
           :session-id="pendingSession"
+          :new-chat="startingNewChat"
           :prefill="prefill"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           @switch-agent="switchAgent"
@@ -434,6 +435,11 @@ const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.nam
 const pickerOpen = ref(false)
 const pickerBusy = ref(false)
 
+// ent#451 — the second bit beside `pendingSession`. Cleared the moment a real
+// thread exists (`openThread`, and the send that gets a session id back), so it
+// can never make a SECOND turn open another thread.
+const startingNewChat = ref(false)
+
 function newChat() {
   pickerOpen.value = true
 }
@@ -608,6 +614,11 @@ function onStartChatFromPage(name, starter) {
 function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
+  // ent#451: this function has always MEANT a fresh chat — it clears
+  // `pendingSession` — but a null session id is also what an unresolved thread
+  // looks like, so the conversation could not tell the two apart and loaded the
+  // agent's most recent thread instead. Saying it explicitly is the fix.
+  startingNewChat.value = true
   pendingSession.value = null; prefill.value = ''; convGen.value++
   // Leave ANY specific route, not an enumerated list of params.
   //
@@ -623,6 +634,9 @@ function newChatWithAgent(name) {
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
   unreachableAgent.value = null
+  // Opening an existing thread is the opposite intent; clear it so a later
+  // send does not still ask for a fresh one.
+  startingNewChat.value = false
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
@@ -634,6 +648,12 @@ function openThread(t) {
 }
 function onSessionAdopted(id) {
   pendingSession.value = id
+  // ent#451: a real thread exists now, so the fresh-start intent is spent.
+  // The send guard already ANDs on "no session yet", so a second turn was never
+  // going to open a third thread — this keeps the two bits from disagreeing
+  // rather than relying on that, and matters when the user navigates away and
+  // back to a thread this flag would otherwise still describe as unborn.
+  startingNewChat.value = false
   if (route.params.sessionId !== id) router.replace(`/workspace/c/${id}`)
   // A thread you are actively talking in is by definition read. This is also
   // what gives a brand-new thread its read cursor, so the very next reply the

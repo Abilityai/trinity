@@ -161,6 +161,12 @@ class PortalChatRequest(BaseModel):
     new one if they've never chatted with this agent)."""
     message: str = Field(min_length=1, max_length=8000)
     session_id: Optional[str] = None
+    # ent#451: ask for a FRESH thread rather than the client's most recent one.
+    # An absent `session_id` alone could not say this — it also means "I don't
+    # know which thread", which is how New chat kept landing in the existing
+    # conversation. Ignored when `session_id` names a thread: the id is a fact,
+    # this is an intent. Defaults False so no existing caller changes behaviour.
+    new_thread: bool = False
 
 
 class PortalChatResponse(BaseModel):

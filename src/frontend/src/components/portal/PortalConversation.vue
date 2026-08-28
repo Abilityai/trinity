@@ -450,6 +450,11 @@ const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available, stt_available}
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
+  // ent#451: a null `sessionId` alone cannot say WHICH kind of "no thread" this
+  // is — an unresolved one (deep link, refresh) or a deliberately fresh one.
+  // This is the second bit that makes them distinguishable, mirroring the
+  // backend's `new_thread`.
+  newChat: { type: Boolean, default: false },
   prefill: { type: String, default: '' },
   // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
   // holds the per-viewer chat state), rendered here.
@@ -646,6 +651,13 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   currentSessionId.value = sid
   resetTypeahead()
+  // ent#451: `newChat` is the deliberate-fresh-start signal, and it has to be
+  // consulted BEFORE the agent-changed branch. Without it this read a changed
+  // agent as "load that agent's history" and called `fetchHistory(name, null)`,
+  // which the backend answers with the most-recent thread — so New chat with an
+  // agent you had spoken to before resumed it, while New chat with the agent
+  // you were already on correctly started fresh. The asymmetry was the tell.
+  if (props.newChat && !sid) { messages.value = []; currentSessionId.value = null; return }
   if (props.agent.name !== oldName || sid) await loadThread(sid)
   else { messages.value = []; currentSessionId.value = null }   // brand-new chat
 })
@@ -661,7 +673,10 @@ onMounted(async () => {
   document.addEventListener('keydown', onEscapeKeydown)
   window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
-  if (props.sessionId) await loadThread(props.sessionId)
+  // ent#451: `newChat` also has to hold on FIRST paint — the picker mounts a
+  // fresh conversation rather than updating one, so the watcher above never
+  // runs for it.
+  if (props.sessionId && !props.newChat) await loadThread(props.sessionId)
   else messages.value = []
   autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
 })
@@ -955,7 +970,8 @@ async function deliver(text) {
     // tell this turn's reply from the previous one's.
     const baseline = await persistedAssistantCount(currentSessionId.value)
     try {
-      started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
+      started = await store.startPortalChat(props.agent.name, text, currentSessionId.value,
+                                            { newThread: props.newChat && !currentSessionId.value })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -969,7 +985,8 @@ async function deliver(text) {
       if (!routeMissing) throw dispatchErr
       // eslint-disable-next-line no-console
       console.debug('[workspace] streaming route unavailable, using sync send', dispatchErr)
-      data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
+      data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value,
+                                        { newThread: props.newChat && !currentSessionId.value })
     }
 
     if (started) {

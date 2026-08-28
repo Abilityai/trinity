@@ -1129,16 +1129,31 @@ def _spawn_title_generation(agent_name: str, session_id: str, client_message: st
     task.add_done_callback(_title_tasks.discard)
 
 
-def _resolve_session_id(agent_name: str, email: str, session_id: str | None) -> str:
+def _resolve_session_id(agent_name: str, email: str, session_id: str | None,
+                        *, new_thread: bool = False) -> str:
     """Return the session a turn belongs to. An explicit ``session_id`` must belong
     to (agent, client) — a miss raises 404 (never write into another client's or a
     stranger's thread). With none given, resume the client's latest session or
-    open a fresh one so a first-time chat still lands in a real thread."""
+    open a fresh one so a first-time chat still lands in a real thread.
+
+    ent#451: ``new_thread`` is the THIRD state. An absent ``session_id`` meant two
+    different things — "I don't know which thread" and "I want a fresh one" — and
+    this resolved it as the first, which is why New chat dropped the user back
+    into the existing conversation. Both readings are right for the case they
+    were written for (a deep link, a refresh, an API caller that never held a
+    session id), so neither could be inverted; the intent had to become sayable.
+
+    An explicit id WINS over the flag. A caller sending both contradicts itself,
+    and the id is a fact where the flag is an intent — silently abandoning a
+    named thread would strand a turn meant for a conversation the caller could
+    see. The ownership check runs first either way, so the flag is never a route
+    past it.
+    """
     if session_id:
         if not db.get_portal_session(session_id, agent_name, email):
             raise ClientPortalError(404, "Conversation not found")
         return session_id
-    latest = db.get_latest_portal_session_id(agent_name, email)
+    latest = None if new_thread else db.get_latest_portal_session_id(agent_name, email)
     if latest:
         return latest
     new_id = uuid.uuid4().hex
@@ -1287,7 +1302,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       include_owned: bool = False,
                       execution_id: str | None = None,
                       turn_timeout_seconds: int | None = None,
-                      availability: str | None = None) -> dict:
+                      availability: str | None = None,
+                      # ent#451 — the caller asked for a fresh thread. Defaults
+                      # False so every existing caller keeps resuming.
+                      new_thread: bool = False) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -1352,7 +1370,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
     turn_timeout = (turn_timeout_seconds if turn_timeout_seconds is not None
                     else resolve_turn_timeout(agent_name))
 
-    session_id = _resolve_session_id(agent_name, email, session_id)
+    session_id = _resolve_session_id(agent_name, email, session_id,
+                                     new_thread=new_thread)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
 
     # ent#186: a thread is titled from its OPENING exchange, exactly once. Decide
@@ -2100,7 +2119,11 @@ def _agent_is_running(agent_name: str) -> bool:
 
 async def start_portal_turn(agent_name: str, message: str, email: str,
                             session_id: str | None = None,
-                            include_owned: bool = False) -> dict:
+                            include_owned: bool = False,
+                            # ent#451 — see `portal_chat`. Both turn entry points
+                            # carry it or the Workspace's streaming path and its
+                            # synchronous fallback disagree.
+                            new_thread: bool = False) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -2133,7 +2156,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
 
     # Resolve the thread up front so the client can adopt it immediately rather
     # than waiting for the turn; `portal_chat` resolving it again is idempotent.
-    session_id = _resolve_session_id(agent_name, email, session_id)
+    session_id = _resolve_session_id(agent_name, email, session_id,
+                                     new_thread=new_thread)
 
     from database import db as core_db
     try:
