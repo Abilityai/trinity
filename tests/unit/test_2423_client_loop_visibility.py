@@ -98,6 +98,75 @@ def test_the_projection_still_drops_what_it_always_dropped(page, stub_db):
 
 
 # ---------------------------------------------------------------------------
+# The filter must not starve the list (review blocker)
+# ---------------------------------------------------------------------------
+def test_a_loop_heavy_agent_still_shows_its_other_work(page, monkeypatch):
+    """Filtering AFTER the SQL LIMIT starves the client list.
+
+    `get_agent_executions_summary` limits in SQL, so dropping loop rows in
+    Python leaves whatever survives INSIDE that window. On the agent this
+    feature exists for — ent#458's own repro is "17 rows, mostly loops" — an
+    agent whose newest 20 rows are loops yielded ZERO rows, and the page
+    rendered "Nothing yet." while the operator saw twenty.
+
+    That trades "rows I cannot explain" for a false claim of no activity, which
+    is strictly worse: the first is confusing, the second is wrong.
+    """
+    asked = {}
+
+    class _Db:
+        def get_agent_executions_summary(self, agent_name, limit=None):
+            asked["limit"] = limit
+            # 30 loops, THEN the chat rows — the shape that starves.
+            loops = [{"id": f"l{i}", "status": "success", "triggered_by": "loop",
+                      "started_at": f"t{i}", "completed_at": None, "duration_ms": 10,
+                      "schedule_id": None} for i in range(30)]
+            chats = [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
+                      "started_at": f"u{i}", "completed_at": None, "duration_ms": 10,
+                      "schedule_id": None} for i in range(5)]
+            return (loops + chats)[:limit] if limit else loops + chats
+
+    monkeypatch.setattr(page, "db", _Db(), raising=False)
+    monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
+
+    out = page._recent_work("a", is_platform=False)
+    assert asked["limit"] > page.MAX_RECENT_WORK, (
+        "the client side must over-fetch, or the filter eats the whole window"
+    )
+    assert out, "a loop-heavy agent rendered as having done nothing at all"
+    assert all(r["triggered_by"] == "chat" for r in out)
+
+
+def test_the_client_list_is_still_bounded(page, monkeypatch):
+    """Over-fetching must not become an unbounded list — the cap moves, it does
+    not disappear."""
+    class _Db:
+        def get_agent_executions_summary(self, agent_name, limit=None):
+            return [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
+                     "started_at": f"u{i}", "completed_at": None, "duration_ms": 10,
+                     "schedule_id": None} for i in range(200)]
+
+    monkeypatch.setattr(page, "db", _Db(), raising=False)
+    monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
+    assert len(page._recent_work("a", is_platform=False)) == page.MAX_RECENT_WORK
+
+
+def test_the_operator_side_does_not_over_fetch(page, monkeypatch):
+    """Nothing is filtered for an operator, so the extra rows would be waste."""
+    asked = {}
+
+    class _Db:
+        def get_agent_executions_summary(self, agent_name, limit=None):
+            asked["limit"] = limit
+            return []
+
+    monkeypatch.setattr(page, "db", _Db(), raising=False)
+    monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
+    page._recent_work("a", is_platform=True)
+    assert asked["limit"] == page.MAX_RECENT_WORK
+
+
+# ---------------------------------------------------------------------------
 # the chart
 # ---------------------------------------------------------------------------
 def _analytics():

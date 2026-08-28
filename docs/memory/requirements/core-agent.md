@@ -475,7 +475,10 @@
   client and a platform user, so exclusions are enforced by **projection in the
   service**, never by filtering in the template: a field that never leaves the
   service cannot be surfaced by a later UI edit. Three that matter —
-  `recent_work` drops `message`/`cost`/`model_used`/`source_user_email`; `asks`
+  `recent_work` drops `message`/`cost`/`model_used`/`source_user_email`, and for
+  a CLIENT drops loop-triggered rows entirely (#2423 — a client can neither open
+  a loop, read what it produced, nor stop one, so reporting the count without
+  the output was activity it could only misread; operators keep every row); `asks`
   admits only agent-authored `approval`/`question` items (never platform
   `alert`s) and never their `context` (free-form agent JSON, a known
   credential-leak surface); report reads are agent-scoped, since report ids are

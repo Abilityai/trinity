@@ -36,6 +36,16 @@ that never leaves the service cannot be surfaced by a later edit.
 |---|---|---|
 | `recent_work` | `message`, `cost`, `model_used`, `source_user_email` | `message` is another user's prompt; `cost` and `model_used` are excluded by AC #7 |
 | `recent_work` | — *except* `schedule_name` (#2161) | The one deliberate crossing. See [What crosses, and why it is the name and not the message](#what-crosses-and-why-it-is-the-name-and-not-the-message) |
+| `recent_work`, `stats` | whole ROWS with `triggered_by = "loop"`, for a client only (#2423) | A client cannot open a loop, see what it produced, or start or stop one — the strip is `isPlatformSession`-gated (ent#458) and this page has no Loops tab. So the loop COUNT was client-visible while the loop OUTPUT was operator-only. Same subtractive rule this section states, and the same reason `alert` asks are dropped: operations telemetry, not something the agent is asking a person. **Operators keep every row** — they can click through to Agent Detail → Loops, so hiding it there removes real signal and fixes nothing |
+
+**The loop exclusion is a row filter, and row filters interact with `LIMIT`.**
+`get_agent_executions_summary` limits in SQL while this filter runs in Python, so
+the client side over-fetches (`MAX_RECENT_WORK * _CLIENT_OVERFETCH`) and slices
+back to `MAX_RECENT_WORK` afterwards. Without that, an agent whose newest rows
+are all loops — ent#458's normal shape, not an edge — yielded an EMPTY list and
+the page read "Nothing yet." while the operator saw twenty. Trading rows a client
+cannot explain for a false claim of no activity is a worse bug than the one being
+fixed. The operator side does not over-fetch: nothing is filtered there.
 | `asks` | `context`, and `alert`-type items | `context` is free-form agent JSON and a known credential-leak surface (canary G-04 exists because secrets turn up there). `alert` items are platform-generated ops telemetry — sync-failing, git-bloat, breaker dormancy — not an agent asking a person anything |
 | report detail | any report in the install | Report ids are global. The roster gate proves only that the caller may reach **this** agent, so without an ownership check the page becomes a reader for every report on the instance. A foreign id returns the same 404 as a missing one, so it is not an existence oracle either (invariant #8) |
 
@@ -214,8 +224,10 @@ A per-viewer variant was considered — showing a viewer their *own* prompts, si
 `source_user_email` identifies them and that leaks nothing cross-user — and
 rejected: it doubles the row's shape by audience, and the product decision was no
 prompt text on this surface at all. The cost is honest and bounded: rows that are
-not schedule-backed (chat, loop, reminder) still carry only trigger, duration and
-time, so **AC #3 is met for scheduled rows only**.
+not schedule-backed (chat, reminder) still carry only trigger, duration and
+time, so **AC #3 is met for scheduled rows only**. (Loop rows reach an OPERATOR
+only since #2423 — a client never sees one, so the question does not arise for
+them.)
 
 **It is not "operator-authored", and calling it that was the comfortable
 mistake.** `POST /api/agents/{name}/schedules` is `AuthorizedAgent` and the MCP
@@ -226,7 +238,8 @@ service, escaped by Vue interpolation on render. The same is already true of
 `asks` (`title` and `question` are agent-authored), so this is the established
 boundary rather than a new one — but it is why the name is bounded rather than
 trusted. Gating it on `principal.is_platform` is one line away if an operator
-ever objects.
+ever objects — and #2423 took exactly that route for loop rows, so the split
+this paragraph anticipated now exists on the same payload.
 
 Four properties of the lookup, each load-bearing:
 
