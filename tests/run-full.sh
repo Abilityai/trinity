@@ -173,12 +173,51 @@ run_tier git-sync    300 git_sync/
 run_tier security    300 security/
 run_tier scheduler   300 scheduler_tests/
 run_tier agent-server 300 agent_server/
+# Journey tier (#2335, Rail R1). Live-stack by definition: these drive the
+# public API against a running instance the way a person does. Longer per-test
+# timeout than any other tier because a journey legitimately waits on a
+# container coming up — 90s to `running` is the platform's own bound, not this
+# harness's impatience.
+run_tier journeys 900 journeys/
 
 # Root-level live-backend tests (everything not owned by a tier above).
-run_tier api 900 . \
-    --ignore=unit --ignore=integration --ignore=git_sync --ignore=security \
-    --ignore=scheduler_tests --ignore=agent_server --ignore=manual --ignore=deploy \
-    --ignore=harness
+#
+# The ignore list is DERIVED, not hand-mirrored. It was written out by hand and
+# `journeys` was added as a tier above without being added below, so `api`
+# collected `journeys/` a second time from `.` — every journey agent created and
+# torn down twice, the container time paid twice, and one journey failure
+# reported under two tier names. That is the new-producer-not-in-the-consumer-
+# allowlist class, and adding one `--ignore=` would leave the next tier to
+# repeat it.
+#
+# TIER_DIRS is the single list. `NON_TIER_DIRS` are directories `api` must also
+# not collect but that no tier owns: `manual/` and `deploy/` are opt-in, and
+# `harness/` and the support packages hold no tests of their own.
+TIER_DIRS=(unit integration git_sync security scheduler_tests agent_server journeys)
+NON_TIER_DIRS=(manual deploy harness fixtures testing_utils testkit)
+
+# And the list is CHECKED against the tree, because a derived list is only as
+# good as its inputs: a new directory under tests/ that nobody wired would still
+# be silently swept into `api`. Failing here names it instead.
+_unclassified=()
+for _d in tests/*/; do
+    _d="${_d#tests/}"; _d="${_d%/}"
+    case " ${TIER_DIRS[*]} ${NON_TIER_DIRS[*]} " in
+        *" ${_d} "*) ;;
+        *) _unclassified+=("${_d}") ;;
+    esac
+done
+if [ ${#_unclassified[@]} -gt 0 ]; then
+    printf '\n\033[1;31m== tests/run-full.sh: unclassified test directories\033[0m\n'
+    printf '   %s\n' "${_unclassified[@]}"
+    printf '   Add each to TIER_DIRS (with its own run_tier line) or to NON_TIER_DIRS.\n'
+    printf '   Left unwired they are collected a SECOND time by the api tier.\n\n'
+    exit 1
+fi
+
+api_ignores=()
+for _d in "${TIER_DIRS[@]}" "${NON_TIER_DIRS[@]}"; do api_ignores+=("--ignore=${_d}"); done
+run_tier api 900 . "${api_ignores[@]}"
 
 # Documented run-standalone tests: they assert route ORDER on a pristine
 # `sys.modules`, so any earlier import of the app makes them vacuous. Separate

@@ -21,4 +21,5 @@ markers = [
     "requires_agent: test requires a running agent",
     "unit: unit tests that don't need backend",
     "integration: mark test as integration test",
+    "journey: a promise the platform makes to a person, tested end to end against a live stack (#2335)",
 ]
