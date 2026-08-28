@@ -65,6 +65,80 @@ export function unreadByAgent(threads) {
   return out
 }
 
+// ent#364 / #2424: asks per agent — the ask twin of `unreadByAgent`.
+//
+// Deliberately a SEPARATE map, never summed into the unread count. The two are
+// different facts about different obligations: an ask is waiting on you to
+// DECIDE, an unread reply on you to READ. PortalSidebar has said so since
+// ent#364; what it lacked was this half.
+export function asksByAgent(asks) {
+  const out = {}
+  for (const a of Array.isArray(asks) ? asks : []) {
+    const name = a?.agent_name
+    if (!name) continue
+    out[name] = (out[name] || 0) + 1
+  }
+  return out
+}
+
+// The aggregate badge's accessible name.
+//
+// #2424: it counted ASKS and said "agents" — two asks raised by one agent read
+// as "2 agents are waiting on your answer". The number was right and the noun
+// was wrong, and the two only diverge when a single agent raises more than one
+// ask, which is why nobody caught it.
+//
+// Resolved toward asks rather than agents, because the row badges added
+// alongside this now answer "which agent" — so the header's job is "how many
+// decisions", and that is a count of asks.
+export function askBadgeTitle(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return ''
+  return `${n} ${n === 1 ? 'ask is' : 'asks are'} waiting on your answer`
+}
+
+// The agent row's accessible name.
+//
+// #2424: this composed unread replies and the availability chip and never
+// mentioned asks, so a blocked agent's title was the bare "Open ws-sage" — the
+// pending decision was unreachable for a screen-reader user as well as
+// invisible. Asks lead: a decision outranks unread chatter.
+export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '' } = {}) {
+  const who = label && label !== name ? `${label} (${name})` : (label || name || '')
+  const asks = Number(askCount) || 0
+  const reads = Number(unread) || 0
+
+  const parts = []
+  if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
+  if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+
+  const base = parts.length ? `${who} — ${parts.join(', ')}` : `Open ${who}`
+  return chipTitle ? `${base} — ${chipTitle}` : base
+}
+
+// #2159 capped the roster at five so a long fleet could not push chats below
+// the fold. #2424: the cap is a plain roster-order slice, so on any fleet larger
+// than five the agent WAITING ON YOU is as likely as not to be behind the
+// toggle — observed with an agent 11th of 12 while the header advertised its
+// two asks.
+//
+// Ask-bearing agents are appended, not floated to the top: re-sorting on a
+// transient count moves rows under the cursor between refreshes, which is the
+// same reason the roster is not re-sorted by availability. So the first N stay
+// exactly where they were and the visible list simply grows.
+export const AGENT_COLLAPSE_LIMIT = 5
+
+export function visibleAgentRows(roster, { expanded = false, askCounts = {}, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+  const list = Array.isArray(roster) ? roster : []
+  if (expanded) return list
+
+  const head = list.slice(0, limit)
+  const shown = new Set(head.map((a) => a?.name))
+  const counts = askCounts || {}
+  const waiting = list.filter((a) => a?.name && !shown.has(a.name) && (Number(counts[a.name]) || 0) > 0)
+  return waiting.length ? [...head, ...waiting] : head
+}
+
 export function totalUnread(threads) {
   return (Array.isArray(threads) ? threads : [])
     .reduce((sum, t) => sum + (Number(t?.unread) || 0), 0)
