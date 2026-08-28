@@ -239,8 +239,22 @@ def test_both_portal_row_creation_sites_name_the_chat():
     from client_portal import service
 
     src = inspect.getsource(service)
-    assert src.count("source_channel_chat_id=session_id") == 2
-    assert src.count("source_channel=PORTAL_SOURCE_CHANNEL") == 2
+    # #2426: these were `== 2`, and there are THREE creation sites — ent#365's
+    # `_precreate_sync_execution` was added after ent#457 counted. The literal
+    # census went red on `dev` the moment the third site appeared, which is the
+    # guard working; nobody acted on it, and the bug it names shipped anyway.
+    #
+    # Asserting the RULE instead of the count: every site that stamps the
+    # surface must also stamp the destination. Census-proof, and it now fails
+    # for the reason the docstring gives rather than because a number moved.
+    surface = src.count("source_channel=PORTAL_SOURCE_CHANNEL")
+    destination = src.count("source_channel_chat_id=session_id")
+    assert surface >= 2, "expected at least the two known portal row creation sites"
+    assert destination == surface, (
+        f"{surface} site(s) stamp source_channel but only {destination} stamp "
+        "source_channel_chat_id — a row created by the unstamped one can never be "
+        "joined back to its chat, so report_completion drops every report from it"
+    )
 
 
 def test_the_portal_body_is_credential_sanitized_like_every_other_channel():

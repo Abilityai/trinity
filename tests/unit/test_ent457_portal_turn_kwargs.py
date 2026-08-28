@@ -37,19 +37,39 @@ def _forwarded_kwargs() -> set[str]:
     from client_portal import service as portal_service
     from services import session_turn_service
 
-    tree = ast.parse(inspect.getsource(portal_service.portal_chat).lstrip())
+    # #2426: this parsed `portal_chat` alone and looked for a literal
+    # `run_resumable_turn(...)` call. Since then the call moved into
+    # `_run_sync_turn_and_clear_marker`, where it is `run_resumable_turn(**kwargs)`
+    # — a splat, which names nothing. So the walk found no keywords, the assert
+    # below fired, and this guard has been RED on `dev` rather than protecting
+    # anything.
+    #
+    # The keywords are named at the WRAPPER's call site, so that is where they
+    # have to be read. Both entry names are scanned and the union taken, so
+    # neither re-inlining the call nor extracting a second wrapper disarms it;
+    # the wrapper's own three parameters are subtracted below with
+    # `run_resumable_turn`'s, since those are consumed and never forwarded.
+    _ENTRY_NAMES = {"run_resumable_turn", "_run_sync_turn_and_clear_marker"}
+    tree = ast.parse(inspect.getsource(portal_service).lstrip())
     passed: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
         name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
-        if name != "run_resumable_turn":
+        if name not in _ENTRY_NAMES:
             continue
         passed |= {kw.arg for kw in node.keywords if kw.arg}
-    assert passed, "portal_chat no longer calls run_resumable_turn by that name"
+    assert passed, (
+        "no keyword-bearing call to run_resumable_turn or its wrapper found in "
+        "client_portal.service — this guard cannot see the portal's turn call"
+    )
 
     consumed = set(inspect.signature(session_turn_service.run_resumable_turn).parameters)
+    # The wrapper's own parameters are consumed by it, not forwarded (#2426).
+    consumed |= set(
+        inspect.signature(portal_service._run_sync_turn_and_clear_marker).parameters
+    )
     return passed - consumed
 
 
