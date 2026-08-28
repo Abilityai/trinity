@@ -1007,7 +1007,7 @@ def reject_non_interactive_principal(current_user: User) -> None:
     Use for credential-lifecycle operations whose whole point is that a human
     decided — never for read/chat surfaces an MCP key legitimately drives.
     """
-    if current_user.mcp_scope is not None:
+    if not is_interactive_principal(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
@@ -1015,6 +1015,28 @@ def reject_non_interactive_principal(current_user: User) -> None:
                 "MCP API keys cannot perform it"
             ),
         )
+
+
+def is_interactive_principal(current_user: User) -> bool:
+    """Did this caller authenticate INTERACTIVELY (a JWT human)?
+
+    The predicate behind ``reject_non_interactive_principal``, extracted
+    (ent#365 review) because not every use of it is a refusal. Some surfaces
+    need to REDACT a field for a machine caller rather than reject the whole
+    request: ``routers/reports.py`` returns a report's audience to the UI and
+    must withhold it from anything key-authenticated.
+
+    Same allowlist, same reason: ``mcp_api_keys.scope`` is a free-text column
+    with no CHECK constraint, so a denylist naming ``agent`` and ``connector``
+    is open at the top and silently admits the next scope that ships. Only
+    ``mcp_scope is None`` (the JWT branch) passes.
+
+    A principal object with no ``mcp_scope`` at all fails CLOSED via the
+    sentinel rather than through ``getattr(..., None)``, which would make an
+    absent attribute the privileged value (the #2323 getattr-discriminator
+    trap).
+    """
+    return getattr(current_user, "mcp_scope", "__missing__") is None
 
 
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:

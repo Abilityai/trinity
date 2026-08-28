@@ -60,6 +60,17 @@
             :payload="payloads[d.id]"
             :fallback-component="ReportSummary"
           />
+          <!-- The card shows a first page, so it says so rather than letting a
+               slice read as the whole table. The agent page is where a full
+               table is read; pointing there is more honest than a "load more"
+               that would page a preview inside a conversation. -->
+          <p
+            v-if="hasMoreRows(d.id)"
+            class="mt-2 text-xs text-gray-500 dark:text-gray-400"
+          >
+            Showing the first {{ shownRows(d.id) }} of
+            {{ rowMeta[d.id].total }} rows — open this agent's Reports for all of it.
+          </p>
           <!-- ent#366: "Useful / Not what I needed" on the work itself — the
                affordance ent#365 left this card as the surface for. Different
                words from a message's thumbs because a deliverable is judged as
@@ -98,6 +109,7 @@ const store = useClientPortalStore()
 const items = ref([])
 const open = ref(null)
 const payloads = reactive({})
+const rowMeta = reactive({})
 const errors = reactive({})
 
 const kindLabel = deliverableKindLabel
@@ -110,14 +122,52 @@ async function load() {
   items.value = await store.fetchSessionDeliverables(props.agentName, props.sessionId)
 }
 
+// Review finding: this called `fetchAgentReport` with no options, so
+// `rows_limit` was omitted and the detail route returned the payload WHOLE — a
+// tabular deliverable near the 5 MiB `REPORT_PAYLOAD_MAX_BYTES` ceiling shipped
+// all of it to the browser and rendered every row, inside a chat card, while
+// the sibling Reports tab pages the identical report through #2162's window.
+// The card also had no "load more", so there was no bounded read available here
+// at all.
+//
+// A first page is the right default for a card: it is a preview inside a
+// conversation, not the reading surface. `row_meta.total` then tells the reader
+// what they are seeing a slice OF, and the agent page remains where a full
+// table is read.
+const CARD_ROWS = 50
+
 async function loadPayload(d) {
   delete errors[d.id]
   try {
-    const full = await store.fetchAgentReport(props.agentName, d.id)
+    const full = await store.fetchAgentReport(props.agentName, d.id, {
+      rowsOffset: 0,
+      rowsLimit: CARD_ROWS,
+    })
     payloads[d.id] = full?.payload ?? {}
+    if (full?.row_meta) rowMeta[d.id] = full.row_meta
   } catch (e) {
     errors[d.id] = e?.response?.data?.detail || "Couldn't open this deliverable."
   }
+}
+
+// `row_meta` is `{total, offset, limit}` — the server does not send a
+// `returned` count, so the shown count is derived rather than assumed.
+function shownRows(id) {
+  const meta = rowMeta[id]
+  if (!meta) return 0
+  // ent#365 review: `meta.limit ?? 0` rendered "Showing the first 0 of N rows"
+  // when the server omitted `limit` — zero shown while `hasMoreRows` stayed
+  // true, which is a sentence that cannot be right. An absent limit means the
+  // server did not bound the slice, so what is shown is everything after the
+  // offset.
+  const remaining = Math.max(0, (meta.total ?? 0) - (meta.offset ?? 0))
+  const limit = typeof meta.limit === 'number' && meta.limit > 0 ? meta.limit : remaining
+  return Math.max(0, Math.min(limit, remaining))
+}
+
+function hasMoreRows(id) {
+  const meta = rowMeta[id]
+  return Boolean(meta) && (meta.total ?? 0) > shownRows(id)
 }
 
 function toggle(id) {
@@ -133,6 +183,7 @@ function toggle(id) {
 watch(() => [props.agentName, props.sessionId], () => {
   open.value = null
   for (const k of Object.keys(payloads)) delete payloads[k]
+  for (const k of Object.keys(rowMeta)) delete rowMeta[k]
   for (const k of Object.keys(errors)) delete errors[k]
   load()
 }, { immediate: true })

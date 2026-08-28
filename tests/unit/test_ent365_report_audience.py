@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import pytest
 
+from client_portal import service as cps
+
 pytestmark = pytest.mark.unit
 
 AGENT = "scribe"
@@ -157,7 +159,7 @@ def publish(monkeypatch):
 async def test_an_address_the_agent_does_not_already_talk_to_is_refused(publish, monkeypatch):
     from fastapi import HTTPException
     mod, call = publish
-    monkeypatch.setattr(mod.db, "email_has_agent_access", lambda agent, email: False)
+    monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: False)
     monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
 
     with pytest.raises(HTTPException) as exc:
@@ -175,8 +177,8 @@ async def test_an_unreadable_roster_refuses_rather_than_publishing(publish, monk
     file the report addressed to it."""
     from fastapi import HTTPException
     mod, call = publish
-    monkeypatch.setattr(mod.db, "email_has_agent_access",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
+    monkeypatch.setattr(cps, "agent_on_roster",
+                        lambda agent, email, include_owned=False: (_ for _ in ()).throw(RuntimeError("db down")))
     monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
 
     with pytest.raises(HTTPException) as exc:
@@ -194,7 +196,7 @@ async def test_a_reachable_address_is_stored_with_the_report(publish, monkeypatc
         stored.update(kwargs)
         return {**_row(), "user_id": 1}
 
-    monkeypatch.setattr(mod.db, "email_has_agent_access", lambda agent, email: True)
+    monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: True)
     monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
     monkeypatch.setattr(mod.report_service, "create_report", fake_create)
     monkeypatch.setattr(mod, "_resolve_portal_session", lambda eid, agent: "sess-1")
@@ -217,8 +219,8 @@ async def test_an_unaddressed_report_stays_operator_only(publish, monkeypatch):
         stored.update(kwargs)
         return {**_row(), "user_id": 1}
 
-    monkeypatch.setattr(mod.db, "email_has_agent_access",
-                        lambda *a, **k: called.append(1) or True)
+    monkeypatch.setattr(cps, "agent_on_roster",
+                        lambda agent, email, include_owned=False: called.append(1) or True)
     monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
     monkeypatch.setattr(mod.report_service, "create_report", fake_create)
 
@@ -259,3 +261,130 @@ def test_a_non_portal_turn_resolves_to_no_chat(monkeypatch):
     monkeypatch.setattr(portal_service, "get_inflight_session_for_execution", lambda eid: None)
 
     assert mod._resolve_portal_session("exec-1", AGENT) is None
+
+
+@pytest.mark.asyncio
+async def test_an_admin_who_is_not_on_the_roster_cannot_be_addressed(publish, monkeypatch):
+    """Review finding: the publish gate and the read gate were different
+    predicates, and the gap was a report nobody could read.
+
+    `db.email_has_agent_access` returns True for ANY user whose role is `admin`,
+    regardless of sharing; the Workspace read gate is `agent_on_roster`, i.e.
+    `agent_sharing` ∪ owned. So a report addressed to a platform admin who
+    neither owns nor is shared the agent stored happily and then 404'd in that
+    admin's Workspace — falsifying the stated invariant that "can be addressed"
+    cannot drift from "can reach".
+    """
+    from fastapi import HTTPException
+    mod, call = publish
+    # The old predicate would have said yes; the roster says no.
+    monkeypatch.setattr(mod.db, "email_has_agent_access", lambda agent, email: True)
+    monkeypatch.setattr(cps, "agent_on_roster", lambda agent, email, include_owned=False: False)
+    monkeypatch.setattr(mod.rate_limiter, "enforce", lambda *a, **k: None)
+
+    with pytest.raises(HTTPException) as exc:
+        await call(audience_email="admin@example.com")
+
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_the_publish_gate_is_the_read_gate(publish, monkeypatch):
+    """Pinned structurally: the two must be the same function, not two
+    predicates that happen to agree today."""
+    import inspect
+    mod, _ = publish
+    src = inspect.getsource(mod.create_report)
+    assert "agent_on_roster(" in src
+    # The old predicate is named in the comment that explains the change, so
+    # this asserts it is not CALLED rather than not mentioned — a substring ban
+    # would forbid documenting the fix.
+    assert "db.email_has_agent_access(" not in src
+
+
+def test_the_create_response_reports_the_audience_it_stored():
+    """Review finding: `Report` extends `ReportSummary`, so `addressed_to` IS in
+    `model_fields` — the filter was dropping it because the row carries the DB
+    name `addressed_to_email`. The same model therefore meant two different
+    things depending on the route: populated on the detail read, always null on
+    create. The MCP tool papered over it by echoing the caller's own argument.
+    """
+    import inspect
+    from routers import reports as mod
+    src = inspect.getsource(mod.create_report)
+    assert "addressed_to_email" in src
+    assert 'projected["addressed_to"]' in src
+
+
+# ---------------------------------------------------------------------------
+# The strip is at the REST read too, not only in the MCP tool (review finding)
+# ---------------------------------------------------------------------------
+
+class TestAudienceIsWithheldFromMachinePrincipals:
+    """An agent-scoped MCP key is a valid bearer token against this API
+    directly — that is how the heartbeat, the #1083 result callback and the
+    reports WRITE path all authenticate. So stripping `addressed_to` only in
+    `stripAudienceFromReports` left an agent able to `curl` the same routes and
+    read the audience for every agent its owner can access: strictly wider than
+    the `{self} u permitted` scope the MCP layer enforces.
+
+    The PR's own rationale was "a tool result is LLM context wherever it lands",
+    which applies at least as strongly to a shell result — the threat model is a
+    prompt-injected agent, and such an agent has Bash.
+    """
+
+    @staticmethod
+    def _row():
+        return {"id": "r1", "agent_name": "scribe", "addressed_to": "client@example.com"}
+
+    def test_a_jwt_human_still_sees_the_audience(self):
+        """The UI reads over a JWT; withholding it there would break the
+        surface the field exists for."""
+        from models import User
+        from routers.reports import _hide_audience
+        human = User(id=1, username="op", role="admin", mcp_scope=None)
+        assert _hide_audience(self._row(), human)["addressed_to"] == "client@example.com"
+
+    @pytest.mark.parametrize("scope", ["agent", "user", "system", "connector",
+                                       "portal_delegate", "ops", "a_scope_from_2027"])
+    def test_every_key_authenticated_caller_is_stripped(self, scope):
+        """An ALLOWLIST, not a denylist. `mcp_api_keys.scope` is free text with
+        no CHECK constraint, so naming `agent` and `connector` would silently
+        admit the next scope that ships (#2323)."""
+        from models import User
+        from routers.reports import _hide_audience
+        machine = User(id=1, username="op", role="admin", mcp_scope=scope)
+        assert "addressed_to" not in _hide_audience(self._row(), machine)
+
+    def test_a_principal_with_no_scope_attribute_fails_closed(self):
+        """`getattr(..., None)` would make an absent attribute the PRIVILEGED
+        value — the #2323 getattr-discriminator trap."""
+        from routers.reports import _hide_audience
+
+        class _Odd:
+            pass
+
+        assert "addressed_to" not in _hide_audience(self._row(), _Odd())
+
+    def test_the_row_is_not_mutated(self):
+        """The caller's dict is reused elsewhere; redaction must copy."""
+        from models import User
+        from routers.reports import _hide_audience
+        row = self._row()
+        _hide_audience(row, User(id=1, username="op", role="admin", mcp_scope="agent"))
+        assert row["addressed_to"] == "client@example.com"
+
+    def test_all_three_read_routes_go_through_it(self):
+        """A strip two of three routes apply is the same hole one hop over —
+        which is exactly how it shipped in the MCP tool the first time."""
+        import inspect
+        from routers import reports as mod
+        for fn in (mod.list_agent_reports, mod.list_fleet_reports, mod.get_report):
+            assert "_hide_audience" in inspect.getsource(fn), fn.__name__
+
+    def test_the_predicate_is_shared_with_its_raising_twin(self):
+        """One definition, so the redact and the refuse cannot drift."""
+        import inspect
+        from dependencies import is_interactive_principal, reject_non_interactive_principal
+        assert "is_interactive_principal" in inspect.getsource(reject_non_interactive_principal)
+        assert is_interactive_principal.__module__ == "dependencies"

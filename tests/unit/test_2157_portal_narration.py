@@ -333,12 +333,44 @@ def test_portal_source_channel_is_not_a_messaging_channel():
 
 
 def test_portal_stamps_the_surface_on_its_executions():
-    """Both creation sites — the pre-created streaming row (ent#286) and the turn
-    itself — carry the stamp; a stamp on only one leaves half the turns unanswerable."""
+    """EVERY creation site carries the stamp; one without it leaves that slice of
+    turns unanswerable.
+
+    Three since the ent#365 review: the pre-created streaming row (ent#286), the
+    turn itself, and the pre-created SYNCHRONOUS row — that third one exists so
+    `mark_turn_inflight` has an id on the `/chat` path, which is what lets an
+    addressed report find its chat there. Asserted as "every site", not as a
+    count, so adding a fourth is a decision rather than a broken test.
+    """
+    import ast
     import inspect
     svc = _portal_service()
     source = inspect.getsource(svc)
-    assert source.count("source_channel=PORTAL_SOURCE_CHANNEL") == 2
+
+    # Per SITE, not by count (ent#365 review). This was
+    # `count("source_channel=...") == creates + 1`, where the `+ 1` stood for the
+    # turn's own dispatch stamp — so a SECOND dispatch-site stamp would have
+    # broken it for a reason that has nothing to do with what it tests. Walking
+    # the calls asserts the actual rule: every row this module creates carries
+    # the portal stamp, however many other stamps exist elsewhere.
+    creation_sites = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_task_execution"
+    ]
+    assert len(creation_sites) >= 2, (
+        "expected the streaming, synchronous and turn creation sites"
+    )
+    unstamped = [
+        site.lineno for site in creation_sites
+        if not any(kw.arg == "source_channel" for kw in site.keywords)
+    ]
+    assert not unstamped, (
+        f"create_task_execution sites without a source_channel stamp: {unstamped}. "
+        f"An unstamped portal row cannot be joined back to its chat, which is "
+        f"what makes an addressed report unanswerable."
+    )
     assert svc.PORTAL_SOURCE_CHANNEL == config.PORTAL_SOURCE_CHANNEL
 
 
