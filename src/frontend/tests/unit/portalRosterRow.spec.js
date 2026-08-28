@@ -13,6 +13,7 @@
  * agent would render as blank.
  */
 import { describe, it, expect } from 'vitest'
+import { visibleAgentRows, AGENT_COLLAPSE_LIMIT } from '../../src/components/portal/portalUtils.js'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
@@ -69,8 +70,16 @@ describe('#2159 the row no longer shows the description', () => {
 
 describe('#2159 the roster is bounded and expandable', () => {
   it('shows a fixed number by default rather than the whole fleet', () => {
-    expect(source).toMatch(/const AGENT_COLLAPSE_LIMIT = \d+/)
-    expect(source).toMatch(/agentsExpanded\.value \? props\.roster : props\.roster\.slice\(0, AGENT_COLLAPSE_LIMIT\)/)
+    // #2424 moved the rule into portalUtils, so this asserts the PROPERTY
+    // rather than the old inline slice expression. Same guarantee, and now it
+    // fails on a broken bound instead of only on a reworded one.
+    const roster = Array.from({ length: 12 }, (_, i) => ({ name: `a${i}` }))
+    const collapsed = visibleAgentRows(roster, { expanded: false, askCounts: {} })
+    expect(collapsed).toHaveLength(AGENT_COLLAPSE_LIMIT)
+    expect(AGENT_COLLAPSE_LIMIT).toBeLessThan(roster.length)
+    expect(visibleAgentRows(roster, { expanded: true, askCounts: {} })).toHaveLength(12)
+    // ...and the component still routes its rows through it.
+    expect(source).toMatch(/visibleAgentRows\(props\.roster/)
   })
 
   it('uses ONE persistent toggle, not two v-if-alternated buttons', () => {

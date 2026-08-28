@@ -8,13 +8,20 @@
       <span class="font-semibold">Workspace</span>
       <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
            on you to decide, the other on you to read — so it gets its own badge
-           rather than being summed into that one. Amber, before the unread count,
-           because a blocked agent outranks unread chatter. -->
+           rather than being summed into that one. Before the unread count,
+           because a blocked agent outranks unread chatter.
+
+           #2424: `status-urgent` (not amber) — the token the operator NavBar's
+           pending-operator-queue badge already uses for "waiting on you", so the
+           two surfaces agree. Amber maps to `state-autonomous`, an operating
+           mode, which is a different claim. The wording comes from
+           `askBadgeTitle` because the inline literal said "agents" while
+           `askCount` counted asks. -->
       <span
         v-if="askCount"
-        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-amber-500 text-white text-[11px] font-semibold flex items-center justify-center"
+        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
         data-testid="sidebar-ask-count"
-        :title="`${askCount} ${askCount === 1 ? 'agent is' : 'agents are'} waiting on your answer`"
+        :title="askBadgeTitle(askCount)"
       >{{ askCount > 99 ? '99+' : askCount }}</span>
       <span
         v-if="totalWaiting"
@@ -135,6 +142,17 @@
             <span class="shrink-0 min-w-[4.5rem] flex justify-end">
               <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
             </span>
+            <!-- #2424: the ask badge ent#364's comment above already promised.
+                 It got an aggregate in the brand header and nothing per row, so
+                 the header advertised a count with no way to reach the agent it
+                 meant. Same token as that header badge; deliberately a DIFFERENT
+                 colour from the unread pill beside it, because they are
+                 different obligations. -->
+            <span
+              v-if="askCountFor(a.name)"
+              class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
+              data-testid="agent-ask-count"
+            >{{ askCountFor(a.name) > 99 ? '99+' : askCountFor(a.name) }}</span>
             <span
               v-if="waitingFor(a.name)"
               class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
@@ -230,6 +248,8 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
+  asksByAgent, askBadgeTitle, agentRowTitle as buildAgentRowTitle,
+  visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
 } from './portalUtils'
 
@@ -268,6 +288,10 @@ const totalWaiting = computed(() => totalUnread(props.threads))
 // would be a second path to the same fact, free to disagree with it.
 const asksStore = useClientPortalStore()
 const askCount = computed(() => asksStore.askCount)
+// #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
+// brand-badge comment in the template.
+const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
+const askCountFor = (name) => asksPerAgent.value[name] || 0
 
 // A row key has to include the kind: thread ids and room ids are independent
 // spaces, so two chats of different kinds could collide on a bare id.
@@ -300,25 +324,33 @@ const agentLabel = (a) => (a.display_label || '').trim() || a.name
 // deleted or lost the agent, and neither is actionable for a client.
 const chipFor = (a) => availabilityChip(a, { detailed: props.isPlatformSession })
 
+// The state must be reachable without relying on colour — which is why #2424
+// is an accessibility fix too: a blocked agent's title was the bare
+// "Open ws-sage" while two asks waited on it.
 function agentRowTitle(a) {
-  const n = waitingFor(a.name)
-  const label = agentLabel(a)
-  const who = label === a.name ? label : `${label} (${a.name})`
-  const base = n
-    ? `${who} — ${n} unread ${n === 1 ? 'reply' : 'replies'}`
-    : `Open ${who}`
-  // The state must be reachable without relying on colour.
   const chip = chipFor(a)
-  return chip ? `${base} — ${chip.title}` : base
+  return buildAgentRowTitle({
+    label: agentLabel(a),
+    name: a.name,
+    unread: waitingFor(a.name),
+    askCount: askCountFor(a.name),
+    chipTitle: chip ? chip.title : '',
+  })
 }
 
 // #2159: a long fleet made the agents block the whole sidebar, pushing chats
 // below the fold. Top 5, expandable in place.
-const AGENT_COLLAPSE_LIMIT = 5
+//
+// #2424: an agent with an open ask is never collapsed out. The slice was plain
+// roster order, so the one row a person needed could be the hidden one — the
+// reported case had it 11th of 12 while the header advertised its two asks. The
+// rule is in portalUtils (`AGENT_COLLAPSE_LIMIT` now lives there too, one
+// definition for the slice and the toggle).
 const agentsExpanded = ref(false)
-const shownAgents = computed(() => (
-  agentsExpanded.value ? props.roster : props.roster.slice(0, AGENT_COLLAPSE_LIMIT)
-))
+const shownAgents = computed(() => visibleAgentRows(props.roster, {
+  expanded: agentsExpanded.value,
+  askCounts: asksPerAgent.value,
+}))
 
 // ent#186: history + search rows show the conversation's agent avatar instead of
 // a bare color dot. The URL is resolved from the roster already loaded at sign-in

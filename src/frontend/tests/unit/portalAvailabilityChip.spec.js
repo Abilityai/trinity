@@ -17,6 +17,7 @@
  * helper, and that nothing became disabled.
  */
 import { describe, it, expect } from 'vitest'
+import { agentRowTitle } from '../../src/components/portal/portalUtils.js'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
@@ -164,6 +165,15 @@ describe('#2196 the surfaces consume the shared rule', () => {
   })
 
   it('the row title carries the state, so it is reachable without colour', () => {
-    expect(SIDEBAR).toMatch(/chip \? `\$\{base\} — \$\{chip\.title\}` : base/)
+    // #2424 moved the composition into portalUtils::agentRowTitle, so this
+    // asserts the property instead of the old inline ternary. Stronger: it now
+    // catches a chip title that is dropped as well as one that is reworded.
+    const withChip = agentRowTitle({
+      label: 'a', name: 'a', chipTitle: 'This agent is stopped — ask admin to start it.',
+    })
+    expect(withChip).toContain('This agent is stopped')
+    expect(agentRowTitle({ label: 'a', name: 'a' })).not.toMatch(/—/)
+    // #2424 additionally requires a pending ask to be reachable the same way.
+    expect(agentRowTitle({ label: 'a', name: 'a', askCount: 2 })).toMatch(/2 asks/i)
   })
 })
