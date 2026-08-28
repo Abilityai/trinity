@@ -472,11 +472,12 @@ exactly the members the ent#100 rule requires to block the claim. A
 the false claim the only emission. `fleet_verdict` was always correct; the
 caller had narrowed its input.
 
-It says *what was measured*, not "auto-switch has nowhere to go". That sentence
-would be underived: `select_best_alternative_subscription` filters on recent
-failures and reads **no headroom at all**, so it will happily relocate agents
-onto a 99% subscription. Teaching it about headroom is
-`abilityai/trinity#2409`, which consumes this classifier.
+It says *what was measured*, not "auto-switch has nowhere to go". Since
+`abilityai/trinity#2409` the selector ranks its candidates over the SAME cached
+readings this sweep samples (through the shared `headroom_reading` gate, and it
+drops a fresh provider refusal) — but its candidate set is also narrowed by the
+2h failure filter the sweep never sees, so the sentence stays about the
+measurement and never promises what the selector will do.
 
 ### Cadence, cost, and the toggle
 

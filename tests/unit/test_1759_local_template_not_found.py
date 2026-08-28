@@ -190,7 +190,7 @@ def _load_crud(monkeypatch):
     db.get_agent_ephemeral_info.return_value = None
     db.get_user_by_username.return_value = {"id": 7}
     db.get_agent_mcp_api_key.return_value = None
-    db.get_least_used_subscription.return_value = None
+    db.list_assignable_subscriptions.return_value = []
     db.get_subscription_token.return_value = None
     db.add_agent_permission.return_value = None
     db.assign_subscription_to_agent.return_value = None

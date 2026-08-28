@@ -57,6 +57,10 @@ from typing import Any, Dict, Optional, Sequence
 from database import db
 from services.subscription_headroom_service import (
     HAS_HEADROOM,
+    # #2409: owned by the headroom service now (the auto-switch ranker reads
+    # the same bound); re-exported here because the recovery sweep and the
+    # ent#434 tests address it as `alerts.MAX_READING_AGE_SECONDS`.
+    MAX_READING_AGE_SECONDS,
     SATURATED,
     UNASSESSABLE,
 )
@@ -90,17 +94,9 @@ WINDOW_SECONDS = 7 * 24 * 3600
 # fact, and shipping both would be two operator items for one event.
 MIN_FLEET_SIZE = 2
 
-# How old a reading may be and still be classified. Deliberately longer than
-# the display predicates' FRESHNESS_SECONDS: a 7-day window does not move
-# meaningfully in a couple of hours, whereas a badge showing a stale number
-# is wrong immediately.
-#
-# It bounds EVERY classification, not only the fleet arm, and the fleet arm is
-# why it has to be generous: that claim needs every subscription simultaneously
-# assessable, which decays exponentially with fleet size (at a 2% per-probe
-# failure rate and N=50, all-fresh is a 36% event), so a tight bound would make
-# the alert unreachable on exactly the large fleet it matters for.
-MAX_READING_AGE_SECONDS = 2 * 3600
+# `MAX_READING_AGE_SECONDS` (how old a reading may be and still be classified)
+# lives in the headroom service since #2409 — see the rationale there — and is
+# imported above.
 
 # No operator item is worth a storm. If a whole fleet crosses at once the
 # fleet alert carries the story; the per-subscription ones are capped.
@@ -452,12 +448,15 @@ def emit_fleet_alert(
 ) -> bool:
     """Every subscription is saturated — auto-switch has nowhere better to go.
 
-    Deliberately narrower than the issue's wording. The claim is about what was
-    MEASURED (every registered subscription is at or past the threshold), not
-    about what auto-switch will do: `select_best_alternative_subscription`
-    filters on recent failures and reads no headroom at all, so a sentence
-    about its behaviour would be underived. Teaching it about headroom is
-    tracked separately at abilityai/trinity#2409.
+    Deliberately narrower than the issue's wording: the claim is about what was
+    MEASURED (every registered subscription is at or past the threshold). Since
+    abilityai/trinity#2409 auto-switch ranks its candidates over the SAME cached
+    readings this sweep samples (`subscription_headroom_service.
+    rank_subscriptions`), so "no subscription with meaningful headroom left to
+    move agents onto" now describes the selector's inputs too — but its
+    candidate set is ALSO narrowed by the 2h failure filter, which this sweep
+    does not see, so the body still states the measurement and never promises
+    what the selector will do.
     """
     saturated = verdict.get("saturated_ids") or []
     labels = [names.get(s, s) for s in saturated]

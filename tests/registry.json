@@ -2465,6 +2465,17 @@
         "unit"
       ],
       "description": "Weekly-subscription-headroom alerts. Pins the three-state classifier (a genuinely saturated subscription must not read as 'no evidence' the way _headroom_indicates_healthy does \u2014 #2396's docstring wrongly named this feature as that predicate's consumer), the projection that decides urgency from the operator's own burn rate rather than a configured time gap, and the deterministic reset-day alert id that IS the state machine (edge-trigger, cross-worker dedup and re-arm with no durable memo, possible because the 7d window was measured fixed-with-reset, not rolling). Also pins the empty-fleet guard (all([]) is True), that an alert-path bug cannot stop #447 recovery detection, and the three registries a platform emitter must appear in."
+    },
+    {
+      "file": "unit/test_2409_headroom_ranked_switch.py",
+      "feature": "#2409",
+      "added": "2026-08-27",
+      "categories": [
+        "backend",
+        "subscriptions",
+        "unit"
+      ],
+      "description": "Auto-switch ranks alternative subscriptions by cached provider headroom (#2409). Pins: the 2h failure filter stays a db-layer FILTER that runs first and is kind-blind (#444/#2352); survivors are ranked furthest-from-the-nearest-wall first (the fuller of the 5h/7d windows, banded to 10 points so agent_count still spreads a storm), a FRESH provider refusal is dropped and a stale one is merely unknown; one MGET, never a probe, tri-state on Redis; every failure of the ranking half degrades to today's order WITH a warning (poisoned-import fail-open beside a positive real-import proof); classify_headroom stays byte-identical to a frozen pre-#2409 copy over the full age x status x window x threshold product; the switch surfaces destination_headroom + a clause; new-agent auto-assign rides the same ranker with one decrypt in the common case."
     }
   ]
 }

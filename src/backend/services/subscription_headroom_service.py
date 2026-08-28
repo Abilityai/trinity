@@ -37,8 +37,10 @@ consumes it; no second definition (#2157 one-gate lesson).
 import asyncio
 import json
 import logging
+import math
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -84,6 +86,21 @@ RECOVERY_PROBE_SECONDS = int(os.getenv("SUBSCRIPTION_RECOVERY_PROBE_SECONDS", "3
 # is inert, and invites a later "packaging fix" that creates exactly the knob
 # this comment argues against.
 SAMPLE_INTERVAL_SECONDS = max(REFRESH_SECONDS, 3600)
+
+# ent#434 / #2409 — how old a reading may be and still be CLASSIFIED or RANKED.
+# Deliberately longer than the display predicates' FRESHNESS_SECONDS: a 7-day
+# window does not move meaningfully in a couple of hours, whereas a badge
+# showing a stale number is wrong immediately. Two consumers, ONE constant
+# (`subscription_headroom_alerts` re-exports it):
+#   - the weekly alert's fleet arm needs every subscription simultaneously
+#     assessable, which decays exponentially with fleet size (at a 2% per-probe
+#     failure rate and N=50, all-fresh is a 36% event), so a tight bound would
+#     make that alert unreachable on exactly the large fleet it matters for;
+#   - the auto-switch ranker reads whatever the sampler left behind, and any
+#     bound under the sampler cadence reads most candidates as UNKNOWN on an
+#     unwatched instance — the feature would ship inert. Hence the `max`: the
+#     bound always covers two sampler intervals (pinned by test).
+MAX_READING_AGE_SECONDS = max(2 * 3600, 2 * SAMPLE_INTERVAL_SECONDS)
 
 AUTO_REFRESH_SETTING = "subscription_headroom_auto_refresh"
 
@@ -615,32 +632,281 @@ def classify_headroom(
     `utilization_pct` is `Optional` INDEPENDENTLY of status, so it is never
     coerced: a missing number cannot be compared to a threshold, and coercing
     it to 0 or 100 invents a reading in the direction of the coercion.
-    """
-    if headroom is None:
-        return UNASSESSABLE
 
-    age = headroom.snapshot_age_seconds
-    limit = FRESHNESS_SECONDS if max_age_seconds is None else max_age_seconds
-    if age is None or age > limit:
+    Since #2409 this is POLICY over `headroom_reading` — the one usability
+    gate the auto-switch ranker shares, so the two cannot drift. The verdicts
+    are byte-identical to the pre-#2409 function; a differential test against
+    a frozen copy pins every (age × status × window × threshold) pair.
+    """
+    reading = headroom_reading(headroom, max_age_seconds=max_age_seconds)
+    if reading is None:
         return UNASSESSABLE
 
     # The provider refused the probe outright — the strongest saturation
     # evidence there is, and it arrives with no utilization figure.
-    if headroom.status == "rate_limited":
+    if reading.provider_status == "rate_limited":
         return SATURATED
-    # invalid_token / error / no_windows / anything unrecognised: we learned
-    # nothing about the quota. Never a headroom claim.
-    if headroom.status != "ok":
+    # invalid_token: the gate let it through because the probe DID answer,
+    # but we learned nothing about the quota. Never a headroom claim.
+    if reading.provider_status != "ok":
         return UNASSESSABLE
 
-    week = headroom.seven_day
+    week = reading.seven_day
     if week is None:
         return UNASSESSABLE
-    if week.status is not None and week.status not in NON_BLOCKING_WINDOW_STATUSES:
+    if week.blocked:
         return SATURATED
     if week.utilization_pct is None:
         return UNASSESSABLE
     return SATURATED if week.utilization_pct >= threshold_pct else HAS_HEADROOM
+
+
+# =============================================================================
+# #2409 — the shared reading gate + the auto-switch ranker
+# =============================================================================
+#
+# `classify_headroom` above and the selector below both need the same first
+# question answered — "is this snapshot usable at all?" — and #2409's own
+# warning is that two answers drift. So the gate is ONE function,
+# `headroom_reading`, and each consumer is a few lines of POLICY over it: the
+# classifier keys on the alert threshold; the ranker deliberately never sees
+# a threshold (an operator's alert knob must not steer where the fleet's
+# agents land — and it is `0` when the alerts are switched off, which would
+# classify every reading saturated).
+
+# A refusal (probe 429 / blocking window / rejected token) is a point-in-time
+# verdict: trusted exactly as long as the LIMIT badge trusts one
+# (`resolve_rate_limited_now` → FRESHNESS_SECONDS), then it is merely unknown.
+REFUSAL_FRESHNESS_SECONDS = FRESHNESS_SECONDS
+# The 5h window can fully reset inside MAX_READING_AGE_SECONDS, so its figure
+# is only evidence about the next minute while display-fresh. The 7d figure is
+# a LOWER BOUND for the whole bound: utilization is monotonic within the
+# provider's fixed window (measured in ent#434), so age only makes it
+# optimistic, never pessimistic.
+FAST_WINDOW_FRESHNESS_SECONDS = FRESHNESS_SECONDS
+# Snapshots do not move during a storm (no probe on this path; ambient refresh
+# is >= 15 min), while `agent_count` — the only key that DOES move as switches
+# land — would otherwise be the last tiebreak. Banding the headroom key lets
+# load-balance spread twenty agents across two subscriptions at 39.0% and
+# 39.4% instead of piling them onto one. Ten points is signal; less is noise
+# beside load.
+HEADROOM_BAND_PCT = 10
+
+
+@dataclass(frozen=True)
+class WindowReading:
+    """One provider window, post-gate."""
+    utilization_pct: Optional[float]   # None = the provider sent no figure
+    blocked: bool                      # status outside NON_BLOCKING_WINDOW_STATUSES (None = not blocked)
+    resets_at: Optional[str]
+
+
+@dataclass(frozen=True)
+class HeadroomReading:
+    """What the last probe said, once the snapshot has passed the usability gate."""
+    age_seconds: int
+    provider_status: str               # "ok" | "rate_limited" | "invalid_token"
+    five_hour: Optional[WindowReading]
+    seven_day: Optional[WindowReading]
+
+    @property
+    def refusing(self) -> bool:
+        """The provider is refusing this token right now, in some window."""
+        if self.provider_status != "ok":
+            return True
+        return any(w.blocked for w in (self.five_hour, self.seven_day) if w is not None)
+
+
+def headroom_reading(
+    headroom: Optional[SubscriptionHeadroom], *, max_age_seconds: Optional[int] = None
+) -> Optional[HeadroomReading]:
+    """THE usability gate — `None` means "nothing here can be believed".
+
+    Unusable: no snapshot, no age or over-age (`max_age_seconds`, default
+    FRESHNESS_SECONDS), or a probe that produced no verdict at all (`error`,
+    `no_windows`, any status this code does not know). A `rate_limited` or
+    `invalid_token` probe DID learn something and passes through as a reading;
+    what it means is each consumer's policy. Freshness is judged BEFORE status
+    — a stale refusal is not a refusal — the order `classify_headroom` has
+    always used. Figures pass through untouched (the classifier's verdicts
+    must stay byte-identical); the ranker sanitises non-finite ones.
+    """
+    if headroom is None:
+        return None
+    age = headroom.snapshot_age_seconds
+    limit = FRESHNESS_SECONDS if max_age_seconds is None else max_age_seconds
+    if age is None or age > limit:
+        return None
+    if headroom.status not in ("ok", "rate_limited", "invalid_token"):
+        return None
+
+    def window(w: Optional[HeadroomWindow]) -> Optional[WindowReading]:
+        if w is None:
+            return None
+        return WindowReading(
+            utilization_pct=w.utilization_pct,
+            blocked=w.status is not None and w.status not in NON_BLOCKING_WINDOW_STATUSES,
+            resets_at=w.resets_at,
+        )
+
+    return HeadroomReading(
+        age_seconds=int(age),
+        provider_status=headroom.status,
+        five_hour=window(headroom.five_hour),
+        seven_day=window(headroom.seven_day),
+    )
+
+
+def cached_headroom_readings(
+    subscription_ids, *, max_age_seconds: Optional[int] = None
+) -> Dict[str, Optional[HeadroomReading]]:
+    """The selector's read: the cached snapshots of a candidate set, gated.
+
+    ONE `MGET` — the selection runs under the per-agent switch lock, and N
+    serial 1s-bounded GETs would stall the loop for N seconds at exactly the
+    moment a fleet-wide wall makes N large. NEVER probes: a probe on the
+    switch path would turn every fleet-wide failure into a probe storm on the
+    survivors. Tri-state like `_read_snapshot` (learnings 2026-08-19): a client
+    that cannot be built, or a Redis that raises, reads every candidate as
+    unknown in ONE attempt; a malformed snapshot blinds only its own
+    candidate. The default bound is the SELECTION bound, not the display one.
+    """
+    ids = [str(s) for s in subscription_ids]
+    readings: Dict[str, Optional[HeadroomReading]] = {sid: None for sid in ids}
+    if not ids:
+        return readings
+    limit = MAX_READING_AGE_SECONDS if max_age_seconds is None else max_age_seconds
+    r = get_breaker_redis()
+    if r is None:
+        return readings
+    try:
+        raws = r.mget([_SNAPSHOT_KEY.format(sid=sid) for sid in ids])
+    except Exception as e:  # noqa: BLE001 — Redis could not be asked: unknown, never an error
+        logger.warning(
+            "[#2409] headroom snapshots unreadable (%s); ranking on load order",
+            type(e).__name__,
+        )
+        return readings
+    for sid, raw in zip(ids, raws or []):
+        if not raw:
+            continue
+        try:
+            readings[sid] = headroom_reading(_to_model(json.loads(raw)), max_age_seconds=limit)
+        except Exception as e:  # noqa: BLE001 — one bad snapshot must not blind the set
+            logger.warning(
+                "[#2409] headroom snapshot for subscription %s is malformed (%s); "
+                "treating it as unknown",
+                sid, type(e).__name__,
+            )
+            readings[sid] = None
+    return readings
+
+
+SELECTION_MEASURED = "measured"   # fresh, serving, weekly figure present — ranked by nearest wall
+SELECTION_UNKNOWN = "unknown"     # nothing usable — today's order (load, then name)
+SELECTION_REFUSED = "refused"     # the provider is refusing it right now — not a candidate
+
+
+def _finite_pct(w: Optional[WindowReading]) -> Optional[float]:
+    """A usable utilization figure, or None. Two-sided: finite AND non-negative.
+    A negative figure is malformed provider data, not a very empty
+    subscription — unbounded it would band to -1 and sort AHEAD of a genuinely
+    empty one. No upper bound: an overage window legitimately reads past 100%.
+    """
+    if w is None or w.utilization_pct is None:
+        return None
+    try:
+        v = float(w.utilization_pct)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and v >= 0 else None
+
+
+def selection_verdict(reading: Optional[HeadroomReading]) -> tuple:
+    """`(tier, primary_pct, other_pct)` — the ranker's whole opinion of one reading.
+
+    Primary is the FULLER window: the nearest wall. The #792 retry re-issues
+    the failed turn on the destination immediately, so a subscription at
+    7d 20% / 5h 98% fails within the minute — "how long will it last" is the
+    weekly question, "will it work now" is the 5h one, and the wall you hit
+    first is whichever is closer. A lexicographic 7d-then-5h key never reaches
+    its second term (1-decimal utilization never ties), which is why this is a
+    max, not a tiebreak. A serving reading with no weekly figure (a 5h-only
+    snapshot) is UNKNOWN — the weekly figure is the AC's key; without it
+    nothing is ranked. No threshold anywhere — see the module note above.
+    """
+    if reading is None:
+        return SELECTION_UNKNOWN, None, None
+    if reading.refusing:
+        if reading.age_seconds <= REFUSAL_FRESHNESS_SECONDS:
+            return SELECTION_REFUSED, None, None
+        return SELECTION_UNKNOWN, None, None
+    week = _finite_pct(reading.seven_day)
+    if week is None:
+        return SELECTION_UNKNOWN, None, None
+    day = (
+        _finite_pct(reading.five_hour)
+        if reading.age_seconds <= FAST_WINDOW_FRESHNESS_SECONDS
+        else None
+    )
+    if day is not None and day > week:
+        return SELECTION_MEASURED, day, week
+    return SELECTION_MEASURED, week, day
+
+
+def selection_sort_key(candidate, reading: Optional[HeadroomReading]) -> tuple:
+    """Lower sorts first: `(tier, band, agent_count, primary, other, name)`.
+
+    Inside a band the agent count decides (the storm argument on
+    HEADROOM_BAND_PCT); inside UNKNOWN the key is exactly today's order —
+    `agent_count ASC, name ASC` — so a set with no readings behaves as it
+    always did, whatever order it arrived in. A missing "other" window sorts
+    after any known one.
+    """
+    tier, primary, other = selection_verdict(reading)
+    agents = int(getattr(candidate, "agent_count", 0) or 0)
+    name = str(getattr(candidate, "name", "") or "")
+    if tier == SELECTION_MEASURED:
+        band = int(primary // HEADROOM_BAND_PCT)
+        # `inf`, not 100: an overage window can read past 100%, and a missing
+        # figure must still sort after every known one.
+        return (0, band, agents, primary, math.inf if other is None else other, name)
+    return (1, 0, agents, 0.0, 0.0, name)
+
+
+def rank_subscriptions(candidates, readings: Dict[str, Optional[HeadroomReading]]) -> list:
+    """Order the survivors of the failure filter; drop the ones the provider is
+    refusing right now.
+
+    Pure: a stable sort over `selection_sort_key`, so a set with no readings
+    comes back in today's order. Never fewer than the input minus fresh
+    refusals — ranking IMPROVES a choice; it never prevents one except when
+    every candidate is refusing. That refusal filter is the one deliberate
+    exception to #2409's literal AC #3 (recorded
+    on the issue): moving an agent onto a subscription the provider is
+    refusing is a guaranteed failed turn plus a failure row, and with several
+    such subscriptions the agent walks through all of them (#444's class).
+    """
+    kept = [
+        c for c in candidates
+        if selection_verdict(readings.get(c.id))[0] != SELECTION_REFUSED
+    ]
+    return sorted(kept, key=lambda c: selection_sort_key(c, readings.get(c.id)))
+
+
+def describe_reading(reading: Optional[HeadroomReading]) -> Dict[str, Any]:
+    """The notification / activity / log shape — tiers and figures, never a token."""
+    tier, _primary, _other = selection_verdict(reading)
+    week = reading.seven_day if reading else None
+    day = reading.five_hour if reading else None
+    return {
+        "tier": tier,
+        "seven_day_pct": _finite_pct(week),
+        "five_hour_pct": _finite_pct(day),
+        "seven_day_resets_at": week.resets_at if week else None,
+        "five_hour_resets_at": day.resets_at if day else None,
+        "reading_age_seconds": reading.age_seconds if reading else None,
+    }
 
 
 async def ensure_reading(

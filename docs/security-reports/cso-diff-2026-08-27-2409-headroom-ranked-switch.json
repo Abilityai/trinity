@@ -1,0 +1,71 @@
+{
+  "version": "1.1",
+  "date": "2026-08-27",
+  "mode": "diff",
+  "scope": "feature/2409-headroom-ranked-switch vs merge-base 908f8713",
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_na": [
+    3,
+    4,
+    5,
+    8
+  ],
+  "attack_surface": {
+    "new_routes": 0,
+    "new_ws": 0,
+    "new_uploads": 0,
+    "new_integrations": 1,
+    "new_jobs": 0,
+    "changed_files": 21,
+    "backend_touched": true,
+    "new_integration_detail": "one Redis MGET over subscription:headroom:{id} via the existing backend-ACL breaker client; read-only, no probe"
+  },
+  "findings": [],
+  "below_gate": [
+    {
+      "item": "destination_headroom (utilization %, reset instants, subscription names) rides agent_activity details on the unfiltered /ws",
+      "confidence": 2,
+      "disposition": "not a finding \u2014 names already rode the same activity; added values are INTERNAL numbers"
+    },
+    {
+      "item": "unreachable/poisoned Redis makes the ranker inert rather than failing the switch",
+      "confidence": 2,
+      "disposition": "by design (AC #4), loud not silent"
+    },
+    {
+      "item": "_parse_utilization maps a >1.0 fraction to a single-digit percent (overage ranks best)",
+      "confidence": null,
+      "disposition": "pre-existing; filed #2419"
+    }
+  ],
+  "supply_chain_summary": "N/A \u2014 no dependency, lockfile, Dockerfile, compose or workflow change",
+  "filter_stats": {
+    "candidates": 3,
+    "reported": 0,
+    "below_gate": 3
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports_this_window": [
+      "cso-2026-08-26-ent434"
+    ],
+    "direction": "stable \u2014 zero gate-passing findings; the diff narrows where an already-authorised switch lands and makes the decision auditable"
+  }
+}

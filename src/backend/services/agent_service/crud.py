@@ -1587,10 +1587,11 @@ def _build_base_env(config: AgentConfig) -> dict:
 
 
 def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str]:
-    """#74: auto-assign a round-robin Claude subscription (Claude runtimes only).
+    """#74: auto-assign a Claude subscription (Claude runtimes only) — since
+    #2409 the one with the most headroom, load-balance order among unranked.
     Sets `CLAUDE_CODE_OAUTH_TOKEN` and pops `ANTHROPIC_API_KEY` on success.
     Returns the assigned subscription id (None when skipped)."""
-    # Auto-assign subscription (round-robin) — #74.
+    # Auto-assign subscription — #74 (headroom-ranked since #2409).
     # Subscriptions are Claude-OAuth tokens (CLAUDE_CODE_OAUTH_TOKEN) and apply
     # ONLY to the Claude Code runtime. Non-Claude runtimes (Gemini, Codex) bring
     # their own credentials via .env (CRED-002), so skip the assign entirely —
@@ -1600,7 +1601,11 @@ def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str
     auto_assigned_subscription_id = None
     if is_claude_runtime(config.runtime):
         try:
-            least_used = db.get_least_used_subscription()
+            # #2409: filter (db) → rank by cached headroom → first decryptable
+            # token, in the subscription service. Lazy import — this module's
+            # creation harnesses stub `services.*` selectively at load.
+            from services.subscription_service import select_subscription_for_new_agent
+            least_used = select_subscription_for_new_agent()
             if least_used:
                 token = db.get_subscription_token(least_used.id)
                 if token:

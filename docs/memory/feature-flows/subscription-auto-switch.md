@@ -165,12 +165,11 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 | GET | `/api/subscriptions/settings/auto-switch` | Get setting state |
 | PUT | `/api/subscriptions/settings/auto-switch?enabled=true` | Toggle setting |
 
-## Selection Strategy
+## Selection Strategy (#2409)
 
-1. Exclude current subscription
-2. Order by agent_count ascending (load-balance)
-3. Skip any subscription with rate-limit events in last 2 hours
-4. Return first viable candidate, or None
+1. **Filter (db):** exclude the current subscription; drop any subscription with a failure row in the last 2 hours (rate-limit OR auth, #2352); order `agent_count ASC, name ASC` — `db.list_viable_alternative_subscriptions`. Filter only, never a ranking.
+2. **Rank (service):** read the survivors' cached provider snapshots in ONE `MGET` (never a probe) and sort furthest-from-the-nearest-wall first — the fuller of the 5h/7d windows — in 10-point bands with `agent_count` as the in-band tiebreak; a FRESH provider refusal is dropped; no usable reading ⇒ today's order — `services.subscription_auto_switch.select_best_alternative_subscription`
+3. Return the first ranked candidate with its `why` (surfaced on the switch), or None — no survivors, or every survivor currently refused by the provider
 
 ## 2h Window Correctness (Issue #476)
 
@@ -228,7 +227,7 @@ So the predicate SPLIT rather than narrowed:
 | Predicate | Counts | Consumers |
 |---|---|---|
 | `is_subscription_rate_limited` | `failure_kind = 'rate_limit'` only (NULL excluded) | `decorate_usage`, `pressure_states`, `get_subscription_usage` — every badge/tile |
-| `has_recent_subscription_failures` | every kind, NULL included | `select_best_alternative_subscription`, `select_subscription_for_new_agent` |
+| `has_recent_subscription_failures` | every kind, NULL included | `list_viable_alternative_subscriptions`, `list_assignable_subscriptions` (db filters; the services rank — #2409) |
 
 The kind-blind half is byte-for-byte the pre-split behaviour, so **nothing about switch safety changed**.
 Narrowing the shared predicate in place would have passed every display assertion and quietly started
@@ -239,3 +238,24 @@ the disagreement between them.
 `_perform_auto_switch` still does not clear the old subscription's events — the note below now reads
 against `has_recent_subscription_failures`, which is the predicate that keeps the just-drained (or
 just-rejected) sub off the candidate list.
+
+## #2409 (2026-08-27) — the selector ranks by cached headroom
+
+**Before:** `db.select_best_alternative_subscription` returned the FIRST survivor of the 2h failure filter in `agent_count ASC` order and read no headroom, so an agent could be moved onto a subscription at 99% of its weekly window — and an *unused dead-token* subscription (no agents ⇒ no failure rows) sorted first. The switch reported success and the agent hit the wall again shortly after; nothing surfaced that the destination was a bad choice.
+
+**Now — filter in the db, rank in the service, never a probe:**
+
+1. `db.list_viable_alternative_subscriptions(current)` — every other subscription with no failure row in the last 2h (any kind, #2352), `agent_count ASC, name ASC`. Filter only; the name tiebreak makes the fallback order deterministic (SQLite leaves ties unspecified).
+2. `services.subscription_auto_switch.select_best_alternative_subscription(current)` — runs under the per-agent switch lock via `asyncio.to_thread` (both reads are blocking): one `MGET` over `subscription:headroom:{id}` for the survivors (`subscription_headroom_service.cached_headroom_readings` — tri-state on Redis, never `get_headroom`/`_locked_probe`), then `rank_subscriptions`. Only survivors are ever read: a candidate the filter dropped is never looked at.
+3. Ranking key `(tier, band, agent_count, primary, other, name)`, stable sort:
+   - **measured** — fresh (≤2h `MAX_READING_AGE_SECONDS`), provider serving, weekly figure present. `primary` = the **fuller** of the two windows (the nearest wall: the #792 retry re-issues the turn on the destination immediately, so 7d 20% / 5h 98% fails within the minute; a lexicographic 7d-then-5h key never reaches its second term because 1-decimal utilization never ties). The 5h figure counts only while display-fresh (≤30 min — it can fully reset inside 2h); the 7d figure is a lower bound for the whole bound (monotonic within the provider's fixed window). Banded to 10 points so `agent_count` — the only key that moves as switches land — still spreads a storm within a band.
+   - **unknown** — no snapshot, stale, transport error, 5h-only, non-finite figure, or a STALE refusal → exactly today's order (`agent_count ASC, name ASC`).
+   - **refused** — a FRESH (≤30 min, the LIMIT-badge bound) probe 429, blocking window status, or rejected token → dropped. The one deviation from the issue's literal AC #3, recorded on the issue: moving an agent onto a subscription the provider is refusing is a guaranteed failed turn plus a failure row, and with several such subscriptions the agent walks through all of them (#444's class as a walk). The only case that now yields no target where it previously did is "every survivor is currently refused by the provider".
+4. Any failure of the ranking half (Redis down, an import that resolved to the wrong module, a bug) → the db's order **plus a WARNING**; when every survivor is unknown and ambient refresh is OFF the log says the ranker is inert (an inert ranker must not look like a working one). The ranking never gates: the survivor set is untouched except for fresh refusals.
+5. `_perform_auto_switch(..., destination_headroom=why)` surfaces the pick: `destination_headroom` (tier, both windows' utilization + reset, reading age, candidate count, auto-refresh flag) on the activity `details`, the notification `metadata` and the result, plus one clause in the notification text — *"It had the most headroom of the 3 alternatives (45% of its weekly limit and 8% of its 5-hour limit used)."* or *"No fresh headroom reading was available for it (ambient headroom refresh is off); it was chosen by load-balance order."* On a two-subscription install the ranking cannot change the pick, so the explanation IS the value there.
+
+**Shared gate.** `classify_headroom` (ent#434) and the ranker consume ONE usability gate, `headroom_reading` (fresh? probe answered? window shape?) — the classifier became six lines of policy over it with byte-identical verdicts, pinned by a differential test against a frozen copy of the pre-#2409 function over the full age × status × window × threshold product. The ranker itself is threshold-free: the alert threshold is an operator knob that must not steer where agents land, and it is `0` when alerts are off. `MAX_READING_AGE_SECONDS` moved into the headroom service (`subscription_headroom_alerts` re-exports it) and is pinned above the sampler cadence, because a bound under it reads most candidates as unknown on an unwatched instance.
+
+**New-agent auto-assign (#74) rides the same ranker:** `db.list_assignable_subscriptions()` → `services.subscription_service.select_subscription_for_new_agent()` — rank, then the first candidate whose token still decrypts (#340), so the common case costs one decrypt. `get_least_used_subscription` is gone; `database` is resolved at call time so the creation harnesses' per-test stubs are honoured.
+
+**Tests:** `tests/unit/test_2409_headroom_ranked_switch.py` — gate table, frozen-oracle classifier parity, ranker tables (incl. the storm/band case and the reviewer's 7d 20% / 5h 98% example), MGET single-call, tri-state Redis, no-probe guard, poisoned-import fail-open beside a positive real-import proof, wiring off the loop, notification clause, new-agent assignment. The #444 / #2352 db-level pins moved to the list form unchanged in substance.

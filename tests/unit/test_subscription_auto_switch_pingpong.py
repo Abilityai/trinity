@@ -9,8 +9,9 @@ ping-pong between two exhausted subscriptions on every subsequent 429.
 
 These tests pin the fix at the db layer: after a simulated switch, the old
 subscription must still be reported as rate-limited, and
-`select_best_alternative_subscription()` must return None when every candidate
-has rate-limit events in the 2h window.
+`list_viable_alternative_subscriptions()` must return an empty candidate list
+when every candidate has rate-limit events in the 2h window (#2409 moved the
+first-match pick into the service layer; the db-level FILTER is what #444 pins).
 """
 
 from __future__ import annotations
@@ -186,16 +187,15 @@ class TestPingPongPrevention:
         assert sub_ops.is_subscription_rate_limited("sub-a") is True
 
     def test_no_alternative_when_both_subs_exhausted(self, sub_ops):
-        """Given two subscriptions that have each hit the limit,
-        select_best_alternative_subscription must return None — not pick the
-        other exhausted sub."""
+        """Given two subscriptions that have each hit the limit, the candidate
+        list must be empty — not offer the other exhausted sub."""
         _record_events(sub_ops, "agent-x", "sub-a", 2)
         _record_events(sub_ops, "agent-x", "sub-b", 2)
 
         # Agent currently on sub-A → asking for an alternative to sub-A
-        assert sub_ops.select_best_alternative_subscription("sub-a") is None
+        assert sub_ops.list_viable_alternative_subscriptions("sub-a") == []
         # Symmetric: from sub-B's perspective too
-        assert sub_ops.select_best_alternative_subscription("sub-b") is None
+        assert sub_ops.list_viable_alternative_subscriptions("sub-b") == []
 
     def test_pingpong_blocked_across_two_switches(self, sub_ops):
         """Full ping-pong scenario: both subscriptions have 429s recorded. After
@@ -203,27 +203,25 @@ class TestPingPongPrevention:
         back to A because A is still flagged as rate-limited."""
         # First cycle: agent-x on sub-A, 2× 429
         _record_events(sub_ops, "agent-x", "sub-a", 2)
-        # Auto-switch picks sub-B (the only other sub, not yet flagged)
-        alt1 = sub_ops.select_best_alternative_subscription("sub-a")
-        assert alt1 is not None
-        assert alt1.id == "sub-b"
+        # Auto-switch's candidate list is sub-B (the only other sub, not yet flagged)
+        alt1 = sub_ops.list_viable_alternative_subscriptions("sub-a")
+        assert [s.id for s in alt1] == ["sub-b"]
         # Perform the switch (post-fix: no clear)
         sub_ops.assign_subscription_to_agent("agent-x", "sub-b")
 
         # Second cycle: 2× 429 on sub-B too
         _record_events(sub_ops, "agent-x", "sub-b", 2)
         # sub-A still rate-limited → no viable alternative → no ping-pong back
-        alt2 = sub_ops.select_best_alternative_subscription("sub-b")
-        assert alt2 is None
+        alt2 = sub_ops.list_viable_alternative_subscriptions("sub-b")
+        assert alt2 == []
 
     def test_viable_alternative_found_when_only_one_sub_exhausted(self, sub_ops):
         """Sanity check: if only one subscription is rate-limited, the other is
         still a valid alternative (the fix must not over-correct and refuse all
         switches)."""
         _record_events(sub_ops, "agent-x", "sub-a", 2)
-        alt = sub_ops.select_best_alternative_subscription("sub-a")
-        assert alt is not None
-        assert alt.id == "sub-b"
+        alt = sub_ops.list_viable_alternative_subscriptions("sub-a")
+        assert [s.id for s in alt] == ["sub-b"]
 
 
 # =============================================================================
@@ -471,11 +469,30 @@ class TestSingleEventThreshold:
         import services.subscription_auto_switch as auto_switch
         importlib.reload(auto_switch)
 
-        # Default alternative subscription returned by select_best_alternative_subscription
+        # Default candidate list returned by list_viable_alternative_subscriptions
+        # (#2409: the db lists, the service ranks; a one-element list = the old pick)
         alt = MagicMock()
         alt.id = "sub-b"
         alt.name = "sub-b"
-        stub_db.select_best_alternative_subscription.return_value = alt
+        alt.agent_count = 0
+        stub_db.list_viable_alternative_subscriptions.return_value = [alt]
+
+        # #2409: the selector lazily imports the headroom service. Install an
+        # OWN leaf stub with the real semantics (learnings 2026-08-12) so the
+        # real module never binds this test's `database` stub on first import.
+        import types as _types
+        headroom_stub = _types.ModuleType("services.subscription_headroom_service")
+        headroom_stub.cached_headroom_readings = lambda ids, **kw: {sid: None for sid in ids}
+        headroom_stub.rank_subscriptions = lambda candidates, readings: list(candidates)
+        headroom_stub.describe_reading = lambda reading: {
+            "tier": "unknown", "seven_day_pct": None, "five_hour_pct": None,
+            "seven_day_resets_at": None, "five_hour_resets_at": None,
+            "reading_age_seconds": None,
+        }
+        headroom_stub.is_auto_refresh_enabled = lambda: True
+        monkeypatch.setitem(
+            sys.modules, "services.subscription_headroom_service", headroom_stub
+        )
 
         # Stub the heavy sub-call. Record args, return a synthetic switch result.
         calls = []
@@ -543,7 +560,7 @@ class TestSingleEventThreshold:
         """Regression on the 2h skip-list: when no alternative is viable,
         the service must NOT call _perform_auto_switch even at threshold=1.
         We simulate the skip-list returning None for the alternative."""
-        svc._stub_db.select_best_alternative_subscription.return_value = None
+        svc._stub_db.list_viable_alternative_subscriptions.return_value = []
 
         result = await svc.handle_subscription_failure(
             agent_name="agent-x",

@@ -14,7 +14,7 @@ incompatible meanings:
 
   - display (`decorate_usage` / `pressure_states` / `get_subscription_usage`)
     wants "is this throttled right now" → rate_limit-kind only;
-  - candidate selection (`select_best_alternative_subscription`,
+  - candidate selection (`list_viable_alternative_subscriptions`,
     `select_subscription_for_new_agent`) wants "did this fail recently for ANY
     reason" → kind-blind, or auto-switch starts moving agents onto
     subscriptions whose token it just watched get rejected (the #444 class).
@@ -262,14 +262,13 @@ class TestCandidateSkipPredicate:
         subscription that cannot authenticate — an outage dressed as a remedy.
         """
         _event(tmp_db, "sub-b", failure_kind="auth")
-        chosen = sub_ops.select_best_alternative_subscription("sub-a")
-        assert chosen is not None
-        assert chosen.id == "sub-c"
+        candidates = sub_ops.list_viable_alternative_subscriptions("sub-a")
+        assert [s.id for s in candidates] == ["sub-c"]
 
     def test_auto_switch_returns_none_when_every_candidate_failed(self, sub_ops, tmp_db):
         _event(tmp_db, "sub-b", failure_kind="auth")
         _event(tmp_db, "sub-c", failure_kind="rate_limit")
-        assert sub_ops.select_best_alternative_subscription("sub-a") is None
+        assert sub_ops.list_viable_alternative_subscriptions("sub-a") == []
 
 
 # =============================================================================

@@ -228,7 +228,7 @@ def _load_crud(monkeypatch, docker_available=True):
     db.get_agent_ephemeral_info.return_value = None
     db.get_user_by_username.return_value = {"id": 7}
     db.get_agent_mcp_api_key.return_value = None
-    db.get_least_used_subscription.return_value = None  # skip auto-assign
+    db.list_assignable_subscriptions.return_value = []  # skip auto-assign (#2409)
     db.get_subscription_token.return_value = None
     db.add_agent_permission.return_value = None
     db.assign_subscription_to_agent.return_value = None
@@ -528,8 +528,8 @@ async def test_case4_no_template_no_github_env(crud_env):
 async def test_case5_claude_subscription_auto_assign(crud_env, monkeypatch):
     crud, ctx = crud_env
     monkeypatch.setattr(crud, "is_claude_runtime", lambda runtime: True)
-    ctx["db"].get_least_used_subscription.return_value = MagicMock(
-        id="sub-1", name="sub-a")
+    ctx["db"].list_assignable_subscriptions.return_value = [MagicMock(
+        id="sub-1", name="sub-a")]
     ctx["db"].get_subscription_token.return_value = "oauth-tok"
 
     await crud.create_agent_internal(_local_config("claude-a"), _user(), None)
@@ -886,8 +886,8 @@ async def test_case14_nonfatal_side_effects_still_succeed(crud_env, sink):
 async def test_case14_nonfatal_subscription_persist_failure(crud_env, monkeypatch):
     crud, ctx = crud_env
     monkeypatch.setattr(crud, "is_claude_runtime", lambda runtime: True)
-    ctx["db"].get_least_used_subscription.return_value = MagicMock(
-        id="sub-1", name="sub-a")
+    ctx["db"].list_assignable_subscriptions.return_value = [MagicMock(
+        id="sub-1", name="sub-a")]
     ctx["db"].get_subscription_token.return_value = "oauth-tok"
     ctx["db"].assign_subscription_to_agent.side_effect = Exception("boom")
     await crud.create_agent_internal(_local_config("nf-sub"), _user(), None)
