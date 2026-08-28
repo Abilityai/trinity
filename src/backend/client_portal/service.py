@@ -1244,12 +1244,30 @@ async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: 
             clear_turn_inflight(marker_session_id, marker_execution_id)
 
 
-def _precreate_sync_execution(agent_name: str, message: str, email: str) -> str | None:
+def _precreate_sync_execution(
+    agent_name: str, message: str, email: str, session_id: str,
+) -> str | None:
     """Create the execution row for a synchronous portal turn (ent#365 review).
 
     Mirrors `start_portal_turn`'s creation exactly — same trigger, same
-    `source_channel` stamp — so the two paths produce indistinguishable rows and
-    a report published from either can be joined back to its chat.
+    `source_channel` stamp, same destination — so the two paths produce
+    indistinguishable rows and a report published from either can be joined back
+    to its chat.
+
+    #2426: that claim used to be false, and it read as true. This site stamped
+    the SURFACE and not the DESTINATION, so a synchronous turn landed with
+    `source_channel='portal'` and a NULL `source_channel_chat_id`. ent#457 does
+    pass the binding down, but `execute_task` persists it only inside
+    `if not execution_id:` — and this function has already made the row and
+    handed the id over, so that branch never runs. A child delegated during such
+    a turn inherited a portal context with nowhere to go, and
+    `report_completion` dropped it at its own `if not source_channel_chat_id`
+    gate. Measured before the fix: 5 of 8 portal rows NULL, split exactly by
+    path — the browser (streaming) stamped, `POST .../chat` did not.
+
+    `session_id` is a required parameter rather than an optional one: the value
+    is in scope at the only call site, and a default would let a future caller
+    reintroduce the silent-inert row this fixes.
 
     Fail-soft to None: this exists so an addressed report finds its session, and
     a turn must not be refused because that bookkeeping could not be done. ONLY
@@ -1275,6 +1293,13 @@ def _precreate_sync_execution(agent_name: str, message: str, email: str) -> str 
             source_user_email=email,
             subscription_id=subscription_id,
             source_channel=PORTAL_SOURCE_CHANNEL,
+            # #2426: the destination, not just the surface. The sibling comment
+            # in `start_portal_turn` says "both creation sites or the stamp is a
+            # coin flip depending on which path made the row" — ent#457 covered
+            # the two sites that existed when it was written; ent#365 had added
+            # this third one.
+            source_channel_chat_id=session_id,
+            source_channel_client=email,
         )
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
@@ -1507,7 +1532,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # than this one growing its own turn machinery.
         owns_marker = False
         if not execution_id:
-            execution_id = _precreate_sync_execution(agent_name, message, email)
+            execution_id = _precreate_sync_execution(agent_name, message, email, session_id)
             if execution_id:
                 mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
                 owns_marker = True
