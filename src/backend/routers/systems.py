@@ -16,7 +16,7 @@ from models import (
     SystemDeployResponse,
 )
 from database import db
-from dependencies import get_current_user, require_role
+from dependencies import get_current_user, require_role, reject_agent_principal
 from services.system_service import (
     system_member_names,
     deploy_manifest,
@@ -284,19 +284,43 @@ async def restart_system(
     current_user: User = Depends(require_role("creator"))
 ):
     """
-    Restart all agents in a system.
+    Restart all agents in a system. Human-only.
 
     Stops and starts every member. Useful after configuration changes.
 
-    #2373: gated on `require_role("creator")`. It was bare `get_current_user` —
-    below the gate on `POST /deploy` and below even the READ-ONLY
-    bundled-catalog routes — so any authenticated principal, including
-    `role: user`, could stop and start every container in any system whose
-    agents it could see. A mutating fleet-wide verb under a lighter gate than
-    the catalog it reads is an oversight, not a decision. `require_role` also
-    rejects agent principals since #1890, which matters here because an
-    agent-scoped MCP key resolves to its owner carrying the owner's role.
+    #2373, role gate: it was bare `get_current_user` — below the gate on
+    `POST /deploy` and below even the READ-ONLY bundled-catalog routes — so any
+    authenticated principal, including `role: user`, could stop and start every
+    container in any system whose agents it could see. A mutating fleet-wide
+    verb under a lighter gate than the catalog it reads is an oversight, not a
+    decision.
+
+    #2373 review, agent principals: `require_role` does NOT reject them, and an
+    earlier version of this docstring claimed it did. It rejects CONNECTOR
+    principals only, and its own docstring says the omission is deliberate —
+    `require_role("creator")` on `POST /api/agents` is what makes ent#69 Part 2
+    agent-spawned creation work, so a blanket rejection there would break ghost
+    spawning. Do not "fix" `require_role`.
+
+    So the rejection belongs here, and it is not merely a wider gate — it
+    closes a BYPASS. The per-agent equivalents (`POST /agents/{name}/start`,
+    `/stop`, `/delete`) each call `enforce_agent_spawn_scope`, so an
+    agent-scoped caller may only start or stop agents it actually SPAWNED
+    (name *and* key id). This route loops every member calling `container_stop`
+    + `start_agent_internal` with no per-member check at all — so reaching it
+    with an agent key performs, in bulk and unscoped, exactly the operation
+    that is spawn-scoped one at a time. On a default admin-owned install an
+    agent key resolves to its owner carrying the owner's role, so
+    `require_role("creator")` alone admits every agent in the fleet
+    (trinity-ops-agent#232 class).
+
+    Scoping per member was considered and rejected for this PR: a system whose
+    every member the caller spawned is a near-empty set, so it would be a
+    strange capability rather than a useful one. If an agent-driven restart is
+    ever wanted, it needs its own design.
     """
+    reject_agent_principal(current_user)
+
     try:
         from routers.agents import get_accessible_agents, start_agent_internal
         from services.docker_service import get_agent_container

@@ -2287,12 +2287,31 @@ was swallowed by the surrounding `except Exception`, so every response omitted
 asserted on the key. Exactly the failure mode the db facade's own comment warns
 about.
 
-**`POST /{name}/restart` is `require_role("creator")`.** It was bare
-`get_current_user` — below `POST /deploy` and below even the read-only
+**`POST /{name}/restart` is `require_role("creator")` AND human-only.** It was
+bare `get_current_user` — below `POST /deploy` and below even the read-only
 bundled-catalog routes — so any authenticated principal could stop and start
-every container in a system whose agents it could see. `require_role` also
-rejects agent principals (#1890), which matters because an agent-scoped MCP key
-resolves to its owner carrying the owner's role.
+every container in a system whose agents it could see.
+
+The second half is a separate gate, and an earlier draft of this paragraph got
+it backwards: **`require_role` does NOT reject agent principals.** It rejects
+CONNECTOR principals only, and its own docstring says so deliberately —
+`require_role("creator")` on `POST /api/agents` is what makes ent#69 Part 2
+agent-spawned creation work, so a blanket rejection there would break ghost
+spawning. Do not "fix" `require_role`; the guard belongs at the endpoint, which
+now calls `reject_agent_principal` explicitly.
+
+That rejection is not merely a wider gate — it closes a **bypass**. The
+per-agent equivalents (`POST /agents/{name}/start`, `/stop`, `/delete`) each
+call `enforce_agent_spawn_scope`, so an agent-scoped caller may only start or
+stop agents it actually SPAWNED (name *and* key id). `restart_system` loops
+every member calling `container_stop` + `start_agent_internal` with **no**
+per-member check, so reaching it with an agent key performs, in bulk and
+unscoped, exactly the operation that is spawn-scoped one at a time — and on a
+default admin-owned install an agent key resolves to its owner carrying the
+owner's role, so the role gate alone admits the whole fleet
+(trinity-ops-agent#232 class). Scoping per member was considered and rejected:
+a system whose every member the caller spawned is a near-empty set, so it would
+be a strange capability rather than a useful one.
 
 **Export round-trips.** The non-full-mesh permissions branch sliced
 `target_agent[len(system_name)+1:]` with no membership filter, so an edge

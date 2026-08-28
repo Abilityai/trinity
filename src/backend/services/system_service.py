@@ -1110,14 +1110,13 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                         # "unknown agent in permissions" check on re-deploy. The
                         # round trip was broken by the export, not the import.
                         explicit_perms = {}
-                        _member_set = set(member_names)
                         for agent in agents:
                             short_name = agent['name'][len(system_name) + 1:]
                             agent_perms = db.get_agent_permissions(agent['name'])
                             targets = [
                                 p["target_agent"][len(system_name) + 1:]
                                 for p in agent_perms
-                                if p["target_agent"] in _member_set
+                                if p["target_agent"] in member_names
                             ]
                             if targets:
                                 explicit_perms[short_name] = targets
@@ -1136,7 +1135,7 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                         targets = [
                             p["target_agent"][len(system_name) + 1:]
                             for p in agent_perms
-                            if p["target_agent"] in set(member_names)
+                            if p["target_agent"] in member_names
                         ]
                         if targets:
                             explicit_perms[short_name] = targets

@@ -83,13 +83,84 @@ def test_restart_is_creator_gated_like_deploy():
     assert "Depends(get_current_user)" not in src
 
 
-def test_restart_is_not_reachable_by_an_agent_principal():
-    """`require_role` rejects agent principals since #1890, which matters here
-    because an agent-scoped MCP key resolves to its owner CARRYING the owner's
-    role — on a default admin-owned install that is every agent."""
+def test_require_role_does_NOT_reject_agent_principals():
+    """The false premise this test used to rest on, pinned as its opposite.
+
+    The earlier version asserted `"reject_agent_principal" in
+    inspect.getsource(require_role)` — and passed, because `getsource` returns
+    the DOCSTRING, which contains the sentence *"Deliberately does NOT call
+    `reject_agent_principal`"*. The assertion matched its own refutation. Same
+    trap `_code_only()` above exists for, one file over.
+
+    `require_role` rejects CONNECTOR principals only, and that omission is
+    deliberate: `require_role("creator")` on `POST /api/agents` is what makes
+    ent#69 Part 2 agent-spawned creation work. Do not "fix" it.
+    """
     import dependencies
-    src = inspect.getsource(dependencies.require_role)
-    assert "reject_agent_principal" in src or "agent_name" in src
+    body = _code_only(inspect.getsource(dependencies.require_role))
+    assert "_reject_connector_principal(current_user)" in body
+    assert "reject_agent_principal(current_user)" not in body, (
+        "require_role must not reject agent principals — ent#69 Part 2 "
+        "agent-spawned creation goes through require_role('creator')"
+    )
+
+
+def test_restart_refuses_an_agent_principal_before_touching_anything():
+    """Behavioural, not textual (#2373 review).
+
+    The gate is `reject_agent_principal` AT THE ENDPOINT, because
+    `require_role` does not do it and an agent key resolves to its owner
+    carrying the owner's role — so `require_role("creator")` alone admits every
+    agent on a default admin-owned install.
+
+    It is a BYPASS being closed, not just a wider gate: `POST /agents/{name}/`
+    `start`/`stop`/`delete` each call `enforce_agent_spawn_scope`, so an agent
+    may only start or stop what it SPAWNED, while this route loops every member
+    calling `container_stop` + `start_agent_internal` with no per-member check.
+
+    Driven for real, and asserted to raise BEFORE any work: the stubs below
+    would blow up loudly if the refusal came late.
+    """
+    import asyncio
+    from fastapi import HTTPException
+    from models import User
+    from routers import systems
+
+    agent_caller = User(
+        id=1, username="owner", role="admin",
+        mcp_scope="agent", agent_name="scribe",
+    )
+
+    def _explode(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("restart_system did work before refusing an agent key")
+
+    import routers.agents as agents_mod
+    real_accessible = agents_mod.get_accessible_agents
+    agents_mod.get_accessible_agents = _explode
+    try:
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(systems.restart_system(
+                system_name="acme", request=None, current_user=agent_caller,
+            ))
+        assert e.value.status_code == 403
+    finally:
+        agents_mod.get_accessible_agents = real_accessible
+
+
+def test_restart_still_admits_a_human_creator():
+    """The refusal must be about the PRINCIPAL KIND, not about the role — a
+    human creator is exactly who this route is for, and a guard that refused
+    them too would pass the test above while breaking the feature."""
+    from models import User
+    from routers import systems
+
+    human = User(id=1, username="op", role="creator", mcp_scope=None)
+    from dependencies import reject_agent_principal
+    reject_agent_principal(human)   # must not raise
+
+    body = _code_only(inspect.getsource(systems.restart_system))
+    assert "reject_agent_principal(current_user)" in body
+    assert 'require_role("creator")' in body
 
 
 # ---------------------------------------------------------------------------
