@@ -11,13 +11,15 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from models import (
     BundledManifestDetail,
     BundledManifestSummary,
+    ScheduleResponse,
     User,
     SystemDeployRequest,
     SystemDeployResponse,
 )
 from database import db
-from dependencies import get_current_user, require_role
+from dependencies import get_current_user, require_role, reject_agent_principal
 from services.system_service import (
+    system_member_names,
     deploy_manifest,
     list_bundled_manifests,
     read_bundled_manifest,
@@ -212,10 +214,12 @@ async def get_system(
         agents = get_accessible_agents(current_user)
 
         # Filter agents by system prefix
-        system_agents = [
-            agent for agent in agents
-            if agent['name'].startswith(f"{system_name}-")
-        ]
+        # #2373: membership by TAG (deploy records it), prefix only as a
+        # narrowed fallback. `startswith(f"{system_name}-")` also captured every
+        # agent of a system named `acme-extra` — including on `restart`, which
+        # stops and starts containers.
+        _members = set(system_member_names(system_name, [a['name'] for a in agents]))
+        system_agents = [agent for agent in agents if agent['name'] in _members]
 
         if not system_agents:
             raise HTTPException(
@@ -247,9 +251,36 @@ async def get_system(
                         "consume": folder_config["consume_enabled"]
                     }
 
-                # Get schedules
-                schedules = db.get_agent_schedules(agent['name'])
-                agent_detail["schedules"] = schedules
+                # #2373: `db.get_agent_schedules` DOES NOT EXIST — the facade
+                # exposes `list_agent_schedules`, and `database.py` deliberately
+                # has no `__getattr__` fallback. The AttributeError was swallowed
+                # by the `except Exception` below, so every response omitted
+                # `schedules` for every agent and logged one warning each, while
+                # `tests/test_systems.py` never asserted on the key. Exactly the
+                # failure mode the db facade's own comment warns about.
+                # PROJECTED, never the raw rows. `list_agent_schedules` returns
+                # whole `db_models.Schedule` objects and this route declares no
+                # `response_model`, so FastAPI would serialize every column —
+                # including `webhook_token`, the bearer credential for the
+                # UNAUTHENTICATED `POST /api/webhooks/{token}`, and
+                # `webhook_secret_encrypted`. `db_models.py:182-189` states that
+                # neither is ever surfaced in an API response model, and
+                # `ScheduleResponse` deliberately omits all four.
+                #
+                # The route is `get_current_user` + `get_accessible_agents`, so
+                # without this any chat-level shared `role: user` received
+                # schedule-trigger credentials for every member agent. Fixing
+                # the long-broken `schedules` key is what made a three-year
+                # no-op reachable, so the projection lands in the same change.
+                #
+                # Projected through the RESPONSE MODEL rather than a hand-picked
+                # dict: a dict is a second field list, free to drift from the one
+                # every other schedule surface uses. Precedent:
+                # `get_agent_schedule_names` (#2161) projects for the same reason.
+                agent_detail["schedules"] = [
+                    ScheduleResponse.model_validate(s, from_attributes=True).model_dump()
+                    for s in db.list_agent_schedules(agent['name'])
+                ]
 
             except Exception as e:
                 logger.warning(f"Failed to get details for agent {agent['name']}: {e}")
@@ -273,14 +304,46 @@ async def get_system(
 async def restart_system(
     system_name: str,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role("creator"))
 ):
     """
-    Restart all agents in a system.
+    Restart all agents in a system. Human-only.
 
-    Finds all agents with the given system prefix and stops then starts them.
-    Useful after configuration changes.
+    Stops and starts every member. Useful after configuration changes.
+
+    #2373, role gate: it was bare `get_current_user` — below the gate on
+    `POST /deploy` and below even the READ-ONLY bundled-catalog routes — so any
+    authenticated principal, including `role: user`, could stop and start every
+    container in any system whose agents it could see. A mutating fleet-wide
+    verb under a lighter gate than the catalog it reads is an oversight, not a
+    decision.
+
+    #2373 review, agent principals: `require_role` does NOT reject them, and an
+    earlier version of this docstring claimed it did. It rejects CONNECTOR
+    principals only, and its own docstring says the omission is deliberate —
+    `require_role("creator")` on `POST /api/agents` is what makes ent#69 Part 2
+    agent-spawned creation work, so a blanket rejection there would break ghost
+    spawning. Do not "fix" `require_role`.
+
+    So the rejection belongs here, and it is not merely a wider gate — it
+    closes a BYPASS. The per-agent equivalents (`POST /agents/{name}/start`,
+    `/stop`, `/delete`) each call `enforce_agent_spawn_scope`, so an
+    agent-scoped caller may only start or stop agents it actually SPAWNED
+    (name *and* key id). This route loops every member calling `container_stop`
+    + `start_agent_internal` with no per-member check at all — so reaching it
+    with an agent key performs, in bulk and unscoped, exactly the operation
+    that is spawn-scoped one at a time. On a default admin-owned install an
+    agent key resolves to its owner carrying the owner's role, so
+    `require_role("creator")` alone admits every agent in the fleet
+    (trinity-ops-agent#232 class).
+
+    Scoping per member was considered and rejected for this PR: a system whose
+    every member the caller spawned is a near-empty set, so it would be a
+    strange capability rather than a useful one. If an agent-driven restart is
+    ever wanted, it needs its own design.
     """
+    reject_agent_principal(current_user)
+
     try:
         from routers.agents import get_accessible_agents, start_agent_internal
         from services.docker_service import get_agent_container
@@ -289,10 +352,12 @@ async def restart_system(
         agents = get_accessible_agents(current_user)
 
         # Filter agents by system prefix
-        system_agents = [
-            agent for agent in agents
-            if agent['name'].startswith(f"{system_name}-")
-        ]
+        # #2373: membership by TAG (deploy records it), prefix only as a
+        # narrowed fallback. `startswith(f"{system_name}-")` also captured every
+        # agent of a system named `acme-extra` — including on `restart`, which
+        # stops and starts containers.
+        _members = set(system_member_names(system_name, [a['name'] for a in agents]))
+        system_agents = [agent for agent in agents if agent['name'] in _members]
 
         if not system_agents:
             raise HTTPException(
@@ -353,10 +418,12 @@ async def get_system_manifest(
         agents = get_accessible_agents(current_user)
 
         # Filter agents by system prefix
-        system_agents = [
-            agent for agent in agents
-            if agent['name'].startswith(f"{system_name}-")
-        ]
+        # #2373: membership by TAG (deploy records it), prefix only as a
+        # narrowed fallback. `startswith(f"{system_name}-")` also captured every
+        # agent of a system named `acme-extra` — including on `restart`, which
+        # stops and starts containers.
+        _members = set(system_member_names(system_name, [a['name'] for a in agents]))
+        system_agents = [agent for agent in agents if agent['name'] in _members]
 
         if not system_agents:
             raise HTTPException(
