@@ -344,9 +344,33 @@ def setup_opentelemetry(app: FastAPI) -> bool:
         return False
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan handler."""
+# ---------------------------------------------------------------------------
+# Lifespan phases (#1028)
+# ---------------------------------------------------------------------------
+# `lifespan` was 580 lines at cyclomatic complexity 109 — the longest function
+# in the backend and the one the refactor audit named first. It is split here
+# into ordered phase helpers whose bodies are moved VERBATIM: the point is to
+# make the startup sequence readable, not to change it.
+#
+# THE ORDER IS THE CONTRACT. Several pairs are load-bearing and none of them
+# is obvious from the call site alone, which is why the sequence is pinned by
+# a test rather than left to a reader's care:
+#   * logging before everything, so a later hang cannot swallow the boot log;
+#   * the event bus before any WebSocket client can register with a dispatcher;
+#   * Docker/system-agent before the services that sweep the fleet;
+#   * startup recovery before the channel transports, so a recovered execution
+#     is not raced by inbound channel traffic.
+#
+# Each phase keeps its own try/except: a phase that fails must not take the
+# boot down, which is the behaviour the original had and this preserves.
+
+async def _init_logging_and_first_run_notice() -> None:
+    """Structured logging, then the first-run notice — before anything that can hang.
+
+    Startup phase 1 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Set up structured JSON logging (captured by Vector)
     setup_logging()
 
@@ -365,6 +389,14 @@ async def lifespan(app: FastAPI):
             "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
         )
 
+
+async def _start_event_bus() -> None:
+    """Redis Streams bus + dispatcher. MUST precede the WebSocket endpoints accepting clients.
+
+    Startup phase 2 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
     # Must start before the WebSocket endpoints begin accepting clients so the
     # first connection has a live dispatcher to register with.
@@ -376,6 +408,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Event bus startup failed (broadcasts will degrade): {e}")
 
+
+async def _log_startup_environment() -> None:
+    """The startup audit row and the two boot-time environment warnings.
+
+    Startup phase 3 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     await platform_audit_service.log(
         event_type=AuditEventType.SYSTEM,
         event_action="startup",
@@ -403,6 +443,14 @@ async def lifespan(app: FastAPI):
             "to the backend service (start.sh auto-generates it on first boot)."
         )
 
+
+async def _init_docker_and_system_agent() -> None:
+    """Roster listing and the system-agent auto-deploy (Phase 11.1).
+
+    Startup phase 4 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
 
     if docker_client:
         try:
@@ -444,6 +492,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Docker not available - running in demo mode")
 
+
+async def _start_maintenance_services() -> None:
+    """Log archive, audit retention, DB vacuum, DB backup, operator-queue sync.
+
+    Startup phase 5 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # NOTE: Embedded scheduler REMOVED (2026-02-11)
     # All schedule execution is handled by the dedicated scheduler service (trinity-scheduler container)
     # which uses Redis distributed locking and syncs schedules from database periodically.
@@ -487,6 +543,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error starting operator queue sync service: {e}")
 
+
+async def _schedule_staggered_services() -> None:
+    """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.
+
+    Startup phase 6 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Stagger cleanup service start by 2.5s to offset from operator queue writes
     async def _start_cleanup_delayed():
         await asyncio.sleep(2.5)
@@ -565,6 +629,14 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting subscription recovery service: {e}")
     asyncio.create_task(_start_subscription_recovery_delayed())
 
+
+async def _start_capacity_and_canary() -> None:
+    """Canary watcher (self-gating) and the CapacityManager maintenance loop (#428).
+
+    Startup phase 7 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
@@ -603,6 +675,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error wiring CapacityManager: {e}")
 
+
+async def _schedule_watch_loops() -> None:
+    """Heartbeat watch (#307) and the lifespan-resumed monitoring loop (#1121).
+
+    Startup phase 8 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
     # staggered +10s. Actively downgrades an agent to a soft `degraded` health
     # state after 3 consecutive missed heartbeats (additive to the 30s
@@ -642,6 +722,14 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
 
+
+async def _run_startup_recovery() -> None:
+    """Orphaned-execution recovery (#128). Opens the #748 warming-up gate in `finally`.
+
+    Startup phase 9 of 10 (#1028). Extracted VERBATIM from the
+    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    """
     # Recover orphaned regular task executions (Issue #128).
     # #748: flip the warming-up gate open in a finally block so the
     # /internal/execute-task route doesn't 503 forever if recovery raises.
@@ -666,6 +754,12 @@ async def lifespan(app: FastAPI):
     finally:
         mark_startup_recovery_complete()
 
+
+async def _start_slack_transport(app: FastAPI) -> None:
+    """Slack transport (Socket Mode or webhook). Optional; never fails boot.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Start Slack channel transport (Socket Mode or webhook)
     try:
         from adapters.slack_adapter import SlackAdapter
@@ -712,6 +806,12 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error starting Slack transport: {e}")
         # Don't fail startup — Slack is optional
 
+
+async def _start_telegram_transport(app: FastAPI) -> None:
+    """Telegram webhook transport. Optional; never fails boot.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Start Telegram webhook transport
     try:
         from adapters.telegram_adapter import TelegramAdapter
@@ -744,6 +844,12 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error starting Telegram transport: {e}")
         # Don't fail startup — Telegram is optional
 
+
+async def _start_whatsapp_transport(app: FastAPI) -> None:
+    """WhatsApp (Twilio) webhook transport (WHATSAPP-001). Optional; never fails boot.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Start WhatsApp (Twilio) webhook transport (WHATSAPP-001)
     try:
         from adapters.whatsapp_adapter import WhatsAppAdapter
@@ -773,8 +879,12 @@ async def lifespan(app: FastAPI):
         logger.error(f"Error starting WhatsApp transport: {e}")
         # Don't fail startup — WhatsApp is optional
 
-    yield
 
+async def _shutdown_background_services(app: FastAPI) -> None:
+    """Log archive, audit retention, DB vacuum, DB backup, cleanup, session cleanup.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # NOTE: Embedded scheduler shutdown removed - scheduler runs in dedicated container
     # See: src/scheduler/, docs/memory/feature-flows/scheduler-service.md
 
@@ -821,6 +931,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping session cleanup service: {e}")
 
+
+async def _shutdown_loops_and_transports(app: FastAPI) -> None:
+    """Fleet monitoring, the three channel transports, sync health, skills sync.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Shutdown fleet monitoring loop (MON-001 / #1121) — parity with the
     # other lifespan-managed loops; no-op when it was never started.
     try:
@@ -874,6 +990,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping skills library sync service: {e}")
 
+
+async def _shutdown_probes_and_clients(app: FastAPI) -> None:
+    """Subscription-recovery probe, canary, operator-queue sync, pooled HTTP clients.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     # Shutdown subscription recovery probe service (#447) — releases the
     # leader lease so a sibling worker takes over immediately instead of
     # waiting out the TTL.
@@ -907,6 +1029,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error closing agent HTTP client pool: {e}")
 
+
+async def _shutdown_audit_and_event_bus(app: FastAPI) -> None:
+    """The shutdown audit row, then the event bus LAST so late broadcasts still land.
+
+    Extracted VERBATIM (#1028); the body below is unchanged.
+    """
     try:
         await platform_audit_service.log(
             event_type=AuditEventType.SYSTEM,
@@ -925,6 +1053,34 @@ async def lifespan(app: FastAPI):
         logger.info("Event bus and stream dispatcher stopped")
     except Exception as e:
         logger.error(f"Error stopping event bus/dispatcher: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler.
+
+    A thin orchestrator over the phase helpers above (#1028). Read the phase
+    list as the boot sequence; each name links to the block it used to inline.
+    """
+    await _init_logging_and_first_run_notice()
+    await _start_event_bus()
+    await _log_startup_environment()
+    await _init_docker_and_system_agent()
+    await _start_maintenance_services()
+    await _schedule_staggered_services()
+    await _start_capacity_and_canary()
+    await _schedule_watch_loops()
+    await _run_startup_recovery()
+    await _start_slack_transport(app)
+    await _start_telegram_transport(app)
+    await _start_whatsapp_transport(app)
+
+    yield
+
+    await _shutdown_background_services(app)
+    await _shutdown_loops_and_transports(app)
+    await _shutdown_probes_and_clients(app)
+    await _shutdown_audit_and_event_bus(app)
 
 
 # Create FastAPI app
