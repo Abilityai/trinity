@@ -376,14 +376,25 @@ def test_a_tag_still_wins_for_a_member_without_the_prefix(monkeypatch):
     assert sorted(out) == ["acme-web", "helper"]
 
 
-def test_a_failed_tag_read_does_not_re_open_2373(monkeypatch):
-    """The `except` set `tags_by_agent = {}`, which makes `claimed_elsewhere`
-    unconditionally False — so membership degraded to the RAW prefix and
-    `restart_system("acme")` stopped and started `acme-extra`'s containers,
-    logging a WARNING and returning a byte-identical response.
+def test_a_tag_read_failure_never_returns_FEWER_members_than_the_prefix(monkeypatch):
+    """The invariant that stops a third narrowing rule being invented here.
 
-    The existing failure test used `["acme-web", "other"]`, which never reaches
-    the collision. This one does.
+    #2373 is about over-capture on the fallback path, and two attempts to fix
+    that by narrowing both produced UNDER-capture on a healthy system — dropping
+    11 of 11 `dd-*` members, dropping a sibling-prefixed member, and in the
+    sharpest case returning `[]` because one agent was named after the system.
+
+    Both errors are real, but they are not symmetric. `restart_system` and
+    `export_manifest` share this predicate: over-capture restarts one agent too
+    many and says so in a WARNING, while under-capture restarts a SUBSET and
+    reports success, or writes a short backup and calls it complete — the silent
+    partial success the union rule exists to prevent.
+
+    So the fallback is pinned as a SUPERSET of the raw prefix, property-style
+    rather than case-by-case. Any future rule that narrows here fails this test
+    by construction, whatever shape it narrows on. The real narrowing lives on
+    the tag-READABLE path, where the evidence exists — see
+    `test_the_prefix_fallback_still_excludes_another_systems_tagged_agents`.
     """
     from services import system_service as svc
 
@@ -391,26 +402,22 @@ def test_a_failed_tag_read_does_not_re_open_2373(monkeypatch):
         raise RuntimeError("tags table unavailable")
 
     monkeypatch.setattr(svc.db, "get_tags_for_agents", _boom, raising=False)
-    # Review pass 3 (C2): the roster now carries `acme-extra` itself, because
-    # that is what makes the sibling system OBSERVABLE. The previous fixture was
-    # `["acme-web", "acme-extra-worker"]`, and the rule that satisfied it —
-    # exclude any member whose short name contains a hyphen — is strictly
-    # narrower than the raw prefix it claims to degrade to: it dropped all
-    # eleven `vc-due-diligence-dd-*` agents of the bundled flagship manifest.
-    #
-    # On a roster of names alone, with tags unreadable, `acme-extra-worker` and
-    # `vc-due-diligence-dd-lead` are genuinely indistinguishable. So the rule
-    # narrows on EVIDENCE and the residual is stated rather than hidden: with no
-    # `acme-extra` on the roster, `acme` may still capture `acme-extra-worker` —
-    # the documented pre-tag behaviour, unchanged from before #2373, on a
-    # transient-error path only. Losing a healthy system entirely is the worse
-    # error of the two.
-    out = svc.system_member_names("acme", ["acme-web", "acme-extra", "acme-extra-worker"])
-    assert "acme-web" in out
-    assert "acme-extra-worker" not in out, (
-        "a tag-read failure must not capture a longer sibling system when the "
-        "roster shows that system exists — #2373 through its own error path"
-    )
+
+    rosters = [
+        ["acme-web", "acme-extra", "acme-extra-worker"],
+        ["acme-api", "acme-api-worker", "acme-web"],
+        ["acme", "acme-web", "acme-db"],
+        ["acme-web-1", "acme-db", "other"],
+        [f"acme-dd-{x}" for x in ("lead", "tech", "market")],
+    ]
+    for roster in rosters:
+        raw = [n for n in roster if n.startswith("acme-")]
+        got = svc.system_member_names("acme", roster)
+        assert got == raw, (
+            f"the unreadable-tag fallback is not the raw prefix for {roster}: "
+            f"got {got}, prefix gives {raw}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Review blocker 4 — the export name slice on a tag-only member
@@ -493,18 +500,71 @@ def test_a_tag_read_failure_keeps_a_hyphenated_short_name(monkeypatch):
     )
 
 
-def test_the_degraded_path_still_excludes_a_REAL_longer_sibling(monkeypatch):
-    """C2 — narrowing is kept, but on roster evidence rather than name shape.
+def test_the_degraded_path_never_drops_a_member_of_its_OWN_system(monkeypatch):
+    """Review pass 4 — the roster-evidence rule was the same bug, one door along.
 
-    `acme-extra-worker` may belong to `acme-extra` exactly when an agent named
-    `acme-extra` exists. That is evidence; a hyphen is not.
+    Two narrowing rules were tried on the unreadable-tag path and BOTH lost
+    members of a healthy system:
+
+      1. `"-" in short_name` dropped 11 of 11 `vc-due-diligence-dd-*` agents.
+      2. roster evidence (`any(other != name and name.startswith(other + "-"))`)
+         drops `acme-api-worker` — an ordinary member of `acme` whose manifest
+         key is `api-worker`, sitting beside key `api` — because a SIBLING
+         MEMBER happens to be a name-prefix of it.
+
+    Both directions matter here because `restart_system` shares this predicate:
+    a dropped member means a subset restarted and reported as success, the
+    silent partial success the union rule exists to prevent.
+    """
+    import services.system_service as svc
+
+    monkeypatch.setattr(svc, "db", _RaisingDb(), raising=False)
+
+    got = svc.system_member_names("acme", ["acme-api", "acme-api-worker", "acme-web"])
+    assert got == ["acme-api", "acme-api-worker", "acme-web"], (
+        f"a sibling member acting as a name-prefix dropped a real member: {got}"
+    )
+
+    got = svc.system_member_names(
+        "vc-dd", ["vc-dd-dd", "vc-dd-dd-lead", "vc-dd-dd-tech"])
+    assert len(got) == 3, f"2 of 3 members dropped: {got}"
+
+
+def test_an_agent_named_after_the_system_does_not_erase_the_system(monkeypatch):
+    """The sharpest form of the same rule: `acme` is a prefix of EVERY member.
+
+    An agent named exactly `acme` anywhere on the accessible roster made the
+    roster-evidence rule exclude every `acme-*` agent, so `system_member_names`
+    returned `[]` — `404 System not found` on `GET /api/systems/acme` and an
+    empty export, for a healthy system, from one unrelated agent's name.
+    """
+    import services.system_service as svc
+
+    monkeypatch.setattr(svc, "db", _RaisingDb(), raising=False)
+    got = svc.system_member_names(
+        "acme", ["acme", "acme-web", "acme-db", "acme-worker"])
+    assert "acme-web" in got and "acme-db" in got and "acme-worker" in got, got
+
+
+def test_the_documented_residual_is_the_raw_prefix(monkeypatch):
+    """And here is the cost, stated rather than hidden.
+
+    With tags unreadable, `acme` DOES capture `acme-extra-worker`. Nothing in
+    the names can separate `worker` of `acme-extra` from `extra-worker` of
+    `acme`; only a tag can, and the tag read is what just failed. This is the
+    pre-#2373 behaviour on an error path, and it ends when the read recovers —
+    deliberately preferred over the two rules above, each of which lost members
+    of a healthy system.
+
+    While the tags ARE readable the narrowing still applies — pinned by
+    `test_membership_excludes_a_longer_sibling_system` above, which is the path
+    that actually runs.
     """
     import services.system_service as svc
 
     monkeypatch.setattr(svc, "db", _RaisingDb(), raising=False)
     got = svc.system_member_names("acme", ["acme-web", "acme-extra", "acme-extra-worker"])
-    assert "acme-extra-worker" not in got, got
-    assert "acme-web" in got and "acme-extra" in got, got
+    assert got == ["acme-web", "acme-extra", "acme-extra-worker"], got
 
 
 def test_no_evidence_means_the_raw_prefix(monkeypatch):

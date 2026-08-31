@@ -789,15 +789,20 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
     where a name prefix is an inference from a naming convention.
 
     The prefix is kept only as a fallback for systems deployed before tagging,
-    and it is narrowed: an agent is excluded when it carries some other tag `T`
-    whose own prefix claims it (`name.startswith(f"{T}-")`). So an `acme-extra`
-    agent, tagged by its own deploy, is never captured by an operation on
-    `acme` even on the fallback path.
+    and while the tags are READABLE it is narrowed: an agent is excluded when it
+    carries some other tag `T` whose own prefix claims it
+    (`name.startswith(f"{T}-")`). So an `acme-extra` agent, tagged by its own
+    deploy, is never captured by an operation on `acme`.
 
-    Residual, stated rather than hidden: two systems deployed BEFORE tagging,
-    where one name is a prefix of the other, remain ambiguous — neither carries
-    a tag to distinguish them. Tagging is what removes the ambiguity, and every
-    system deployed since ent#124 has it.
+    When the tag read FAILS there is nothing left to narrow with, and the body
+    explains at length why every attempt to narrow on name shape or roster
+    shape instead lost members of a healthy system. That path degrades to the
+    raw prefix.
+
+    Residual, stated rather than hidden: two systems where one name is a prefix
+    of the other are ambiguous whenever no tag distinguishes them — deployed
+    before tagging, or during a tag-read outage. Tagging is what removes the
+    ambiguity, and every system deployed since ent#124 has it.
     """
     if not system_name or not agent_names:
         return []
@@ -839,27 +844,39 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
                 for t in (tags_by_agent.get(name) or [])
             )
         else:
-            # #2373 review (C2): narrow against the OBSERVED ROSTER, never
-            # against the shape of the name.
+            # #2373 review pass 4: with tags unreadable this degrades to the RAW
+            # PREFIX, which is what this docstring and the flow doc have always
+            # promised. Two narrower rules were tried here and BOTH lost members
+            # of a healthy system — the same failure, one door along, twice:
             #
-            # The previous rule was `"-" in name[len(prefix):]` — exclude any
-            # member whose short name contains a hyphen. That is strictly
-            # NARROWER than the raw prefix it claimed to degrade to, and the
-            # bundled flagship manifest is entirely inside the gap:
-            # `config/manifests/vc-due-diligence.yaml` names all eleven agents
-            # `dd-*`, so every deployed name is `vc-due-diligence-dd-<x>`, every
-            # remainder contains a hyphen, and a transient tag-read error turned
-            # a healthy fleet into `404 System not found` and an empty export.
+            #   1. `"-" in name[len(prefix):]` — exclude any member whose short
+            #      name has a hyphen. Strictly narrower than the prefix it
+            #      claimed to fall back to: the bundled flagship manifest names
+            #      all eleven agents `dd-*`, so `vc-due-diligence` returned 0 of
+            #      11 and a healthy fleet read as `404 System not found`.
             #
-            # A longer sibling system is only a real possibility when the roster
-            # SHOWS one: `acme-extra-worker` may belong to `acme-extra` exactly
-            # when an agent named `acme-extra` exists. With no such evidence this
-            # degrades to the raw prefix — the documented pre-tag behaviour, and
-            # what the docstring and the flow doc actually promise.
-            excluded = any(
-                other != name and name.startswith(f"{other}-")
-                for other in agent_names
-            )
+            #   2. `any(other != name and name.startswith(f"{other}-")
+            #          for other in agent_names)` — exclude on roster evidence.
+            #      Measured: system `acme` with roster
+            #      `[acme-api, acme-api-worker, acme-web]` dropped
+            #      `acme-api-worker`, an ordinary member whose manifest key is
+            #      `api-worker` sitting beside key `api`; and an agent named
+            #      literally `acme` anywhere on the roster is a prefix of EVERY
+            #      member, so the whole system resolved to `[]`.
+            #
+            # There is no third rule, because the distinction does not exist in
+            # the names: `acme-extra-worker` is `worker` of `acme-extra` or
+            # `extra-worker` of `acme`, and nothing but a tag can say which. So
+            # this is a choice between two errors, and the ordering is the one
+            # stated above — losing a healthy system entirely is worse than
+            # briefly over-capturing on an error path. `restart_system` shares
+            # this predicate, and a subset restarted while reporting success is
+            # the silent partial success the union comment above condemns.
+            #
+            # Residual, on the unreadable-tag path only: `acme` may capture
+            # `acme-extra-worker`. That is the documented pre-#2373 behaviour,
+            # unchanged, and it ends the moment the tag read recovers.
+            excluded = False
         if not excluded:
             narrowed.append(name)
 
@@ -1043,7 +1060,13 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     # must agree with `get_system`/`restart_system` about that — the caller
     # already filtered `agents`, so this is the same set, named so the
     # comprehensions can test membership instead of re-deriving it from a prefix.
-    member_names = set(system_member_names(system_name, [a['name'] for a in agents]))
+    # #2373 review pass 4 (I1): the CALLER already resolved membership —
+    # `routers/systems.py` filters `system_agents` through this same predicate
+    # before calling here. Re-deriving it was a second tag read per export, and
+    # worse: if that read degraded where the first had not, `member_names` would
+    # be a strict subset of `agents` and permission edges to real members would
+    # be dropped from the backup in silence.
+    member_names = {a['name'] for a in agents}
 
     # Extract short names (remove system prefix)
     agent_configs = {}

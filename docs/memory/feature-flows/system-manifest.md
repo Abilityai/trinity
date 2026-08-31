@@ -2273,18 +2273,24 @@ is an inference from a naming convention. The prefix survives only as a fallback
 for pre-tag deployments, and it is narrowed — an agent carrying some other tag
 `T` whose own prefix claims it (`name.startswith(f"{T}-")`) is excluded, so a
 tagged `acme-extra` agent is never captured by `acme` even on that path. A tag
-read that fails degrades to the prefix rather than 500ing, narrowed only where
-the ROSTER evidences a longer sibling — an agent literally named `acme-extra`
-sitting beside `acme-extra-worker`. It deliberately does NOT narrow on name
-SHAPE: excluding any member whose short name contains a hyphen is strictly
-narrower than the prefix it claims to fall back to, and dropped all eleven
-`vc-due-diligence-dd-*` agents of the bundled flagship manifest — turning a
-healthy fleet into `404 System not found` and an empty export on a transient
-error. Residual, stated rather than hidden: two systems deployed BEFORE tagging
-where one name is a prefix of the other stay ambiguous — on a roster of names
-alone `acme-extra-worker` and `vc-due-diligence-dd-lead` are indistinguishable,
-so with no evidence `acme` may still capture the former. Losing a healthy system
-entirely is the worse of the two errors. This predicate
+read that fails degrades to the RAW PREFIX rather than 500ing, and deliberately
+narrows no further. Two narrower rules were tried there and both lost members of
+a healthy system: excluding any member whose short name contains a hyphen dropped
+all eleven `vc-due-diligence-dd-*` agents of the bundled flagship manifest, and
+excluding on roster evidence dropped `acme-api-worker` — an ordinary member whose
+manifest key is `api-worker` sitting beside key `api` — and returned an EMPTY set
+whenever an agent happened to be named after the system itself, since that name
+prefixes every member. The distinction does not exist in the names:
+`acme-extra-worker` is `worker` of `acme-extra` or `extra-worker` of `acme`, and
+only a tag can say which. Both errors are real and they are not symmetric —
+`restart_system` shares this predicate, so over-capture restarts one agent too
+many and logs it, while under-capture restarts a SUBSET and reports success. The
+fallback is pinned as a superset of the raw prefix so a third narrowing rule
+cannot be invented here. Residual, stated rather than hidden: while the tags are
+unreadable, `acme` may capture `acme-extra-worker` — the pre-#2373 behaviour, on
+an error path, ending when the read recovers. Two systems deployed BEFORE tagging
+where one name is a prefix of the other stay ambiguous for the same reason.
+This predicate
 is also the prerequisite for the teardown verb, where the same collision would
 delete rather than restart.
 
