@@ -187,7 +187,11 @@ def test_chat_registers_pending_before_lock_wait_and_discards_after():
     assert reply["response"] == "hi"
     assert order[:3] == ["pending", "lock", "execute"], order
     assert "discard" in order
-    registry.register_pending.assert_called_once_with("exec-chat-1", metadata={"type": "chat"})
+    registry.register_pending.assert_called_once_with(
+        "exec-chat-1",
+        timeout_seconds=chat_mod.PENDING_CHAT_TIMEOUT_SECONDS,
+        metadata={"type": "chat"},
+    )
 
 
 # ---------------------------------------------------------------------------

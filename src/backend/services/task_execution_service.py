@@ -562,7 +562,11 @@ async def agent_post_with_retry(
             return
         restamped = False
         try:
-            restamped = db.restamp_execution_dispatch(execution_id)
+            # Off-loop like the slot renewal below: this is a SYNC sqlite write
+            # and it runs while both semaphores are held, at the one moment the
+            # queue is by definition congested — exactly the event-loop stall
+            # `agent_call_limiter` exists to bound.
+            restamped = await asyncio.to_thread(db.restamp_execution_dispatch, execution_id)
         except Exception as e:  # noqa: BLE001 — bookkeeping never blocks the dispatch
             logger.warning(f"[TaskExecService] restamp failed for {execution_id}: {e}")
         renewed = False

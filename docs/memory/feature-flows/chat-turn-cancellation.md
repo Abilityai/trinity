@@ -144,6 +144,27 @@ arms: the row behind `task_execution_id` must belong to `name`, or the call is
 refused with the proxy's own uniform 404 (a foreign id must read exactly like
 an unknown one); an unreadable row fails CLOSED (503). Arm 2 additionally
 scopes its own lookups — `cancel_inflight(eid, agent_name=name)` ignores an
+**The remote arm's phase must post-date its own cancel write (#2435 review).**
+`entry.phase` flipped to `calling` in memory only, so the marker advertised
+`parked` for up to one 15s refresher tick after the POST had begun — and under
+`--workers 2` roughly half of all cancels are served by the worker that does
+NOT own the coroutine and therefore read it. That answer made this arm finalize
+CANCELLED and release the slot while the agent ran the turn to a billed
+completion whose SUCCESS then lost the CAS: the #378 symptom in a narrower
+window. It is closed by ordering, not by narrowing —
+
+    owner : W(marker=calling) -> R(cancel)     (`_publish_calling_and_check_cancel_sync`)
+    remote: W(cancel)         -> R(marker)     (`_set_cancel_then_reread_phase_sync`)
+
+so an observed `parked` gives `W_remote(cancel) < R_remote(marker) <
+W_owner(marker) < R_owner(cancel)` and the grant is *guaranteed* to see the key
+and refuse to POST. Both sides spend the same one round-trip they already did.
+The owner gates that publish on the ENTRY's age, not this attempt's park:
+`track_inflight_dispatch` wraps the whole retry loop, so a retry can grant
+instantly under a marker a tick left saying `parked`. The remote's scope check
+stays on its FIRST read, so no cancel key is ever written for a foreign agent.
+
+`cancel_inflight(eid, agent_name=name)` ignores an
 entry registered for another agent and `request_cross_worker_cancel(eid,
 agent_name=name)` ignores a marker whose `agent` differs (or is absent) — and
 keeps a row belt as a second layer, as does the BACKLOG cancel-if-queued arm

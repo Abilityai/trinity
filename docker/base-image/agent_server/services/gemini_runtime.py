@@ -251,9 +251,21 @@ class GeminiRuntime(AgentRuntime):
                 _registered_id, process, metadata={"type": "chat", "runtime": "gemini"}
             )
 
-            # Write prompt to stdin and close it
-            process.stdin.write(prompt)
-            process.stdin.close()
+            # Write prompt to stdin and close it.
+            # #2433 review: `register()` above may have just SIGKILLed the group
+            # (a cancel that landed while the execution was still pending), so
+            # this write can raise BrokenPipeError — and the `finally:
+            # unregister()` below guards only the reader. Without this the
+            # registry entry leaks, and a leaked entry is reported to the
+            # backend as agent-known (bounded to one RECENTLY_COMPLETED TTL by
+            # `list_recently_completed_ids`, but still that long with orphan
+            # recovery blocked). Pair the register with the failure path here.
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except BaseException:
+                get_process_registry().unregister(_registered_id)
+                raise
 
             # Helper function that reads subprocess output (runs in thread pool)
             def read_subprocess_output():
@@ -685,9 +697,21 @@ class GeminiRuntime(AgentRuntime):
                 _registered_id, process, metadata={"type": "task", "runtime": "gemini"}
             )
 
-            # Write prompt to stdin and close it
-            process.stdin.write(prompt)
-            process.stdin.close()
+            # Write prompt to stdin and close it.
+            # #2433 review: `register()` above may have just SIGKILLed the group
+            # (a cancel that landed while the execution was still pending), so
+            # this write can raise BrokenPipeError — and the `finally:
+            # unregister()` below guards only the reader. Without this the
+            # registry entry leaks, and a leaked entry is reported to the
+            # backend as agent-known (bounded to one RECENTLY_COMPLETED TTL by
+            # `list_recently_completed_ids`, but still that long with orphan
+            # recovery blocked). Pair the register with the failure path here.
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except BaseException:
+                get_process_registry().unregister(_registered_id)
+                raise
 
             # Helper function that reads subprocess output
             def read_subprocess_output():

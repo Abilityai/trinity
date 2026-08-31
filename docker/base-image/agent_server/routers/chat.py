@@ -15,7 +15,7 @@ from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
 from ..services.claude_code import get_execution_lock
 from ..services.runtime_adapter import get_runtime
-from ..services.process_registry import get_process_registry
+from ..services.process_registry import get_process_registry, PENDING_CHAT_TIMEOUT_SECONDS
 from ..services import result_callback
 
 logger = logging.getLogger(__name__)
@@ -37,82 +37,90 @@ async def chat(request: ChatRequest):
     # it and orphaned it after 60s. Register it as ACCEPTED before the wait;
     # `register()` promotes the entry at spawn, the discard below is the belt.
     registry = get_process_registry()
-    registry.register_pending(request.execution_id, metadata={"type": "chat"})
+    registry.register_pending(
+        request.execution_id,
+        timeout_seconds=PENDING_CHAT_TIMEOUT_SECONDS,
+        metadata={"type": "chat"},
+    )
 
     # Acquire execution lock - only one execution at a time
     # The platform-level queue should prevent this, but this is a safety net
-    async with get_execution_lock():
-        logger.info(f"[Chat] Execution lock acquired for message: {request.message[:50]}...")
+    # The discard is paired with the register STRUCTURALLY: a request
+    # cancelled while awaiting the execution lock (client disconnect) never
+    # reached the body, so an inner `finally` could not drop its entry.
+    try:
+        async with get_execution_lock():
+            logger.info(f"[Chat] Execution lock acquired for message: {request.message[:50]}...")
 
-        # Add user message to history
-        agent_state.add_message("user", request.message)
+            # Add user message to history
+            agent_state.add_message("user", request.message)
 
-        # Execute via runtime adapter (supports Claude Code or Gemini CLI)
-        runtime = get_runtime()
-        # Use request.model if provided, otherwise use the model set via /api/model endpoint
-        effective_model = request.model or agent_state.current_model
-        # #1020: feed the richer /health signal — count this execution and
-        # record success/failure (drives consecutive_failures).
-        agent_state.record_task_start()
-        try:
-            response_text, execution_log, metadata, raw_messages = await runtime.execute(
-                prompt=request.message,
-                model=effective_model,
-                continue_session=True,
-                stream=request.stream,
-                system_prompt=request.system_prompt,
-                execution_id=request.execution_id
-            )
-        except BaseException:
-            agent_state.record_task_finish(success=False)
-            raise
-        finally:
-            # #2433: promoted at spawn; this only drops an entry that never spawned.
-            registry.discard_pending(request.execution_id)
-        agent_state.record_task_finish(success=True)
+            # Execute via runtime adapter (supports Claude Code or Gemini CLI)
+            runtime = get_runtime()
+            # Use request.model if provided, otherwise use the model set via /api/model endpoint
+            effective_model = request.model or agent_state.current_model
+            # #1020: feed the richer /health signal — count this execution and
+            # record success/failure (drives consecutive_failures).
+            agent_state.record_task_start()
+            try:
+                response_text, execution_log, metadata, raw_messages = await runtime.execute(
+                    prompt=request.message,
+                    model=effective_model,
+                    continue_session=True,
+                    stream=request.stream,
+                    system_prompt=request.system_prompt,
+                    execution_id=request.execution_id
+                )
+            except BaseException:
+                agent_state.record_task_finish(success=False)
+                raise
+            agent_state.record_task_finish(success=True)
 
-        # Add assistant response to history
-        agent_state.add_message("assistant", response_text)
+            # Add assistant response to history
+            agent_state.add_message("assistant", response_text)
 
-        # Update session-level stats
-        if metadata.cost_usd:
-            agent_state.session_total_cost += metadata.cost_usd
-        agent_state.session_total_output_tokens += metadata.output_tokens
-        # Context window usage: metadata.input_tokens should contain the complete total
-        # (from modelUsage.inputTokens which includes all turns and cached tokens)
-        # However, with --continue flag, Claude Code may sometimes report only new tokens
-        # Fix: Context should monotonically increase during a session, so keep the max
-        if metadata.input_tokens > agent_state.session_context_tokens:
-            agent_state.session_context_tokens = metadata.input_tokens
-            logger.debug(f"Context updated to {metadata.input_tokens} tokens")
-        elif metadata.input_tokens > 0 and metadata.input_tokens < agent_state.session_context_tokens:
-            # Claude reported fewer tokens than before - likely only new input, not cumulative
-            # Keep the previous (higher) value as context should only grow
-            logger.warning(
-                f"Context tokens decreased from {agent_state.session_context_tokens} to {metadata.input_tokens}. "
-                f"Keeping previous value (likely --continue reporting issue)"
-            )
-        agent_state.session_context_window = metadata.context_window
+            # Update session-level stats
+            if metadata.cost_usd:
+                agent_state.session_total_cost += metadata.cost_usd
+            agent_state.session_total_output_tokens += metadata.output_tokens
+            # Context window usage: metadata.input_tokens should contain the complete total
+            # (from modelUsage.inputTokens which includes all turns and cached tokens)
+            # However, with --continue flag, Claude Code may sometimes report only new tokens
+            # Fix: Context should monotonically increase during a session, so keep the max
+            if metadata.input_tokens > agent_state.session_context_tokens:
+                agent_state.session_context_tokens = metadata.input_tokens
+                logger.debug(f"Context updated to {metadata.input_tokens} tokens")
+            elif metadata.input_tokens > 0 and metadata.input_tokens < agent_state.session_context_tokens:
+                # Claude reported fewer tokens than before - likely only new input, not cumulative
+                # Keep the previous (higher) value as context should only grow
+                logger.warning(
+                    f"Context tokens decreased from {agent_state.session_context_tokens} to {metadata.input_tokens}. "
+                    f"Keeping previous value (likely --continue reporting issue)"
+                )
+            agent_state.session_context_window = metadata.context_window
 
-        logger.info(f"[Chat] Execution lock releasing after completion")
+            logger.info(f"[Chat] Execution lock releasing after completion")
 
-        # Return enhanced response with execution log and session stats
-        # Use raw_messages (full Claude Code JSON transcript) for execution log viewer compatibility
-        # Also include simplified execution_log for backward compatibility with activity tracking
-        return {
-            "response": response_text,
-            "execution_log": raw_messages,  # Full Claude Code stream-json format for UI
-            "execution_log_simplified": [entry.model_dump() for entry in execution_log],  # For activity tracking
-            "metadata": metadata.model_dump(),
-            "session": {
-                "total_cost_usd": agent_state.session_total_cost,
-                "context_tokens": agent_state.session_context_tokens,
-                "context_window": agent_state.session_context_window,
-                "message_count": len(agent_state.conversation_history),
-                "model": agent_state.current_model
-            },
-            "timestamp": datetime.now().isoformat()
-        }
+            # Return enhanced response with execution log and session stats
+            # Use raw_messages (full Claude Code JSON transcript) for execution log viewer compatibility
+            # Also include simplified execution_log for backward compatibility with activity tracking
+            return {
+                "response": response_text,
+                "execution_log": raw_messages,  # Full Claude Code stream-json format for UI
+                "execution_log_simplified": [entry.model_dump() for entry in execution_log],  # For activity tracking
+                "metadata": metadata.model_dump(),
+                "session": {
+                    "total_cost_usd": agent_state.session_total_cost,
+                    "context_tokens": agent_state.session_context_tokens,
+                    "context_window": agent_state.session_context_window,
+                    "message_count": len(agent_state.conversation_history),
+                    "model": agent_state.current_model
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+    finally:
+        # Promoted at spawn; this only drops an entry that never spawned.
+        registry.discard_pending(request.execution_id)
 
 
 @router.post("/api/task")

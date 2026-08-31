@@ -63,12 +63,30 @@ def test_renew_uses_the_slots_own_stored_timeout():
     assert svc.redis.ttl(svc._metadata_key("agent-a", "exec-long")) > 7200
 
 
-def test_renew_falls_back_to_default_ttl_without_metadata():
+def test_renew_refuses_when_the_metadata_hash_is_already_gone():
+    """#2433 review: `zadd XX` succeeds while `expire` on a missing key is a
+    silent no-op, so the old order returned True having renewed nothing — and
+    re-anchored the ZSET score into exactly the ZSET-without-hash state canary
+    S-03 reports as `missing`. Refuse, and leave the score alone."""
     svc = _service()
-    svc.redis.zadd(svc._slots_key("agent-a"), {"exec-nm": time.time() - 50})
-    assert svc.renew_slot("agent-a", "exec-nm") is True
-    # No hash existed; EXPIRE on a missing key is a no-op and must not raise.
+    stale = time.time() - 50
+    svc.redis.zadd(svc._slots_key("agent-a"), {"exec-nm": stale})
+
+    assert svc.renew_slot("agent-a", "exec-nm") is False
+    # The score must NOT have moved — a refusal may not perpetuate the state.
+    assert svc.redis.zscore(svc._slots_key("agent-a"), "exec-nm") == pytest.approx(stale)
     assert svc.redis.ttl(svc._metadata_key("agent-a", "exec-nm")) in (-1, -2)
+
+
+def test_renew_falls_back_to_default_ttl_for_an_unparseable_timeout():
+    """The fallback still exists for a hash that is PRESENT but whose
+    `timeout_seconds` cannot be read — that is a renewable slot."""
+    svc = _service()
+    svc.redis.zadd(svc._slots_key("agent-a"), {"exec-bad": time.time() - 50})
+    svc.redis.hset(svc._metadata_key("agent-a", "exec-bad"), "timeout_seconds", "not-a-number")
+
+    assert svc.renew_slot("agent-a", "exec-bad") is True
+    assert svc.redis.ttl(svc._metadata_key("agent-a", "exec-bad")) > 0
 
 
 def test_renew_never_resurrects_a_released_slot():

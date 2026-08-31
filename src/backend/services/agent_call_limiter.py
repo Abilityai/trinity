@@ -455,22 +455,77 @@ def _set_cancel_sync(execution_id: str) -> None:
     client.set(_cancel_key(execution_id), "1", ex=int(_queue_wait_bound_seconds() + INFLIGHT_DEADLINE_SLACK_SECONDS))
 
 
+def _set_cancel_then_reread_phase_sync(execution_id: str) -> str:
+    """Set the cancel key and re-read the marker, IN THAT ORDER, in one
+    pipeline (single connection ⇒ the server applies them in order).
+
+    The order is the whole point. A remote terminate must never finalize
+    CANCELLED for an execution the owning worker is already POSTing — the
+    agent would run the turn, billed, against a released slot, and its late
+    SUCCESS would lose the CAS to the standing CANCELLED (the #378 symptom
+    this issue exists to remove). Pair this with the owner's
+    ``_publish_calling_and_check_cancel_sync`` (marker write BEFORE the cancel
+    read) and the interleaving is closed, not merely narrowed:
+
+        owner : W(marker=calling) -> R(cancel)
+        remote: W(cancel)         -> R(marker)
+
+    If the remote's read observes ``parked`` then R_remote(marker) precedes
+    W_owner(marker), so the full chain is
+    ``W_remote(cancel) < R_remote(marker) < W_owner(marker) < R_owner(cancel)``
+    — the owner's cancel read is guaranteed to see the key and raise before
+    any POST. The pre-#2433-review order (read-then-set) admitted the reverse
+    interleaving, and the marker's phase could additionally be up to
+    ``INFLIGHT_TICK_SECONDS`` stale because only the refresher published it.
+
+    Returns the phase the SECOND read observed. A marker that vanished
+    between the two reads answers ``"unknown"``, which the caller treats as
+    not-parked and routes through the agent — the safe direction.
+    """
+    client = _get_client()
+    if client is None:
+        return "unknown"
+    pipe = client.pipeline(transaction=False)
+    pipe.set(_cancel_key(execution_id), "1", ex=int(_queue_wait_bound_seconds() + INFLIGHT_DEADLINE_SLACK_SECONDS))
+    pipe.get(_marker_key(execution_id))
+    _, raw = pipe.execute()
+    if not isinstance(raw, (str, bytes)):
+        return "unknown"
+    try:
+        parsed = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    if not isinstance(parsed, dict):
+        return "unknown"
+    return str(parsed.get("phase") or "unknown")
+
+
 async def request_cross_worker_cancel(
     execution_id: str, *, agent_name: Optional[str] = None
 ) -> Optional[str]:
-    """For an execution some OTHER worker owns: read its marker; if present,
-    set the cancel key its grant will check and return the marker's phase.
+    """For an execution some OTHER worker owns: read its marker to scope the
+    request, then set the cancel key its grant will check and RE-READ the
+    phase from after that write (``_set_cancel_then_reread_phase_sync``).
     None when no marker (or no Redis). ``agent_name`` scopes it exactly like
     ``cancel_inflight`` — a marker written for a different agent (or one whose
-    payload cannot name its agent) is never cancelled through this path."""
+    payload cannot name its agent) is never cancelled through this path, and
+    the scope check runs on the FIRST read so no key is ever written for a
+    foreign agent.
+
+    The returned phase is only safe to act on because it post-dates the cancel
+    key: ``parked`` here means the owner's grant is guaranteed to observe the
+    key and refuse to POST, so the caller may finalize CANCELLED itself.
+    Anything else routes through the agent as before."""
     try:
         marker = await asyncio.to_thread(_read_marker_sync, execution_id)
         if marker is None:
             return None
         if agent_name is not None and marker.get("agent") != agent_name:
             return None
-        await asyncio.to_thread(_set_cancel_sync, execution_id)
-        return str(marker.get("phase") or "unknown")
+        # Scope decided above on the first read; the PHASE must come from a
+        # read taken AFTER the cancel key is set, or a marker that is stale in
+        # the unsafe direction lets this finalize CANCELLED under a live POST.
+        return await asyncio.to_thread(_set_cancel_then_reread_phase_sync, execution_id)
     except Exception as e:  # noqa: BLE001
         _note_redis_failure(e)
         return None
@@ -482,6 +537,42 @@ def _cancel_requested_cross_worker_sync(execution_id: str) -> bool:
         return False
     try:
         return bool(client.get(_cancel_key(execution_id)))
+    except Exception as e:  # noqa: BLE001
+        _note_redis_failure(e)
+        return False
+
+
+def _publish_calling_and_check_cancel_sync(entry: InflightEntry) -> bool:
+    """Publish this entry's parked->calling transition and read the cancel key,
+    IN THAT ORDER, in one pipeline — replacing the bare cancel read, so the
+    fix costs no extra round-trip.
+
+    Before this, ``entry.phase`` flipped to ``calling`` in memory only and the
+    marker was rewritten by the 15s refresher, so ``execution:inflight:{id}``
+    could advertise ``parked`` for up to ``INFLIGHT_TICK_SECONDS`` after the
+    POST had begun. With ``--workers 2`` roughly half of all cancels are
+    served by the worker that does NOT own the coroutine and therefore trust
+    that value: the row was finalized CANCELLED and its slot released while
+    the agent ran the turn to a billed completion whose SUCCESS then lost the
+    CAS. See ``_set_cancel_then_reread_phase_sync`` for the ordering proof.
+
+    Returns True when a cancel is already pending (the caller raises before
+    dispatching). Fails soft — a Redis error reads as "no cancel", exactly
+    as the bare read it replaces did.
+    """
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        pipe = client.pipeline(transaction=False)
+        pipe.set(
+            _marker_key(entry.execution_id),
+            _marker_payload(entry),
+            ex=INFLIGHT_MARKER_TTL_SECONDS,
+        )
+        pipe.get(_cancel_key(entry.execution_id))
+        _, cancel_raw = pipe.execute()
+        return bool(cancel_raw)
     except Exception as e:  # noqa: BLE001
         _note_redis_failure(e)
         return False
@@ -705,9 +796,11 @@ async def acquire_agent_call_slot(
     #2433 — when ``execution_id`` names a live ``track_inflight_dispatch``
     entry, the wait is recorded as its ``parked`` phase (the refresher
     keeps the marker AND the capacity-slot lease alive for the whole park);
-    at grant the entry flips to ``calling``, a cancel requested meanwhile
-    (in-process flag, or the cross-worker cancel key for a park past the
-    marker grace) raises ``BackendAgentCallCancelled`` before any POST, and
+    at grant the entry flips to ``calling`` — published to the marker in the
+    same round-trip that reads the cancel key, so a remote terminate can never
+    see a stale ``parked`` — a cancel requested meanwhile (in-process flag, or
+    the cross-worker cancel key once the entry is past the marker grace)
+    raises ``BackendAgentCallCancelled`` before any POST, and
     ``on_granted(parked_seconds)`` is awaited when the park reached
     ``DISPATCH_RESTAMP_THRESHOLD_SECONDS`` so the caller can re-anchor the
     execution's clock and lease at dispatch.
@@ -751,11 +844,18 @@ async def acquire_agent_call_slot(
                 entry.phase = "calling"
                 entry.parked_since = None
                 cancelled = entry.cancel_requested
-                if not cancelled and waited_s >= INFLIGHT_MARKER_GRACE_SECONDS:
-                    # The park was long enough to have a cross-worker marker, so
-                    # another worker's terminate may have set the cancel key.
+                # Gate on the ENTRY's age, never on this attempt's park: the
+                # marker exists once the entry is older than the grace (that is
+                # `_tick`'s own filter), and `track_inflight_dispatch` wraps the
+                # whole retry loop — so a retry that grants instantly can still
+                # have a marker a tick left saying `parked`. Publishing the
+                # parked->calling transition BEFORE reading the cancel key is
+                # what closes the cross-worker race; see
+                # `_publish_calling_and_check_cancel_sync`.
+                entry_age = time.monotonic() - entry.registered_at
+                if not cancelled and entry_age >= INFLIGHT_MARKER_GRACE_SECONDS:
                     cancelled = await asyncio.to_thread(
-                        _cancel_requested_cross_worker_sync, execution_id
+                        _publish_calling_and_check_cancel_sync, entry
                     )
                 if cancelled:
                     logger.info(

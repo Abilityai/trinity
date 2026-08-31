@@ -1915,6 +1915,11 @@ class CleanupService:
             return
 
         agent_names = list(reclaimed.keys())
+        # #2433 review: ONE Redis round-trip for the whole cycle, mirroring
+        # `_reconcile_orphaned_executions` — under a backlog these are the same
+        # cycle, and a per-row MGET made the cost scale with the reclaim count.
+        reclaimed_ids = [eid for ids in reclaimed.values() for eid in ids]
+        inflight = await _inflight_verdict_map(reclaimed_ids)
         async with httpx.AsyncClient(timeout=WATCHDOG_HTTP_TIMEOUT) as client:
             results = await asyncio.gather(
                 *(self._get_agent_running_ids(client, name) for name in agent_names),
@@ -2033,7 +2038,7 @@ class CleanupService:
                     # and the dispatcher's own terminal (or its HTTP timeout)
                     # finishes it. An unreadable marker is not "absent" either;
                     # the registry-blind Phase-1 stale sweep stays the backstop.
-                    verdict = (await _inflight_verdict_map([execution_id])).get(execution_id, "absent")
+                    verdict = inflight.get(execution_id, "absent")
                     if verdict != "absent":
                         report.dispatch_inflight_skipped += 1
                         logger.warning(

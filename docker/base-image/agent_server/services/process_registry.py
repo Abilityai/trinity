@@ -60,6 +60,14 @@ TRANSIENT_PID_TTL_SECONDS = 300  # 5 minutes
 # run's own budget, never shorter than it.
 PENDING_SLACK_SECONDS = 60
 PENDING_DEFAULT_TIMEOUT_SECONDS = 900  # the /api/task handler's own default
+# `/api/chat` carries no per-request timeout (`ChatRequest` has no such field),
+# and a chat waiting on the execution lock behind a long turn can legitimately
+# wait up to the agent's `execution_timeout_seconds` — whose platform ceiling is
+# 7200s. Sizing its pending window off the /api/task default silently evicted
+# the entry mid-wait, so `pending_ids` stopped covering exactly the wait it was
+# added for. The backend's in-flight marker covers this case too; this keeps the
+# agent-side layer from quietly ceasing to defend.
+PENDING_CHAT_TIMEOUT_SECONDS = 7200
 
 
 class ProcessRegistry:
@@ -147,7 +155,9 @@ class ProcessRegistry:
                 # Preserve a cancel that landed before a re-registration.
                 "cancel_requested": bool(existing and existing.get("cancel_requested")),
             }
-        logger.info(f"[ProcessRegistry] Pending execution {execution_id} (accepted, not yet spawned)")
+        # DEBUG, not INFO: this fires on every /api/task and /api/chat, and the
+        # line that carries signal is the eviction WARNING, not the happy path.
+        logger.debug(f"[ProcessRegistry] Pending execution {execution_id} (accepted, not yet spawned)")
 
     def discard_pending(self, execution_id: Optional[str]) -> None:
         """#2433: drop a pending entry. Idempotent — a double discard, a discard
@@ -540,8 +550,27 @@ class ProcessRegistry:
             # filtered out of `list_running()` (`poll() is None`) and not yet in
             # the buffer above — a seconds-wide hole the watchdog fell into.
             # Semantically it IS "completed, not yet reported".
+            #
+            # Bounded by the SAME TTL as the buffer above, measured from when
+            # the exit was first OBSERVED — not from `started_at`, which would
+            # drop a legitimately long turn the moment it entered its drain.
+            # Without a bound a LEAKED entry (an exception between `register()`
+            # and `finally: unregister()`) is reported as agent-known forever,
+            # so the orphan watchdog never recovers that row and the leak costs
+            # the full 120-min registry-blind sweep — with its fabricated
+            # `duration_ms` — instead of one watchdog cycle. Before #2433 the
+            # same leak self-healed, because `list_running()` filters on
+            # `poll() is None`. Stamping here is safe and sufficient: this is
+            # the only reader, and a first observation that lags the true exit
+            # only ever extends the window in the conservative direction.
+            now = time.time()
             for eid, entry in self._processes.items():
-                if entry["process"].poll() is not None:
+                if entry["process"].poll() is None:
+                    continue
+                exited_seen_at = entry.get("exited_seen_at")
+                if exited_seen_at is None:
+                    exited_seen_at = entry["exited_seen_at"] = now
+                if now - exited_seen_at < RECENTLY_COMPLETED_TTL_SECONDS:
                     ids.add(eid)
             return list(ids)
 
