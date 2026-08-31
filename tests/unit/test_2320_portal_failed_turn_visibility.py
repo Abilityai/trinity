@@ -205,7 +205,7 @@ def chat(monkeypatch):
         return state.availability
 
     monkeypatch.setattr(svc, "_agent_availability", _availability)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: s or SESSION)
     monkeypatch.setattr(svc, "_build_portal_system_prompt", lambda a, e: None)
     monkeypatch.setattr(svc, "_spawn_title_generation", lambda *a, **kw: None)
     monkeypatch.setattr(svc, "_persist_user_turn", lambda *a, **kw: None)
@@ -515,7 +515,7 @@ def streaming(monkeypatch, redis_stub):
                                   redis=redis_stub, ops_at_chat=None)
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: s or SESSION)
 
     async def _ready(name):
         return "ready"
@@ -537,7 +537,7 @@ def streaming(monkeypatch, redis_stub):
 
     async def _fake_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         turn_timeout_seconds=None, availability=None):
+                         turn_timeout_seconds=None, availability=None, **kw):
         state.chat_calls.append(execution_id)
         # Snapshot the op log the moment the turn starts, so "did a DEL happen
         # AFTER the turn" is answerable without guessing at indices.

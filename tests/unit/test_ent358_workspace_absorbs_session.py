@@ -131,7 +131,7 @@ def portal(monkeypatch):
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
     monkeypatch.setattr(svc, "_build_portal_system_prompt", lambda a, e: None)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: SESSION)
     monkeypatch.setattr(svc, "_spawn_title_generation", lambda *a, **kw: None)
 
     async def _no_inbox(agent, email, message):

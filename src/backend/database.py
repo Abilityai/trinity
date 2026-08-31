@@ -173,6 +173,11 @@ def init_database():
         upgrade_to_head()
         # #1638: seed BEFORE _ensure_admin_user_engine — see the sqlite path.
         _seed_fresh_install_retention_engine()
+        # #2085: give every OTHER retention window an explicit row too, at the
+        # value already in force. MUST follow the line above — both use
+        # insert-or-ignore, so the first writer wins and the reverse order
+        # would overwrite the #1039 community floor with the wide defaults.
+        _seed_retention_windows_engine()
         # ent#237: same fresh-install window, same ordering requirement.
         _seed_fresh_install_skill_source_engine()
         _ensure_admin_user_engine()
@@ -224,6 +229,14 @@ def init_database():
             # BEFORE _ensure_admin_user (which makes `users` non-empty and so
             # would make this install look pre-existing).
             _seed_fresh_install_retention(cursor, conn)
+
+            # #2085: give every OTHER retention window an explicit row too, at
+            # the value already in force, so no install resolves a retention
+            # window from the image. MUST follow the line above — both use
+            # INSERT OR IGNORE, so the first writer wins and the reverse order
+            # would overwrite the #1039 community floor with the wide defaults.
+            # Unlike the seed above this is NOT fresh-install-only.
+            _seed_retention_windows(cursor, conn)
 
             # ent#237: seed the bundled community skills source. Same
             # fresh-install window and the same must-precede-_ensure_admin_user
@@ -297,6 +310,91 @@ def _seed_fresh_install_retention(cursor, conn):
     except Exception as e:
         print(f"WARNING: [#1638] retention seed skipped ({e}); "
               f"install keeps the default (wider) retention windows")
+
+
+_RETENTION_WINDOW_SEED_NOTE = (
+    "[#2085] Seeded %d retention window(s) with the value already in force "
+    "(%s). This install no longer resolves a retention window from the image."
+)
+
+
+def _retention_window_seed_values():
+    """The (key, value) pairs to write: every retention window, at the value the
+    prune already uses for an install with no row (#2085).
+
+    Sourced from `RETENTION_OPS_KEYS` rather than a second hand-written list, so
+    a window added later (ent#433 added two, #2216 a third) is covered on the
+    day it ships instead of quietly inheriting the image default forever.
+    """
+    # config, NOT services.settings_service: that module imports `db` from this
+    # one and this runs at import time, so importing it here raises ImportError
+    # — which this seed's fail-safe contract then SWALLOWS, leaving the feature
+    # silently dead on every boot. Verified empirically before the move; the
+    # same #1638 circular-import trap, one seed later.
+    from config import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+
+    return [
+        (key, OPS_SETTINGS_DEFAULTS[key])
+        for key in RETENTION_OPS_KEYS
+        if key in OPS_SETTINGS_DEFAULTS
+    ]
+
+
+def _seed_retention_windows(cursor, conn):
+    """Write an explicit `system_settings` row for every retention window that
+    has none — the half of #1638 that #1645 left undone (#2085).
+
+    #1645 applies the #1039 community floor by seeding rows on FRESH installs
+    only. Every install that has ever upgraded rather than been created fresh
+    therefore has no rows, and `cleanup_service` resolves its windows at prune
+    time from `OPS_SETTINGS_DEFAULTS` — a dict that ships inside the backend
+    image and is replaced on every rebuild. The only thing standing between a
+    future edit to that dict and the #1638 failure mode (a silent hard-DELETE
+    of existing data ~seconds after the next boot, green /health, no error) is
+    a code comment.
+
+    Three properties make this cheap and safe:
+
+    * BEHAVIOURALLY INERT. It writes the number already in force, so nothing
+      prunes differently the day it runs.
+    * ORDERING IS LOAD-BEARING. Must run AFTER `_seed_fresh_install_retention`.
+      Both use INSERT OR IGNORE, so the first writer wins: reversed, a fresh
+      install would get the wide defaults instead of the #1039 floor and the
+      community floor would be silently deleted by the change meant to protect
+      retention. Pinned by tests/unit/test_2085_retention_seed_existing_installs.py.
+    * NEVER CLOBBERS. OR IGNORE leaves an operator's explicit value alone, and
+      makes the seed idempotent under the racing workers both migration locks
+      permit (they fail open).
+
+    Stated tradeoff (#2085): a seeded install stops inheriting later changes to
+    the code default in EITHER direction, so widening a window for existing
+    installs becomes a deliberate migration. That is the intended consequence —
+    retention becomes explicit per-install config rather than an implicit
+    inheritance from whatever image happens to be running.
+
+    Fails SAFE and never raises: `init_database` runs at import, so raising here
+    is a permanent boot crash-loop rather than a failed request. A skip leaves
+    the install exactly where it is today — resolving from the wide code
+    defaults.
+    """
+    try:
+        pairs = _retention_window_seed_values()
+        now = utc_now_iso()
+        seeded = []
+        for key, value in pairs:
+            cursor.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, updated_at) "
+                "VALUES (?, ?, ?)",
+                (key, value, now),
+            )
+            if cursor.rowcount:
+                seeded.append(f"{key}={value}")
+        conn.commit()
+        if seeded:
+            print(_RETENTION_WINDOW_SEED_NOTE % (len(seeded), ", ".join(sorted(seeded))))
+    except Exception as e:
+        print(f"WARNING: [#2085] retention window seed skipped ({e}); "
+              f"install keeps resolving unset windows from the code defaults")
 
 
 _DEFAULT_SOURCE_SEED_NOTE = (
@@ -437,6 +535,48 @@ def _seed_fresh_install_retention_engine():
     except Exception as e:
         print(f"WARNING: [#1638] retention seed skipped ({e}); "
               f"install keeps the default (wider) retention windows")
+
+
+def _seed_retention_windows_engine():
+    """Retention-window seed — engine-based path for PostgreSQL (#2085).
+
+    Mirrors `_seed_retention_windows`; see it for the rationale, the ordering
+    requirement, and the fail-safe contract. Same must-run-AFTER relationship
+    with `_seed_fresh_install_retention_engine`.
+    """
+    from sqlalchemy import select
+
+    from db.engine import get_engine, make_insert
+    from db.tables import system_settings
+
+    try:
+        pairs = _retention_window_seed_values()
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(
+                    select(system_settings.c.key).where(
+                        system_settings.c.key.in_([k for k, _ in pairs])
+                    )
+                )
+            }
+            seeded = []
+            for key, value in pairs:
+                if key in existing:
+                    continue
+                conn.execute(
+                    make_insert(system_settings)
+                    .values(key=key, value=value, updated_at=now)
+                    .on_conflict_do_nothing(index_elements=["key"])
+                )
+                seeded.append(f"{key}={value}")
+        if seeded:
+            print(_RETENTION_WINDOW_SEED_NOTE % (len(seeded), ", ".join(sorted(seeded))))
+    except Exception as e:
+        print(f"WARNING: [#2085] retention window seed skipped ({e}); "
+              f"install keeps resolving unset windows from the code defaults")
+
 
 
 _SETUP_COMPLETED_RECONCILE_NOTE = (

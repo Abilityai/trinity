@@ -486,10 +486,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // roster-scoped endpoint — the OSS chat endpoint fences the portal token).
     // Returns `{response, cost, session_id}` — the echoed session_id lets the
     // caller adopt the thread a first (session-less) turn landed in.
-    async sendPortalChat(agentName, message, sessionId = null) {
+    // ent#451: `newThread` says a null `sessionId` means "start a fresh one",
+    // not "I don't know which". The backend cannot tell those apart from the
+    // absence alone — which is why New chat used to land in the existing
+    // conversation — and it ignores the flag when a session IS named.
+    async sendPortalChat(agentName, message, sessionId = null, { newThread = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId },
+        { message, session_id: sessionId, new_thread: newThread },
         { headers: this.authHeader }
       )
       return data
@@ -500,10 +504,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null) {
+    async startPortalChat(agentName, message, sessionId = null, { newThread = false } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId },
+        { message, session_id: sessionId, new_thread: newThread },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}

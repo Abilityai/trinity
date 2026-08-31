@@ -63,14 +63,14 @@ def portal(monkeypatch):
     state = types.SimpleNamespace(chat_calls=[], created=[], row=None, availability="ready")
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: s or SESSION)
 
     # `availability` (#2196): `start_portal_turn` resolved the state for its own
     # gate and hands it down, so the streamed turn costs ONE Docker read rather
     # than one at dispatch and another inside `portal_chat`.
     async def _fake_chat(agent_name, message, email, session_id=None,
                         include_owned=False, execution_id=None,
-                        turn_timeout_seconds=None, availability=None):
+                        turn_timeout_seconds=None, availability=None, **kw):
         state.chat_calls.append({
             "agent": agent_name, "message": message, "email": email,
             "session_id": session_id, "execution_id": execution_id,

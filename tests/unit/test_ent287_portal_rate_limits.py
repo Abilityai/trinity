@@ -68,7 +68,7 @@ def portal(tmp_path, monkeypatch):
 
     calls: list[tuple] = []
 
-    async def _fake_chat(agent_name, message, email, session_id=None, include_owned=False):
+    async def _fake_chat(agent_name, message, email, session_id=None, include_owned=False, **kw):
         calls.append(("chat", agent_name, email))
         return {"response": "ok", "session_id": "s1", "cost": 0.0}
 
@@ -86,11 +86,15 @@ def portal(tmp_path, monkeypatch):
 
 
 class _Body:
-    """Minimal PortalChatRequest stand-in (the router only reads these two)."""
+    """Minimal PortalChatRequest stand-in (the fields the router reads)."""
 
-    def __init__(self, message="hi", session_id=None):
+    def __init__(self, message="hi", session_id=None, new_thread=False):
         self.message = message
         self.session_id = session_id
+        # ent#451 — the router forwards this to both turn entry points. A
+        # stand-in missing it fails with AttributeError rather than a useful
+        # assertion, which is the cost of hand-rolling a model double.
+        self.new_thread = new_thread
 
 
 class _Upload:
