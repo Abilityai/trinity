@@ -107,7 +107,17 @@ async def maybe_dispatch_resume(
     from database import db
     from services import idempotency_service
     from services.platform_audit_service import AuditEventType, platform_audit_service
-    from services.task_execution_service import task_execution_service
+    # `get_task_execution_service()`, not a module-level `task_execution_service`.
+    # That name has never existed on the module — the import raised ImportError
+    # on the FIRST line of this function, above the try, so every respond→resume
+    # dispatch died before reading the opt-in. It was invisible because the call
+    # is a fire-and-forget task (the traceback surfaces only as asyncio's
+    # "Task exception was never retrieved"), and because the ent#329 unit test
+    # stubbed `services.task_execution_service` with a SimpleNamespace that
+    # DEFINED `task_execution_service` — manufacturing the very symbol whose
+    # absence was the bug. Verified against a live instance: flag on, answer
+    # recorded, zero executions created.
+    from services.task_execution_service import get_task_execution_service
 
     agent_name = item.get("agent_name")
     item_id = item.get("id")
@@ -142,7 +152,7 @@ async def maybe_dispatch_resume(
         return None
 
     try:
-        result = await task_execution_service.execute_task(
+        result = await get_task_execution_service().execute_task(
             agent_name=agent_name,
             message=_framed_message(item, response, response_text),
             triggered_by=TRIGGERED_BY,

@@ -207,9 +207,13 @@ def _install(monkeypatch, *, enabled=True, recorder=None, flag_raises=False, rep
             AuditEventType=SimpleNamespace(EXECUTION="execution"),
         ),
     )
+    # The stub must mirror the REAL module's contract. It previously defined
+    # `task_execution_service`, a name the real module has never exported — so
+    # the stub manufactured the symbol whose absence was the production bug and
+    # this suite stayed green while every dispatch died on an ImportError.
     _install_module(
         "services.task_execution_service",
-        SimpleNamespace(task_execution_service=recorder),
+        SimpleNamespace(get_task_execution_service=lambda: recorder),
     )
     return recorder, audit
 
@@ -380,3 +384,68 @@ def test_the_knob_is_owner_only():
     source = _read("routers/agents.py")
     block = source.split('@router.put("/{agent_name}/operator-resume")')[1][:400]
     assert "OwnedAgentByName" in block
+
+
+# ---------------------------------------------------------------------------
+# The stub must not invent an API the real module lacks
+# ---------------------------------------------------------------------------
+
+def test_the_names_this_service_imports_actually_exist_on_the_real_modules():
+    """Every `from services.X import Y` in `operator_resume_service` must resolve.
+
+    THIS IS THE BUG THIS FILE SHIPPED. The service did
+    `from services.task_execution_service import task_execution_service` — a name
+    that module has never exported — so `maybe_dispatch_resume` raised
+    ImportError on its first line, above the try, and every respond→resume
+    dispatch died. Nothing caught it: the call is fire-and-forget, so the
+    traceback appeared only as asyncio's "Task exception was never retrieved",
+    and the stub in this very file DEFINED `task_execution_service`, manufacturing
+    the symbol whose absence was the defect.
+
+    Verified against a live instance before fixing: opt-in on, answer recorded,
+    audit row written, **zero executions created**.
+
+    So this asserts against the REAL module source — never the stubbed
+    `sys.modules` entry, which is what made the original invisible. Parsed with
+    `ast` rather than imported, so it stays a unit test and cannot itself be
+    fooled by a leaked stub.
+    """
+    import ast
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2] / "src" / "backend"
+    svc = backend / "services" / "operator_resume_service.py"
+    tree = ast.parse(svc.read_text(encoding="utf-8"))
+
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if not node.module.startswith("services."):
+            continue
+        target = backend / Path(node.module.replace(".", "/") + ".py")
+        if not target.exists():
+            continue
+        exported = set()
+        for n in ast.parse(target.read_text(encoding="utf-8")).body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                exported.add(n.name)
+            elif isinstance(n, ast.Assign):
+                exported.update(
+                    t.id for t in n.targets if isinstance(t, ast.Name)
+                )
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                exported.add(n.target.id)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                exported.update((a.asname or a.name).split(".")[0] for a in n.names)
+
+        for alias in node.names:
+            checked += 1
+            assert alias.name in exported, (
+                f"operator_resume_service imports `{alias.name}` from "
+                f"`{node.module}`, which does not export it. This is the ent#329 "
+                f"dispatch bug: the import sits above the try, so the whole "
+                f"function raises before it reads the opt-in, and the failure is "
+                f"swallowed as a fire-and-forget task exception."
+            )
+    assert checked, "no services.* imports found — did the module move?"
