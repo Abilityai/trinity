@@ -215,13 +215,55 @@ async def _audit(
         logger.exception("operator-resume: audit write failed for item=%s", item_id)
 
 
+def _schedule_on_loop(item: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
+    """Create the task. MUST run on the event-loop thread."""
+    task = asyncio.create_task(maybe_dispatch_resume(item, **kwargs))
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)
+
+
 def spawn_resume_dispatch(item: Dict[str, Any], **kwargs) -> None:
     """Fire the dispatch in the background so respond stays fast.
 
     The execution row is created inside ``execute_task``, so the work is visible
     in Executions the moment it is admitted — the caller returning first does not
     make a failure invisible.
+
+    WORKS FROM BOTH CALLER SHAPES, and that is not defensive padding — it is the
+    ent#430 defect. `asyncio.create_task` needs a RUNNING loop, and gets one only
+    when the caller is `async def`. The operator route is; the Workspace ask route
+    is a plain `def`, which FastAPI runs through `run_in_threadpool` — a worker
+    thread with no loop — so `create_task` raised `RuntimeError: no running event
+    loop`, the caller's `except` swallowed it, and every client answer recorded
+    the answer and dispatched nothing. Byte-for-byte the behaviour ent#430 exists
+    to remove.
+
+    Fixed HERE rather than by making that route async, for two reasons: the route
+    does blocking DB I/O, so `async def` alone would move it onto the loop; and
+    ent#430's stated shape is ONE dispatch site, which splitting the spawn back
+    out to the caller would undo. Any future sync caller now inherits the fix.
     """
-    task = asyncio.create_task(maybe_dispatch_resume(item, **kwargs))
-    _inflight.add(task)
-    task.add_done_callback(_inflight.discard)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop: we are on a worker thread. `anyio.from_thread.run_sync` hops
+        # back to the host loop that owns this thread — Starlette's threadpool is
+        # anyio's, so the portal is always present on this path. It runs the
+        # scheduling call ON the loop thread and returns once the task exists;
+        # it does not wait for the dispatch itself, so respond stays fast.
+        from anyio.from_thread import run_sync as _run_sync_in_loop
+
+        try:
+            _run_sync_in_loop(_schedule_on_loop, item, kwargs)
+        except RuntimeError as e:
+            # Reached only from a thread anyio does not own — not a shape any
+            # production caller has (Starlette's threadpool IS anyio's), but it
+            # must not degrade into the silent no-op this whole fix removes.
+            # Re-raised with the cause named so the caller's `except` logs
+            # something actionable and reports `resume_requested: false`.
+            raise RuntimeError(
+                "resume dispatch could not be scheduled: called from a thread "
+                f"with neither a running loop nor an anyio portal ({e})"
+            ) from e
+        return
+    _schedule_on_loop(item, kwargs)

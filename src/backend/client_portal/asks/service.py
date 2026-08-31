@@ -197,8 +197,20 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         responded_by_id=None,
         responded_by_email=email,
     )
-    if not updated:
-        # Lost a race with an operator answering the same row.
+    # A lost race has TWO shapes and only one of them is falsy. `respond_to_
+    # operator_queue_item` returns None when the row does not exist, but when the
+    # row exists and has already left `pending` — the race that actually happens
+    # — it returns a TRUTHY dict carrying `_status_conflict`, having written
+    # nothing. Checking `if not updated` alone therefore falls through on the
+    # real race, and this path then spends money dispatching a resume for an
+    # answer that is not in the database, under an idempotency key derived from
+    # the LOSING text — so the two answers hash differently and one queue item
+    # produces two paid executions.
+    #
+    # `routers/operator_queue.py` pops the same flag before its own spawn; this
+    # is that rule, not a new one. Popped rather than read so the sentinel never
+    # reaches `_project` and becomes a client-visible field.
+    if not updated or updated.pop("_status_conflict", False):
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
 
     logger.info(
@@ -229,24 +241,34 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     # ON THIS LINE would still propagate, and a 500 here would tell the client
     # their answer failed when it is committed and already on its way to the
     # agent. The answer is the thing that must not be lost.
-    try:
-        from services import operator_resume_service
-
-        operator_resume_service.spawn_resume_dispatch(
-            updated,
-            response=response or "",
-            response_text=response_text,
-            responded_by_email=email,
-        )
-    except Exception:  # noqa: BLE001 — never lose a committed answer
-        logger.exception(
-            "[WorkspaceAsks] resume dispatch could not be started for %s", item_id
-        )
-
     # `updated` first, `item` as the fallback: both name the same agent, and the
     # CAS result is the row this answer actually landed on.
     agent = (updated.get("agent_name") or item.get("agent_name") or "")
-    return _project(updated, resume_requested=_resume_requested(agent))
+
+    dispatched = False
+    if _resume_requested(agent):
+        try:
+            from services import operator_resume_service
+
+            operator_resume_service.spawn_resume_dispatch(
+                updated,
+                response=response or "",
+                response_text=response_text,
+                responded_by_email=email,
+            )
+            dispatched = True
+        except Exception:  # noqa: BLE001 — never lose a committed answer
+            logger.exception(
+                "[WorkspaceAsks] resume dispatch could not be started for %s", item_id
+            )
+
+    # AC #5: report what was actually SCHEDULED, not what the flag permits.
+    # This previously read the opt-in a second time after the swallowed spawn, so
+    # a spawn that raised still answered `resume_requested: true` — the exact
+    # over-claim ("an ask that reads as acted upon while nothing happened") the
+    # docstring below says it fails closed against. `dispatched` is set only on
+    # the line after the spawn returns, so the failure path reports false.
+    return _project(updated, resume_requested=dispatched)
 
 
 def _resume_requested(agent_name: str) -> bool:
