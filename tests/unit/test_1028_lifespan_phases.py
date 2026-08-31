@@ -247,3 +247,92 @@ def test_only_lifespan_carries_the_asynccontextmanager_decorator():
         f"a phase helper carries @asynccontextmanager: {stray}. It almost "
         "certainly slid off `lifespan` onto the definition below it."
     )
+
+
+def _bound_names(fn: ast.AST) -> set[str]:
+    """Every name a function binds: params, imports, assignments, nested defs,
+    `except X as e`, loop and comprehension targets, `with ... as`."""
+    names = {a.arg for a in fn.args.args}
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            names.update(
+                t.id for t in ast.walk(node.target) if isinstance(t, ast.Name)
+            )
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            names.update(
+                t.id for t in ast.walk(node.optional_vars) if isinstance(t, ast.Name)
+            )
+    return names
+
+
+def _module_names(tree: ast.Module) -> set[str]:
+    import builtins
+
+    names = set(dir(builtins))
+    for node in tree.body:
+        subs = list(ast.walk(node)) if isinstance(node, ast.Try) else [node]
+        for sub in subs:
+            if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for alias in sub.names:
+                    names.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(sub.name)
+            elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                names.add(sub.id)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            names.update(
+                t.id for t in ast.walk(node) if isinstance(t, ast.Name)
+                and isinstance(t.ctx, ast.Store)
+            )
+    return names
+
+
+@pytest.mark.parametrize("name", STARTUP_PHASES + SHUTDOWN_PHASES)
+def test_no_phase_helper_depends_on_another_phases_locals(name):
+    """A phase may only use what it binds itself or what the module provides.
+
+    THIS IS THE DEFECT THE SPLIT ACTUALLY SHIPPED, caught in review. `main.py`
+    does not import `database` at module level: the former `lifespan` did
+    `from database import db as _db` once near the top, and three later blocks
+    — the system-agent gate, the Telegram transport and the WhatsApp transport
+    — used `_db` through the enclosing function scope, 100+ lines away.
+    `message_router` was the same shape, imported in the Slack block and used
+    by the Telegram one.
+
+    Splitting the function ends that sharing, and the failure is INVISIBLE
+    three ways over: it is not a syntax error, `main` still imports cleanly
+    (nothing runs `lifespan` at import time), and every use site sits inside a
+    `try/except Exception` — so the `NameError` is caught and logged, and the
+    Telegram and WhatsApp transports simply never start. A silently dead
+    integration, not a failed boot.
+
+    Cheap to state, impossible to see by eye in a 700-line diff, and it gets
+    more likely with every future phase split. So it is a test.
+    """
+    tree = _tree()
+    fns = {
+        n.name: n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    fn = fns[name]
+    used = {
+        n.id for n in ast.walk(fn)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    unresolved = sorted(used - _bound_names(fn) - _module_names(tree))
+    assert not unresolved, (
+        f"`{name}` uses {unresolved}, which it does not bind and `main.py` does "
+        "not provide at module level. It was almost certainly reachable only "
+        "through the old `lifespan`'s enclosing scope. Re-materialise the "
+        "import inside this helper — and note the NameError would be SWALLOWED "
+        "by the surrounding try/except, so nothing else would tell you."
+    )

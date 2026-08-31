@@ -367,7 +367,7 @@ def setup_opentelemetry(app: FastAPI) -> bool:
 async def _init_logging_and_first_run_notice() -> None:
     """Structured logging, then the first-run notice — before anything that can hang.
 
-    Startup phase 1 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 1 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -393,7 +393,7 @@ async def _init_logging_and_first_run_notice() -> None:
 async def _start_event_bus() -> None:
     """Redis Streams bus + dispatcher. MUST precede the WebSocket endpoints accepting clients.
 
-    Startup phase 2 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 2 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -412,7 +412,7 @@ async def _start_event_bus() -> None:
 async def _log_startup_environment() -> None:
     """The startup audit row and the two boot-time environment warnings.
 
-    Startup phase 3 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 3 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -447,10 +447,17 @@ async def _log_startup_environment() -> None:
 async def _init_docker_and_system_agent() -> None:
     """Roster listing and the system-agent auto-deploy (Phase 11.1).
 
-    Startup phase 4 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 4 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
+    # #1028: re-materialised here. In the former 580-line `lifespan` this name
+    # was a function-local import bound once near the top and shared with every
+    # later block through the enclosing scope. Splitting the function ends that
+    # sharing, and every use below sits inside a `try/except Exception`, so the
+    # NameError would have been caught and logged rather than raised — a silently
+    # dead transport, not a failed boot.
+    from database import db as _db
 
     if docker_client:
         try:
@@ -496,7 +503,7 @@ async def _init_docker_and_system_agent() -> None:
 async def _start_maintenance_services() -> None:
     """Log archive, audit retention, DB vacuum, DB backup, operator-queue sync.
 
-    Startup phase 5 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 5 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -547,7 +554,7 @@ async def _start_maintenance_services() -> None:
 async def _schedule_staggered_services() -> None:
     """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.
 
-    Startup phase 6 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 6 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -633,7 +640,7 @@ async def _schedule_staggered_services() -> None:
 async def _start_capacity_and_canary() -> None:
     """Canary watcher (self-gating) and the CapacityManager maintenance loop (#428).
 
-    Startup phase 7 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 7 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -679,7 +686,7 @@ async def _start_capacity_and_canary() -> None:
 async def _schedule_watch_loops() -> None:
     """Heartbeat watch (#307) and the lifespan-resumed monitoring loop (#1121).
 
-    Startup phase 8 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 8 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -726,7 +733,7 @@ async def _schedule_watch_loops() -> None:
 async def _run_startup_recovery() -> None:
     """Orphaned-execution recovery (#128). Opens the #748 warming-up gate in `finally`.
 
-    Startup phase 9 of 10 (#1028). Extracted VERBATIM from the
+    Startup phase 9 of 12 (#1028). Extracted VERBATIM from the
     former 580-line `lifespan`; the body below is unchanged. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
@@ -813,6 +820,14 @@ async def _start_telegram_transport(app: FastAPI) -> None:
     Extracted VERBATIM (#1028); the body below is unchanged.
     """
     # Start Telegram webhook transport
+    # #1028: re-materialised here. In the former 580-line `lifespan` this name
+    # was a function-local import bound once near the top and shared with every
+    # later block through the enclosing scope. Splitting the function ends that
+    # sharing, and every use below sits inside a `try/except Exception`, so the
+    # NameError would have been caught and logged rather than raised — a silently
+    # dead transport, not a failed boot.
+    from database import db as _db
+    from adapters.message_router import message_router
     try:
         from adapters.telegram_adapter import TelegramAdapter
         from adapters.transports.telegram_webhook import TelegramWebhookTransport, register_webhook
@@ -851,6 +866,14 @@ async def _start_whatsapp_transport(app: FastAPI) -> None:
     Extracted VERBATIM (#1028); the body below is unchanged.
     """
     # Start WhatsApp (Twilio) webhook transport (WHATSAPP-001)
+    # #1028: re-materialised here. In the former 580-line `lifespan` this name
+    # was a function-local import bound once near the top and shared with every
+    # later block through the enclosing scope. Splitting the function ends that
+    # sharing, and every use below sits inside a `try/except Exception`, so the
+    # NameError would have been caught and logged rather than raised — a silently
+    # dead transport, not a failed boot.
+    from database import db as _db
+
     try:
         from adapters.whatsapp_adapter import WhatsAppAdapter
         from adapters.transports.twilio_webhook import (
