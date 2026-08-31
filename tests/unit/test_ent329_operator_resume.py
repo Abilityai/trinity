@@ -13,9 +13,11 @@ the fix safe rather than merely present:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import sqlite3
 import sys
+import pathlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -207,9 +209,13 @@ def _install(monkeypatch, *, enabled=True, recorder=None, flag_raises=False, rep
             AuditEventType=SimpleNamespace(EXECUTION="execution"),
         ),
     )
+    # The stub must mirror the REAL module's contract. It previously defined
+    # `task_execution_service`, a name the real module has never exported — so
+    # the stub manufactured the symbol whose absence was the production bug and
+    # this suite stayed green while every dispatch died on an ImportError.
     _install_module(
         "services.task_execution_service",
-        SimpleNamespace(task_execution_service=recorder),
+        SimpleNamespace(get_task_execution_service=lambda: recorder),
     )
     return recorder, audit
 
@@ -360,19 +366,111 @@ def test_trigger_counts_as_autonomous():
     assert '"operator_response"' in block
 
 
-def test_dispatch_hangs_off_the_cas_win_only():
-    """A lost respond race must not dispatch.
+def _dispatch_call_sites() -> list[pathlib.Path]:
+    """Every module that calls ``spawn_resume_dispatch``, DISCOVERED.
+
+    Deliberately a walk and not a list (ent#430 review). The guard below started
+    as one hardcoded path — `routers/operator_queue.py`, the only caller ent#329
+    knew about — and ent#430 added a second caller that promptly lost the rule:
+    `respond_to_operator_queue_item` signals a lost race with a **truthy** dict
+    carrying `_status_conflict`, so a plain `if not updated` fell through and
+    dispatched for an answer that was never recorded. A hardcoded list cannot
+    catch that, because the file it needs to check is the one being added.
+
+    Same shape as #1677's caller-parity guard and #2428's derived bucket guard:
+    when the rule is "every caller does X", the guard has to find the callers.
+    """
+    root = _BACKEND
+    hits = []
+    for path in root.rglob("*.py"):
+        # The service that DEFINES it is not a call site, and the enterprise
+        # submodule owns its own tree (and may be absent on an OSS checkout).
+        if path.name == "operator_resume_service.py" or "enterprise" in path.parts:
+            continue
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "spawn_resume_dispatch(" in text:
+            hits.append(path)
+    return hits
+
+
+def _dispatching_functions(path: pathlib.Path):
+    """Every function in `path` that calls ``spawn_resume_dispatch``, as CODE.
+
+    `ast.unparse` is the point, not decoration. The first version of this guard
+    tested `"_status_conflict" in source` against the raw file, and a mutation
+    proved it blind: deleting the check from the `if` still passed, because the
+    long comment ABOVE it explaining the race still contained the string. A
+    source-substring guard cannot tell a check from a paragraph about the check.
+    Comments do not survive parsing, so the round trip leaves only code.
+    """
+    tree = ast.parse(path.read_text())
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = ast.unparse(node)
+        if "spawn_resume_dispatch(" in body:
+            out.append((node.name, body))
+    return out
+
+
+def test_every_dispatch_call_site_hangs_off_the_cas_win_only():
+    """A lost respond race must not dispatch — at EVERY call site.
 
     ``respond_to_operator_queue_item`` returns a ``_status_conflict`` marker when
-    the item left `pending` between the check and the UPDATE; the endpoint raises
-    409 there. The dispatch call must sit *after* that raise, or a caller whose
+    the item left `pending` between the check and the UPDATE; the caller must
+    refuse there. The dispatch must sit *after* that refusal, or a caller whose
     answer was never recorded still spends the agent's money — the #1083 rule
     that side effects hang off the CAS result, not off the attempt.
+
+    It is worse than one wasted execution: the idempotency key digests the
+    ANSWER TEXT, so the winner and the loser hash differently and one queue item
+    produces TWO paid executions.
+
+    Discovered rather than listed, and asserted against parsed CODE rather than
+    file text, so a third call site inherits the rule instead of re-losing it.
+    `architecture.md`'s "Two callers, one rule" bullet claims exactly this
+    protection; before ent#430's review it claimed it while the guard read a
+    single hardcoded file.
     """
-    source = _read("routers/operator_queue.py")
-    conflict = source.index("_status_conflict")
-    dispatch = source.index("spawn_resume_dispatch")
-    assert conflict < dispatch
+    sites = _dispatch_call_sites()
+    assert len(sites) >= 2, (
+        f"expected at least the two known dispatch call sites, found {sites} — "
+        f"if the helper was renamed, this guard has gone blind"
+    )
+    checked = 0
+    for path in sites:
+        rel = path.relative_to(_BACKEND).as_posix()
+        fns = _dispatching_functions(path)
+        assert fns, f"{rel} matched the text scan but no function calls it — alias?"
+        for name, body in fns:
+            assert "_status_conflict" in body, (
+                f"{rel}::{name} dispatches a resume without ever consulting "
+                f"`_status_conflict` IN CODE, so a lost respond race reaches the "
+                f"spawn: the answer is not in the database and the agent is paid "
+                f"to act on it"
+            )
+            assert body.index("_status_conflict") < body.index("spawn_resume_dispatch("), (
+                f"{rel}::{name} dispatches BEFORE checking `_status_conflict` — "
+                f"the race loser spends"
+            )
+            checked += 1
+    assert checked >= 2, checked
+
+
+def test_the_discovery_walk_finds_both_known_callers():
+    """The guard above is only as good as what it finds, so pin the floor.
+
+    A rename of the helper, or a caller that reaches it through an alias, would
+    otherwise leave the loop iterating an empty list and passing in silence —
+    the failure mode a discovery guard trades for the one it fixes.
+    """
+    found = {p.relative_to(_BACKEND).as_posix() for p in _dispatch_call_sites()}
+    assert "routers/operator_queue.py" in found, found
+    assert "client_portal/asks/service.py" in found, found
 
 
 def test_the_knob_is_owner_only():
@@ -380,3 +478,68 @@ def test_the_knob_is_owner_only():
     source = _read("routers/agents.py")
     block = source.split('@router.put("/{agent_name}/operator-resume")')[1][:400]
     assert "OwnedAgentByName" in block
+
+
+# ---------------------------------------------------------------------------
+# The stub must not invent an API the real module lacks
+# ---------------------------------------------------------------------------
+
+def test_the_names_this_service_imports_actually_exist_on_the_real_modules():
+    """Every `from services.X import Y` in `operator_resume_service` must resolve.
+
+    THIS IS THE BUG THIS FILE SHIPPED. The service did
+    `from services.task_execution_service import task_execution_service` — a name
+    that module has never exported — so `maybe_dispatch_resume` raised
+    ImportError on its first line, above the try, and every respond→resume
+    dispatch died. Nothing caught it: the call is fire-and-forget, so the
+    traceback appeared only as asyncio's "Task exception was never retrieved",
+    and the stub in this very file DEFINED `task_execution_service`, manufacturing
+    the symbol whose absence was the defect.
+
+    Verified against a live instance before fixing: opt-in on, answer recorded,
+    audit row written, **zero executions created**.
+
+    So this asserts against the REAL module source — never the stubbed
+    `sys.modules` entry, which is what made the original invisible. Parsed with
+    `ast` rather than imported, so it stays a unit test and cannot itself be
+    fooled by a leaked stub.
+    """
+    import ast
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2] / "src" / "backend"
+    svc = backend / "services" / "operator_resume_service.py"
+    tree = ast.parse(svc.read_text(encoding="utf-8"))
+
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if not node.module.startswith("services."):
+            continue
+        target = backend / Path(node.module.replace(".", "/") + ".py")
+        if not target.exists():
+            continue
+        exported = set()
+        for n in ast.parse(target.read_text(encoding="utf-8")).body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                exported.add(n.name)
+            elif isinstance(n, ast.Assign):
+                exported.update(
+                    t.id for t in n.targets if isinstance(t, ast.Name)
+                )
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                exported.add(n.target.id)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                exported.update((a.asname or a.name).split(".")[0] for a in n.names)
+
+        for alias in node.names:
+            checked += 1
+            assert alias.name in exported, (
+                f"operator_resume_service imports `{alias.name}` from "
+                f"`{node.module}`, which does not export it. This is the ent#329 "
+                f"dispatch bug: the import sits above the try, so the whole "
+                f"function raises before it reads the opt-in, and the failure is "
+                f"swallowed as a fire-and-forget task exception."
+            )
+    assert checked, "no services.* imports found — did the module move?"

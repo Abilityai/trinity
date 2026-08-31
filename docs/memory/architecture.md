@@ -1331,6 +1331,30 @@ on (ent#364 AC #5).
   raises 409 when the item left `pending` under the caller; the dispatch call
   sits after that raise, so an answer that was never recorded never spends
   (the #1083 rule that side effects follow the CAS result).
+- **Two callers, one rule (ent#430).** The Workspace ask answer
+  (`client_portal/asks/service.py::answer_ask`) is the second, and it had to
+  learn the CAS rule the hard way: `respond_to_operator_queue_item` signals a
+  lost race by returning a **truthy** dict carrying `_status_conflict`, so a
+  plain `if not updated` let the loser dispatch — spending on an answer that is
+  not in the database, and, because the idempotency key digests the answer TEXT,
+  spending TWICE for one queue item. Guarded now by enumerating every caller
+  rather than the one route ent#329 knew about, so a third site inherits the
+  rule instead of re-losing it.
+- **The dispatch must survive a sync caller.** `spawn_resume_dispatch` was
+  `asyncio.create_task`, which needs a RUNNING loop and gets one only from an
+  `async def` endpoint. The operator route is one; the Workspace ask route is a
+  plain `def`, which FastAPI runs through `run_in_threadpool` — a worker thread
+  with no loop — so it raised `RuntimeError: no running event loop`, the
+  caller's `except` swallowed it, and every client answer recorded the answer
+  and dispatched nothing. It now hops back to the host loop via
+  `anyio.from_thread.run_sync` when there is no running loop. The tests could
+  not see it because every one of them monkeypatched the spawn; the guard is a
+  test that drives the real function from a real worker thread.
+- **`resume_requested` reports what was SCHEDULED**, not what the opt-in
+  permits — set only after the spawn returns, so a spawn that raised answers
+  `false`. It is a report of intent, not a promise: the opt-in is read once here
+  and again inside the dispatch, and an owner disabling it in between gets an
+  over-report that the FAILED row and the audit entry above are the remedy for.
 - **Idempotent** (Invariant #18): the key is `operator_resume:{item_id}:{sha256
   of the answer}` in the agent scope, so a replayed or double respond dispatches
   once.

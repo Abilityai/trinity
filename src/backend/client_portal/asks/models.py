@@ -24,8 +24,17 @@ class WorkspaceAsk(BaseModel):
     options: Optional[List[Any]] = None
     created_at: str
     expires_at: Optional[str] = None
-    status: str                     # pending | expired  (terminal ones are not listed)
+    # pending | expired on a LISTING (`list_asks` queries `status="pending"`, so
+    # terminal rows never appear there); `answered` is reachable only from the
+    # ANSWER response, where the row this call just recorded is projected back.
+    status: str
     chat_id: Optional[str] = None   # the thread it was attached to, when known
+    # ent#430 AC #5: whether answering this ask sets work in motion, so a
+    # surface can say "answered" without implying the agent started working.
+    # Populated only on the ANSWER response — a pending ask has not been
+    # answered, so the question does not arise, and defaulting it to False on a
+    # listing would read as "answering this does nothing".
+    resume_requested: Optional[bool] = None
 
 
 class WorkspaceAskAnswer(BaseModel):
