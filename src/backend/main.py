@@ -996,7 +996,14 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
-    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    # ent#461: the DEFAULT, never a clobber. This middleware runs after every
+    # route, so a plain assignment silently overwrote a header a route had
+    # deliberately set — which made the signed file-download route's
+    # `cross-origin` policy completely inert. That route exists to be opened
+    # from Telegram/Slack/WhatsApp, and `same-origin` is exactly what stops
+    # those clients embedding or previewing it. Every other route keeps the
+    # strict default, because absence still resolves to it.
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
 
     # HSTS only when we know the wire is HTTPS — checking both the
