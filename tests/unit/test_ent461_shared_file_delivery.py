@@ -180,3 +180,45 @@ def test_a_length_longer_than_the_file_does_not_hang(tmp_path):
     f = tmp_path / "blob.bin"
     f.write_bytes(b"z" * 10)
     assert b"".join(_iter_file(str(f), 0, 99999)) == b"z" * 10
+
+
+# --------------------------------------------------------------------------- #
+# The middleware interaction — found only by testing the REAL app
+# --------------------------------------------------------------------------- #
+
+def test_the_security_middleware_does_not_clobber_a_routes_own_corp():
+    """`main.add_security_headers` runs after every route.
+
+    It set `Cross-Origin-Resource-Policy` with a plain assignment, which
+    silently overwrote the header this route deliberately sets — making the
+    `cross-origin` half of the ent#461 fix completely INERT in the real
+    application while every unit test passed, because a bare
+    `FastAPI()` + router harness has no middleware.
+
+    Caught by running the real server and reading the response. Pinned here as a
+    source assertion because asserting it end-to-end needs a live stack, and the
+    thing that must not regress is the `setdefault` — a future edit back to `=`
+    would re-break it invisibly.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    main_src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "main.py").read_text()
+    tree = ast.parse(main_src)
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "add_security_headers"
+    )
+    body = ast.unparse(fn)
+
+    assert "setdefault('Cross-Origin-Resource-Policy', 'same-origin')" in body, (
+        "the security middleware must SET A DEFAULT for CORP, not assign it — a "
+        "plain assignment overwrites the file-download route's `cross-origin` "
+        "policy and the link stops being embeddable from Telegram/Slack/WhatsApp, "
+        "with nothing in the unit suite able to see it (ent#461)."
+    )
+    assert 'headers["Cross-Origin-Resource-Policy"] =' not in body, (
+        "a plain CORP assignment is back in the security middleware — see above."
+    )
