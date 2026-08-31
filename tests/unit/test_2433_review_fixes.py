@@ -352,7 +352,14 @@ def _is_registry_module(tree: ast.AST, source: str) -> bool:
     """A module is in scope when it drives the process registry — that is what
     makes a live registration reachable from a `stdin.write`. A module that
     writes to a subprocess without ever registering it is a different (and not
-    leaky) shape, and requiring `unregister` there would be nonsense."""
+    leaky) shape, and requiring `unregister` there would be nonsense.
+
+    Scope is keyed on `register(`, not on `register_pending(` — a chosen
+    boundary, not an oversight (#2450 review). `unregister()` discards a
+    pending entry too, so the pairing would be meaningful for a module that
+    only registers PENDING and writes stdin; no such module exists today
+    (every pending registration is promoted by `register()` at spawn, and the
+    write follows the spawn). Widen the predicate here if one ever appears."""
     if "process_registry" not in source and "get_process_registry" not in source:
         return False
     return any(
@@ -391,10 +398,25 @@ def _unguarded_stdin_writes(source: str, label: str):
       `finally` (`headless_executor._run_headless_subprocess`, handed to
       `run_in_executor` inside `execute_headless_task`'s guarded try).
 
-    Cross-MODULE caller pairing is deliberately not modelled: it would fail
-    loudly here rather than pass silently, which is the safe direction for a
-    guard. A module with no stdin write is vacuously clean (empty list) —
-    never a failure.
+    Caller pairing is recognised only through a bare NAME reference, never an
+    attribute call (#2450 review). Collecting `ast.Attribute` attrs too made
+    the exemption fire on any method call in any guarded try, so a plain
+    `try: runtime.execute(...) finally: unregister()` silently exempted EVERY
+    function named `execute` in the module — and `execute`/`run`/`send` are
+    exactly the names a dispatch try calls. That is a false negative landing
+    on the case discovery was added for: the four known sites are pinned by
+    `test_each_known_site_is_pinned_to_its_pairing_mechanism`, but a NEW
+    module has no such pin. The one legitimate caller-paired site passes a
+    bare name (`run_in_executor(_HEADLESS_EXECUTOR, _run_headless_subprocess,
+    ctx)`), so the attribute half bought nothing and cost the guard its teeth.
+    If a future site is genuinely paired through an attribute call it will be
+    reported here — fix it by referencing the function by name or by adding a
+    justified allowlist entry, never by re-adding the attribute half.
+
+    Cross-MODULE caller pairing is deliberately not modelled either: it would
+    fail loudly here rather than pass silently, which is the safe direction
+    for a guard. A module with no stdin write is vacuously clean (empty list)
+    — never a failure.
     """
     tree = ast.parse(source)
     if not _is_registry_module(tree, source):
@@ -412,8 +434,6 @@ def _unguarded_stdin_writes(source: str, label: str):
         for n in ast.walk(ast.Module(body=t.body, type_ignores=[])):
             if isinstance(n, ast.Name):
                 covered_names.add(n.id)
-            elif isinstance(n, ast.Attribute):
-                covered_names.add(n.attr)
 
     offenders = []
     for fn in ast.walk(tree):
@@ -448,8 +468,6 @@ def _pairing_mechanisms(source: str):
         for n in ast.walk(body):
             if isinstance(n, ast.Name):
                 covered_names.add(n.id)
-            elif isinstance(n, ast.Attribute):
-                covered_names.add(n.attr)
 
     out = {}
     for fn in ast.walk(tree):
@@ -536,6 +554,30 @@ def execute(prompt, process, execution_id):
     process.stdin.close()
 """
     assert _unguarded_stdin_writes(src, "mistral_runtime.py") == [("mistral_runtime.py", 6)]
+
+
+def test_a_method_call_in_a_guarded_try_does_not_exempt_a_same_named_function():
+    """#2450 review — the reachable false negative. Collecting `ast.Attribute`
+    attrs into the caller-pairing set made ANY method call inside ANY guarded
+    try exempt every same-named function in the module, so this ordinary shape
+    hid a real leak. `execute` / `run` / `send` are precisely the names a
+    dispatch try calls."""
+    planted = """
+from ..services.process_registry import get_process_registry
+
+class Runtime:
+    def execute(self, prompt, process, execution_id):
+        get_process_registry().register(execution_id, process, metadata={})
+        process.stdin.write(prompt)
+        process.stdin.close()
+
+    def dispatch(self, runtime, execution_id, prompt, process):
+        try:
+            return runtime.execute(prompt, process, execution_id)
+        finally:
+            get_process_registry().unregister(execution_id)
+"""
+    assert _unguarded_stdin_writes(planted, "planted.py") == [("planted.py", 7)]
 
 
 def test_the_guard_accepts_both_pairing_shapes():
