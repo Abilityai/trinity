@@ -403,3 +403,41 @@ def test_an_operator_never_has_rates_withheld(page, monkeypatch):
                         raising=False)
     out = page._stats("a", page.DEFAULT_WINDOW, is_platform=True)
     assert out["total_executions"] == 12 and out["success_rate"] == 89.0
+
+
+# ---------------------------------------------------------------------------
+# The two constants are separate BY DESIGN — so pin the correspondence
+# ---------------------------------------------------------------------------
+def test_the_hidden_trigger_and_the_hidden_bucket_cannot_drift(page):
+    """`_CLIENT_HIDDEN_TRIGGERS` and `_CLIENT_HIDDEN_BUCKETS` are two
+    vocabularies for one decision, and nothing connected them.
+
+    `"loop"` is a `triggered_by` value; `"Loops"` is a display label that
+    `db/schedules/analytics.py::_TRIGGER_BUCKETS` maps it to. Keeping them as
+    separate constants is right — a rename on either side is a different edit —
+    but the module comment said "a single constant would hide that a rename on
+    either side breaks the pair" and then left nothing to notice the break.
+
+    Rename the bucket label to `"Agent loops"` and this PR half-reverts in
+    silence: the chart shows loop counts to clients again while `_recent_work`
+    still hides the rows, which is precisely the "legend reads 12 above a list
+    that says nothing" contradiction the change exists to remove.
+
+    Derived from the real map, so it fails on a rename in EITHER file.
+    """
+    from db.schedules.analytics import _TRIGGER_BUCKETS
+
+    for trigger in page._CLIENT_HIDDEN_TRIGGERS:
+        assert trigger in _TRIGGER_BUCKETS, (
+            f"{trigger!r} is hidden from a client's rows but is not a mapped "
+            f"trigger, so no chart bucket corresponds to it"
+        )
+
+    expected = {_TRIGGER_BUCKETS[t] for t in page._CLIENT_HIDDEN_TRIGGERS}
+    assert page._CLIENT_HIDDEN_BUCKETS == expected, (
+        f"rows hide {sorted(page._CLIENT_HIDDEN_TRIGGERS)} -> buckets "
+        f"{sorted(expected)}, but the chart hides "
+        f"{sorted(page._CLIENT_HIDDEN_BUCKETS)}. The two halves of one decision "
+        f"have drifted: a client would see a count for work whose rows are "
+        f"hidden, or lose a legend entry for rows it can still see."
+    )

@@ -188,6 +188,14 @@ _CLIENT_HIDDEN_TRIGGERS = frozenset({"loop"})
 # Named separately because the two vocabularies are genuinely different — one is
 # a `triggered_by` value, the other a display label — and a single constant
 # would hide that a rename on either side breaks the pair.
+#
+# Review pass 2: that comment described the hazard and then left nothing to
+# notice it. The correspondence is now DERIVED from `_TRIGGER_BUCKETS` and
+# asserted by `test_the_hidden_trigger_and_the_hidden_bucket_cannot_drift`, so a
+# rename in either file fails CI instead of half-reverting this change — the
+# chart would show loop counts to a client again while the rows stayed hidden,
+# which is the "legend reads 12 above a list that says nothing" contradiction
+# the whole change exists to remove.
 _CLIENT_HIDDEN_BUCKETS = frozenset({"Loops"})
 
 
@@ -210,7 +218,6 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
         }
     if not is_platform:
         a = _without_hidden_buckets(a)
-    first_try = portal_db.first_try_stats(agent_name, hours)
     if not is_platform and not a.get("total_executions"):
         # #2423 review: `success_rate` and `first_try` are deliberately NOT
         # re-derived over the filtered set — a filtered numerator over an
@@ -235,6 +242,10 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
             "first_try": {"terminal": 0, "first_try": 0, "rate": None},
             "unavailable": False,
         }
+    # Below the zero-gate on purpose: the withheld branch discards this value,
+    # so computing it above cost one DB round-trip on exactly the case that
+    # cannot use it (#2423 review pass 2).
+    first_try = portal_db.first_try_stats(agent_name, hours)
     return {
         "window": window,
         "window_hours": a.get("window_hours", hours),
