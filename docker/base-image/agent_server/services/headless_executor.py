@@ -24,6 +24,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,23 @@ logger = logging.getLogger(__name__)
 # the cost/pain inflection: short fan-out is cheap to re-run, long
 # deliverables aren't.
 _JSONL_PERSIST_THRESHOLD_S = 600
+
+# #2433: headless subprocess runs get their OWN pool. They used to go to the
+# event loop's default executor (`run_in_executor(None, …)`), sized
+# `min(32, cpu_count + 4)` — six threads on a 2-vCPU host — and each run holds
+# its thread for the whole subprocess lifetime, so the seventh concurrent
+# `/api/task` was accepted (counted in /health `active_tasks`) but neither
+# spawned nor registered until a thread freed. The backend watchdog read that
+# as an orphan. Sized to the backend's `max_parallel_tasks` fleet ceiling (#506,
+# `settings_service.MAX_PARALLEL_TASKS_CEILING_MAX` — pinned by
+# tests/unit/test_2433_headless_executor.py) so the pool can never be the
+# throttle: the real brake on concurrent claude processes is the backend's
+# per-agent `max_parallel_tasks`, not this constant. `ctx.terminate`, auto_sync
+# and pipe-close stay on the default pool.
+HEADLESS_EXECUTOR_MAX_WORKERS = 32
+_HEADLESS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=HEADLESS_EXECUTOR_MAX_WORKERS, thread_name_prefix="headless-task"
+)
 
 # #970: cadence for the bounded subprocess wait, and the no-progress ceiling
 # for a single tool_use that never receives a tool_result. Claude Code has
@@ -806,6 +824,22 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     exception. Raises ``subprocess.TimeoutExpired`` on inner timeout —
     the caller converts to HTTP 504.
     """
+    # #2433: a cancel that landed while this run was still queued in the pool
+    # (the pending state) must never spend a subprocess. Optimisation only —
+    # the authoritative consumer of a cancel-while-pending is `register()`,
+    # which kills at spawn and keeps the #679 marker, so a cancel racing this
+    # check is still honoured. 409 passes the caller's `except HTTPException:
+    # raise` untouched; the /api/task handler relabels it `cancelled` via the
+    # same marker.
+    if get_process_registry().was_terminated(ctx.task_session_id):
+        logger.info(
+            f"[Headless Task] Task {ctx.task_session_id} cancelled before start — not spawning"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Execution cancelled before it started",
+        )
+
     # Issue #407: start_new_session=True puts claude (and any hooks it
     # spawns) into their own process group so we can reap the whole tree
     # on exit/timeout. Without this, hook grandchildren can outlive
@@ -1623,7 +1657,8 @@ async def execute_headless_task(
         try:
             try:
                 await asyncio.wait_for(
-                    loop.run_in_executor(None, _run_headless_subprocess, ctx),
+                    # #2433: the dedicated pool — never the CPU-sized default.
+                    loop.run_in_executor(_HEADLESS_EXECUTOR, _run_headless_subprocess, ctx),
                     timeout=ctx.effective_timeout + 60
                 )
             except asyncio.TimeoutError:

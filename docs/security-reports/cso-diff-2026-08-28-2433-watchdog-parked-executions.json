@@ -1,0 +1,104 @@
+{
+  "version": "1.1",
+  "date": "2026-08-28",
+  "mode": "diff",
+  "scope": "feature/2433-watchdog-parked-executions vs merge-base 135248e9",
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    6,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_na": {
+    "3": "no dependency, lockfile or package change",
+    "4": "no workflow change",
+    "8": ".claude skills untouched"
+  },
+  "attack_surface": {
+    "new_routes": 0,
+    "new_ws": 0,
+    "new_uploads": 0,
+    "new_integrations": 1,
+    "new_jobs": 1,
+    "changed_files": 30,
+    "new_test_files": 10,
+    "backend_touched": true,
+    "agent_server_touched": true,
+    "new_integration_detail": "Redis liveness markers execution:inflight:{id} (60s TTL, one refresher task per backend process, 15s tick) and execution:cancel:{id} via the existing backend-ACL breaker client; agent-server /api/executions/running gains pending_ids",
+    "compose_detail": "BACKEND_AGENT_CALL_LIMIT / BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S forwarded in prod + hosted compose with defaults; no network, port, volume or socket change"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "fingerprint": "3b8daf618f143cd7",
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "outcome": "FIXED in-branch",
+      "phase": "P9/P12",
+      "category": "access-control-a01",
+      "file": "src/backend/services/chat_execution_service.py",
+      "anchor": "_proxy_terminate_and_finalize: db.update_execution_status(execution_id=task_execution_id, status=CANCELLED) with no agent check; fix: entry gate in terminate_execution",
+      "title": "Cross-agent false-cancel through the proxy terminate arm via caller-supplied task_execution_id",
+      "pre_existing": true,
+      "description": "terminate_execution takes execution_id (path) and task_execution_id (query param, defaults to the path id). The proxy arm POSTs execution_id to agent A \u2014 whose 404 is what scoped the old path \u2014 but writes CANCELLED and closes the dispatch activity keyed on task_execution_id, which the agent never sees. The #2433 review added agent-scope belts to the queued and parked arms; the independent verifier found the proxy arm carried none.",
+      "exploit_scenario": [
+        "Caller is authorised on agent A and has a live turn X on A.",
+        "Caller learns agent B's execution id T (128-bit; learnable from the fleet-wide /ws agent_activity stream \u2014 see below_gate #1).",
+        "POST /api/agents/A/executions/X/terminate?task_execution_id=T.",
+        "Queued arm: B's row is not queued/not A's \u2192 None. Parked arm: registry/marker scoped to A \u2192 None.",
+        "Proxy arm: agent A answers terminated for X; release_if_matches(A, T) is a no-op; db.update_execution_status(T, CANCELLED) wins the CAS on B's RUNNING row; B's dispatch activity is closed as cancelled.",
+        "B keeps running (never contacted) but its later SUCCESS loses the CAS: B's deliverable is discarded and its row reads as a user cancellation."
+      ],
+      "impact": "Cross-tenant false-cancel + result loss on any agent whose execution id is known; no slot release, no process kill, no RCE.",
+      "recommendation": "FIXED: one agent-scope gate at the entry of terminate_execution for all three arms \u2014 the row behind task_execution_id must belong to name (uniform 404 'Execution not found in agent', so a foreign id reads like an unknown one; an unreadable row fails closed with 503); per-arm belts kept as a second layer. Tests: test_2433_dispatch_wiring.py (exploit replay, fail-closed, positive controls).",
+      "verification": "Independent fresh-context verifier (Phase 12) refuted the branch's 'closed on all arms' claim with a traced exploit; the entry gate was added and the exploit test now passes; test_ent155_chat_cancel.py and test_terminate_async_executor.py unchanged and green."
+    }
+  ],
+  "below_gate": [
+    {
+      "item": "/ws (SCOPE_ALL) broadcasts agent_activity events carrying execution_id / related_execution_id / agent_name fleet-wide to any authenticated user, so an execution id is learnable without access to its agent",
+      "confidence": 7,
+      "why_below": "pre-existing, documented thin-trigger design outside this diff; with finding 1 fixed the id alone is no longer a write capability. Residual: cross-tenant disclosure of ids, agent names and activity types. Recommend a follow-up to scope /ws agent_activity by accessible_agents like /ws/events."
+    },
+    {
+      "item": "pending_ids is agent-asserted (a compromised agent can claim any id)",
+      "confidence": 6,
+      "why_below": "the watchdog unions it only against that agent's OWN rows (cleanup_service._extract_agent_known_ids, type-guarded), so the blast radius is 'keep my own rows alive', which the agent could already do by running them."
+    },
+    {
+      "item": "Path-supplied execution ids reach Redis as key material (execution:cancel:{id})",
+      "confidence": 5,
+      "why_below": "keys are binary-safe bulk strings (no protocol injection) and the cancel key is written only after the marker's agent matches the caller's authorised agent; no unbounded key creation."
+    }
+  ],
+  "supply_chain_summary": "N/A \u2014 no dependency, lockfile, Dockerfile or workflow change; compose changes are env forwards only",
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 1,
+    "below_gate": 3,
+    "verified_by_subagent": 1,
+    "refuted": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 0,
+    "low": 0,
+    "fixed_in_branch": 1
+  },
+  "trend": {
+    "prior_reports_this_window": [
+      "cso-diff-2026-08-27-2409-headroom-ranked-switch"
+    ],
+    "direction": "one HIGH surfaced by the independent verifier \u2014 pre-existing, adjacent to the class the branch fixed, closed in-branch before merge; zero open findings at the gate"
+  }
+}

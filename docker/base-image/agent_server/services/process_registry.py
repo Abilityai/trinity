@@ -51,6 +51,24 @@ TERMINATED_TTL_SECONDS = 300  # 5 minutes
 # silently reintroduce the #1501 mid-run kill for long hooks).
 TRANSIENT_PID_TTL_SECONDS = 300  # 5 minutes
 
+# #2433: slack added to an execution's timeout to bound how long an ACCEPTED-but-
+# not-yet-spawned ("pending") entry stays visible to the backend watchdog. A
+# pending entry is removed by the owning handler's `finally` (or promoted by
+# `register()`); the deadline is only the lazily-evicted backstop against a
+# missed removal, so a leaked entry can never keep a `running` row alive
+# forever. Mirrors the transient-pid rule above: the window is derived from the
+# run's own budget, never shorter than it.
+PENDING_SLACK_SECONDS = 60
+PENDING_DEFAULT_TIMEOUT_SECONDS = 900  # the /api/task handler's own default
+# `/api/chat` carries no per-request timeout (`ChatRequest` has no such field),
+# and a chat waiting on the execution lock behind a long turn can legitimately
+# wait up to the agent's `execution_timeout_seconds` — whose platform ceiling is
+# 7200s. Sizing its pending window off the /api/task default silently evicted
+# the entry mid-wait, so `pending_ids` stopped covering exactly the wait it was
+# added for. The backend's in-flight marker covers this case too; this keeps the
+# agent-side layer from quietly ceasing to defend.
+PENDING_CHAT_TIMEOUT_SECONDS = 7200
+
 
 class ProcessRegistry:
     """
@@ -93,17 +111,99 @@ class ProcessRegistry:
         # removed by the spawner's finally; the stored deadline is the
         # lazy-evicted backstop against a missed removal.
         self._transient_pids: Dict[int, float] = {}
+        # #2433: execution_id -> {accepted_at, deadline, metadata, cancel_requested}
+        # for executions the agent-server has ACCEPTED (handler entry) but not yet
+        # SPAWNED — queued in the headless thread pool, or waiting on the chat
+        # execution lock. Surfaced as `pending_ids` on /api/executions/running so
+        # the backend watchdog treats "accepted, not yet running" as proof of
+        # life instead of orphaning the row (false FAILED + released slot while
+        # the turn later ran anyway). `register()` promotes an entry; the owning
+        # handler's `finally` discards it; `deadline` is the leak backstop.
+        self._pending: Dict[str, dict] = {}
+
+    def register_pending(
+        self,
+        execution_id: Optional[str],
+        *,
+        timeout_seconds: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """#2433: mark an execution as ACCEPTED but not yet spawned.
+
+        Called at the handler entry of `/api/task` (sync branch), inside the
+        #1083 `try_spawn_async` before the detached task is created, and at
+        `/api/chat` entry before the execution lock is awaited. Idempotent
+        re-registration refreshes the deadline. An empty/None id is ignored.
+
+        Args:
+            timeout_seconds: this execution's own budget; the entry expires at
+                ``accepted_at + timeout_seconds + PENDING_SLACK_SECONDS`` if the
+                owner never discards it. Falls back to the handler default.
+        """
+        if not execution_id:
+            return
+        window = PENDING_DEFAULT_TIMEOUT_SECONDS
+        if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0 and timeout_seconds != float("inf"):
+            window = float(timeout_seconds)
+        now = time.time()
+        with self._lock:
+            existing = self._pending.get(execution_id)
+            self._pending[execution_id] = {
+                "accepted_at": now,
+                "deadline": now + window + PENDING_SLACK_SECONDS,
+                "metadata": metadata or {},
+                # Preserve a cancel that landed before a re-registration.
+                "cancel_requested": bool(existing and existing.get("cancel_requested")),
+            }
+        # DEBUG, not INFO: this fires on every /api/task and /api/chat, and the
+        # line that carries signal is the eviction WARNING, not the happy path.
+        logger.debug(f"[ProcessRegistry] Pending execution {execution_id} (accepted, not yet spawned)")
+
+    def discard_pending(self, execution_id: Optional[str]) -> None:
+        """#2433: drop a pending entry. Idempotent — a double discard, a discard
+        of an already-promoted id, or of an unknown id is a no-op, so `finally`
+        blocks call it unconditionally."""
+        if not execution_id:
+            return
+        with self._lock:
+            self._pending.pop(execution_id, None)
+
+    def list_pending_ids(self) -> List[str]:
+        """#2433: ids accepted but not yet spawned. Expired entries (owner never
+        discarded them) are evicted lazily here, so a leaked entry can never
+        keep a backend row alive past the run's own budget."""
+        now = time.time()
+        with self._lock:
+            expired = [eid for eid, entry in self._pending.items() if entry["deadline"] < now]
+            for eid in expired:
+                del self._pending[eid]
+            if expired:
+                logger.warning(
+                    f"[ProcessRegistry] Evicted {len(expired)} pending entr(y/ies) past deadline "
+                    f"(owner never discarded): {expired}"
+                )
+            return list(self._pending.keys())
 
     def register(self, execution_id: str, process: subprocess.Popen, metadata: dict = None):
         """
         Register a running process.
+
+        #2433: promotes a pending entry (one id, one state). If a cancel was
+        requested while the execution was still pending, that cancel is
+        CONSUMED here — the process group we were just handed is killed and the
+        #679 `_terminated` marker is KEPT, so the handler relabels the turn
+        `cancelled`. Before this, `register()` cleared the marker unconditionally
+        and a cancel landing between the thread-top check and `Popen` was erased:
+        the turn ran to a billed SUCCESS that overwrote the watchdog's terminal.
 
         Args:
             execution_id: Unique identifier for this execution
             process: The subprocess.Popen handle
             metadata: Optional metadata (type, message preview, etc.)
         """
+        kill_requested = False
         with self._lock:
+            pending = self._pending.pop(execution_id, None)
             self._processes[execution_id] = {
                 "process": process,
                 "started_at": datetime.utcnow(),
@@ -112,11 +212,33 @@ class ProcessRegistry:
             # Initialize log streaming structures
             self._log_subscribers[execution_id] = []
             self._log_buffers[execution_id] = []
-            # Issue #679 (C10): clear any stale cancel marker so an execution_id
-            # reused by the #678 in-line reader-race retry can't inherit the
-            # previous attempt's "cancelled" label.
-            self._terminated.pop(execution_id, None)
+            if pending and pending.get("cancel_requested"):
+                kill_requested = True
+                # Keep `_terminated` — the cancel is authoritative and the handler
+                # reads it after the (now immediate) exit.
+                self._terminated.setdefault(execution_id, time.time())
+            else:
+                # Issue #679 (C10): clear any stale cancel marker so an execution_id
+                # reused by the #678 in-line reader-race retry can't inherit the
+                # previous attempt's "cancelled" label.
+                self._terminated.pop(execution_id, None)
             logger.info(f"[ProcessRegistry] Registered execution {execution_id}")
+
+        if kill_requested:
+            # Outside the lock: a signal syscall, but never hold the registry
+            # lock across anything that touches a foreign process.
+            pgid = (metadata or {}).get("pgid")
+            try:
+                _signal_process_tree(process, signal.SIGKILL, pgid=pgid)
+                logger.info(
+                    f"[ProcessRegistry] Execution {execution_id} was cancelled while pending "
+                    f"— killed at spawn (nothing ran)"
+                )
+            except Exception:
+                logger.exception(
+                    f"[ProcessRegistry] Kill-at-spawn failed for cancelled-while-pending "
+                    f"execution {execution_id} — marker kept, turn will be relabelled"
+                )
 
     def unregister(self, execution_id: str):
         """Unregister a completed process and signal stream end to subscribers."""
@@ -124,6 +246,9 @@ class ProcessRegistry:
             if execution_id in self._processes:
                 del self._processes[execution_id]
                 logger.info(f"[ProcessRegistry] Unregistered execution {execution_id}")
+            # #2433 belt: an execution that ends without ever being promoted
+            # (pre-spawn cancel, spawn failure) must not linger as pending.
+            self._pending.pop(execution_id, None)
 
             # Signal end of stream to all subscribers
             if execution_id in self._log_subscribers:
@@ -165,6 +290,21 @@ class ProcessRegistry:
         with self._lock:
             entry = self._processes.get(execution_id)
             if not entry:
+                pending = self._pending.get(execution_id)
+                if pending is not None:
+                    # #2433: accepted but not yet spawned. Record the cancel on the
+                    # entry (consumed by `register()` — kill at spawn, marker kept)
+                    # AND stamp the #679 marker now so the thread-top pre-spawn
+                    # check can skip the Popen entirely. The entry is deliberately
+                    # KEPT: popping it would let the next watchdog sweep orphan a
+                    # row whose thread is about to raise cancelled-before-start.
+                    pending["cancel_requested"] = True
+                    self._terminated[execution_id] = time.time()
+                    logger.info(
+                        f"[ProcessRegistry] Cancel requested for pending execution "
+                        f"{execution_id} (not yet spawned)"
+                    )
+                    return {"success": True, "returncode": None, "reason": "cancelled_before_start"}
                 return {"success": False, "reason": "not_found"}
 
             process = entry["process"]
@@ -404,7 +544,35 @@ class ProcessRegistry:
             expired = [eid for eid, ts in self._recently_completed.items() if ts < cutoff]
             for eid in expired:
                 del self._recently_completed[eid]
-            return list(self._recently_completed.keys())
+            ids = set(self._recently_completed.keys())
+            # #2433 (C): a registered process that has EXITED but whose owner
+            # hasn't reached `finally: unregister()` yet (pipe drain, join) is
+            # filtered out of `list_running()` (`poll() is None`) and not yet in
+            # the buffer above — a seconds-wide hole the watchdog fell into.
+            # Semantically it IS "completed, not yet reported".
+            #
+            # Bounded by the SAME TTL as the buffer above, measured from when
+            # the exit was first OBSERVED — not from `started_at`, which would
+            # drop a legitimately long turn the moment it entered its drain.
+            # Without a bound a LEAKED entry (an exception between `register()`
+            # and `finally: unregister()`) is reported as agent-known forever,
+            # so the orphan watchdog never recovers that row and the leak costs
+            # the full 120-min registry-blind sweep — with its fabricated
+            # `duration_ms` — instead of one watchdog cycle. Before #2433 the
+            # same leak self-healed, because `list_running()` filters on
+            # `poll() is None`. Stamping here is safe and sufficient: this is
+            # the only reader, and a first observation that lags the true exit
+            # only ever extends the window in the conservative direction.
+            now = time.time()
+            for eid, entry in self._processes.items():
+                if entry["process"].poll() is None:
+                    continue
+                exited_seen_at = entry.get("exited_seen_at")
+                if exited_seen_at is None:
+                    exited_seen_at = entry["exited_seen_at"] = now
+                if now - exited_seen_at < RECENTLY_COMPLETED_TTL_SECONDS:
+                    ids.add(eid)
+            return list(ids)
 
     def was_terminated(self, execution_id: str) -> bool:
         """Issue #679: True if terminate() sent a kill-signal for this execution

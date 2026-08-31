@@ -2476,6 +2476,125 @@
         "unit"
       ],
       "description": "Auto-switch ranks alternative subscriptions by cached provider headroom (#2409). Pins: the 2h failure filter stays a db-layer FILTER that runs first and is kind-blind (#444/#2352); survivors are ranked furthest-from-the-nearest-wall first (the fuller of the 5h/7d windows, banded to 10 points so agent_count still spreads a storm), a FRESH provider refusal is dropped and a stale one is merely unknown; one MGET, never a probe, tri-state on Redis; every failure of the ranking half degrades to today's order WITH a warning (poisoned-import fail-open beside a positive real-import proof); classify_headroom stays byte-identical to a frozen pre-#2409 copy over the full age x status x window x threshold product; the switch surfaces destination_headroom + a clause; new-agent auto-assign rides the same ranker with one decrypt in the common case."
+    },
+    {
+      "file": "unit/test_2433_process_registry_pending.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "process-registry",
+        "watchdog"
+      ],
+      "description": "#2433: agent-side pending registration (accepted-not-spawned), cancel-while-pending consumed by register(), recently-completed covers the post-exit drain window."
+    },
+    {
+      "file": "unit/test_2433_task_handler_pending.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "routers",
+        "watchdog"
+      ],
+      "description": "#2433: /api/task, /api/chat and the #1083 async spawn register pending before any queue and discard in finally; /api/executions/running carries pending_ids."
+    },
+    {
+      "file": "unit/test_2433_headless_executor.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "headless-executor"
+      ],
+      "description": "#2433: headless runs use a dedicated 32-thread pool pinned to the backend fleet ceiling; pre-spawn cancel raises 409 without Popen."
+    },
+    {
+      "file": "unit/test_2433_gemini_registers.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#2433: Gemini registers/unregisters its subprocess with the process registry (it never did)."
+    },
+    {
+      "file": "unit/test_2433_limiter_inflight.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "agent-call-limiter",
+        "watchdog"
+      ],
+      "description": "#2433: in-flight dispatch registry + single refresher (fakeredis), tri-state verdicts, cancel at grant, on_granted re-anchor, both-branch queue warning."
+    },
+    {
+      "file": "unit/test_2433_slot_renew.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "capacity"
+      ],
+      "description": "#2433: SlotService.renew_slot re-anchors a held slot lease (score + hash TTL together, S-03-safe)."
+    },
+    {
+      "file": "unit/test_2433_db_restamp.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "db",
+        "schema"
+      ],
+      "description": "#2433: restamp_execution_dispatch CAS (RUNNING, NULL lease) moves started_at to dispatch and keeps admission in queued_at (real schema via db_harness)."
+    },
+    {
+      "file": "unit/test_2433_dispatch_wiring.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "task-execution",
+        "chat"
+      ],
+      "description": "#2433: agent_post_with_retry tracks the whole call in-flight, re-anchors at grant, raises cancelled-while-parked; terminate cancels a parked row without the agent."
+    },
+    {
+      "file": "unit/test_2433_watchdog_inflight.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "backend",
+        "cleanup",
+        "watchdog"
+      ],
+      "description": "#2433: watchdog/Phase-3/startup withhold orphan recovery for a live (or unverifiable) backend dispatcher; pending_ids proof-of-life; honest orphan string."
+    },
+    {
+      "file": "unit/test_2433_limiter_packaging.py",
+      "feature": "#2433",
+      "added": "2026-08-28",
+      "categories": [
+        "packaging",
+        "config"
+      ],
+      "description": "#2433: BACKEND_AGENT_CALL_* forwarded in prod + hosted compose and documented in .env.example; limiter docstring default matches code."
+    },
+    {
+      "file": "unit/test_2433_review_fixes.py",
+      "feature": "#2433",
+      "added": "2026-08-31",
+      "categories": [
+        "backend",
+        "agent-server",
+        "watchdog",
+        "concurrency",
+        "regression"
+      ],
+      "description": "PR #2435 review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (the parked->calling transition is published in the same round-trip that reads the cancel key); the exited-but-registered set is TTL-bounded so a leaked entry stops blocking orphan recovery; register() is paired with the stdin-write failure path; the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
     }
   ]
 }

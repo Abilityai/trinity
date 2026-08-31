@@ -332,9 +332,19 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             "pgid": process_pgid,
         })
 
-        # Write prompt to stdin and close it
-        process.stdin.write(prompt)
-        process.stdin.close()
+        # Write prompt to stdin and close it.
+        # #2433 review: the `finally: registry.unregister()` further down starts
+        # after this write, so a BrokenPipeError here (the `register()` above
+        # SIGKILLs the group when a cancel landed while the execution was
+        # pending) leaks the entry — which since #2433 is reported to the
+        # backend as agent-known for a full RECENTLY_COMPLETED TTL, blocking
+        # orphan recovery for that row. Same guard as the Gemini paths.
+        try:
+            process.stdin.write(prompt)
+            process.stdin.close()
+        except BaseException:
+            registry.unregister(execution_id)
+            raise
 
         stderr_lines: List[str] = []
 

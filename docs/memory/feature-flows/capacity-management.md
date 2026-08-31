@@ -31,6 +31,7 @@ LOC); summary table:
 | `acquire(agent, exec_id, max_concurrent, *, overflow_policy, overflow_payload?, breaker_enabled=False, ...)` | Try to admit; on overflow, dispatch to chosen policy. Returns `AcquireResult{state, execution_id, queue_position?}`. Raises `CapacityFull` when at capacity AND overflow is unavailable/full. Raises `CircuitOpen` (before slot acquisition) when `breaker_enabled` AND the dispatch breaker is open (#526 — see [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md)). |
 | `release(agent, exec_id)` | Release a slot. In-memory queue is popped (bookkeeping); persistent backlog drains via internal slot-release callback. |
 | `release_if_matches(agent, exec_id)` | Watchdog-safe release: only releases if `exec_id` actually holds a slot. Returns `bool`. |
+| `SlotService.renew_slot(agent, exec_id)` — **not** on the facade; reached via `get_slot_service()` (#2433) | Re-anchor a HELD slot's lease at *now*: `ZADD XX CH` score + `EXPIRE` of the metadata hash to the slot's own stored `timeout_seconds + SLOT_TTL_BUFFER`, **together**. Synchronous (worker thread). Returns `False` — never resurrects — for a slot no longer held, **and refuses (score untouched) when the metadata hash has already expired** (#2435 review: `ZADD XX` succeeds while `EXPIRE` on a missing key is a silent no-op, so the old order reported a renewal it had not performed and re-anchored exactly the ZSET-without-hash state canary S-03 reports as `missing`); fail-open. See [Lease re-anchoring at dispatch](#lease-re-anchoring-at-dispatch-2433). |
 | `get_status(agent, max_concurrent)` | `QueueStatus` for the `/api/agents/{name}/queue` endpoint (current + in-memory queue only; persistent backlog is exposed via executions endpoints). |
 | `get_all_states(agent_capacities)` | Bulk capacity meter for the dashboard. |
 | `get_slot_state(agent, max_concurrent)` | Per-slot detail for the agent_config router. |
@@ -141,6 +142,69 @@ switch; never raises. Full breaker mechanics, the two-breaker split, and outcome
 recording at the execution terminals live in
 [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md).
 
+## Lease re-anchoring at dispatch (#2433)
+
+A slot's lease is set at **admission**: `acquire_slot` writes `ZADD score=now`
+and `EXPIRE metadata_hash (timeout_seconds + SLOT_TTL_BUFFER)` in one breath, and
+`reclaim_stale` → `_cleanup_stale_slots_for_agent` later judges each slot by
+`now − score > stored timeout + 300`. Between admission and the agent actually
+receiving the turn sits a queue this module never modelled — the backend
+agent-call semaphore in `services/agent_call_limiter.py`, acquired inside
+`agent_post_with_retry` *after* the row is `running` and the slot held. A park
+there spent the lease without running: `park + run > timeout + 300` measured
+from admission got the slot TTL-reclaimed under a live execution (Phase 3 then
+saw the agent still running it, skipped the FAILED write, and the agent ran
+overbooked), and the same admission-anchored `started_at` let the registry-blind
+Phase-1 `mark_stale_executions_failed` bulk-FAIL the row mid-run. The backlog
+spill already defines `started_at` as *left the queue* (`db/schedules/queue.py`);
+the limiter is a second, hidden queue, so the same rule applies to the lease.
+Canonical description: architecture.md → *In-Flight Dispatch Proof-of-Life
+(#2433)*.
+
+`SlotService.renew_slot(agent_name, execution_id)` is the primitive:
+
+- `ZADD … XX CH` score=now on `agent:slots:{name}` — `XX` so a released or
+  TTL-reclaimed member is **never resurrected** (a renewal of a missing member
+  returns `False` and leaves `ZCARD` alone), `CH` so the return value says
+  whether anything moved.
+- `EXPIRE agent:slot:{name}:{exec_id}` to the slot's **own** stored
+  `timeout_seconds + SLOT_TTL_BUFFER` (`DEFAULT_SLOT_TTL_SECONDS` when the hash
+  is unreadable), issued **with** the score move — canary S-03 reconstructs the
+  initial TTL as `ttl_remaining + (read − score)`, so moving only one of the two
+  would page `below_floor` on every renewed slot.
+- Synchronous on purpose (called via `asyncio.to_thread` at grant and from the
+  limiter refresher's worker thread); any Redis error → `False`, logged at
+  DEBUG. Fail-open bookkeeping: a failed renewal degrades to today's
+  admission-anchored lease, never to a blocked dispatch.
+
+Two callers, both outside the facade — a third documented facade bypass beside
+`backlog_service.drain_next` and `agent_call_limiter`'s cap read (#506):
+
+| Caller | When | Paired with |
+|--------|------|-------------|
+| `agent_call_limiter._tick_sync` (the ONE per-process refresher) | every `INFLIGHT_TICK_SECONDS` (15s) tick, for every in-flight entry whose `phase == "parked"` | the cross-worker `execution:inflight:{execution_id}` marker refresh — so a park can never outlive a short per-schedule slot TTL |
+| `task_execution_service._on_dispatch_granted` | once at semaphore grant, when the park reached `DISPATCH_RESTAMP_THRESHOLD_SECONDS` (5s) | `db.restamp_execution_dispatch(execution_id)` — `started_at = now`, admission kept in `queued_at`, CAS on `RUNNING` + NULL lease — so row clock and slot lease move together and `duration_ms` records the run, not the park |
+
+A fast acquire (park < 5s) renews nothing — the hot path pays no Redis write.
+An execution cancelled **while parked** releases its slot through the existing
+`release_if_matches` (`chat_execution_service._cancel_inflight_if_parked`); the
+dispatcher's own late FAILED write then loses the CAS, so a renewed lease never
+outlives its CANCELLED row. Dispatch wiring:
+[task-execution-service.md](task-execution-service.md); the watchdog's tri-state
+`inflight_verdicts` read that withholds `release_if_matches` for a live
+dispatcher: [cleanup-service.md](cleanup-service.md).
+
+### Tests
+
+- `tests/unit/test_2433_slot_renew.py` — score and hash TTL move together and
+  the S-03 reconstruction stays at the floor; the slot's own stored timeout is
+  used (a 7200s slot renews past 7200); default TTL without metadata; `False`
+  (and `ZCARD` still 0) for a released slot; fail-open on a broken client.
+- `tests/unit/test_2433_limiter_inflight.py::test_refresher_renews_slot_lease_only_while_parked`
+  — the refresher renews `parked` entries and stops once they flip to `calling`.
+- `tests/unit/test_2433_dispatch_wiring.py::test_park_at_grant_restamps_row_and_renews_slot`
+  — exactly one `restamp_execution_dispatch` + one `renew_slot` per grant after a park.
+
 ## End-to-end flow
 
 ### `/chat` — short synchronous, in-memory queue
@@ -181,8 +245,8 @@ in-flight executions across the upgrade keep working.
 
 | Concern | Storage | Key / column |
 |---------|---------|--------------|
-| Active slot counter (per agent) | Redis ZSET | `agent:slots:{name}` (member = exec_id, score = unix ts) |
-| Per-slot metadata | Redis HASH | `agent:slot:{name}:{exec_id}` (auto-expires via dynamic TTL = `agent.timeout + 5min` buffer) |
+| Active slot counter (per agent) | Redis ZSET | `agent:slots:{name}` (member = exec_id, score = unix ts of admission — moved to the dispatch instant by `renew_slot` after a park, #2433) |
+| Per-slot metadata | Redis HASH | `agent:slot:{name}:{exec_id}` (auto-expires via dynamic TTL = `agent.timeout + 5min` buffer, set at admission and re-armed by `renew_slot` — always together with the score, #2433) |
 | In-memory overflow queue | Redis LIST | `agent:queue:{name}` (LPUSH new, RPOP oldest, depth ≤ `IN_MEMORY_DEPTH=3`) |
 | Persistent overflow backlog | SQLite | `schedule_executions` rows where `status='queued'` (driven by `queued_at` ASC for FIFO; `backlog_metadata` JSON holds the request to replay; partial index `idx_executions_queued`) |
 
@@ -198,6 +262,7 @@ Two periodic loops keep capacity state honest:
 - **`services/cleanup_service.py` watchdog (5min tick)** — calls
   `capacity.reclaim_stale(agent_timeouts={...})` to release slots whose
   per-agent dynamic TTL has expired; uses `release_if_matches(agent, exec_id)` (TOCTOU-safe) when reconciling individual orphaned executions so it only releases slots the targeted execution actually holds.
+  Since #2433 a slot whose execution is parked in the backend agent-call queue is renewed every 15s by the limiter's refresher, so `reclaim_stale`'s `now − score` age never crosses the TTL under a live dispatcher — and the watchdog consults `agent_call_limiter.inflight_verdicts` before recovering (and releasing) a row the agent does not know, withholding on `alive` and, for rows younger than `inflight_max_age_seconds()`, on `unknown` (see [cleanup-service.md](cleanup-service.md)).
 
 ## What replaced what
 
@@ -233,6 +298,9 @@ APIs.
 | Terminate endpoint | `src/backend/routers/chat.py` | `force_release` |
 | `TaskExecutionService` | `src/backend/services/task_execution_service.py` | `reject` (router pre-acquired) |
 | Cleanup watchdog | `src/backend/services/cleanup_service.py` | `reclaim_stale` + `release_if_matches` |
+| Limiter refresher (parked entries, 15s tick) | `src/backend/services/agent_call_limiter.py` (`_tick_sync`) | `SlotService.renew_slot` — direct, not via the facade (#2433) |
+| Dispatch grant after a park ≥5s | `src/backend/services/task_execution_service.py` (`_on_dispatch_granted`) | `SlotService.renew_slot` — direct, beside `db.restamp_execution_dispatch` (#2433) |
+| Terminate — execution still parked | `src/backend/services/chat_execution_service.py` (`_cancel_inflight_if_parked`) | `release_if_matches` (#2433) |
 | Maintenance tick | `src/backend/main.py` (60s loop) | `run_maintenance` |
 | `/api/agents/{name}/queue` | `src/backend/routers/agents.py` | `get_status` |
 | Dashboard capacity meter | agent_config router | `get_all_states`, `get_slot_state` |
@@ -242,6 +310,7 @@ APIs.
 
 - **#428** — Tier 2.5 facade work (this flow). PR #527, branch `feature/428-capacity-manager`.
 - **#526 (RELIABILITY-007)** — `acquire(breaker_enabled=…)` dispatch-breaker gate (raises `CircuitOpen` before overflow) + the `run_maintenance` backstop. See [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md).
+- **#2433** — `SlotService.renew_slot` + lease re-anchoring at dispatch: `park + run` must not exceed `timeout + 300` measured from admission, so the limiter's refresher renews a parked slot every tick and the grant after a park ≥5s renews it once more beside `db.restamp_execution_dispatch`. See [Lease re-anchoring at dispatch](#lease-re-anchoring-at-dispatch-2433).
 - **CAPACITY-001** — `SlotService` (now internal). See [parallel-capacity.md](parallel-capacity.md).
 - **BACKLOG-001 (#260)** — `BacklogService` (now internal). See [persistent-task-backlog.md](persistent-task-backlog.md).
 - **EXEC-024** — `TaskExecutionService` consumer. See [task-execution-service.md](task-execution-service.md).
@@ -257,4 +326,5 @@ APIs.
 - [parallel-headless-execution.md](parallel-headless-execution.md) — `/task` endpoint flow; the persistent path is the queue-overflow story.
 - [cleanup-service.md](cleanup-service.md) — uses `reclaim_stale` + `release_if_matches` for stale-slot recovery.
 - [execution-termination.md](execution-termination.md) — uses `force_release`.
+- [chat-turn-cancellation.md](chat-turn-cancellation.md) — #2433 parked-cancel arm: `_cancel_inflight_if_parked` releases the slot via `release_if_matches` before the dispatcher's grant, which then raises `BackendAgentCallCancelled` instead of POSTing.
 - [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md) — #526 per-agent dispatch breaker; `acquire()` is its enforcement chokepoint (the Step 0 gate) and `run_maintenance` carries its backlog backstop.

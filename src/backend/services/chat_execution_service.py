@@ -48,6 +48,7 @@ from database import db
 from services.activity_service import activity_service
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services import agent_call_limiter
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.task_execution_service import (
@@ -429,12 +430,22 @@ async def _finalize_budget_exhausted(
 ):
     """#904 RC-1: backend agent-call budget exhausted → 503 without firing
     SUB-003. #1332: mirror a raced CANCELLED terminal onto the activities instead
-    of stamping FAILED over a cancel. Always raises ChatDispatchError(503)."""
+    of stamping FAILED over a cancel. Raises ChatDispatchError(503).
+
+    #2433: a cancel that landed while the call was PARKED surfaces here as the
+    ``BackendAgentCallCancelled`` subclass. The dispatcher then writes
+    CANCELLED itself (not FAILED) so the row reads the same whichever writer —
+    this one or the terminate path — wins the CAS, and raises 409: a cancel is
+    not a capacity problem to retry."""
     budget_msg = str(budget_exc)
+    cancelled = isinstance(budget_exc, agent_call_limiter.BackendAgentCallCancelled)
     existing = db.get_execution(task_execution_id) if task_execution_id else None
-    budget_close_state = (
-        activity_state_for_terminal(existing.status) if existing else ActivityState.FAILED
-    )
+    if cancelled:
+        budget_close_state = ActivityState.CANCELLED
+    else:
+        budget_close_state = (
+            activity_state_for_terminal(existing.status) if existing else ActivityState.FAILED
+        )
     budget_close_error = budget_msg if budget_close_state == ActivityState.FAILED else None
     await activity_service.complete_activity(
         activity_id=chat_activity_id,
@@ -444,7 +455,7 @@ async def _finalize_budget_exhausted(
     if task_execution_id and (not existing or existing.status != TaskExecutionStatus.CANCELLED):
         db.update_execution_status(
             execution_id=task_execution_id,
-            status=TaskExecutionStatus.FAILED,
+            status=TaskExecutionStatus.CANCELLED if cancelled else TaskExecutionStatus.FAILED,
             error=budget_msg,
         )
     if collaboration_activity_id:
@@ -453,7 +464,7 @@ async def _finalize_budget_exhausted(
             status=budget_close_state,
             error=budget_close_error,
         )
-    raise ChatDispatchError(503, budget_msg)
+    raise ChatDispatchError(409 if cancelled else 503, budget_msg)
 
 
 def _parse_agent_http_error(e, name: str):
@@ -638,7 +649,8 @@ async def run_chat_turn(
             payload,
             max_retries=3,
             retry_delay=1.0,
-            timeout=chat_timeout + 10  # Add buffer for HTTP overhead
+            timeout=chat_timeout + 10,  # Add buffer for HTTP overhead
+            execution_id=task_execution_id,  # #2433: in-flight proof-of-life
         )
         response.raise_for_status()
 
@@ -1655,7 +1667,14 @@ async def _cancel_queued_if_queued(name, execution_id, task_execution_id, curren
         _exec_row = db.get_execution(task_execution_id)
     except Exception:
         _exec_row = None
-    if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
+    # #2433 (adjacent, pre-existing): this branch never asks the agent either,
+    # so it must be agent-scoped itself — a queued row of ANOTHER agent is not
+    # this caller's to cancel.
+    if (
+        _exec_row
+        and _exec_row.status == TaskExecutionStatus.QUEUED
+        and getattr(_exec_row, "agent_name", name) == name
+    ):
         cancelled = db.cancel_queued_execution(
             task_execution_id, reason="Cancelled by user while queued"
         )
@@ -1829,10 +1848,47 @@ async def terminate_execution(*, name, execution_id, task_execution_id, current_
     cancel that lands after the row is already terminal loses and leaves the
     real terminal alone.
     """
+    # Agent scope for the DB half, checked ONCE for every arm. The route proves
+    # `name`; `task_execution_id` is caller-supplied (a query param on the
+    # operator route) and is the id the CANCELLED CAS and the activity close
+    # are keyed on. The proxy's 404 scopes only `execution_id` — the id the
+    # AGENT is asked about — so without this a caller authorised on agent A
+    # could pass agent B's row id and flip it to CANCELLED without B ever being
+    # contacted (found by the #2433 security verification: the queued and
+    # parked arms carried their own belts, the proxy arm carried none). Fail
+    # CLOSED — an unreadable row cannot prove ownership of a cross-tenant
+    # terminal write. Uniform 404, the same detail the proxy answers for an id
+    # the agent does not know, so a foreign id is indistinguishable from an
+    # unknown one (Invariant #8).
+    if task_execution_id:
+        try:
+            _owner_row = db.get_execution(task_execution_id)
+        except Exception as e:
+            logger.warning(
+                f"[Terminate] Could not read execution {task_execution_id} to verify agent scope: {e}"
+            )
+            raise ChatDispatchError(503, "Could not verify execution ownership; retry")
+        if _owner_row is not None and getattr(_owner_row, "agent_name", None) != name:
+            logger.warning(
+                f"[Terminate] Refusing terminate of {task_execution_id} via '{name}': row belongs to "
+                f"'{getattr(_owner_row, 'agent_name', None)}'"
+            )
+            raise ChatDispatchError(404, "Execution not found in agent")
+
     queued = await _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user,
                                             actor_kind=actor_kind)
     if queued is not None:
         return queued
+
+    # #2433: parked in the backend agent-call queue? The agent has never heard
+    # of it (it would 404), so cancel it HERE: flag the dispatcher (this worker
+    # or, via the cross-worker cancel key, the one that owns it) so the grant
+    # refuses to POST, and finalize CANCELLED now. Before this the only
+    # "cancel" a parked row ever got was the watchdog's wrong one.
+    parked = await _cancel_inflight_if_parked(name, execution_id, task_execution_id, current_user,
+                                              actor_kind=actor_kind)
+    if parked is not None:
+        return parked
 
     container = get_agent_container(name)
     if not container:
@@ -1842,3 +1898,83 @@ async def terminate_execution(*, name, execution_id, task_execution_id, current_
 
     return await _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user,
                                                actor_kind=actor_kind)
+
+
+async def _cancel_inflight_if_parked(name, execution_id, task_execution_id, current_user,
+                                     actor_kind="operator"):
+    """#2433: cancel an execution whose backend dispatcher is still PARKED in
+    the agent-call queue (never dispatched). Returns the cancelled payload, or
+    None when the execution is not parked anywhere — including an in-flight
+    entry already in its ``calling`` phase, where the agent has the turn and
+    the normal proxy-terminate path applies.
+
+    Cross-worker: the parked coroutine may live in the other uvicorn worker.
+    ``cancel_inflight`` flags a local entry; otherwise the in-flight marker is
+    read and the cancel key set, which that worker's grant checks before it
+    POSTs. Either way the row is finalized CANCELLED here (the CAS-guarded
+    #679 shape), the slot released, the activity closed — the dispatcher's own
+    late FAILED write then loses the CAS, exactly like a late agent reply.
+    """
+    eid = task_execution_id or execution_id
+    if not eid:
+        return None
+    # Agent-scoped, both halves: the caller is authorised on `name`, never on a
+    # bare execution id (the operator route resolves `name` through
+    # `get_authorized_agent` and takes the id from the path verbatim). The
+    # agent-proxy path is scoped for free — a foreign id 404s on the agent —
+    # so this branch, which never asks the agent, must scope itself.
+    phase = agent_call_limiter.cancel_inflight(eid, agent_name=name)
+    if phase is None:
+        phase = await agent_call_limiter.request_cross_worker_cancel(eid, agent_name=name)
+    if phase != "parked":
+        return None
+    if task_execution_id:
+        try:
+            _row = db.get_execution(task_execution_id)
+        except Exception:
+            _row = None
+        if _row is not None and _row.agent_name != name:
+            # Belt: the registry/marker said `name`, the row disagrees — never
+            # write a terminal across agents. Fall through to the proxy path.
+            logger.warning(
+                f"[Terminate] Refusing parked cancel of {task_execution_id}: row belongs to "
+                f"'{_row.agent_name}', request was for '{name}'"
+            )
+            return None
+
+    cancel_won = False
+    if task_execution_id:
+        try:
+            capacity = get_capacity_manager()
+            released = await capacity.release_if_matches(name, task_execution_id)
+            logger.info(
+                "[Terminate] Released capacity for parked execution %s on '%s' (released=%s)",
+                task_execution_id, name, released,
+            )
+        except Exception as e:
+            logger.warning(f"[Terminate] Failed to release capacity for parked {task_execution_id}: {e}")
+        cancel_won = db.update_execution_status(
+            execution_id=task_execution_id,
+            status=TaskExecutionStatus.CANCELLED,
+            error="Execution cancelled by user while queued in the backend agent-call queue",
+        )
+        logger.info(
+            f"[Terminate] Cancelled parked execution {task_execution_id} on '{name}' "
+            f"(cas_won={cancel_won})"
+        )
+        await _close_dispatch_activity_cancelled(task_execution_id, cancel_won)
+
+    await activity_service.track_activity(
+        agent_name=name,
+        activity_type=ActivityType.EXECUTION_CANCELLED,
+        user_id=getattr(current_user, "id", None),
+        triggered_by="user",
+        related_execution_id=task_execution_id,
+        details={
+            "execution_id": execution_id,
+            "task_execution_id": task_execution_id,
+            "status": "cancelled_while_parked",
+            "actor_kind": actor_kind,
+        },
+    )
+    return {"status": "cancelled_while_parked", "execution_id": execution_id}

@@ -205,6 +205,59 @@ class SlotService:
                         "[Slots] release callback skipped: no running event loop"
                     )
 
+    def renew_slot(self, agent_name: str, execution_id: str) -> bool:
+        """#2433: re-anchor a HELD slot's lease at 'now'.
+
+        The slot's TTL (``timeout_seconds + SLOT_TTL_BUFFER``) is set at
+        acquire, i.e. at admission. An execution parked in the backend
+        agent-call queue spends that lease without running, so a long park
+        (or park + run) got the slot reclaimed under a live execution —
+        Phase 3 then saw the agent still running it, skipped the FAILED
+        write, and the agent ran overbooked. The limiter's refresher calls
+        this every tick while an execution is parked, and once more at grant.
+
+        Moves the ZSET score AND the metadata-hash TTL **together**, so canary
+        S-03's reconstruction (``ttl_remaining + (read − score)``) stays exactly
+        at the floor. ``ZADD XX`` never resurrects a slot that was already
+        released/reclaimed — a renewal of a missing member is a no-op that
+        returns False, and a slot whose metadata hash is already gone is
+        refused rather than half-renewed (see below).
+
+        Synchronous on purpose: it is called from the refresher's worker
+        thread (``asyncio.to_thread``), never on the event loop.
+        """
+        slots_key = self._slots_key(agent_name)
+        metadata_key = self._metadata_key(agent_name, execution_id)
+        try:
+            # #2433 review: read the metadata hash BEFORE moving the score. If
+            # the hash has already expired, `zadd XX` still succeeds while
+            # `expire` is a silent no-op — so the old order returned True while
+            # leaving (and re-anchoring) exactly the ZSET-without-hash state
+            # canary S-03 reports as `missing`. Refusing here neither creates
+            # that state nor perpetuates it, and the return value stays honest:
+            # the caller logs `renewed=False` instead of a renewal that is not
+            # there. The hash is not rebuilt — its `timeout_seconds` is this
+            # execution's own budget and is unknowable from here.
+            stored_timeout = self.redis.hget(metadata_key, "timeout_seconds")
+            if stored_timeout is None:
+                logger.debug(
+                    f"[Slots] renew_slot skipped for {execution_id} on '{agent_name}': "
+                    f"metadata hash already expired (S-03 'missing' state)"
+                )
+                return False
+            changed = self.redis.zadd(slots_key, {execution_id: time.time()}, xx=True, ch=True)
+            if not changed:
+                return False
+            try:
+                effective_ttl = int(stored_timeout) + SLOT_TTL_BUFFER
+            except (ValueError, TypeError):
+                effective_ttl = DEFAULT_SLOT_TTL_SECONDS
+            self.redis.expire(metadata_key, effective_ttl)
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-open bookkeeping
+            logger.debug(f"[Slots] renew_slot failed for {execution_id} on '{agent_name}': {e}")
+            return False
+
     @staticmethod
     async def _safe_invoke(
         cb: Callable[[str], Awaitable[None]], agent_name: str

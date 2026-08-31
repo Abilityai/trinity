@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, and_
+from sqlalchemy import select, insert, update, and_, func
 
 from ..engine import get_engine
 from ..query_helpers import latest_per_group
@@ -286,6 +286,55 @@ class ScheduleExecutionsMixin:
                     )
                 )
                 .values(claude_session_id=sentinel)
+            )
+            return result.rowcount > 0
+
+    def restamp_execution_dispatch(self, execution_id: str) -> bool:
+        """#2433: re-anchor a RUNNING row's clock at the moment the backend
+        actually handed the call to the agent, after a park in the backend
+        agent-call queue.
+
+        ``started_at`` is written at admission, but every age check reads it
+        as "the run began": the registry-blind Phase-1 stale sweep
+        (``mark_stale_executions_failed``), canary E-01, the watchdog's 60s
+        dispatch grace, and ``duration_ms`` at the terminal write. A long park
+        therefore spent the run's own budget — a row parked 20 min and then
+        run for 50 min against a 3600s timeout was bulk-FAILed **mid-run**,
+        its slot TTL-reclaimed, and its ``duration_ms`` recorded the park. The
+        backlog spill already defines ``started_at`` as *left the queue*
+        (``queue.py``: "reset started_at so drain records a clean run window");
+        the limiter is a second, hidden queue, so the same rule applies.
+
+        The admission instant is preserved in ``queued_at`` (only when it was
+        NULL — a drained backlog row keeps its own), so a parked row carries the
+        same ``queued_at``/``started_at`` shape as a drained one and the wait is
+        visible in the row rather than erased. CAS: RUNNING + NULL lease only
+        (pull rows are owned by the lease reaper); a row that went terminal
+        during the park is left alone.
+
+        Returns:
+            True if the row was re-stamped.
+        """
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.lease_expires_at.is_(None),
+                    )
+                )
+                .values(
+                    started_at=now,
+                    # SET expressions read the pre-update row on both dialects,
+                    # so this captures the ADMISSION started_at, not `now`.
+                    queued_at=func.coalesce(
+                        schedule_executions.c.queued_at,
+                        schedule_executions.c.started_at,
+                    ),
+                )
             )
             return result.rowcount > 0
 
