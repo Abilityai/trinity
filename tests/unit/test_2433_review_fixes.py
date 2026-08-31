@@ -216,9 +216,19 @@ async def test_a_fast_first_call_still_never_touches_redis(limiter, fake_redis, 
 
 
 @pytest.mark.asyncio
-async def test_publish_and_check_is_fail_soft(limiter, monkeypatch):
-    """A Redis error at grant reads as 'no cancel', exactly as the bare read
-    it replaced did — it must never abort a dispatch."""
+async def test_publish_and_check_is_fail_soft_and_the_residual_is_recorded(limiter, monkeypatch):
+    """A Redis error at grant reads as 'no cancel', exactly as the bare read it
+    replaced did — it must never abort a dispatch (every other Redis touch in
+    this subsystem is fail-open; failing closed would fail EVERY dispatch on a
+    blip).
+
+    The second half of that is the residual, recorded here as well as in the
+    helper's docstring because "fails soft" reads as covering both halves and
+    covers only the read: the transition is then never published either, so a
+    remote worker with a healthy connection can still read a stale `parked` and
+    finalize CANCELLED under this live POST. Bounded by the negative cache plus
+    one tick, and unreachable on a HARD outage (a process whose client is None
+    never wrote a marker, so the remote routes through the agent)."""
     class _Boom:
         def pipeline(self, *a, **k):
             raise ConnectionError("down")
@@ -226,7 +236,8 @@ async def test_publish_and_check_is_fail_soft(limiter, monkeypatch):
     monkeypatch.setattr(limiter, "_client_factory", lambda: _Boom())
     async with limiter.track_inflight_dispatch("exec-boom", "agent-a", http_timeout=60):
         async with limiter.acquire_agent_call_slot("agent-a", execution_id="exec-boom"):
-            pass  # no raise
+            pass  # no raise — the dispatch proceeds, which is the documented direction
+    assert limiter.INFLIGHT_REDIS_RETRY_SECONDS > 0, "the residual's bound must exist"
 
 
 # ---------------------------------------------------------------------------
@@ -334,57 +345,254 @@ def test_a_long_turn_entering_its_drain_is_still_reported(monkeypatch):
     assert "long-eid" in reg.list_recently_completed_ids()
 
 
-def _stdin_write_is_guarded(path: Path) -> bool:
-    """True when every `process.stdin.write(...)` in the module sits inside a
-    `try` whose handler calls `unregister`."""
-    tree = ast.parse(path.read_text())
+AGENT_SERVER = _ROOT / "docker" / "base-image" / "agent_server"
 
-    def _writes(node) -> bool:
-        for n in ast.walk(node):
-            if (
-                isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "write"
-                and isinstance(n.func.value, ast.Attribute)
-                and n.func.value.attr == "stdin"
-            ):
-                return True
+
+def _is_registry_module(tree: ast.AST, source: str) -> bool:
+    """A module is in scope when it drives the process registry — that is what
+    makes a live registration reachable from a `stdin.write`. A module that
+    writes to a subprocess without ever registering it is a different (and not
+    leaky) shape, and requiring `unregister` there would be nonsense."""
+    if "process_registry" not in source and "get_process_registry" not in source:
         return False
+    return any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "register"
+        for n in ast.walk(tree)
+    )
 
-    def _unregisters(node) -> bool:
-        return any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "unregister"
-            for n in ast.walk(node)
-        )
 
-    guarded = 0
-    total = sum(1 for n in ast.walk(tree) if _writes(n) and isinstance(n, ast.Expr))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
+def _stdin_writes(node: ast.AST):
+    """Every `<something>.stdin.write(...)` call in this subtree."""
+    return [
+        n for n in ast.walk(node)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "write"
+        and isinstance(n.func.value, ast.Attribute)
+        and n.func.value.attr == "stdin"
+    ]
+
+
+def _unregisters(nodes) -> bool:
+    return any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "unregister"
+        for node in nodes for n in ast.walk(node)
+    )
+
+
+def _unguarded_stdin_writes(source: str, label: str):
+    """Return `(label, lineno)` for every stdin write that no `unregister` will
+    cover. Two shapes are accepted, because both occur in the tree:
+
+    * **local** — the write sits in a `try` whose handlers or `finally`
+      unregister (`claude_code`, `gemini_runtime` x2 after this PR);
+    * **caller-paired** — the write's enclosing function is *referenced* inside
+      a `try` whose `finally` unregisters, so an exception propagates to that
+      `finally` (`headless_executor._run_headless_subprocess`, handed to
+      `run_in_executor` inside `execute_headless_task`'s guarded try).
+
+    Cross-MODULE caller pairing is deliberately not modelled: it would fail
+    loudly here rather than pass silently, which is the safe direction for a
+    guard. A module with no stdin write is vacuously clean (empty list) —
+    never a failure.
+    """
+    tree = ast.parse(source)
+    if not _is_registry_module(tree, source):
+        return []
+
+    guarded_nodes = set()
+    covered_names = set()
+    for t in ast.walk(tree):
+        if not isinstance(t, ast.Try):
             continue
-        if not any(_writes(stmt) for stmt in node.body):
+        if not _unregisters(list(t.handlers) + list(t.finalbody)):
             continue
-        if any(_unregisters(h) for h in node.handlers) or _unregisters(
-            ast.Module(body=node.finalbody, type_ignores=[])
-        ):
-            guarded += sum(1 for stmt in node.body if _writes(stmt))
-    return total > 0 and guarded == total
+        for w in _stdin_writes(ast.Module(body=t.body, type_ignores=[])):
+            guarded_nodes.add(w)
+        for n in ast.walk(ast.Module(body=t.body, type_ignores=[])):
+            if isinstance(n, ast.Name):
+                covered_names.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                covered_names.add(n.attr)
+
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        caller_paired = fn.name in covered_names
+        for w in _stdin_writes(fn):
+            if w in guarded_nodes or caller_paired:
+                continue
+            offenders.append((label, w.lineno))
+    return offenders
 
 
-@pytest.mark.parametrize(
-    "rel",
-    [
-        "docker/base-image/agent_server/services/gemini_runtime.py",
-        "docker/base-image/agent_server/services/claude_code.py",
-    ],
-)
-def test_register_is_paired_with_the_stdin_write_failure_path(rel):
-    """`register()` SIGKILLs the group when a cancel landed while the execution
-    was pending, so the very next `stdin.write` can raise BrokenPipeError. The
-    `finally: unregister()` guards only the reader further down — without this
-    pairing the entry leaks, and a leaked entry blocks orphan recovery for a
-    whole RECENTLY_COMPLETED TTL."""
-    assert _stdin_write_is_guarded(_ROOT / rel), f"{rel}: stdin.write is not paired with unregister"
+def _pairing_mechanisms(source: str):
+    """`{lineno: "local" | "caller"}` for every stdin write in a registry
+    module. Coverage by CALLER is name-based (no call-graph), so a collision
+    between a guarded try's identifiers and a function name could in principle
+    mask a real offender — a false NEGATIVE. Pinning the mechanism per known
+    site is the cheap defence: if a site silently switches from `local` to
+    `caller` (or the reverse), the test says so instead of passing on the
+    weaker path."""
+    tree = ast.parse(source)
+    guarded_nodes = set()
+    covered_names = set()
+    for t in ast.walk(tree):
+        if not isinstance(t, ast.Try):
+            continue
+        if not _unregisters(list(t.handlers) + list(t.finalbody)):
+            continue
+        body = ast.Module(body=t.body, type_ignores=[])
+        guarded_nodes.update(_stdin_writes(body))
+        for n in ast.walk(body):
+            if isinstance(n, ast.Name):
+                covered_names.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                covered_names.add(n.attr)
+
+    out = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for w in _stdin_writes(fn):
+            if w in guarded_nodes:
+                out[w.lineno] = "local"
+            elif fn.name in covered_names:
+                out[w.lineno] = "caller"
+    return out
+
+
+def _agent_server_registry_modules():
+    """DISCOVER, never enumerate. A hardcoded list is the failure this guard
+    exists to prevent one level up (#1677's caller-parity guard walks every
+    call site; Invariant #5: 'a guard that walks only one of the two trees is
+    not a guard'). A filename glob is not enough either — `claude_code.py` and
+    `headless_executor.py` are both real sites and match no `*_runtime.py`."""
+    return sorted(
+        p for p in AGENT_SERVER.rglob("*.py")
+        if _is_registry_module(ast.parse(p.read_text()), p.read_text())
+    )
+
+
+def test_no_agent_server_module_writes_stdin_without_pairing_unregister():
+    """#2448: `register()` SIGKILLs the group when a cancel landed while the
+    execution was pending, so the next `stdin.write` can raise BrokenPipeError.
+    An unpaired write leaks the registry entry, and a leaked entry blocks that
+    row's orphan recovery for a whole RECENTLY_COMPLETED TTL.
+
+    The predecessor of this test ENUMERATED two files and therefore guarded
+    nothing (#2435 re-review) — it is the discovery that makes the claim true."""
+    modules = _agent_server_registry_modules()
+    offenders = []
+    for path in modules:
+        offenders += _unguarded_stdin_writes(path.read_text(), str(path.relative_to(_ROOT)))
+    assert not offenders, (
+        "stdin.write not paired with unregister:\n"
+        + "\n".join(f"  {f}:{ln}" for f, ln in offenders)
+        + "\n\nAccepted shapes: wrap the write in `try/except BaseException: "
+          "unregister(); raise`, or call the writing function from inside a try "
+          "whose `finally` unregisters."
+    )
+
+
+def test_the_guard_actually_discovers_the_known_sites():
+    """A discovery guard that discovers nothing passes vacuously — pin the
+    floor so a broken walk (moved tree, renamed package) fails loudly."""
+    found = {p.name for p in _agent_server_registry_modules()}
+    assert {"claude_code.py", "gemini_runtime.py", "headless_executor.py", "codex_runtime.py"} <= found, found
+
+    writes = sum(
+        len(_stdin_writes(ast.parse(p.read_text())))
+        for p in _agent_server_registry_modules()
+    )
+    assert writes >= 4, f"expected the 4 known stdin writes, examined {writes}"
+
+
+def test_each_known_site_is_pinned_to_its_pairing_mechanism():
+    """`claude_code` and `gemini_runtime` are paired LOCALLY (the write sits in
+    its own try/except that unregisters). `headless_executor` is paired at its
+    CALLER — `_run_headless_subprocess` is handed to `run_in_executor` inside
+    `execute_headless_task`'s guarded try — which is why an enumerating guard
+    (or a `*_runtime.py` glob) never saw it as a site at all."""
+    svc = AGENT_SERVER / "services"
+    assert set(_pairing_mechanisms((svc / "claude_code.py").read_text()).values()) == {"local"}
+    gemini = _pairing_mechanisms((svc / "gemini_runtime.py").read_text())
+    assert len(gemini) == 2 and set(gemini.values()) == {"local"}
+    headless = _pairing_mechanisms((svc / "headless_executor.py").read_text())
+    assert len(headless) == 1 and set(headless.values()) == {"caller"}
+
+
+def test_the_guard_catches_an_unpaired_new_runtime():
+    """#2448 — the reviewer's PoC: a new runtime dropped into the tree with a
+    bare write must be caught. The enumerating guard answered '2 passed, 13
+    deselected' to exactly this."""
+    src = """
+from ..services.process_registry import get_process_registry
+
+def execute(prompt, process, execution_id):
+    get_process_registry().register(execution_id, process, metadata={})
+    process.stdin.write(prompt)
+    process.stdin.close()
+"""
+    assert _unguarded_stdin_writes(src, "mistral_runtime.py") == [("mistral_runtime.py", 6)]
+
+
+def test_the_guard_accepts_both_pairing_shapes():
+    local = """
+from ..services.process_registry import get_process_registry
+
+def execute(prompt, process, eid):
+    get_process_registry().register(eid, process, metadata={})
+    try:
+        process.stdin.write(prompt)
+    except BaseException:
+        get_process_registry().unregister(eid)
+        raise
+"""
+    caller = """
+from ..services.process_registry import get_process_registry
+
+def _run(ctx, process):
+    get_process_registry().register(ctx.eid, process, metadata={})
+    process.stdin.write(ctx.prompt)
+
+async def execute(ctx):
+    registry = get_process_registry()
+    try:
+        await loop.run_in_executor(None, _run, ctx)
+    finally:
+        registry.unregister(ctx.eid)
+"""
+    assert _unguarded_stdin_writes(local, "local.py") == []
+    assert _unguarded_stdin_writes(caller, "caller.py") == []
+
+
+def test_a_registry_module_with_no_stdin_write_is_vacuously_clean():
+    """`codex_runtime` registers but uses `stdin=DEVNULL`. The old helper
+    returned `total > 0 and guarded == total`, so a discovered file with no
+    write would have read as a FAILURE the moment the guard stopped
+    enumerating."""
+    src = """
+from ..services.process_registry import get_process_registry
+
+def execute(process, eid):
+    get_process_registry().register(eid, process, metadata={})
+"""
+    assert _unguarded_stdin_writes(src, "codex_like.py") == []
+    codex = AGENT_SERVER / "services" / "codex_runtime.py"
+    assert _unguarded_stdin_writes(codex.read_text(), "codex_runtime.py") == []
+
+
+def test_a_non_registry_module_is_out_of_scope():
+    """A module that writes to a subprocess without registering it is a
+    different shape; demanding `unregister` there would be nonsense."""
+    src = """
+def run(process, payload):
+    process.stdin.write(payload)
+    process.stdin.close()
+"""
+    assert _unguarded_stdin_writes(src, "plain.py") == []
 
 
 # ---------------------------------------------------------------------------

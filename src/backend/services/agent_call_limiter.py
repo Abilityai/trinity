@@ -557,8 +557,29 @@ def _publish_calling_and_check_cancel_sync(entry: InflightEntry) -> bool:
     CAS. See ``_set_cancel_then_reread_phase_sync`` for the ordering proof.
 
     Returns True when a cancel is already pending (the caller raises before
-    dispatching). Fails soft — a Redis error reads as "no cancel", exactly
-    as the bare read it replaces did.
+    dispatching).
+
+    **Fail-soft applies to the READ half only, and the WRITE half's failure is
+    not harmless — say so rather than let "fails soft" cover both.** A Redis
+    error here reads as "no cancel" exactly as the bare read it replaces did,
+    so the dispatch proceeds; but the transition is then also never published,
+    so the marker keeps advertising ``parked``. If the OTHER worker's
+    connection is healthy where this one's is not, its
+    ``_set_cancel_then_reread_phase_sync`` reads that stale ``parked``,
+    finalizes the row CANCELLED and releases the slot while this worker POSTs
+    — the original symptom, on the Redis-error path. Bounded, not closed: the
+    failure arms a ``INFLIGHT_REDIS_RETRY_SECONDS`` (30s) negative cache in
+    THIS process, so the refresher cannot republish either until it lapses and
+    the next tick lands (≤ ``INFLIGHT_TICK_SECONDS``).
+
+    It needs a per-connection transient failure on one worker while the other
+    is healthy. A HARD unavailability is safe by construction: ``_get_client()``
+    returning None here means this process's refresher never wrote a marker
+    either, so the remote's first read answers None and routes through the
+    agent. Failing CLOSED (refusing to dispatch when the publish fails) was
+    rejected — every other Redis touch in this subsystem is fail-open, so a
+    blip would fail every dispatch — and a retry cannot close it either, since
+    the remote's read can still win the interleaving.
     """
     client = _get_client()
     if client is None:

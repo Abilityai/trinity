@@ -2592,9 +2592,10 @@
         "agent-server",
         "watchdog",
         "concurrency",
-        "regression"
+        "regression",
+        "static-guard"
       ],
-      "description": "PR #2435 review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (the parked->calling transition is published in the same round-trip that reads the cancel key); the exited-but-registered set is TTL-bounded so a leaked entry stops blocking orphan recovery; register() is paired with the stdin-write failure path; the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
+      "description": "PR #2435 review + re-review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (parked->calling is published in the same round-trip that reads the cancel key; the Redis-error residual is recorded, not claimed closed); the exited-but-registered set is TTL-bounded from first observation of the exit; a DISCOVERING guard walks every agent_server module that drives the process registry and requires each stdin.write to be paired with unregister either locally or at its caller (an enumerating list missed the live headless_executor site); the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
     }
   ]
 }
