@@ -155,7 +155,12 @@ def test_a_dispatch_failure_never_loses_the_answer(asks, monkeypatch):
     monkeypatch.setattr(ors, "spawn_resume_dispatch", _boom, raising=False)
 
     out = asks.answer_ask("q1", "x@example.com", False, response="Ship it", response_text=None)
-    assert out.status in ("pending", "expired")  # projection maps DB status; the point is it returned at all
+    # The answer survived the spawn failure — that is the point of the test.
+    # `answered`, not `pending`: the row IS answered, and reporting otherwise
+    # beside `resume_requested` was the contradiction this assertion used to
+    # paper over ("projection maps DB status; the point is it returned at all").
+    assert out.status == "answered"
+    assert out.resume_requested is False, "a spawn that raised must not claim a resume"
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +264,30 @@ def test_both_answer_routes_use_the_same_dispatch(asks):
     client_src = inspect.getsource(asks)
     assert "spawn_resume_dispatch" in operator_src
     assert "spawn_resume_dispatch" in client_src
+
+
+# ---------------------------------------------------------------------------
+# The projected status (review pass 2, non-blocking)
+# ---------------------------------------------------------------------------
+def test_an_answered_ask_does_not_come_back_as_pending(asks):
+    """`status: "pending"` beside `resume_requested: true` is one row saying both
+    that nobody has answered it and that answering it started work."""
+    assert asks._status_of({"status": "responded"}) == "answered"
+    assert asks._status_of({"status": "acknowledged"}) == "answered"
+
+
+def test_the_listing_statuses_are_unchanged(asks):
+    """`answered` is reachable only from the answer response — the listing
+    carries pending and expired rows and must keep reading exactly as before."""
+    assert asks._status_of({"status": "pending"}) == "pending"
+    assert asks._status_of({"status": "pending",
+                            "expires_at": "2000-01-01T00:00:00Z"}) == "expired"
+    assert asks._status_of({}) == "pending"
+
+
+def test_an_expired_answer_still_reads_as_answered(asks):
+    """An answer that landed is a fact; an `expires_at` that has since passed
+    does not un-answer it. Ordering, pinned — the obvious refactor is to test
+    expiry first, which would make a slow client's own answer vanish."""
+    assert asks._status_of({"status": "responded",
+                            "expires_at": "2000-01-01T00:00:00Z"}) == "answered"

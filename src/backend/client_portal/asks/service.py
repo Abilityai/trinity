@@ -50,6 +50,30 @@ def _is_expired(item: dict) -> bool:
     return bool(expires_at) and expires_at <= utc_now_iso()
 
 
+# Queue statuses that mean "this has been answered". `acknowledged` is the
+# operator-side terminal for the same thing; both read as answered to a client,
+# which has no vocabulary for the distinction and no surface that uses it.
+_ANSWERED_STATUSES = frozenset({"responded", "acknowledged"})
+
+
+def _status_of(item: dict) -> str:
+    """`pending` | `expired` | `answered` (ent#430 review).
+
+    The listing only ever carries pending and expired rows, so `answered` is
+    reachable from ONE place: the response to an answer that was just recorded.
+    That response used to read `status: "pending"` beside
+    `resume_requested: true` — a row simultaneously reporting that nobody has
+    answered it and that answering it started work. Harmless while the second
+    field did not exist; actively contradictory once it did.
+
+    Answered is checked BEFORE expiry: an answer that landed is a fact, and an
+    `expires_at` that has since passed does not un-answer it.
+    """
+    if (item.get("status") or "") in _ANSWERED_STATUSES:
+        return "answered"
+    return "expired" if _is_expired(item) else "pending"
+
+
 def _project(item: dict, *, resume_requested: Optional[bool] = None) -> WorkspaceAsk:
     """The explicit client-facing projection (see `WorkspaceAsk`).
 
@@ -71,7 +95,7 @@ def _project(item: dict, *, resume_requested: Optional[bool] = None) -> Workspac
         options=item.get("options") if isinstance(item.get("options"), list) else None,
         created_at=item.get("created_at") or "",
         expires_at=item.get("expires_at"),
-        status="expired" if _is_expired(item) else "pending",
+        status=_status_of(item),
         chat_id=chat_id if isinstance(chat_id, str) else None,
         resume_requested=resume_requested,
     )
@@ -280,10 +304,22 @@ def _resume_requested(agent_name: str) -> bool:
     `operator_resume_dispatch` audit entry (ent#329) — operator-visible, which
     is the surface that can act on it.
 
-    Read from the SAME accessor `maybe_dispatch_resume` gates on, so the two
-    cannot disagree about what is about to happen. Fails CLOSED: an unreadable
-    flag claims nothing, because over-claiming is precisely the failure AC #5
-    names — an ask that reads as acted upon while nothing happened.
+    This is the SAME accessor `maybe_dispatch_resume` gates on, but it is a
+    SECOND read of it, taken a task hop earlier — and the earlier draft of this
+    docstring claimed the two "cannot disagree", which is true of the accessor
+    and false of the instant. An owner who disables the opt-in between this line
+    and the dispatch gets `resume_requested: true` and no resume. That window is
+    accepted rather than closed, and the reason it cannot simply be one read is
+    that the two reads answer different questions: this one is synchronous and
+    must produce a value for THIS response, while the dispatch's own read is the
+    authority at the moment it would spend. Collapsing them either makes the
+    response wait for a background task or lets a stale verdict authorise a
+    spend — both worse than a rare over-report that AC #5's own remedy (the
+    FAILED row plus the `operator_resume_dispatch` audit entry) already covers.
+
+    Fails CLOSED: an unreadable flag claims nothing, because over-claiming is
+    precisely the failure AC #5 names — an ask that reads as acted upon while
+    nothing happened.
     """
     try:
         return bool(db.get_operator_resume_enabled(agent_name))
