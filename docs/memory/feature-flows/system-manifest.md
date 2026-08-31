@@ -2273,9 +2273,18 @@ is an inference from a naming convention. The prefix survives only as a fallback
 for pre-tag deployments, and it is narrowed — an agent carrying some other tag
 `T` whose own prefix claims it (`name.startswith(f"{T}-")`) is excluded, so a
 tagged `acme-extra` agent is never captured by `acme` even on that path. A tag
-read that fails degrades to the prefix rather than 500ing. Residual, stated
-rather than hidden: two systems deployed BEFORE tagging where one name is a
-prefix of the other stay ambiguous — nothing distinguishes them. This predicate
+read that fails degrades to the prefix rather than 500ing, narrowed only where
+the ROSTER evidences a longer sibling — an agent literally named `acme-extra`
+sitting beside `acme-extra-worker`. It deliberately does NOT narrow on name
+SHAPE: excluding any member whose short name contains a hyphen is strictly
+narrower than the prefix it claims to fall back to, and dropped all eleven
+`vc-due-diligence-dd-*` agents of the bundled flagship manifest — turning a
+healthy fleet into `404 System not found` and an empty export on a transient
+error. Residual, stated rather than hidden: two systems deployed BEFORE tagging
+where one name is a prefix of the other stay ambiguous — on a roster of names
+alone `acme-extra-worker` and `vc-due-diligence-dd-lead` are indistinguishable,
+so with no evidence `acme` may still capture the former. Losing a healthy system
+entirely is the worse of the two errors. This predicate
 is also the prerequisite for the teardown verb, where the same collision would
 delete rather than restart.
 

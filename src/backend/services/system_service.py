@@ -839,7 +839,27 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
                 for t in (tags_by_agent.get(name) or [])
             )
         else:
-            excluded = "-" in name[len(prefix):]
+            # #2373 review (C2): narrow against the OBSERVED ROSTER, never
+            # against the shape of the name.
+            #
+            # The previous rule was `"-" in name[len(prefix):]` — exclude any
+            # member whose short name contains a hyphen. That is strictly
+            # NARROWER than the raw prefix it claimed to degrade to, and the
+            # bundled flagship manifest is entirely inside the gap:
+            # `config/manifests/vc-due-diligence.yaml` names all eleven agents
+            # `dd-*`, so every deployed name is `vc-due-diligence-dd-<x>`, every
+            # remainder contains a hyphen, and a transient tag-read error turned
+            # a healthy fleet into `404 System not found` and an empty export.
+            #
+            # A longer sibling system is only a real possibility when the roster
+            # SHOWS one: `acme-extra-worker` may belong to `acme-extra` exactly
+            # when an agent named `acme-extra` exists. With no such evidence this
+            # degrades to the raw prefix — the documented pre-tag behaviour, and
+            # what the docstring and the flow doc actually promise.
+            excluded = any(
+                other != name and name.startswith(f"{other}-")
+                for other in agent_names
+            )
         if not excluded:
             narrowed.append(name)
 
@@ -985,6 +1005,28 @@ async def start_all_agents(agent_names: List[str]) -> Dict[str, str]:
     return results
 
 
+def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
+    """The manifest key for a member, or None when it cannot have one.
+
+    #2373 review (C1): a manifest agent key IS the short name, and the short name
+    only exists for a member that actually carries the `<system>-` prefix.
+    Membership since this change also admits TAG-ONLY members, whose names carry
+    no prefix at all — so a blind `name[len(system)+1:]` slice produces garbage:
+    `helper` under system `acme` slices to `r`, and two tag-only members under
+    `content-production` both slice to `''`, colliding on one dict key.
+
+    Either way the exported manifest fails its own `validate_manifest` on
+    re-deploy — the round trip broken by the export, not the import. Returning
+    None lets each caller SKIP and report, which is what AC #3 asks for: drop or
+    scope the edge, never blind-slice it.
+    """
+    prefix = f"{system_name}-"
+    if not full_name.startswith(prefix):
+        return None
+    short = full_name[len(prefix):]
+    return short or None
+
+
 def export_manifest(system_name: str, agents: List[Dict]) -> str:
     """
     Export a system as a YAML manifest.
@@ -1023,11 +1065,13 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
-        if not full_name.startswith(prefix):
+        # ONE rule for "what is this member's manifest key", shared with both
+        # permission loops (#2373 review C1) — a guarded slice here and a blind
+        # one there is exactly how the two loops drifted apart.
+        short_name = _member_short_name(full_name, system_name)
+        if short_name is None:
             unprefixed.append(full_name)
             continue
-        # Remove system prefix and hyphen
-        short_name = full_name[len(system_name) + 1:]
 
         # #1759: `or`, NOT a `.get` default. Every Blank Agent's dict carries
         # `"template": None` (routers/agents.py builds the label as
@@ -1165,12 +1209,20 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                         # round trip was broken by the export, not the import.
                         explicit_perms = {}
                         for agent in agents:
-                            short_name = agent['name'][len(system_name) + 1:]
+                            # #2373 review (C1): prefix-safe on BOTH sides of the
+                            # edge. A tag-only member has no manifest key, so its
+                            # edges cannot be represented — skip rather than emit
+                            # a sliced-to-garbage key that breaks the round trip.
+                            short_name = _member_short_name(agent['name'], system_name)
+                            if short_name is None:
+                                continue
                             agent_perms = db.get_agent_permissions(agent['name'])
                             targets = [
-                                p["target_agent"][len(system_name) + 1:]
-                                for p in agent_perms
-                                if p["target_agent"] in member_names
+                                t for t in (
+                                    _member_short_name(p["target_agent"], system_name)
+                                    for p in agent_perms
+                                    if p["target_agent"] in member_names
+                                ) if t is not None
                             ]
                             if targets:
                                 explicit_perms[short_name] = targets
@@ -1181,15 +1233,21 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                     # Export explicit permissions
                     explicit_perms = {}
                     for agent in agents:
-                        short_name = agent['name'][len(system_name) + 1:]
+                        # #2373 review (C1): see the sibling branch — membership
+                        # admits tag-only members, which have no manifest key.
+                        short_name = _member_short_name(agent['name'], system_name)
+                        if short_name is None:
+                            continue
                         agent_perms = db.get_agent_permissions(agent['name'])
                         # #2373: membership, not the prefix — `acme` must not
                         # export an edge to an `acme-extra` agent as though it
                         # were its own member.
                         targets = [
-                            p["target_agent"][len(system_name) + 1:]
-                            for p in agent_perms
-                            if p["target_agent"] in member_names
+                            t for t in (
+                                _member_short_name(p["target_agent"], system_name)
+                                for p in agent_perms
+                                if p["target_agent"] in member_names
+                            ) if t is not None
                         ]
                         if targets:
                             explicit_perms[short_name] = targets

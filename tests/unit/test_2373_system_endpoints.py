@@ -247,12 +247,22 @@ def test_export_scopes_permission_edges_to_members_in_both_branches():
     pointing outside the system was blind-sliced into a garbage short name that
     then failed `validate_manifest` on re-deploy — the export broke its own
     round trip."""
+    # Review pass 3: this was a SOURCE COUNT (`slices == guarded == 2`) and it
+    # passed while the bug was live — the guard it counted filters membership,
+    # which since this change ADMITS tag-only members whose names carry no
+    # prefix at all. Replaced with an assertion about the property: no blind
+    # length-slice survives anywhere in the exporter.
     from services import system_service
     src = _code_only(inspect.getsource(system_service.export_manifest))
-    slices = src.count('p["target_agent"][len(system_name) + 1:]')
-    guarded = src.count('if p["target_agent"] in')
-    assert slices == guarded == 2, (
-        "every target slice must be guarded by membership"
+    assert "[len(system_name) + 1:]" not in src, (
+        "export_manifest slices a name by prefix length without checking the "
+        "prefix is present — `helper` under system `acme` becomes `r`, and two "
+        "tag-only members under `content-production` both become '' and collide "
+        "on one manifest key (C1)"
+    )
+    assert src.count("_member_short_name(") >= 4, (
+        "both permission loops must resolve BOTH sides of each edge through the "
+        "prefix-safe helper"
     )
     assert 'startswith(f"{system_name}-")' not in src
 
@@ -381,11 +391,25 @@ def test_a_failed_tag_read_does_not_re_open_2373(monkeypatch):
         raise RuntimeError("tags table unavailable")
 
     monkeypatch.setattr(svc.db, "get_tags_for_agents", _boom, raising=False)
-    out = svc.system_member_names("acme", ["acme-web", "acme-extra-worker"])
+    # Review pass 3 (C2): the roster now carries `acme-extra` itself, because
+    # that is what makes the sibling system OBSERVABLE. The previous fixture was
+    # `["acme-web", "acme-extra-worker"]`, and the rule that satisfied it —
+    # exclude any member whose short name contains a hyphen — is strictly
+    # narrower than the raw prefix it claims to degrade to: it dropped all
+    # eleven `vc-due-diligence-dd-*` agents of the bundled flagship manifest.
+    #
+    # On a roster of names alone, with tags unreadable, `acme-extra-worker` and
+    # `vc-due-diligence-dd-lead` are genuinely indistinguishable. So the rule
+    # narrows on EVIDENCE and the residual is stated rather than hidden: with no
+    # `acme-extra` on the roster, `acme` may still capture `acme-extra-worker` —
+    # the documented pre-tag behaviour, unchanged from before #2373, on a
+    # transient-error path only. Losing a healthy system entirely is the worse
+    # error of the two.
+    out = svc.system_member_names("acme", ["acme-web", "acme-extra", "acme-extra-worker"])
     assert "acme-web" in out
     assert "acme-extra-worker" not in out, (
-        "a tag-read failure must not capture a longer sibling system — that is "
-        "the bug #2373 exists to fix, re-entered through its own error path"
+        "a tag-read failure must not capture a longer sibling system when the "
+        "roster shows that system exists — #2373 through its own error path"
     )
 
 # ---------------------------------------------------------------------------
@@ -427,4 +451,111 @@ def test_a_member_without_the_prefix_is_skipped_from_the_export_not_mangled(monk
     assert "" not in keys, "an empty agent key collides and fails validate_manifest"
     assert len(keys) == 1, (
         f"tag-only members must be omitted, not mangled into colliding keys; got {keys}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review pass 3 — C1 and C2, both driven through the real functions
+# ---------------------------------------------------------------------------
+
+class _RaisingDb:
+    """Every attribute is a callable that raises — forces the degraded path."""
+
+    def __getattr__(self, name):
+        def _raise(*a, **k):
+            raise RuntimeError("tag read failed")
+        return _raise
+
+
+def test_a_tag_read_failure_keeps_a_hyphenated_short_name(monkeypatch):
+    """C2 — the degraded path must degrade to the PREFIX, not below it.
+
+    The previous rule excluded any member whose short name contained a hyphen.
+    The bundled flagship manifest is entirely inside that gap:
+    `config/manifests/vc-due-diligence.yaml` names all eleven agents `dd-*`, so
+    every deployed name is `vc-due-diligence-dd-<x>` and every remainder has a
+    hyphen. A transient tag-read error therefore turned a healthy, correctly
+    tagged fleet into `404 System not found` on `GET /api/systems/{name}` and an
+    EMPTY export — strictly worse than the raw prefix it claimed to fall back to.
+    """
+    import services.system_service as svc
+
+    monkeypatch.setattr(svc, "db", _RaisingDb(), raising=False)
+    roster = [
+        f"vc-due-diligence-dd-{x}" for x in
+        ("lead", "intake", "tech", "market", "legal", "finance",
+         "refs", "memo", "risk", "ops", "synth")
+    ]
+    got = svc.system_member_names("vc-due-diligence", roster)
+    assert len(got) == 11, (
+        f"a tag-read failure dropped {11 - len(got)} of 11 members of the bundled "
+        f"vc-due-diligence system: {got}"
+    )
+
+
+def test_the_degraded_path_still_excludes_a_REAL_longer_sibling(monkeypatch):
+    """C2 — narrowing is kept, but on roster evidence rather than name shape.
+
+    `acme-extra-worker` may belong to `acme-extra` exactly when an agent named
+    `acme-extra` exists. That is evidence; a hyphen is not.
+    """
+    import services.system_service as svc
+
+    monkeypatch.setattr(svc, "db", _RaisingDb(), raising=False)
+    got = svc.system_member_names("acme", ["acme-web", "acme-extra", "acme-extra-worker"])
+    assert "acme-extra-worker" not in got, got
+    assert "acme-web" in got and "acme-extra" in got, got
+
+
+def test_no_evidence_means_the_raw_prefix(monkeypatch):
+    """With no sibling on the roster the fallback is the documented behaviour."""
+    import services.system_service as svc
+
+    monkeypatch.setattr(svc, "db", _RaisingDb(), raising=False)
+    got = svc.system_member_names("acme", ["acme-web-1", "acme-db"])
+    assert got == ["acme-web-1", "acme-db"], got
+
+
+@pytest.mark.parametrize("full,system,expected", [
+    ("acme-web", "acme", "web"),
+    ("content-production-bot", "content-production", "bot"),
+    ("helper", "acme", None),                    # tag-only member: no key
+    ("bot", "content-production", None),          # would slice to 'ntent-production-bot'[?]
+    ("acme", "acme", None),                       # would slice to ''
+])
+def test_a_member_short_name_is_prefix_safe(full, system, expected):
+    """C1 — a manifest key exists only for a member carrying the prefix.
+
+    Membership now admits TAG-ONLY members, whose names carry no prefix at all,
+    so the blind `name[len(system)+1:]` slice in both permission loops produced
+    garbage: `helper` under `acme` sliced to `r`, and two tag-only members under
+    `content-production` both sliced to `''` — one colliding dict key. Either
+    way the export failed its own `validate_manifest` on re-deploy: the round
+    trip broken by the export, not the import.
+    """
+    from services.system_service import _member_short_name
+
+    assert _member_short_name(full, system) == expected
+
+
+def test_neither_permission_loop_blind_slices():
+    """C1 — the fix must be in BOTH branches, which is how it was missed once.
+
+    The `agent_configs` loop got the prefix skip; the two permission loops did
+    not. Asserted structurally because both branches sit behind a template
+    lookup that a unit test cannot easily reach, and a source count is what
+    previously passed while the bug was live — so this asserts the ABSENCE of
+    the blind slice rather than a count of guards.
+    """
+    import inspect
+    import services.system_service as svc
+
+    src = inspect.getsource(svc.export_manifest)
+    assert "[len(system_name) + 1:]" not in src, (
+        "export_manifest still slices a name by prefix length without checking "
+        "the prefix is there — use _member_short_name (C1)."
+    )
+    assert src.count("_member_short_name(") >= 4, (
+        "both permission loops must use the prefix-safe helper on BOTH sides of "
+        "each edge (source and target)"
     )
