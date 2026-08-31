@@ -66,49 +66,6 @@ def test_recent_work_carries_no_message_cost_or_model(monkeypatch):
     }
 
 
-def test_asks_exclude_platform_alerts(monkeypatch):
-    """`alert` items are platform-generated ops telemetry — sync-failing,
-    git-bloat, breaker dormancy — not something an agent is asking a person.
-    Surfacing them on a client's page is both noise and disclosure.
-
-    The viewer's email is a required argument (ent#428): the addressee filter is
-    applied in SQL, and these two tests stub the query out, so it is the type
-    filter alone that is under test here.
-    """
-    from client_portal import agent_page
-
-    monkeypatch.setattr(agent_page.db, "list_operator_queue_items", lambda **k: [
-        {"id": "1", "type": "alert", "title": "sync failing", "question": "n/a"},
-        {"id": "2", "type": "question", "title": "Which invoice?", "question": "A or B?"},
-        {"id": "3", "type": "approval", "title": "Send it?", "question": "ok?"},
-    ])
-
-    got = agent_page._asks(AGENT, EMAIL)
-
-    assert [a["id"] for a in got] == ["2", "3"]
-
-
-def test_asks_never_carry_context(monkeypatch):
-    """`context` is free-form agent JSON and a known credential-leak surface
-    (canary G-04 exists because secrets have turned up in agent-authored
-    metadata). It is not filtered in the UI — it never leaves the service."""
-    from client_portal import agent_page
-
-    monkeypatch.setattr(agent_page.db, "list_operator_queue_items", lambda **k: [{
-        "id": "1", "type": "question", "title": "t", "question": "q",
-        "context": {"api_key": "sk-live-should-never-appear"},
-    }])
-
-    ask = agent_page._asks(AGENT, EMAIL)[0]
-
-    assert "context" not in ask
-    assert "sk-live" not in repr(ask)
-
-
-# ---------------------------------------------------------------------------
-# Cross-agent isolation on the report read
-# ---------------------------------------------------------------------------
-
 def test_a_report_belonging_to_another_agent_is_not_readable(monkeypatch):
     """Report ids are global. The roster gate only proves the caller may reach
     THIS agent, so without the ownership check its page becomes a reader for
@@ -182,7 +139,10 @@ def test_a_failing_data_source_degrades_that_section_only(monkeypatch):
 
     page = agent_page.build_page(EMAIL, AGENT, {"description": "d"}, window="7d")
 
-    assert page["asks"] == [] and page["recent_work"] == []
+    # #2449: `asks` left this payload — the page renders them from `/asks`
+    # through `PortalAsks`, one projection instead of two.
+    assert "asks" not in page
+    assert page["recent_work"] == []
     assert page["header"]["health"]["status"] == "unknown"
     assert page["stats"]["unavailable"] is True
     assert page["header"]["description"] == "d"   # what IS known still renders

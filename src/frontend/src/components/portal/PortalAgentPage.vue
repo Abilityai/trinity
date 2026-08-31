@@ -105,7 +105,7 @@
           @click="tab = t.id"
         >
           {{ t.label }}
-          <span v-if="t.id === 'overview' && asks.length" class="ml-1 px-1.5 rounded-full bg-action-primary-600 text-white text-[10px]">{{ asksBadge }}</span>
+          <span v-if="t.id === 'overview' && openAskCount" class="ml-1 px-1.5 rounded-full bg-action-primary-600 text-white text-[10px]">{{ openAskCount }}</span>
         </button>
       </nav>
     </header>
@@ -194,51 +194,6 @@
             </ul>
           </section>
         </div>
-
-        <!-- Asks sit BELOW that row, full width, and only when there are any
-             (#2169). No empty state: an agent with nothing waiting must not
-             advertise the section.
-
-             This supersedes #2161's "asks are first in DOM order so the mobile
-             stack keeps the priority" — deliberately, on instruction, not by
-             oversight. The residual is bounded: the Overview tab's ask-count
-             badge lives in the header, which is `shrink-0` and sits OUTSIDE the
-             page scroller, so a narrow viewport still shows the count at every
-             scroll position; only the ask text moves below the fold.
-
-             Everything #2161 built into the card survives: compact cards, a
-             clamped question, the first five plus a counted toggle, and no
-             nested scroll region (#2101) — this page has one scroll axis. -->
-        <section v-if="asks.length" class="mb-6">
-          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
-          <div
-            v-for="a in visibleAsks"
-            :key="a.id"
-            class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3 py-2.5"
-          >
-            <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
-            <p v-if="a.question" class="mt-0.5 text-xs text-gray-600 dark:text-gray-300 line-clamp-3">{{ a.question }}</p>
-            <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1">
-              <span v-for="o in a.options" :key="o" class="text-[11px] rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">{{ o }}</span>
-            </div>
-            <!-- Answering writes to the operator queue, an operator surface
-                 with its own auth. Rather than render a control that 403s for
-                 a client, the answer path is the conversation. -->
-            <button class="mt-1.5 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
-              Reply in chat →
-            </button>
-          </div>
-          <!-- In place, not a nested scroll region: this page has one scroll
-               axis (#2101), and a pane that scrolls inside a page that scrolls
-               traps the gesture on touch. -->
-          <button
-            v-if="asks.length > ASKS_PREVIEW"
-            class="text-xs text-action-primary-600 hover:underline"
-            @click="allAsks = !allAsks"
-          >
-            {{ allAsks ? 'Show fewer' : `Show all ${asksBadge}` }}
-          </button>
-        </section>
 
         <section>
           <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Your chats with {{ agentName }}</h2>
@@ -421,12 +376,10 @@ const WINDOWED_TABS = ['overview', 'activity']
 
 // How many asks show before the toggle. Enough to see there is a queue, few
 // enough that the rest of the Overview stays on screen.
-const ASKS_PREVIEW = 5
 
 // Mirrors `agent_page.MAX_ASKS`. The service truncates there, so a full-length
 // list means "at least this many" — named here rather than inlined so the
 // duplication across the API boundary is visible to whoever changes the cap.
-const ASKS_CAP = 20
 
 const tab = ref('overview')
 const timeWindow = ref('7d')
@@ -455,23 +408,23 @@ const reportErrors = computed(() => (reportsMine.value ? store.reportErrors : {}
 const documents = ref([])
 const uploads = ref([])
 
-const allAsks = ref(false)
-
 const stats = computed(() => page.value?.stats || { total_executions: 0, timeline: [] })
-const asks = computed(() => page.value?.asks || [])
+// #2449: the badge counts the SAME list `PortalAsks` renders, from the same
+// store. It used to count `page.asks` — a second, older projection of the same
+// `operator_queue` rows — which made the page render every ask twice and let
+// the two halves disagree in two ways at once: `page.asks` was capped at 20
+// while `/asks` fetches 200, and it carried no `status`, so an EXPIRED ask was
+// counted here while the sidebar's `askCount` (pending-only, by design — "the
+// person did not fail to answer something they can still answer") left it out.
+// Pending-only here settles that the way the store already documents.
+const openAskCount = computed(
+  () => store.asksForAgent(props.agentName).filter((a) => a.status === 'pending').length,
+)
 // ent#366 — raw counts of how this agent's work landed with people.
 const ratings = computed(() => page.value?.ratings || { up: 0, down: 0, total: 0, unavailable: false })
 const ratingsCaption = computed(() => (
   ratings.value.unavailable ? 'ratings unavailable' : 'helpful / not helpful'
 ))
-const visibleAsks = computed(() => (allAsks.value ? asks.value : asks.value.slice(0, ASKS_PREVIEW)))
-// The service caps asks at MAX_ASKS, so a full list is a floor, not a count —
-// rendering a bare "20" against 50 pending would be a wrong number, not a
-// rounded one.
-const asksBadge = computed(() => (
-  asks.value.length >= ASKS_CAP ? `${ASKS_CAP}+` : String(asks.value.length)
-))
-
 const chartBuckets = computed(() => bucketsForChart(stats.value))
 const hasActivity = computed(() => hasChartActivity(stats.value))
 const recentWork = computed(() => page.value?.recent_work || [])
@@ -560,7 +513,6 @@ watch(() => props.agentName, () => {
   openReport.value = null
   documents.value = []
   uploads.value = []
-  allAsks.value = false
   tab.value = 'overview'
   load()
 })
