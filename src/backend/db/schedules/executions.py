@@ -312,6 +312,15 @@ class ScheduleExecutionsMixin:
         (pull rows are owned by the lease reaper); a row that went terminal
         during the park is left alone.
 
+        **Why re-stamping the row is what reaches ``duration_ms``:** it is
+        computed in ``update_execution_status`` from THIS column, not from the
+        in-coroutine ``start_time`` in ``task_execution_service`` — that one is
+        taken before the capacity acquire and still spans the park, which is
+        why the sibling ``execution_time_ms`` continues to measure park + run
+        and is not a bug. Two clocks, two meanings: ``duration_ms`` answers
+        "how long did the agent run", ``execution_time_ms`` answers "how long
+        did the caller wait". (#2435 review verified this end-to-end.)
+
         Returns:
             True if the row was re-stamped.
         """
