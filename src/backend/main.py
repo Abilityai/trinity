@@ -447,9 +447,10 @@ async def _log_startup_environment() -> None:
 async def _init_docker_and_system_agent() -> None:
     """Roster listing and the system-agent auto-deploy (Phase 11.1).
 
-    Startup phase 4 of 12 (#1028). Extracted VERBATIM from the
-    former 580-line `lifespan`; the body below is unchanged. Ordering between
-    phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
+    Startup phase 4 of 12 (#1028). Extracted from the former 580-line
+    `lifespan` verbatim EXCEPT the re-materialised `_db` import below — see the
+    comment on it. Ordering between phases is load-bearing and pinned by
+    tests/unit/test_1028_lifespan_phases.py.
     """
     # #1028: re-materialised here. In the former 580-line `lifespan` this name
     # was a function-local import bound once near the top and shared with every
@@ -817,7 +818,8 @@ async def _start_slack_transport(app: FastAPI) -> None:
 async def _start_telegram_transport(app: FastAPI) -> None:
     """Telegram webhook transport. Optional; never fails boot.
 
-    Extracted VERBATIM (#1028); the body below is unchanged.
+    Extracted from the former `lifespan` (#1028) verbatim EXCEPT the
+    re-materialised import(s) below — see the comment on them.
     """
     # Start Telegram webhook transport
     # #1028: re-materialised here. In the former 580-line `lifespan` this name
@@ -863,7 +865,8 @@ async def _start_telegram_transport(app: FastAPI) -> None:
 async def _start_whatsapp_transport(app: FastAPI) -> None:
     """WhatsApp (Twilio) webhook transport (WHATSAPP-001). Optional; never fails boot.
 
-    Extracted VERBATIM (#1028); the body below is unchanged.
+    Extracted from the former `lifespan` (#1028) verbatim EXCEPT the
+    re-materialised import(s) below — see the comment on them.
     """
     # Start WhatsApp (Twilio) webhook transport (WHATSAPP-001)
     # #1028: re-materialised here. In the former 580-line `lifespan` this name
