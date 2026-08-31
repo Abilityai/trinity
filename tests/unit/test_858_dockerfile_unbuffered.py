@@ -95,12 +95,37 @@ def test_backend_matches_scheduler_unbuffered() -> None:
 
 
 def _lifespan_body() -> list[ast.stmt]:
-    """Return the top-level statements of main.py's `lifespan` handler."""
+    """The lifespan's statements in EXECUTION order, flattened across phases.
+
+    #1028 split the former 580-line `lifespan` into ordered phase helpers, so
+    `setup_logging()`, the first-run notice and `event_bus.start()` now sit in
+    three different functions. The #858 invariant is an ORDERING one, and after
+    the split the order is expressed by the sequence of `await _phase()` calls —
+    so this expands each awaited helper inline, in call order, and the existing
+    index comparisons below keep meaning exactly what they meant before.
+
+    A helper that cannot be resolved to a module-level function is left as the
+    bare `await` statement rather than skipped, so an unresolvable phase can
+    never silently drop the statements it contains.
+    """
     tree = ast.parse(BACKEND_MAIN.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan":
-            return node.body
-    pytest.fail("async def lifespan(...) not found in src/backend/main.py")
+    fns = {
+        n.name: n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    lifespan = fns.get("lifespan")
+    if lifespan is None:
+        pytest.fail("async def lifespan(...) not found in src/backend/main.py")
+
+    flattened: list[ast.stmt] = []
+    for stmt in lifespan.body:
+        helper = None
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await):
+            call = stmt.value.value
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                helper = fns.get(call.func.id)
+        flattened.extend(helper.body if helper is not None else [stmt])
+    return flattened
 
 
 def _string_content(node: ast.AST) -> str:
