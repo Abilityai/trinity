@@ -279,6 +279,23 @@
 
 ---
 
+### 12.12 Retention Windows Seeded on Every Install (Issue #2085)
+- **Status**: ✅ Implemented (2026-08-28, Issue #2085)
+- **Requirement ID**: RETENTION-003
+- **GitHub Issue**: #2085 (completes the half of #1638 that #1645 left undone)
+- **Description**: #1645 closed #1638 by reverting `OPS_SETTINGS_DEFAULTS` to the wide historical values and applying the #1039 community floor through explicit `system_settings` rows seeded on **fresh installs only**. Every install that has ever *upgraded* rather than been created fresh therefore had **no rows at all**, so `cleanup_service` resolved each of the 11 windows at prune time from a dict that ships inside the backend image and is replaced on every rebuild. The only thing between a future edit to that dict and the #1638 failure mode — a silent hard-DELETE of existing data seconds after the next boot, green `/health`, no error — was a code comment. This seeds an explicit row for every window that has none, at **the value already in force**, so no install resolves a retention window from the image again.
+- **Key Features**:
+  - **`database._seed_retention_windows{,_engine}`** — one writer per backend, called from `init_database()` on **every** boot regardless of install age (unlike the #1638 seed, which is fresh-install-only). Both arms `INSERT OR IGNORE` / `on_conflict_do_nothing`.
+  - **Behaviourally inert** — it writes the number the prune already used, so nothing prunes differently the day it runs. That is what makes it shippable with no migration note and no operator action.
+  - **Key set derived from `RETENTION_OPS_KEYS`**, never a second hand-written list, so a window added later is covered the day it ships rather than quietly inheriting the image default forever (ent#433 added two, #2216 a third — the issue text's "eight windows" was already stale at 11 when this landed).
+  - **Ordering is load-bearing** — MUST run **after** `_seed_fresh_install_retention`. Both writers are insert-or-ignore, so the first to reach a key wins: reversed, a fresh install would silently receive the wide defaults (30/90/7/30) instead of the #1039 floor, deleting the community floor via the change meant to protect retention. Pinned behaviourally **and** by a source-order guard on both the SQLite and engine arms.
+  - **Never clobbers an operator value; idempotent** under the racing workers both migration locks permit (they fail open).
+  - **Fail-safe, never raises** — `init_database()` runs at import, so raising is a permanent boot crash-loop rather than a failed request. A skip leaves the install exactly where it is today, resolving from the wide code defaults.
+  - **`backup_retention_days` included** — it is a retention window with the same image-default exposure. Seeding makes `OPS_SETTINGS_DEFAULTS`' value the one that lands in the DB for a key whose private reader (`db_backup_service.effective_backup_retention_days`, inverted coercion) falls back to its **own** module constant; the two are now parity-tested.
+- **Stated tradeoff**: a seeded install stops inheriting later changes to the code default in **either** direction, so *widening* a window for existing installs becomes a deliberate migration rather than something that arrives silently with an image. That is the intended consequence — retention becomes explicit per-install config instead of implicit inheritance from whatever image happens to be running, symmetric with the rule the `OPS_SETTINGS_DEFAULTS` comment already imposes on narrowing.
+- **Known adjacent gap (not fixed here)**: generic `DELETE /api/settings/{key}` carries no `RETENTION_OPS_KEYS` guard (only `PUT` does), so an admin can still delete a window row. After #2085 that is transient — the next boot re-seeds it — but the asymmetry with `PUT` remains.
+- **Fleet impact**: ops#300 (the `/update` step 8e `CONST_RISK` false positive) is blocked on this shipping and reaching instances; once every install carries rows, step 8e can drop its source-text guessing for a plain assertion over the instance's own stored values.
+
 ## 30. CLI Tool (CLI-001)
 
 ### 30.1 CLI Package
