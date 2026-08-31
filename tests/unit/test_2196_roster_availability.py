@@ -674,7 +674,7 @@ def turn(monkeypatch):
     written = []
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
-    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: "sess-1")
+    monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s, **kw: "sess-1")
     monkeypatch.setattr(portal_db, "get_portal_session", lambda *a, **kw: {"title": "t"})
     monkeypatch.setattr(portal_db, "get_portal_messages", lambda *a, **kw: [])
     monkeypatch.setattr(portal_db, "get_cached_claude_session_id", lambda sid: None)

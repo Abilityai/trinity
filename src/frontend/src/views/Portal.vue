@@ -221,6 +221,7 @@
           :agent="activeAgent"
           :roster="store.agents"
           :session-id="pendingSession"
+          :new-chat="startingNewChat"
           :prefill="prefill"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           @switch-agent="switchAgent"
@@ -434,6 +435,11 @@ const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.nam
 const pickerOpen = ref(false)
 const pickerBusy = ref(false)
 
+// ent#451 — the second bit beside `pendingSession`. Cleared the moment a real
+// thread exists (`openThread`, and the send that gets a session id back), so it
+// can never make a SECOND turn open another thread.
+const startingNewChat = ref(false)
+
 function newChat() {
   pickerOpen.value = true
 }
@@ -583,6 +589,12 @@ function openRoom(roomId) {
   markRead('room', roomId)
   activeRoomId.value = roomId
   pendingSession.value = null
+  // ent#451 review: every site that nulls `pendingSession` also settles the
+  // intent. Latent today because both consumers AND on "no session yet", but a
+  // flag whose meaning depends on a second variable is one refactor from being
+  // wrong, and the declaration at :441 claims it is cleared the moment a real
+  // thread exists.
+  startingNewChat.value = false
   convGen.value++
   router.push(`/workspace/r/${roomId}`)
 }
@@ -595,6 +607,7 @@ function openAgentPage(name) {
   if (!name) return
   unreachableAgent.value = null
   pendingSession.value = null
+  startingNewChat.value = false
   activeRoomId.value = null
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
@@ -608,6 +621,11 @@ function onStartChatFromPage(name, starter) {
 function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
+  // ent#451: this function has always MEANT a fresh chat — it clears
+  // `pendingSession` — but a null session id is also what an unresolved thread
+  // looks like, so the conversation could not tell the two apart and loaded the
+  // agent's most recent thread instead. Saying it explicitly is the fix.
+  startingNewChat.value = true
   pendingSession.value = null; prefill.value = ''; convGen.value++
   // Leave ANY specific route, not an enumerated list of params.
   //
@@ -623,6 +641,9 @@ function newChatWithAgent(name) {
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
   unreachableAgent.value = null
+  // Opening an existing thread is the opposite intent; clear it so a later
+  // send does not still ask for a fresh one.
+  startingNewChat.value = false
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
@@ -634,6 +655,12 @@ function openThread(t) {
 }
 function onSessionAdopted(id) {
   pendingSession.value = id
+  // ent#451: a real thread exists now, so the fresh-start intent is spent.
+  // The send guard already ANDs on "no session yet", so a second turn was never
+  // going to open a third thread — this keeps the two bits from disagreeing
+  // rather than relying on that, and matters when the user navigates away and
+  // back to a thread this flag would otherwise still describe as unborn.
+  startingNewChat.value = false
   if (route.params.sessionId !== id) router.replace(`/workspace/c/${id}`)
   // A thread you are actively talking in is by definition read. This is also
   // what gives a brand-new thread its read cursor, so the very next reply the
@@ -757,7 +784,15 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (!sid || !store.isClientSignedIn) return
   if (pendingSession.value === sid && activeAgentName.value) return
   const known = threads.value.find((t) => (t.id || t.session_id) === sid)
-  if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
+  // ent#451 review: this is "the commonest way in — back/forward, a bookmark
+  // and a reload" (below), and it adopts a REAL thread, so any pending
+  // fresh-start intent is spent here too.
+  if (known) {
+    activeAgentName.value = known.agent_name
+    pendingSession.value = sid
+    startingNewChat.value = false
+    convGen.value++
+  }
   // Opening by ROUTE is an open. Back/forward, a bookmark and a reload all land
   // here rather than in `openThread`, and it is the commonest way in — without
   // this the sidebar badges the conversation on screen, through every reload.
@@ -769,9 +804,15 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
 // surface. The decision itself (which agent, which thread) is a pure function in
 // portalUtils so it can be tested without mounting the shell.
 function resolveAgentQuery() {
+  // ONE local, read twice: `resolveAgentLanding` decides which thread to land
+  // on, and `startingNewChat` decides what the first SEND asks for. Reading
+  // `route.query.new` separately in each place is how they drifted — the
+  // landing honoured `?new=1` and the send did not, so the deep link rendered
+  // an empty conversation and then resumed the old thread on the first turn.
+  const forceNew = !!route.query.new
   const landing = resolveAgentLanding({
     agent: route.query.agent,
-    forceNew: !!route.query.new,
+    forceNew,
     agents: store.agents,
     threads: threads.value,
   })
@@ -785,6 +826,7 @@ function resolveAgentQuery() {
       unreachableAgent.value = String(route.query.agent)
       activeAgentName.value = null
       pendingSession.value = null
+      startingNewChat.value = false
       convGen.value++
       return true
     }
@@ -796,6 +838,11 @@ function resolveAgentQuery() {
   prefill.value = ''
   convGen.value++
   pendingSession.value = landing.sessionId
+  // `landing.sessionId` is null under `forceNew`, but null alone is exactly the
+  // ambiguity ent#451 exists to remove — it also means "unresolved". AND-ed
+  // with the landing so a `?new=1` that still resolved a thread (it cannot
+  // today, but the two are independent functions) never claims a fresh start.
+  startingNewChat.value = forceNew && !landing.sessionId
   if (landing.sessionId) router.replace(`/workspace/c/${landing.sessionId}`)
   return true
 }

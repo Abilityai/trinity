@@ -728,7 +728,8 @@ async def portal_chat(
     )
     try:
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
-                                          include_owned=include_owned)
+                                          include_owned=include_owned,
+                                          new_thread=body.new_thread)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1079,6 +1080,10 @@ async def portal_chat_stream(
         started = await service.start_portal_turn(
             agent_name, body.message, email,
             session_id=body.session_id, include_owned=include_owned,
+            # ent#451 — the streaming path is what the Workspace uses; the sync
+            # one above is its fallback. A flag honoured by only one brings the
+            # bug back exactly when streaming fails.
+            new_thread=body.new_thread,
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)
