@@ -63,11 +63,6 @@ ASK_TYPES = ("approval", "question")
 MAX_ASKS = 20
 MAX_RECENT_WORK = 20
 
-# #2423 review: how much wider the client-side read is, because its filter runs
-# after SQL's LIMIT. 5x covers ent#458's shape (a loop per member per run beside
-# occasional chat) with margin; it is a cap on the READ, so the cost is bounded
-# either way and only the filtering side pays it.
-_CLIENT_OVERFETCH = 5
 MAX_CHATS = 20
 
 # Executions the platform creates outside a cron schedule carry this sentinel
@@ -146,11 +141,17 @@ def _without_hidden_buckets(a: dict) -> dict:
 def _bucket_of(row) -> str:
     """The bucket name of a top-level `by_type` entry, whichever shape it is.
 
-    Tolerant on purpose: the accessor emits `{"bucket", "total"}` rows, the
-    module's own unavailable-path default is `[]`, and a test double has used a
-    bare mapping. An unrecognised row keeps its place rather than being dropped
-    — hiding a row we failed to parse would be the opposite of this function's
-    job.
+    Tolerant in ONE direction only, and deliberately: the accessor emits
+    `{"bucket", "total"}` rows and the module's own unavailable path defaults to
+    `[]`, so a row of any other shape is unparseable — and an unparseable row is
+    KEPT, never dropped. This function's job is to hide two named buckets; a
+    parse failure that hid a third would be the opposite of it, silently, with
+    the day totals re-derived around the hole.
+
+    The tolerance is not there to accommodate a test double. It is there because
+    `_without_hidden_buckets` re-derives `total_executions` from what survives
+    this call, so a row this function cannot read still has to reach `_total_of`
+    and be counted (#2423 review).
     """
     if isinstance(row, dict):
         return row.get("bucket") or ""
@@ -209,6 +210,31 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
         }
     if not is_platform:
         a = _without_hidden_buckets(a)
+    first_try = portal_db.first_try_stats(agent_name, hours)
+    if not is_platform and not a.get("total_executions"):
+        # #2423 review: `success_rate` and `first_try` are deliberately NOT
+        # re-derived over the filtered set — a filtered numerator over an
+        # unfiltered denominator is worse than a figure that is merely broad.
+        # But that argument only holds while there is visible work to be broad
+        # ABOUT. With every row hidden the strip read "0 executions · 89%
+        # success · 33/37 first try", which is not broad, it is a contradiction
+        # the client cannot resolve — three numbers describing work the page
+        # simultaneously says did not happen.
+        #
+        # So the rates are withheld at exactly zero, and the UI already renders
+        # a null rate as an em-dash (a fresh agent has no success rate; 0% would
+        # read as "it fails every time"). Withheld, never zeroed.
+        return {
+            "window": window,
+            "window_hours": a.get("window_hours", hours),
+            "total_executions": 0,
+            "success_rate": None,
+            "timeline": a.get("timeline", []),
+            "by_type": [],
+            "buckets": [],
+            "first_try": {"terminal": 0, "first_try": 0, "rate": None},
+            "unavailable": False,
+        }
     return {
         "window": window,
         "window_hours": a.get("window_hours", hours),
@@ -225,7 +251,7 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
         "buckets": a.get("buckets", []),
         # AC #3's "first-try rate". Distinct from success_rate above, which
         # counts a retried-then-succeeded execution as a success.
-        "first_try": portal_db.first_try_stats(agent_name, hours),
+        "first_try": first_try,
         "unavailable": False,
     }
 
@@ -335,35 +361,31 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK, *,
     resolves — not only `triggered_by == "schedule"` — since a webhook that fires
     a schedule *is* running that schedule, and naming it is the point.
     """
-    # #2423 review: the filter runs in PYTHON and the limit runs in SQL, so
-    # asking for exactly `limit` rows and then dropping loops starves the list —
-    # an agent whose newest 20 rows are all loops rendered "Nothing yet." while
-    # the operator saw twenty. That is worse than the bug being fixed: rows you
-    # cannot explain are confusing, "this agent has done nothing" is false.
+    # #2423: a client sees only work it can act on or understand. The exclusion
+    # is pushed into SQL rather than applied to the result, because a filter
+    # that runs AFTER the LIMIT starves the list: an agent whose newest rows are
+    # all loops rendered "Nothing yet." while the operator saw twenty, which is
+    # worse than the bug being fixed — rows you cannot explain are confusing,
+    # "this agent has done nothing" is false.
     #
-    # ent#458's own repro ("17 rows, mostly loops") is exactly this shape, so it
-    # is the normal case for the agents this feature exists for, not an edge.
+    # The first fix over-fetched `MAX_RECENT_WORK * 5 = 100` and filtered in
+    # Python. That is not a smaller starvation window, it is the SAME bug with a
+    # constant in front of it, and the constant loses: `models.MAX_RUNS_LIMIT`
+    # is 100, so ONE loop at its documented maximum emits exactly 100
+    # consecutive rows and fills the whole over-fetch window. ent#458's own
+    # repro ("17 rows, mostly loops") is this shape at small scale, and it is
+    # the normal case for the agents this feature exists for.
     #
-    # Over-fetch only on the side that filters. The operator sees every row, so
-    # the extra read would be pure waste there. The multiplier is a cap, not a
-    # guarantee: an agent with more than `MAX_RECENT_WORK * _CLIENT_OVERFETCH`
-    # consecutive loop rows still shows fewer, which is honest — it is genuinely
-    # what that agent has been doing — and the chart beside it carries the same
-    # window. An unbounded read to close that would make one client's page cost
-    # proportional to an agent's whole history.
-    fetch = limit if is_platform else limit * _CLIENT_OVERFETCH
+    # Filtering in SQL also drops the extra read entirely: the client page now
+    # fetches exactly `limit` rows like the operator page, instead of five times
+    # as many to throw most away.
     try:
-        rows = db.get_agent_executions_summary(agent_name, limit=fetch)
+        rows = db.get_agent_executions_summary(
+            agent_name, limit=limit,
+            exclude_triggers=None if is_platform else _CLIENT_HIDDEN_TRIGGERS)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: executions read failed for %s: %s", agent_name, e)
         return []
-    # #2423: a client sees only work it can act on or understand. Filtered here
-    # rather than in the UI for the same reason the fields above are projected
-    # here — a row that never leaves the service cannot be surfaced by a later
-    # template change.
-    if not is_platform:
-        rows = [r for r in rows
-                if r.get("triggered_by") not in _CLIENT_HIDDEN_TRIGGERS][:limit]
     names = _schedule_names(agent_name, rows)
     return [{
         "id": r.get("id"),
@@ -448,12 +470,14 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
     """Assemble the page. `card` is the caller's roster entry (identity + what
     it can do), already resolved and access-checked by the caller.
 
-    On the "rating tally" named in AC #3: there is no rating, thumbs or feedback
-    mechanism anywhere in Trinity, so it has no data source and is omitted
-    rather than invented — a number a user reads as "how well is this agent
-    doing" has to come from something real. Recorded in the requirement as the
-    one AC bullet not met. (The first-try rate beside it IS real: it comes from
-    `retry_count`, see `portal_db.first_try_stats`.)
+    On the "rating tally" named in AC #3: it was omitted at first because nothing
+    in Trinity produced ratings, and a number a user reads as "how well is this
+    agent doing" has to come from something real. ent#366 shipped that source —
+    a Workspace thumb writes `agent_evaluations` under `evaluator =
+    workspace:<email>` — so `_rating_tally` projects it and the AC is met. This
+    docstring, the flow doc and the requirement all still claimed the opposite
+    two releases later; corrected in #2423 review. (The first-try rate beside it
+    is separate and also real: `retry_count`, see `portal_db.first_try_stats`.)
     """
     card = card or {}
     return {
@@ -472,7 +496,7 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
             # an explicit None, so the bare form would 500 the one page ent#360
             # built to always render.
             "availability": card.get("availability") or "unknown",
-            "last_active": _last_active(agent_name),
+            "last_active": _last_active(agent_name, is_platform=is_platform),
         },
         # "What it can do" — a projection of the briefing the roster already
         # carries (#138 / ent#380), NOT a second mechanism. ent#178 is the
@@ -490,10 +514,20 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
     }
 
 
-def _last_active(agent_name: str) -> Optional[str]:
-    """When this agent last did anything, from its newest execution row."""
+def _last_active(agent_name: str, *, is_platform: bool = False) -> Optional[str]:
+    """When this agent last did anything, from its newest execution row.
+
+    Scoped to what the viewer can SEE (#2423 review). Reading the newest row
+    unconditionally reports a loop run's timestamp to a client for whom that row
+    does not exist — a header saying "active 2 minutes ago" above a list whose
+    newest entry is from yesterday, with nothing on the page to reconcile the
+    two. Same exclusion, same reason as `_recent_work`, and pushed into SQL for
+    the same reason: `limit=1` in Python cannot survive any filtering at all.
+    """
     try:
-        rows = db.get_agent_executions_summary(agent_name, limit=1)
+        rows = db.get_agent_executions_summary(
+            agent_name, limit=1,
+            exclude_triggers=None if is_platform else _CLIENT_HIDDEN_TRIGGERS)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: last-active read failed for %s: %s", agent_name, e)
         return None

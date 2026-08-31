@@ -556,10 +556,13 @@
     `.../reports/{id}` (optional `rows_offset`/`rows_limit` window a tabular payload,
     #2162 — two query params on the existing route, not a second route) under the
     client-portal prefix, all roster-gated
-- **Not met**: the AC's **rating tally**. There is no rating, thumbs or feedback
-  mechanism anywhere in Trinity, so it has no data source and was omitted rather
-  than invented — a number a user reads as "how well is this agent doing" has to
-  come from something real. The **first-try rate** beside it IS real: successes
+- **The AC's rating tally** was initially **not met** — nothing in Trinity
+  produced ratings, so it had no data source and was omitted rather than
+  invented. ent#366 then shipped that source (a Workspace thumb writes to
+  `agent_evaluations` under `evaluator = workspace:<email>`), and the page
+  projects the up/down counts through `_rating_tally`. The AC is now met; this
+  bullet claimed otherwise for two releases after the fact (corrected in #2423
+  review). The **first-try rate** beside it IS real: successes
   with `retry_count` 0, distinct from the success rate (which counts a
   retried-then-succeeded execution as a success).
 - **Two of #2161's own ACs were deliberately overridden** — recorded so they are

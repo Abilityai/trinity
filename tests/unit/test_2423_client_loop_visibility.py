@@ -50,11 +50,26 @@ def _rows():
     ]
 
 
+def _sql_like(rows, limit, exclude_triggers):
+    """What the accessor actually does now: WHERE before LIMIT.
+
+    Every stub in this file models it, because a stub that limits first and
+    filters second is the very bug under test and would make these tests pass
+    against the broken implementation (review pass 2).
+    """
+    if exclude_triggers:
+        rows = [r for r in rows
+                if r.get("triggered_by") is None
+                or r.get("triggered_by") not in exclude_triggers]
+    return rows[:limit] if limit else rows
+
+
 @pytest.fixture()
 def stub_db(monkeypatch, page):
     class _Db:
-        def get_agent_executions_summary(self, agent_name, limit=None):
-            return _rows()
+        def get_agent_executions_summary(self, agent_name, limit=None,
+                                         *, exclude_triggers=None):
+            return _sql_like(_rows(), limit, exclude_triggers)
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
     monkeypatch.setattr(page, "_schedule_names", lambda a, r: {"s1": "Nightly sweep"},
@@ -101,69 +116,118 @@ def test_the_projection_still_drops_what_it_always_dropped(page, stub_db):
 # The filter must not starve the list (review blocker)
 # ---------------------------------------------------------------------------
 def test_a_loop_heavy_agent_still_shows_its_other_work(page, monkeypatch):
-    """Filtering AFTER the SQL LIMIT starves the client list.
+    """The list must not starve, at ANY run length — the review-pass-2 blocker.
 
-    `get_agent_executions_summary` limits in SQL, so dropping loop rows in
-    Python leaves whatever survives INSIDE that window. On the agent this
-    feature exists for — ent#458's own repro is "17 rows, mostly loops" — an
-    agent whose newest 20 rows are loops yielded ZERO rows, and the page
-    rendered "Nothing yet." while the operator saw twenty.
+    The first fix over-fetched `MAX_RECENT_WORK * 5 = 100` rows and filtered in
+    Python. That is the same bug with a constant in front of it, and the
+    constant loses: `models.MAX_RUNS_LIMIT` is 100, so a single loop at its
+    DOCUMENTED MAXIMUM emits exactly 100 consecutive rows and fills the entire
+    over-fetch window. The client page then reads "Nothing yet." for an agent
+    that has been working all day.
 
-    That trades "rows I cannot explain" for a false claim of no activity, which
-    is strictly worse: the first is confusing, the second is wrong.
+    So this fixture uses 250 loops — more than any multiplier — and passes only
+    because the exclusion is in SQL, where the LIMIT applies to rows that
+    already survived the WHERE.
     """
     asked = {}
+    loops = [{"id": f"l{i}", "status": "success", "triggered_by": "loop",
+              "started_at": f"t{i:04d}", "completed_at": None, "duration_ms": 10,
+              "schedule_id": None} for i in range(250)]
+    chats = [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
+              "started_at": f"u{i}", "completed_at": None, "duration_ms": 10,
+              "schedule_id": None} for i in range(5)]
 
     class _Db:
-        def get_agent_executions_summary(self, agent_name, limit=None):
+        def get_agent_executions_summary(self, agent_name, limit=None,
+                                         *, exclude_triggers=None):
             asked["limit"] = limit
-            # 30 loops, THEN the chat rows — the shape that starves.
-            loops = [{"id": f"l{i}", "status": "success", "triggered_by": "loop",
-                      "started_at": f"t{i}", "completed_at": None, "duration_ms": 10,
-                      "schedule_id": None} for i in range(30)]
-            chats = [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
-                      "started_at": f"u{i}", "completed_at": None, "duration_ms": 10,
-                      "schedule_id": None} for i in range(5)]
-            return (loops + chats)[:limit] if limit else loops + chats
+            asked["exclude"] = exclude_triggers
+            return _sql_like(loops + chats, limit, exclude_triggers)
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
     monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
 
     out = page._recent_work("a", is_platform=False)
-    assert asked["limit"] > page.MAX_RECENT_WORK, (
-        "the client side must over-fetch, or the filter eats the whole window"
-    )
     assert out, "a loop-heavy agent rendered as having done nothing at all"
     assert all(r["triggered_by"] == "chat" for r in out)
+    assert asked["exclude"] == page._CLIENT_HIDDEN_TRIGGERS, (
+        "the exclusion must reach the accessor — filtering the RESULT is what "
+        "starved the list in the first place"
+    )
+
+
+def test_the_client_page_does_not_over_fetch_either(page, monkeypatch):
+    """The SQL filter also removes the extra read.
+
+    Pinned because 'fetch more and drop some' is the tempting fix, and it costs
+    five reads' worth of rows on every client page load to throw most away.
+    """
+    asked = {}
+
+    class _Db:
+        def get_agent_executions_summary(self, agent_name, limit=None,
+                                         *, exclude_triggers=None):
+            asked["limit"] = limit
+            return []
+
+    monkeypatch.setattr(page, "db", _Db(), raising=False)
+    monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
+    page._recent_work("a", is_platform=False)
+    assert asked["limit"] == page.MAX_RECENT_WORK
+
+
+def test_last_active_is_scoped_to_what_the_viewer_can_see(page, monkeypatch):
+    """A header timestamp from a row the client cannot see is unexplainable.
+
+    `_last_active` read the newest row unconditionally, so a client saw "active
+    2 minutes ago" above a list whose newest entry was yesterday's — with
+    nothing on the page able to reconcile the two.
+    """
+    rows = [{"id": "l", "triggered_by": "loop", "started_at": "2026-08-31T12:00:00Z"},
+            {"id": "c", "triggered_by": "chat", "started_at": "2026-08-30T09:00:00Z"}]
+
+    class _Db:
+        def get_agent_executions_summary(self, agent_name, limit=None,
+                                         *, exclude_triggers=None):
+            return _sql_like(rows, limit, exclude_triggers)
+
+    monkeypatch.setattr(page, "db", _Db(), raising=False)
+    assert page._last_active("a", is_platform=False) == "2026-08-30T09:00:00Z"
+    assert page._last_active("a", is_platform=True) == "2026-08-31T12:00:00Z"
 
 
 def test_the_client_list_is_still_bounded(page, monkeypatch):
     """Over-fetching must not become an unbounded list — the cap moves, it does
     not disappear."""
     class _Db:
-        def get_agent_executions_summary(self, agent_name, limit=None):
-            return [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
+        def get_agent_executions_summary(self, agent_name, limit=None,
+                                         *, exclude_triggers=None):
+            rows = [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
                      "started_at": f"u{i}", "completed_at": None, "duration_ms": 10,
                      "schedule_id": None} for i in range(200)]
+            return _sql_like(rows, limit, exclude_triggers)
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
     monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
     assert len(page._recent_work("a", is_platform=False)) == page.MAX_RECENT_WORK
 
 
-def test_the_operator_side_does_not_over_fetch(page, monkeypatch):
-    """Nothing is filtered for an operator, so the extra rows would be waste."""
+def test_the_operator_side_asks_for_no_exclusion(page, monkeypatch):
+    """A platform viewer sees every row, so no WHERE clause is added for them."""
     asked = {}
 
     class _Db:
-        def get_agent_executions_summary(self, agent_name, limit=None):
+        def get_agent_executions_summary(self, agent_name, limit=None,
+                                         *, exclude_triggers=None):
             asked["limit"] = limit
+            asked["exclude"] = exclude_triggers
             return []
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
     monkeypatch.setattr(page, "_schedule_names", lambda a, r: {}, raising=False)
     page._recent_work("a", is_platform=True)
     assert asked["limit"] == page.MAX_RECENT_WORK
+    assert asked["exclude"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -270,3 +334,72 @@ def test_the_route_passes_who_is_looking(page):
 
     src = inspect.getsource(router.portal_agent_page)
     assert "is_platform=principal.is_platform" in src
+
+
+# ---------------------------------------------------------------------------
+# The stats strip must not contradict itself (review pass 2, non-blocking)
+# ---------------------------------------------------------------------------
+def test_rates_are_withheld_when_every_row_was_hidden(page, monkeypatch):
+    """"0 executions" beside "89% success" is three numbers describing work the
+    same strip says did not happen.
+
+    `success_rate` and `first_try` are deliberately NOT re-derived over the
+    filtered set — a filtered numerator over an unfiltered denominator is worse
+    than a figure that is merely broad. That argument holds only while there is
+    visible work to be broad ABOUT; at exactly zero it stops being broad and
+    becomes a contradiction the client cannot resolve.
+    """
+    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h: {
+        "window_hours": h, "total_executions": 12, "success_rate": 89.0,
+        "timeline": [{"date": "2026-08-30", "total": 12,
+                      "by_type": {"Loops": 12}}],
+        "by_type": [{"bucket": "Loops", "total": 12}],
+        "buckets": ["Loops"],
+    }, raising=False)
+    monkeypatch.setattr(page.portal_db, "first_try_stats",
+                        lambda a, h: {"terminal": 37, "first_try": 33, "rate": 89.2},
+                        raising=False)
+
+    out = page._stats("a", page.DEFAULT_WINDOW, is_platform=False)
+    assert out["total_executions"] == 0
+    assert out["success_rate"] is None, "a rate over zero visible work is a contradiction"
+    assert out["first_try"]["rate"] is None
+    assert out["unavailable"] is False, (
+        "withheld is not the same as unavailable — the read succeeded"
+    )
+    # Withheld, never zeroed: 0% reads as "it fails every time".
+    assert out["first_try"]["rate"] != 0
+
+
+def test_rates_survive_when_any_visible_work_remains(page, monkeypatch):
+    """The suppression is exactly at zero — one surviving row keeps the figures,
+    broad as they are."""
+    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h: {
+        "window_hours": h, "total_executions": 13, "success_rate": 89.0,
+        "timeline": [{"date": "2026-08-30", "total": 13,
+                      "by_type": {"Loops": 12, "Chat": 1}}],
+        "by_type": [{"bucket": "Loops", "total": 12}, {"bucket": "Chat", "total": 1}],
+        "buckets": ["Loops", "Chat"],
+    }, raising=False)
+    monkeypatch.setattr(page.portal_db, "first_try_stats",
+                        lambda a, h: {"terminal": 37, "first_try": 33, "rate": 89.2},
+                        raising=False)
+
+    out = page._stats("a", page.DEFAULT_WINDOW, is_platform=False)
+    assert out["total_executions"] == 1
+    assert out["success_rate"] == 89.0
+    assert out["first_try"]["rate"] == 89.2
+
+
+def test_an_operator_never_has_rates_withheld(page, monkeypatch):
+    """Nothing is hidden from them, so a zero total is a real zero."""
+    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h: {
+        "window_hours": h, "total_executions": 12, "success_rate": 89.0,
+        "timeline": [], "by_type": [{"bucket": "Loops", "total": 12}],
+        "buckets": ["Loops"],
+    }, raising=False)
+    monkeypatch.setattr(page.portal_db, "first_try_stats",
+                        lambda a, h: {"terminal": 37, "first_try": 33, "rate": 89.2},
+                        raising=False)
+    out = page._stats("a", page.DEFAULT_WINDOW, is_platform=True)
+    assert out["total_executions"] == 12 and out["success_rate"] == 89.0
