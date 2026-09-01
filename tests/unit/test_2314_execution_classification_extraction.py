@@ -42,6 +42,40 @@ def _functions(src: str) -> dict[str, str]:
     }
 
 
+def _pre_carve_service() -> str | None:
+    """The PRE-CARVE `task_execution_service.py`, or None when it no longer exists.
+
+    The three transition pins below compare this branch against `origin/dev` —
+    which is the pre-carve state only WHILE the carve is unmerged. The moment
+    #2457 lands, origin/dev IS the carved layout: the moved functions are gone
+    from the old module (KeyError in the byte-identity pin) and old == new line
+    count (the strict `<` shrink pin), so both fail forever on dev itself —
+    caught by the #2247 absolute-failures push gate on merge day (#2469), and
+    invisible to PR runs because base and head fail together. Presence of the
+    moved names on origin/dev's service module is the detector: it separates
+    "not yet merged" from "already merged" without pinning a SHA. A transition
+    pin whose basis is gone skips — its property was proven at merge time, and
+    a permanent red teaches people to ignore the gate, the exact rot #2247
+    exists to notice. The structural pins (re-exports, leaf-ness, unresolved
+    names, effectful sibling) read only the working tree and keep running.
+    """
+    old = subprocess.run(
+        ["git", "show", "origin/dev:src/backend/services/task_execution_service.py"],
+        capture_output=True, text=True, cwd=_ROOT,
+    ).stdout
+    if not old:
+        return None
+    if not all(name in _functions(old) for name in MOVED):
+        return None
+    return old
+
+
+_BASIS_GONE = (
+    "origin/dev already carries the carve — the pre-carve comparison basis is "
+    "gone (proven at merge time; see _pre_carve_service)"
+)
+
+
 def test_every_moved_body_is_byte_identical_to_the_original():
     """A refactor claim is only worth what proves it.
 
@@ -50,12 +84,9 @@ def test_every_moved_body_is_byte_identical_to_the_original():
     so 'I moved it carefully' is not evidence. This compares the parsed body of
     every moved function against the same function on `origin/dev`.
     """
-    old = subprocess.run(
-        ["git", "show", "origin/dev:src/backend/services/task_execution_service.py"],
-        capture_output=True, text=True, cwd=_ROOT,
-    ).stdout
-    if not old:
-        pytest.skip("origin/dev not available in this checkout")
+    old = _pre_carve_service()
+    if old is None:
+        pytest.skip(_BASIS_GONE)
 
     before, after = _functions(old), _functions(_NEW.read_text())
     for name in MOVED:
@@ -65,12 +96,9 @@ def test_every_moved_body_is_byte_identical_to_the_original():
 
 def test_no_other_function_in_the_service_was_touched():
     """The carve must not be a place where something else got 'tidied'."""
-    old = subprocess.run(
-        ["git", "show", "origin/dev:src/backend/services/task_execution_service.py"],
-        capture_output=True, text=True, cwd=_ROOT,
-    ).stdout
-    if not old:
-        pytest.skip("origin/dev not available in this checkout")
+    old = _pre_carve_service()
+    if old is None:
+        pytest.skip(_BASIS_GONE)
 
     before, after = _functions(old), _functions(_SVC.read_text())
     changed = [k for k in after if k in before and before[k] != after[k]]
@@ -159,12 +187,9 @@ def test_the_new_module_is_a_leaf():
 
 def test_the_carve_actually_shrank_the_hotspot():
     """A decomposition that does not reduce the file is theatre."""
-    old = subprocess.run(
-        ["git", "show", "origin/dev:src/backend/services/task_execution_service.py"],
-        capture_output=True, text=True, cwd=_ROOT,
-    ).stdout
-    if not old:
-        pytest.skip("origin/dev not available in this checkout")
+    old = _pre_carve_service()
+    if old is None:
+        pytest.skip(_BASIS_GONE)
     assert len(_SVC.read_text().split("\n")) < len(old.split("\n"))
 
 
