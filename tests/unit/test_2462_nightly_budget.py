@@ -213,3 +213,19 @@ class TestTheDemonstrationHasABlastRadius:
         assert 'if [ -n "$only" ]' in discover, (
             "the PR filter is not guarded on a non-empty input"
         )
+
+    def test_the_module_comes_from_this_workflows_own_commit(self, workflow):
+        """`ref: dev` is wrong here in a way that only shows up when it matters.
+
+        A dispatch from a branch runs THAT branch's workflow against `dev`'s
+        module, so the two can disagree — and on the run that proved this fix,
+        `dev` did not have the module at all and the comment job died with
+        MODULE_NOT_FOUND. `github.sha` is the same trust level (this workflow
+        has only `schedule` and `workflow_dispatch` triggers, both refs a repo
+        writer chose) and cannot skew.
+        """
+        comment = _uncommented(_job(workflow, "comment"))
+        assert "ref: ${{ github.sha }}" in comment, (
+            "the trusted checkout no longer pins to this workflow's own commit "
+            "— workflow and verdict module can then disagree (#2462)"
+        )

@@ -391,17 +391,25 @@ jobs:
       issues: write           # PR conversation comments are issue comments
       pull-requests: write
     steps:
-      # #2462: `dev`, pinned, never PR code. The architecture rule at the top
-      # of this file is that untrusted PR code must not share a job with a
-      # write-capable token — this checkout is the same trust level as the
-      # workflow file itself, and it exists so the verdict logic can live in a
-      # module a test can execute instead of as inline `github-script` prose.
-      # A false all-clear on a regression detector is the error nothing
-      # downstream corrects, so that logic must be testable.
-      - name: Checkout dev (trusted — verdict module only)
+      # #2462: the verdict module, from THE COMMIT THIS WORKFLOW CAME FROM.
+      #
+      # The architecture rule at the top of this file is that untrusted PR code
+      # must not share a job with a write-capable token. `github.sha` satisfies
+      # it exactly: this workflow has only `schedule` and `workflow_dispatch`
+      # triggers, both of which run a ref a repo writer chose, so it is the same
+      # trust level as the workflow definition being executed — if that commit
+      # cannot be trusted, neither can the YAML deciding to check it out. PR
+      # code is still never checked out in this job.
+      #
+      # `ref: dev` was tried first and is WRONG in a way that only shows up when
+      # it matters: a dispatch from a branch runs that branch's workflow against
+      # `dev`'s module, so the two can disagree — and on the run that proved
+      # this fix, `dev` did not have the module at all and the job died with
+      # MODULE_NOT_FOUND. Workflow and module must come from one commit.
+      - name: Checkout the verdict module (trusted, same commit as this workflow)
         uses: actions/checkout@v7
         with:
-          ref: dev
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: scripts/ci
