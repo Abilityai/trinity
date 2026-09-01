@@ -99,6 +99,16 @@ docker compose -f docker-compose.hosted.yml logs -f backend
 docker compose -f docker-compose.hosted.yml stop     # 'stop', never 'down'
 ```
 
+### The shape you are building toward
+
+![Trinity deployment topology — one host, VPN-private access, tunnel-published public endpoints, agents isolated from the data plane](assets/trinity-deployment-topology.webp)
+
+One host runs everything as Docker containers on two isolated bridge networks —
+agents have no route to Redis or the platform database. Operators reach the full
+UI + API over your VPN (Tailscale recommended); public users and channel
+webhooks reach only the routes you publish through an outbound tunnel, so the
+host opens no inbound ports. The table below is how you pick that public edge.
+
 ### TLS on a bare VM
 
 Trinity serves plain HTTP and terminates TLS **outside** the application. There
