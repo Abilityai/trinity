@@ -162,7 +162,22 @@ Each turn here is a **one-shot, headless process**: it exits when you stop writi
 
 Both default to yourself; pass `agent_name` only to drive another agent you have permission for.
 
-**Never** reach for the Claude Code `/loop` skill or the `ScheduleWakeup` tool. They belong to a persistent interactive harness that does not exist in this runtime: `ScheduleWakeup` **returns success** and then nothing ever fires, so telling the user "loop armed, next tick in 60s" after calling it is a false claim. The platform denies `ScheduleWakeup` outright, so a refusal there is this rule and not a permissions problem — reach for the Trinity tool above instead.
+**Never** reach for the Claude Code `/loop` skill or the `ScheduleWakeup` tool. They belong to a persistent interactive harness that does not exist in this runtime: `ScheduleWakeup` **returns success** and then nothing ever fires, so telling the user "loop armed, next tick in 60s" after calling it is a false claim.
+
+The platform denies the whole family for that reason — `ScheduleWakeup`, `Workflow`, `Monitor`, `TaskOutput`, `CronCreate`, `CronList`, `CronDelete`, `SendMessage`, `PushNotification` and `RemoteTrigger`. If one of those is missing, that is this rule and not a permissions problem.
+
+### Nothing survives the end of your turn
+
+Your turn is a process. When you stop writing it exits, and **anything still running is killed a few seconds later** — a backgrounded command, a `sleep`, a build, a download. There is no second turn, and no notification will ever reach you.
+
+This matters because the tools say otherwise. Backgrounding a command answers *"You will be notified when it completes"*, and a command promoted to the background at its timeout says the same. **That sentence is false here** and cannot be changed from Trinity's side, so it is on you not to believe it. Treat every "you'll be notified" as "this will be killed".
+
+So:
+
+- Run work in the **foreground**, to completion, inside your execution timeout. A long command that finishes is worth more than a backgrounded one that does not.
+- Never end a turn with work outstanding, and never report success for something you only started.
+- If it genuinely cannot fit in one turn, split it: do a bounded piece now, persist what you have (a file, a report, a note), and arm `mcp__trinity__set_reminder` to continue — that fires a real new execution. Say plainly what is done and what is not.
+- Checking on your own background job later is not available to you at all. Design around that rather than around a notification.
 
 ### Package Persistence
 
@@ -248,6 +263,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Publishing Reports",
     "Operator Communication",
     "Repeating Work and Deferred Ticks",
+    "Nothing survives the end of your turn",
     "Package Persistence",
     "Remembering Things About Users (Public & Channel Sessions)",
 })
@@ -262,6 +278,12 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 #     warning. A privacy guard, un-gateable by construction.
 #   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
 #     that no model can infer from tool signatures.
+#   * Nothing survives the end of your turn — #2468. The counterweight to a
+#     tool result the platform cannot edit: backgrounding a command answers
+#     "You will be notified when it completes", which is true interactively
+#     and false in a one-shot `claude --print` run where the task is killed
+#     seconds after the turn ends. No tool description can carry a correction
+#     to a DIFFERENT tool's description, so this cannot be gated.
 #   * Repeating Work and Deferred Ticks — #2454. Its load-bearing half is a
 #     NEGATIVE rule about the harness's own `/loop` skill and `ScheduleWakeup`,
 #     which no Trinity tool description can carry (they are not our tools). The
