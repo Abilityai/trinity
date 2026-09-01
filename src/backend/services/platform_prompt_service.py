@@ -153,6 +153,17 @@ This is entirely your judgment. Some situations where it may be appropriate:
 - Situations requiring domain knowledge you don't have
 - Important alerts the operator should be aware of
 
+### Repeating Work and Deferred Ticks
+
+Each turn here is a **one-shot, headless process**: it exits when you stop writing, and anything you scheduled inside it dies with it. So "run a loop", "do this every N minutes" and "check back later" mean the Trinity primitives, which outlive the turn:
+
+- `mcp__trinity__run_agent_loop(message, max_runs, ...)` — bounded, budgeted repetition. Visible in the Loops panel and stoppable from there.
+- `mcp__trinity__set_reminder(message, delay_seconds=...)` — one-shot deferred tick that re-invokes you later as a real execution.
+
+Both default to yourself; pass `agent_name` only to drive another agent you have permission for.
+
+**Never** reach for the Claude Code `/loop` skill or the `ScheduleWakeup` tool. They belong to a persistent interactive harness that does not exist in this runtime: `ScheduleWakeup` **returns success** and then nothing ever fires, so telling the user "loop armed, next tick in 60s" after calling it is a false claim. The platform denies `ScheduleWakeup` outright, so a refusal there is this rule and not a permissions problem — reach for the Trinity tool above instead.
+
 ### Package Persistence
 
 When installing system packages (apt-get, npm -g, etc.), add them to your setup script so they persist across container updates:
@@ -236,6 +247,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Sharing Files with Users",
     "Publishing Reports",
     "Operator Communication",
+    "Repeating Work and Deferred Ticks",
     "Package Persistence",
     "Remembering Things About Users (Public & Channel Sessions)",
 })
@@ -250,6 +262,12 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 #     warning. A privacy guard, un-gateable by construction.
 #   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
 #     that no model can infer from tool signatures.
+#   * Repeating Work and Deferred Ticks — #2454. Its load-bearing half is a
+#     NEGATIVE rule about the harness's own `/loop` skill and `ScheduleWakeup`,
+#     which no Trinity tool description can carry (they are not our tools). The
+#     wrong path reports success and silently never fires, so dropping this at
+#     MINIMAL would restore exactly the false-success the section exists to
+#     stop.
 # Derived, not hand-listed, so it cannot disagree with the drop set.
 _ALWAYS_SECTIONS = _KNOWN_SECTION_HEADINGS - _MINIMAL_DROP_SECTIONS
 
