@@ -108,6 +108,17 @@ jobs:
     # and the red lands on whichever PR is open, including the `base` side,
     # which is plain `dev` and has nothing to do with the PR it reddens.
     #
+    # Measured on this workflow's own runners, first parallel run (33498960688),
+    # same six-shard matrix:
+    #
+    #     8.1m  8.6m  8.7m  9.0m  9.0m  17.5m   (all SUCCESS)
+    #
+    # Median 15m -> 9.0m, and the one starved shard — the same ~2x runner
+    # variance that used to produce the cancels — landed at 17.5m instead of
+    # not finishing at all. That is the number that matters: the worst
+    # starvation seen historically was >=3x (15m of work not finishing inside
+    # 45m), and 3x of 9m is 27m, which clears the cap by 18 minutes.
+    #
     # Do NOT raise this number as the next step if the cap starts being reached
     # again. Three raises in a row would mean the suite is growing faster than
     # anyone is willing to measure it; the next lever is the balance of the
