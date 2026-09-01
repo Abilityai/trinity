@@ -228,7 +228,7 @@
                   v-model="adminEmailInput"
                   :placeholder="adminEmailCurrent || 'you@company.com'"
                   :disabled="savingAdminEmail"
-                  class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                 />
                 <button
                   @click="saveAdminEmail"
@@ -284,7 +284,7 @@
                       v-model="publicUrl"
                       :placeholder="publicUrlCurrent || 'https://your-domain.com'"
                       :disabled="savingPublicUrl"
-                      class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                     />
                     <button
                       @click="savePublicUrl"
@@ -1588,7 +1588,7 @@ Example:
                   v-model="mcpUrlInput"
                   type="url"
                   :placeholder="mcpUrlConfig.default_url || 'https://your-domain.com/mcp'"
-                  class="flex-1 block rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                 />
                 <button
                   @click="saveMcpUrl"
@@ -1820,7 +1820,7 @@ Example:
                   id="quota-creator"
                   v-model="agentQuotaValues.max_agents_creator"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -1835,7 +1835,7 @@ Example:
                   id="quota-operator"
                   v-model="agentQuotaValues.max_agents_operator"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -1850,7 +1850,7 @@ Example:
                   id="quota-user"
                   v-model="agentQuotaValues.max_agents_user"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -2109,7 +2109,7 @@ import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
-import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
+import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'

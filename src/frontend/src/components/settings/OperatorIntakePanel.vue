@@ -89,24 +89,24 @@
               required
               maxlength="254"
               autocomplete="email"
-              class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm"
+              :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']"
             />
           </label>
           <label class="block">
             <span class="text-sm text-gray-700 dark:text-gray-200">Company (optional)</span>
-            <input v-model.trim="form.company" type="text" maxlength="200" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <input v-model.trim="form.company" type="text" maxlength="200" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
             <span class="text-sm text-gray-700 dark:text-gray-200">Name (optional)</span>
-            <input v-model.trim="form.name" type="text" maxlength="200" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <input v-model.trim="form.name" type="text" maxlength="200" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
             <span class="text-sm text-gray-700 dark:text-gray-200">Role (optional)</span>
-            <input v-model.trim="form.role" type="text" maxlength="200" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <input v-model.trim="form.role" type="text" maxlength="200" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
             <span class="text-sm text-gray-700 dark:text-gray-200">Primary use case (optional)</span>
-            <input v-model.trim="form.use_case" type="text" maxlength="500" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <input v-model.trim="form.use_case" type="text" maxlength="500" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
         </div>
 
@@ -144,6 +144,7 @@
 <script setup>
 import { ref, computed, onMounted, reactive } from 'vue'
 import { useOperatorIntakeStore } from '../../stores/operatorIntake'
+import { SETTINGS_TEXT_INPUT_CLASS } from './fieldStyles'
 
 const store = useOperatorIntakeStore()
 
