@@ -475,7 +475,10 @@
   client and a platform user, so exclusions are enforced by **projection in the
   service**, never by filtering in the template: a field that never leaves the
   service cannot be surfaced by a later UI edit. Three that matter —
-  `recent_work` drops `message`/`cost`/`model_used`/`source_user_email`; `asks`
+  `recent_work` drops `message`/`cost`/`model_used`/`source_user_email`, and for
+  a CLIENT drops loop-triggered rows entirely (#2423 — a client can neither open
+  a loop, read what it produced, nor stop one, so reporting the count without
+  the output was activity it could only misread; operators keep every row); `asks`
   admits only agent-authored `approval`/`question` items (never platform
   `alert`s) and never their `context` (free-form agent JSON, a known
   credential-leak surface); report reads are agent-scoped, since report ids are
@@ -553,10 +556,13 @@
     `.../reports/{id}` (optional `rows_offset`/`rows_limit` window a tabular payload,
     #2162 — two query params on the existing route, not a second route) under the
     client-portal prefix, all roster-gated
-- **Not met**: the AC's **rating tally**. There is no rating, thumbs or feedback
-  mechanism anywhere in Trinity, so it has no data source and was omitted rather
-  than invented — a number a user reads as "how well is this agent doing" has to
-  come from something real. The **first-try rate** beside it IS real: successes
+- **The AC's rating tally** was initially **not met** — nothing in Trinity
+  produced ratings, so it had no data source and was omitted rather than
+  invented. ent#366 then shipped that source (a Workspace thumb writes to
+  `agent_evaluations` under `evaluator = workspace:<email>`), and the page
+  projects the up/down counts through `_rating_tally`. The AC is now met; this
+  bullet claimed otherwise for two releases after the fact (corrected in #2423
+  review). The **first-try rate** beside it IS real: successes
   with `retry_count` 0, distinct from the success rate (which counts a
   retried-then-succeeded execution as a success).
 - **Two of #2161's own ACs were deliberately overridden** — recorded so they are

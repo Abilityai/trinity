@@ -612,6 +612,9 @@ async def portal_agent_page(
                                         include_owned=principal.is_platform)
     return agent_page.build_page(
         email, agent_name, card.model_dump() if card else None, window=window,
+        # #2423: the page reports different things to a client and an operator,
+        # and this is the same flag `get_agent_card` above already keys on.
+        is_platform=principal.is_platform,
     )
 
 

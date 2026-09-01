@@ -1698,12 +1698,17 @@ class DatabaseManager:
     def get_agent_executions(self, agent_name: str, limit: int = 50):
         return self._schedule_ops.get_agent_executions(agent_name, limit)
 
-    def get_agent_executions_summary(self, agent_name: str, limit: int = 50):
+    def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
+                                     exclude_triggers=None):
         """Get execution summaries for list view - excludes large text fields.
+
+        `exclude_triggers` filters before the LIMIT — see the operation's own
+        docstring for why a caller must not do that in Python (#2423).
 
         PERF-001: Task List Performance Optimization
         """
-        return self._schedule_ops.get_agent_executions_summary(agent_name, limit)
+        return self._schedule_ops.get_agent_executions_summary(
+            agent_name, limit, exclude_triggers=exclude_triggers)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)

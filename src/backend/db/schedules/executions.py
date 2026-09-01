@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy import select, insert, update, and_, func, or_
 
 from ..engine import get_engine
 from ..query_helpers import latest_per_group
@@ -580,8 +580,28 @@ class ScheduleExecutionsMixin:
                 for row in conn.execute(stmt).mappings()
             ]
 
-    def get_agent_executions_summary(self, agent_name: str, limit: int = 50) -> List[Dict]:
+    def get_agent_executions_summary(
+        self,
+        agent_name: str,
+        limit: int = 50,
+        *,
+        exclude_triggers: Optional[frozenset] = None,
+    ) -> List[Dict]:
         """Get execution summaries for list view - excludes large text fields.
+
+        `exclude_triggers` (#2423 review) filters BEFORE the LIMIT, which is the
+        whole point of it living here rather than in the caller. A caller that
+        fetches N rows and drops some in Python is bounded by how many of the
+        newest N survive, so a RUN of excluded rows starves the list — and for
+        the client Workspace page the excluded trigger is `loop`, whose
+        documented ceiling (`models.MAX_RUNS_LIMIT`) is 100 consecutive rows
+        from ONE loop. No over-fetch multiplier outruns that: the multiplier is
+        a constant a reviewer picks, the run length is a product limit.
+
+        NULL is deliberately NOT excluded. `triggered_by` is NOT NULL in the
+        schema, but SQL `NOT IN` evaluates to NULL for a NULL left side and the
+        row would vanish — an unclassified row is not a hidden one, and dropping
+        it silently is the failure this parameter exists to prevent.
 
         Returns only the columns needed for the Tasks list UI, excluding:
         - response (can be large)
@@ -623,6 +643,11 @@ class ScheduleExecutionsMixin:
             .order_by(schedule_executions.c.started_at.desc())
             .limit(limit)
         )
+        if exclude_triggers:
+            stmt = stmt.where(or_(
+                schedule_executions.c.triggered_by.is_(None),
+                schedule_executions.c.triggered_by.notin_(sorted(exclude_triggers)),
+            ))
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():

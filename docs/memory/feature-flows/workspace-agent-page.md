@@ -36,6 +36,46 @@ that never leaves the service cannot be surfaced by a later edit.
 |---|---|---|
 | `recent_work` | `message`, `cost`, `model_used`, `source_user_email` | `message` is another user's prompt; `cost` and `model_used` are excluded by AC #7 |
 | `recent_work` | — *except* `schedule_name` (#2161) | The one deliberate crossing. See [What crosses, and why it is the name and not the message](#what-crosses-and-why-it-is-the-name-and-not-the-message) |
+| `recent_work`, `stats` | whole ROWS with `triggered_by = "loop"`, for a client only (#2423) | A client cannot open a loop, see what it produced, or start or stop one — the strip is `isPlatformSession`-gated (ent#458) and this page has no Loops tab. So the loop COUNT was client-visible while the loop OUTPUT was operator-only. Same subtractive rule this section states, and the same reason `alert` asks are dropped: operations telemetry, not something the agent is asking a person. **Operators keep every row** — they can click through to Agent Detail → Loops, so hiding it there removes real signal and fixes nothing |
+
+**The loop exclusion is a row filter, so it runs in SQL — before the `LIMIT`.**
+`get_agent_executions_summary` takes an `exclude_triggers` set and adds it as a
+`WHERE`, so the limit applies to rows that already survived the filter. Filtering
+the RESULT instead starves the list: an agent whose newest rows are all loops —
+ent#458's normal shape, not an edge — yielded an EMPTY list and the page read
+"Nothing yet." while the operator saw twenty. Trading rows a client cannot
+explain for a false claim of no activity is a worse bug than the one being fixed.
+
+The first fix over-fetched `MAX_RECENT_WORK * 5 = 100` rows and filtered in
+Python. That is the same bug with a constant in front of it, and **the constant
+loses**: `models.MAX_RUNS_LIMIT` is 100, so ONE loop at its documented maximum
+emits exactly 100 consecutive rows and consumes the entire over-fetch window. No
+multiplier survives a product limit — a reviewer picks the multiplier, the
+product picks the run length. Moving the filter also deletes the extra read: the
+client page now fetches exactly `MAX_RECENT_WORK` rows, like the operator page,
+instead of five times as many to discard most of them.
+
+`_last_active` carries the same exclusion for the same reason. Reading the newest
+row unconditionally reported a loop run's timestamp to a client for whom that row
+does not exist — a header saying "active 2 minutes ago" above a list whose newest
+entry is yesterday's, with nothing on the page to reconcile the two. `limit=1`
+makes it the extreme case: no over-fetch is even conceivable there.
+
+**`success_rate` and `first_try` are not re-derived — but they are withheld at
+zero.** A filtered numerator over an unfiltered denominator is worse than a
+figure that is merely broad, so both stay computed over every terminal row. That
+argument holds only while there is visible work to be broad *about*: on an agent
+whose window is entirely loops, the strip read `0 executions · 89% success ·
+33/37 first try` — three numbers describing work the same strip says did not
+happen, and a contradiction the client has no way to resolve. At exactly zero
+visible executions both rates are therefore **withheld** (`null`, which the UI
+already renders as an em-dash), never zeroed: 0% reads as "it fails every time".
+One surviving row is enough to keep the broad figures. Operators are never
+subject to it — nothing is hidden from them, so their zero is a real zero.
+
+NULL `triggered_by` is explicitly NOT excluded. `triggered_by` is `NOT NULL` in
+the schema, but SQL `NOT IN` evaluates to NULL for a NULL left side and the row
+would silently vanish — an unclassified row is not a hidden one.
 | `asks` | `context`, and `alert`-type items | `context` is free-form agent JSON and a known credential-leak surface (canary G-04 exists because secrets turn up there). `alert` items are platform-generated ops telemetry — sync-failing, git-bloat, breaker dormancy — not an agent asking a person anything |
 | report detail | any report in the install | Report ids are global. The roster gate proves only that the caller may reach **this** agent, so without an ownership check the page becomes a reader for every report on the instance. A foreign id returns the same 404 as a missing one, so it is not an existence oracle either (invariant #8) |
 
@@ -95,10 +135,15 @@ on rows predating #678, read as zero, since such a success genuinely had no
 retry. No terminal executions ⇒ `rate: null`, not `0.0`: a fresh agent has no
 first-try rate, and 0% reads as "it fails every time".
 
-**Rating tally is not shipped.** There is no rating, thumbs or feedback
-mechanism anywhere in Trinity — no table, no column, no endpoint. It has no data
-source, so it was omitted rather than invented. A number a user reads as "how
-well is this agent doing" has to come from something real.
+**Rating tally.** It was omitted at first because nothing in Trinity produced
+ratings — no table, no column, no endpoint — and a number a user reads as "how
+well is this agent doing" has to come from something real. ent#366 then shipped
+the data source: a Workspace thumb writes to `agent_evaluations` under
+`evaluator = workspace:<email>`, and `_rating_tally` projects the up/down counts
+through `platform_db.workspace_rating_tally`. It degrades to no tally rather than
+failing the page, and the count is of PEOPLE, not clicks — the ent#366 uniqueness
+constraint makes a re-rate a correction. (This paragraph asserted the opposite
+for two releases after the feature landed; corrected in #2423 review.)
 
 ## The Reports tab (#2162)
 
@@ -214,8 +259,10 @@ A per-viewer variant was considered — showing a viewer their *own* prompts, si
 `source_user_email` identifies them and that leaks nothing cross-user — and
 rejected: it doubles the row's shape by audience, and the product decision was no
 prompt text on this surface at all. The cost is honest and bounded: rows that are
-not schedule-backed (chat, loop, reminder) still carry only trigger, duration and
-time, so **AC #3 is met for scheduled rows only**.
+not schedule-backed (chat, reminder) still carry only trigger, duration and
+time, so **AC #3 is met for scheduled rows only**. (Loop rows reach an OPERATOR
+only since #2423 — a client never sees one, so the question does not arise for
+them.)
 
 **It is not "operator-authored", and calling it that was the comfortable
 mistake.** `POST /api/agents/{name}/schedules` is `AuthorizedAgent` and the MCP
@@ -226,7 +273,8 @@ service, escaped by Vue interpolation on render. The same is already true of
 `asks` (`title` and `question` are agent-authored), so this is the established
 boundary rather than a new one — but it is why the name is bounded rather than
 trusted. Gating it on `principal.is_platform` is one line away if an operator
-ever objects.
+ever objects — and #2423 took exactly that route for loop rows, so the split
+this paragraph anticipated now exists on the same payload.
 
 Four properties of the lookup, each load-bearing:
 
@@ -448,6 +496,10 @@ destination" is finally true.
 | UI | `views/Portal.vue`, `router/index.js` | `/workspace/a/:agentName`; shared stage escape (#2161) |
 | Store | `stores/clientPortal.js` | `fetchAgentPage`, `fetchAgentReports`, `fetchAgentReport`; the whole Reports orchestration + generation guard (#2162) |
 | Service | `client_portal/agent_page.py` | `_window_rows` + `report_detail(rows_offset, rows_limit)` (#2162) |
+| Service | `client_portal/agent_page.py` | `_CLIENT_HIDDEN_TRIGGERS` / `_CLIENT_HIDDEN_BUCKETS`; `is_platform` threaded through `_recent_work`, `_stats`, `_last_active` (#2423) |
+| DB | `db/schedules/executions.py` | `get_agent_executions_summary(..., exclude_triggers=)` — the `WHERE` that must precede the `LIMIT` (#2423) |
+| DB | `database.py` | facade passthrough for `exclude_triggers` (#2423) |
+| Router | `client_portal/router.py` | forwards `principal.is_platform` into the page build (#2423) |
 | Router | `client_portal/router.py` | `rows_offset`/`rows_limit` on the existing detail route, rate-limited (#2162) |
 | UI | `components/reports/ReportSummary.vue` | **new** — the CLIENT-FACING human-readable fallback; no raw escape hatch (#2162) |
 | UI | `components/reports/reportSummary.js` | **new** — the bounded, redacting summariser (pure) (#2162) |
@@ -516,6 +568,24 @@ Guards the **mechanism** rather than the spelling — a prop declared and never 
 would pass a call-site scan — and re-asserts the five CI-pinned `payload.X` keys
 are still inside `ReportRenderer.vue`, the file `test_1535` regexes them out of.
 
+`tests/unit/test_2423_client_loop_visibility.py` — the projection: a client sees
+no loop row and no `Loops` chart bucket, an operator sees both, and the CLIENT
+view is the default so a caller that forgets to say who is looking leaks least.
+Every stub models SQL faithfully (`WHERE` then `LIMIT`) via one shared
+`_sql_like` helper — a stub that limits first and filters second is the bug under
+test and would pass against the broken implementation.
+
+`tests/unit/test_2423_executions_summary_exclude.py` — the accessor against a
+REAL SQLite through the real engine, because the file above can only prove
+`_recent_work` *asks* for the exclusion; no Python stub can prove the `WHERE`
+actually precedes the `LIMIT`, and that ordering is the whole fix. The
+load-bearing case inserts 100 loop rows — not a pathological fixture, exactly one
+loop at `MAX_RUNS_LIMIT` — and it fails when the filter is moved back after the
+limit (verified by mutation). Plus: the limit still bounds, the NEWEST surviving
+rows are returned rather than the oldest, a NULL trigger is not treated as
+hidden, multiple excluded triggers work, the agent scope is not widened, and
+every existing caller passing nothing sees exactly what it saw.
+
 `src/frontend/tests/unit/workspaceRoomsGate.spec.js` — F24 was **rewritten**, not
 deleted. It used to require each exit function to contain `route.params.roomId`;
 after #2161 that would mandate the enumeration that *was* the defect, so it now
@@ -526,7 +596,6 @@ requires the shared escape and asserts the enumeration is gone.
 | Limitation | Detail |
 |---|---|
 | **Asks are read-only** | Answering writes to the operator queue, an operator surface with its own auth. Rather than render a control that 403s for a client, the card offers "Reply in chat →". |
-| **No rating tally** | See above — no data source exists. |
 | **Files tab is a list, not the panel** | It lists documents and uploads; the upload flow stays in the existing files panel. |
 | **Non-scheduled rows still carry no context** (#2161) | `schedule_name` answers for schedule- and webhook-backed work. A chat, loop or reminder row has no equivalent safe label, and its message is a prompt — so those rows keep trigger, duration and time. AC #3 is met for scheduled rows only. |
 | **Ask count saturates at 20** | `MAX_ASKS` truncates server-side, so the badge reads `20+` rather than a true count. |
