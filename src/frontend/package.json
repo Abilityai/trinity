@@ -24,8 +24,8 @@
     "chart.js": "^4.4.7",
     "dompurify": "^3.4.11",
     "js-yaml": "^5.3.0",
-    "marked": "^18.0.9",
-    "mermaid": "^11.16.1",
+    "marked": "^18.0.10",
+    "mermaid": "^11.17.0",
     "monaco-editor": "^0.56.0",
     "pinia": "^4.0.3",
     "qrcode": "^1.5.4",
@@ -42,12 +42,12 @@
     "autoprefixer": "^10.5.4",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.19",
-    "vite": "^8.2.1",
-    "vitest": "^4.1.10"
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   },
   "optionalDependencies": {
-    "@rollup/rollup-darwin-arm64": "^4.62.4",
-    "@rollup/rollup-linux-arm64-musl": "^4.62.4"
+    "@rollup/rollup-darwin-arm64": "^4.62.5",
+    "@rollup/rollup-linux-arm64-musl": "^4.62.5"
   },
   "overrides": {
     "dompurify": "^3.4.11"
