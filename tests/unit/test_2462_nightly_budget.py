@@ -191,3 +191,25 @@ class TestItCannotDieQuietly:
         """AC 3 — a capped leg and a leg that legitimately had nothing to run
         were indistinguishable from outside."""
         assert "GITHUB_STEP_SUMMARY" in _uncommented(_job(workflow, "test"))
+
+
+class TestTheDemonstrationHasABlastRadius:
+    """A change to this workflow can only be verified by running it, and
+    running it sweeps every open PR and posts bot comments on other people's
+    work. The scoped dispatch exists so proving a fix costs one PR."""
+
+    def test_a_manual_dispatch_can_be_scoped_to_one_pr(self, workflow):
+        assert "pr_number:" in _uncommented(_job(workflow, "discover")) or \
+            re.search(r"inputs:\s*\n\s*pr_number:", workflow), (
+            "workflow_dispatch lost its single-PR scope — verifying a change "
+            "again means sweeping every open PR (#2462)"
+        )
+
+    def test_the_scheduled_sweep_is_unscoped(self, workflow):
+        """The filter must be opt-in. An always-on filter with an empty input
+        would silently reduce the nightly to nothing — the same silence this
+        issue is about, arriving by a different door."""
+        discover = _uncommented(_job(workflow, "discover"))
+        assert 'if [ -n "$only" ]' in discover, (
+            "the PR filter is not guarded on a non-empty input"
+        )

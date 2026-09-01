@@ -20,6 +20,11 @@ on:
   schedule:
     - cron: '0 6 * * *'   # 06:00 UTC = 07:00 London
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Sweep only this PR (blank = every open PR, as the schedule does)'
+        required: false
+        type: string
 
 # No top-level permissions — each job declares its own narrow scope.
 permissions: {}
@@ -54,12 +59,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # #2462: a manual dispatch may scope the sweep to ONE PR. The
+          # scheduled run passes nothing and is unchanged. This exists because
+          # verifying a change to this workflow otherwise means sweeping every
+          # open PR and posting bot comments on other people's work to prove
+          # your own fix — the demonstration should not have a blast radius
+          # wider than the thing being demonstrated.
+          #
+          # Filtered by `select`, not by fetching the single PR: an id that is
+          # closed, targets another base, or does not exist then yields an
+          # empty set and the honest `has_prs=false` path, rather than a matrix
+          # leg that fails deep inside the merge step.
+          only='${{ inputs.pr_number }}'
           prs=$(gh pr list \
             --repo "${{ github.repository }}" \
             --base dev \
             --state open \
             --limit 50 \
             --json number,headRefName,headRefOid)
+          if [ -n "$only" ]; then
+            prs=$(echo "$prs" | jq -c --argjson only "$only" '[.[] | select(.number == $only)]')
+            echo "Scoped to PR #$only: $(echo "$prs" | jq 'length') match(es)"
+          fi
           count=$(echo "$prs" | jq 'length')
           if [ "$count" = "0" ]; then
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
