@@ -273,7 +273,7 @@ class TestRecoveryServiceWiring:
             mod.db, "list_subscriptions", lambda: [_Sub("a"), _Sub("b"), _Sub("c")]
         )
 
-        async def _probe(sid):
+        async def _probe(sid, **_kw):  # **_kw: #2443 passes limited_ids
             if sid == "b":
                 raise RuntimeError("boom")
             return "recovered" if sid == "a" else "not_limited"
