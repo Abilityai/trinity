@@ -24,6 +24,15 @@ on:
 # No top-level permissions — each job declares its own narrow scope.
 permissions: {}
 
+env:
+  # ONE definition of the seed set (#2462). `discover` builds a matrix leg per
+  # seed from it and `comment` requires exactly these seeds before it will
+  # publish a verdict, so the two cannot disagree about how many legs a
+  # complete answer takes. Restating the list in either place is how a fourth
+  # seed silently makes every PR permanently unverified, or a removed one
+  # silently lowers the bar.
+  NIGHTLY_SEEDS: '12345 67890 99999'
+
 concurrency:
   group: backend-unit-nightly
   cancel-in-progress: false
@@ -57,11 +66,19 @@ jobs:
             echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          matrix=$(echo "$prs" | jq -c '{include: [.[] | {
-            pr_number: .number,
-            head_ref: .headRefName,
-            head_sha: .headRefOid
-          }]}')
+          # #2462: one leg per (PR, seed), not one leg per PR running all six
+          # suites. A leg is now base+head for ONE seed — two suites, which fits
+          # a budget; six never did. Keeping base and head for the same seed in
+          # the SAME leg is what lets the regression diff stay where it is,
+          # inside the job that holds the trusted stashed copy of the script.
+          matrix=$(echo "$prs" | jq -c --arg seeds "$NIGHTLY_SEEDS" \
+            '{include: [.[] | . as $pr
+              | (($seeds | split(" ")) | map({
+                  pr_number: $pr.number,
+                  head_ref: $pr.headRefName,
+                  head_sha: $pr.headRefOid,
+                  seed: .
+                }))] | flatten}')
           {
             echo "has_prs=true"
             echo "matrix<<MATRIX_EOF"
@@ -70,11 +87,43 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   test:
-    name: pytest (PR #${{ matrix.pr_number }})
+    name: pytest (PR #${{ matrix.pr_number }}, seed ${{ matrix.seed }})
     needs: discover
     if: needs.discover.outputs.has_prs == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # #2462: this job had `timeout-minutes: 25` while running SIX full unit
+    # suites (three seeds x base and head). One suite was ~15 minutes, so a leg
+    # needed ~90 minutes of a 25-minute budget and every leg for a mergeable PR
+    # was cancelled at the cap. Twelve consecutive nights of `cancelled` in the
+    # queryable history, and no result for any mergeable PR in any of them. The
+    # only legs that "succeeded" finished in 46 seconds — the merge-conflict
+    # short-circuits, i.e. exactly the ones that ran nothing.
+    #
+    # Nobody noticed because the workflow is structurally incapable of
+    # reporting its own death: it is scheduled (so a cancel notifies no one and
+    # blocks no PR), and the diff step is gated on the suite step completing,
+    # so a capped leg produces no artifact, no diff and no comment. Silence and
+    # success look identical from outside.
+    #
+    # Two changes, and BOTH are needed — either alone leaves it broken:
+    #
+    #   1. a leg is now ONE seed (base + head = two suites), not three seeds
+    #      x two sides = six;
+    #   2. the suites run under xdist, the #2461 change, measured at ~9 min per
+    #      suite on these runners against ~15 min serial.
+    #
+    # So a leg is ~18 minutes of suite plus ~4 of full-history checkout, merge
+    # and install: ~22. 60 is ~2.7x that, which clears the worst runner
+    # starvation actually measured on this repo's runners (1.94x, from #2461's
+    # 17.5m shard beside its 9.0m siblings).
+    #
+    # Residual, stated rather than discovered later: a pathological ~3x runner
+    # still reaches this cap. The difference from before is blast radius and
+    # visibility — it now costs ONE SEED of one PR instead of that PR's entire
+    # verdict, the PR is reported as unverified rather than silently skipped
+    # (see the all-seeds rule in `comment`), and a sweep that dies wholesale
+    # fails the run loudly instead of ending `cancelled`.
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -154,13 +203,36 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r tests/requirements-test.txt 'pytest-randomly>=3.15.0'
+          pip install -r tests/requirements-test.txt \
+            'pytest-randomly>=3.15.0' 'pytest-xdist>=3.5.0'
 
       - name: Diff-script self-test (trusted copy)
         run: python "$HOME/.ci-tools/diff-pytest-failures.py" --self-test
 
       - name: Run unit suite (base = origin/dev, head = merge commit)
         if: steps.merge.outputs.merge_conflict == 'false'
+        # #2462: ONE seed per leg — the loops that ran all three are gone. Base
+        # and head for that seed stay in this workspace so the diff below can
+        # still run here, under the trusted stashed script, rather than needing
+        # a fourth job that downloads junit artifacts from an untrusted one.
+        #
+        # -n auto --dist loadfile is #2461's change, for #2461's reasons —
+        # see backend-unit-test.yml, where the flags, the loadfile rationale
+        # (this suite manipulates sys.modules and pins env at module import,
+        # so within-file ordering is load-bearing) and the measured
+        # before/after all live. Repeating the reasoning here would give it two
+        # homes and one of them would go stale.
+        #
+        # --timeout=300 --timeout-method=signal is NEW on this workflow and was
+        # simply missing: #2019 added it to the PR-blocking workflow after four
+        # anonymous cancels in one day, and this one never got it. Without it a
+        # single stalled test consumes the whole leg and dies without naming
+        # itself — the same failure, on the workflow where nobody is watching.
+        #
+        # `|| true` is unchanged and still load-bearing: pytest exits non-zero
+        # while ANY test fails, and `dev` has a known non-empty baseline, so
+        # the BASE side must keep running or there is nothing to diff against.
+        # The diff step is what decides this leg's verdict.
         run: |
           set -euo pipefail
           # Snapshot the merge commit so we can come back to it.
@@ -168,21 +240,21 @@ jobs:
 
           # Base run = origin/dev tip, before merge.
           git switch --detach origin/dev
-          for seed in 12345 67890 99999; do
-            ( cd tests && python -m pytest unit/ -m "not slow" \
-                -p randomly --randomly-seed=$seed \
-                --junit-xml="$GITHUB_WORKSPACE/junit-base-pr${{ matrix.pr_number }}-$seed.xml" \
-                --tb=no -q || true )
-          done
+          ( cd tests && python -m pytest unit/ -m "not slow" \
+              --timeout=300 --timeout-method=signal \
+              -n auto --dist loadfile \
+              -p randomly --randomly-seed=${{ matrix.seed }} \
+              --junit-xml="$GITHUB_WORKSPACE/junit-base-pr${{ matrix.pr_number }}-${{ matrix.seed }}.xml" \
+              --tb=no -q || true )
 
           # Head run = merge commit.
           git switch --detach "$MERGE_SHA"
-          for seed in 12345 67890 99999; do
-            ( cd tests && python -m pytest unit/ -m "not slow" \
-                -p randomly --randomly-seed=$seed \
-                --junit-xml="$GITHUB_WORKSPACE/junit-head-pr${{ matrix.pr_number }}-$seed.xml" \
-                --tb=no -q || true )
-          done
+          ( cd tests && python -m pytest unit/ -m "not slow" \
+              --timeout=300 --timeout-method=signal \
+              -n auto --dist loadfile \
+              -p randomly --randomly-seed=${{ matrix.seed }} \
+              --junit-xml="$GITHUB_WORKSPACE/junit-head-pr${{ matrix.pr_number }}-${{ matrix.seed }}.xml" \
+              --tb=no -q || true )
 
       - name: Run regression diff (trusted copy)
         if: steps.merge.outputs.merge_conflict == 'false'
@@ -190,9 +262,9 @@ jobs:
         run: |
           set +e
           python "$HOME/.ci-tools/diff-pytest-failures.py" \
-            --base junit-base-pr${{ matrix.pr_number }}-*.xml \
-            --head junit-head-pr${{ matrix.pr_number }}-*.xml \
-            --out "diff-pr${{ matrix.pr_number }}.md"
+            --base junit-base-pr${{ matrix.pr_number }}-${{ matrix.seed }}.xml \
+            --head junit-head-pr${{ matrix.pr_number }}-${{ matrix.seed }}.xml \
+            --out "diff-pr${{ matrix.pr_number }}-${{ matrix.seed }}.md"
           rc=$?
           if [ $rc -eq 0 ]; then
             echo "regression=false" >> "$GITHUB_OUTPUT"
@@ -223,10 +295,11 @@ jobs:
           # ALL-CLEAR on a regression detector, which nothing corrects.
           #
           # Writing no file is the honest answer: the comment job enumerates
-          # `status-pr*.json`, so a missing one means this PR is skipped and any
-          # existing sticky is left exactly as it was.
+          # `status-pr*.json` and requires one per seed (#2462), so a missing
+          # one means this PR is reported as UNVERIFIED and any existing sticky
+          # is left exactly as it was — never overwritten with a tick.
           if [ -z "$merge_conflict" ]; then
-            echo "::warning::merge verdict unknown for PR ${{ matrix.pr_number }} — no status written, sticky left untouched"
+            echo "::warning::merge verdict unknown for PR ${{ matrix.pr_number }} seed ${{ matrix.seed }} — no status written, PR reported unverified"
             exit 0
           fi
 
@@ -238,28 +311,51 @@ jobs:
             if [ "$merge_conflict" = "true" ]; then
               regression="false"
             else
-              echo "::warning::regression verdict unknown for PR ${{ matrix.pr_number }} — no status written, sticky left untouched"
+              echo "::warning::regression verdict unknown for PR ${{ matrix.pr_number }} seed ${{ matrix.seed }} — no status written, PR reported unverified"
               exit 0
             fi
           fi
           jq -n \
             --arg pr "${{ matrix.pr_number }}" \
+            --arg seed "${{ matrix.seed }}" \
             --arg head_sha "${{ matrix.head_sha }}" \
             --arg merge_conflict "$merge_conflict" \
             --arg regression "$regression" \
-            '{pr_number: ($pr|tonumber), head_sha: $head_sha,
+            '{pr_number: ($pr|tonumber), seed: $seed, head_sha: $head_sha,
               merge_conflict: ($merge_conflict == "true"),
               regression: ($regression == "true")}' \
-            > "status-pr${{ matrix.pr_number }}.json"
+            > "status-pr${{ matrix.pr_number }}-${{ matrix.seed }}.json"
+
+      - name: Leg summary
+        # #2462 AC 3: a leg that was CAPPED and a leg that legitimately had
+        # nothing to run were indistinguishable from outside — the 46-second
+        # merge-conflict skips were the only "successes" for twelve nights, and
+        # nothing on the run page said so. This writes what this leg actually
+        # did, so the Actions summary answers the question without opening a
+        # log. It cannot run at all when the job is cancelled at the cap, and
+        # that ABSENCE is itself the distinguishing signal.
+        if: always()
+        run: |
+          {
+            echo "### PR #${{ matrix.pr_number }} — seed ${{ matrix.seed }}"
+            if [ "${{ steps.merge.outputs.merge_conflict }}" = "true" ]; then
+              echo "- merge conflict against \`dev\` — suite deliberately not run"
+            elif [ "${{ steps.merge.outputs.merge_conflict }}" = "false" ]; then
+              echo "- suite ran (base + head, seed ${{ matrix.seed }})"
+              echo "- regression: ${{ steps.diff.outputs.regression || 'unknown' }}"
+            else
+              echo "- no merge verdict — leg failed before the suite could run"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nightly-pr-${{ matrix.pr_number }}
+          name: nightly-pr-${{ matrix.pr_number }}-seed-${{ matrix.seed }}
           path: |
-            diff-pr${{ matrix.pr_number }}.md
-            status-pr${{ matrix.pr_number }}.json
+            diff-pr${{ matrix.pr_number }}-${{ matrix.seed }}.md
+            status-pr${{ matrix.pr_number }}-${{ matrix.seed }}.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -270,9 +366,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      contents: read          # #2462: to check out the TRUSTED verdict module
       issues: write           # PR conversation comments are issue comments
       pull-requests: write
     steps:
+      # #2462: `dev`, pinned, never PR code. The architecture rule at the top
+      # of this file is that untrusted PR code must not share a job with a
+      # write-capable token — this checkout is the same trust level as the
+      # workflow file itself, and it exists so the verdict logic can live in a
+      # module a test can execute instead of as inline `github-script` prose.
+      # A false all-clear on a regression detector is the error nothing
+      # downstream corrects, so that logic must be testable.
+      - name: Checkout dev (trusted — verdict module only)
+        uses: actions/checkout@v7
+        with:
+          ref: dev
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+
       - name: Download all nightly artifacts
         uses: actions/download-artifact@v8
         with:
@@ -293,47 +406,105 @@ jobs:
       # #2029 considered a second, coarser belt here — gating this step on
       # `needs.test.result == 'success'` — and it is deliberately NOT applied.
       # `test` is a MATRIX job, so its result is `failure` when any single leg
-      # fails: one PR's infrastructure hiccup would suppress the report for
+      # fails: one leg's infrastructure hiccup would suppress the report for
       # every other PR in the sweep, trading a false green for a silence that
       # is just as wrong and affects PRs that were fine.
       #
-      # The per-PR guard in `Write status JSON` is already both precise and
-      # complete: a leg with no verdict writes no file, the loop below
-      # enumerates what exists, and only that PR is skipped. The all-legs-failed
-      # case falls out of the same mechanism — no files, no comments.
+      # The per-leg guard in `Write status JSON` is precise: a leg with no
+      # verdict writes no file, the script below enumerates what exists, and
+      # #2462's completeness rule means the affected PR is reported unverified
+      # rather than given a tick on a partial answer.
+      #
+      # What #2029 could not have anticipated is the all-legs-failed case,
+      # which under the old 25-minute budget was EVERY night for twelve nights:
+      # no files, no comments, and a run that ends without a red mark anywhere.
+      # That one is now `core.setFailed` in the script — the sweep is allowed
+      # to say nothing about a PR, but not to say nothing at all and pass.
       - name: Post or update sticky comment per PR
         uses: actions/github-script@v9
         env:
           PATHS: ${{ steps.list.outputs.paths }}
+          # Passed explicitly rather than relied on from the workflow-level
+          # env, so the completeness rule below reads its seed set from the
+          # same place `discover` builds the matrix from, visibly.
+          NIGHTLY_SEEDS: ${{ env.NIGHTLY_SEEDS }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
+            const { verdictFor, groupByPr } = require(
+              `${process.env.GITHUB_WORKSPACE}/scripts/ci/nightly-verdict.js`
+            );
             const marker = '<!-- nightly-unit-suite -->';
 
             const paths = (process.env.PATHS || '').split('\n').map(s => s.trim()).filter(Boolean);
+            const expectedSeeds = (process.env.NIGHTLY_SEEDS || '').split(' ').filter(Boolean);
+
+            // #2462: a sweep that produced NOTHING while PRs were open is the
+            // exact signature of the twelve dead nights — every leg capped, no
+            // artifact, no comment, run ends without a red mark anywhere. It
+            // must not exit 0. A run where every PR merge-conflicted still
+            // writes a status per leg, so zero files with PRs present can only
+            // mean the legs themselves died.
             if (paths.length === 0) {
-              core.info('No status JSONs found — nothing to comment on.');
+              core.setFailed(
+                'Nightly produced no status artifacts while open PRs existed — every test leg failed ' +
+                'or was cancelled. This is the #2462 signature; check the test job durations.'
+              );
               return;
             }
 
+            // #2462: legs are per (PR, seed) now, so a PR's verdict is the
+            // union of its seeds. Group first, then decide — and the deciding
+            // lives in scripts/ci/nightly-verdict.js, which a test executes.
+            const parsed = [];
             for (const p of paths) {
               try {
-                const status = JSON.parse(fs.readFileSync(p, 'utf8'));
-                const pr = status.pr_number;
-                const diffPath = `diff-pr${pr}.md`;
+                parsed.push(JSON.parse(fs.readFileSync(p, 'utf8')));
+              } catch (err) {
+                core.warning(`Failed to read ${p}: ${err.message}`);
+              }
+            }
+            const byPr = groupByPr(parsed);
+
+            for (const [pr, legs] of byPr) {
+              try {
+                const verdict = verdictFor(legs, expectedSeeds);
+
+                if (verdict.status === 'unverified') {
+                  core.warning(
+                    `PR #${pr}: unverified — no result for seed(s) ${verdict.missing.join(', ') || '(none reported)'}. ` +
+                    'Sticky left untouched.'
+                  );
+                  continue;
+                }
+
+                const status = {
+                  merge_conflict: verdict.status === 'merge_conflict',
+                  regression: verdict.status === 'regression',
+                  head_sha: verdict.headSha,
+                };
+                const regressed = (verdict.regressed || []).map(
+                  l => ({ ...l, diffPath: `diff-pr${pr}-${l.seed}.md` })
+                );
 
                 let body;
                 if (status.merge_conflict) {
                   body = `${marker}\n⚠️ **Nightly unit-suite check skipped — merge conflict against \`dev\`.**\n\nResolve by running \`git merge dev\` locally and pushing the result. The next nightly run will re-test once the conflict is gone.`;
                 } else if (status.regression) {
-                  let diffMd = '_diff artifact missing_';
-                  if (fs.existsSync(diffPath)) {
-                    diffMd = fs.readFileSync(diffPath, 'utf8');
-                  }
-                  body = `${marker}\n⚠️ **Nightly unit-suite found regressions when this PR is merged into \`dev\`.**\n\n<details>\n<summary>Regression details (head_sha: \`${status.head_sha}\`)</summary>\n\n${diffMd}\n\n</details>\n\n_Reproduce locally:_ \`git merge dev && tests/run-core.sh\``;
+                  // Name the seed on each block. Under pytest-randomly the
+                  // seed is the reproduction instruction, so a diff without it
+                  // tells a reviewer what broke but not how to see it again.
+                  const sections = regressed.map(l => {
+                    const md = fs.existsSync(l.diffPath)
+                      ? fs.readFileSync(l.diffPath, 'utf8')
+                      : '_diff artifact missing_';
+                    return `**Seed \`${l.seed}\`**\n\n${md}`;
+                  }).join('\n\n---\n\n');
+                  const scope = `${regressed.length} of ${verdict.total} seeds`;
+                  body = `${marker}\n⚠️ **Nightly unit-suite found regressions when this PR is merged into \`dev\`** (${scope}).\n\n<details>\n<summary>Regression details (head_sha: \`${status.head_sha}\`)</summary>\n\n${sections}\n\n</details>\n\n_Reproduce locally:_ \`git merge dev && ( cd tests && python -m pytest unit/ -m "not slow" -p randomly --randomly-seed=${regressed[0].seed} )\``;
                 } else {
-                  body = `${marker}\n✅ **Nightly unit-suite clean** when this PR is merged into \`dev\` (head_sha: \`${status.head_sha}\`).`;
+                  body = `${marker}\n✅ **Nightly unit-suite clean** when this PR is merged into \`dev\`, all ${verdict.total} seeds (head_sha: \`${status.head_sha}\`).`;
                 }
 
                 // Find existing sticky comment by marker (paginated).
@@ -383,7 +554,7 @@ jobs:
                   core.info(`PR #${pr}: clean and no prior comment — nothing to post.`);
                 }
               } catch (err) {
-                // Per-PR failure must not take out the rest of the matrix.
-                core.warning(`Failed to process ${p}: ${err.message}`);
+                // Per-PR failure must not take out the rest of the sweep.
+                core.warning(`Failed to process PR #${pr}: ${err.message}`);
               }
             }
