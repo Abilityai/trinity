@@ -42,7 +42,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 import httpx
 
@@ -178,7 +178,9 @@ def parse_unified_headers(headers) -> Optional[dict]:
 async def _probe(subscription_id: str) -> Optional[dict]:
     """One probe call; returns the snapshot dict (with status) or None when the
     subscription has no usable token. Never raises; never logs the token."""
-    token = db.get_subscription_token(subscription_id)
+    # #2443: sync SQLAlchemy, and this one runs inside every probe — the
+    # sweep's hottest path. Same reason as the predicate above.
+    token = await asyncio.to_thread(db.get_subscription_token, subscription_id)
     if not token:
         return None
 
@@ -457,23 +459,58 @@ async def get_headroom(
     return _to_model(snapshot)
 
 
-def _believed_limited(subscription_id: str, snapshot: Optional[dict]) -> bool:
+def _believed_limited(
+    subscription_id: str,
+    snapshot: Optional[dict],
+    *,
+    limited_ids: Optional[Set[str]] = None,
+) -> bool:
     """Is this subscription currently PRESENTED as rate-limited? (#447)
 
     Deliberately the union of both arms the display resolver can fire on, so
     the recovery probe targets exactly the set of subscriptions wearing a
     `LIMIT` badge — including the common case where the badge comes from the
     stale 2h db predicate and no provider snapshot disagrees with it yet.
+
+    ``limited_ids`` (#2443) is the sweep's one batched read of the db arm. When
+    given, this function issues NO query and is safe to call directly from the
+    event loop; when absent it falls back to the per-id read, which the caller
+    must therefore run off the loop (``recover_probe`` does). The fallback is
+    kept rather than made mandatory so a one-off probe outside a sweep does not
+    have to build a set to ask about a single subscription.
     """
     if snapshot and snapshot.get("status") == "rate_limited":
         return True
+    if limited_ids is not None:
+        return subscription_id in limited_ids
     try:
         return bool(db.is_subscription_rate_limited(subscription_id))
     except Exception:  # noqa: BLE001 — a db blip must not stall the sweep
         return False
 
 
-async def recover_probe(subscription_id: str) -> str:
+def rate_limited_ids(subscription_ids: Sequence[str]) -> Set[str]:
+    """One threaded read of the db arm for a whole sweep or batch (#2443).
+
+    Fail-open to the EMPTY set, matching the per-id predicate's own
+    ``except -> False``: a db blip must not stall the sweep, and the direction
+    is the safe one — a subscription that is genuinely limited is re-examined
+    on the next 300s cycle, whereas failing the other way would probe every
+    subscription on the instance on every db error.
+
+    Callers wrap this in ``asyncio.to_thread``; it is deliberately sync so the
+    db call and the thread hop stay one decision at the call site.
+    """
+    try:
+        return db.rate_limited_subscription_ids(list(subscription_ids))
+    except Exception:  # noqa: BLE001 — same reason as the per-id predicate
+        logger.debug("rate_limited_ids read failed; treating as none-limited")
+        return set()
+
+
+async def recover_probe(
+    subscription_id: str, *, limited_ids: Optional[Set[str]] = None
+) -> str:
     """Re-probe ONE subscription believed limited; return a short outcome (#447).
 
     Never raises. Fail-CLOSED on Redis, exactly like the ambient path: a client
@@ -489,7 +526,16 @@ async def recover_probe(subscription_id: str) -> str:
     redis_ok, snapshot = _read_snapshot(subscription_id)
     if not redis_ok:
         return "redis_unavailable"
-    if not _believed_limited(subscription_id, snapshot):
+    # #2443: the db arm is a synchronous SQLAlchemy call. With the sweep's
+    # batched set it costs nothing; without one it goes to a thread, because a
+    # sync query landing during the 03:30 backup or the 04:30 VACUUM blocks
+    # /health, the WS dispatcher and every in-flight request for up to the 30s
+    # busy timeout (the reason `_record_history` states at length next door).
+    if limited_ids is not None:
+        believed = _believed_limited(subscription_id, snapshot, limited_ids=limited_ids)
+    else:
+        believed = await asyncio.to_thread(_believed_limited, subscription_id, snapshot)
+    if not believed:
         return "not_limited"
     age = _snapshot_age_seconds(snapshot) if snapshot else None
     if age is not None and age < RECOVERY_PROBE_SECONDS:
@@ -1051,7 +1097,13 @@ async def pressure_states(
     token is dead is no longer `rate_limited_now` — without the split the badge
     would simply trade one wrong word ("limit") for another ("429s").
     """
-    counts_24h = db.get_failure_event_counts_by_subscription(hours=24)
+    # #2443: both db arms are batched and threaded. This runs on the 60s
+    # dashboard poll, and the per-id predicate below used to be one synchronous
+    # query PER SUBSCRIPTION on the event loop.
+    counts_24h = await asyncio.to_thread(
+        db.get_failure_event_counts_by_subscription, hours=24
+    )
+    limited_ids = await asyncio.to_thread(rate_limited_ids, subscription_ids)
     out: Dict[str, Dict[str, Any]] = {}
     for sid in subscription_ids:
         # wait=False: the dashboard's 60s poll is the DEMAND signal for a
@@ -1060,7 +1112,7 @@ async def pressure_states(
         # Same one-gate resolver as `decorate_usage` — the per-agent chip and
         # the tile must never disagree about one subscription (#447).
         limited = resolve_rate_limited_now(
-            db_says_limited=db.is_subscription_rate_limited(sid), headroom=headroom
+            db_says_limited=sid in limited_ids, headroom=headroom
         )
         entry = counts_24h.get(sid) or {}
         by_kind = entry.get("by_kind") or {}

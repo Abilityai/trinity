@@ -260,7 +260,11 @@ def test_the_agent_page_does_not_show_one_client_another_clients_ask(queue_db, r
     question are exactly where an ask meant for someone else says something not
     meant for this reader.
     """
-    from client_portal import agent_page
+    # #2449: repointed at the surviving projection. The page had a second,
+    # older reader of the same rows; it is gone, and the page now renders asks
+    # through `PortalAsks`, which reads `/asks`. The ent#364 AC is unchanged;
+    # the reader under it is the one the page actually uses.
+    from client_portal.asks import service as asks_service
     from database import db
     from services.operator_queue_service import _clamp_ingested_item
 
@@ -275,8 +279,10 @@ def test_the_agent_page_does_not_show_one_client_another_clients_ask(queue_db, r
         "addressed_to_email": "alice@example.com",
     }, "scout"))
 
-    assert [a["id"] for a in agent_page._asks("scout", "alice@example.com")] == [item_id]
-    assert agent_page._asks("scout", "bob@example.com") == []
+    alice = asks_service.list_asks("alice@example.com", is_platform=False, agent_name="scout")
+    bob = asks_service.list_asks("bob@example.com", is_platform=False, agent_name="scout")
+    assert [a.id for a in alice] == [item_id]
+    assert bob == []
 
 
 def test_the_agent_page_does_not_show_a_client_an_operator_ask(queue_db, roster):
@@ -286,12 +292,13 @@ def test_the_agent_page_does_not_show_a_client_an_operator_ask(queue_db, roster)
     client cannot act on it from this page anyway — the only affordance is
     "reply in chat". Operators keep the full queue in Operations.
     """
-    from client_portal import agent_page
+    from client_portal.asks import service as asks_service
     from database import db
 
     _seed(db, "scout", "req-operator")
 
-    assert agent_page._asks("scout", "client@example.com") == []
+    assert asks_service.list_asks(
+        "client@example.com", is_platform=False, agent_name="scout") == []
 
 
 # --- raise-time chat attachment (ent#429) --------------------------------------

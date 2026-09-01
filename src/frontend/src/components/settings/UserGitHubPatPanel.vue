@@ -20,7 +20,7 @@
             v-model="pat"
             :placeholder="status.configured ? '•••••••••• (configured)' : 'ghp_... or github_pat_...'"
             :disabled="saving"
-            class="block w-full pr-10 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm"
+            :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-full pr-10']"
           />
           <button
             type="button"
@@ -81,6 +81,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { SETTINGS_TEXT_INPUT_CLASS } from './fieldStyles'
 import axios from 'axios'
 
 const pat = ref('')

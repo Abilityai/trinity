@@ -59,8 +59,14 @@ DEFAULT_WINDOW = "7d"
 
 # Only these reach a Workspace viewer. `alert` is platform-generated operations
 # telemetry, not a question an agent is asking a person.
-ASK_TYPES = ("approval", "question")
-MAX_ASKS = 20
+# #2449: `ASK_TYPES` / `MAX_ASKS` and the `_asks()` reader that used them are
+# gone. This page rendered asks from a SECOND projection of the same
+# `operator_queue` rows, beside the `PortalAsks` component that reads `/asks` —
+# so every ask appeared twice, and the two halves disagreed: this one capped at
+# 20 where `/asks` fetches 200, and carried no `status`, so it could not show an
+# expired ask as expired (ent#429's AC) and counted one where the sidebar did
+# not. One entity, one projection; `client_portal/asks/service.py` is it, and it
+# covers strictly more (revoked share, unreadable roster, expiry, context).
 MAX_RECENT_WORK = 20
 
 MAX_CHATS = 20
@@ -267,55 +273,6 @@ def _stats(agent_name: str, window: str, *, is_platform: bool = False) -> dict:
     }
 
 
-def _asks(agent_name: str, viewer_email: str) -> list[dict]:
-    """What this agent is waiting on THIS VIEWER for.
-
-    Read-only here. Answering an approval writes to the operator queue, which is
-    an operator surface with its own auth; the page offers "reply in chat"
-    instead, so neither audience lands on a control that does nothing.
-
-    `viewer_email` is not decoration (ent#428). One agent is routinely shared
-    with several clients, and this block used to be scoped by `agent_name`
-    alone — so every co-shared client read every other client's pending ask,
-    title and question verbatim. `context` was already withheld here as a known
-    leak surface, but `title`/`question`/`options` are agent-authored free text
-    and are exactly where an ask addressed to someone else says something not
-    meant for this reader. `addressed_to_email` exists to decide *whose* surface
-    an ask appears on (ent#364); this reader predates it and was never taught.
-
-    Unaddressed operator asks (`addressed_to_email IS NULL`) are excluded by the
-    same condition, and that is the intended narrowing rather than a side
-    effect: this is a client-facing page, an operator ask is agent-authored text
-    written for the operator, and a client cannot act on one from here anyway.
-    Operators keep the full queue in Operations, and this matches what the
-    Workspace's other ask surfaces already show the same person.
-    """
-    try:
-        items = db.list_operator_queue_items(
-            status="pending", agent_name=agent_name,
-            addressed_to_email=viewer_email, limit=MAX_ASKS,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("agent page: operator queue read failed for %s: %s", agent_name, e)
-        return []
-    out = []
-    for it in items:
-        if it.get("type") not in ASK_TYPES:
-            continue
-        out.append({
-            "id": it.get("id"),
-            "type": it.get("type"),
-            "priority": it.get("priority"),
-            "title": it.get("title"),
-            "question": it.get("question"),
-            "options": it.get("options"),
-            "created_at": it.get("created_at"),
-            # `context` is deliberately absent — free-form agent JSON, and a
-            # known credential-leak surface (canary G-04).
-        })
-    return out
-
-
 def _schedule_names(agent_name: str, rows: list[dict]) -> dict:
     """`schedule_id` → schedule NAME, for the rows that actually carry one (#2161).
 
@@ -514,7 +471,6 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
         # unified exposable-skills config this becomes a view of when it lands.
         "capabilities": card.get("playbooks") or [],
         "stats": _stats(agent_name, window, is_platform=is_platform),
-        "asks": _asks(agent_name, email),
         # ent#366 AC #4: a RAW TALLY, never a percentage. At the volumes this
         # page sees, one thumbs-down out of one rating renders as "100%
         # negative" — a number that looks like evidence and is not. Both

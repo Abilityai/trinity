@@ -228,21 +228,6 @@ class PortalAllSessions(BaseModel):
     sessions: list[PortalAllSessionsItem]
 
 
-class PortalAgentAsk(BaseModel):
-    """One thing the agent is waiting on a person for (ent#360).
-
-    Agent-authored `approval`/`question` items only. `context` is deliberately
-    absent — free-form agent JSON, and a known credential-leak surface.
-    """
-    id: str
-    type: str
-    priority: Optional[str] = None
-    title: Optional[str] = None
-    question: Optional[str] = None
-    options: Optional[list] = None
-    created_at: Optional[str] = None
-
-
 class PortalAgentWork(BaseModel):
     """One execution: shape, plus the name of the schedule behind it.
 
@@ -315,7 +300,6 @@ class PortalAgentPage(BaseModel):
     header: PortalAgentHeader
     capabilities: list[PortalPlaybook] = Field(default_factory=list)
     stats: PortalAgentStats
-    asks: list[PortalAgentAsk] = Field(default_factory=list)
     recent_work: list[PortalAgentWork] = Field(default_factory=list)
     # ent#366 — raw up/down counts (never a percentage). `unavailable` keeps an
     # unread tally from rendering as a real zero.

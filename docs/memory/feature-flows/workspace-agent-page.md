@@ -88,7 +88,6 @@ GET /api/enterprise/client-portal/agents/{name}/page?window=7d
   └─ agent_page.build_page
        ├─ _health ............... last persisted health check
        ├─ _stats ................ db.get_agent_analytics (#1107) + first_try_stats
-       ├─ _asks ................. operator queue, filtered + projected
        └─ _recent_work .......... executions, projected to shape
             └─ _schedule_names .. ONE query, id → name only (#2161)
 ```
@@ -322,8 +321,28 @@ Two constraints on that layout:
   gesture on touch. Containment is first-N-plus-toggle, not `overflow-y-auto`.
   **Still true after #2169** — the section moved, its containment did not change.
 
-The badge reads `20+` at the cap, because `MAX_ASKS` truncates server-side — a
-bare "20" against 50 pending is a wrong number, not a rounded one.
+**The page renders asks ONCE, from `/asks` (#2449).** It used to render them
+twice: `<PortalAsks>` off the `/asks` store, and a second "Waiting on you"
+section off a `page.asks` payload built by the page's own `_asks()` reader. Both
+guards were true at the same time, so a client saw every ask twice — once with
+answer controls, once with a "Reply in chat →" link whose justifying comment
+("rather than render a control that 403s for a client") predated ent#428's
+client answer route and was simply no longer true.
+
+Deleting one was the fix rather than styling around it, because the two halves
+disagreed. `page.asks` capped at `MAX_ASKS = 20` where `/asks` fetches 200, and
+it carried no `status` and no `expires_at` — so that section could not show an
+expired ask as expired (ent#429's AC) and counted one in the Overview badge
+where the sidebar's `askCount`, pending-only by design, did not. The badge now
+counts the same store list the section renders, pending-only, so the two agree.
+
+`_asks()` is gone with it, and with it one DB query per page load. Nothing is
+lost: `client_portal/asks/service.py::list_asks` covers strictly more —
+revoked-share re-check, unreadable-roster fail-closed, expiry, and the
+`context`-never-forwarded rule. The one behavioural difference is deliberate and
+was already live: `_asks` excluded `alert` items while `/asks` includes them, so
+the page already showed them through `<PortalAsks>`; only the duplicate hid
+them.
 
 ### The Overview row is unconditional, and asks moved below it (#2169)
 
@@ -334,9 +353,18 @@ its data: an agent with nothing waiting collapsed to one column, so the layout
 changed whenever a transient operator-queue item opened or closed.
 
 The top row is now **unconditional** and its occupants are the chart (left) and
-recent work (right); asks sit **below it at full width**, still only when there
-are any and still with no empty-state placeholder — an agent with nothing
-waiting must not advertise the section. Nothing has to collapse, because both
+recent work (right); asks sit only when there are any, still with no empty-state
+placeholder — an agent with nothing waiting must not advertise the section.
+
+> **#2169's "below the top row" no longer describes the page (#2449), and this
+> is worth a decision rather than a silent drift.** ent#428 mounted
+> `<PortalAsks>` immediately under the header, ABOVE the stats strip, so the
+> page led with asks *and* repeated them lower down. The two ordering tests kept
+> passing only because the lower copy existed. #2449 removed the duplicate, so
+> the surviving mount is the one near the top and asks now lead the page —
+> reversing the instruction #2169 recorded. Deleting a duplicate is not the
+> right place to settle where asks belong: if "below the top row" still stands,
+> move the surviving mount, do not restore a second one. Nothing has to collapse, because both
 row occupants already own an empty state ("No activity in this window." /
 "Nothing yet."). The chart's `max-w-2xl` went with the move: inside a half-width
 column that cap does not bind below ~1656px.
@@ -598,5 +626,4 @@ requires the shared escape and asserts the enumeration is gone.
 | **Asks are read-only** | Answering writes to the operator queue, an operator surface with its own auth. Rather than render a control that 403s for a client, the card offers "Reply in chat →". |
 | **Files tab is a list, not the panel** | It lists documents and uploads; the upload flow stays in the existing files panel. |
 | **Non-scheduled rows still carry no context** (#2161) | `schedule_name` answers for schedule- and webhook-backed work. A chat, loop or reminder row has no equivalent safe label, and its message is a prompt — so those rows keep trigger, duration and time. AC #3 is met for scheduled rows only. |
-| **Ask count saturates at 20** | `MAX_ASKS` truncates server-side, so the badge reads `20+` rather than a true count. |
 | **"What it can do" is the briefing** | A projection of the roster briefing (#138/ent#380). ent#178 (unified exposable-skills config) is the mechanism this becomes a view of; it deliberately does not build a competing one. |

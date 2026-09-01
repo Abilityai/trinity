@@ -389,7 +389,7 @@ class TestSweepIsolation:
         would take that mechanism down with it."""
         import services.subscription_recovery_service as svc
 
-        async def _recovered(sid):
+        async def _recovered(sid, **_kw):  # **_kw: #2443 passes limited_ids
             return "recovered"
 
         async def _explode(sid, **kw):
@@ -588,7 +588,7 @@ class TestReviewRegressions:
         monkeypatch.setattr(alerts.db, "get_setting_value",
                             lambda k, default=None: "0")
 
-        async def _recovered(sid):
+        async def _recovered(sid, **_kw):  # **_kw: #2443 passes limited_ids
             return "not_limited"
         monkeypatch.setattr(svc, "recover_probe", _recovered)
         monkeypatch.setattr(
@@ -606,7 +606,7 @@ class TestReviewRegressions:
         otherwise an operator who turned it off still pays the quota."""
         import services.subscription_recovery_service as svc
 
-        async def _recovered(sid):
+        async def _recovered(sid, **_kw):  # **_kw: #2443 passes limited_ids
             return "not_limited"
 
         async def _must_not_run(*a, **k):  # pragma: no cover
@@ -725,7 +725,7 @@ def _wire_sweep(monkeypatch, subs, *, raises_for=(), classification=None):
     import services.subscription_headroom_alerts as alerts
     emitted = []
 
-    async def _recovered(sid):
+    async def _recovered(sid, **_kw):  # **_kw: #2443 passes limited_ids
         return "not_limited"
 
     async def _ensure(sid, *, max_age_seconds):
