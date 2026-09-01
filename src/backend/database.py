@@ -2712,6 +2712,11 @@ class DatabaseManager:
         """Throttled (429) in the last 2h — the DISPLAY predicate (#2352)."""
         return self._subscription_ops.is_subscription_rate_limited(subscription_id)
 
+    def rate_limited_subscription_ids(self, subscription_ids):
+        """The batched form of `is_subscription_rate_limited` — one query for a
+        whole sweep or dashboard poll (#2443)."""
+        return self._subscription_ops.rate_limited_subscription_ids(subscription_ids)
+
     def has_recent_subscription_failures(self, subscription_id: str, hours: int = 2):
         """Failed for ANY reason in the window — the CANDIDATE-SKIP predicate
         used by auto-switch and assignment (#2352). Not interchangeable with

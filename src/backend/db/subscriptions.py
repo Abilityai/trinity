@@ -14,7 +14,7 @@ every return shape is preserved exactly.
 
 import uuid
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Sequence, Set, Tuple
 
 from sqlalchemy import select, insert, update, delete, func, and_
 
@@ -694,21 +694,70 @@ class SubscriptionOperations:
         in SQL — the exclusion documented on the two callers above is a
         property of this one comparison, not a second rule applied elsewhere.
         """
+        stmt = (
+            select(func.count().label("cnt"))
+            .select_from(subscription_rate_limit_events)
+            .where(
+                and_(
+                    subscription_rate_limit_events.c.subscription_id == subscription_id,
+                    *self._failure_event_window(hours=hours, kinds=kinds),
+                )
+            )
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar_one())
+
+    @staticmethod
+    def _failure_event_window(*, hours: int, kinds: Optional[Tuple[str, ...]] = None):
+        """The window + kind half of the failure-event predicate, WITHOUT the
+        subscription-id term.
+
+        Extracted so the single-id count above and the batched id-set below are
+        the same question asked of the same rows — one scoped to a row, one to
+        a set. Copying the two conditions into the batch instead would give the
+        display predicate two definitions of "recently rate-limited", which is
+        precisely the drift #2352 spent a fix untangling.
+        """
         conditions = [
-            subscription_rate_limit_events.c.subscription_id == subscription_id,
             # #476: iso_cutoff, not datetime('now', ...) — the format has to
             # match how occurred_at was written.
             subscription_rate_limit_events.c.occurred_at > iso_cutoff(hours),
         ]
         if kinds is not None:
             conditions.append(subscription_rate_limit_events.c.failure_kind.in_(kinds))
+        return conditions
+
+    def rate_limited_subscription_ids(
+        self, subscription_ids: Sequence[str]
+    ) -> Set[str]:
+        """The subset of ``subscription_ids`` that ``is_subscription_rate_limited``
+        would answer True for — in ONE query (#2443).
+
+        The per-id predicate is a synchronous SQLAlchemy call, and both of its
+        hot callers ask it once per subscription: the #447 recovery sweep (every
+        300s, now chunk-concurrent) and the dashboard pressure batch (every 60s).
+        Asking N times off the event loop is still N round-trips; asking once is
+        one, and it is the shape ``get_failure_event_counts_by_subscription``
+        already uses next door.
+
+        Empty input short-circuits without touching the DB — an ``IN ()`` is a
+        wasted round-trip whose answer is known.
+        """
+        ids = [s for s in dict.fromkeys(subscription_ids) if s]
+        if not ids:
+            return set()
         stmt = (
-            select(func.count().label("cnt"))
-            .select_from(subscription_rate_limit_events)
-            .where(and_(*conditions))
+            select(subscription_rate_limit_events.c.subscription_id)
+            .where(
+                and_(
+                    subscription_rate_limit_events.c.subscription_id.in_(ids),
+                    *self._failure_event_window(hours=2, kinds=("rate_limit",)),
+                )
+            )
+            .distinct()
         )
         with get_engine().connect() as conn:
-            return int(conn.execute(stmt).scalar_one())
+            return {row[0] for row in conn.execute(stmt)}
 
     def clear_rate_limit_events(self, agent_name: str, subscription_id: str) -> None:
         """Clear rate-limit events for an (agent, subscription) pair after successful switch."""

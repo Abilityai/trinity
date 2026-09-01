@@ -72,7 +72,7 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from database import db
 from redis_breaker_util import get_breaker_redis
@@ -83,6 +83,7 @@ from services.subscription_headroom_service import (
     classify_headroom,
     ensure_reading,
     is_auto_refresh_enabled,
+    rate_limited_ids,
     recover_probe,
 )
 
@@ -226,7 +227,12 @@ class SubscriptionRecoveryService:
             await asyncio.sleep(max(1, sleep_for))
 
     async def _sweep_one(
-        self, sub: Any, *, threshold: int, alerting: bool
+        self,
+        sub: Any,
+        *,
+        threshold: int,
+        alerting: bool,
+        limited_ids: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
         """Recovery, then headroom sampling, for ONE subscription.
 
@@ -234,6 +240,12 @@ class SubscriptionRecoveryService:
         tidiness: a bug in the ent#434 evaluation must never stop #447's
         recovery detection, which is the only mechanism that clears a stale
         `LIMIT` badge (nothing clears a failure row on success).
+
+        ``limited_ids`` is the cycle's one batched read of the "believed
+        rate-limited" db arm (#2443). ``None`` — the default, so this stays
+        callable on its own — means `recover_probe` falls back to a per-id read
+        it runs off the event loop; the defect that fix closes (a sync query on
+        the loop) is closed on both paths, only the round-trip count differs.
 
         Recovery runs FIRST. `_probe_floor_ok` bounds probes at 60s per
         subscription, so whichever consumer probes first floors the other out.
@@ -249,7 +261,7 @@ class SubscriptionRecoveryService:
         }
 
         try:
-            result["outcome"] = await recover_probe(sid)
+            result["outcome"] = await recover_probe(sid, limited_ids=limited_ids)
         except Exception as e:  # noqa: BLE001 — one bad subscription must not
             # end the sweep; its siblings are independent.
             logger.warning("Recovery probe failed for %s: %s", sid, e)
@@ -307,11 +319,25 @@ class SubscriptionRecoveryService:
             threshold = alerts.DEFAULT_THRESHOLD_PCT
         alerting = threshold > 0
 
+        # #2443: ONE read of the "believed rate-limited" db arm for the whole
+        # sweep, off the event loop. It used to be a synchronous SQLAlchemy call
+        # per subscription inside `recover_probe`, and since the sweep became
+        # chunk-concurrent (ent#434) N of them land together — a sync query
+        # crossing the 03:30 backup or the 04:30 VACUUM blocks /health, the WS
+        # dispatcher and every in-flight request for up to the 30s busy timeout.
+        # Read once per cycle, not per chunk: a subscription that becomes
+        # limited mid-sweep is picked up on the next 300s cycle, well inside the
+        # 2h window the predicate asks about.
+        limited_ids = await asyncio.to_thread(rate_limited_ids, [s.id for s in subs])
+
         results: List[Dict[str, Any]] = []
         lease_ttl = max(60, RECOVERY_PROBE_SECONDS) * 3
         for chunk in _chunks(subs, _MAX_CONCURRENT_PROBES):
             results.extend(await asyncio.gather(*[
-                self._sweep_one(sub, threshold=threshold, alerting=alerting)
+                self._sweep_one(
+                    sub, threshold=threshold, alerting=alerting,
+                    limited_ids=limited_ids,
+                )
                 for sub in chunk
             ]))
             # Re-assert the lease between chunks rather than only at the top of

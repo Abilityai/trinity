@@ -33,6 +33,7 @@ from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
 from .services.result_callback import schedule_pending_result_resend
 from .services.orphan_sweeper import schedule_orphan_sweeper
+from .utils.thread_diagnostics import enable as _enable_thread_diagnostics
 from .services.pull_worker import (
     schedule_pull_workers,
     schedule_pending_pull_result_resend,
@@ -43,6 +44,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Create FastAPI application
+# #2455: arm the thread-stack dump BEFORE anything can wedge. Free until
+# used — a signal handler plus a function; no polling, no timer. Gives ops
+# `kill -USR1 <pid>` on a wedged container, and lets the stuck-reader
+# branches below dump automatically at the instant they notice.
+_enable_thread_diagnostics()
+
 app = FastAPI(
     title="Claude Agent API",
     description="Internal API for Claude Code agent (not exposed externally)",

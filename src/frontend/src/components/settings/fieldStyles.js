@@ -22,3 +22,33 @@ export const SETTINGS_NUMBER_INPUT_CLASS =
 export const SETTINGS_PRIMARY_BUTTON_CLASS =
   'inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium ' +
   'rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50'
+
+/**
+ * The TEXT field used by every Settings panel (#2464).
+ *
+ * SHAPE ONLY — no width. Callers add their own layout class (`w-full` in a
+ * grid, `flex-1` beside a button), because that is the one property the two
+ * existing call sites legitimately disagree about and baking either in would
+ * force the other to override it.
+ *
+ * Every property is stated explicitly, and that is the whole point of this
+ * constant rather than a stylistic preference. The repo does NOT load
+ * `@tailwindcss/forms` (`tailwind.config.js` plugins = typography only), so
+ * there are no form-element base styles to inherit:
+ *
+ *   - `border-gray-300` alone sets a border COLOUR on a border whose width is
+ *     0 under Tailwind preflight — nothing renders. The bare `border` is what
+ *     makes it visible, and its absence is invisible in review because the
+ *     class string reads as if it were complete.
+ *   - padding does not exist unless `px-3 py-2` says so.
+ *   - the light background is otherwise the UA default rather than a decision.
+ *
+ * That is exactly how ent#463's intake form shipped as five borderless,
+ * unpadded bars next to the Admin sign-in email field it was meant to match.
+ */
+export const SETTINGS_TEXT_INPUT_CLASS =
+  'block px-3 py-2 text-sm rounded-md shadow-sm ' +
+  'border border-gray-300 dark:border-gray-600 ' +
+  'bg-white dark:bg-gray-700 dark:text-white placeholder-gray-400 ' +
+  'focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 ' +
+  'disabled:opacity-60 disabled:cursor-not-allowed'

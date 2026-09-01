@@ -36,7 +36,11 @@ from ..models import ExecutionLogEntry, ExecutionMetadata
 from ..model_context import resolve_context_window
 from ..state import agent_state
 from ..utils.credential_sanitizer import sanitize_dict, sanitize_subprocess_line, sanitize_text
-from ._runtime_config import _DEFAULT_MAX_TURNS_TASK, _load_guardrails
+from ._runtime_config import (
+    _DEFAULT_MAX_TURNS_TASK,
+    _load_guardrails,
+    merged_disallowed_tools,
+)
 from .execution_env import build_execution_env
 from .error_classifier import (
     _classify_empty_result,
@@ -752,12 +756,12 @@ def _setup_headless_command(
         cmd.extend(["--allowedTools", tools_str])
         logger.info(f"[Headless Task] Restricting tools to: {tools_str}")
 
-    # GUARD-003: merge disallowed tools from guardrails config.
+    # GUARD-003 guardrails deny-list, unioned with the platform denials (#2454).
     guardrails = _load_guardrails()
-    disallowed_tools = guardrails.get("disallowed_tools") or []
+    disallowed_tools = merged_disallowed_tools(guardrails)
     if disallowed_tools:
         cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
-        logger.info(f"[Headless Task] Guardrails disallow tools: {disallowed_tools}")
+        logger.info(f"[Headless Task] Disallowed tools: {disallowed_tools}")
 
     # #562: when images are present, use stream-json stdin format so images
     # are delivered as proper vision content blocks, not base64 text strings.

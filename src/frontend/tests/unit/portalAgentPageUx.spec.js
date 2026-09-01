@@ -247,99 +247,60 @@ describe('StackedBarChart labels prop', () => {
 
 describe('Overview containment', () => {
   it('keeps asks on the Overview rather than a new tab', () => {
+    // #2449 repoint: the marker moved, the property did not. The page used to
+    // render asks from TWO sources — this section off `page.asks`, and
+    // `<PortalAsks>` off the `/asks` store — so every ask appeared twice. The
+    // duplicate is gone; `<PortalAsks>` is the rendering, and it is still on the
+    // Overview rather than behind a sixth tab.
     const src = pageSource()
-    expect(src).toContain('Waiting on you')
-    // The tab list is unchanged: five tabs, no sixth for asks.
+    expect(src).toContain('<PortalAsks')
     expect(src).not.toMatch(/id:\s*'asks'/)
   })
 
-  it('orders the Overview activity → recent work → asks', () => {
-    // Reverses #2161's "asks first in DOM order so the mobile stack keeps the
-    // priority" (#2169). The reversal is deliberate and instructed, not a
-    // regression, and it is pinned rather than deleted so a later reader can
-    // see the rule was retired on purpose — the precedent is #2161 itself
-    // rewriting workspaceRoomsGate F24. The mobile residual is bounded: the
-    // ask-count badge lives in the header, outside the page scroller.
-    const src = pageSource()
-    // Presence first. `indexOf` returns -1 for a deleted marker, and -1 is less
-    // than everything, so an ordering assertion alone passes on deletion.
-    expect(src).toContain('Activity · last')
-    expect(src).toContain('>Recent work<')
-    expect(src).toContain('Waiting on you')
-    expect(src.indexOf('Activity · last')).toBeLessThan(src.indexOf('>Recent work<'))
-    expect(src.indexOf('>Recent work<')).toBeLessThan(src.indexOf('Waiting on you'))
+  it('does not advertise an asks section for an agent with nothing waiting', () => {
+    // Survives the #2449 de-duplication: the surviving mount is guarded on the
+    // store list being non-empty, so an agent with nothing waiting renders no
+    // section at all — same rule, one source.
+    expect(pageSource()).toMatch(
+      /v-if="store\.asksForAgent\(agentName\)\.length"[\s\S]{0,160}<PortalAsks/,
+    )
   })
 
-  it('does not nest a scroll region inside the page scroller', () => {
-    // Precedent #2101 on this surface: the chat pane is the single scroll axis,
-    // and a pane that scrolls inside a page that scrolls traps touch gestures.
-    // Containment is first-N plus a toggle instead.
-    expect(pageSource()).not.toMatch(/overflow-y-auto[^"]*"[\s\S]{0,200}Waiting on you/)
-    expect(pageSource()).toContain('allAsks')
+  it('does not nest a scroll region inside the asks rendering', () => {
+    // #2101 on this surface: the page has one scroll axis, and a pane that
+    // scrolls inside a page that scrolls traps the gesture on touch. After
+    // #2449 the containment belongs to `PortalAsks`, so assert it there rather
+    // than against a section this file no longer owns.
+    const ASKS = fileURLToPath(
+      new URL('../../src/components/portal/PortalAsks.vue', import.meta.url),
+    )
+    expect(stripComments(readFileSync(ASKS, 'utf8'))).not.toMatch(
+      /overflow-y-auto|overflow-auto/,
+    )
   })
 
-  it('renders the ask count as a floor when the service truncated it', () => {
-    // MAX_ASKS = 20 server-side, so a full list means "at least 20" — a bare
-    // "20" against 50 pending is a wrong number, not a rounded one. The cap is
-    // a named constant so the cross-boundary duplication is visible.
-    const src = pageSource()
-    expect(src).toMatch(/const ASKS_CAP = 20/)
-    expect(src).toMatch(/asks\.value\.length >= ASKS_CAP \? `\$\{ASKS_CAP\}\+`/)
-  })
-
-  it('keeps the top row two columns whether or not there are asks', () => {
-    // The #2169 defect, inverted. The column count used to be bound to
-    // `asks.length`, so the page changed shape when a transient operator-queue
-    // item opened or closed. Both directions are asserted: the negative alone
-    // passes if the grid is deleted outright, and a looser positive says
-    // nothing about the two classes living on the SAME element.
-    //
-    // The positive is scoped to the Overview block, and that scoping is the
-    // whole assertion. A file-wide match is satisfied by the LOADING SKELETON,
-    // which this same change gave the identical `grid gap-6 xl:grid-cols-2`
-    // string — so with the row's grid deleted outright, or its two classes
-    // split across two elements, the negative passed vacuously and the positive
-    // passed on the skeleton, and the headline AC failed with a green suite.
-    // Verified by planting both violations (learnings L2).
-    const src = pageSource()
-    expect(src).not.toMatch(/grid-cols-2'?\s*:\s*asks\.length/)
-    expect(overviewBlock(src)).toMatch(/class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b[^"]*"/)
-  })
-
-  it('puts asks outside the top row, not in it as a third column', () => {
-    // Every other guard here is satisfied by an asks section left INSIDE the
-    // grid as a third child — half width, under the chart — so AC #3 could fail
-    // with a green suite. What separates the two layouts is whether the row's
-    // <div> has CLOSED by the time the asks section opens, and a bare
-    // `slice(grid, asks)).toContain('</div>')` does not answer that: the chart's
-    // own bordered card closes inside the row. So match the row's opening tag to
-    // its close by depth.
-    const src = pageSource()
-    const overview = src.indexOf("tab === 'overview'")
-    expect(overview).toBeGreaterThan(-1)
-
-    const gridClass = src.indexOf('xl:grid-cols-2', overview)
-    expect(gridClass).toBeGreaterThan(-1)
-    const gridOpen = src.lastIndexOf('<div', gridClass)
-    expect(gridOpen).toBeGreaterThan(overview)
-
-    let depth = 0
-    let i = gridOpen
-    let gridClose = -1
-    while (i < src.length) {
-      const open = src.indexOf('<div', i)
-      const close = src.indexOf('</div>', i)
-      if (close === -1) break
-      if (open !== -1 && open < close) { depth += 1; i = open + 4; continue }
-      depth -= 1
-      if (depth === 0) { gridClose = close; break }
-      i = close + 6
-    }
-    expect(gridClose).toBeGreaterThan(-1)
-
-    const asksAt = src.indexOf('Waiting on you')
-    expect(asksAt).toBeGreaterThan(gridClose)
-  })
+  // RETIRED BY #2449 — recorded rather than silently dropped, the way this file
+  // records #2161's own reversal above.
+  //
+  // Three tests lived here that pinned the DELETED section:
+  //
+  //   'orders the Overview activity -> recent work -> asks'  (#2169)
+  //   'puts asks outside the top row, not in it as a third column'  (#2169)
+  //   'renders the ask count as a floor when the service truncated it'
+  //
+  // The first two encoded #2169's instructed rule that asks sit BELOW the top
+  // row. That rule was already void before this change: ent#428 added
+  // `<PortalAsks>` immediately under the header, ABOVE the stats strip, so the
+  // page led with asks and then repeated them lower down. The tests kept
+  // passing only because the lower copy still existed. Deleting the duplicate
+  // makes the page do one thing; it does not decide where asks belong, and if
+  // the answer is still "below the top row" the fix is to move the surviving
+  // mount, not to restore a second one.
+  //
+  // The third pinned `ASKS_CAP = 20`, mirroring the removed reader's server-side
+  // `MAX_ASKS`. The surviving list is fetched at `limit=200`, so a "20+" floor
+  // would now be a wrong number rather than a rounded one. The badge is a plain
+  // count of the pending list, pinned in `portalAskSingleSource.spec.js`.
 
   it('lets the activity chart fill its column', () => {
     // The chart carried `max-w-2xl` when it sat alone above a full-width row.
@@ -351,7 +312,12 @@ describe('Overview containment', () => {
   })
 
   it('does not advertise an asks section for an agent with nothing waiting', () => {
-    expect(pageSource()).toMatch(/<section v-if="asks\.length"/)
+    // #2449 repoint: the guard moved with the rendering. The surviving mount is
+    // conditioned on the store list being non-empty, so an agent with nothing
+    // waiting renders no section — same rule, one source instead of two.
+    expect(pageSource()).toMatch(
+      /v-if="store\.asksForAgent\(agentName\)\.length"[\s\S]{0,160}<PortalAsks/,
+    )
   })
 
   it('shapes the loading skeleton like the row it precedes', () => {
