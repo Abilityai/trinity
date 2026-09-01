@@ -42,7 +42,7 @@ variable "image_tag" {
   description = "Trinity release tag to bake, e.g. v0.9.1. Never 'latest'."
   validation {
     condition     = var.image_tag != "latest" && length(var.image_tag) > 0
-    error_message = "image_tag must be a pinned release tag, not 'latest'."
+    error_message = "The image_tag variable must be a pinned release tag, not 'latest'."
   }
 }
 
