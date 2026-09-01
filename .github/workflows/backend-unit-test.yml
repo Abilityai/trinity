@@ -94,6 +94,25 @@ jobs:
     # xdist) rather than keep buying minutes. That is worth doing and is not
     # this change; raising the cap stops the bleeding without hiding the trend,
     # since the durations above are recorded here for the next reader.
+    #
+    # 2026-09-01 (#2461): that alternative is now taken — see `-n auto
+    # --dist loadfile` on the run step below. The cap STAYS at 45. The point of
+    # parallelising is not to use the headroom, it is to move the whole
+    # distribution far enough below the cap that a slow runner stops reaching
+    # it. Measured over the 18 runs before this change, 78 shards:
+    #
+    #     success: min 13m  median 15m  p90 17m  max 30m
+    #     killed at the cap: 5-6 shards at exactly 45m  (~8% of shards)
+    #     -> ~40% of runs carried at least one spurious red (1 - 0.92^6)
+    #
+    # and the red lands on whichever PR is open, including the `base` side,
+    # which is plain `dev` and has nothing to do with the PR it reddens.
+    #
+    # Do NOT raise this number as the next step if the cap starts being reached
+    # again. Three raises in a row would mean the suite is growing faster than
+    # anyone is willing to measure it; the next lever is the balance of the
+    # distribution (`--dist load` instead of `loadfile`, or splitting the
+    # slowest files), not the budget.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -127,9 +146,17 @@ jobs:
         # tests/requirements-test.txt would silently randomize
         # tests/run-core.sh and any local contributor pytest invocation,
         # because pytest auto-discovers installed plugins.
+        #
+        # pytest-xdist rides along here for a DIFFERENT reason, stated so the
+        # next reader does not infer a rule that isn't there: xdist is inert
+        # without `-n`, so by requirements-test.txt's own documented test (see
+        # the hypothesis note in that file) it would be harmless to put there.
+        # It is here because six workflows install that file and only this one
+        # runs the suite in parallel — the narrower home is the honest one.
         run: |
           python -m pip install --upgrade pip
-          pip install -r tests/requirements-test.txt 'pytest-randomly>=3.15.0'
+          pip install -r tests/requirements-test.txt \
+            'pytest-randomly>=3.15.0' 'pytest-xdist>=3.5.0'
 
       - name: Diff-script self-test
         run: python "$HOME/.ci-tools/diff-pytest-failures.py" --self-test
@@ -182,10 +209,45 @@ jobs:
         # release, not one permanent hang. `signal` cannot interrupt a C call
         # holding the GIL; if that ever turns out to be the case here, the
         # symptom is another anonymous cancel and `thread` is the fallback.
+        #
+        # -n auto --dist loadfile (#2461): the "make the suite faster" half of
+        # the timeout-minutes note above. `auto` is os.cpu_count(), which is 4
+        # on ubuntu-latest and follows the runner if that ever changes.
+        #
+        # `loadfile`, not the default `load`: it keeps every test in a file on
+        # one worker. This suite manipulates sys.modules and pins env at module
+        # import (tests/unit/conftest.py, and files like
+        # test_2186_start_stopped_agent_recreate.py), so within-file ordering is
+        # load-bearing in places while ACROSS files the isolation improves —
+        # workers are separate processes, and conftest already pins
+        # TRINITY_DB_PATH per PID (`trinity-unit-tests-{os.getpid()}.db`), which
+        # is what makes per-worker DB state correct without any change here.
+        # The cost of `loadfile` is balance: a shard's critical path is its
+        # slowest single FILE (~2 min today, test_start_agent_skip_inject's real
+        # connection retries), which is far below the cap. If balance ever
+        # becomes the binding constraint, `load` is the next lever — but it
+        # needs the within-file assumptions audited first, so it is not a
+        # drop-in.
+        #
+        # Verified before landing, full suite, seed 12345, identical selection:
+        # serial 15 failed / 13216 passed / 26 skipped, parallel -n 4 the SAME
+        # 15 / 13216 / 26. Wall time is not quoted from that run on purpose —
+        # it was measured on a loaded workstation alongside a live Docker
+        # stack, where per-test time inflated under concurrency in a way a
+        # dedicated runner does not reproduce. The numbers that matter are the
+        # CI durations recorded in the PR for #2461.
+        #
+        # Residual, stated rather than discovered later: if an xdist worker
+        # dies mid-run, xdist reports the in-flight test as a failure and
+        # carries on, so the JUnit stays complete enough for the diff job. A
+        # worker lost together with its queue would show up as a burst of
+        # "fixed" tests on one side of the diff, which is noisy but visible —
+        # not a silent pass.
         run: |
           cd tests
           python -m pytest unit/ -m "not slow" \
             --timeout=300 --timeout-method=signal \
+            -n auto --dist loadfile \
             -p randomly --randomly-seed=${{ matrix.seed }} \
             --junit-xml="$GITHUB_WORKSPACE/junit-${{ matrix.side }}-${{ matrix.seed }}.xml" \
             --tb=no -q || true
