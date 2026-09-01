@@ -1168,18 +1168,49 @@ class TestMarkerNormalisation:
     The `marker` fixture rebinds `cfg.TRINITY_INSTALL_SOURCE` directly, which is
     the right shape for testing the recorder but bypasses the `.strip().lower()`
     the real boot applies — so a case/whitespace claim asserted through the
-    fixture alone proves nothing about production. These go through
-    `os.environ` + a genuine module reload instead.
+    fixture alone proves nothing about production. These go through `os.environ`
+    and a genuine execution of `config.py` instead — under a throwaway module
+    name, never `importlib.reload`; see `_load_config_with` for why the
+    distinction is load-bearing rather than stylistic.
     """
 
-    def _reload_config_with(self, monkeypatch, raw):
-        import importlib
+    def _load_config_with(self, monkeypatch, raw):
+        """Execute the real `config.py` under a THROWAWAY module name.
+
+        Deliberately not `importlib.reload(config)`. Reload mutates the shared
+        module object in place, and `config.py` mints a random `SECRET_KEY` at
+        import whenever the env var is unset — which it is under the unit suite.
+        Modules that bound `from config import SECRET_KEY` at their own import
+        keep the old value while anything reading `config.SECRET_KEY` per request
+        gets the new one, so every JWT signed on one side fails verification on
+        the other. That is the #1895 divergence, and the conftest hook written
+        for it cannot catch this shape: it restores `sys.modules["config"]` to
+        the same object a reload has already mutated.
+
+        Loading under a fresh name runs the identical module-level statement —
+        `os.getenv(...).strip().lower()` — with none of that reach. There is
+        nothing to restore afterwards, so no `finally` can be forgotten, and it
+        stays correct if config grows another import-time-derived value.
+
+        Safe because `config.py` imports only `os` and `urlparse` and its only
+        import-time side effect is a warning print.
+        """
+        import importlib.util
+
         cfg = _config()
         if raw is None:
             monkeypatch.delenv(cfg.INSTALL_SOURCE_ENV_VAR, raising=False)
         else:
             monkeypatch.setenv(cfg.INSTALL_SOURCE_ENV_VAR, raw)
-        return importlib.reload(cfg)
+
+        spec = importlib.util.spec_from_file_location(
+            "_trinity_config_probe_2380", cfg.__file__
+        )
+        probe = importlib.util.module_from_spec(spec)
+        # Not registered in sys.modules: the point is that nothing else can
+        # reach it, and it is garbage-collected with the test.
+        spec.loader.exec_module(probe)
+        return probe
 
     def test_case_and_whitespace_are_normalised_by_the_real_boot_path(
         self, monkeypatch
@@ -1188,12 +1219,9 @@ class TestMarkerNormalisation:
         costs nothing — normalisation can only ever land on a value already in
         the closed set, so it widens what is SPELLED acceptably, never what is
         accepted."""
-        reloaded = self._reload_config_with(monkeypatch, "  DO-Marketplace  ")
-        try:
-            assert reloaded.TRINITY_INSTALL_SOURCE == MARKETPLACE
-            assert reloaded.TRINITY_INSTALL_SOURCE in reloaded.INSTALL_SOURCE_VALUES
-        finally:
-            self._reload_config_with(monkeypatch, None)
+        loaded = self._load_config_with(monkeypatch, "  DO-Marketplace  ")
+        assert loaded.TRINITY_INSTALL_SOURCE == MARKETPLACE
+        assert loaded.TRINITY_INSTALL_SOURCE in loaded.INSTALL_SOURCE_VALUES
 
     def test_a_whitespace_only_marker_is_indistinguishable_from_absent(
         self, monkeypatch
@@ -1201,22 +1229,16 @@ class TestMarkerNormalisation:
         """`"   "` strips to `""`, so it takes the ABSENT branch (silent), not
         the invalid branch (which warns). Pinned because the two are easy to
         conflate and only one of them is supposed to log."""
-        reloaded = self._reload_config_with(monkeypatch, "   ")
-        try:
-            assert reloaded.TRINITY_INSTALL_SOURCE == ""
-        finally:
-            self._reload_config_with(monkeypatch, None)
+        loaded = self._load_config_with(monkeypatch, "   ")
+        assert loaded.TRINITY_INSTALL_SOURCE == ""
 
     def test_normalisation_cannot_invent_a_value_outside_the_set(
         self, monkeypatch
     ):
         """The point of the previous test, stated as the property that matters:
         no spelling of a non-member normalises into a member."""
-        reloaded = self._reload_config_with(monkeypatch, "  DO_MARKETPLACE  ")
-        try:
-            assert reloaded.TRINITY_INSTALL_SOURCE not in reloaded.INSTALL_SOURCE_VALUES
-        finally:
-            self._reload_config_with(monkeypatch, None)
+        loaded = self._load_config_with(monkeypatch, "  DO_MARKETPLACE  ")
+        assert loaded.TRINITY_INSTALL_SOURCE not in loaded.INSTALL_SOURCE_VALUES
 
 
 class TestWriteOnceIsStructural:
