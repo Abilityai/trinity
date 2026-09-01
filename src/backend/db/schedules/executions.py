@@ -77,6 +77,8 @@ class ScheduleExecutionsMixin:
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
             # Auto-compact observability (Bundle B)
             compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
+            # Turn-integrity flags (#2467)
+            turn_integrity=row["turn_integrity"] if "turn_integrity" in row_keys else None,
             # Reader-race auto-retry (#678)
             retry_count=row["retry_count"] if "retry_count" in row_keys and row["retry_count"] is not None else 0,
             # Lease-reaper re-delivery counter (#1081 Phase 3, #429/#1402)
@@ -396,6 +398,7 @@ class ScheduleExecutionsMixin:
         compact_metadata: str = None,
         retry_count: Optional[int] = None,
         claim_token: Optional[str] = None,
+        turn_integrity: Optional[str] = None,
     ) -> bool:
         """Update execution status when completed.
 
@@ -467,6 +470,11 @@ class ScheduleExecutionsMixin:
             # don't accidentally zero it.
             if retry_count is not None:
                 values["retry_count"] = int(retry_count)
+            # #2467: same conditional shape — an unconditional None here would
+            # NULL the column on the documented FAILED→SUCCESS resurrect CAS
+            # and on every terminal writer that doesn't derive it.
+            if turn_integrity is not None:
+                values["turn_integrity"] = turn_integrity
 
             if status == TaskExecutionStatus.SUCCESS:
                 # Agent's own completion result wins over everything except a
@@ -638,6 +646,7 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.fan_out_id,
                 schedule_executions.c.business_status,
                 schedule_executions.c.validation_execution_id,
+                schedule_executions.c.turn_integrity,
             )
             .where(schedule_executions.c.agent_name == agent_name)
             .order_by(schedule_executions.c.started_at.desc())

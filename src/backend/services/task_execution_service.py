@@ -47,6 +47,7 @@ from services.capacity_manager import (
     get_capacity_manager,
 )
 from services.dispatch_breaker import DispatchBreaker
+from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -2024,6 +2025,37 @@ class TaskExecutionService:
 
             context_used = _compute_context_used(metadata) or 0
             sanitized_resp = sanitize_response(envelope.response)
+
+            # #2467: derive turn-integrity flags (background tasks killed at
+            # CLI exit + the waited-path pending count) from the transcript at
+            # write time — the kill events already ride execution_log on every
+            # deployed agent image, so this needs no rebuild (#1741 precedent).
+            # Scan + notice live in the execution_integrity leaf; both are None
+            # on a healthy run, keeping the happy path byte-identical. The leaf
+            # is total by contract, but a raise here would record a BILLED
+            # success as FAILED — the exact harm class #2467 fights — so belt
+            # it like the execution_log serialization above.
+            try:
+                turn_integrity_json, killed_notice = derive_turn_integrity(
+                    exec_log, metadata
+                )
+                # Transcript-derived JSON passes the same sanitizer as its
+                # siblings execution_log_json / tool_calls_json above — the
+                # leaf's charset whitelist is the primary control, this is the
+                # boundary-consistency belt.
+                if turn_integrity_json:
+                    turn_integrity_json = sanitize_execution_log(turn_integrity_json)
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    f"[TaskExecService] turn-integrity derivation failed for {eid}: {e}"
+                )
+                turn_integrity_json, killed_notice = None, None
+            if killed_notice:
+                sanitized_resp = (
+                    f"{killed_notice}\n\n{sanitized_resp}"
+                    if sanitized_resp
+                    else killed_notice
+                )
             # claude_session_id falls back to metadata (the persisted column); the
             # activity-detail session_id below uses the raw envelope.session_id to
             # preserve the prior `response_data.get("session_id")` semantics.
@@ -2055,6 +2087,7 @@ class TaskExecutionService:
                     claude_session_id=claude_session_id,
                     compact_metadata=compact_metadata_json,
                     retry_count=envelope.retry_count or None,
+                    turn_integrity=turn_integrity_json,
                 )
                 if not won:
                     # #671/H4: SUCCESS lost the CAS — only to a CANCELLED row.

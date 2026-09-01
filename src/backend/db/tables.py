@@ -255,6 +255,7 @@ schedule_executions = Table(
     Column("validation_execution_id", Text),
     Column("validates_execution_id", Text),
     Column("compact_metadata", Text),
+    Column("turn_integrity", Text),
     Column("source_user_id", Integer),
     Column("source_user_email", Text),
     Column("source_agent_name", Text),

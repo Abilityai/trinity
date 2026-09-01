@@ -3849,6 +3849,34 @@ def _migrate_shared_sessions_tables_to_oss(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_turn_integrity(cursor, conn):
+    """#2467: queryable turn-integrity flags on the execution row.
+
+    A ``claude --print`` turn that ends with a background shell still running
+    is killed by the CLI ~5s after exit; the kill is reported in the stream the
+    agent forwards as ``execution_log``, but the row recorded a clean
+    ``success`` with no structured trace. ``turn_integrity`` is a nullable
+    TEXT JSON object derived backend-side at terminal write
+    (``services/execution_integrity.py``), carrying
+    ``background_tasks_killed`` (structural kill records: id/type/origin/
+    status — never description or command text, the #2127 privacy rule) and
+    ``background_tasks_pending_at_exit`` (the waited-path counter that was
+    previously reported in metadata but persisted nowhere).
+
+    NULL means "no evidence" (healthy run, or a transcript shape without the
+    events) — never "verified healthy" (the ``clone_status`` convention).
+    Mirrored by Alembic ``0049_execution_turn_integrity``.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "turn_integrity",
+        "ALTER TABLE schedule_executions ADD COLUMN turn_integrity TEXT",
+        log_msg="Adding turn_integrity column to schedule_executions...",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3968,4 +3996,5 @@ MIGRATIONS = [
     ("report_audience", _migrate_report_audience),
     ("channel_report_client", _migrate_channel_report_client),
     ("workspace_ratings", _migrate_workspace_ratings),
+    ("execution_turn_integrity", _migrate_execution_turn_integrity),
 ]
