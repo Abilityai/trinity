@@ -593,7 +593,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, reactive, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import axios from 'axios'
+import { http } from '../utils/boundedHttp'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
@@ -760,9 +760,9 @@ async function fetchAgents() {
     // execution stats are decorative, so a failing stats call must not fail the
     // tab. `allSettled` instead of `all` for exactly that split.
     const [fleetRes, autonomyRes, statsRes] = await Promise.allSettled([
-      axios.get('/api/ops/fleet/status'),
-      axios.get('/api/agents/autonomy-status'),
-      axios.get('/api/agents/execution-stats', { params: { include_7d: true } })
+      http.get('/api/ops/fleet/status'),
+      http.get('/api/agents/autonomy-status'),
+      http.get('/api/agents/execution-stats', { params: { include_7d: true } })
     ])
     if (fleetRes.status !== 'fulfilled') throw fleetRes.reason
     if (autonomyRes.status !== 'fulfilled') throw autonomyRes.reason
@@ -814,7 +814,7 @@ async function fetchQueue() {
   const seq = ++queueFetchSeq
   loading.queue = true
   try {
-    const res = await axios.get('/api/operator-queue', { params: { limit: 100 } })
+    const res = await http.get('/api/operator-queue', { params: { limit: 100 } })
     if (seq !== queueFetchSeq) return // a newer fetch owns the list now
     // The endpoint returns {items, count}; `(res.data || []).filter` on that
     // object threw on every poll, so this tab always read "No pending items".
@@ -837,7 +837,7 @@ async function fetchQueue() {
 async function fetchNotifications() {
   loading.notifications = true
   try {
-    const res = await axios.get('/api/notifications', { params: { status: 'pending', limit: 100 } })
+    const res = await http.get('/api/notifications', { params: { status: 'pending', limit: 100 } })
     notifications.value = listFrom(res.data, 'notifications')
     hasLoaded.notifications = true
     lastLoadedAt.notifications = Date.now()
@@ -853,7 +853,7 @@ async function fetchNotifications() {
 async function fetchFleetHealth() {
   loading.fleet = true
   try {
-    const res = await axios.get('/api/ops/fleet/status')
+    const res = await http.get('/api/ops/fleet/status')
     fleetSummary.value = res.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
     hasLoaded.fleet = true
     lastLoadedAt.fleet = Date.now()
@@ -868,7 +868,7 @@ async function fetchFleetHealth() {
 
 async function fetchAgentLogs(name) {
   try {
-    const res = await axios.get(`/api/agents/${name}/logs`, { params: { tail: 30 } })
+    const res = await http.get(`/api/agents/${name}/logs`, { params: { tail: 30 } })
     agentLogs[name] = res.data.logs || 'No logs available'
   } catch (e) {
     agentLogs[name] = 'Failed to load logs'
@@ -913,9 +913,9 @@ async function toggleAgent(name, currentStatus) {
   togglingAgents[name] = true
   try {
     if (currentStatus === 'running') {
-      await axios.post(`/api/agents/${name}/stop`)
+      await http.post(`/api/agents/${name}/stop`)
     } else {
-      await axios.post(`/api/agents/${name}/start`)
+      await http.post(`/api/agents/${name}/start`)
     }
     await fetchAgents()
   } catch (e) {
@@ -929,7 +929,7 @@ async function toggleAutonomy(agent) {
   togglingAutonomy[agent.name] = true
   try {
     const newState = !agent.autonomy_enabled
-    await axios.put(`/api/agents/${agent.name}/autonomy`, { enabled: newState })
+    await http.put(`/api/agents/${agent.name}/autonomy`, { enabled: newState })
     agent.autonomy_enabled = newState
   } catch (e) {
     // The toggle reverts to the server value, so without this the switch just
@@ -977,7 +977,7 @@ function startNewChat() {
 
 async function loadChatSessions() {
   try {
-    const res = await axios.get(`/api/agents/${chatAgent.value}/chat/sessions`)
+    const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions`)
     chatSessions.value = res.data.sessions || []
   } catch (e) {
     chatSessions.value = []
@@ -988,7 +988,7 @@ async function selectSession(session) {
   chatSessionId.value = session.id
   showSessions.value = false
   try {
-    const res = await axios.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
+    const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
     chatMessages.value = res.data.messages || []
     scrollChatToBottom()
   } catch (e) {
@@ -1038,7 +1038,7 @@ async function sendChatMessage() {
       async_mode: true
     }
 
-    const submitRes = await axios.post(`/api/agents/${chatAgent.value}/task`, payload)
+    const submitRes = await http.post(`/api/agents/${chatAgent.value}/task`, payload)
     const executionId = submitRes.data.execution_id
 
     // Poll for completion
@@ -1080,7 +1080,7 @@ async function pollExecution(agentName, executionId) {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 5000))
     try {
-      const res = await axios.get(`/api/agents/${agentName}/executions/${executionId}`)
+      const res = await http.get(`/api/agents/${agentName}/executions/${executionId}`)
       const exec = res.data
       if (exec.status && exec.status !== 'running' && exec.status !== 'pending') {
         return exec
@@ -1184,7 +1184,7 @@ async function sendQueueResponse(item, body) {
   respondingItems[id] = true
   delete respondErrors[id]
   try {
-    await axios.post(`/api/operator-queue/${id}/respond`, body)
+    await http.post(`/api/operator-queue/${id}/respond`, body)
   } catch (e) {
     console.error('Failed to send queue response:', e?.response?.status ?? e?.message ?? e)
     respondingItems[id] = false
@@ -1236,7 +1236,7 @@ function acknowledgeQueueItem(item) {
 
 async function acknowledgeNotification(id) {
   try {
-    await axios.post(`/api/notifications/${id}/acknowledge`)
+    await http.post(`/api/notifications/${id}/acknowledge`)
     await fetchNotifications()
   } catch (e) {
     reportActionFailure(e, 'acknowledge that notification')
@@ -1283,13 +1283,13 @@ async function executeAction(action) {
   try {
     let res
     if (action === 'emergency-stop') {
-      res = await axios.post('/api/ops/emergency-stop')
+      res = await http.post('/api/ops/emergency-stop')
     } else if (action === 'fleet-restart') {
-      res = await axios.post('/api/ops/fleet/restart')
+      res = await http.post('/api/ops/fleet/restart')
     } else if (action === 'pause-schedules') {
-      res = await axios.post('/api/ops/schedules/pause')
+      res = await http.post('/api/ops/schedules/pause')
     } else if (action === 'resume-schedules') {
-      res = await axios.post('/api/ops/schedules/resume')
+      res = await http.post('/api/ops/schedules/resume')
     }
     actionResult.value = { success: true, message: res.data.message || 'Action completed' }
     await fetchFleetHealth()
