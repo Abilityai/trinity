@@ -206,3 +206,73 @@ def test_the_assertions_read_the_command_not_the_comment(workflow):
     assert "#" in raw, "the step no longer carries the comment this guards against"
     assert not any(l.strip().startswith("#") for l in cmd.splitlines())
     assert "python -m pytest" in cmd, "comment stripping ate the command"
+
+
+# ---------------------------------------------------------------------------
+# #2461 — the same step, the other half of the budget problem
+# ---------------------------------------------------------------------------
+#
+# These live here rather than in a `test_2461_*.py` of their own because they
+# assert about the SAME step, and `_step` / `_command` above already carry two
+# mutation-found corrections (indentation bounding, comment stripping). A
+# second file would either import from this one or grow a second copy of both
+# helpers — and a copy is how one of them silently stops matching the other.
+#
+# The defect: a healthy shard finishes in ~15 minutes, a starved one does not
+# finish in 45 and dies as `The operation was canceled`. Measured over the 18
+# runs before the fix, 78 shards: success min 13m / median 15m / p90 17m /
+# max 30m, with 5-6 shards killed at exactly the cap — ~8% of shards, so ~40%
+# of runs carried at least one spurious red, landing on whichever PR was open
+# INCLUDING the `base` side, which is plain `dev`.
+
+class TestTheSuiteRunsInParallel:
+
+    def test_the_unit_suite_is_parallelised(self, workflow):
+        step = _pytest_step(workflow)
+        assert re.search(r"-n\s+(auto|\d+)", step), (
+            "the unit suite runs serially again — a starved runner returns to "
+            "reaching the 45-minute cap, and the red lands on whichever PR is "
+            "open (#2461)"
+        )
+
+    def test_distribution_keeps_a_file_on_one_worker(self, workflow):
+        """`loadfile`, not the default `load`.
+
+        The suite manipulates sys.modules and pins env at module import, so
+        within-file ordering is load-bearing in places. Across files the
+        isolation improves — workers are separate processes and the unit
+        conftest already pins TRINITY_DB_PATH per PID.
+
+        A future move to `load` is a legitimate next lever for balance, but it
+        needs those within-file assumptions audited first, so it must not
+        happen as a silent edit.
+        """
+        step = _pytest_step(workflow)
+        assert "--dist loadfile" in step, (
+            "distribution mode changed away from loadfile — see #2461 before "
+            "loosening this"
+        )
+
+    def test_xdist_is_installed_for_the_run(self, workflow):
+        """A `-n` flag with no plugin is an unrecognised-argument error, i.e.
+        the whole shard fails rather than running serially. Pin both halves so
+        neither can be dropped alone."""
+        install = _command(workflow, "Install test dependencies")
+        assert "pytest-xdist" in install, (
+            "the run passes -n but xdist is not installed — pytest exits on an "
+            "unrecognised argument and every shard fails (#2461)"
+        )
+
+    def test_the_cap_is_not_raised_instead(self, workflow):
+        """Parallelising is the alternative to buying minutes, not a companion
+        to it. 45 was already the second raise (25 -> 45 on 2026-08-25); a
+        third would mean the suite is growing faster than anyone is measuring
+        it, and the next lever is the balance of the distribution, not the
+        budget."""
+        job = workflow.split("  test:", 1)[1]
+        caps = re.findall(r"^\s*timeout-minutes:\s*(\d+)", job, re.MULTILINE)
+        assert caps, "the unit-suite job lost its timeout-minutes entirely"
+        assert int(caps[0]) <= 45, (
+            f"unit-suite job cap raised to {caps[0]}m — #2461 exists because "
+            "raising it is the move that stopped working"
+        )
