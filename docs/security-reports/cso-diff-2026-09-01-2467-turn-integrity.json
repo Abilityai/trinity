@@ -1,0 +1,56 @@
+{
+  "version": "1.1",
+  "date": "2026-09-01",
+  "mode": "diff",
+  "scope": "all-phases-diff-constrained",
+  "branch": "feature/2467-bg-kill-visibility",
+  "merge_base": "a1f3a6e4",
+  "issue": "abilityai/trinity#2467",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "modified_auth_paths": 0,
+    "new_data_paths": [
+      "agent stream events -> backend-derived turn_integrity column + notice"
+    ]
+  },
+  "findings": [],
+  "filter_stats": {
+    "candidates_considered": 3,
+    "discarded_equal_trust": 1,
+    "discarded_no_exploit_path": 2,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "verification": {
+    "guard_tests_green": 42,
+    "feature_tests_green": 37,
+    "live_e2e": "flagged record verified"
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-08-28-2433-watchdog-parked-executions.md",
+    "new": 0,
+    "resolved": "n/a (diff scopes differ)"
+  }
+}

@@ -258,6 +258,7 @@ TABLES = {
             validation_execution_id TEXT,
             validates_execution_id TEXT,
             compact_metadata TEXT,
+            turn_integrity TEXT,
             source_user_id INTEGER,
             source_user_email TEXT,
             source_agent_name TEXT,

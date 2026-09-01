@@ -241,6 +241,10 @@ class ScheduleExecution(BaseModel):
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
     # Auto-compact observability (Bundle B)
     compact_metadata: Optional[str] = None       # JSON list of compact events fired during this turn
+    # Turn-integrity flags (#2467): JSON object with background_tasks_killed
+    # (structural kill records) and/or background_tasks_pending_at_exit.
+    # NULL = no evidence (healthy run or old transcript shape), never "verified healthy".
+    turn_integrity: Optional[str] = None
     # Reader-race auto-retry (#678): how many times this execution was retried in-line
     # by the backend HTTPError handler. 0 = never retried; 1 = retried once (cap).
     retry_count: int = 0

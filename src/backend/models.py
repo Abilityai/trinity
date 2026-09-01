@@ -1497,6 +1497,8 @@ class FleetExecutionSummary(BaseModel):
     fan_out_id: Optional[str] = None
     business_status: Optional[str] = None
     validation_execution_id: Optional[str] = None
+    # Turn-integrity flags (#2467) — small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
     queued_at: Optional[datetime] = None
 
     class Config:
@@ -3306,6 +3308,8 @@ class ExecutionSummary(BaseModel):
     validation_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B) - small JSON list
     compact_metadata: Optional[str] = None
+    # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -3358,6 +3362,8 @@ class ExecutionResponse(BaseModel):
     validates_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B)
     compact_metadata: Optional[str] = None
+    # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
 
     class Config:
         from_attributes = True

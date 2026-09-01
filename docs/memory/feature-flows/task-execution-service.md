@@ -1,5 +1,22 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-09-01 (#2467, turn-integrity derivation at terminal write):** `apply_result`'s
+> SUCCESS branch now derives turn-integrity flags from the transcript it already holds —
+> `services/execution_integrity.py::derive_turn_integrity(exec_log, metadata)` (a pure leaf; the
+> hotspot delta is ~8 lines by design) scans the CLI's task lifecycle events for background tasks
+> **killed at CLI exit** (`task_updated {"status":"killed"}` / `task_notification
+> {"status":"stopped"}`, keyed on the kill events because the ledger drains to `[]` before exit)
+> and plucks the #2127 waited-path `background_tasks_pending_at_exit` count from metadata. When
+> either is present it writes new nullable `schedule_executions.turn_integrity` (TEXT JSON; the
+> `update_execution_status` kwarg is **conditional**, the `retry_count` pattern — an unconditional
+> `None` would NULL the column on the FAILED→SUCCESS resurrect CAS) and, for kills only, prepends a
+> visible notice to `sanitized_resp` — which then reaches the stored response, the returned result,
+> the #1578 event summary and the channel completion report from the one variable. NULL ≡ "no
+> evidence", never "verified healthy". Backend-side deliberately (the #1741 no-rebuild precedent);
+> canonical description + privacy/validation rules:
+> [parallel-headless-execution.md](parallel-headless-execution.md) → *The Kill the Gate Correctly
+> Does Not Cover (#2467)*. Prior update follows.
+>
 > **Updated 2026-08-28 (#2433, in-flight dispatch proof-of-life):** an execution that was
 > **admitted** (row `running`, capacity slot held, `claude_session_id='dispatched'`) could park in
 > the backend agent-call semaphore (`services/agent_call_limiter.py`, acquired inside
