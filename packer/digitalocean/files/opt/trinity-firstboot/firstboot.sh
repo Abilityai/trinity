@@ -143,6 +143,42 @@ http://${PUBLIC_IP} {
 CADDY
     systemctl enable caddy
     systemctl restart caddy
+
+    # --- Verify the certificate was actually issued --------------------------
+    # Without this the failure is SILENT and worse than silent: Caddy serves a
+    # TLS error, this script still exits 0, and the MOTD prints a confident
+    # `https://<ip>` URL. The user's first contact with Trinity is a browser
+    # warning on a box that reported success.
+    #
+    # The probe is `curl` against our own public IP with normal verification.
+    # Trinity is not started yet (that is step 6), so Caddy answers 502 — which
+    # is FINE and is the point: curl without `-f` treats an HTTP error as
+    # success, so a zero exit means the TLS handshake completed and the chain
+    # validated against the system trust store. That is exactly the claim being
+    # tested, and nothing weaker distinguishes "real Let's Encrypt certificate"
+    # from "Caddy fell back to its internal CA".
+    #
+    # ACME issuance is not instant, hence the poll. Never fatal: a droplet that
+    # serves over HTTP with an honest banner is far better than one that
+    # refuses to finish booting.
+    TLS_STATUS="failed"
+    for _ in $(seq 1 30); do
+        if curl -sS -o /dev/null --max-time 10 "https://${PUBLIC_IP}/" 2>/dev/null; then
+            TLS_STATUS="ok"
+            break
+        fi
+        sleep 5
+    done
+    printf '%s\n' "$TLS_STATUS" > "${STATE_DIR}/tls-status"
+    if [ "$TLS_STATUS" = "ok" ]; then
+        echo "TLS: certificate issued for ${PUBLIC_IP}."
+    else
+        echo "TLS: WARNING — no valid certificate for ${PUBLIC_IP} after ~150s." >&2
+        echo "     Trinity will still start and is reachable over http://${PUBLIC_IP}." >&2
+        echo "     Check: journalctl -u caddy -n 100" >&2
+    fi
+else
+    printf '%s\n' "unknown" > "${STATE_DIR}/tls-status"
 fi
 
 # --- 6. Start Trinity --------------------------------------------------------

@@ -25,12 +25,40 @@ apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
 systemctl enable docker
 
 # --- Caddy (reverse proxy + automatic certificates) --------------------------
+# PINNED, and the floor is load-bearing rather than hygiene. The whole
+# no-domain HTTPS story rests on Caddy issuing a Let's Encrypt certificate for
+# a bare IP, and Caddy could not do that until recently:
+# caddyserver/caddy#7399 — v2.10.0 fails outright with
+# "subject '<ip>' cannot have public IP certificate", the IPv4 fix landed via
+# mholt/acmez#47 (2025-12-17), and IPv6 was not resolved until 2026-04-25.
+# v2.11.3 (2026-05-12) is the first stable release carrying both.
+#
+# An unpinned `apt-get install caddy` happened to work only because the repo's
+# current stable is new enough. That is a silent dependency on a moving
+# upstream for a property this image is built around, and the symptom of
+# getting it wrong appears on a customer's droplet as a browser warning.
+CADDY_VERSION="2.11.4"
+CADDY_MIN_VERSION="2.11.3"
 curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
   | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
   > /etc/apt/sources.list.d/caddy-stable.list
 apt-get update -q
-apt-get install -y -q caddy
+apt-get install -y -q "caddy=${CADDY_VERSION}"
+
+# Assert the floor rather than trusting the pin. The pin can be edited, the
+# repo can drop a version, and a `caddy upgrade` on a running droplet can move
+# it — this is the check that survives all three. Deliberately NOT `apt-mark
+# hold`: forward versions carry the fix, and holding would block security
+# updates for the life of the droplet.
+_caddy_installed="$(caddy version | head -1 | sed 's/^v//' | cut -d' ' -f1)"
+if [ "$(printf '%s\n%s\n' "$CADDY_MIN_VERSION" "$_caddy_installed" \
+        | sort -V | head -1)" != "$CADDY_MIN_VERSION" ]; then
+    echo "FATAL: caddy ${_caddy_installed} is below ${CADDY_MIN_VERSION}, which" >&2
+    echo "       cannot issue Let's Encrypt IP certificates (caddyserver/caddy#7399)." >&2
+    exit 1
+fi
+echo "Caddy ${_caddy_installed} (floor ${CADDY_MIN_VERSION}) — IP certificates supported."
 # Not enabled here: first boot writes the Caddyfile (it needs the droplet's own
 # IP) and starts it. A Caddy enabled with the packaged default would race first
 # boot for :80 and take a certificate for the wrong name.

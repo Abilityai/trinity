@@ -21,10 +21,26 @@ if [ -f "${STATE_DIR}/firstboot-failed" ]; then
     exit 0
 fi
 
-if [ -n "$IP" ]; then
-    echo "  Web UI:  https://${IP}"
+# The scheme comes from what first boot actually VERIFIED, not from what the
+# Caddyfile intended. Printing `https://` after a failed issuance sends the
+# user to a browser warning and tells them the box is fine.
+TLS="$(cat ${STATE_DIR}/tls-status 2>/dev/null)"
+if [ "$TLS" = "ok" ]; then
+    SCHEME="https"
 else
-    echo "  Web UI:  https://<this droplet's IP>"
+    SCHEME="http"
+fi
+
+if [ -n "$IP" ]; then
+    echo "  Web UI:  ${SCHEME}://${IP}"
+else
+    echo "  Web UI:  ${SCHEME}://<this droplet's IP>"
+fi
+
+if [ "$TLS" != "ok" ] && [ "$TLS" != "unknown" ]; then
+    echo
+    echo "  ⚠  HTTPS is NOT active — no certificate was issued for this IP."
+    echo "     Traffic is unencrypted. Check: journalctl -u caddy -n 100"
 fi
 
 if [ -r "${STATE_DIR}/admin-credentials" ]; then
@@ -43,7 +59,7 @@ fi
 
 echo
 echo "  Next:    open the Web UI, sign in, and follow the hardening guide"
-echo "           (a domain, and locking the instance to a VPN)."
+echo "           (add a domain, then serve it through a Cloudflare Tunnel)."
 echo "  Docs:    https://docs.ability.ai"
 echo "  Support: https://github.com/abilityai/trinity/issues  (label: do-marketplace)"
 echo "  DigitalOcean does not build or support Trinity."
