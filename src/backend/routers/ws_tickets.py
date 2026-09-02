@@ -1,3 +1,4 @@
+# mcp: none — single-use WebSocket auth tickets for the browser (#550); an MCP client never opens /ws
 """
 WebSocket auth ticket endpoint (#550).
 

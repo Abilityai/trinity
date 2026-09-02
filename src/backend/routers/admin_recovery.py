@@ -1,3 +1,4 @@
+# mcp: none — admin-only soft-delete recovery (#834 Phase 1c); a human operator surface, not an agent capability
 """
 Admin recovery endpoints for soft-deleted entities (Issue #834 Phase 1c).
 

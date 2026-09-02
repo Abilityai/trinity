@@ -1,3 +1,4 @@
+# mcp: none — first-run front-desk card state for the Dashboard (ent#319)
 """First-run state for the front-desk surface (ent#319, epic ent#54).
 
 One read: is this still the first run for the calling user, and which seeded

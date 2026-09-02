@@ -57,6 +57,17 @@ export const useSessionsStore = defineStore('sessions', {
     brainOrbVoiceAvailable: false, // trinity-enterprise#60 — Brain Orb voice tile (Phase 3)
     brainOrbWriteAvailable: false, // trinity-enterprise#61 — Brain Orb KB-write surface (Phase 4a)
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
+
+    // #2380 — install provenance + the URL posture this instance ADVERTISES.
+    // `marketplaceInstall` is THE gate for the first-run hardening guide and is
+    // resolved server-side, so the browser holds no second copy of which
+    // sources count as a marketplace (the ent#386 rule); `installSource` rides
+    // beside it for display only. `installTlsPosture` says what URL the
+    // instance hands out — nothing here probes a socket or reads a
+    // certificate, so no consumer may render it as a verified "secure".
+    installSource: 'unknown',
+    marketplaceInstall: false,
+    installTlsPosture: 'unconfigured',
   }),
 
   getters: {
@@ -105,6 +116,13 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
         this.brainOrbWriteAvailable = !!r.data?.brain_orb_write_available
         this.claudeAuthConfigured = !!r.data?.claude_auth_configured
+        // #2380: string flags, `platform_default_model`'s precedent on this
+        // surface. Coerced through the same safe default the catch below uses,
+        // so a null/absent field lands on the closed value rather than
+        // undefined — which reads as falsy but prints as "undefined".
+        this.installSource = r.data?.install_source || 'unknown'
+        this.marketplaceInstall = !!r.data?.marketplace_install
+        this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
         // ent#158: the A2A config tab shows only when the enterprise A2A module
         // is entitled (registered in enterprise_features).
         this.a2aAvailable = Array.isArray(r.data?.enterprise_features)
@@ -119,6 +137,13 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbWriteAvailable = false
         this.claudeAuthConfigured = false
         this.a2aAvailable = false
+        // #2380 fails CLOSED like every flag above it: `unknown` provenance is
+        // not a marketplace, so the hardening guide stays hidden. Showing a
+        // security prompt on a correctly-configured managed instance is the
+        // exact failure this feature is shaped to avoid.
+        this.installSource = 'unknown'
+        this.marketplaceInstall = false
+        this.installTlsPosture = 'unconfigured'
       } finally {
         this.featureFlagsLoaded = true
       }

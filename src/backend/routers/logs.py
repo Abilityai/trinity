@@ -1,3 +1,4 @@
+# mcp: none — log-archival admin surface (stats / retention / archive); per-agent container logs are agents.py → chat.ts (get_agent_logs)
 """
 Log management API endpoints.
 

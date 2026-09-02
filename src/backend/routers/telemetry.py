@@ -1,3 +1,4 @@
+# mcp: none — host CPU / memory / disk telemetry for the UI
 """
 Host and Container Telemetry Endpoints
 

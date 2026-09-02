@@ -203,6 +203,10 @@ services:
       #   bare, set to ""      -> "" -> seed disabled, as documented
       - TRINITY_DEFAULT_SKILL_SOURCE
       - TRINITY_DEFAULT_SKILL_SOURCE_REF
+      # #2380: install provenance marker, written by whatever
+      # provisioned this box. Bare passthrough (not ${VAR:-}) so an
+      # unset marker never reaches the container as an empty string.
+      - TRINITY_INSTALL_SOURCE
       # ent#126: directory the bundled-manifest catalog
       # (GET /api/systems/manifests) reads. Empty = the image's own
       # config/manifests (already bind-mounted :ro below). Point it at another

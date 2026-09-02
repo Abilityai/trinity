@@ -1,3 +1,4 @@
+# mcp: none — public-link management is a grant surface, human-only (Invariant #8 grant-vs-use)
 """
 Owner endpoints for managing public agent links (Phase 12.2).
 

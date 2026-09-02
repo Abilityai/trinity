@@ -479,6 +479,107 @@ class SettingsService:
         return self._resolve_bool_flag("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED")
 
     # =========================================================================
+    # Install provenance + advertised-URL posture (#2380)
+    # =========================================================================
+
+    def get_install_source(self) -> str:
+        """How this instance was installed — the recorded value, or `unknown`.
+
+        Reads the row `database._record_install_source` wrote at boot. The env
+        var is deliberately NOT a fallback here: provenance is a recorded fact,
+        and an env-var read leg would make it re-assertable at any time by
+        anyone who can edit `.env`, which is exactly the property that lets the
+        marketplace gate be self-granted.
+
+        Fail-open to `unknown` (never toward a marketplace value) on a missing
+        row, an unrecognised value, or a settings-read failure — this feeds
+        `GET /api/settings/feature-flags`, where a raise would 500 the endpoint
+        and zero EVERY flag in the frontend store (`_resolve_bool_flag`'s
+        rationale). An `unknown` verdict hides the guide; that is the safe
+        direction, since showing a hardening prompt on a correctly-configured
+        managed instance is the failure this whole feature is shaped to avoid.
+
+        Uncached, matching `_resolve_bool_flag`: the backend runs `--workers 2`
+        and one SQLite read per call is negligible.
+        """
+        from config import INSTALL_SOURCE_SETTING_KEY, INSTALL_SOURCE_UNKNOWN, INSTALL_SOURCE_VALUES
+
+        try:
+            recorded = self.get_setting(INSTALL_SOURCE_SETTING_KEY)
+        except Exception:
+            return INSTALL_SOURCE_UNKNOWN
+        if not recorded:
+            return INSTALL_SOURCE_UNKNOWN
+        value = str(recorded).strip().lower()
+        return value if value in INSTALL_SOURCE_VALUES else INSTALL_SOURCE_UNKNOWN
+
+    def is_marketplace_install(self) -> bool:
+        """Whether provenance is a marketplace channel — the guide's one gate.
+
+        Resolved here rather than in the browser so the frontend holds no second
+        copy of which sources count as a marketplace (the ent#386 rule); the
+        flag surface ships this boolean beside the raw value.
+        """
+        from config import MARKETPLACE_INSTALL_SOURCES
+
+        return self.get_install_source() in MARKETPLACE_INSTALL_SOURCES
+
+    def get_install_tls_posture(self) -> str:
+        """What this instance ADVERTISES itself as reachable at (#2380).
+
+        Returns one of `unconfigured` / `http` / `https-ip` / `https-domain`.
+
+        Named for what it actually knows. Nothing here probes a socket or reads
+        a certificate — the backend serves plain HTTP and TLS is terminated
+        outside it (HOST-010), so no in-process check can observe the real
+        posture. This derives from the URL the instance is configured to hand
+        out (`public_chat_url`, else the baked `FRONTEND_URL`), and the guide's
+        copy must say "advertises" rather than assert a verified certificate.
+        That constraint is the AC — never claim `secure` on evidence not held.
+
+        `https-ip` vs `https-domain` is the distinction that matters to the
+        guide: an IP certificate is a real, browser-trusted cert, but it renews
+        on a ~6-day Let's Encrypt short-lived profile and the address is
+        unmemorable. It is a working posture to be upgraded, not a broken one.
+
+        Derived rather than returning the URL itself because the URL lives
+        behind an admin-only settings read, and this reaches every authenticated
+        principal on the flag surface.
+
+        Resolves through `get_public_chat_url()` — the CANONICAL resolver, which
+        is row → `PUBLIC_CHAT_URL` env — rather than reading the row directly.
+        Reading the row alone invented a third resolution order and diverged from
+        every other consumer (public links, Telegram/WhatsApp/VoIP webhooks): a
+        droplet provisioned with `PUBLIC_CHAT_URL` in `.env` and no row would
+        resolve its domain everywhere else while this function reported `http`,
+        nagging forever on an instance that already has a name.
+
+        `FRONTEND_URL` remains a last resort beneath both, since it is the other
+        address an image builder plausibly bakes and this must not report
+        `unconfigured` when the instance clearly knows its own address.
+
+        Everything is inside the guard, imports included: this feeds
+        `/api/settings/feature-flags`, where a raise zeroes every flag.
+        """
+        configured = ""
+        try:
+            configured = (self.get_public_chat_url() or "").strip()
+        except Exception:
+            configured = ""
+        if not configured:
+            # Separately guarded, deliberately: a DB blip must not also discard
+            # what the environment already told us. Folding the two into one try
+            # made a failing settings read skip the env leg entirely and report
+            # `unconfigured` on an instance whose address was never in doubt.
+            try:
+                from config import FRONTEND_URL
+
+                configured = (FRONTEND_URL or "").strip()
+            except Exception:
+                configured = ""
+        return classify_advertised_url(configured)
+
+    # =========================================================================
     # Workspace / portal session policy (ent#375)
     # =========================================================================
 
@@ -860,6 +961,63 @@ def clear_secret_setting(key: str) -> bool:
 def has_secret_setting(key: str) -> bool:
     """Whether a credential-bearing setting is configured in the DB."""
     return settings_service.has_secret_setting(key)
+
+
+def classify_advertised_url(url: str) -> str:
+    """Pure classifier behind `get_install_tls_posture` (#2380).
+
+    Split out with no DB or settings dependency so the URL grammar can be tested
+    directly — the interesting cases are all parsing (bracketed IPv6, a port, a
+    trailing dot, `localhost`), and routing each through a settings read to
+    exercise them would test the wrong thing.
+
+    Fails toward `unconfigured` on anything unparseable rather than guessing:
+    every other verdict is a claim about how the instance is reached, and an
+    unparseable URL supports none of them.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    if not url:
+        return "unconfigured"
+    try:
+        # No schemeless-input handling on purpose. A bare `example.com` yields no
+        # scheme, and without one there is no claim to make about how the
+        # instance is reached — every posture but `unconfigured` asserts
+        # something about transport. Coercing a missing scheme to `https` would
+        # manufacture exactly the confidence this function exists to withhold.
+        parts = urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").strip().rstrip(".")
+    except Exception:
+        return "unconfigured"
+    if not host:
+        return "unconfigured"
+    if scheme not in ("http", "https"):
+        return "unconfigured"
+    if scheme == "http":
+        return "http"
+    try:
+        # `hostname` already strips the brackets from an IPv6 authority.
+        ipaddress.ip_address(host)
+        return "https-ip"
+    except ValueError:
+        return "https-domain"
+
+
+def get_install_source() -> str:
+    """Recorded install provenance, or `unknown` (#2380)."""
+    return settings_service.get_install_source()
+
+
+def is_marketplace_install() -> bool:
+    """Whether this install came from a marketplace channel (#2380)."""
+    return settings_service.is_marketplace_install()
+
+
+def get_install_tls_posture() -> str:
+    """What URL posture this instance advertises (#2380)."""
+    return settings_service.get_install_tls_posture()
 
 
 def is_session_tab_enabled() -> bool:

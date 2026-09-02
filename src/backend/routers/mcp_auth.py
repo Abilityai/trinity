@@ -1,3 +1,4 @@
+# mcp: auth.ts (request_login, verify_login) + connector.ts over the internal /api/internal/mcp-auth/* surface (#848)
 """Internal surface for MCP inline email auth (#848).
 
 Four endpoints the Trinity MCP server calls on behalf of a **keyless** MCP

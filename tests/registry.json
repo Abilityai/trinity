@@ -2626,6 +2626,13 @@
       "added": "2026-09-02",
       "categories": ["backend", "security", "websocket", "regression"],
       "description": "ent#467 /ws agent scope: `/ws` was SCOPE_ALL and unfiltered, so any authenticated user could mint a ticket and read every tenant's agent names, execution ids and activity types (plus another user's email on agent_shared/agent_unshared). Pins the visibility rule (every agent a payload names must be accessible; admins short-circuit; an agent-less event stays fleet-visible), the payload agent-identity vocabulary against the live broadcast shapes, that BOTH delivery paths filter (live fan-out and the last-event-id replay, structurally), unchanged SCOPE_SCOPED (/ws/events) semantics, fail-closed identity resolution (unknown/suspended/db-error close the socket; emailless non-admin resolves to an empty roster), stream-driven roster refresh on access-changing events, and an AST discovery guard requiring every /ws broadcast payload in the OSS tree to be agent-keyed or explicitly allowlisted as fleet-level with a reason."
+    },
+    {
+      "file": "unit/test_2468_headless_tool_audit.py",
+      "feature": "#2468",
+      "added": "2026-09-01",
+      "categories": ["backend", "agent-server", "prompt", "regression"],
+      "description": "#2468 headless tool audit: PLATFORM_DENIED_TOOLS family (11 tools measured on claude 2.1.235) + PLATFORM_KEPT_TOOLS data + AUDIT_CLI_VERSION; every denied name has a recorded reason with verbatim description fragments; DENIED \u222a KEPT exactly covers the measured init list; CORE_TOOLS never-denied guard; guardrails merge/dedupe (AC 5); reverse vocabulary guard (prompt family paragraph \u2286 deny tuple); 'Nothing survives the end of your turn' counterweight registered always-tier, survives every tier/runtime, quotes the Bash promise, stays truthful about waited subagents and names the foreground wait idiom."
     }
   ]
 }

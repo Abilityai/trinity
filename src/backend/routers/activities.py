@@ -1,3 +1,4 @@
+# mcp: executions.ts (get_agent_activity_summary → /api/activities/timeline)
 """
 Activities Router
 
