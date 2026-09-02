@@ -121,6 +121,7 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
+from services.ws_identity_service import accessible_agents_for, resolve_ws_identity  # ent#467
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
@@ -191,7 +192,23 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._client_ids: Dict[WebSocket, str] = {}
 
-    async def connect(self, websocket: WebSocket, last_event_id: Optional[str] = None) -> None:
+    async def connect(
+        self,
+        websocket: WebSocket,
+        last_event_id: Optional[str] = None,
+        *,
+        email: str = "",
+        is_admin: bool = False,
+        accessible_agents: Optional[List[str]] = None,
+    ) -> None:
+        """Accept a ``/ws`` client and register it with its agent scope.
+
+        ent#467: the identity arguments are what make ``/ws`` filtered. They
+        are keyword-only and default to "nobody, no agents", so a caller that
+        forgets them registers a slot that sees only agent-less events rather
+        than the whole fleet — the fail-closed direction for a delivery
+        surface. ``/ws`` itself resolves them before calling and refuses the
+        connection when it cannot."""
         await websocket.accept()
         async def _send(payload: dict) -> None:
             await websocket.send_text(json.dumps(payload))
@@ -199,6 +216,9 @@ class ConnectionManager:
             websocket,
             scope=SCOPE_ALL,
             send_func=_send,
+            is_admin=is_admin,
+            accessible_agents=accessible_agents or [],
+            email=email,
             last_event_id=last_event_id,
         )
         self._client_ids[websocket] = client_id
@@ -258,6 +278,14 @@ class FilteredWebSocketManager:
 
 manager = ConnectionManager()
 filtered_manager = FilteredWebSocketManager()
+
+
+# ent#467 — `/ws` is agent-scoped now, so the dispatcher needs a way to
+# re-resolve a live client's roster after a share/create/delete. Injected
+# rather than imported inside `event_bus`: that module's only import is
+# `config`, and reaching into `database` from the delivery layer would invert
+# the router → service → db direction (Invariant #1).
+stream_dispatcher.set_accessible_resolver(accessible_agents_for)
 
 # Inject WebSocket manager into routers that need it
 set_agents_ws_manager(manager)
@@ -1416,8 +1444,30 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
 
+    # ent#467 — resolve WHO this is before accepting, because `/ws` events are
+    # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
+    # subject is not a resolvable Trinity user is refused rather than
+    # registered with an empty roster, so an identity we cannot establish
+    # never becomes a silently-degraded connection nobody notices. This also
+    # incidentally refuses a VoIP-scoped ticket (`subject` there is a numeric
+    # user id, not a username) on a surface it was never minted for.
+    try:
+        identity = resolve_ws_identity(str(payload.get("sub")))
+    except Exception:
+        logger.warning("[/ws] identity resolution failed", exc_info=True)
+        identity = None
+    if identity is None:
+        await websocket.close(code=4001, reason="WebSocket ticket subject is not a known user")
+        return
+
     # Ticket validated — now accept the connection
-    await manager.connect(websocket, last_event_id=validate_last_event_id(last_event_id))
+    await manager.connect(
+        websocket,
+        last_event_id=validate_last_event_id(last_event_id),
+        email=identity["email"],
+        is_admin=identity["is_admin"],
+        accessible_agents=identity["accessible_agents"],
+    )
 
     try:
         while True:

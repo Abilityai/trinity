@@ -2621,6 +2621,13 @@
       "description": "#2467 agent-side negative controls (permanent): the fix is backend-side by design, so these pin that the agent stays byte-identical - the #2127 marker stays scoped to waited types, no agent-side field or notice for a killed shell, the kill lifecycle events ARE present sanitized in raw_messages (the backend scan's input), and the ledger-widening 'fix' is provably inert (the CLI drains the ledger before exiting). Uses a _NaturalExitPopen harness that exits only when stdout is exhausted - the natural-exit path the #2127 fakes cannot express."
     },
     {
+      "file": "unit/test_ent467_ws_agent_scope.py",
+      "feature": "ent#467",
+      "added": "2026-09-02",
+      "categories": ["backend", "security", "websocket", "regression"],
+      "description": "ent#467 /ws agent scope: `/ws` was SCOPE_ALL and unfiltered, so any authenticated user could mint a ticket and read every tenant's agent names, execution ids and activity types (plus another user's email on agent_shared/agent_unshared). Pins the visibility rule (every agent a payload names must be accessible; admins short-circuit; an agent-less event stays fleet-visible), the payload agent-identity vocabulary against the live broadcast shapes, that BOTH delivery paths filter (live fan-out and the last-event-id replay, structurally), unchanged SCOPE_SCOPED (/ws/events) semantics, fail-closed identity resolution (unknown/suspended/db-error close the socket; emailless non-admin resolves to an empty roster), stream-driven roster refresh on access-changing events, and an AST discovery guard requiring every /ws broadcast payload in the OSS tree to be agent-keyed or explicitly allowlisted as fleet-level with a reason."
+    },
+    {
       "file": "unit/test_2468_headless_tool_audit.py",
       "feature": "#2468",
       "added": "2026-09-01",
