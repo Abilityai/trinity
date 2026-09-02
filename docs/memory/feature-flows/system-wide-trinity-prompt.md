@@ -121,6 +121,11 @@ Platform instructions are injected at runtime on every Claude Code invocation �
   - `PLATFORM_INSTRUCTIONS` constant — static platform instructions (collaboration tools, operator queue ref, package persistence)
   - `get_platform_system_prompt()` — combines static instructions with `trinity_prompt` DB setting
 
+### Sections, tiers, and the two one-shot-runtime rules (#2454 → #2468)
+- Section machinery: every `### `-headed section must be registered in `_KNOWN_SECTION_HEADINGS` (equality-pinned by `tests/unit/test_ent243_prompt_tier.py`); `_MINIMAL_DROP_SECTIONS` names the tool-usage sections lower tiers drop; `_ALWAYS_SECTIONS` is **derived** (`_KNOWN − _MINIMAL_DROP`), never hand-listed. `_adapt_instructions_for_runtime` strips `mcp__trinity__` for Codex (so section text spells `mcp__trinity__set_reminder` and survives as `set_reminder`; `_CODEX_MCP_ORIENTATION` enumerates the bare names incl. `set_reminder`/`run_agent_loop`).
+- **"Repeating Work and Deferred Ticks"** (#2454, always-tier): routes repetition to `run_agent_loop`/`set_reminder`; its negative rule names the harness `/loop` skill + `ScheduleWakeup`, and — since #2468 — the whole denied family, phrased as a **capability fact** ("dies with this process") never a policy fact, so the sentence stays true on fleet images the deny has not reached yet (mixed-fleet window: the prompt ships on backend deploy, the deny on the image cut). Forward vocabulary coupling (every denied name appears here) pinned by `test_2454_loop_routing.py`; reverse (every name this paragraph claims removed is actually denied) by `test_2468_headless_tool_audit.py`.
+- **"Nothing survives the end of your turn"** (#2468, always-tier): the counterweight for the one promise Trinity cannot deny — Bash's own *"You will be notified when it completes"* (verbatim on 2.1.235; its text also blocks long leading sleeps and routes polling to the denied `Monitor`). Claims are truth-scoped: the kill-claim covers **commands** (subagents are `local_agent` = CLI-waited, said explicitly), no "no second turn" absolutism (false on `--resume` surfaces), and it names the working wait idiom (foreground until-loop under `timeout`) plus the split-persist-`set_reminder` alternative. Cost: ≈ +390 input tokens on every execution, every tier — accepted as the fix's backend-reachable half. Deny mechanism + audit: [agent-guardrails.md](agent-guardrails.md) § Platform tool denials.
+
 ### Chat Path (Interactive)
 - `src/backend/routers/chat.py`
   - `POST /api/agents/{name}/chat` — calls `get_platform_system_prompt()`, adds `system_prompt` to payload sent to agent `/api/chat`
@@ -313,3 +318,4 @@ This feature does not broadcast changes via WebSocket. Changes take effect immed
 | 2026-01-23 | claude | Updated line numbers after refactoring |
 | 2026-03-14 | claude | Platform instructions moved from CLAUDE.md to CLAUDE.local.md |
 | 2026-03-15 | claude | Major rewrite: Runtime injection via --append-system-prompt (Issue #136). Removed file-based injection entirely. |
+| 2026-09-01 | claude | #2454/#2468: section/tier machinery documented; "Repeating Work" family paragraph (capability-first) + always-tier "Nothing survives the end of your turn" counterweight |

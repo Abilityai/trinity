@@ -2619,6 +2619,13 @@
         "regression"
       ],
       "description": "#2467 agent-side negative controls (permanent): the fix is backend-side by design, so these pin that the agent stays byte-identical - the #2127 marker stays scoped to waited types, no agent-side field or notice for a killed shell, the kill lifecycle events ARE present sanitized in raw_messages (the backend scan's input), and the ledger-widening 'fix' is provably inert (the CLI drains the ledger before exiting). Uses a _NaturalExitPopen harness that exits only when stdout is exhausted - the natural-exit path the #2127 fakes cannot express."
+    },
+    {
+      "file": "unit/test_2468_headless_tool_audit.py",
+      "feature": "#2468",
+      "added": "2026-09-01",
+      "categories": ["backend", "agent-server", "prompt", "regression"],
+      "description": "#2468 headless tool audit: PLATFORM_DENIED_TOOLS family (11 tools measured on claude 2.1.235) + PLATFORM_KEPT_TOOLS data + AUDIT_CLI_VERSION; every denied name has a recorded reason with verbatim description fragments; DENIED \u222a KEPT exactly covers the measured init list; CORE_TOOLS never-denied guard; guardrails merge/dedupe (AC 5); reverse vocabulary guard (prompt family paragraph \u2286 deny tuple); 'Nothing survives the end of your turn' counterweight registered always-tier, survives every tier/runtime, quotes the Bash promise, stays truthful about waited subagents and names the foreground wait idiom."
     }
   ]
 }

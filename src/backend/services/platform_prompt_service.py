@@ -162,7 +162,22 @@ Each turn here is a **one-shot, headless process**: it exits when you stop writi
 
 Both default to yourself; pass `agent_name` only to drive another agent you have permission for.
 
-**Never** reach for the Claude Code `/loop` skill or the `ScheduleWakeup` tool. They belong to a persistent interactive harness that does not exist in this runtime: `ScheduleWakeup` **returns success** and then nothing ever fires, so telling the user "loop armed, next tick in 60s" after calling it is a false claim. The platform denies `ScheduleWakeup` outright, so a refusal there is this rule and not a permissions problem — reach for the Trinity tool above instead.
+**Never** reach for the Claude Code `/loop` skill or the `ScheduleWakeup` tool. They belong to a persistent interactive harness that does not exist in this runtime: `ScheduleWakeup` **returns success** and then nothing ever fires, so telling the user "loop armed, next tick in 60s" after calling it is a false claim.
+
+The same is true of the whole family of harness tools that promise a future event or a peer session — `Workflow`, `Monitor`, `TaskOutput`, `CronCreate`, `CronList`, `CronDelete`, `SendMessage`, `ListAgents`, `PushNotification` and `RemoteTrigger`. None of them can deliver here: a wakeup, cron job, workflow, monitor stream, peer message or desktop notification dies with this process. The platform removes them where it can, so if one of those tools seems to be missing, that is this rule and not a permissions problem — reach for the Trinity tools above instead.
+
+### Nothing survives the end of your turn
+
+Your turn is a process. When you stop writing it exits, and **anything still running is killed a few seconds later** — a backgrounded command, a `sleep`, a build, a download. No completion notification will ever reach you, and even where a conversation resumes later, that later turn is a fresh process in which your background work is already dead.
+
+This matters because the tools say otherwise. Backgrounding a command answers *"You will be notified when it completes"*, and a command promoted to the background at its timeout says the same. **That sentence is false here** and cannot be changed from Trinity's side, so it is on you not to believe it. Treat every "you'll be notified" as "this will be killed". (Subagents are the one exception: the process waits for agents you launch before exiting — but a *command* you background is not waited for.)
+
+So:
+
+- Run work in the **foreground**, to completion, inside your execution timeout. A long command that finishes is worth more than a backgrounded one that does not.
+- Need to wait for something? Wait in the foreground with a bounded loop — e.g. `timeout 300 bash -c 'until <condition>; do sleep 5; done'` — then read the result. (Bash's own text suggests `Monitor` or backgrounding for this; neither survives your turn.)
+- Never end a turn with work outstanding, and never report success for something you only started.
+- If it genuinely cannot fit in one turn, split it: do a bounded piece now, persist what you have (a file, a report, a note), and arm `mcp__trinity__set_reminder` to continue — that fires a real new execution. Say plainly what is done and what is not.
 
 ### Package Persistence
 
@@ -248,6 +263,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Publishing Reports",
     "Operator Communication",
     "Repeating Work and Deferred Ticks",
+    "Nothing survives the end of your turn",
     "Package Persistence",
     "Remembering Things About Users (Public & Channel Sessions)",
 })
@@ -267,7 +283,19 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 #     which no Trinity tool description can carry (they are not our tools). The
 #     wrong path reports success and silently never fires, so dropping this at
 #     MINIMAL would restore exactly the false-success the section exists to
-#     stop.
+#     stop. #2468 widened the rule to the whole denied family, phrased as a
+#     capability fact ("dies with this process") rather than a policy fact, so
+#     the sentence stays true on fleet images the deny has not reached yet.
+#   * Nothing survives the end of your turn — #2468. The counterweight to a
+#     tool result the platform cannot edit: backgrounding a Bash command
+#     answers "You will be notified when it completes", which is true
+#     interactively and false in a one-shot `claude --print` run where the
+#     task is killed seconds after the turn ends (Bash also routes polling to
+#     the denied Monitor tool, so the section carries the working wait idiom).
+#     No tool description can carry a correction to a DIFFERENT tool's
+#     description, so this cannot be gated. Scoped honestly: subagents
+#     (`local_agent`) ARE waited for, and resumable surfaces do get later
+#     turns — the section claims neither away.
 # Derived, not hand-listed, so it cannot disagree with the drop set.
 _ALWAYS_SECTIONS = _KNOWN_SECTION_HEADINGS - _MINIMAL_DROP_SECTIONS
 
@@ -324,7 +352,8 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory` — "
+    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory`, "
+    "`set_reminder`, `run_agent_loop` — "
     "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
     "\n\n---\n\n"
