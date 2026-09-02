@@ -1,3 +1,4 @@
+# mcp: none — key mint / revoke is a grant surface, human-only (Invariant #8 grant-vs-use)
 """
 MCP API Key management routes for the Trinity backend.
 """

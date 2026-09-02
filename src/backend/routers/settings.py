@@ -1,3 +1,4 @@
+# mcp: none — platform admin settings — a grant surface, human-only (Invariant #8 grant-vs-use)
 """
 System settings routes for the Trinity backend.
 
@@ -256,6 +257,27 @@ async def get_public_feature_flags(
         # routes enforce it themselves.
         "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
+        # Install provenance (#2380). A STRING, not a boolean — `platform_default_model`
+        # above is the precedent for a non-boolean on this surface. One of
+        # do-marketplace / vultr-marketplace / script / unknown, recorded once at
+        # first boot from TRINITY_INSTALL_SOURCE and read from `system_settings`
+        # thereafter. Surfaced HERE rather than on a new route because this is the
+        # established home for UI-gating flags and the browser already awaits it.
+        "install_source": settings_service.get_install_source(),
+        # The resolved gate for the first-run hardening guide. Ships beside the raw
+        # value so the browser holds no second copy of WHICH sources count as a
+        # marketplace (the ent#386 rule). False on every non-marketplace install —
+        # including the entire managed fleet, whose plain-HTTP-over-Tailscale shape
+        # is indistinguishable from an unhardened droplet by any other signal.
+        "marketplace_install": settings_service.is_marketplace_install(),
+        # What URL this instance ADVERTISES itself at: unconfigured | http |
+        # https-ip | https-domain. Derived from `public_chat_url` (else the baked
+        # FRONTEND_URL) — nothing probes a socket or reads a certificate, because
+        # TLS terminates outside the backend (HOST-010) and no in-process check can
+        # see it. Derived rather than returning the URL because that read is
+        # admin-only and this surface is not. The guide's copy must say
+        # "advertises", never assert a verified certificate.
+        "install_tls_posture": settings_service.get_install_tls_posture(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run wizard uses
         # this to surface the one hard setup gate. True if a platform-wide
@@ -2906,6 +2928,28 @@ async def update_setting(
     """
     assert_admin(current_user)
 
+    # #2380: install provenance is a RECORDED FACT, not a setting. It is written
+    # once at boot from TRINITY_INSTALL_SOURCE and gates a surface that is meant
+    # to appear on marketplace installs and nowhere else. Leaving it on the
+    # catch-all would make the gate self-assertable — an admin (or, on a default
+    # admin-owned install, anything holding an admin's credential) could type a
+    # marketplace value and summon the guide on a managed instance, or type a
+    # non-marketplace one and suppress it on a droplet that needs it.
+    # There is deliberately no dedicated write route to point at: the only
+    # supported way to set provenance is to provision the box with the marker.
+    from config import INSTALL_SOURCE_ENV_VAR, INSTALL_SOURCE_SETTING_KEY
+
+    if key == INSTALL_SOURCE_SETTING_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
+                "installed and is not writable through the API. It is recorded "
+                f"once at first boot from the {INSTALL_SOURCE_ENV_VAR} "
+                "environment variable."
+            ),
+        )
+
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
@@ -3225,6 +3269,23 @@ async def delete_setting(
     Admin-only endpoint. Returns success even if setting didn't exist.
     """
     assert_admin(current_user)
+
+    # #2380: blocked here as well as on PUT, and for a sharper reason than
+    # ent#14's below. Provenance is write-once by design — `_record_install_source`
+    # refuses to overwrite an existing row — so a DELETE is not "revert to a
+    # default", it is the one move that UNLOCKS a rewrite: delete the row, edit
+    # `.env`, restart, and the boot recorder happily records the new value.
+    # Blocking the write while leaving the delete open would be no gate at all.
+    from config import INSTALL_SOURCE_SETTING_KEY
+
+    if key == INSTALL_SOURCE_SETTING_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
+                "installed and cannot be cleared through the API."
+            ),
+        )
 
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
     # Deleting an ack re-arms a guard and therefore fails safe; deleting

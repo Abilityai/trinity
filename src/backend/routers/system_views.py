@@ -1,3 +1,4 @@
+# mcp: none — saved dashboard tag filters — UI state only (ORG-001)
 """
 System Views API Router (ORG-001 Phase 2: Agent Systems & Tags).
 

@@ -1,3 +1,4 @@
+# mcp: none — channel binding CRUD is an owner grant surface; group messaging is channels.ts (Telegram/Slack — WhatsApp has no groups)
 """
 WhatsApp/Twilio integration router (WHATSAPP-001).
 

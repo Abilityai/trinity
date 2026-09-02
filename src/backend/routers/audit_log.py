@@ -1,3 +1,4 @@
+# mcp: none — admin-only read surface (SEC-001); MCP tool calls WRITE audit rows via the internal path, they never read them
 """
 Platform Audit Log API (SEC-001 / Issue #20).
 

@@ -11,6 +11,10 @@ Install Trinity, create your admin account, and start managing agents in minutes
 
 ## How It Works
 
+![Trinity deployment topology — one host, VPN-private access, tunnel-published public endpoints, agents isolated from the data plane](../../assets/trinity-deployment-topology.webp)
+
+*The recommended production shape: everything on one host as Docker containers, private access over your VPN (Tailscale recommended), public endpoints published only through an outbound tunnel, and agents on a separate network from the data plane. A local install is the same containers with ports exposed directly.*
+
 ### Prerequisites
 
 - Docker Desktop installed and running

@@ -1,3 +1,4 @@
+# mcp: channels.ts (list_channel_groups, send_group_message → /slack/channels); binding CRUD is an owner grant surface, human-only
 """
 Slack integration router (SLACK-001).
 

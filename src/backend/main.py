@@ -122,6 +122,7 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
+from services.ws_identity_service import accessible_agents_for, resolve_ws_identity  # ent#467
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
@@ -192,7 +193,23 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._client_ids: Dict[WebSocket, str] = {}
 
-    async def connect(self, websocket: WebSocket, last_event_id: Optional[str] = None) -> None:
+    async def connect(
+        self,
+        websocket: WebSocket,
+        last_event_id: Optional[str] = None,
+        *,
+        email: str = "",
+        is_admin: bool = False,
+        accessible_agents: Optional[List[str]] = None,
+    ) -> None:
+        """Accept a ``/ws`` client and register it with its agent scope.
+
+        ent#467: the identity arguments are what make ``/ws`` filtered. They
+        are keyword-only and default to "nobody, no agents", so a caller that
+        forgets them registers a slot that sees only agent-less events rather
+        than the whole fleet — the fail-closed direction for a delivery
+        surface. ``/ws`` itself resolves them before calling and refuses the
+        connection when it cannot."""
         await websocket.accept()
         async def _send(payload: dict) -> None:
             await websocket.send_text(json.dumps(payload))
@@ -200,6 +217,9 @@ class ConnectionManager:
             websocket,
             scope=SCOPE_ALL,
             send_func=_send,
+            is_admin=is_admin,
+            accessible_agents=accessible_agents or [],
+            email=email,
             last_event_id=last_event_id,
         )
         self._client_ids[websocket] = client_id
@@ -259,6 +279,14 @@ class FilteredWebSocketManager:
 
 manager = ConnectionManager()
 filtered_manager = FilteredWebSocketManager()
+
+
+# ent#467 — `/ws` is agent-scoped now, so the dispatcher needs a way to
+# re-resolve a live client's roster after a share/create/delete. Injected
+# rather than imported inside `event_bus`: that module's only import is
+# `config`, and reaching into `database` from the delivery layer would invert
+# the router → service → db direction (Invariant #1).
+stream_dispatcher.set_accessible_resolver(accessible_agents_for)
 
 # Inject WebSocket manager into routers that need it
 set_agents_ws_manager(manager)
@@ -1421,8 +1449,30 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
 
+    # ent#467 — resolve WHO this is before accepting, because `/ws` events are
+    # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
+    # subject is not a resolvable Trinity user is refused rather than
+    # registered with an empty roster, so an identity we cannot establish
+    # never becomes a silently-degraded connection nobody notices. This also
+    # incidentally refuses a VoIP-scoped ticket (`subject` there is a numeric
+    # user id, not a username) on a surface it was never minted for.
+    try:
+        identity = resolve_ws_identity(str(payload.get("sub")))
+    except Exception:
+        logger.warning("[/ws] identity resolution failed", exc_info=True)
+        identity = None
+    if identity is None:
+        await websocket.close(code=4001, reason="WebSocket ticket subject is not a known user")
+        return
+
     # Ticket validated — now accept the connection
-    await manager.connect(websocket, last_event_id=validate_last_event_id(last_event_id))
+    await manager.connect(
+        websocket,
+        last_event_id=validate_last_event_id(last_event_id),
+        email=identity["email"],
+        is_admin=identity["is_admin"],
+        accessible_agents=identity["accessible_agents"],
+    )
 
     try:
         while True:
@@ -1585,7 +1635,10 @@ async def health_check():
 
 
 def _build_version_payload(
-    voice_enabled: bool, edition: str, enterprise_features: list
+    voice_enabled: bool,
+    edition: str,
+    enterprise_features: list,
+    install_source: str = "unknown",
 ) -> dict:
     """Pure dict-builder for the `/api/version` payload (#926-testable).
 
@@ -1595,7 +1648,9 @@ def _build_version_payload(
     the unit tests exec-slice this function out of the source, so any
     dependency on module state (e.g. entitlement_service) would break
     them — `edition`/`enterprise_features` are computed by the handler
-    and threaded in as parameters (#1443).
+    and threaded in as parameters (#1443), and `install_source` (#2380) is
+    threaded in for exactly the same reason: it is a `system_settings` read,
+    and a DB call inside this function would break the exec-slice.
     """
     import os
     from pathlib import Path
@@ -1683,6 +1738,10 @@ def _build_version_payload(
         "git_commit_timestamp": os.getenv("GIT_COMMIT_TIMESTAMP", "unknown"),
         "git_branch": os.getenv("GIT_BRANCH", "unknown"),
         "voice_enabled": voice_enabled,
+        # #2380: how this instance was installed, for operator support. The
+        # same recorded value the feature-flag surface serves, so the two
+        # cannot diverge (the `edition` precedent one field up).
+        "install_source": install_source,
     }
 
 
@@ -1704,6 +1763,11 @@ async def get_version(current_user: User = Depends(get_current_user)):
     submodule presence on disk — a mounted-but-failed registration reports
     "oss"; a partial registration reports "enterprise" with the surviving
     modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
+
+    `install_source` (#2380) is how this instance was installed —
+    `do-marketplace` / `vultr-marketplace` / `script` / `unknown` — recorded
+    once at first boot and surfaced here so an operator can answer "what kind
+    of install is this?" from a support surface they already read.
     """
     # Function-local import (matches routers/settings.py): the module
     # global is rebound by `_set_for_testing`, so a top-level
@@ -1711,10 +1775,15 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # instance and bypass test stubs.
     from services.entitlement_service import entitlement_service
 
+    from services import settings_service as _settings_service
+
     features = entitlement_service.list_entitled_features()
     edition = "enterprise" if features else "oss"
+    # #2380: resolved here, not inside the builder — that function is
+    # exec-sliced by its own tests and must stay stdlib-only.
+    install_source = _settings_service.get_install_source()
     return _build_version_payload(
-        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features
+        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features, install_source
     )
 
 

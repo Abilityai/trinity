@@ -99,6 +99,16 @@ docker compose -f docker-compose.hosted.yml logs -f backend
 docker compose -f docker-compose.hosted.yml stop     # 'stop', never 'down'
 ```
 
+### The shape you are building toward
+
+![Trinity deployment topology — one host, VPN-private access, tunnel-published public endpoints, agents isolated from the data plane](assets/trinity-deployment-topology.webp)
+
+One host runs everything as Docker containers on two isolated bridge networks —
+agents have no route to Redis or the platform database. Operators reach the full
+UI + API over your VPN (Tailscale recommended); public users and channel
+webhooks reach only the routes you publish through an outbound tunnel, so the
+host opens no inbound ports. The table below is how you pick that public edge.
+
 ### TLS on a bare VM
 
 Trinity serves plain HTTP and terminates TLS **outside** the application. There
@@ -133,6 +143,13 @@ with no domain, which is why that channel provisions a Caddy sidecar using
 Let's Encrypt's short-lived IP certificates, and why Trinity shows a first-run
 hardening guide there (#2380) prompting for a real domain or a VPN. That guide is
 gated on install provenance and never appears on an install like this one.
+
+Provenance is set by whatever builds the image — `TRINITY_INSTALL_SOURCE` in
+`.env` (`do-marketplace` / `vultr-marketplace` / `script`), read once at first
+boot and recorded permanently. Setting it by hand afterwards does nothing: the
+recorder never overwrites an existing value and the API refuses to write or
+clear it, because a gate that can be self-asserted is not a gate. Leave it unset
+on an ordinary install — the guide then renders nowhere, which is the intent.
 
 ## Configuration
 

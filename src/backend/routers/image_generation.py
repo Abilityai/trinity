@@ -1,3 +1,4 @@
+# mcp: none — platform image generation for the UI (IMG-001)
 """
 Image generation router (IMG-001).
 

@@ -1,3 +1,4 @@
+# mcp: none — owner configuration surface (autonomy / timeout / resources / capabilities) — a grant, not a use; deliberately unexposed (Invariant #8)
 """Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 

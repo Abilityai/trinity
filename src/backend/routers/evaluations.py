@@ -1,3 +1,4 @@
+# mcp: none — the referee surface (ent#206): writes are human-admin-only by design, reads serve the UI
 """Behavioral evaluations — the referee surface (ent#206).
 
 Three-layer (Invariant #1). The load-bearing rule of the eval epic: **the graded

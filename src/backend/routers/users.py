@@ -1,3 +1,4 @@
+# mcp: none — user management is an admin grant surface (ROLE-001), human-only
 """
 User management routes for the Trinity backend.
 

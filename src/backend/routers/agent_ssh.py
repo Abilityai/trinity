@@ -1,3 +1,4 @@
+# mcp: agents.ts (get_agent_ssh_access)
 """SSH access endpoints for Trinity agents."""
 import time
 from datetime import datetime, timedelta

@@ -220,6 +220,12 @@
           </div>
         </div>
 
+        <!-- Instance hardening guide (#2380). FIRST in the stack on purpose: a
+             security-posture prompt outranks a getting-started nudge — a
+             marketplace droplet is answering the public internet right now,
+             whereas the cards below can wait a page load. Renders only on a
+             marketplace install that has not yet been given a domain. -->
+        <HardeningGuide />
         <!-- First-run front desk (ent#319). Shows only on a seed-only install:
              the fleet is running and none of it is the user's, which is the
              exact case the wizard's auto-open cannot see since ent#124. -->
@@ -487,6 +493,7 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import HardeningGuide from '@/components/onboarding/HardeningGuide.vue'
 import FrontDeskPanel from '@/components/onboarding/FrontDeskPanel.vue'
 import ActivationChecklist from '@/components/onboarding/ActivationChecklist.vue'
 import AdminEmailNudge from '@/components/onboarding/AdminEmailNudge.vue'

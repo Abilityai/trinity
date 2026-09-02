@@ -1,3 +1,4 @@
+# mcp: none — browser-only proxy for the Brain Orb iframe (JWT via postMessage, #58); agents read the KB through their own hooks
 """Brain Orb backend proxy (#58, trinity-enterprise).
 
 Read-only broker between the first-party orb page (frontend origin) and the

@@ -1,3 +1,4 @@
+# mcp: none — #306 soak dashboard, dev-only
 """
 Debug / observability endpoints.
 
