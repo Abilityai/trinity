@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -506,12 +507,19 @@ class TestListReadersCarryTheColumn:
             )
             """
         )
+        # Relative, never a literal date: `get_fleet_executions` defaults to a
+        # 24h `hours` window, so a fixed `started_at` is a time bomb — this
+        # fixture shipped with "2026-09-01T10:00:00Z", passed every run until
+        # 2026-09-02 10:00 UTC, then failed every `dev` push after it (run
+        # 33634096378) with `assert 0 == 1` and no code change anywhere.
+        started = datetime.now(timezone.utc) - timedelta(minutes=5)
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ"  # the utc_now_iso() shape the readers parse
         conn.execute(
             "INSERT INTO schedule_executions(id, schedule_id, agent_name, status, "
             "started_at, completed_at, message, triggered_by, turn_integrity) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             ("e-ti", "s1", "agent-ti", "success",
-             "2026-09-01T10:00:00.000000Z", "2026-09-01T10:01:00.000000Z",
+             started.strftime(fmt), (started + timedelta(minutes=1)).strftime(fmt),
              "m", "schedule", self._TI),
         )
         conn.commit()
