@@ -56,19 +56,57 @@
       >Open the conversation</button>
 
       <template v-else>
-        <div v-if="ask.options?.length" class="mt-2 flex flex-wrap gap-2">
-          <button
-            v-for="opt in ask.options"
-            :key="String(opt)"
-            type="button"
-            :disabled="busyId === ask.id"
-            class="rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
-            :data-testid="`portal-ask-option-${ask.id}`"
-            @click="answer(ask, String(opt))"
-          >{{ opt }}</button>
-        </div>
+        <!-- #2375: controls come from the shared kind rule (queueResponseKind),
+             so this surface cannot drift from desktop QueueCard and /m. An
+             approval is select → optional note → explicit Send — never a
+             one-tap irreversible answer; the tapped option only arms Send. -->
+        <template v-if="controlsKind(ask) === 'approval'">
+          <div class="mt-2 flex flex-wrap gap-2" role="radiogroup">
+            <button
+              v-for="opt in optionsOf(ask)"
+              :key="opt"
+              type="button"
+              :disabled="busyId === ask.id"
+              class="rounded-lg border text-xs font-medium px-2.5 py-1.5 disabled:opacity-50"
+              :class="picks[ask.id] === opt
+                ? 'bg-action-primary-600 border-action-primary-600 text-white'
+                : 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:border-action-primary-500'"
+              :aria-pressed="picks[ask.id] === opt"
+              :data-testid="`portal-ask-option-${ask.id}`"
+              @click="picks[ask.id] = picks[ask.id] === opt ? null : opt"
+            >{{ opt }}</button>
+          </div>
+          <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
+            <input
+              v-model="notes[ask.id]"
+              type="text"
+              :disabled="busyId === ask.id"
+              placeholder="Add a note (optional)…"
+              class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
+              :data-testid="`portal-ask-note-${ask.id}`"
+            />
+            <button
+              type="submit"
+              :disabled="busyId === ask.id || !picks[ask.id]"
+              class="rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
+              :data-testid="`portal-ask-send-${ask.id}`"
+            >{{ busyId === ask.id ? 'Sending…' : 'Send' }}</button>
+          </form>
+        </template>
 
-        <form v-else class="mt-2 flex items-center gap-2" @submit.prevent="answer(ask, null, drafts[ask.id])">
+        <!-- An alert only wants acknowledging; "Got it" mirrors desktop and /m. -->
+        <button
+          v-else-if="controlsKind(ask) === 'acknowledge'"
+          type="button"
+          :disabled="busyId === ask.id"
+          class="mt-2 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
+          :data-testid="`portal-ask-ack-${ask.id}`"
+          @click="submit(ask)"
+        >{{ busyId === ask.id ? 'Sending…' : 'Got it' }}</button>
+
+        <!-- A question (or an approval that offered no options) takes a typed
+             answer — sent as the DECISION (`response`), never as a note (#2375). -->
+        <form v-else class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
           <input
             v-model="drafts[ask.id]"
             type="text"
@@ -94,6 +132,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { expiredLabel, askThreadLink } from './portalUtils'
+import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
@@ -109,7 +148,9 @@ const emit = defineEmits(['open-thread'])
 
 const store = useClientPortalStore()
 const busyId = ref(null)
-const drafts = reactive({})
+const drafts = reactive({})   // question: the typed answer (the DECISION)
+const picks = reactive({})    // approval: the selected option
+const notes = reactive({})    // approval: the optional free-text note
 const errors = reactive({})
 
 const items = computed(() =>
@@ -117,15 +158,31 @@ const items = computed(() =>
 )
 const visible = computed(() => store.asksAvailable && items.value.length > 0)
 
-const KINDS = { question: 'Question', approval: 'Approval needed', alert: 'Update' }
-const kindLabel = (kind) => KINDS[kind] || 'Question'
+// #2375: one label set and one controls rule across desktop, /m and the
+// Workspace — both come from utils/operatorQueue, the single home #2370
+// established. An ask's `kind` is the queue row's `type` verbatim.
+const kindLabel = (kind) => queueTypeLabel(kind) || 'Question'
+const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.options })
 
-async function answer(ask, response, text = null) {
+async function submit(ask) {
+  // The shared builder decides the wire shape: the decision travels as
+  // `response` (the field the agent reads), a note as `response_text`. It
+  // returns null when there is nothing valid to send — no option picked,
+  // blank answer — and the controls stay armed.
+  const body = buildQueueResponse({
+    kind: controlsKind(ask),
+    option: picks[ask.id],
+    note: notes[ask.id] || '',
+    answer: drafts[ask.id] || '',
+  })
+  if (!body) return
   busyId.value = ask.id
   errors[ask.id] = null
   try {
-    await store.answerAsk(ask.id, { response, responseText: text || null })
+    await store.answerAsk(ask.id, { response: body.response, responseText: body.response_text })
     delete drafts[ask.id]
+    delete picks[ask.id]
+    delete notes[ask.id]
   } catch (err) {
     // The backend's refusals are already written for a human ("This ask expired
     // before it was answered."), so surface them rather than replacing them with
