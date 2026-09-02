@@ -107,6 +107,14 @@ _ALLOWLIST = {
     ),
     (
         "services/chat_execution_service.py",
+        "_cancel_inflight_if_parked",
+    ): (
+        "#2433 parked-queue cancel. The single update_execution_status(error=...) "
+        "write is a STATIC literal ('Execution cancelled by user while queued...'); "
+        "the execution never dispatched, so no agent-authored text exists to leak."
+    ),
+    (
+        "services/chat_execution_service.py",
         "_finalize_http_failure",
     ): (
         "Writes error=error_msg, but error_msg is produced (and scrubbed) by "
