@@ -66,14 +66,36 @@ def test_latest_still_gated_on_a_real_tag_push() -> None:
     assert "startsWith(github.ref, 'refs/tags/v')" in line
 
 
+def test_prefixed_alias_uses_raw_not_v_version() -> None:
+    """The v-prefixed alias must be `{{raw}}`, which survives a pre-release.
+
+    `v{{version}}` is a COMPONENT pattern, so metadata-action drops it for a
+    pre-release under the same rule that (correctly) drops `{{major}}.{{minor}}`:
+    "Pre-release (rc, beta, alpha) will only extend {{version}} (or {{raw}} if
+    specified) as tag". `{{raw}}` is the documented exception and keeps the `v`.
+
+    Observed on v0.9.5-rc1: `0.9.5-rc1` published, `v0.9.5-rc1` absent — which
+    left `01-provision.sh` with no workable `TRINITY_IMAGE_TAG`, since it feeds
+    one value to both `git clone --branch` and `docker pull`.
+    """
+    body = _WORKFLOW.read_text()
+    assert "type=semver,pattern={{raw}}" in body, (
+        "the v-prefixed alias must use {{raw}} — v{{version}} silently publishes "
+        "nothing for a pre-release tag"
+    )
+    assert "type=semver,pattern=v{{version}}" not in body, (
+        "v{{version}} is dropped for pre-releases; use {{raw}}"
+    )
+
+
 def test_semver_patterns_are_untouched() -> None:
-    """`{{version}}` / `v{{version}}` must still publish for a pre-release.
+    """`{{version}}` / `{{raw}}` must still publish for a pre-release.
 
     An RC has to be pullable by its own exact tag — that is the whole point of
     cutting one. Only the mutable `latest` pointer is withheld.
     """
     body = _WORKFLOW.read_text()
-    for pattern in ("type=semver,pattern={{version}}", "type=semver,pattern=v{{version}}"):
+    for pattern in ("type=semver,pattern={{version}}", "type=semver,pattern={{raw}}"):
         assert pattern in body, f"missing {pattern}"
         rule = next(ln for ln in body.splitlines() if pattern in ln)
         assert "ref_name" not in rule, (

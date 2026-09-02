@@ -135,6 +135,21 @@ jobs:
           # makes the release name and the image tag the same string, which is
           # what anyone reading the releases page will type.
           #
+          # `{{raw}}` rather than `v{{version}}` for the v-prefixed alias. They
+          # agree on a release (`v0.9.5` -> `v0.9.5`) and differ on a PRE-release,
+          # where the same rule that correctly drops `{{major}}.{{minor}}` also
+          # drops `v{{version}}`: "Pre-release (rc, beta, alpha) will only extend
+          # {{version}} (or {{raw}} if specified) as tag". `v{{version}}` is a
+          # component pattern; `{{raw}}` is the documented exception, so it is the
+          # only spelling that survives a prerelease WITH the prefix.
+          #
+          # v0.9.5-rc1 published `0.9.5-rc1` and no `v0.9.5-rc1`, which broke the
+          # marketplace build outright: packer/digitalocean/scripts/01-provision.sh
+          # feeds ONE `TRINITY_IMAGE_TAG` to both `git clone --branch` (wants the
+          # git tag, `v...`) and `docker pull` (wants the image tag). Those are the
+          # same string only while this alias exists, so its absence left no value
+          # of `image_tag` able to build the snapshot at all.
+          #
           # `type=sha` is NOT used: it resolves from `github.sha`, which on a
           # `workflow_dispatch` with `ref:` is the dispatching branch's head,
           # not the tree that was checked out and built. The raw value below
@@ -180,7 +195,7 @@ jobs:
           # no effect whatsoever on a `type=raw` value.
           tags: |
             type=semver,pattern={{version}},enable=${{ github.event_name == 'push' }}
-            type=semver,pattern=v{{version}},enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{raw}},enable=${{ github.event_name == 'push' }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' }}
             type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=raw,value=sha-${{ steps.prov.outputs.short_sha }}
