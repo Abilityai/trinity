@@ -61,7 +61,7 @@
              approval is select → optional note → explicit Send — never a
              one-tap irreversible answer; the tapped option only arms Send. -->
         <template v-if="controlsKind(ask) === 'approval'">
-          <div class="mt-2 flex flex-wrap gap-2" role="radiogroup">
+          <div class="mt-2 flex flex-wrap gap-2">
             <button
               v-for="opt in optionsOf(ask)"
               :key="opt"
@@ -80,6 +80,7 @@
             <input
               v-model="notes[ask.id]"
               type="text"
+              maxlength="4000"
               :disabled="busyId === ask.id"
               placeholder="Add a note (optional)…"
               class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
@@ -110,6 +111,7 @@
           <input
             v-model="drafts[ask.id]"
             type="text"
+            maxlength="500"
             :disabled="busyId === ask.id"
             placeholder="Your answer…"
             class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
