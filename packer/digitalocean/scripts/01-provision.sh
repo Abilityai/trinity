@@ -24,6 +24,21 @@ apt-get update -q
 apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable docker
 
+# --- iptables-persistent -----------------------------------------------------
+# Installed HERE rather than at first boot (#2281 review I1). First boot did it
+# as `>/dev/null 2>&1 || true` at the busiest apt moment a droplet ever has, so
+# a transient mirror failure left the DOCKER-USER DROP rules unsaved and gone at
+# the next reboot — silently. Baked once at build time it is deterministic for
+# every droplet from this snapshot, and first boot only has to run the save.
+#
+# The debconf answers must be preseeded: the package otherwise prompts to save
+# the CURRENT ruleset, and a prompt in a non-interactive Packer run hangs until
+# the provisioner times out. `false` on both — first boot saves the ruleset that
+# actually matters, after Docker and the DROP rules exist.
+echo iptables-persistent iptables-persistent/autosave_v4 boolean false | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
+apt-get install -y -q iptables-persistent
+
 # --- Caddy (reverse proxy + automatic certificates) --------------------------
 # PINNED, and the floor is load-bearing rather than hygiene. The whole
 # no-domain HTTPS story rests on Caddy issuing a Let's Encrypt certificate for
@@ -90,6 +105,20 @@ docker tag "ghcr.io/abilityai/trinity-agent-base:${TRINITY_IMAGE_TAG}" trinity-a
 docker pull redis:7-alpine
 docker pull timberio/vector:0.43.1-alpine
 docker pull alpine:3.20
+
+# The OTel collector is NOT profile-gated in docker-compose.hosted.yml — unlike
+# cloudflared, which is correctly skippable under `profiles: [tunnel]` — so
+# `start.sh --hosted` starts it on every droplet. Omitting it here (#2281 review
+# I2) left first boot pulling a few hundred megabytes, against the one property
+# this snapshot exists to have. Read from the checkout rather than hardcoded, so
+# a collector bump in compose cannot leave this line pinning a stale digest.
+OTEL_IMAGE="$(grep -oE 'otel/opentelemetry-collector-contrib:[0-9][^"'"'"'[:space:]]*' \
+  /opt/trinity/docker-compose.hosted.yml | head -1)"
+if [ -z "$OTEL_IMAGE" ]; then
+    echo "FATAL: could not resolve the OTel collector image from docker-compose.hosted.yml." >&2
+    exit 1
+fi
+docker pull "$OTEL_IMAGE"
 
 # Record what was baked, for the MOTD and for support.
 mkdir -p /etc/trinity

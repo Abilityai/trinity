@@ -9,8 +9,18 @@
 set -euo pipefail
 
 echo "=== Fetching DigitalOcean marketplace validation tooling ==="
-git clone --depth 1 https://github.com/digitalocean/marketplace-partners.git \
-  /tmp/marketplace-partners
+# PINNED, not HEAD (#2281 review I4). Both scripts below run as root and are the
+# last thing to touch the image a vendor review approves, so a moving
+# third-party target is not an acceptable input to a certified artifact — even
+# DigitalOcean's own canonical repo. Bump deliberately, having read the diff.
+# `fetch <sha>` rather than `clone --depth 1`: a shallow clone can only take a
+# ref, and github.com serves commit-SHA fetches.
+MP_COMMIT=b70878804ca27c01d5f5e882d26485defbaba210  # master @ 2026-07-16
+git init -q /tmp/marketplace-partners
+git -C /tmp/marketplace-partners remote add origin \
+  https://github.com/digitalocean/marketplace-partners.git
+git -C /tmp/marketplace-partners fetch -q --depth 1 origin "$MP_COMMIT"
+git -C /tmp/marketplace-partners checkout -q FETCH_HEAD
 
 echo "=== cleanup.sh ==="
 bash /tmp/marketplace-partners/scripts/90-cleanup.sh

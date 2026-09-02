@@ -77,13 +77,22 @@ cd "$TRINITY_DIR"
 if [ ! -f .env ]; then
     cp .env.example .env
 fi
+# Rewrites the line rather than substituting into it. `sed "s|^k=.*|k=$value|"`
+# was wrong here (#2281 review I3): the replacement half is user-controlled on
+# the user-data password path, where `&` expands to the whole match, `\` escapes
+# and `|` ends the expression. The failure is the silent kind — `.env` holds a
+# mangled password while the MOTD states the operator's own password is in
+# effect. Rewriting needs no escaping of the value at all. `|| true` because
+# grep exits 1 when nothing matches, which is the ordinary first-write case, and
+# `cat >` rather than `mv` so .env keeps its own inode and mode.
 set_env() {
     local key="$1" value="$2"
-    if grep -qE "^${key}=" .env; then
-        sed -i "s|^${key}=.*|${key}=${value}|" .env
-    else
-        printf '%s=%s\n' "$key" "$value" >> .env
-    fi
+    local tmp
+    tmp="$(mktemp)"
+    grep -vE "^${key}=" .env > "$tmp" || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    cat "$tmp" > .env
+    rm -f "$tmp"
 }
 set_env ADMIN_PASSWORD "$ADMIN_PASSWORD"
 set_env FRONTEND_PORT 8081
@@ -93,22 +102,46 @@ set_env TRINITY_INSTALL_SOURCE do-marketplace
 chmod 0600 .env
 
 # --- 4. Close the Docker/ufw gap --------------------------------------------
-# docker-compose.hosted.yml publishes 8000 (backend), 8080 (MCP), 8686 (Vector)
-# and the OTel collector's ports on 0.0.0.0. Docker's iptables rules are
-# consulted BEFORE ufw's chain, so those ports are reachable from the internet
-# on a droplet whose ufw says otherwise — `ufw deny 8000` is silently inert.
+# docker-compose.hosted.yml publishes 8000 (backend), 8080 (MCP), 8686 (Vector),
+# the OTel collector's four ports, and the frontend's own FRONTEND_PORT on
+# 0.0.0.0. Docker's iptables rules are consulted BEFORE ufw's chain, so those
+# ports are reachable from the internet on a droplet whose ufw says otherwise —
+# `ufw deny 8000` is silently inert.
+#
+# 8081 is the entry that matters most and was missing (#2281 review C1): it is
+# the SPA itself, moved off :80 in step 3 so Caddy can own 80/443. Compose
+# publishes it with the short syntax `"${FRONTEND_PORT:-80}:8080"`, which binds
+# 0.0.0.0 — so without it the login page answers plain HTTP on
+# http://<ip>:8081, past both the TLS termination and the http→https redirect
+# this whole image is built around.
+#
+# One variable feeds both the probe and the insert: two hand-maintained lists
+# that disagree means the -C probe never matches its own rule and every re-run
+# stacks another. tests/unit/test_2281_firstboot_port_exposure.py keeps this
+# list from drifting from what compose actually publishes.
 #
 # DOCKER-USER is the one chain Docker leaves for the operator and evaluates
 # first, so the drop belongs here. Everything a user needs is served by Caddy on
-# 80/443; the container ports stay reachable from the host and from other
-# containers, which is what the platform itself uses.
+# 80/443; the container ports stay reachable from the host (Caddy proxies
+# 127.0.0.1:8081) and from other containers, which is what the platform uses.
+DROP_PORTS=8000,8080,8081,8686,4317,4318,8889,13133
 if ! iptables -C DOCKER-USER -i eth0 -p tcp -m multiport \
-       --dports 8000,8080,8686,4317,4318,8889,13133 -j DROP 2>/dev/null; then
+       --dports "$DROP_PORTS" -j DROP 2>/dev/null; then
     iptables -I DOCKER-USER -i eth0 -p tcp -m multiport \
-      --dports 8000,8080,8686,4317,4318,8889,13133 -j DROP
+      --dports "$DROP_PORTS" -j DROP
 fi
-apt-get install -y -q iptables-persistent >/dev/null 2>&1 || true
-netfilter-persistent save >/dev/null 2>&1 || true
+
+# iptables-persistent is installed at BUILD time (01-provision.sh). Installing
+# it here was `>/dev/null 2>&1 || true` (#2281 review I1) — at the busiest apt
+# moment a droplet ever has, and a transient mirror failure then made the save
+# silently impossible: the boot still reported success and the DROP rules were
+# simply gone at the next reboot, the ports reopening with no symptom anywhere.
+# Only the save remains, and its failure is now loud.
+if ! netfilter-persistent save; then
+    echo "WARNING: netfilter-persistent save failed. The DOCKER-USER DROP rules" >&2
+    echo "         are active NOW but will not survive a reboot." >&2
+    echo "         Re-run: /opt/trinity-firstboot/firstboot.sh" >&2
+fi
 
 # --- 5. Caddy ----------------------------------------------------------------
 # Let's Encrypt issues certificates for bare IP addresses as of 2026-01-15, via

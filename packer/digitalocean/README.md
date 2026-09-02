@@ -86,11 +86,20 @@ Caddy with `issuer acme` + `profile shortlived` for any app with an HTTP
 interface. A domain is a post-login upgrade, not a prerequisite.
 
 **Docker publishes past ufw.** `docker-compose.hosted.yml` publishes 8000, 8080,
-8686 and the OTel collector ports on `0.0.0.0`. Docker's iptables rules are
-consulted before ufw's chain, so `ufw deny 8000` on such a droplet is silently
-inert. First boot inserts a `DOCKER-USER` DROP rule for those ports on `eth0` —
-the one chain Docker leaves to the operator and evaluates first. They remain
-reachable from the host and between containers, which is what the platform uses.
+8686, the OTel collector ports **and the frontend's `FRONTEND_PORT` (8081 here)**
+on `0.0.0.0`. Docker's iptables rules are consulted before ufw's chain, so
+`ufw deny 8000` on such a droplet is silently inert. First boot inserts a
+`DOCKER-USER` DROP rule for those ports on `eth0` — the one chain Docker leaves
+to the operator and evaluates first. They remain reachable from the host (Caddy
+proxies `127.0.0.1:8081`) and between containers, which is what the platform
+uses.
+
+8081 is the one that decides whether the TLS story holds at all: it is the SPA,
+moved off `:80` so Caddy can own 80/443, and compose's short port syntax binds it
+to every interface. Left out of the DROP list, the login page answers plain HTTP
+on `http://<ip>:8081` — past the certificate and past the `http→https` redirect.
+`tests/unit/test_2281_firstboot_port_exposure.py` keeps the list and the compose
+file from drifting apart.
 
 **The agent base image is not a compose service.** The backend creates agent
 containers from the literal local tag `trinity-agent-base:latest`, hardcoded in
