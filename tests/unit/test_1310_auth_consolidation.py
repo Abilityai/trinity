@@ -122,7 +122,9 @@ import routers.notifications as notifications  # noqa: E402
 import routers.ops as ops  # noqa: E402
 import routers.public as public  # noqa: E402
 import routers.public_memory as public_memory  # noqa: E402
-import routers.settings as settings  # noqa: E402
+# #1028: `routers/settings.py` is the package `routers/settings/`; this names
+# the module that owns the handler under test.
+import routers.settings.generic as settings  # noqa: E402
 import routers.slack as slack  # noqa: E402
 import routers.subscriptions as subscriptions  # noqa: E402
 import routers.system_agent as system_agent  # noqa: E402
