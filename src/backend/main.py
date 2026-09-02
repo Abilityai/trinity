@@ -86,6 +86,7 @@ from routers.tags import router as tags_router, set_websocket_manager as set_tag
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
+from routers.canvas import router as canvas_router  # Agent canvas (ent#438)
 from routers.product_events import router as product_events_router
 from routers.onboarding import router as onboarding_router
 from routers.evaluations import router as evaluations_router  # ent#206 behavioral-eval referee surface
@@ -1248,6 +1249,10 @@ app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(reports_router)  # Agent Reports (#918)
+# ent#438 — the agent canvas. Mounted on the same /api/agents prefix as
+# agent_config et al.; its routes are all `/{name}/canvas...`, which is
+# below the static collection routes registered earlier (Invariant #4).
+app.include_router(canvas_router)  # Agent canvas (ent#438)
 app.include_router(product_events_router)  # Local product-event capture (ent#184)
 app.include_router(onboarding_router)  # First-run front desk state (ent#319)
 app.include_router(evaluations_router)  # Behavioral evaluations (ent#206)

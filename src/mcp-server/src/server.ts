@@ -18,6 +18,7 @@ import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
 import { createReportTools } from "./tools/reports.js";
+import { createCanvasTools } from "./tools/canvas.js";
 import { createSubscriptionTools } from "./tools/subscriptions.js";
 import { createMonitoringTools } from "./tools/monitoring.js";
 import { createNeverminedTools } from "./tools/nevermined.js";
@@ -597,6 +598,7 @@ export async function createServer(config: ServerConfig = {}) {
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
     createReportTools(client, requireApiKey),     // Agent Reports (#918)
+    createCanvasTools(client, requireApiKey),     // Agent canvas (ent#438)
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
     createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection
     createSubscriptionTools(client, requireApiKey),

@@ -2619,6 +2619,13 @@
         "regression"
       ],
       "description": "#2467 agent-side negative controls (permanent): the fix is backend-side by design, so these pin that the agent stays byte-identical - the #2127 marker stays scoped to waited types, no agent-side field or notice for a killed shell, the kill lifecycle events ARE present sanitized in raw_messages (the backend scan's input), and the ledger-widening 'fix' is provably inert (the CLI drains the ledger before exiting). Uses a _NaturalExitPopen harness that exits only when stdout is exhausted - the natural-exit path the #2127 fakes cannot express."
+    },
+    {
+      "file": "unit/test_ent438_agent_canvas.py",
+      "feature": "ent#438",
+      "added": "2026-09-02",
+      "categories": ["backend", "frontend", "workspace", "regression"],
+      "description": "ent#438 agent canvas + workspace merge: audience defaults to operator and an unrecognised stored value reads as operator (allowlist, so a canvas never widens who sees agent output); the Workspace read narrows IN THE QUERY; staleness is derived (agent finished a run after the write) not a clock, never claims more than it observed, and is computed once per agent; canvas ids are charset-validated with a named 400 and the pattern is anchored; blocks are count- AND byte-capped; writes are self-gated while reads are not; a foreign execution_id degrades rather than refusing (provenance, not authorization); the retired /agents/:name/workspace route still resolves and carries its agent, the page is gone and nothing references it; every advertised block kind has a renderer and the five shared ones delegate to the CI-pinned components/reports/ dispatch without widening the report display_hint enum; agent-authored html is DOMPurify-sanitised; the voice panel writes the durable canvas at operator audience and still has a caller; dual-track migration present and the table is AGENT_REFS-registered."
     }
   ]
 }

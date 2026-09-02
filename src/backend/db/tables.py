@@ -575,6 +575,25 @@ enterprise_room_messages = Table(
 )
 
 
+agent_canvases = Table(
+    # ent#438 — a durable, addressable surface an agent renders onto and
+    # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,
+    # not an append, which is the whole difference from `agent_reports`.
+    "agent_canvases",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("canvas_id", Text, primary_key=True),
+    Column("title", Text),
+    Column("blocks", Text),
+    # 'operator' (default) | 'roster' — a validated column, never a key inside
+    # `blocks`, so a prompt-injected agent cannot decide who reads it.
+    Column("audience", Text),
+    Column("schema_version", Integer),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+    Column("updated_by_execution_id", Text),
+)
+
 agent_reports = Table(
     "agent_reports",
     metadata,

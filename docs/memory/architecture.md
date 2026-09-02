@@ -763,6 +763,97 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   (chunked, `idx_agent_reports_created`). Table `agent_reports`; dual migration (SQLite
   `agent_reports_table` + Alembic `0006_agent_reports`).
 
+### Agent Canvas — a durable surface an agent renders onto (ent#438)
+
+A **report** (#918) is published once and accumulates; a **canvas** is one
+surface the agent keeps *current*. `agent_canvases` is keyed on the composite
+`(agent_name, canvas_id)`, so a write is an upsert and the surface is
+addressable — that key is the whole difference, and it is why the canvas needs
+**no retention window** (bounded by construction, deliberately absent from
+`RETENTION_OPS_KEYS`) while `agent_reports` needs one. Router
+`routers/canvas.py` → `services/canvas_service.py` → `db/canvas.py`; dual-track
+migration (`agent_canvases_table` + Alembic `0050`); `AGENT_REFS`-registered,
+where the rename half is load-bearing rather than tidy — `agent_name` is *half
+the primary key*, so an unregistered table would leave a renamed agent's canvas
+addressed to a name nothing resolves and its next write would mint a SECOND
+canvas under the new name while the old one stayed visible.
+
+- **The workspace merge.** `/agents/:name/workspace` — a Gemini voice orb beside
+  an in-memory panel, gated on `VOICE_ENABLED && GEMINI_API_KEY &&
+  WORKSPACE_ENABLED` — is **deleted**, its route a query-preserving redirect to
+  `/workspace?agent=` (the ent#381 shape). Safe only because ent#440 had already
+  put voice conversation inside the Workspace, so once the canvas moved the page
+  had no capability of its own left. Two knock-on edits are load-bearing rather
+  than cosmetic: `AgentHeader`'s button drops its `workspaceAvailable` gate (the
+  Workspace needs no Gemini key, so gating would hide a working link on every
+  install without one) and its stopped-agent disable (#2196 — the page reports
+  availability itself, and a dead button is a worse answer than a page that says
+  why); and `ChatPanel`'s voice overlay now passes `workspaceMode: true`, because
+  the retired page was the ONLY caller that did — bridging the voice panel to the
+  canvas while leaving it unreachable would be dead code wearing a fix's name.
+- **Audience is how "never widens" is made structural.** `audience` ∈ `operator`
+  (default) | `roster`, a validated COLUMN and never a key inside `blocks` (the
+  ent#364 rule — `blocks` is agent-authored, so an audience buried there lets a
+  prompt-injected agent choose its readers). `normalize_audience` is an
+  ALLOWLIST, so an unrecognised stored value reads as `operator` (#2396's rule;
+  the column is plain TEXT with no CHECK constraint). The Workspace read narrows
+  **in the query**, not afterwards — a read that loads everything and filters in
+  Python has already put an operator-only surface one edit away from the
+  response (ent#365 FR-2). Roster gate and audience narrowing are both needed:
+  one answers *may this person reach this agent*, the other *did the agent mean
+  this for them*.
+- **Staleness is derived, not a clock.** `stale` = the agent finished a run
+  after the canvas was last written. An age threshold was rejected — a canvas
+  has no inherent freshness expectation, so a clock cries wolf on a monthly
+  summary or stays silent on a minute-by-minute one, whereas "the agent has run
+  since" is a fact about *this* canvas, checkable against
+  `updated_by_execution_id`. `last_completed_execution_at` is a `MAX` over the
+  whole column rather than a windowed scan **because** a head full of
+  `queued`/`running` rows would push the newest completed row out of a window
+  and report a stale canvas as current. Fail-QUIET is available here and only
+  here: the mark is an addition to an always-rendered `updated_at`, so missing
+  evidence costs the mark, not the honesty — marking on no evidence would train
+  the reader to ignore it. Derived once per agent, never once per canvas.
+- **One rendering layer.** Blocks are `{kind, title?, payload}`;
+  `table`/`kpi`/`markdown`/`timeline`/`json` **delegate** to the shared
+  `components/reports/` dispatch (reused, never forked — those keys are CI-pinned
+  by `test_1535_report_prompt_guidance.py`), and the canvas adds `chart`
+  (`TrendLineChart` as-is) and `html` (DOMPurify via the EXISTING
+  `utils/markdown.js`, so it shares the configured link hardening — a second
+  sanitizer is a second policy to keep in step). The report `display_hint` enum
+  is deliberately NOT widened: a canvas is a superset of a report's rendering,
+  not a change to what a report is. An unknown kind resolves to `json`, never to
+  nothing — a silently dropped block would leave the surface looking complete.
+- **Writes are self-gated** (`AuthorizedAgent` proves the key's OWNER can reach
+  the path agent, not that an agent-scoped key is writing its own canvas — the
+  #918 rule, and here it is a disclosure surface too because a `roster` canvas is
+  client-visible), rate-limited, id-charset-validated with a named 400, and
+  capped at 50 blocks / 512 KiB (the byte cap being what the count cap cannot
+  express). `execution_id` runs through `resolve_and_validate_execution`
+  (MEM-001) and a foreign id **degrades to None rather than refusing** — it is
+  provenance, not authorization. Reads are NOT self-gated: an operator is a
+  user-scoped principal with no `agent_name`, and the `{self} ∪ permitted`
+  narrowing for agent keys lives at the MCP layer.
+- **The voice panel moved rather than being dropped.**
+  `gemini_voice._execute_panel_tool` still updates the live `panel_state` and now
+  persists it to canvas `voice` at fixed `audience="operator"` (a voice session
+  always ran on an operator-authenticated surface). Mermaid and image panels map
+  onto markdown blocks, so no new kind was needed; the write is fail-soft, since
+  a canvas failure must not break the panel in front of the operator or the tool
+  result the model is waiting on.
+- **MCP**: `set_canvas` / `get_canvas` / `list_canvases` / `clear_canvas`. There
+  is deliberately **no** `append_to_canvas` — `set_canvas` replaces, so
+  read-change-write is the only sequence that leaves the surface in a state the
+  agent chose.
+- **OSS-core by decision (ent#438): deliberately ungated** — no
+  `requires_entitlement`, logic in the OSS tree. Recorded explicitly because
+  CLAUDE.md's default for an enterprise-tracker feature is *gated unless ruled
+  otherwise*, so the ruling must never be inferred later from the mere fact that
+  it merged (the ent#326 / ent#384 / ent#392 discipline). Rationale, on operator
+  instruction: the Workspace and everything around it is OSS.
+
+See [agent-canvas.md](feature-flows/agent-canvas.md).
+
 ### Agent Evaluations — the referee surface (ent#206)
 
 The `quality` axis for agent work, kept structurally apart from `completion` (a clean

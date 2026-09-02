@@ -618,6 +618,53 @@ async def portal_agent_page(
     )
 
 
+@router.get("/agents/{agent_name}/canvas")
+def portal_agent_canvases(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The canvases this agent has published to the people it works with (ent#438).
+
+    Metadata only — blocks are fetched per canvas on open, the same split the
+    reports pair above uses and for the same reason: a canvas is capped at
+    512 KiB and a list of them is not a list view.
+
+    Roster-gated like every route on this prefix, and additionally narrowed to
+    `audience='roster'` inside the accessor. Both are needed and neither is
+    redundant: the roster gate answers "may this person reach this agent", the
+    audience narrowing answers "did the agent mean this for them" — an
+    operator-only canvas stays invisible to a rostered client.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    return {"agent_name": agent_name, "canvases": agent_page.canvases(agent_name)}
+
+
+@router.get("/agents/{agent_name}/canvas/{canvas_id}")
+def portal_agent_canvas_detail(
+    agent_name: str,
+    canvas_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """One published canvas with its blocks.
+
+    A canvas the agent did not publish to its roster returns the same 404 as
+    one that does not exist, so this is not an existence oracle for the
+    operator-only surfaces (the uniform-404 contract the report detail route
+    above states).
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    from services import rate_limiter
+
+    # A canvas re-reads and re-parses its whole block list per request. Bounded
+    # for the same reason the report detail route is, and keyed after the
+    # roster gate so an unreachable agent cannot mint limiter keys.
+    rate_limiter.enforce(f"portal_canvas_detail:{principal.email}:{agent_name}", 60, 60)
+    canvas = agent_page.canvas_detail(agent_name, canvas_id)
+    if canvas is None:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return canvas
+
+
 @router.get("/agents/{agent_name}/reports", response_model=PortalAgentReports)
 def portal_agent_reports(
     agent_name: str,
