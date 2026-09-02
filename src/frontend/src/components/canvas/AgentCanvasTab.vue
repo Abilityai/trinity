@@ -8,7 +8,7 @@
       Workspace page for the people it works with.
     </p>
 
-    <p v-if="error" class="mb-3 text-xs text-status-error-600 dark:text-status-error-400">
+    <p v-if="error" class="mb-3 text-xs text-status-danger-600 dark:text-status-danger-400">
       {{ error }}
     </p>
 

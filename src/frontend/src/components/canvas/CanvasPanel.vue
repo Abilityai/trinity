@@ -54,7 +54,7 @@
         >{{ fresh.note }}</p>
 
         <div class="px-4 py-4">
-          <p v-if="detailError" class="text-xs text-status-error-600 dark:text-status-error-400">
+          <p v-if="detailError" class="text-xs text-status-danger-600 dark:text-status-danger-400">
             {{ detailError }}
           </p>
           <p
