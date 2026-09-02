@@ -3,7 +3,7 @@
 > **Status**: ✅ Implemented (2026-08-12)
 > **Issues**: abilityai/trinity-enterprise#358 (absorb) · abilityai/trinity-enterprise#286 (streaming)
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.9
-> **Related**: [session-tab.md](session-tab.md) (the engine, still accurate), [architecture.md → Resumable Turns](../architecture.md#resumable-turns)
+> **Related**: [session-tab.md](session-tab.md) (the engine, still accurate), [architecture.md → Resumable Turns](../architecture/execution.md#resumable-turns)
 
 ## Overview
 
