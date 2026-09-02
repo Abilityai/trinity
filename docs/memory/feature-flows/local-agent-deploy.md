@@ -1,6 +1,6 @@
 # Feature: Local Agent Deployment via MCP
 
-> **Updated**: 2026-08-08 - #2060 integrity contract: embedded `.trinity-manifest.json` verified post-extract AND post-copy (fail-closed `MANIFEST_DRIFT`), symlink preservation contract (`copytree(symlinks=True)`, `extractall(filter='tar')`), observed-vs-limit caps + decompressed-size cap + AppleDouble skip, evidence-bearing response (`verified`/counts/`compatibility_hard_count`), `Idempotency-Key` + per-base-name deploy lock, residue/compensation fixes. See requirements `core-agent.md` §4.1.2.
+> **Updated**: 2026-09-02 - #2060 integrity contract: embedded `.trinity-manifest.json` verified post-extract AND post-copy (fail-closed `MANIFEST_DRIFT`), symlink preservation contract (`copytree(symlinks=True)`, `extractall(filter='tar')`), observed-vs-limit caps + decompressed-size cap + AppleDouble skip, evidence-bearing response (`verified`/counts/`compatibility_hard_count`), `Idempotency-Key` + per-base-name deploy lock, residue/compensation fixes. See requirements `core-agent.md` §4.1.2.
 
 ## Overview
 
@@ -292,8 +292,11 @@ automatically.
    - Returns HTTP 429 with `QUOTA_EXCEEDED` code on limit
 
 6c. **Per-Base-Name Deploy Lock (#2060)** — `agent:deploy_op:{base_name}`
-    (Redis SETNX, 10-min TTL, released in `finally`; registered in
-    `agent_runtime_state.EXEMPT_KEYSPACES`). Held from before the first side
+    (the shared `redis_breaker_util.SingleFlightLock` #1920: SETNX + 10-min
+    TTL, unique per-acquire token, compare-and-delete `release_if_owned` in
+    `finally`; registered in `agent_runtime_state.EXEMPT_KEYSPACES`; the
+    client comes from the module-level `_deploy_lock_client` seam, the SITE
+    binding the primitive's injected-client contract asks for). Held from before the first side
     effect; contention → 409 `DEPLOY_IN_PROGRESS`. **Fail-open** on Redis
     down — the prepop attached-volume 409 is the destructive-collision
     backstop.
@@ -632,7 +635,7 @@ rm -f "$ARCHIVE"
 
 | Date | Changes |
 |------|---------|
-| 2026-08-08 | **#2060 (integrity contract)**: embedded `.trinity-manifest.json` verified post-extract + post-copy, fail-closed `MANIFEST_REQUIRED`/`MANIFEST_INVALID`/`MANIFEST_DRIFT`; symlink contract (`copytree(symlinks=True)`, dangling preserved + warned, `extractall(filter='tar')` pinned); `MAX_FILES` 1000→10000, new `MAX_EXTRACTED_SIZE` 500 MB, observed+limit on cap errors, AppleDouble `._*` skip; evidence response fields (`verified`/`files_expected`/`files_deployed`/`symlinks_deployed`/`compatibility_hard_count` via fail-open #668 STATIC); `Idempotency-Key` (scope `agent_deploy:{user_id}`, #2040-F3 staleness branch) + `agent:deploy_op:{base}` lock; S6 fixes: `dest_created` before copy (named `TEMPLATE_COPY_FAILED`), workspace-volume cleanup + `WORKSPACE_VOLUME_IN_USE` 409, previous-version restart on any failure. MCP tool sets `require_manifest: true` in code + derives the idempotency key; CLI embeds the manifest in-memory + prints evidence. Requirements: `core-agent.md` §4.1.2. Follow-ups FU-1 (direct-upload transport, AC 1) / FU-2 (redeploy-in-place, AC 7). |
+| 2026-09-02 | **#2060 (integrity contract)**: embedded `.trinity-manifest.json` verified post-extract + post-copy, fail-closed `MANIFEST_REQUIRED`/`MANIFEST_INVALID`/`MANIFEST_DRIFT`; symlink contract (`copytree(symlinks=True)`, dangling preserved + warned, `extractall(filter='tar')` pinned); `MAX_FILES` 1000→10000, new `MAX_EXTRACTED_SIZE` 500 MB, observed+limit on cap errors, AppleDouble `._*` skip; evidence response fields (`verified`/`files_expected`/`files_deployed`/`symlinks_deployed`/`compatibility_hard_count` via fail-open #668 STATIC); `Idempotency-Key` (scope `agent_deploy:{user_id}`, #2040-F3 staleness branch) + `agent:deploy_op:{base}` lock (shared `SingleFlightLock`, #1920); S6 fixes: `dest_created` before copy (named `TEMPLATE_COPY_FAILED`), workspace-volume cleanup + `WORKSPACE_VOLUME_IN_USE` 409, previous-version restart on any failure. MCP tool sets `require_manifest: true` in code + derives the idempotency key; CLI embeds the manifest in-memory + prints evidence. Requirements: `core-agent.md` §4.1.2. Follow-ups FU-1 (direct-upload transport, AC 1) / FU-2 (redeploy-in-place, AC 7). |
 | 2026-05-29 | **#950 (deferred hardening)**: `is_trinity_compatible()` now requires a non-empty, UTF-8 `CLAUDE.md` (blocking 400, was a non-fatal warning). New `collect_mcp_credential_warnings()` surfaces MCP servers with unsatisfied `${VAR}` refs as advisory `DeployLocalResponse.warnings[]` (also added to the MCP tool response type). Documented the `credentials` request field (reinstated after #251) + `MAX_DEPLOY_CREDENTIALS`, the credential-merge step, and the `DEPLOYED_TEMPLATES_DIR_UNWRITABLE`/`WORKSPACE_PREPOP_FAILED` error codes. Refreshed router snippet (`require_role("creator")`, `agents.py:418-430`). |
 | 2026-04-03 | **#251**: Removed `credentials` parameter from the deploy flow. Archive is self-contained — `.env` and credential files included in tar.gz. Removed credential injection block that caused hangs. *(Note: a `credentials` map was later reinstated as an optional API/CLI field — see 2026-05-29.)* |
 | 2026-02-05 | **CRED-002**: Removed `credential_manager` parameter from deploy flow. |

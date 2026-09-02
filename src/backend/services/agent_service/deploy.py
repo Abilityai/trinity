@@ -11,11 +11,10 @@ import tarfile
 import tempfile
 import shutil
 import logging
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from io import BytesIO
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import docker
 from fastapi import HTTPException, Request
@@ -39,6 +38,7 @@ from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_start
 from utils.helpers import sanitize_agent_name
 from services.settings_service import get_agent_quota_for_role
+from redis_breaker_util import SingleFlightLock  # #1920 shared single-flight lock
 from services.mcp_validator import validate_mcp_config, McpValidationError
 from .helpers import get_agents_by_prefix, get_next_version_name, get_latest_version
 
@@ -66,9 +66,10 @@ _MANIFEST_DRIFT_LIST_CAP = 50  # per-list path cap in the 400 detail
 _MANIFEST_MAX_PATH_CHARS = 1024
 
 # Per-base-name deploy serialization (#2060): two concurrent deploys of one
-# base name would compute the same next-version name. SETNX + TTL, fail-open
-# on Redis down (the attached-volume 409 in prepop is the backstop).
-# Registered in agent_runtime_state.EXEMPT_KEYSPACES.
+# base name would compute the same next-version name. The shared
+# `SingleFlightLock` (#1920: SETNX + TTL, per-acquire token, compare-and-delete
+# release), fail-open on Redis down (the attached-volume 409 in prepop is the
+# backstop). Registered in agent_runtime_state.EXEMPT_KEYSPACES.
 _DEPLOY_LOCK_TTL_S = 600
 
 MANIFEST_GENERATION_SNIPPET = (
@@ -187,14 +188,13 @@ def _remove_partial_deploy(dest_created: Path | None) -> None:
 # Deploy lock (#2060) — per-base-name SETNX serialization
 # =============================================================================
 
-class _DeployLock(NamedTuple):
-    client: Any  # None = fail-open (nothing to release)
-    key: str
-    token: str
-
-
 def _deploy_lock_client():
-    """The Redis client for the deploy lock; None = fail-open."""
+    """The Redis client for the deploy lock; None = fail-open.
+
+    Kept as a module-level seam (the SITE binding, not a helper-owned factory)
+    because `SingleFlightLock` deliberately takes an injected client — see its
+    docstring — and the unit tests monkeypatch this name.
+    """
     try:
         from routers.auth import get_redis_client
         return get_redis_client()
@@ -202,49 +202,42 @@ def _deploy_lock_client():
         return None
 
 
-def _acquire_deploy_lock(base_name: str) -> _DeployLock:
+def _acquire_deploy_lock(base_name: str) -> SingleFlightLock:
     """Serialize deploys per base name across uvicorn workers (#2060).
 
     Two concurrent deploys of one base name both compute the same
     `get_next_version_name` and collide on the template dir + workspace
-    volume. SETNX with a TTL backstop; **fail-open** when Redis is down (a
-    flaky lock layer must never block a real deploy — the attached-volume 409
-    in prepop is the destructive-collision backstop). 409 on contention.
+    volume. Built on the shared ownership-checked `SingleFlightLock` (#1920):
+    unique per-acquire token, compare-and-delete release, **fail-open** when
+    Redis is down (a flaky lock layer must never block a real deploy — the
+    attached-volume 409 in prepop is the destructive-collision backstop).
+    409 on contention.
     """
-    key = f"agent:deploy_op:{base_name}"
-    token = uuid.uuid4().hex
-    client = _deploy_lock_client()
-    if client is None:
-        return _DeployLock(None, key, token)
-    try:
-        held = bool(client.set(key, token, nx=True, ex=_DEPLOY_LOCK_TTL_S))
-    except Exception:
-        return _DeployLock(None, key, token)
-    if not held:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": (
-                    f"A deploy of '{base_name}' is already in progress. "
-                    f"Wait for it to finish (or up to {_DEPLOY_LOCK_TTL_S}s) "
-                    f"and retry."
-                ),
-                "code": "DEPLOY_IN_PROGRESS",
-            },
-        )
-    return _DeployLock(client, key, token)
+    lock = SingleFlightLock(
+        f"agent:deploy_op:{base_name}",
+        _DEPLOY_LOCK_TTL_S,
+        client=_deploy_lock_client(),
+    )
+    if lock.acquire():
+        return lock
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": (
+                f"A deploy of '{base_name}' is already in progress. "
+                f"Wait for it to finish (or up to {_DEPLOY_LOCK_TTL_S}s) "
+                f"and retry."
+            ),
+            "code": "DEPLOY_IN_PROGRESS",
+        },
+    )
 
 
-def _release_deploy_lock(lock: Optional[_DeployLock]) -> None:
-    """Best-effort ownership-checked release; the TTL backstops."""
-    if lock is None or lock.client is None:
-        return
-    try:
-        from redis_breaker_util import lock_token_matches  # #1919 shared predicate
-        if lock_token_matches(lock.client.get(lock.key), lock.token):
-            lock.client.delete(lock.key)
-    except Exception:  # pragma: no cover — defensive
-        logger.debug("deploy lock release failed for %s", lock.key, exc_info=True)
+def _release_deploy_lock(lock: Optional[SingleFlightLock]) -> None:
+    """Ownership-checked release (no-op when fail-open or not held); the TTL
+    backstops. `release_if_owned` never raises."""
+    if lock is not None:
+        lock.release_if_owned()
 
 
 # =============================================================================
