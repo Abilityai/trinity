@@ -1186,8 +1186,14 @@ async def deploy_local_agent_logic(
         # value downstream.
         _templates_base = os.path.normpath(str(templates_dir))
         _normalized_dest = os.path.normpath(str(dest_path))
-        if _normalized_dest != _templates_base and not _normalized_dest.startswith(
-            _templates_base + os.sep
+        # Shape matters: `not startswith(...) or == base` (the
+        # `_remove_partial_deploy` form) is the barrier CodeQL recognizes —
+        # on the fall-through branch the prefix is PROVEN. The former
+        # `!= base and not startswith` raised on the same inputs but left the
+        # fall-through unproven, so every downstream use of dest_path (copytree,
+        # the post-copy manifest walk) reported py/path-injection (#2060).
+        if not _normalized_dest.startswith(_templates_base + os.sep) or (
+            _normalized_dest == _templates_base
         ):
             raise HTTPException(
                 status_code=400,
