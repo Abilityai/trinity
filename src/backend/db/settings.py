@@ -86,6 +86,22 @@ class SettingsOperations:
 
         assert_plaintext_write_allowed(key)
 
+        # #2380: install provenance is write-once and is never UPDATED. This
+        # method is an upsert, so it is the wrong instrument for that key by
+        # construction — the recorder uses `insert_setting_if_absent` below.
+        # Guarded here as well as on both catch-all routes for the reason this
+        # docstring already gives: a boundary-only guard protects the doors that
+        # exist today, and the six issues listed above are all the same door
+        # being found open somewhere new.
+        from config import INSTALL_SOURCE_SETTING_KEY
+
+        if key == INSTALL_SOURCE_SETTING_KEY:
+            raise ValueError(
+                f"{INSTALL_SOURCE_SETTING_KEY} is write-once install provenance "
+                "and cannot be set through set_setting(); it is recorded at boot "
+                "from TRINITY_INSTALL_SOURCE via insert_setting_if_absent()"
+            )
+
         now = utc_now_iso()
 
         stmt = (
@@ -104,6 +120,35 @@ class SettingsOperations:
             value=value,
             updated_at=datetime.fromisoformat(now)
         )
+
+    def insert_setting_if_absent(self, key: str, value: str) -> bool:
+        """Insert a setting only when the key does not already exist (#2380).
+
+        Returns True when a row was actually written.
+
+        The write-once counterpart to ``set_setting``. It cannot overwrite, so
+        unlike the upsert it is safe to expose without a per-key policy check:
+        the worst a caller can do is fail to change anything. That property is
+        what lets ``set_setting`` refuse ``install_source`` outright.
+
+        Uses ``on_conflict_do_nothing`` so write-once is enforced by the PRIMARY
+        KEY rather than by a preceding SELECT. The read-then-write shape it
+        replaces is a check-then-act, and while the PostgreSQL boot path is
+        serialised by the advisory lock in ``alembic_runner.upgrade_to_head``,
+        resting a security property on an unrelated lock's scheduling is how it
+        quietly stops holding when that lock moves. Mirrors the SQLite arm's
+        ``INSERT OR IGNORE`` (``_seed_fresh_install_retention`` uses the same
+        pair), so both backends enforce it the same way.
+        """
+        now = utc_now_iso()
+        stmt = (
+            make_insert(system_settings)
+            .values(key=key, value=value, updated_at=now)
+            .on_conflict_do_nothing(index_elements=["key"])
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+        return bool(result.rowcount)
 
     def delete_setting(self, key: str) -> bool:
         """

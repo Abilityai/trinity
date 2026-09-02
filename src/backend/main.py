@@ -1580,7 +1580,10 @@ async def health_check():
 
 
 def _build_version_payload(
-    voice_enabled: bool, edition: str, enterprise_features: list
+    voice_enabled: bool,
+    edition: str,
+    enterprise_features: list,
+    install_source: str = "unknown",
 ) -> dict:
     """Pure dict-builder for the `/api/version` payload (#926-testable).
 
@@ -1590,7 +1593,9 @@ def _build_version_payload(
     the unit tests exec-slice this function out of the source, so any
     dependency on module state (e.g. entitlement_service) would break
     them — `edition`/`enterprise_features` are computed by the handler
-    and threaded in as parameters (#1443).
+    and threaded in as parameters (#1443), and `install_source` (#2380) is
+    threaded in for exactly the same reason: it is a `system_settings` read,
+    and a DB call inside this function would break the exec-slice.
     """
     import os
     from pathlib import Path
@@ -1678,6 +1683,10 @@ def _build_version_payload(
         "git_commit_timestamp": os.getenv("GIT_COMMIT_TIMESTAMP", "unknown"),
         "git_branch": os.getenv("GIT_BRANCH", "unknown"),
         "voice_enabled": voice_enabled,
+        # #2380: how this instance was installed, for operator support. The
+        # same recorded value the feature-flag surface serves, so the two
+        # cannot diverge (the `edition` precedent one field up).
+        "install_source": install_source,
     }
 
 
@@ -1699,6 +1708,11 @@ async def get_version(current_user: User = Depends(get_current_user)):
     submodule presence on disk — a mounted-but-failed registration reports
     "oss"; a partial registration reports "enterprise" with the surviving
     modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
+
+    `install_source` (#2380) is how this instance was installed —
+    `do-marketplace` / `vultr-marketplace` / `script` / `unknown` — recorded
+    once at first boot and surfaced here so an operator can answer "what kind
+    of install is this?" from a support surface they already read.
     """
     # Function-local import (matches routers/settings.py): the module
     # global is rebound by `_set_for_testing`, so a top-level
@@ -1706,10 +1720,15 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # instance and bypass test stubs.
     from services.entitlement_service import entitlement_service
 
+    from services import settings_service as _settings_service
+
     features = entitlement_service.list_entitled_features()
     edition = "enterprise" if features else "oss"
+    # #2380: resolved here, not inside the builder — that function is
+    # exec-sliced by its own tests and must stay stdlib-only.
+    install_source = _settings_service.get_install_source()
     return _build_version_payload(
-        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features
+        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features, install_source
     )
 
 

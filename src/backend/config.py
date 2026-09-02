@@ -513,6 +513,55 @@ DEFAULT_SKILL_SOURCE_URL = os.getenv(
 DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.1.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
 
+# ============================================================================
+# Install provenance (#2380)
+# ============================================================================
+# HOW this instance was installed, so a surface can be shown to a marketplace
+# operator and to NOBODY else. The value is recorded once at first boot from
+# `TRINITY_INSTALL_SOURCE` (see `database._record_install_source`) and read back
+# from `system_settings` thereafter.
+#
+# An env var rather than a marker file (`/etc/trinity/install-source`), which
+# the issue also offered: `config.py` reads zero files today, and a file would
+# need a read-only bind mount added to every compose file — the packaging class
+# this codebase has shipped repeatedly (#1039, #1056, #1707), where the value
+# never reaches the container and the feature is silently inert forever. The
+# provisioning script already writes `.env`; this is one more line in it.
+#
+# Provenance is the gate rather than observed TLS/network state because the two
+# are not distinguishable from inside the container. Measured across the managed
+# fleet, every instance serves plain HTTP with no domain over a Tailscale CGNAT
+# address — identical in shape to an unhardened public droplet, and already
+# correct (HTTP over a WireGuard tunnel is encrypted transport). Keying on TLS
+# state fires permanently on every paying client; keying on provenance cannot.
+INSTALL_SOURCE_SETTING_KEY = "install_source"
+INSTALL_SOURCE_ENV_VAR = "TRINITY_INSTALL_SOURCE"
+INSTALL_SOURCE_UNKNOWN = "unknown"
+
+# The closed set. The env value is normalised (`.strip().lower()`) before it is
+# matched, so `  DO-Marketplace  ` is accepted — `.env` is a trusted provisioning
+# channel written by a script, and normalisation can only ever map onto a value
+# already in this set, so it widens what is *spelled* acceptably without widening
+# what is *accepted*. An unrecognised value is NOT recorded and reads as
+# `unknown` — never coerced toward a marketplace value, and never recorded as
+# `unknown` either, so a corrected marker on a later boot can still land
+# (recording it would let one typo permanently freeze provenance via
+# first-write-wins).
+INSTALL_SOURCE_VALUES = frozenset({
+    "do-marketplace",
+    "vultr-marketplace",
+    "script",
+    INSTALL_SOURCE_UNKNOWN,
+})
+
+# The subset that renders the first-run hardening guide. Kept here rather than
+# in the frontend so the browser holds no second copy of the predicate (the
+# ent#386 rule); the flag surface ships the resolved boolean, not this set.
+MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
+
+TRINITY_INSTALL_SOURCE = os.getenv(INSTALL_SOURCE_ENV_VAR, "").strip().lower()
+
+
 COMMUNITY_FRESH_INSTALL_SEED = {
     "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "execution_row_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
