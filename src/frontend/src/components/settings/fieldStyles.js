@@ -22,3 +22,25 @@ export const SETTINGS_NUMBER_INPUT_CLASS =
 export const SETTINGS_PRIMARY_BUTTON_CLASS =
   'inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium ' +
   'rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50'
+
+/**
+ * The text input used by Settings panels.
+ *
+ * The shape the admin sign-in email field established, made shared for the
+ * same reason as the number input above: ent#463's intake form declared only
+ * `rounded-md border-gray-300 dark:bg-gray-700`, and this project does NOT
+ * load `@tailwindcss/forms` — so a bare `border-<color>` sets a colour on a
+ * zero-width border and the fields rendered as unpadded, borderless bars.
+ * The width, the padding and the background have to be stated explicitly.
+ */
+export const SETTINGS_TEXT_INPUT_CLASS =
+  'block w-full px-3 py-2 text-sm rounded-md shadow-sm ' +
+  'border border-gray-300 dark:border-gray-600 ' +
+  'bg-white dark:bg-gray-700 text-gray-900 dark:text-white ' +
+  'placeholder-gray-400 dark:placeholder-gray-500 ' +
+  'focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 ' +
+  'disabled:opacity-60 disabled:cursor-not-allowed'
+
+/** The label above a Settings field. */
+export const SETTINGS_FIELD_LABEL_CLASS =
+  'block text-sm font-medium text-gray-700 dark:text-gray-300'

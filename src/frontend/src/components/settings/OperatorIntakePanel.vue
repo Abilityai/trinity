@@ -80,33 +80,34 @@
         @submit.prevent="submit"
         class="space-y-4"
       >
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4">
           <label class="block sm:col-span-2">
-            <span class="text-sm text-gray-700 dark:text-gray-200">Email <span class="text-status-danger-600">*</span></span>
+            <span :class="LABEL_CLASS">Email <span class="text-status-danger-600 dark:text-status-danger-400">*</span></span>
             <input
               v-model.trim="form.email"
               type="email"
               required
               maxlength="254"
               autocomplete="email"
-              class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm"
+              placeholder="you@company.com"
+              :class="['mt-1', INPUT_CLASS]"
             />
           </label>
           <label class="block">
-            <span class="text-sm text-gray-700 dark:text-gray-200">Company (optional)</span>
-            <input v-model.trim="form.company" type="text" maxlength="200" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <span :class="LABEL_CLASS">Company <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <input v-model.trim="form.company" type="text" maxlength="200" autocomplete="organization" placeholder="Acme Inc." :class="['mt-1', INPUT_CLASS]" />
           </label>
           <label class="block">
-            <span class="text-sm text-gray-700 dark:text-gray-200">Name (optional)</span>
-            <input v-model.trim="form.name" type="text" maxlength="200" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <span :class="LABEL_CLASS">Name <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <input v-model.trim="form.name" type="text" maxlength="200" autocomplete="name" placeholder="Ada Lovelace" :class="['mt-1', INPUT_CLASS]" />
           </label>
           <label class="block">
-            <span class="text-sm text-gray-700 dark:text-gray-200">Role (optional)</span>
-            <input v-model.trim="form.role" type="text" maxlength="200" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <span :class="LABEL_CLASS">Role <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <input v-model.trim="form.role" type="text" maxlength="200" autocomplete="organization-title" placeholder="Platform engineer" :class="['mt-1', INPUT_CLASS]" />
           </label>
           <label class="block">
-            <span class="text-sm text-gray-700 dark:text-gray-200">Primary use case (optional)</span>
-            <input v-model.trim="form.use_case" type="text" maxlength="500" class="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm" />
+            <span :class="LABEL_CLASS">Primary use case <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
+            <input v-model.trim="form.use_case" type="text" maxlength="500" placeholder="What you plan to run on Trinity" :class="['mt-1', INPUT_CLASS]" />
           </label>
         </div>
 
@@ -144,6 +145,12 @@
 <script setup>
 import { ref, computed, onMounted, reactive } from 'vue'
 import { useOperatorIntakeStore } from '../../stores/operatorIntake'
+import { SETTINGS_TEXT_INPUT_CLASS, SETTINGS_FIELD_LABEL_CLASS } from './fieldStyles'
+
+// Aliased for the template — the same field shape the admin sign-in email
+// uses, so the two forms on this tab cannot drift apart again.
+const INPUT_CLASS = SETTINGS_TEXT_INPUT_CLASS
+const LABEL_CLASS = SETTINGS_FIELD_LABEL_CLASS
 
 const store = useOperatorIntakeStore()
 
