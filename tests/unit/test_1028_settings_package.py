@@ -39,7 +39,7 @@ _REPO = Path(__file__).resolve().parents[2]
 _PKG = _REPO / "src" / "backend" / "routers" / "settings"
 
 
-def _pre_split_router():
+def _pre_split_router(monkeypatch):
     """The single-module `routers/settings.py` as it was before the split.
 
     Read out of git rather than kept as a fixture copy: a checked-in duplicate
@@ -57,23 +57,24 @@ def _pre_split_router():
     try:
         spec = importlib.util.spec_from_file_location("_pre_split_settings", tmp)
         mod = importlib.util.module_from_spec(spec)
-        sys.modules["_pre_split_settings"] = mod
+        # monkeypatch-scoped so the registration is reverted at test teardown
+        # (the sys.modules lint forbids bare assignment/pop here).
+        monkeypatch.setitem(sys.modules, "_pre_split_settings", mod)
         spec.loader.exec_module(mod)
         return mod.router
     finally:
         tmp.unlink(missing_ok=True)
-        sys.modules.pop("_pre_split_settings", None)
 
 
 def _sig(route):
     return (route.path, tuple(sorted(route.methods)), route.name)
 
 
-def test_the_mounted_route_set_is_unchanged():
+def test_the_mounted_route_set_is_unchanged(monkeypatch):
     """The API a caller sees is identical — no route lost, none invented."""
     import routers.settings as new
 
-    before = {_sig(r) for r in _pre_split_router().routes}
+    before = {_sig(r) for r in _pre_split_router(monkeypatch).routes}
     after = {_sig(r) for r in new.router.routes}
     assert after - before == set(), f"routes invented by the split: {sorted(after - before)}"
     assert before - after == set(), f"routes lost by the split: {sorted(before - after)}"

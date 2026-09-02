@@ -157,8 +157,11 @@ def test_consent_audit_uses_a_real_audit_event_type():
     from pathlib import Path
     from services.platform_audit_service import AuditEventType
 
-    src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
-           / "settings.py").read_text()
+    # #1028: routers/settings.py is a package; the consent handler lives in
+    # flags.py — read the whole package so a sub-module move cannot blank this.
+    pkg = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
+           / "settings")
+    src = "\n".join(f.read_text() for f in sorted(pkg.glob("*.py")))
     handler = src[src.index("telemetry_sharing_consent") - 2000:
                   src.index("telemetry_sharing_consent") + 200]
     members = re.findall(r"AuditEventType\.([A-Z_]+)", handler)
@@ -177,8 +180,9 @@ def test_generic_settings_put_blocks_telemetry_sharing_keys():
     egress consent around all of that (trinity-ops-agent#232 class)."""
     from pathlib import Path
 
+    # #1028: the generic catch-all lives in routers/settings/generic.py now.
     src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
-           / "settings.py").read_text()
+           / "settings" / "generic.py").read_text()
     assert 'key.startswith("telemetry_sharing_")' in src, (
         "generic settings PUT must block the telemetry_sharing_* key family"
     )

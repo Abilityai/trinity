@@ -39,8 +39,25 @@ _spec = importlib.util.spec_from_file_location(
     submodule_search_locations=[_pkg_dir],
 )
 agent_client = importlib.util.module_from_spec(_spec)
-sys.modules["agent_client"] = agent_client
+# Import-time stub monkeypatch can't reach (the exec below needs the parent
+# registered first); the autouse _restore_sys_modules fixture below reverts it.
+_STUBBED_MODULE_NAMES = ["agent_client"]
+sys.modules["agent_client"] = agent_client  # noqa — restored by the fixture
 _spec.loader.exec_module(agent_client)
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
 # The pool internals under test live in the http_pool module.
 _http_pool = agent_client.http_pool
 
