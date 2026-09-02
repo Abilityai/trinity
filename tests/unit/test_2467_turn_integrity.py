@@ -453,6 +453,14 @@ class TestFacadeSignatureParity:
         )
 
 
+def _recent_iso(*, minutes_ago: int) -> str:
+    """A fresh ISO-Z timestamp shortly in the past, matching utc_now_iso()'s
+    format — rows built from it always sit inside a rolling hours=24 window."""
+    from datetime import datetime, timedelta, timezone
+    dt = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 class TestListReadersCarryTheColumn:
     """AC #2's real surfaces: BOTH list readers with explicit column lists must
     return `turn_integrity` — `get_fleet_executions` (raw-SQL SELECT) and
@@ -510,8 +518,13 @@ class TestListReadersCarryTheColumn:
             "INSERT INTO schedule_executions(id, schedule_id, agent_name, status, "
             "started_at, completed_at, message, triggered_by, turn_integrity) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
+            # Timestamps are derived from NOW, never hardcoded: get_fleet_executions
+            # defaults to hours=24, so a fixed started_at turned this into a time
+            # bomb — green until the calendar caught up, then red on every branch
+            # (first fired 2026-09-02T10:00Z, fleet-list arm only; the agent-summary
+            # arm has no window and kept passing).
             ("e-ti", "s1", "agent-ti", "success",
-             "2026-09-01T10:00:00.000000Z", "2026-09-01T10:01:00.000000Z",
+             _recent_iso(minutes_ago=10), _recent_iso(minutes_ago=9),
              "m", "schedule", self._TI),
         )
         conn.commit()
