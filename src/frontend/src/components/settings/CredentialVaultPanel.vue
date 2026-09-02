@@ -61,7 +61,7 @@
       <section class="space-y-3">
         <h4 class="text-sm font-medium text-gray-800 dark:text-gray-200">Credentials</h4>
 
-        <p v-if="loading" class="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
+        <p v-if="loading && !entries.length" class="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
 
         <div v-else-if="!entries.length" class="text-sm text-gray-500 dark:text-gray-400">
           No credentials yet — add one below.
@@ -127,7 +127,7 @@
 
           <!-- Per-entry grants -->
           <div v-if="grantsOpenId === e.id" class="mt-3 pt-3 border-t border-gray-100 dark:border-gray-700 space-y-2">
-            <p v-if="grantsLoading" class="text-xs text-gray-500 dark:text-gray-400">Loading grants…</p>
+            <p v-if="grantsLoading && !grants.length" class="text-xs text-gray-500 dark:text-gray-400">Loading grants…</p>
             <div v-else-if="!grants.length" class="text-xs text-gray-500 dark:text-gray-400">
               Not granted to any agent yet.
             </div>
