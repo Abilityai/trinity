@@ -161,11 +161,28 @@ jobs:
           # A dispatch therefore publishes `sha-<short>` and nothing else, which
           # is exactly what a smoke build needs. Re-cutting a release is done by
           # re-pushing the git tag, which fires `push` and takes the full set.
+          #
+          # `latest` additionally excludes PRE-RELEASE tags (`v0.9.5-rc1`). The
+          # `startsWith(refs/tags/v)` guard above answers "is this a version tag",
+          # not "is this a version anyone should be running" — and a release
+          # candidate is pushed precisely so a marketplace snapshot can be built
+          # from it BEFORE the payload is blessed, i.e. the one tag that must not
+          # become what every unpinned hosted install pulls on its next
+          # `start.sh --hosted`. The same hazard the dispatch gate exists for,
+          # arriving through the other door.
+          #
+          # The `-` test IS the semver prerelease rule (spec item 9: a prerelease
+          # is a hyphen plus dot-separated identifiers after patch), so it needs
+          # no list of `rc`/`beta`/`alpha` spellings to keep current. Note this
+          # cannot be delegated to metadata-action: its own prerelease handling
+          # ("pre-release will only extend {{version}}") applies to `type=semver`
+          # — which is why `{{major}}.{{minor}}` below is already safe — and has
+          # no effect whatsoever on a `type=raw` value.
           tags: |
             type=semver,pattern={{version}},enable=${{ github.event_name == 'push' }}
             type=semver,pattern=v{{version}},enable=${{ github.event_name == 'push' }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=raw,value=sha-${{ steps.prov.outputs.short_sha }}
 
       - name: Select build args for this image
