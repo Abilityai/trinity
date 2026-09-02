@@ -62,12 +62,68 @@ collaboration edges after a laptop sleep.
 **2. Single stream with `scope` field, not two streams**
 - Stream key: `trinity:events`
 - Every XADD carries `scope: "all" | "scoped"` and optional `agent_name`
-- `_event_is_visible(slot, scope, agent_name)` enforces:
-  - `/ws` clients (`scope=SCOPE_ALL`) see only `scope=all` events
+- `_event_is_visible(slot, scope, agent_name, agent_names)` enforces:
+  - `/ws` clients (`scope=SCOPE_SCOPED` events never reach them) see a
+    `scope=all` event only when **every** agent the payload names is one they
+    may access — admins short-circuit, an event naming no agent is
+    fleet-visible (ent#467)
   - `/ws/events` clients (`scope=SCOPE_SCOPED`) see `scope=scoped` events,
-    filtered by `accessible_agents` (admins see all)
+    filtered by the single envelope `agent_name` (admins see all) — unchanged
 - Rationale: Keeps the auth boundary in one place; avoids the 8 dual-broadcast
   call sites having to `XADD` twice.
+
+**2a. `/ws` is agent-scoped too (ent#467)**
+
+`/ws` shipped `SCOPE_ALL` and *unfiltered*, so every `agent_activity`,
+`agent_created`, `operator_queue_*` and `agent_shared` event reached every
+authenticated client — fleet-wide agent names, execution ids and activity
+types, plus another user's email on the two sharing events. Any `role=user`
+with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
+`get_current_user`) and read it. `/ws/events` had scoped since #306.
+
+- **Identity at connect.** `services/ws_identity_service.resolve_ws_identity`
+  turns the ticket's `sub` into `{email, is_admin, accessible_agents}`.
+  Fails **closed** — an unknown username, a suspended account (#995) or a
+  raising lookup closes the socket with 4001. A non-admin row with *no email*
+  is a resolved identity with an **empty roster**, not a refusal: ownership
+  joins `users.email` and `agent_sharing` is keyed on it, so the empty set is
+  the exact answer, and the frontend never retries a 4001.
+- **Identity is derived from the payload, once per event.** The 36 live
+  `manager.broadcast` sites disagree about where the agent name lives
+  (`agent_name` top-level, `data.name`, `data.agent_name`, two keys at once
+  for `agent_collaboration`), so `agent_names_in_payload()` reads a fixed key
+  vocabulary in one place. `details` is read **narrowly** (the two
+  collaboration keys only) because activity `details` is free-form and a
+  `details["name"]` holding a tool name would hide the event from the agent's
+  own owner.
+- **Both delivery paths filter.** `_catchup` re-reads history straight out of
+  Redis on a `last-event-id` reconnect; a filter wired only into `_fanout`
+  would hand the whole unfiltered backlog to any client that reconnects. Pinned
+  structurally by `tests/unit/test_ent467_ws_agent_scope.py`.
+- **Admins are never filtered.** Their roster would be a connect-time
+  snapshot, so filtering on it would blind the operator to every agent created
+  after the page loaded. `resolve_ws_identity` therefore resolves *no* roster
+  for an admin.
+- **A live roster is refreshed by the stream itself.** `_maybe_invalidate_rosters`
+  watches for `agent_created` / `agent_deleted` / `agent_shared` /
+  `agent_unshared` / `agent_renamed` and re-resolves each non-admin slot in a
+  worker thread (`set_accessible_resolver`, injected from `main.py` so the
+  delivery layer never imports `database`). Because every worker reads the same
+  stream, one publish invalidates rosters on all of them with no call-site
+  edits. A missed invalidation degrades to the `/ws/events` contract — stale
+  until reconnect — never to a leak, since the stale roster is the smaller one.
+- **No Redis format change**: the envelope still carries a single
+  `agent_name`; the set is derived from the payload at delivery, so entries
+  written by a pre-ent#467 worker during a rolling deploy filter correctly.
+- **The guard, not the extractor, is the safety net.** A payload naming no
+  agent stays fleet-visible (fail-open), so `test_ent467_ws_agent_scope.py`
+  discovers **every** `/ws` broadcast payload in the OSS tree by AST and fails
+  unless each is either agent-keyed or listed in `FLEET_LEVEL_ALLOWLIST` with
+  a reason. Known allowlist entries: the bulk `operator_queue_cleared`
+  (reports a count, names no agent) and the ent#170 room triggers (ids only;
+  `room_participant_state.identity` *is* an agent name but the column is
+  polymorphic, so keying on it would drop the event for the room's own human
+  participants — room-membership scoping is a tracked follow-up).
 
 **3. Per-client bounded queue, never await send from fan-out**
 - Each client slot has `asyncio.Queue(maxsize=256)`
@@ -235,7 +291,9 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | Entry | `src/backend/main.py:538-547` | Lifespan 2s graceful drain on shutdown |
 | Client | `src/frontend/src/utils/websocket.js` | Main WebSocket client; `_eid` capture, reconnect replay, `resync_required` → REST refetch |
 | Client | `src/frontend/src/stores/network.js:535+` | Collaboration dashboard WS client; same contract, separate `lastEventId` |
+| Service | `src/backend/services/ws_identity_service.py` | ent#467 `/ws` identity + agent scope (`resolve_ws_identity`, `accessible_agents_for`) |
 | Tests | `tests/test_event_bus.py` | 23 unit tests — envelope, scope visibility, eviction, slow-consumer resync, monotonic cursor guard, catchup trim detection |
+| Tests | `tests/unit/test_ent467_ws_agent_scope.py` | 36 tests — payload agent-identity vocabulary, `/ws` visibility rule, both delivery paths, roster refresh, fail-closed identity, AST discovery guard over every `/ws` broadcast |
 
 ## Constants
 
