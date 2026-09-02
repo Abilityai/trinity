@@ -1,3 +1,4 @@
+# mcp: chat.ts (fan_out)
 """
 Fan-out router — parallel task dispatch and result collection (FANOUT-001).
 

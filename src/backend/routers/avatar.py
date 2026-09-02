@@ -1,3 +1,4 @@
+# mcp: none — avatar generation + image serving for the UI (AVATAR-001)
 """
 Avatar generation and serving router (AVATAR-001, AVATAR-002).
 

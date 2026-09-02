@@ -1,3 +1,4 @@
+# mcp: none — public trigger endpoint (token in URL); webhook MANAGEMENT lives in schedules.py and is covered by schedules.ts
 """
 Webhook trigger endpoints for agent schedules (WEBHOOK-001, #291).
 

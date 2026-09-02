@@ -1,3 +1,4 @@
+# mcp: none — platform admin settings — a grant surface, human-only (Invariant #8 grant-vs-use)
 """
 System settings routes for the Trinity backend.
 
