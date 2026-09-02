@@ -220,7 +220,7 @@ project_trinity/
 ├── src/
 │   ├── backend/          # FastAPI backend (main.py, database.py)
 │   ├── frontend/         # Vue.js 3 + Tailwind CSS
-│   └── mcp-server/       # Trinity MCP server (62 tools)
+│   └── mcp-server/       # Trinity MCP server (121 tools)
 ├── docker/
 │   ├── base-image/       # Universal agent base (agent-server.py)
 │   ├── backend/          # Backend Dockerfile
@@ -238,7 +238,7 @@ project_trinity/
 
 | Category | File | Description |
 |----------|------|-------------|
-| Backend | `src/backend/main.py` | FastAPI app, 300+ endpoints across 40+ routers |
+| Backend | `src/backend/main.py` | FastAPI app, ~500 endpoints across 72 routers |
 | Backend | `src/backend/database.py` | SQLite persistence |
 | Backend | `src/backend/routers/credentials.py` | Credential injection (CRED-002) |
 | Frontend | `src/frontend/src/views/AgentDetail.vue` | Agent detail page |

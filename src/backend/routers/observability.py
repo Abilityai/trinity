@@ -1,3 +1,4 @@
+# mcp: none — observability rollups for the UI
 """
 Observability routes for the Trinity backend.
 
