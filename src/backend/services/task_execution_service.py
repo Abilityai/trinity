@@ -19,7 +19,6 @@ Lifecycle:
 import asyncio
 import json
 import logging
-import re
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,7 +29,12 @@ import httpx
 
 from database import db
 from services.agent_auth import agent_httpx_client
-from models import ActivityState, ActivityType, TaskExecutionStatus, activity_state_for_terminal
+from models import (
+    ActivityState,
+    ActivityType,
+    TaskExecutionStatus,
+    activity_state_for_terminal,
+)
 from services.activity_service import activity_service
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.agent_call_limiter import (
@@ -52,11 +56,17 @@ from services import event_dispatch_service
 from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
+
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
 # capacity stack at import time (its own reference to this module is lazy).
 from services.pull_pilot import note_unreachable_pull_trigger
 from services.settings_service import settings_service
-from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
+from utils.credential_sanitizer import (
+    sanitize_dict,
+    sanitize_execution_log,
+    sanitize_response,
+    sanitize_text,
+)
 from services.tool_call_summary import extract_tool_calls
 from utils.helpers import utc_now_iso
 from services.platform_prompt_service import (
@@ -83,6 +93,7 @@ def _resolve_agent_runtime(agent_name: str) -> str:
     except Exception:
         return "claude-code"
 
+
 logger = logging.getLogger(__name__)
 
 # #2314: these six pure response-readers and their two constants now live in
@@ -102,10 +113,10 @@ from .execution_classification import (  # noqa: F401
     detect_unresolved_slash_command,
 )
 
-
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TaskExecutionErrorCode(str, Enum):
@@ -114,15 +125,16 @@ class TaskExecutionErrorCode(str, Enum):
     Used by callers (message router, chat, etc.) to match error types
     without parsing human-readable error strings.
     """
-    TIMEOUT = "timeout"              # Execution exceeded timeout_seconds
-    CAPACITY = "capacity"            # All parallel slots in use
-    AUTH = "auth"                    # No API key or subscription configured
-    BILLING = "billing"             # Rate limit, credit, or billing issue
-    AGENT_ERROR = "agent_error"     # Agent returned non-zero exit code
-    NETWORK = "network"             # HTTP/connection error to agent container
-    CIRCUIT_OPEN = "circuit_open"   # Circuit breaker open — agent known unhealthy (#767)
-    RECONCILED = "reconciled"       # Terminal write lost the CAS; row reflects another writer's terminal (#671/H4)
-    LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
+
+    TIMEOUT = "timeout"  # Execution exceeded timeout_seconds
+    CAPACITY = "capacity"  # All parallel slots in use
+    AUTH = "auth"  # No API key or subscription configured
+    BILLING = "billing"  # Rate limit, credit, or billing issue
+    AGENT_ERROR = "agent_error"  # Agent returned non-zero exit code
+    NETWORK = "network"  # HTTP/connection error to agent container
+    CIRCUIT_OPEN = "circuit_open"  # Circuit breaker open — agent known unhealthy (#767)
+    RECONCILED = "reconciled"  # Terminal write lost the CAS; row reflects another writer's terminal (#671/H4)
+    LEASE_EXPIRED = "lease_expired"  # Fire-and-forget lease expired — no callback before slot TTL (#1083)
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
     EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
 
@@ -130,14 +142,15 @@ class TaskExecutionErrorCode(str, Enum):
 @dataclass
 class TaskExecutionResult:
     """Result of a task execution."""
+
     execution_id: str
-    status: str                         # TaskExecutionStatus value
-    response: str                       # Sanitized response text
+    status: str  # TaskExecutionStatus value
+    response: str  # Sanitized response text
     cost: Optional[float] = None
     context_used: Optional[int] = None
     context_max: Optional[int] = None
-    session_id: Optional[str] = None    # Claude Code session ID
-    execution_log: Optional[str] = None # Sanitized JSON transcript
+    session_id: Optional[str] = None  # Claude Code session ID
+    execution_log: Optional[str] = None  # Sanitized JSON transcript
     raw_response: dict = field(default_factory=dict)
     error: Optional[str] = None
     error_code: Optional[TaskExecutionErrorCode] = None
@@ -179,6 +192,7 @@ class TerminalEnvelope:
         raw_response: full response dict threaded back via ``TaskExecutionResult``
             (Session router consumes ``compact_events``); empty for callbacks.
     """
+
     execution_id: Optional[str]
     status: str
     response: Optional[str] = None
@@ -198,8 +212,6 @@ class TerminalEnvelope:
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # Reader-race signature (Issue #678 auto-retry)
 # ---------------------------------------------------------------------------
@@ -210,8 +222,6 @@ class TerminalEnvelope:
 # to the retry so a 30-min task that ate 28 min before failing doesn't get
 # another 30 min on top.
 _AUTO_RETRY_MAX_TIMEOUT_S = 300.0
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +252,17 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # ent#329: `operator_response` belongs here. The operator answered and moved
     # on; the resume turn runs with nobody reading its reply, so an unresolved
     # command in it is invisible without the alert.
-    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response"}
+    {
+        "schedule",
+        "webhook",
+        "loop",
+        "event",
+        "fan_out",
+        "agent",
+        "reminder",
+        "a2a",
+        "operator_response",
+    }
 )
 
 
@@ -252,8 +271,6 @@ _AUTONOMOUS_TRIGGERS = frozenset(
 # Truncate every echo: a >16 KiB command would otherwise trip the DB question
 # belt (ValueError) and let the agent suppress its own alert.
 _COMMAND_DISPLAY_MAX = 200
-
-
 
 
 async def _alert_skill_not_found(
@@ -356,10 +373,14 @@ async def _alert_skill_not_found(
 
         logger.warning(
             "[#1410] skill_not_found alert raised for %s: command=%s execution=%s",
-            agent_name, command_display, execution_id,
+            agent_name,
+            command_display,
+            execution_id,
         )
     except Exception:  # noqa: BLE001 — alerting must never break the terminal write
-        logger.exception("[#1410] failed to raise skill_not_found alert for %s", agent_name)
+        logger.exception(
+            "[#1410] failed to raise skill_not_found alert for %s", agent_name
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -375,15 +396,10 @@ async def _alert_skill_not_found(
 _SWITCH_RETRY_DELAY_S = 3.0
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Agent HTTP helper (moved from routers/chat.py)
 # ---------------------------------------------------------------------------
+
 
 async def agent_post_with_retry(
     agent_name: str,
@@ -432,16 +448,24 @@ async def agent_post_with_retry(
             # and it runs while both semaphores are held, at the one moment the
             # queue is by definition congested — exactly the event-loop stall
             # `agent_call_limiter` exists to bound.
-            restamped = await asyncio.to_thread(db.restamp_execution_dispatch, execution_id)
+            restamped = await asyncio.to_thread(
+                db.restamp_execution_dispatch, execution_id
+            )
         except Exception as e:  # noqa: BLE001 — bookkeeping never blocks the dispatch
             logger.warning(f"[TaskExecService] restamp failed for {execution_id}: {e}")
         renewed = False
         try:
-            from services.slot_service import get_slot_service  # noqa: WPS433 — lazy on purpose
+            from services.slot_service import (
+                get_slot_service,
+            )  # noqa: WPS433 — lazy on purpose
 
-            renewed = await asyncio.to_thread(get_slot_service().renew_slot, agent_name, execution_id)
+            renewed = await asyncio.to_thread(
+                get_slot_service().renew_slot, agent_name, execution_id
+            )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[TaskExecService] slot renew failed for {execution_id}: {e}")
+            logger.warning(
+                f"[TaskExecService] slot renew failed for {execution_id}: {e}"
+            )
         logger.info(
             f"[TaskExecService] Execution {execution_id} on {agent_name} parked "
             f"{int(parked_seconds)}s in the backend call queue — re-anchored at dispatch "
@@ -453,9 +477,13 @@ async def agent_post_with_retry(
         for attempt in range(max_retries):
             try:
                 async with acquire_agent_call_slot(
-                    agent_name, execution_id=execution_id, on_granted=_on_dispatch_granted,
+                    agent_name,
+                    execution_id=execution_id,
+                    on_granted=_on_dispatch_granted,
                 ):
-                    async with agent_httpx_client(agent_name, timeout=timeout) as client:
+                    async with agent_httpx_client(
+                        agent_name, timeout=timeout
+                    ) as client:
                         response = await client.post(agent_url, json=payload)
                         return response
             except BackendAgentCallBudgetExhausted:
@@ -471,7 +499,7 @@ async def agent_post_with_retry(
             except httpx.ConnectError as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    delay = retry_delay * (2 ** attempt)
+                    delay = retry_delay * (2**attempt)
                     logger.debug(
                         f"Agent {agent_name} connection failed (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {delay}s..."
@@ -517,7 +545,9 @@ async def terminate_execution_on_agent(
     if not execution_id:
         return False
 
-    agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate"
+    agent_url = (
+        f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate"
+    )
 
     try:
         async with agent_httpx_client(agent_name, timeout=TERMINATE_TIMEOUT) as client:
@@ -593,6 +623,7 @@ def dispatch_breaker_active(agent_name: str) -> bool:
     """
     try:
         from config import DISPATCH_BREAKER_ENABLED
+
         if not DISPATCH_BREAKER_ENABLED:
             return False
         return bool(db.get_circuit_breaker_enabled(agent_name))
@@ -623,6 +654,7 @@ def dispatch_async_eligible(triggered_by: Optional[str]) -> bool:
     """
     try:
         from config import ASYNC_DISPATCH_ELIGIBLE_TRIGGERS, DISPATCH_ASYNC
+
         if not DISPATCH_ASYNC:
             return False
         return triggered_by in ASYNC_DISPATCH_ELIGIBLE_TRIGGERS
@@ -698,7 +730,9 @@ async def _fail_backlog_and_audit(agent_name: str) -> None:
 
 
 async def _record_dispatch_terminal(
-    agent_name: str, breaker_enabled: bool, error_code: Optional["TaskExecutionErrorCode"]
+    agent_name: str,
+    breaker_enabled: bool,
+    error_code: Optional["TaskExecutionErrorCode"],
 ) -> None:
     """Record a dispatch-breaker outcome at an execution terminal (#526 D10).
 
@@ -886,6 +920,7 @@ async def _write_terminal_and_gate(
 # Circuit-breaker fast-fail messaging (#1557)
 # ---------------------------------------------------------------------------
 
+
 def _circuit_breaker_error(transport_open: bool, dispatch_open: bool) -> str:
     """Honest fast-fail reason for an open circuit, by which breaker fired.
 
@@ -910,6 +945,7 @@ def _circuit_breaker_error(transport_open: bool, dispatch_open: bool) -> str:
 # Service
 # ---------------------------------------------------------------------------
 
+
 class TaskExecutionService:
     """
     Stateless service encapsulating the full task-execution lifecycle.
@@ -923,7 +959,7 @@ class TaskExecutionService:
         self,
         agent_name: str,
         message: str,
-        triggered_by: str,                      # "manual"|"public"|"schedule"|"agent"|"mcp"|"fan_out"
+        triggered_by: str,  # "manual"|"public"|"schedule"|"agent"|"mcp"|"fan_out"
         source_user_id: Optional[int] = None,
         source_user_email: Optional[str] = None,
         source_agent_name: Optional[str] = None,
@@ -1065,7 +1101,8 @@ class TaskExecutionService:
                 try:
                     cap_result = await capacity.acquire(
                         agent_name=agent_name,
-                        execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
+                        execution_id=execution_id
+                        or f"temp-{datetime.utcnow().timestamp()}",
                         max_concurrent=max_parallel_tasks,
                         message_preview=message[:100] if message else "",
                         timeout_seconds=timeout_seconds,
@@ -1119,7 +1156,9 @@ class TaskExecutionService:
                     # before any agent call; nothing was admitted or enqueued.
                     # Discard itself is driven by the apply_result hook / GC
                     # sweep, never from the admission path.
-                    error_msg = f"ephemeral_exhausted: ghost agent budget spent ({e.reason})"
+                    error_msg = (
+                        f"ephemeral_exhausted: ghost agent budget spent ({e.reason})"
+                    )
                     logger.info(
                         f"[TaskExecService] Ephemeral budget gate denied {agent_name} "
                         f"({e.reason}); fast-failing execution {execution_id}"
@@ -1180,7 +1219,9 @@ class TaskExecutionService:
                 )
             if transport_open or dispatch_open:
                 error_msg = _circuit_breaker_error(transport_open, dispatch_open)
-                logger.warning(f"[TaskExecService] CB open, fast-failing execution {execution_id} for {agent_name}")
+                logger.warning(
+                    f"[TaskExecService] CB open, fast-failing execution {execution_id} for {agent_name}"
+                )
                 # #671/H4: route the terminal write through the CAS — the
                 # activity is completed only if this writer won (a lost CAS to a
                 # cancel/already-terminal row must not also complete it).
@@ -1213,9 +1254,13 @@ class TaskExecutionService:
             # write overwrites/ignores the marker — harmless, no callback arrives.
             if execution_id:
                 try:
-                    db.mark_execution_dispatched(execution_id, async_dispatch=async_dispatch)
+                    db.mark_execution_dispatched(
+                        execution_id, async_dispatch=async_dispatch
+                    )
                 except Exception as e:
-                    logger.warning(f"[TaskExecService] Failed to mark execution dispatched: {e}")
+                    logger.warning(
+                        f"[TaskExecService] Failed to mark execution dispatched: {e}"
+                    )
 
             # ---- 4. Call agent with retry --------------------------------
             # Compose platform prompt + execution context (#171) + caller system_prompt.
@@ -1255,7 +1300,9 @@ class TaskExecutionService:
                     runtime=agent_runtime, model=model
                 )
                 effective_system_prompt = (
-                    platform_prompt + "\n\n" + system_prompt if system_prompt else platform_prompt
+                    platform_prompt + "\n\n" + system_prompt
+                    if system_prompt
+                    else platform_prompt
                 )
 
             payload = {
@@ -1275,14 +1322,18 @@ class TaskExecutionService:
             }
 
             effective_timeout = float(timeout_seconds or 600) + 10
-            logger.info(f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={allowed_tools}, msg_len={len(message)})")
+            logger.info(
+                f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={allowed_tools}, msg_len={len(message)})"
+            )
 
             # #678 retry bookkeeping. Hoisted ABOVE the first agent call so the
             # except branches can read these without NameError when the first
             # call raises (e.g. ConnectError after agent_post_with_retry's own
             # internal retries are exhausted).
             retry_count = 0
-            previous_attempt_cost = 0.0  # accumulator: failed-attempt cost rolled into terminal write
+            previous_attempt_cost = (
+                0.0  # accumulator: failed-attempt cost rolled into terminal write
+            )
             # #792: one-shot guard for the SUB-003 switch+retry. A dedicated flag
             # (NOT retry_count, which #678's reader-race retry owns) so the two
             # retry reasons never suppress each other. Read by the except handler
@@ -1299,8 +1350,12 @@ class TaskExecutionService:
                 execution_id=execution_id,  # #2433: in-flight proof-of-life
             )
 
-            execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
-            logger.info(f"[TaskExecService] Agent {agent_name} responded: HTTP {response.status_code} ({execution_time_ms}ms)")
+            execution_time_ms = int(
+                (datetime.utcnow() - start_time).total_seconds() * 1000
+            )
+            logger.info(
+                f"[TaskExecService] Agent {agent_name} responded: HTTP {response.status_code} ({execution_time_ms}ms)"
+            )
 
             # #678 auto-retry: when the agent server returned a 502 with the
             # reader-race signature AND the original turn was cheap to retry,
@@ -1323,7 +1378,9 @@ class TaskExecutionService:
                     retry_agent_timeout = int(
                         min(float(timeout_seconds or 600), _AUTO_RETRY_MAX_TIMEOUT_S)
                     )
-                    retry_http_timeout = min(effective_timeout, _AUTO_RETRY_MAX_TIMEOUT_S)
+                    retry_http_timeout = min(
+                        effective_timeout, _AUTO_RETRY_MAX_TIMEOUT_S
+                    )
 
                     # CB re-check: if the agent went unhealthy between the
                     # first 502 and now, fast-fail the retry the same way
@@ -1341,7 +1398,10 @@ class TaskExecutionService:
                         # terminal cost write so the spend isn't silently
                         # absorbed by the retry's $0-or-success replacement.
                         prev_cost_raw = prev_meta.get("cost_usd")
-                        if isinstance(prev_cost_raw, (int, float)) and prev_cost_raw > 0:
+                        if (
+                            isinstance(prev_cost_raw, (int, float))
+                            and prev_cost_raw > 0
+                        ):
                             previous_attempt_cost = float(prev_cost_raw)
                         logger.warning(
                             f"[TaskExecService] Reader-race signature on {agent_name} "
@@ -1371,9 +1431,14 @@ class TaskExecutionService:
                                 },
                             )
                         except Exception as audit_err:
-                            logger.debug(f"[TaskExecService] audit log failed (non-fatal): {audit_err}")
+                            logger.debug(
+                                f"[TaskExecService] audit log failed (non-fatal): {audit_err}"
+                            )
 
-                        retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
+                        retry_payload = {
+                            **payload,
+                            "timeout_seconds": retry_agent_timeout,
+                        }
                         start_time = datetime.utcnow()
                         response = await agent_post_with_retry(
                             agent_name,
@@ -1384,7 +1449,9 @@ class TaskExecutionService:
                             timeout=retry_http_timeout,
                             execution_id=execution_id,  # #2433: in-flight proof-of-life
                         )
-                        execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+                        execution_time_ms = int(
+                            (datetime.utcnow() - start_time).total_seconds() * 1000
+                        )
                         logger.info(
                             f"[TaskExecService] Agent {agent_name} retry responded: "
                             f"HTTP {response.status_code} ({execution_time_ms}ms, "
@@ -1414,6 +1481,7 @@ class TaskExecutionService:
                         from services.subscription_auto_switch import (
                             handle_subscription_failure,
                         )
+
                         switch_result = await handle_subscription_failure(
                             agent_name=agent_name,
                             error_message=switch_error_msg,
@@ -1428,7 +1496,9 @@ class TaskExecutionService:
                         retry_count += 1
                         # #678 R2 rollup: accumulate the failed attempt's cost so it
                         # isn't absorbed by the retry's success replacement.
-                        previous_attempt_cost += _salvage_attempt_cost(switch_partial_meta)
+                        previous_attempt_cost += _salvage_attempt_cost(
+                            switch_partial_meta
+                        )
                         # Cap the retry to the REMAINING original budget so a 429
                         # after a long run can't balloon wall-clock / slot time.
                         elapsed_s = (datetime.utcnow() - start_time).total_seconds()
@@ -1460,16 +1530,23 @@ class TaskExecutionService:
                                     "attempt": retry_count + 1,
                                     "phase": "initiated",
                                     "failure_kind": switch_failure_kind,
-                                    "new_subscription": switch_result.get("new_subscription"),
+                                    "new_subscription": switch_result.get(
+                                        "new_subscription"
+                                    ),
                                 },
                             )
                         except Exception as audit_err:
-                            logger.debug(f"[TaskExecService] audit log failed (non-fatal): {audit_err}")
+                            logger.debug(
+                                f"[TaskExecService] audit log failed (non-fatal): {audit_err}"
+                            )
 
                         # Small settle so a hot-reloaded token is live for the next
                         # subprocess; the retry call itself probes readiness.
                         await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
-                        retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
+                        retry_payload = {
+                            **payload,
+                            "timeout_seconds": retry_agent_timeout,
+                        }
                         start_time = datetime.utcnow()
                         response = await agent_post_with_retry(
                             agent_name,
@@ -1480,7 +1557,9 @@ class TaskExecutionService:
                             timeout=retry_http_timeout,
                             execution_id=execution_id,  # #2433: in-flight proof-of-life
                         )
-                        execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+                        execution_time_ms = int(
+                            (datetime.utcnow() - start_time).total_seconds() * 1000
+                        )
                         logger.info(
                             f"[TaskExecService] Agent {agent_name} post-switch retry "
                             f"responded: HTTP {response.status_code} ({execution_time_ms}ms, "
@@ -1560,7 +1639,10 @@ class TaskExecutionService:
                 logger.warning(
                     "[#1410] %s: command '%s' did not resolve to an installed "
                     "skill (execution %s, triggered_by=%s) — recording FAILED",
-                    agent_name, unresolved_command, execution_id, triggered_by,
+                    agent_name,
+                    unresolved_command,
+                    execution_id,
+                    triggered_by,
                 )
                 if triggered_by in _AUTONOMOUS_TRIGGERS:
                     _spawn_bg(
@@ -1618,7 +1700,9 @@ class TaskExecutionService:
         except httpx.TimeoutException:
             elapsed = int((datetime.utcnow() - start_time).total_seconds())
             error_msg = f"Task execution timed out after {timeout_seconds} seconds"
-            logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
+            logger.error(
+                f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)"
+            )
 
             # Issue #61: Terminate the execution on the agent to prevent orphaned
             # Claude processes from accumulating. Best-effort — watchdog is safety net.
@@ -1669,7 +1753,11 @@ class TaskExecutionService:
                 )
             # #671/H4: CAS-gate the terminal write; complete the activity only
             # if we won.
-            terminal = TaskExecutionStatus.CANCELLED if cancelled else TaskExecutionStatus.FAILED
+            terminal = (
+                TaskExecutionStatus.CANCELLED
+                if cancelled
+                else TaskExecutionStatus.FAILED
+            )
             await _write_terminal_and_gate(
                 execution_id,
                 activity_id,
@@ -1693,7 +1781,9 @@ class TaskExecutionService:
             error_msg, partial_metadata, agent_execution_log = _extract_agent_error(
                 getattr(e, "response", None), f"HTTP error: {type(e).__name__}"
             )
-            logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}")
+            logger.error(
+                f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}"
+            )
 
             # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
             # failures (503 from agent server, or auth indicators in the error
@@ -1703,13 +1793,16 @@ class TaskExecutionService:
             # this execution (and its retry still failed into here), do NOT switch
             # again — a second switch would burn another rate-limit event and churn
             # to a third never-used subscription.
-            agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
+            agent_status_code = getattr(
+                getattr(e, "response", None), "status_code", None
+            )
             if not subscription_switch_attempted:
                 try:
                     from services.subscription_auto_switch import (
                         handle_subscription_failure,
                         is_auth_failure,
                     )
+
                     if agent_status_code == 429:
                         await handle_subscription_failure(
                             agent_name=agent_name,
@@ -1723,13 +1816,17 @@ class TaskExecutionService:
                             failure_kind="auth",
                         )
                 except Exception as switch_err:
-                    logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
+                    logger.error(
+                        f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}"
+                    )
 
             # Issue #285: Detect auth failures (HTTP 503 from agent server)
             # Return structured error code so callers can handle appropriately
             error_code = None
             if agent_status_code == 503:
-                logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
+                logger.warning(
+                    f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}"
+                )
                 error_code = TaskExecutionErrorCode.AUTH
 
             # #678 salvage + terminal write + side-effects live in apply_result.
@@ -1764,7 +1861,9 @@ class TaskExecutionService:
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}")
+            logger.error(
+                f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}"
+            )
             # #671/H4: CAS-gate the terminal write; complete the activity only
             # if we won.
             await _write_terminal_and_gate(
@@ -1907,7 +2006,9 @@ class TaskExecutionService:
                     # it here: that works on every agent image with no rebuild.
                     tool_calls = extract_tool_calls(exec_log)
                     tool_calls_json = (
-                        sanitize_execution_log(json.dumps(tool_calls)) if tool_calls else None
+                        sanitize_execution_log(json.dumps(tool_calls))
+                        if tool_calls
+                        else None
                     )
                 except Exception as e:
                     logger.error(
@@ -1953,7 +2054,9 @@ class TaskExecutionService:
             claude_session_id = envelope.session_id or metadata.get("session_id")
 
             compact_events = metadata.get("compact_events") or []
-            compact_metadata_json = json.dumps(compact_events) if compact_events else None
+            compact_metadata_json = (
+                json.dumps(compact_events) if compact_events else None
+            )
 
             # #678 R2: roll the failed first attempt's cost into the terminal
             # write. previous_attempt_cost is 0.0 when no retry fired.
@@ -1971,7 +2074,8 @@ class TaskExecutionService:
                     status=TaskExecutionStatus.SUCCESS,
                     response=sanitized_resp,
                     context_used=context_used if context_used > 0 else None,
-                    context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
+                    context_max=metadata.get("context_window")
+                    or DEFAULT_CONTEXT_WINDOW,
                     cost=total_cost,
                     tool_calls=tool_calls_json,
                     execution_log=execution_log_json,
@@ -2018,7 +2122,9 @@ class TaskExecutionService:
                         "session_id": envelope.session_id,
                         "cost_usd": total_cost,
                         "execution_time_ms": envelope.execution_time_ms,
-                        "tool_count": len(exec_log) if isinstance(exec_log, list) else 0,
+                        "tool_count": (
+                            len(exec_log) if isinstance(exec_log, list) else 0
+                        ),
                         "response_preview": (sanitized_resp or "")[:200],
                     },
                 )
@@ -2072,13 +2178,21 @@ class TaskExecutionService:
         # #678 salvage: surface what telemetry the agent captured before it
         # wedged. Sanitize the partial metadata as defense-in-depth.
         partial_metadata = sanitize_dict(metadata) if metadata else {}
-        salvage_cost_raw = partial_metadata.get("cost_usd") if partial_metadata else None
-        salvage_context = _compute_context_used(partial_metadata) if partial_metadata else None
+        salvage_cost_raw = (
+            partial_metadata.get("cost_usd") if partial_metadata else None
+        )
+        salvage_context = (
+            _compute_context_used(partial_metadata) if partial_metadata else None
+        )
         salvage_context_max = (
-            (partial_metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW) if partial_metadata else None
+            (partial_metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW)
+            if partial_metadata
+            else None
         )
         if envelope.previous_attempt_cost > 0:
-            base = salvage_cost_raw if isinstance(salvage_cost_raw, (int, float)) else 0.0
+            base = (
+                salvage_cost_raw if isinstance(salvage_cost_raw, (int, float)) else 0.0
+            )
             salvage_cost: Optional[float] = base + envelope.previous_attempt_cost
         else:
             salvage_cost = salvage_cost_raw
@@ -2091,12 +2205,20 @@ class TaskExecutionService:
         # applier), and derive the #1741 tool_calls SUMMARY (never a second copy
         # of the transcript). None (a bare-string old-image body) leaves both
         # columns null = today.
+        # ent#279: identity-scrub the salvaged transcript BEFORE the pattern pass,
+        # mirroring the SUCCESS branch — a fetched secret with no known prefix
+        # escapes sanitize_execution_log, and the #1741 tool_calls summary is
+        # derived from this same object.
+        if _staged and isinstance(envelope.execution_log, list):
+            envelope.execution_log = scrub_obj(_staged, envelope.execution_log)
         exec_log = envelope.execution_log
         salvage_execution_log_json = None
         salvage_tool_calls_json = None
         if isinstance(exec_log, list) and len(exec_log) > 0:
             try:
-                salvage_execution_log_json = sanitize_execution_log(json.dumps(exec_log))
+                salvage_execution_log_json = sanitize_execution_log(
+                    json.dumps(exec_log)
+                )
                 salvage_tool_calls = extract_tool_calls(exec_log)
                 salvage_tool_calls_json = (
                     sanitize_execution_log(json.dumps(salvage_tool_calls))
@@ -2152,7 +2274,9 @@ class TaskExecutionService:
         # non-None code that reaches this applier (e.g. a 504→TIMEOUT or, since
         # #1085, a 429→BILLING async callback), wrongly tripping the AUTH dispatch
         # breaker. Value-compare is correct regardless of the quirk. (#1085)
-        _ec_value = envelope.error_code.value if envelope.error_code is not None else None
+        _ec_value = (
+            envelope.error_code.value if envelope.error_code is not None else None
+        )
         # #526 D10: AUTH-only counting — a non-auth failure never touches the
         # breaker (None would falsely reset it).
         if won and _ec_value == "auth":
@@ -2173,7 +2297,9 @@ class TaskExecutionService:
                     get_redelivery_governor().record_terminal_failure(
                         agent_name, _ec_value
                     )
-            except Exception:  # noqa: BLE001 — detection is best-effort, never blocks a terminal
+            except (
+                Exception
+            ):  # noqa: BLE001 — detection is best-effort, never blocks a terminal
                 logger.debug("[#1085] governor record skipped", exc_info=True)
         if won and release_slot and eid:
             await capacity.release(agent_name, eid)
