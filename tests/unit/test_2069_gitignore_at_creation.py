@@ -159,6 +159,8 @@ def _load_crud(monkeypatch):
     _purge_real_services(monkeypatch, mocks)
     import services.agent_service.crud as crud_mod
 
+    # #1028: git_service is a package; collaborator patches in these tests
+    # land on `gs.gitignore`, the module that owns the merge machinery.
     return crud_mod, patcher, crud_mod.git_service
 
 
@@ -180,7 +182,7 @@ def gs(crud_gs):
 # 1. Merge behaviour (AC#2) — real command against a tmp repo
 # ---------------------------------------------------------------------------
 def _run_merge_command(gs, path: Path) -> str:
-    cmd = gs._build_gitignore_merge_command(str(path))
+    cmd = gs.gitignore._build_gitignore_merge_command(str(path))
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
     assert (
         result.returncode == 0
@@ -368,22 +370,22 @@ class TestReadinessGating:
     @staticmethod
     def _fast(monkeypatch, gs):
         """Tiny deadline + a fresh loop-unbound semaphore per run."""
-        monkeypatch.setattr(gs, "_MERGE_READY_TIMEOUT_SECONDS", 0.5)
-        monkeypatch.setattr(gs, "_MERGE_READY_INTERVAL_SECONDS", 0.02)
-        monkeypatch.setattr(gs, "_MERGE_EXEC_TIMEOUT_SECONDS", 0.5)
-        monkeypatch.setattr(gs, "_gitignore_merge_semaphore", asyncio.Semaphore(8))
+        monkeypatch.setattr(gs.gitignore, "_MERGE_READY_TIMEOUT_SECONDS", 0.5)
+        monkeypatch.setattr(gs.gitignore, "_MERGE_READY_INTERVAL_SECONDS", 0.02)
+        monkeypatch.setattr(gs.gitignore, "_MERGE_EXEC_TIMEOUT_SECONDS", 0.5)
+        monkeypatch.setattr(gs.gitignore, "_gitignore_merge_semaphore", asyncio.Semaphore(8))
 
     def test_waits_then_never_ready_times_out_cleanly(self, gs, monkeypatch):
         """(a)/(c): while /health is down the merge is never attempted; when the
         server never comes up the poll times out WITHOUT raising."""
         self._fast(monkeypatch, gs)
         monkeypatch.setattr(
-            gs, "_probe_agent_server_ready", AsyncMock(return_value=False)
+            gs.gitignore, "_probe_agent_server_ready", AsyncMock(return_value=False)
         )
         exec_mock = AsyncMock()
-        monkeypatch.setattr(gs, "execute_command_in_container", exec_mock)
+        monkeypatch.setattr(gs.gitignore, "execute_command_in_container", exec_mock)
         build = MagicMock(side_effect=AssertionError("merge must not build a command"))
-        monkeypatch.setattr(gs, "_build_gitignore_merge_command", build)
+        monkeypatch.setattr(gs.gitignore, "_build_gitignore_merge_command", build)
 
         _run(gs.merge_gitignore_after_clone("a1"))  # returns, no exception
         exec_mock.assert_not_called()
@@ -395,21 +397,21 @@ class TestReadinessGating:
         untrack sweep (`_build_rm_cached_ignored_command`) — creation is PREVENT."""
         self._fast(monkeypatch, gs)
         monkeypatch.setattr(
-            gs, "_probe_agent_server_ready", AsyncMock(return_value=True)
+            gs.gitignore, "_probe_agent_server_ready", AsyncMock(return_value=True)
         )
-        monkeypatch.setattr(gs, "_container_has_git_dir", AsyncMock(return_value=True))
+        monkeypatch.setattr(gs.gitignore, "_container_has_git_dir", AsyncMock(return_value=True))
         monkeypatch.setattr(
-            gs, "_git_toplevel", AsyncMock(return_value="/home/developer")
+            gs.gitignore, "_git_toplevel", AsyncMock(return_value="/home/developer")
         )
         exec_mock = AsyncMock(return_value={"exit_code": 0, "output": ""})
-        monkeypatch.setattr(gs, "execute_command_in_container", exec_mock)
-        real_builder = gs._build_gitignore_merge_command  # captured before patching
+        monkeypatch.setattr(gs.gitignore, "execute_command_in_container", exec_mock)
+        real_builder = gs.gitignore._build_gitignore_merge_command  # captured before patching
         merge_spy = MagicMock(side_effect=real_builder)  # returns the REAL command
-        monkeypatch.setattr(gs, "_build_gitignore_merge_command", merge_spy)
+        monkeypatch.setattr(gs.gitignore, "_build_gitignore_merge_command", merge_spy)
         rm_cached = MagicMock(
             side_effect=AssertionError("untrack must NOT run at creation")
         )
-        monkeypatch.setattr(gs, "_build_rm_cached_ignored_command", rm_cached)
+        monkeypatch.setattr(gs.gitignore, "_build_rm_cached_ignored_command", rm_cached)
 
         _run(gs.merge_gitignore_after_clone("a1"))
 
@@ -424,13 +426,13 @@ class TestReadinessGating:
         is never resolved and the merge never runs."""
         self._fast(monkeypatch, gs)
         monkeypatch.setattr(
-            gs, "_probe_agent_server_ready", AsyncMock(return_value=True)
+            gs.gitignore, "_probe_agent_server_ready", AsyncMock(return_value=True)
         )
-        monkeypatch.setattr(gs, "_container_has_git_dir", AsyncMock(return_value=False))
+        monkeypatch.setattr(gs.gitignore, "_container_has_git_dir", AsyncMock(return_value=False))
         top = AsyncMock(side_effect=AssertionError("toplevel must not be resolved"))
-        monkeypatch.setattr(gs, "_git_toplevel", top)
+        monkeypatch.setattr(gs.gitignore, "_git_toplevel", top)
         exec_mock = AsyncMock()
-        monkeypatch.setattr(gs, "execute_command_in_container", exec_mock)
+        monkeypatch.setattr(gs.gitignore, "execute_command_in_container", exec_mock)
 
         _run(gs.merge_gitignore_after_clone("a1"))
         top.assert_not_called()
@@ -440,12 +442,12 @@ class TestReadinessGating:
         """(d): `_git_toplevel` None → skip (never merge against a guessed path)."""
         self._fast(monkeypatch, gs)
         monkeypatch.setattr(
-            gs, "_probe_agent_server_ready", AsyncMock(return_value=True)
+            gs.gitignore, "_probe_agent_server_ready", AsyncMock(return_value=True)
         )
-        monkeypatch.setattr(gs, "_container_has_git_dir", AsyncMock(return_value=True))
-        monkeypatch.setattr(gs, "_git_toplevel", AsyncMock(return_value=None))
+        monkeypatch.setattr(gs.gitignore, "_container_has_git_dir", AsyncMock(return_value=True))
+        monkeypatch.setattr(gs.gitignore, "_git_toplevel", AsyncMock(return_value=None))
         exec_mock = AsyncMock()
-        monkeypatch.setattr(gs, "execute_command_in_container", exec_mock)
+        monkeypatch.setattr(gs.gitignore, "execute_command_in_container", exec_mock)
 
         _run(gs.merge_gitignore_after_clone("a1"))
         exec_mock.assert_not_called()
@@ -456,17 +458,17 @@ class TestReadinessGating:
         the merge exec were not wrapped, this test would hang."""
         self._fast(monkeypatch, gs)
         monkeypatch.setattr(
-            gs, "_probe_agent_server_ready", AsyncMock(return_value=True)
+            gs.gitignore, "_probe_agent_server_ready", AsyncMock(return_value=True)
         )
-        monkeypatch.setattr(gs, "_container_has_git_dir", AsyncMock(return_value=True))
+        monkeypatch.setattr(gs.gitignore, "_container_has_git_dir", AsyncMock(return_value=True))
         monkeypatch.setattr(
-            gs, "_git_toplevel", AsyncMock(return_value="/home/developer")
+            gs.gitignore, "_git_toplevel", AsyncMock(return_value="/home/developer")
         )
 
         async def _hang(*a, **k):
             await asyncio.sleep(100)
 
-        monkeypatch.setattr(gs, "execute_command_in_container", _hang)
+        monkeypatch.setattr(gs.gitignore, "execute_command_in_container", _hang)
 
         async def _bounded():
             # An outer belt so a MISSING wait_for hangs THIS test (not the suite),
@@ -485,10 +487,10 @@ class TestReadinessGating:
         exact leak #2069 closes. Pinned with a 1-permit semaphore: pre-fix the
         poll ran INSIDE it, so the fast agent would block forever on `async with`
         and this test would time out."""
-        monkeypatch.setattr(gs, "_gitignore_merge_semaphore", asyncio.Semaphore(1))
-        monkeypatch.setattr(gs, "_MERGE_READY_TIMEOUT_SECONDS", 30)
-        monkeypatch.setattr(gs, "_MERGE_READY_INTERVAL_SECONDS", 0.01)
-        monkeypatch.setattr(gs, "_MERGE_EXEC_TIMEOUT_SECONDS", 30)
+        monkeypatch.setattr(gs.gitignore, "_gitignore_merge_semaphore", asyncio.Semaphore(1))
+        monkeypatch.setattr(gs.gitignore, "_MERGE_READY_TIMEOUT_SECONDS", 30)
+        monkeypatch.setattr(gs.gitignore, "_MERGE_READY_INTERVAL_SECONDS", 0.01)
+        monkeypatch.setattr(gs.gitignore, "_MERGE_EXEC_TIMEOUT_SECONDS", 30)
 
         slow_parked = asyncio.Event()
         never_ready = asyncio.Event()
@@ -500,13 +502,13 @@ class TestReadinessGating:
                 return False
             return True  # "fast" is ready on its first probe
 
-        monkeypatch.setattr(gs, "_probe_agent_server_ready", _probe)
-        monkeypatch.setattr(gs, "_container_has_git_dir", AsyncMock(return_value=True))
+        monkeypatch.setattr(gs.gitignore, "_probe_agent_server_ready", _probe)
+        monkeypatch.setattr(gs.gitignore, "_container_has_git_dir", AsyncMock(return_value=True))
         monkeypatch.setattr(
-            gs, "_git_toplevel", AsyncMock(return_value="/home/developer")
+            gs.gitignore, "_git_toplevel", AsyncMock(return_value="/home/developer")
         )
         exec_mock = AsyncMock(return_value={"exit_code": 0, "output": ""})
-        monkeypatch.setattr(gs, "execute_command_in_container", exec_mock)
+        monkeypatch.setattr(gs.gitignore, "execute_command_in_container", exec_mock)
 
         async def _body():
             slow = asyncio.create_task(gs.merge_gitignore_after_clone("slow"))
@@ -529,7 +531,7 @@ class TestReadinessGating:
 
         # Exactly the fast agent's merge ran; the slow one never became ready.
         assert exec_mock.await_count == 1
-        expected = gs._build_gitignore_merge_command("/home/developer")
+        expected = gs.gitignore._build_gitignore_merge_command("/home/developer")
         assert exec_mock.await_args.kwargs["command"] == expected
 
 

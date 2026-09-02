@@ -499,6 +499,10 @@ def _load_git_service(monkeypatch):
     patcher = patch.dict("sys.modules", mocks)
     patcher.start()
     _purge_real_services(monkeypatch, mocks)
+    # #1028: git_service is a package; `gs` is the package and each patch in
+    # this file lands on the module whose function is being driven —
+    # provisioning for the anonymous probe, sync for the sync/reset verbs,
+    # gitignore for the migrate hook sync reads through it.
     import services.git_service as gs
     return gs, patcher, database_mod.db
 
@@ -529,7 +533,7 @@ class _FakeProc:
 
 class TestProbeAnonymousRepoAccess:
     def _probe(self, gs, proc):
-        with patch.object(gs.asyncio, "create_subprocess_exec",
+        with patch.object(gs.provisioning.asyncio, "create_subprocess_exec",
                           AsyncMock(return_value=proc)):
             return _run(gs.probe_anonymous_repo_access("o/r"))
 
@@ -556,7 +560,7 @@ class TestProbeAnonymousRepoAccess:
 
     def test_spawn_failure_is_transient(self, git_service_env):
         gs, _ = git_service_env
-        with patch.object(gs.asyncio, "create_subprocess_exec",
+        with patch.object(gs.provisioning.asyncio, "create_subprocess_exec",
                           AsyncMock(side_effect=FileNotFoundError("no git"))):
             assert _run(gs.probe_anonymous_repo_access("o/r")) == "transient"
 
@@ -604,7 +608,7 @@ class TestWriteCredentialGuard:
         gs, db = git_service_env
         db.get_agent_github_pat.return_value = None
         c = _FakeContainer(["OTHER=1"])
-        with patch.object(gs, "get_agent_container", MagicMock(return_value=c)):
+        with patch.object(gs.sync, "get_agent_container", MagicMock(return_value=c)):
             result = _run(gs.sync_to_github("a1"))
         assert result.success is False
         assert result.conflict_type == "no_write_credentials"
@@ -623,9 +627,9 @@ class TestWriteCredentialGuard:
         gs, _db = git_service_env
         c = _FakeContainer(["GITHUB_PAT=ghp_x"])
         migrate = AsyncMock()
-        with patch.object(gs, "get_agent_container", MagicMock(return_value=c)), \
-             patch.object(gs, "_migrate_workspace_gitignore", migrate), \
-             patch.object(gs, "agent_httpx_client",
+        with patch.object(gs.sync, "get_agent_container", MagicMock(return_value=c)), \
+             patch.object(gs.gitignore, "_migrate_workspace_gitignore", migrate), \
+             patch.object(gs.sync, "agent_httpx_client",
                           MagicMock(side_effect=RuntimeError("stop here"))):
             result = _run(gs.sync_to_github("a1"))
         # Reached past the guard (the sentinel error came from the HTTP layer).
@@ -640,7 +644,7 @@ class TestWriteCredentialGuard:
         activity_mod.activity_service.get_current_activities = AsyncMock(
             return_value=[])
         with patch.dict(sys.modules, {"services.activity_service": activity_mod}), \
-             patch.object(gs, "get_agent_container", MagicMock(return_value=c)):
+             patch.object(gs.sync, "get_agent_container", MagicMock(return_value=c)):
             result = _run(gs.reset_to_main_preserve_state("a1"))
         assert result["error"] == "no_write_credentials"
 

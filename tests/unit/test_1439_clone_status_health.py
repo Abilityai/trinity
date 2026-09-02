@@ -261,5 +261,5 @@ class TestStartupShCloneRace:
 
     def test_clone_tmp_gitignored(self):
         # Defense-in-depth: a crash-orphaned temp clone must never be committed.
-        gi = (_BACKEND / "services" / "git_service.py").read_text()
+        gi = (_BACKEND / "services" / "git_service" / "gitignore.py").read_text()
         assert ".trinity-clone-tmp/" in gi

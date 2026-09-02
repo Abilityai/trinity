@@ -84,7 +84,10 @@ def _load_git_service():
     sys.modules["database"].GitSyncResult = Mock
 
     sys.modules.pop("services.git_service", None)
-    import services.git_service as gs
+    # #1028: `services/git_service.py` is a package; the alias names the module
+    # that owns the functions under test, so `patch.object(gs, ...)` lands
+    # where the code actually looks.
+    import services.git_service.trinity_files as gs
     return gs
 
 

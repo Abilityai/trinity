@@ -63,7 +63,9 @@ def _load_git_service(monkeypatch):
     monkeypatch.setitem(sys.modules, "services.git_service", None)
     monkeypatch.delitem(sys.modules, "services.git_service")
 
-    import services.git_service as gs
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.gitignore as gs
     return gs
 
 
