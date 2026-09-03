@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   agentDisplayName,
   hasDistinctLabel,
@@ -187,5 +190,107 @@ describe('agentOptionLabel', () => {
   it('is the bare display name when nothing is hidden', () => {
     expect(agentOptionLabel({ name: 'delivery-ops' })).toBe('delivery-ops')
     expect(agentOptionLabel('delivery-ops')).toBe('delivery-ops')
+  })
+})
+
+/**
+ * Structural guards (#2358) — read from the SFC source.
+ *
+ * `vitest.config.js` pins `environment: 'node'` with no mount harness, so the
+ * rules below are not reachable as behaviour here, and the Playwright specs
+ * that WOULD reach them are `ui`-label-gated and do not run on most PRs.
+ * Reading the source costs nothing and runs everywhere — the
+ * `gridTileLinks.spec.js` pattern.
+ *
+ * Each rule is pinned TERM BY TERM rather than by one broad match: a guard that
+ * only checks "some placement class is present" goes green on the exact typo it
+ * exists to catch.
+ */
+const PANEL = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../src/components/AgentListPanel.vue'),
+  'utf8'
+)
+const TILE = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../src/components/AgentTile.vue'),
+  'utf8'
+)
+
+/** Every `class="…"` / `:class="…"` attribute value containing `token`. */
+function classAttrsContaining(source, token) {
+  const attrs = source.match(/:?class="[^"]*"/g) || []
+  return attrs.filter((a) => a.includes(token))
+}
+
+describe('structural: name resolution goes through the helper, never a chain', () => {
+  it.each([
+    ['AgentListPanel.vue', PANEL],
+    ['AgentTile.vue', TILE],
+  ])('%s has no `display_label ||` / `??` / ternary chain', (_name, source) => {
+    // Ternary included on purpose: `display_label ? display_label : name` is
+    // the same defect wearing different punctuation (§1.3.1 FR-3 — resolution
+    // goes through a single helper, not per-site chains).
+    expect(source).not.toMatch(/display_label\s*(\|\||\?\?|\?)/)
+  })
+})
+
+describe('structural: the lg list is ONE column sizing context (#2358)', () => {
+  it('declares the track template exactly once — on the list container', () => {
+    // Two copies of a template string is the defect itself: each grid resolves
+    // its own `auto` tracks and the `1fr` name track absorbs the difference.
+    const templates = PANEL.match(/lg:grid-cols-\[/g) || []
+    expect(templates).toHaveLength(1)
+    expect(PANEL).toContain(
+      'lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto]'
+    )
+  })
+
+  it('makes the header AND the row subgrid items spanning every track', () => {
+    expect((PANEL.match(/lg:grid-cols-subgrid/g) || [])).toHaveLength(2)
+    const header = classAttrsContaining(PANEL, 'lg:grid-cols-subgrid').find((a) =>
+      a.includes('hidden lg:grid')
+    )
+    expect(header, 'the header is a subgrid item').toBeTruthy()
+    expect(header).toContain('lg:col-span-full')
+    const row = classAttrsContaining(PANEL, 'lg:grid lg:grid-cols-subgrid')[0]
+    expect(row, 'the row is a subgrid item').toBeTruthy()
+    expect(row).toContain('lg:col-span-full')
+  })
+
+  it('places the CapacityMeter definitely in BOTH axes — track 10, rows 1–2', () => {
+    // Sparse auto-placement would put it in rows 2–3 (the secondary line's
+    // definite column bumps the cursor to row 2 first), hanging an implicit
+    // third row below every line. `row-start-1` after `row-span-2` is what
+    // makes it `grid-row: 1 / span 2` — Tailwind emits gridRow before
+    // gridRowStart.
+    const meters = PANEL.match(/<CapacityMeter[\s\S]*?\/>/g) || []
+    const placed = meters.filter((m) => m.includes('lg:col-start-10'))
+    expect(placed).toHaveLength(1)
+    expect(placed[0]).toContain('lg:row-start-1')
+    expect(placed[0]).toContain('lg:row-span-2')
+  })
+
+  it('places the secondary line definitely on row 2, under the name column', () => {
+    const lines = classAttrsContaining(PANEL, 'lg:row-start-2')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('lg:col-start-4')
+    expect(lines[0]).toContain('lg:col-end-10')
+    // No-wrap contract: a long slug + badges + tags must never open a third row.
+    expect(lines[0]).toContain('flex-nowrap')
+    expect(lines[0]).toContain('overflow-hidden')
+    expect(lines[0]).toContain('min-h-[1.375rem]')
+  })
+
+  it('gives no subgrid item horizontal padding — insets are item margins', () => {
+    // A subgrid item's own horizontal padding is laid out INSIDE its first and
+    // last tracks (CSS Grid L2 §7.1); re-adding `pl-8` here would silently make
+    // alignment depend on that corner again. `lg:ml-8` / `lg:mr-4` on the first
+    // and last cells are ordinary L1 margins and contribute identically on the
+    // header and every row.
+    const subgridItems = classAttrsContaining(PANEL, 'lg:grid-cols-subgrid')
+    for (const attr of subgridItems) {
+      expect(attr).not.toMatch(/lg:p[xlr]-/)
+    }
+    expect(PANEL).toContain('lg:ml-8')
+    expect(PANEL).toContain('lg:mr-4')
   })
 })

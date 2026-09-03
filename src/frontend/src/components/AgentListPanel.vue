@@ -214,19 +214,48 @@
       </div>
     </div>
 
-    <!-- Agents List -->
-    <div class="flex flex-col gap-1.5">
-      <!-- Column Header (lg+ only) -->
-      <div class="hidden lg:grid lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto] lg:gap-x-4 items-center pl-8 pr-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-        <div class="w-4"></div>
-        <div class="w-3"></div>
+    <!-- Agents List.
+
+         #2358 — ONE column sizing context at lg. The header and every row used
+         to be INDEPENDENT grids sharing a copy of the same template string, so
+         each resolved its own `auto` tracks against its own content and the
+         `1fr` name track absorbed the difference: a row reading `14/16` put
+         Controls/Success at a different x than a row reading `0`, and neither
+         matched the header. The template is declared HERE, once; the header and
+         each row are `grid-cols-subgrid` items of it, so every track resolves
+         across all of them together.
+
+         Ten tracks: chk · status dot · sync dot · NAME (1fr) · activity ·
+         toggles · success · stats · arrow · CapacityMeter. The meter is track
+         10 rather than a sibling outside the grid — without it the row grid was
+         10px narrower than the header, so the two had different right edges and
+         a different `1fr`, misaligning every track between them even with
+         identical content.
+
+         Edge insets are ordinary item MARGINS (`lg:ml-8` on the first cell,
+         `lg:mr-4` on the last), identical on the header and every row — NOT
+         padding on a subgrid item, which is laid out inside its first/last
+         tracks (CSS Grid L2 §7.1) and would make alignment depend on a spec
+         corner. Do not re-add horizontal padding to the header or a row. -->
+    <div class="flex flex-col gap-y-1.5 lg:grid lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto] lg:gap-x-4">
+      <!-- Column Header (lg+ only). The spacer widths no longer DECIDE
+           alignment (the shared `auto` tracks size to the row cells), but they
+           are kept equal to the cells they sit above so a spacer can never be
+           the widest contribution. -->
+      <div
+        data-testid="list-header"
+        class="hidden lg:grid lg:grid-cols-subgrid lg:col-span-full items-center py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider"
+      >
+        <div class="w-4 lg:ml-8"></div>
+        <div class="w-2.5"></div>
         <div class="w-2"></div>
-        <div>Name</div>
-        <div>Status</div>
-        <div>Controls</div>
-        <div>Success</div>
-        <div>Exec / Sched</div>
-        <div class="w-6"></div>
+        <div data-col="name">Name</div>
+        <div data-col="status">Status</div>
+        <div data-col="controls">Controls</div>
+        <div data-col="success">Success</div>
+        <div data-col="stats">Exec / Sched</div>
+        <div class="w-4"></div>
+        <div class="w-1.5 lg:mr-4"></div>
       </div>
 
       <!-- Agent Rows -->
@@ -236,6 +265,12 @@
         :data-agent="agent.name"
         :class="[
           'relative overflow-visible bg-white dark:bg-gray-800 rounded-lg',
+          // #2358: at lg the row IS a subgrid item — still the visual box
+          // (background, radius, hover, the system border-l, and the
+          // positioning parent of the half-out avatar), now resolving its
+          // columns from the list container. Vertical padding is lg-only: the
+          // md/base layouts below carry their own.
+          'lg:grid lg:grid-cols-subgrid lg:col-span-full lg:items-center lg:gap-y-1 lg:py-3',
           'transition-colors duration-150 hover:bg-gray-50 dark:hover:bg-gray-750',
           agent.is_system
             ? 'border-l-3 border-l-purple-500'
@@ -253,18 +288,17 @@
           </div>
         </div>
 
-        <!-- Desktop layout (lg+) -->
-        <div class="hidden lg:flex pl-8 pr-4 py-3">
-          <!-- Two-row content block -->
-          <div class="flex flex-col flex-1 min-w-0">
-          <!-- Main grid (Row 1) -->
-          <div class="grid grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto] gap-x-4 items-center">
-            <!-- Checkbox -->
+        <!-- Desktop layout (lg+). `contents` rather than a box: these eleven
+             children ARE the row's grid items, so one breakpoint switch stands
+             in for eleven `hidden lg:…` cells and no extra box sits between the
+             row and its tracks. -->
+        <div class="hidden lg:contents">
+            <!-- Checkbox (track 1 — carries the row's left inset) -->
             <input
               type="checkbox"
               :checked="selectedAgents.includes(agent.name)"
               @change="toggleSelection(agent.name)"
-              class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer flex-shrink-0"
+              class="w-4 h-4 lg:ml-8 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer flex-shrink-0"
             />
 
             <!-- Status dot -->
@@ -283,7 +317,7 @@
             ></div>
 
             <!-- Name + badges -->
-            <div class="flex items-center min-w-0 gap-2">
+            <div data-col="name" class="flex items-center min-w-0 gap-2">
               <router-link
                 :to="`/agents/${agent.name}`"
                 class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
@@ -327,6 +361,7 @@
 
             <!-- Activity label -->
             <div
+              data-col="status"
               :class="[
                 'text-xs font-medium capitalize whitespace-nowrap',
                 getActivityLabelClass(agent.name)
@@ -338,7 +373,7 @@
             <!-- Toggles. System rows: the Run toggle is hidden (grid-tile
                  guard adopted, ent#260 item B) — stopping the system agent
                  stays on its Agent Detail page. -->
-            <div class="flex items-center gap-1">
+            <div data-col="controls" class="flex items-center gap-1">
               <div class="w-[7rem] flex-shrink-0 flex justify-end" :class="{ 'invisible': agent.is_system }">
                 <RunningStateToggle
                   :model-value="agent.status === 'running'"
@@ -366,7 +401,7 @@
             </div>
 
             <!-- Success rate bar -->
-            <div class="flex items-center gap-2">
+            <div data-col="success" class="flex items-center gap-2">
               <template v-if="hasSuccessData(agent.name)">
                 <div class="w-20 flex-shrink-0 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
                   <div
@@ -398,7 +433,7 @@
             </div>
 
             <!-- Stats: executions + schedules -->
-            <div class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-2 whitespace-nowrap">
+            <div data-col="stats" class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-2 whitespace-nowrap">
               <!-- Executions count -->
               <div class="flex items-center gap-1">
                 <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -424,10 +459,16 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
               </svg>
             </router-link>
-          </div>
 
-          <!-- Bottom row: tags (always rendered for uniform height) -->
-          <div class="flex items-center gap-1 pl-[5.125rem] min-h-[1.375rem] pt-1">
+          <!-- Secondary line (grid row 2, under the name column through the
+               arrow). Definite placement in BOTH axes is load-bearing, here and
+               on the meter below: with sparse auto-placement this item's
+               definite column would bump the cursor to row 2, and the meter's
+               2-row span would then land in rows 2–3 — an implicit third row
+               hanging below every line. Always rendered, so a row is the same
+               height with or without content on it. `pl-[5.125rem]` is gone:
+               `col-start-4` puts it under the name column by construction. -->
+          <div class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] lg:row-start-2 lg:col-start-4 lg:col-end-10">
             <template v-if="getAgentTags(agent).length > 0">
               <span
                 v-for="tag in getAgentTags(agent).slice(0, 3)"
@@ -445,15 +486,16 @@
               </span>
             </template>
           </div>
-          </div><!-- end flex-col wrapper -->
 
-          <!-- Capacity meter — full tile height -->
+          <!-- Capacity meter (track 10 — carries the row's right inset). Its
+               `ml-1` is gone: the container's `gap-x-4` supplies the spacing,
+               and the header's matching spacer is the meter's own 6px. -->
           <CapacityMeter
             :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
             :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
             :height="48"
             :width="6"
-            class="ml-1 flex-shrink-0 self-stretch"
+            class="flex-shrink-0 lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:self-stretch lg:mr-4"
           />
         </div>
 
