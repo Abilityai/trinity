@@ -46,6 +46,33 @@ variable "image_tag" {
   }
 }
 
+# Optional: build with an SSH key that ALREADY exists on the account, instead of
+# letting the builder import a temporary one per run.
+#
+# Left unset (the default) the builder imports a key and creates the droplet in
+# the next API call — and DigitalOcean does not reliably resolve the new key id
+# that fast. The first real build of this bundle lost that race on 4 of 5
+# creates, each failing in ~7 seconds with
+# "422 ... <id> are invalid key identifiers for Droplet creation", and each
+# leaking the temporary key (Packer's own cleanup then 404s on it).
+#
+# Supplying a pre-made key removes the window entirely, because nothing is
+# created during the build. Both must be given together; `ssh_key_id = 0` and an
+# empty path mean "unset", which is exactly the old behaviour.
+#
+#   doctl compute ssh-key import trinity-packer-build --public-key-file ~/.ssh/id_ed25519.pub
+variable "ssh_key_id" {
+  type        = number
+  default     = 0
+  description = "ID of an existing DigitalOcean SSH key. 0 = let Packer create a temporary one."
+}
+
+variable "ssh_private_key_file" {
+  type        = string
+  default     = ""
+  description = "Private key matching ssh_key_id. Required when ssh_key_id is set."
+}
+
 variable "region" {
   type    = string
   default = "nyc3"
@@ -70,6 +97,11 @@ source "digitalocean" "trinity" {
   size          = var.build_size
   ssh_username  = "root"
   snapshot_name = local.snapshot_name
+
+  # Both zero-valued unless the operator supplied them; the builder then falls
+  # back to importing a temporary key, which is the pre-existing behaviour.
+  ssh_key_id           = var.ssh_key_id
+  ssh_private_key_file = var.ssh_private_key_file
 }
 
 build {
