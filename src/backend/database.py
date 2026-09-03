@@ -1914,6 +1914,14 @@ class DatabaseManager:
         """Stack/legend order for trigger buckets (ent#96)."""
         return self._schedule_ops.trigger_bucket_order()
 
+    def count_terminal_executions_by_status(self, hours: int = 24):
+        """ent#437 — terminal execution counts by status for the telemetry aggregate."""
+        return self._schedule_ops.count_terminal_executions_by_status(hours)
+
+    def first_autonomous_success_at(self):
+        """ent#437 — the warm-ask milestone: earliest autonomous SUCCESS, or None."""
+        return self._schedule_ops.first_autonomous_success_at()
+
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
     # =========================================================================

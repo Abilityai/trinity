@@ -80,20 +80,24 @@ fleet benchmarks in return ("how does my setup compare?").
 ## What is shared (anonymized aggregates only)
 
 A single JSON document on a periodic heartbeat (default every 24h), keyed by the
-anonymous `installation_id`:
+anonymous `sharing_id` (**schema version 2**, ent#437):
 
 ```jsonc
 {
-  "installation_id": "…",          // anonymous, random, per-install
-  "schema_version": 1,
+  "sharing_id": "…",               // random UUID, minted when you turn sharing ON,
+                                   // discarded when you turn it OFF, re-minted next time.
+                                   // NEVER the install id (that one travels with your
+                                   // email if you opted into product updates).
+  "schema_version": 2,
   "shared_at": "…Z",
   "window_days": 30,               // period the counts cover
   "backfill": true,                // true on the consent-time history send
   "instance": {
-    "trinity_version": "…",        // short git commit
+    "trinity_version": "0.9.5",    // RELEASE version, never a commit SHA
     "edition": "community" | "enterprise",
     "platform": "Linux",
-    "python_version": "3.13.x"
+    "python_version": "3.13.x",
+    "install_source": "unknown"    // how this instance was installed (#2380), or unknown
   },
   "enterprise_features": ["…"],    // coarse module ids (already in /api/version)
   "counts": {                      // COUNTS ONLY
@@ -105,15 +109,37 @@ anonymous `installation_id`:
   "activation_funnel": {           // Tier-1 wizard-step counts
     "setup_started": 1, "setup_step_create": 1,
     "setup_step_credential": 0, "setup_completed": 0, "setup_dismissed": 0
+  },
+  "outcomes": {                    // how runs ENDED — an outcome mix, not a failure taxonomy
+    "by_trigger": {                // keys: chat | mcp | channel | public | schedule | loop |
+      "schedule": { "total": 12, "success": 11, "failed": 1 }   // reminder | room | operator_queue | agent | voice | other
+    },
+    "by_status": { "success": 21, "failed": 1 },   // success | failed | error | cancelled | skipped | other
+    "provider_failures": { "rate_limit": 0, "auth": 0 }   // provider-side refusals recorded by the platform
   }
 }
 ```
 
 **Never shared:** no message/chat content, no prompts, no agent outputs, no
-credentials or tokens, no emails, no user identities, **no agent names** — only
-coarse counts and enums. The exact payload for your instance is **inspectable
-before you consent** in the Settings → Usage sharing panel (expand "Exactly what
-would be shared").
+credentials or tokens, no emails, no user identities, **no agent names**, no
+per-agent cost — only coarse counts and enums. The exact payload for your
+instance is **inspectable before you consent** in the Settings → Usage sharing
+panel (expand "Exactly what would be shared") and the **last 5 send attempts** —
+successes and failures, with the HTTP status or error class — are kept locally
+and shown under **Recent sends**, so you can see afterwards precisely what left.
+
+**Enforced, not just documented:** the payload is validated against this schema
+before every send. Anything outside it (an unknown key, a wrong type, the install
+id, a bucket name that is not in the vocabulary above) is **refused and recorded,
+never sent**. New product features land in the `other` buckets until the schema
+version is deliberately bumped.
+
+**What "anonymous" means here, honestly:** the payload itself carries nothing
+that identifies a person or company, and the release version rather than a commit
+hash so adoption timing cannot re-join it to other streams. Unlinkability also
+depends on the receiving service keeping this stream apart from the identified
+product-updates record — a contract on the receiver, not something the payload
+can guarantee alone.
 
 ## Retroactive backfill at consent
 
@@ -125,7 +151,9 @@ the moment of consent.
 ## Reversibility
 
 Turn **Usage sharing** off (Settings → General) and egress stops at the next
-heartbeat — no further data leaves. For a hard, air-gapped guarantee set
+heartbeat — no further data leaves, and the share id is discarded locally (a later
+re-consent mints a new one; anything already sent stays with the receiver until a
+deletion signal exists). For a hard, air-gapped guarantee set
 `TELEMETRY_SHARING_ENABLED=false` (or `DO_NOT_TRACK=1`): the toggle then can't
 enable egress at all.
 

@@ -29,9 +29,11 @@ First-time setup wizard for admin password and API key configuration. On an inst
 >    where the wizard still renders).
 > 2. The **admin sign-in email** is no longer captured here for most installs.
 >    It moves to a dismissible post-login prompt
->    (`components/onboarding/AdminEmailNudge.vue` → Settings → General). The
->    **product-updates opt-in** has no second home yet —
->    `abilityai/trinity-enterprise#463`.
+>    (since ent#437 section 1 of `components/onboarding/FinishSetupCard.vue`,
+>    formerly `AdminEmailNudge.vue` → Settings → General). The **product-updates
+>    opt-in** got its Settings home in `abilityai/trinity-enterprise#463`; the
+>    usage-sharing consent is section 2 of the same card
+>    ([telemetry-sharing.md](telemetry-sharing.md)).
 >
 > Canonical description: `docs/memory/architecture.md` →
 > [First-Run Provisioning](../architecture.md#first-run-provisioning--honest-setup_completed-2381).

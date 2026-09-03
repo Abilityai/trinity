@@ -969,7 +969,11 @@ def _flags(monkeypatch, *, source, marketplace, posture):
     monkeypatch.setattr(rs, "settings_service", stub_settings)
     monkeypatch.setattr(
         rs, "telemetry_sharing_service",
-        types.SimpleNamespace(is_consent_enabled=lambda: False),
+        types.SimpleNamespace(
+            is_consent_enabled=lambda: False,
+            # ent#437: the flags document now spreads the four consent bools.
+            public_flags=lambda: {"telemetry_sharing_enabled": False},
+        ),
     )
     monkeypatch.setattr(rs.db, "has_any_subscription", lambda: False)
 
