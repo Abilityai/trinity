@@ -543,10 +543,10 @@ export function createAgentTools(
         "and SSH keys (.ssh/id_*). Use files_b64 for binary material. The agent must be running.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to inject credentials into"),
-        files: z.record(z.string()).optional().describe(
+        files: z.record(z.string(), z.string()).optional().describe(
           'Map of file paths to TEXT contents. Example: {".env": "KEY=value", ".config/gcloud/sa.json": "{...}"}'
         ),
-        files_b64: z.record(z.string()).optional().describe(
+        files_b64: z.record(z.string(), z.string()).optional().describe(
           'Map of file paths to BASE64-encoded binary contents (e.g. .p12/.pfx/DER cert material).'
         ),
       }),
