@@ -593,13 +593,16 @@ describe('ent#449 chart zone — one loading motion', () => {
 
   it('themes the beam from the grid palette, at a specificity that cannot lose', () => {
     // The primitive's own `.dark .scanline` is (0,3,0); a two-class override
-    // ties with it and wins only by stylesheet injection order.
-    const rule = TILE_SRC.match(/([^}\n][^}]*\.ex-zone\.scanline[^{]*)\{([^}]*)\}/s)
-    expect(rule, 'the override must be scoped to the zone').toBeTruthy()
+    // ties with it and wins only by stylesheet injection order. Anchored on the
+    // SELECTOR LINE, not on a span that could swallow the comment above it — a
+    // guard that passes on prose guards nothing.
+    const rule = TILE_SRC.match(/\n(\.ex-head\s*~\s*\.ex-zone\.scanline)\s*\{([^}]*)\}/)
+    expect(rule, 'the override must sit on a (0,4,0) selector scoped to the zone').toBeTruthy()
     expect(rule[2]).toMatch(/--scan-core:\s*var\(--gv-blue\)/)
     expect(rule[2]).toMatch(/--scan-track:\s*var\(--gv-bar-track\)/)
-    // Three classes + the scoped attribute = (0,4,0), order-independent.
-    expect(rule[1]).toContain('.ex-head ~')
+    // No raw colour reaches the beam: both tokens are grid tokens, defined in
+    // BOTH theme blocks (gridTokens.spec.js), so dark mode needs no second rule.
+    expect(rule[2]).not.toMatch(/#[0-9a-fA-F]{3,8}|rgba?\(/)
     // Theming belongs in the token layer, never a `.dark` selector in a
     // component (design-system contract).
     expect(TILE_SRC).not.toMatch(/\.dark\s+\.ex-zone/)
