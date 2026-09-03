@@ -75,6 +75,25 @@ source "digitalocean" "trinity" {
 build {
   sources = ["source.digitalocean.trinity"]
 
+  # FIRST, before anything touches apt. Ubuntu's cloud images run apt-daily and
+  # unattended-upgrades on boot, and they hold /var/lib/dpkg/lock-frontend while
+  # Packer's SSH session is already open — so 01-provision.sh's opening
+  # `apt-get update` races them and the build dies with
+  # "E: Could not get lock /var/lib/dpkg/lock-frontend" (apt exit 100).
+  # Intermittent, so it reads as a flake; it is not one, and a build that only
+  # succeeds sometimes is not something to hand a Marketplace reviewer.
+  #
+  # This is DigitalOcean's own prescribed remedy, not an invention: their
+  # reference template (marketplace-partners/marketplace-image.json, the same
+  # repo 90-cleanup-and-check.sh already pins) opens with exactly this
+  # provisioner. Ours had no wait of any kind.
+  #
+  # It belongs in the template rather than at the top of 01-provision.sh because
+  # the `file` provisioner below also runs before that script.
+  provisioner "shell" {
+    inline = ["cloud-init status --wait"]
+  }
+
   # Files first: the per-instance script and MOTD must exist before cleanup runs.
   provisioner "file" {
     source      = "files/"
