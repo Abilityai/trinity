@@ -1443,9 +1443,14 @@ on (ent#364 AC #5).
   `_VALID_TRIGGERS` (Executions filter), `_TRIGGER_BUCKETS` → its own
   "Operator queue" analytics bucket (unmapped triggers silently become "Other"),
   and `_AUTONOMOUS_TRIGGERS` (nobody reads a resume turn's reply, so an
-  unresolved slash command earns an alert). It is **stranded** for pull mode:
-  dispatched by a direct backend call, never by `POST /task`, so
-  `_derive_task_trigger` cannot emit it (#2048).
+  unresolved slash command earns an alert). It is **stranded** for pull mode.
+  Until #2391 that was structural — dispatched by a direct backend call, never by
+  `POST /task`, so `_derive_task_trigger` could not emit it (#2048). Since #2391
+  gave `task_execution_service` a pilot-gated `queue_persistent` policy it is a
+  **choice**: the respond endpoint records `result.status` as the dispatch
+  receipt (the `operator_resume_dispatch` audit row above and the #525
+  idempotency completion), and `queued` is not the outcome that contract
+  reports. It is absent from `pull_pilot.PULL_REACHABLE_TRIGGERS` deliberately.
 
 The owner-facing toggle is in `components/ReliabilityPanel.vue`.
 

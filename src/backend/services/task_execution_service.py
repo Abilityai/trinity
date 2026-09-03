@@ -44,6 +44,7 @@ from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
+    PersistentTaskPayload,
     get_capacity_manager,
 )
 from services.dispatch_breaker import DispatchBreaker
@@ -53,7 +54,7 @@ from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
 # capacity stack at import time (its own reference to this module is lazy).
-from services.pull_pilot import note_unreachable_pull_trigger
+from services.pull_pilot import note_unreachable_pull_trigger, pull_owns_dispatch
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
 from services.tool_call_summary import extract_tool_calls
@@ -556,6 +557,112 @@ def dispatch_async_eligible(triggered_by: Optional[str]) -> bool:
         return False
 
 
+def build_pull_queue_payload(
+    *,
+    agent_name: str,
+    triggered_by: str,
+    execution_id: Optional[str],
+    message: str,
+    model: Optional[str],
+    allowed_tools: Optional[list],
+    system_prompt: Optional[str],
+    timeout_seconds: Optional[int],
+    resume_session_id: Optional[str],
+    subscription_id: Optional[str],
+    source_user_id: Optional[int],
+    source_user_email: Optional[str],
+    source_agent_name: Optional[str],
+    slot_already_held: bool,
+) -> Optional[PersistentTaskPayload]:
+    """The #2391 producer gate: the overflow payload that lets THIS producer put
+    a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
+
+    Until #2391 this producer dispatched with ``overflow_policy="reject"``
+    unconditionally, so the scheduler's traffic — all cron, plus webhooks and
+    reminders — could never be claimed by a pull worker no matter how
+    ``PULL_MODE_PILOT_AGENTS`` was set (#2048 made that legible; it did not fix
+    it). Returning a payload here flips the policy to ``"queue_persistent"`` for
+    this one dispatch, which is what ``capacity_manager.acquire``'s pull branch
+    needs to hand the row to ``BacklogService`` instead of admitting it.
+
+    **The capacity-pressure decision (#2391 AC #1).** The gate is
+    ``pull_owns_dispatch`` — the SAME predicate that already decides pull
+    ownership — and nothing else. So:
+
+      * flag OFF for this agent (every agent, by default): ``None`` → the policy
+        stays ``"reject"`` and a fire arriving at capacity still fails fast with
+        "Agent at capacity", byte-for-byte as before. **Scheduled dispatch
+        semantics do not change for any agent that is not a pull pilot.** The
+        alternative — giving this producer an unconditional persistent queue —
+        would have changed the fleet's dominant traffic class under capacity
+        pressure whether or not pull was enabled, which is precisely the risk
+        #2048 declined to take.
+      * flag ON: the row is never offered a slot at all (``acquire``'s
+        ``pull_exclusive`` branch skips the ZADD), so "at capacity" stops being a
+        state that can reject it. Capacity becomes physical — the agent's worker
+        pool — which is #1081 Phase 5, pilot-scoped. Backpressure moves from
+        reject-at-dispatch to ``agent_ownership.max_backlog_depth``: a full
+        backlog still raises ``CapacityFull``, just at a deeper threshold and
+        with ``reason="persistent_full"``.
+
+    **Interaction with #1083 fire-and-forget (AC #4).** Both mechanisms exist to
+    let a turn outlive the request, and they must not stack. Pull wins by
+    construction, not by precedence: a pull-queued row is never dispatched, so
+    there is no HTTP call for the agent to ACK with 202 and ``async_result`` is
+    never sent. ``dispatch_async_eligible`` is still evaluated in
+    ``execute_task`` but its result is unreachable once this returns a payload.
+    The two share the machinery that matters anyway — the eid-keyed slot lease,
+    the lease reaper, and the ``claim_token``-gated CAS terminal write — so the
+    recovery story is single, not layered.
+
+    Two hard preconditions, both about not corrupting state we do not own:
+
+      * ``execution_id`` must exist — ``BacklogService.enqueue`` transitions an
+        EXISTING row RUNNING→QUEUED under a CAS; with no row there is nothing to
+        transition.
+      * ``slot_already_held`` must be False — the caller (a drain, or the /task
+        router's pre-flight) owns a real slot and releases it in our ``finally``.
+        Queueing under a held slot would leak it for the lease TTL.
+
+    Never raises: ``pull_owns_dispatch`` already fails safe to push, and the
+    request build is pure construction. The dangerous direction is queueing work
+    that should have been pushed.
+    """
+    if slot_already_held or not execution_id:
+        return None
+    if not pull_owns_dispatch(agent_name, triggered_by):
+        return None
+
+    # Lazy: several unit suites stub `models` with a partial module, and a
+    # top-level import of a name they omit would break importing this service
+    # entirely (the `_resolve_agent_runtime` precedent above).
+    from models import ParallelTaskRequest
+
+    # `system_prompt` is deliberately the CALLER's raw override, NOT the
+    # composed prompt: `pull_coordination_service._compose_pull_system_prompt`
+    # rebuilds platform prompt + execution context around it at claim time
+    # (#1629), so composing here would double the platform preamble.
+    request = ParallelTaskRequest(
+        message=message,
+        model=model,
+        allowed_tools=allowed_tools,
+        system_prompt=system_prompt,
+        timeout_seconds=timeout_seconds,
+        async_mode=True,
+        resume_session_id=resume_session_id,
+    )
+    return PersistentTaskPayload(
+        request=request,
+        effective_timeout=int(timeout_seconds or 900),
+        user_id=source_user_id,
+        user_email=source_user_email,
+        subscription_id=subscription_id,
+        x_source_agent=source_agent_name,
+        triggered_by=triggered_by,
+        collaboration_activity_id=None,
+    )
+
+
 # Strong references to fire-and-forget breaker tasks. asyncio's event loop holds
 # only a WEAK reference to a bare ``create_task`` result, so an un-referenced task
 # can be garbage-collected mid-flight (the backlog drain would silently vanish).
@@ -941,6 +1048,11 @@ class TaskExecutionService:
         # returns 200, which falls through to the synchronous handling below. When
         # the agent ACKs 202 we hand the slot lease to the callback and skip the
         # `finally` release. Best-effort read; defaults off.
+        # #2391: pull and fire-and-forget do NOT stack. When the pilot flag
+        # owns this trigger the row is queued below and `execute_task` returns
+        # before any agent call, so this value is computed and never used —
+        # `async_result` is never sent and no 202 can arrive. Push dispatch is
+        # the only path on which fire-and-forget is reachable.
         async_dispatch = dispatch_async_eligible(triggered_by)
         # Set True once a 202 ACK hands the slot lease to the result callback, so
         # the `finally` does NOT release it (the callback/reaper owns it now).
@@ -983,6 +1095,30 @@ class TaskExecutionService:
         # try so no handler can NameError on a pre-dispatch exception.
         state = _AttemptState(start_time=datetime.utcnow())
 
+        # ---- #2391: does this dispatch belong on the durable queue? --------
+        # Evaluated here, where every field the queued row needs is in scope.
+        # None (the default for every non-pilot agent) keeps overflow_policy at
+        # "reject" and this whole path byte-for-byte as it was. Non-None means a
+        # pull pilot owns this trigger: the row is queued, the agent's worker
+        # claims it, and #1083's async ACK never comes into play because no
+        # dispatch happens at all.
+        pull_overflow_payload = build_pull_queue_payload(
+            agent_name=agent_name,
+            triggered_by=triggered_by,
+            execution_id=execution_id,
+            message=message,
+            model=model,
+            allowed_tools=allowed_tools,
+            system_prompt=system_prompt,
+            timeout_seconds=timeout_seconds,
+            resume_session_id=resume_session_id,
+            subscription_id=subscription_id,
+            source_user_id=source_user_id,
+            source_user_email=source_user_email,
+            source_agent_name=source_agent_name,
+            slot_already_held=slot_already_held,
+        )
+
         # Wrap entire execution flow to ensure execution status is updated on any failure.
         # This fixes issue #90 where exceptions during slot acquisition left executions
         # stuck in 'running' status with NULL session_id and duration_ms.
@@ -997,6 +1133,7 @@ class TaskExecutionService:
                 breaker_enabled=breaker_enabled,
                 slot_already_held=slot_already_held,
                 capacity=capacity,
+                pull_overflow_payload=pull_overflow_payload,
             )
             if admission_denied is not None:
                 return admission_denied
@@ -1224,14 +1361,24 @@ class TaskExecutionService:
         breaker_enabled: bool,
         slot_already_held: bool,
         capacity,
+        pull_overflow_payload: Optional[PersistentTaskPayload] = None,
     ) -> tuple[bool, Optional[TaskExecutionResult]]:
         """Step 2 of execute_task: acquire the capacity slot (or refuse).
 
-        Returns ``(slot_acquired, denial)``. A non-None *denial* is the
-        terminal ``TaskExecutionResult`` for a CapacityFull / CircuitOpen /
-        EphemeralBudgetExhausted fast-fail (the FAILED row is already
-        written); the caller returns it verbatim. Any *other* exception
-        from ``capacity.acquire`` propagates, exactly as it did inline.
+        Returns ``(slot_acquired, denial)``. A non-None *denial* is a terminal
+        ``TaskExecutionResult`` the caller returns verbatim — a CapacityFull /
+        CircuitOpen / EphemeralBudgetExhausted fast-fail (the FAILED row is
+        already written), or, since #2391, a QUEUED handoff (see below). Any
+        *other* exception from ``capacity.acquire`` propagates, exactly as it
+        did inline.
+
+        *pull_overflow_payload* (#2391) is non-None only when
+        ``build_pull_queue_payload`` decided this dispatch belongs to a pull
+        pilot's durable queue. It selects ``overflow_policy="queue_persistent"``
+        instead of ``"reject"`` and is the payload ``BacklogService`` persists.
+        Not a "denial" in any failure sense: the row is QUEUED and a worker will
+        claim it, so the caller must stop — no activity, no agent call, no slot
+        to release.
         """
         slot_acquired = slot_already_held
         # ---- 2. Acquire capacity slot ------------------------------------
@@ -1251,6 +1398,14 @@ class TaskExecutionService:
             # from the flag being unset. Say so once per (agent, trigger).
             # Diagnostic only; never raises, never affects dispatch.
             note_unreachable_pull_trigger(agent_name, triggered_by)
+            # #2391: the ONLY thing that widens this producer's policy is a
+            # pilot-gated payload. Written as an if/else over two literals, not
+            # a ternary, so `test_2048_pull_pilot_reach.py`'s structural scan
+            # can still read both policies out of this module's source.
+            if pull_overflow_payload is not None:
+                overflow_policy = "queue_persistent"
+            else:
+                overflow_policy = "reject"
             try:
                 cap_result = await capacity.acquire(
                     agent_name=agent_name,
@@ -1258,15 +1413,42 @@ class TaskExecutionService:
                     max_concurrent=max_parallel_tasks,
                     message_preview=message[:100] if message else "",
                     timeout_seconds=timeout_seconds,
-                    overflow_policy="reject",
+                    overflow_policy=overflow_policy,
+                    overflow_payload=pull_overflow_payload,
                     breaker_enabled=breaker_enabled,
                 )
+                if cap_result.state == "queued_persistent":
+                    # #2391: handed to the durable queue; the agent's own worker
+                    # claims it via GET /api/internal/next-task and reports the
+                    # terminal through the claim-token CAS. Nothing further to do
+                    # here — and critically no slot was ZADDed, so the `finally`
+                    # in execute_task must not release one.
+                    logger.info(
+                        f"[TaskExecService] Pull pilot {agent_name}: queued "
+                        f"execution {execution_id} (trigger={triggered_by}) for "
+                        f"worker claim instead of pushing (#2391)"
+                    )
+                    return False, TaskExecutionResult(
+                        execution_id=execution_id or "",
+                        status=TaskExecutionStatus.QUEUED,
+                        response="",
+                    )
                 slot_acquired = cap_result.state == "admitted"
-            except CapacityFull:
-                error_msg = (
-                    f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} "
-                    f"parallel tasks running)"
-                )
+            except CapacityFull as e:
+                # #2391: on the pull path "at capacity" means the DURABLE BACKLOG
+                # is full (max_backlog_depth), not that parallel slots are busy —
+                # the pull branch never asks for a slot. Name the real limit or
+                # the operator debugs the wrong number.
+                if getattr(e, "reason", None) == "persistent_full":
+                    error_msg = (
+                        "Agent backlog full (max_backlog_depth reached); "
+                        "queued task rejected"
+                    )
+                else:
+                    error_msg = (
+                        f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} "
+                        f"parallel tasks running)"
+                    )
                 if execution_id:
                     db.update_execution_status(
                         execution_id=execution_id,

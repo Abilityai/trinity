@@ -13,6 +13,11 @@ from enum import Enum
 
 class ExecutionStatus(str, Enum):
     """Status of a schedule execution."""
+    # #2391: a dispatch the backend handed to the durable pull queue instead of
+    # pushing (pull-pilot agents only). NON-terminal — the agent's worker claims
+    # the row back to `running` — so `_poll_execution_completion` must keep
+    # polling through it, exactly as it does through `running`.
+    QUEUED = "queued"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
