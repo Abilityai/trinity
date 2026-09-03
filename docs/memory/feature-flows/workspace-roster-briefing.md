@@ -255,24 +255,145 @@ up a level to the stage zone.
 
 ## Measurement (AC3)
 
-The wedged case is *container running, server not answering*:
-`docker exec agent-X sh -c 'kill -STOP $(pgrep -f agent-server.py)'`, restored
-with `kill -CONT`. **Not `docker pause`** — a non-`running` container reads
-`availability="stopped"`, which `_agent_briefing` skips before any HTTP, so the
-"before" measurement would be fast and prove nothing. Expect X's heartbeat to
-stop and a stale-heartbeat alert after ~15 s; restore promptly.
+**Method: an offline service-level timing harness, not a live fleet.** The live
+dev stack carries exactly one agent container — `agent-trinity-system` — so the
+plan's step-3 recipe (`kill -STOP` on a throwaway agent's `agent-server.py`) had
+no eligible subject: the only candidate is the orchestrator, which is off limits.
+The harness therefore drives the real `get_roster` / `get_agent_card` /
+`get_briefings` in both trees (`origin/dev` @ `a4eebdbe` vs this branch) over a
+12-agent roster, stubbing only the two edges the measurement is not about — the
+SQL roster read and the Docker availability read, a constant addend on *both*
+sides. The agent HTTP edge is stubbed at `agent_httpx_client`, so the real
+`timeout=` plumbing and the real sequential-vs-concurrent GET structure run.
 
-| Endpoint | Before (origin/dev) | After |
+`docker pause` stays wrong for the same reason the plan gives: a non-`running`
+container reads `availability="stopped"`, which the briefing skips before any
+HTTP, so the "before" would be fast and prove nothing.
+
+Three unreachable shapes are distinguished, because they exit the briefing by
+three different doors and only one of them trips the wall clock:
+
+| Shape | What the agent does | Which bound catches it |
 |---|---|---|
-| `GET /my-agents` (12 agents, 1 wedged) | _to be filled at verification_ | _to be filled_ |
-| `GET /briefings?agents=<healthy>` | n/a | _to be filled_ |
-| `GET /briefings` (whole roster, 1 wedged) | n/a | _to be filled_ |
-| `GET /agents/X/page` (X wedged) | _to be filled_ | _to be filled_ |
+| **wedged** (`kill -STOP`) | connect accepted, read never answered | httpx per-phase `ReadTimeout` at 2.0 s |
+| **tarpit** | bytes trickle, no per-phase timer ever fires | the 3.0 s wall clock |
+| **refused** | container gone, connect refused | neither — fails immediately |
 
-Also measured at verification: the **healthy-busy tail** — `/briefings?agents=Y`
-×10 while Y runs a turn with tool calls. If p95 exceeds
-`_BRIEFING_HTTP_TIMEOUT_SECONDS`, the constants are raised (still well under 5 s)
-before the PR leaves draft.
+Roster of 12, one agent unreachable, healthy agents answering each GET in 50 ms.
+Five runs per cell; `min / median / max` seconds.
+
+| Endpoint | Before (`origin/dev` @ `a4eebdbe`) | After (this branch) |
+|---|---|---|
+| `GET /my-agents` (12 agents, 1 **wedged**) | 10.003 / 10.004 / 10.086 | **0.000 / 0.000 / 0.000** |
+| `GET /my-agents` (12 agents, all healthy) | 0.103 / 0.105 / 0.167 | **0.000 / 0.000 / 0.000** |
+| `GET /briefings?agents=<healthy>` | n/a | 0.051 / 0.053 / 0.054 |
+| `GET /briefings` (whole roster, 1 **wedged**) | n/a | 2.002 / 2.002 / 2.003 |
+| `GET /briefings` (whole roster, 1 **tarpit**) | n/a | 3.001 / 3.003 / 3.003 |
+| `GET /agents/X/page` (X **wedged**) | 10.002 / 10.003 / 10.005 | 2.002 / 2.002 / 2.085 |
+| `GET /agents/X/page` (X **tarpit**) | (never returns under the old code) | 3.002 / 3.002 / 3.002 |
+| `GET /agents/Y/page` (Y healthy) | 0.101 / 0.103 / 0.106 | 0.051 / 0.051 / 0.053 |
+
+**AC3 is met.** The roster's floor is no longer its slowest agent: with one
+wedged agent `/my-agents` goes from 10.0 s to 0.000 s, and the active agent's own
+hints (`/briefings?agents=<healthy>`) arrive in 0.053 s regardless of what the
+rest of the fleet is doing — which is what the `?agents=` filter exists for.
+
+Three things the numbers say that the plan predicted but had not yet shown:
+
+- **"5 s was a floor, not a ceiling."** The old literal is httpx's *per-phase*
+  timeout and the two GETs ran sequentially, so one wedged agent cost **10 s**,
+  not 5. The `gather` then made that the whole roster's cost.
+- **The wall clock is not redundant with the httpx value.** It never fires in the
+  wedged shape (2.0 s catches it first) and is the *only* thing that returns at
+  all in the tarpit shape.
+- **The concurrent-GET change halves the healthy agent page**, 0.103 s → 0.051 s
+  — a second, unadvertised win from the same edit.
+
+Re-run at 250 ms per healthy GET to confirm nothing above is an artifact of the
+50 ms figure: before `/my-agents` 10.005 s (wedged) / 0.506 s (healthy), after
+0.000 s in both; healthy agent page 0.503 s → 0.252 s. The shape holds.
+
+**What this method does NOT prove.** It does not exercise the real network, the
+real agent-server, TLS/DNS, or the backend's own request path — it times the
+service functions. It models the two GETs as fully concurrent, whereas a real
+agent server is one uvicorn worker whose event loop serialises them, so the
+measured "after" healthy figure is the optimistic end. And the Docker read is
+stubbed to zero on both sides, so every number above excludes it (it is a shared
+addend, and a named residual below).
+
+### Healthy-busy tail (step 5b) — component measured, tail NOT measured
+
+The question the constants turn on is whether a *healthy but busy* agent can
+exceed 2.0 s on a briefing GET. It has two parts and only one was reachable here.
+
+**Measured — the scan's own cost.** `GET /api/skills` is served by an `async def`
+that calls the synchronous `scan_skills_directory` inline, with no `to_thread` /
+`run_in_executor`, so it occupies the agent server's event loop for its whole
+duration (verified in `docker/base-image/agent_server/routers/skills.py`). Timed
+directly against synthesised skill trees, 20 runs each:
+
+| Skills | p50 | p95 | max |
+|---|---|---|---|
+| 10 | 1.9 ms | 2.5 ms | 2.6 ms |
+| 50 | 9.5 ms | 11.7 ms | 12.0 ms |
+| 200 | 37.2 ms | 38.2 ms | 44.4 ms |
+
+≈0.19 ms per skill — **three orders of magnitude under the 2.0 s bound**. The
+scan itself cannot plausibly trip it.
+
+**Not measured — event-loop contention.** That leaves exactly one path to a
+false trip: the agent server's single event loop being occupied for >2.0 s while
+a turn runs. Reproducing it needs a real agent mid-turn, and no eligible agent
+exists on this host (see the method note above); starting a turn would also mean
+spending on the live fleet. **Named human step before the PR leaves draft:** on an
+instance with a real non-system agent Y, start a turn that runs several tool
+calls and time `GET /briefings?agents=Y` ×10 during it; if p95 exceeds
+`_BRIEFING_HTTP_TIMEOUT_SECONDS`, raise the constants (still well under 5 s).
+
+**The constants are UNCHANGED at 2.0 s / 3.0 s** — nothing measured contradicts
+them, and they are not moved on a guess. But note what the tightening from 5.0 s
+costs if the tail does turn out to be long: per the finding below, a healthy-but-
+slow agent does not render as `unavailable`, it renders as an agent with **no
+hints**, and the client never retries it.
+
+### Finding at verification — an unreachable agent does not always read `unavailable`
+
+Measured, not inferred. `briefing_state` for the SAME unreachable agent depends
+on which door the failure exits by:
+
+| Shape | `/briefings` entry | `get_agent_card` | Latency |
+|---|---|---|---|
+| **tarpit** | `unavailable` ✅ | `unavailable` ✅ | 3.0 s (wall clock) |
+| **wedged** (`kill -STOP`) | `ready` ⚠️ | `ready` ⚠️ | 2.0 s (httpx) |
+| **refused** (container gone) | `ready` ⚠️ | `ready` ⚠️ | ~0 s |
+
+The cause is structural, not a slip: `ok=False` is reachable only from the
+`availability` early return, a non-tuple return, or the wall clock tripping.
+Every HTTP failure is swallowed one level down — `_agent_briefing` has a
+`try/except` per GET leg *and* an outer `except Exception` — so an httpx
+`ReadTimeout` or `ConnectError` returns a normal, empty `AgentBriefing()` well
+inside the budget, and `_bounded_briefing` correctly reports that it "reached a
+verdict", which is what its docstring defines `ok` to mean.
+
+The consequence is the one D4 was written to prevent: the two commonest
+unreachable shapes render as a genuinely hint-less agent ("Start a conversation
+below."), and because `shouldRequestBriefing` retries only `unavailable`, the
+client never tries again for the rest of the session. It also makes
+`get_briefings`' own docstring wrong where it says a stopped or absent container
+"lands as `unavailable`" — measured, it lands as `ready`. Note `/briefings`
+passes `availability="unknown"` for every name by design (no Docker read), so
+the `availability` door — the one that *does* yield `unavailable` — is never
+taken on that route at all.
+
+**Not changed here** (a verification stage measures; it does not redesign). The
+honest fix is for `_agent_briefing` to report *reachability* separately from
+*content* — one flag, set where the excepts already are — so `ok` can mean "the
+agent answered". Recorded for the lane owner's decision before the PR leaves
+draft: either the behaviour changes, or the two docstrings and D4's rationale
+are corrected to say that only the wall-clock shape is distinguishable.
+
+**AC3 is unaffected** — it is a latency criterion, and the latency numbers above
+meet it in every shape.
 
 ## Residuals
 
