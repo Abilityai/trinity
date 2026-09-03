@@ -4,6 +4,19 @@
 # from it — so nothing droplet-specific and nothing secret may be produced here.
 set -euo pipefail
 
+# Packer's shell provisioner runs a non-login, non-interactive SSH shell, whose
+# PATH does not reliably carry the sbin directories. Every tool used up to the
+# firewall block lives in /usr/bin (apt-get, gpg, systemctl, git, docker), so the
+# first /usr/sbin binary reached is `ufw` — and the build died there with
+# "ufw: command not found" (exit 127) AFTER pulling all five images, five and a
+# half minutes in. Ubuntu 24.04 also merged /sbin into /usr/sbin, so both names
+# are listed for older bases.
+#
+# Set once at the top rather than absolute-pathing each call: the next sbin tool
+# added below would otherwise reintroduce the same failure, at the same late
+# point in the build.
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
+
 : "${TRINITY_IMAGE_TAG:?TRINITY_IMAGE_TAG must be passed by the Packer build}"
 
 echo "=== Trinity 1-Click build: baking ${TRINITY_IMAGE_TAG} ==="

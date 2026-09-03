@@ -6,6 +6,13 @@
 # snapshot: the admin password, the droplet's own IP, the certificate.
 set -euo pipefail
 
+# Same exposure as 01-provision.sh: this script's load-bearing tools — iptables
+# and netfilter-persistent, which close the Docker-past-ufw gap — live in
+# /usr/sbin. cloud-init normally supplies a root PATH that covers them, but the
+# cost of not depending on that is one line, and the failure it prevents is the
+# container ports staying open to the internet.
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
+
 STATE_DIR=/etc/trinity
 CRED_FILE="${STATE_DIR}/admin-credentials"
 USER_SUPPLIED_PW="${STATE_DIR}/admin-password"
