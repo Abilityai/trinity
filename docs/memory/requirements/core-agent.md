@@ -939,6 +939,11 @@ already holds.
   `data-code-block` / `data-copy-code` markers are therefore removed from the
   input before decoration, so only decorator-built wrappers ever carry them, and
   the handler reads `:scope > pre` (the wrapper's own child) and nothing else.
+  The decorator additionally refuses any opener marked would not have written —
+  the `<code>` tag must carry nothing but an optional `class` — because DOMPurify
+  keeps `hidden` and `style`, so a raw `<pre><code hidden>` would otherwise be
+  handed a real Copy button over a block that renders empty: the same pastejack
+  through the opener rather than through a forged wrapper.
   The only non-constant byte the decorator injects is the language label, which
   is charset-validated (`^[a-z0-9][a-z0-9_+#.-]{0,23}$`, so it cannot contain
   `<>&"'`) and falls back to a neutral "code".

