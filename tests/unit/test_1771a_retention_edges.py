@@ -1150,7 +1150,7 @@ class TestStructuralInvariants:
         # pinned by tests/unit/test_2216_backup_primitives.py. The carve-out
         # set lives in CODE beside RETENTION_OPS_KEYS (not test-locally), so
         # the next file-artifact window is declared where the key is added.
-        from services.settings_service import NON_ROW_RETENTION_OPS_KEYS
+        from config import NON_ROW_RETENTION_OPS_KEYS
         assert NON_ROW_RETENTION_OPS_KEYS <= set(RETENTION_OPS_KEYS), (
             "a non-row carve-out must itself be a registered retention window"
         )

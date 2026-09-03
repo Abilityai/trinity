@@ -99,11 +99,24 @@ _ALLOWLIST = {
         "services/task_execution_service.py",
         "execute_task",
     ): (
-        "The four direct update_execution_status(error=...) writes here are STATIC "
-        "admission/shutdown strings (capacity-full, dispatch-breaker fast-fail, "
-        "ephemeral-exhausted, backend-shutdown). The agent-authored SUCCESS/FAILURE "
-        "terminals are delegated to apply_result / _write_terminal_and_gate, which "
-        "both scrub."
+        "The single remaining direct update_execution_status(error=...) write here "
+        "is the STATIC backend-shutdown string. #2314 moved the three admission "
+        "fast-fail writes (capacity-full, dispatch-breaker, ephemeral-exhausted) "
+        "into _admission_gate, allowlisted directly below on the same grounds. The "
+        "agent-authored SUCCESS/FAILURE terminals are delegated to apply_result / "
+        "_write_terminal_and_gate, which both scrub."
+    ),
+    (
+        "services/task_execution_service.py",
+        "_admission_gate",
+    ): (
+        "#2314 extracted this helper out of execute_task. Its three "
+        "update_execution_status(error=...) writes are the SAME static "
+        "admission-refusal strings that entry covered before the decomposition: "
+        "capacity-full (an int from agent config), the dispatch-breaker literal, "
+        "and ephemeral-exhausted (a platform-enumerated e.reason). The gate runs "
+        "BEFORE any agent call, so no agent-authored text and no staged secret can "
+        "exist on this path yet."
     ),
     (
         "services/chat_execution_service.py",

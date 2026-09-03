@@ -140,7 +140,6 @@ def build_pdf(payload: Any, display_hint: Optional[str], title: str) -> bytes:
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib.units import mm
         from reportlab.platypus import (
-            PageBreak,
             Paragraph,
             Preformatted,
             SimpleDocTemplate,
