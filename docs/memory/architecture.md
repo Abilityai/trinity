@@ -1596,7 +1596,7 @@ collapses *no container* and *Docker could not be asked* into one falsy value
 card carries `availability` (`ready`/`stopped`/`unavailable`/`unknown`), resolved once
 per roster load in `get_roster` — **not** in `_roster_rows`, which stays pure SQL so
 #2198's batch-sessions gate does not inherit a Docker read, and **not** inside
-`_agent_briefing`, so #2163 stays free to defer/bound/cache the briefing. Invariant #11
+`_agent_briefing` (which #2163 did: defer + bound; cache deferred). Invariant #11
 is untouched: every Docker read still happens inside `docker_service.py`.
 
 **The sidebar's thread list is one viewer-scoped call (#2198).**
@@ -1655,11 +1655,13 @@ enterprise-tracker feature is *gated unless ruled otherwise*, so the ruling must
 be inferred later from the mere fact that it merged; it inherits ent#356's move of the
 whole client-portal surface into OSS core.
 
-**New-chat briefing hints (ent#138 / ent#380):** each roster card ships a briefing —
+**New-chat briefing hints (ent#138 / ent#380):** each agent has a briefing —
 description + capability hint cards `playbooks[]{title,description,starter_prompt}` —
-resolved best-effort at sign-in (`service.py::_agent_briefing`, from the agent's
-`/api/template/info` + `/api/skills`), so the empty-chat screen renders with zero extra
-fetches. The hint set is a **ladder**: the operator's exposed playbooks (connector
+resolved best-effort by `service.py::_agent_briefing` from the agent's
+`/api/template/info` + `/api/skills`. ent#138 shipped it ON the roster payload so the
+empty-chat screen rendered with zero extra fetches; since #2163 it is **hydrated by
+`GET /briefings` after the roster lands** (below), because that fan-out was the
+Workspace's latency floor. The hint set is a **ladder**: the operator's exposed playbooks (connector
 allow-list ∩ `user_invocable` — the same policy the MCP connector advertises) win
 outright; an agent exposing none falls back to its template-declared `use_cases`
 ("What You Can Ask"), sanitized and capped (6 × 200 chars). Clicking a hint **pre-fills
@@ -1742,6 +1744,37 @@ decision (ent#440): deliberately ungated** — recorded explicitly because the
 default for an enterprise-tracker feature is gated-unless-ruled-otherwise (the
 ent#326/ent#384/ent#392 discipline). **No backend change, no new endpoint, no
 migration.** See [workspace-voice-conversation.md](feature-flows/workspace-voice-conversation.md).
+
+**The briefing is off the roster's critical path (#2163).** `get_roster` used to fan
+`_agent_briefing` across every card and `await asyncio.gather(...)`, which waits for
+ALL — so the Workspace's first paint was bounded by the SLOWEST agent in the fleet, for
+every user, on every sign-in, regardless of fleet size. "Best-effort and parallel"
+bounded the blast radius (a failing agent left defaults) but never the LATENCY. The
+roster now awaits no agent HTTP at all, and `GET /api/enterprise/client-portal/briefings`
+hydrates the briefings after it — viewer-scoped like `/sessions`, with an optional
+`?agents=` filter whose names are only ever tested for SET MEMBERSHIP against the roster
+(the string that reaches `agent-{name}:8000` is always a DB row value, so a crafted name
+cannot steer the target, and an unknown one is dropped rather than answered). Two forms,
+two per-viewer limiter keys: the unfiltered batch is far tighter, because one call to it
+costs one bounded agent request per rostered agent. It makes **no Docker read** —
+`_agent_briefing` attempts `unknown` by design (it reaches the agent by DNS, so
+container state says nothing about whether it answers HTTP), so a stopped container
+fails its connect under the bound and lands `unavailable`, the same verdict a skip would
+give, one fleet Docker call cheaper. Every remaining briefing — the batch and the agent
+page's single one — runs under ONE bound: `_BRIEFING_HTTP_TIMEOUT_SECONDS` (2.0, httpx,
+PER PHASE) inside `_BRIEFING_BUDGET_SECONDS` (3.0, wall clock, `_bounded_briefing`); the
+literal `5.0` it replaces was never a ceiling, because the function makes two sequential
+GETs. The result rides the card as **`briefing_state`** — `pending | ready |
+unavailable`, all three SERVER-owned, defaulting to `"ready"` so an older payload reads
+as resolved-inline. A bound trip must never pass for an agent that genuinely has no
+hints, and a headless ent#83 client must not have to reinvent the third value from empty
+fields; `ready` means "reached a verdict inside its budget", not "returned data". It is
+a **data-state marker, not a capability** — the #2128 rule below is untouched. API
+consumers that want the briefing make the second call. On the client, three
+`ScanlineReveal` zones (stage, conversation body, briefing) each key on their own "no
+data yet", and `ScanlineReveal` gained an additive `content-class` prop because
+`.scan-content` is the primitive's own element and a full-height flex stage had no hook.
+See [workspace-roster-briefing.md](feature-flows/workspace-roster-briefing.md).
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
 cannot read `GET /api/settings/feature-flags` — that endpoint is `get_current_user`-gated

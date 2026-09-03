@@ -693,9 +693,11 @@
 - **Honest empty state.** A source with nothing in it shows one line; a query
   that matches nothing **closes** the popup. The copy never claims what the
   client cannot observe: `_agent_briefing` returns `[]` for a stopped or slow
-  agent exactly as it does for one with no playbooks, and the roster is fetched
-  once at mount — so "no playbooks exposed" would be a false claim about
-  operator configuration for the ordinary state of an idle fleet. "No peers" and
+  agent exactly as it does for one with no playbooks, and the briefing arrives
+  AFTER the roster (§5.16, #2163) — so "no playbooks exposed" would be a false
+  claim about operator configuration for the ordinary state of an idle fleet.
+  The typeahead self-heals when playbooks arrive late (its source is a computed
+  over the card), which is what makes the deferred hydration invisible to it. "No peers" and
   "peers exist but none is mentionable" are separate statements.
 - **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
   scoped to the room's **agent participants**. That scope was established by
@@ -891,6 +893,71 @@ box; the words are recorded either way and handed to the agent's
   `0047_workspace_ratings`; four nullable columns (`target_kind`, `target_id`,
   `comment`, `updated_at`) and the partial UNIQUE above.
 - **Flow**: `docs/memory/feature-flows/workspace-ratings.md`
+
+### 5.16 Workspace roster latency floor — briefing hydration off the critical path (#2163)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_ROSTER_BRIEFING_DEFERRED`
+- **Description**: `GET /my-agents` fanned `_agent_briefing` across every card
+  and awaited `asyncio.gather`, which waits for ALL — so the Workspace's first
+  paint was bounded by the SLOWEST agent in the fleet, for every user, on every
+  sign-in, regardless of fleet size. The briefing is now hydrated after the
+  roster, and every briefing that still runs is bounded.
+
+- **AC-1 — one unresponsive agent does not delay the roster**: `get_roster`
+  awaits no agent HTTP at all (two SQL reads and one Docker list). Pinned by a
+  stub that never resolves: under the old code the call could not return.
+- **AC-2 — the briefing still renders hints, never silently empty**: an explicit
+  loading treatment, then a terminal that is hints, an honest "no hints" line,
+  or an honest "couldn't load" line (ent#380's "no dead chrome").
+- **AC-3 — measured before/after with a deliberately unresponsive agent**: the
+  wedged case is *container running, server not answering* (`kill -STOP` on
+  `agent-server.py` inside the container). `docker pause` measures nothing —
+  a non-`running` container reads `availability="stopped"`, which the briefing
+  skips before any HTTP.
+- **AC-4 — the standard first-load motion**: three `ScanlineReveal` zones, each
+  keyed on its own "no data yet" — the stage, the conversation body, and the
+  briefing hint zone. The static "Opening this conversation…" / "Loading…" lines
+  are gone. A background refetch never re-enters loading.
+
+- **The bound (option 2, the belt)**: `_BRIEFING_HTTP_TIMEOUT_SECONDS = 2.0`
+  (httpx, PER PHASE) and `_BRIEFING_BUDGET_SECONDS = 3.0` (wall clock, via
+  `_bounded_briefing`). The literal `5.0` it replaces was never a ceiling — two
+  sequential GETs, each with a per-phase timeout. Constants, not settings and
+  not env vars (`SAMPLE_INTERVAL_SECONDS` precedent #1644; an unforwarded env
+  read is inert while reading as configurable, #1039). Both values confirmed
+  against the healthy-busy tail at verification: `GET /api/skills` is a
+  synchronous directory scan on the agent-server's own event loop, so a healthy
+  agent mid-turn can legitimately exceed a second.
+- **`briefing_state` is a SERVER-owned tri-state** on the card —
+  `pending | ready | unavailable`, default `"ready"` so an older payload reads
+  as resolved-inline. A bound trip reports `unavailable`; it must never pass for
+  an agent that genuinely has no hints, and a headless ent#83 client must not
+  have to reinvent the third value from empty fields. `ready` means "reached a
+  verdict inside its budget", NOT "returned data". A data-state marker, never a
+  capability — #2128's rule (the roster payload is the portal capability
+  channel) is untouched.
+- **Route**: `GET /api/enterprise/client-portal/briefings[?agents=a,b]`,
+  viewer-scoped like `/sessions`. Scope is the roster and the ROSTER's strings
+  are what is iterated, so a crafted name cannot steer the agent HTTP target;
+  unknown names are dropped (no existence oracle, Invariant #8). No `?agents=`
+  briefs the whole roster; a filter briefs the active agent so its hints arrive
+  at its own speed. Per-viewer rate limits, the unfiltered form far tighter
+  (10/min vs 60/min) because one call costs one bounded agent request per
+  rostered agent. No Docker read. No MCP tool (read-only, portal-principal-only,
+  no operator consumer — Invariant #13); no `Idempotency-Key` (a read, not a
+  trigger boundary); no DB change, no migration.
+- **Client**: the background batch fires from the store's roster-SUCCESS branch
+  (both "Try again" buttons bypass `bootstrap()`) at >= 1 pending card; the
+  active agent's single is driven by `Portal.vue`'s `activeAgent` watcher and is
+  never coalesced into the batch. A hydrated card survives a roster refetch;
+  `unavailable` is re-armed as `pending` by an explicit refetch and retried at
+  most once per session otherwise.
+- **Out of scope, deliberately**: a server-side briefing cache (needs Redis +
+  invalidation under `--workers 2`; off the critical path the per-agent cost is
+  no longer user-visible), bounding the roster's Docker read, and the sweep of
+  the remaining bespoke Workspace indicators (`PortalFilesPanel`'s spinner,
+  `PortalSidebar`'s skeleton) — those stay on #1921.
+- **Flow**: `docs/memory/feature-flows/workspace-roster-briefing.md`
 
 ## 6. Activity Monitoring
 

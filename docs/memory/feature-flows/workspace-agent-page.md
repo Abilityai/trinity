@@ -84,7 +84,11 @@ would silently vanish — an unclassified row is not a hidden one.
 ```
 GET /api/enterprise/client-portal/agents/{name}/page?window=7d
   ├─ _require_roster ............ uniform 404 for an agent off the roster
-  ├─ get_roster ................. identity + "what it can do" (briefing, #138/ent#380)
+  ├─ get_agent_card ............. identity + "what it can do" (ONE briefing, #2160;
+  │                                bounded since #2163 — the page's own floor was the
+  │                                agent's 5s-per-phase HTTP, so a wedged agent hung
+  │                                its OWN page; a trip reports briefing_state
+  │                                "unavailable" rather than an empty briefing)
   └─ agent_page.build_page
        ├─ _health ............... last persisted health check
        ├─ _stats ................ db.get_agent_analytics (#1107) + first_try_stats
