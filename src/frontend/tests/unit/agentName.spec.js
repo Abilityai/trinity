@@ -294,3 +294,46 @@ describe('structural: the lg list is ONE column sizing context (#2358)', () => {
     expect(PANEL).toContain('lg:mr-4')
   })
 })
+
+/** The SFC's `<template>` region — everything before `<script setup>`. */
+function templateOf(source) {
+  const i = source.indexOf('<script setup>')
+  expect(i, 'SFC has a <script setup> block').toBeGreaterThan(0)
+  return source.slice(0, i)
+}
+
+describe('structural: all three List breakpoints render the same names (#2358 AC #7)', () => {
+  it('renders the primary name via agentNameParts at every name site', () => {
+    const tpl = templateOf(PANEL)
+    // lg, md and base each have their own name-rendering site; the bug was
+    // fixed at one of them and left at the other two more than once in this
+    // component's history.
+    expect((tpl.match(/agentNameParts\(agent\)\.primary/g) || [])).toHaveLength(3)
+    // `agentDisplayName` is still imported — the name filter and the toasts use
+    // it — but nothing in the markup may resolve a name a second way.
+    expect(tpl).not.toContain('agentDisplayName(')
+  })
+
+  it('renders the slug as real text at every breakpoint, selectable, outside the link', () => {
+    const tpl = templateOf(PANEL)
+    for (const id of ['agent-slug-lg', 'agent-slug-md', 'agent-slug-base']) {
+      const el = tpl.match(new RegExp(`<code[\\s\\S]{0,400}?${id}[\\s\\S]{0,400}?</code>`))
+      expect(el, `${id} renders`).toBeTruthy()
+      // FR-4 says visible AND copyable: a `title` is invisible on touch,
+      // unreachable by keyboard and impossible to copy from, and `select-all`
+      // is what makes ONE click take the whole hyphenated slug (plain text
+      // selection takes a single segment on double-click).
+      expect(el[0], `${id} is selectable`).toContain('select-all')
+      expect(el[0], `${id} shows the slug`).toContain('agentNameParts(agent).secondary')
+    }
+    // Never inside the router-link: the slug is a copy target, not a nav target.
+    expect(tpl).not.toMatch(/<router-link[\s\S]{0,600}?agent-slug-/)
+  })
+
+  it('gates every List runtime badge on the non-default rule, and none at base', () => {
+    const tpl = templateOf(PANEL)
+    const badges = tpl.match(/<RuntimeBadge[\s\S]*?\/>/g) || []
+    expect(badges.length, 'lg + md secondary lines only').toBe(2)
+    for (const b of badges) expect(b).toContain('showsRuntimeBadgeInList(agent)')
+  })
+})

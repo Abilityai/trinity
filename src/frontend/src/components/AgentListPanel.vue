@@ -316,14 +316,19 @@
               :title="syncHealthEntry(agent.name) ? syncHealthLabel(agent.name) : ''"
             ></div>
 
-            <!-- Name + badges -->
+            <!-- Name + EXCEPTION markers only (#2358). What a row shows here
+                 is the label when there is one; the slug follows on the
+                 secondary line below, as real text. Badges that appear on
+                 nearly every row (the runtime pill, the #471 pressure badge)
+                 have left this cell — a marker that never varies is texture,
+                 and it was pushing the name into truncation. -->
             <div data-col="name" class="flex items-center min-w-0 gap-2">
               <router-link
                 :to="`/agents/${agent.name}`"
                 class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 :title="agentNameTooltip(agent)"
               >
-                {{ agentDisplayName(agent) }}
+                {{ agentNameParts(agent).primary }}
               </router-link>
               <span
                 v-if="agent.is_system"
@@ -338,24 +343,12 @@
               >
                 GHOST
               </span>
-              <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
               <span
                 v-if="agent.is_shared"
                 class="px-1.5 py-0.5 text-[10px] font-medium bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 rounded flex-shrink-0"
                 :title="'Shared by ' + agent.owner"
               >
                 Shared
-              </span>
-              <!-- #471: subscription-pressure badge (shared predicate) -->
-              <span
-                v-if="pressureBadgeFor(agent.name)"
-                class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
-                :class="pressureBadgeFor(agent.name).level === 'crit'
-                  ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
-                  : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
-                :title="pressureBadgeFor(agent.name).title"
-              >
-                {{ pressureBadgeFor(agent.name).text }}
               </span>
             </div>
 
@@ -468,19 +461,53 @@
                hanging below every line. Always rendered, so a row is the same
                height with or without content on it. `pl-[5.125rem]` is gone:
                `col-start-4` puts it under the name column by construction. -->
-          <div class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] lg:row-start-2 lg:col-start-4 lg:col-end-10">
+          <div class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10">
+            <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
+                 the row's one meta strip and it stays legible only while it has
+                 an order and a shrink policy — a future badge goes here, in
+                 this order, or it does not go in the row at all. The slug is
+                 the only shrinkable item, so the identity ellipsizes rather
+                 than the chips being crushed, and it is `select-all` because a
+                 double-click under plain text selection takes one hyphenated
+                 segment, not the slug. Meta ink sits on this container so the
+                 slug inherits it. -->
+            <code
+              v-if="agentNameParts(agent).secondary"
+              data-testid="agent-slug-lg"
+              class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
+            >{{ agentNameParts(agent).secondary }}</code>
+            <!-- #471: subscription-pressure badge (shared predicate, unchanged
+                 — only its home moved off the name cell). First in the line: a
+                 problem signal escalates to the front, as on the grid tile. -->
+            <span
+              v-if="pressureBadgeFor(agent.name)"
+              class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
+              :class="pressureBadgeFor(agent.name).level === 'crit'
+                ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
+                : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
+              :title="pressureBadgeFor(agent.name).title"
+            >
+              {{ pressureBadgeFor(agent.name).text }}
+            </span>
+            <RuntimeBadge
+              v-if="showsRuntimeBadgeInList(agent)"
+              data-testid="runtime-badge"
+              :runtime="agent.runtime"
+              :show-label="false"
+              class="flex-shrink-0"
+            />
             <template v-if="getAgentTags(agent).length > 0">
               <span
                 v-for="tag in getAgentTags(agent).slice(0, 3)"
                 :key="tag"
-                class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20"
+                class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20 flex-shrink-0"
                 :title="'#' + tag"
               >
                 #{{ tag }}
               </span>
               <span
                 v-if="getAgentTags(agent).length > 3"
-                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap"
+                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
               >
                 +{{ getAgentTags(agent).length - 3 }}
               </span>
@@ -520,7 +547,7 @@
               class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
               :title="agentNameTooltip(agent)"
             >
-              {{ agentDisplayName(agent) }}
+              {{ agentNameParts(agent).primary }}
             </router-link>
             <span
               v-if="agent.is_system"
@@ -528,7 +555,6 @@
             >
               SYSTEM
             </span>
-            <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
             <span
               v-if="agent.is_shared"
               class="px-1.5 py-0.5 text-[10px] font-medium bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 rounded flex-shrink-0"
@@ -556,28 +582,38 @@
             </div>
           </div>
           <div class="flex items-center gap-3 pl-[3.125rem]">
+            <!-- #2358: there is no header at md/base to line up against, so
+                 row-to-row parity is all a reader has. A toggle a row is not
+                 allowed to use is RESERVED rather than dropped (`invisible`
+                 keeps the box and takes no clicks) — dropping it shifted the
+                 success bar, the meter and the task counts on exactly the
+                 system and shared rows. The width comes from the toggle
+                 itself, so it cannot drift from a hand-written rem. -->
             <div class="flex items-center gap-2">
-              <RunningStateToggle
-                v-if="!agent.is_system"
-                :model-value="agent.status === 'running'"
-                :loading="networkStore.isTogglingRunning(agent.name)"
-                size="sm"
-                @toggle="handleRunningToggle(agent)"
-              />
-              <ReadOnlyToggle
-                v-if="!agent.is_system && !agent.is_shared"
-                :model-value="!!agent.read_only_enabled"
-                :loading="readOnlyLoading === agent.name"
-                size="sm"
-                @toggle="handleReadOnlyToggle(agent)"
-              />
-              <AutonomyToggle
-                v-if="!agent.is_system"
-                :model-value="agent.autonomy_enabled"
-                :loading="autonomyLoading === agent.name"
-                size="sm"
-                @toggle="handleAutonomyToggle(agent)"
-              />
+              <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system }">
+                <RunningStateToggle
+                  :model-value="agent.status === 'running'"
+                  :loading="networkStore.isTogglingRunning(agent.name)"
+                  size="sm"
+                  @toggle="handleRunningToggle(agent)"
+                />
+              </div>
+              <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system || agent.is_shared }">
+                <ReadOnlyToggle
+                  :model-value="!!agent.read_only_enabled"
+                  :loading="readOnlyLoading === agent.name"
+                  size="sm"
+                  @toggle="handleReadOnlyToggle(agent)"
+                />
+              </div>
+              <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system }">
+                <AutonomyToggle
+                  :model-value="agent.autonomy_enabled"
+                  :loading="autonomyLoading === agent.name"
+                  size="sm"
+                  @toggle="handleAutonomyToggle(agent)"
+                />
+              </div>
             </div>
             <div class="flex items-center gap-2 flex-1 min-w-0">
               <template v-if="hasSuccessData(agent.name)">
@@ -605,12 +641,15 @@
                 <span class="text-[10px] text-gray-400 dark:text-gray-500">&mdash;</span>
               </template>
             </div>
+            <!-- Always rendered (the lg contract): a `v-if` here moved the
+                 tasks/cost column by the meter's width on every row whose slot
+                 stats had not arrived yet. -->
             <CapacityMeter
-              v-if="getSlotStats(agent.name)"
-              :active="getSlotStats(agent.name).active"
-              :max="getSlotStats(agent.name).max"
+              :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
+              :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
               :height="28"
               :width="10"
+              class="flex-shrink-0"
             />
             <div class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-1.5 whitespace-nowrap">
               <template v-if="hasExecutionStats(agent.name)">
@@ -623,22 +662,41 @@
               <span v-else class="text-gray-400 dark:text-gray-500">--</span>
             </div>
           </div>
-          <!-- Tags row (tablet) -->
-          <div v-if="getAgentTags(agent).length > 0" class="flex items-center gap-1 pl-[3.125rem]">
-            <span
-              v-for="tag in getAgentTags(agent).slice(0, 3)"
-              :key="tag"
-              class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20"
-              :title="'#' + tag"
-            >
-              #{{ tag }}
-            </span>
-            <span
-              v-if="getAgentTags(agent).length > 3"
-              class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap"
-            >
-              +{{ getAgentTags(agent).length - 3 }}
-            </span>
+          <!-- Secondary line (tablet) — same contract as lg: always rendered,
+               so md rows are one height whether or not they carry tags (they
+               were not: a tagged row used to be ~30px taller). That uniformity
+               is what makes it a safe home for the slug. Tagless md rows grow
+               by this line's height — an intended density trade, release-noted
+               in the flow doc. -->
+          <div class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] pl-[3.125rem] text-gray-500 dark:text-gray-400">
+            <code
+              v-if="agentNameParts(agent).secondary"
+              data-testid="agent-slug-md"
+              class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
+            >{{ agentNameParts(agent).secondary }}</code>
+            <RuntimeBadge
+              v-if="showsRuntimeBadgeInList(agent)"
+              data-testid="runtime-badge"
+              :runtime="agent.runtime"
+              :show-label="false"
+              class="flex-shrink-0"
+            />
+            <template v-if="getAgentTags(agent).length > 0">
+              <span
+                v-for="tag in getAgentTags(agent).slice(0, 3)"
+                :key="tag"
+                class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20 flex-shrink-0"
+                :title="'#' + tag"
+              >
+                #{{ tag }}
+              </span>
+              <span
+                v-if="getAgentTags(agent).length > 3"
+                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
+              >
+                +{{ getAgentTags(agent).length - 3 }}
+              </span>
+            </template>
           </div>
         </div>
 
@@ -663,7 +721,7 @@
               class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400 flex-1 min-w-0"
               :title="agentNameTooltip(agent)"
             >
-              {{ agentDisplayName(agent) }}
+              {{ agentNameParts(agent).primary }}
             </router-link>
             <span
               v-if="agent.is_system"
@@ -671,15 +729,19 @@
             >
               SYS
             </span>
-            <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
+            <!-- No runtime badge at base: a <=767px name line has no room for
+                 a marker that is identical on every row of a single-runtime
+                 fleet. The runtime is on the grid tile and Agent Detail. -->
             <div class="flex items-center gap-2 flex-shrink-0">
-              <RunningStateToggle
-                v-if="!agent.is_system"
-                :model-value="agent.status === 'running'"
-                :loading="networkStore.isTogglingRunning(agent.name)"
-                size="sm"
-                @toggle="handleRunningToggle(agent)"
-              />
+              <!-- Reserved, not dropped — see the md note. -->
+              <div :class="{ 'invisible': agent.is_system }">
+                <RunningStateToggle
+                  :model-value="agent.status === 'running'"
+                  :loading="networkStore.isTogglingRunning(agent.name)"
+                  size="sm"
+                  @toggle="handleRunningToggle(agent)"
+                />
+              </div>
               <router-link
                 :to="`/agents/${agent.name}`"
                 class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
@@ -690,10 +752,21 @@
               </router-link>
             </div>
           </div>
-          <div class="flex items-center gap-3 pl-[3.25rem] text-[11px] text-gray-500 dark:text-gray-400">
+          <!-- Meta line — already always rendered, so the slug rides it here
+               too and a labelled row stays exactly as tall as an unlabelled
+               one. The separator carries no ink of its own: it inherits this
+               line's meta gray. -->
+          <div class="flex items-center gap-3 min-w-0 overflow-hidden pl-[3.25rem] text-[11px] text-gray-500 dark:text-gray-400">
+            <template v-if="agentNameParts(agent).secondary">
+              <code
+                data-testid="agent-slug-base"
+                class="font-mono min-w-0 truncate select-all"
+              >{{ agentNameParts(agent).secondary }}</code>
+              <span class="flex-shrink-0">·</span>
+            </template>
             <div
               :class="[
-                'font-medium capitalize',
+                'font-medium capitalize flex-shrink-0',
                 getActivityLabelClass(agent.name)
               ]"
             >
@@ -743,7 +816,8 @@ import { formatCostCompact } from '../composables/useFormatters'
 import { useNotification } from '../composables/useNotification'
 import { useAgentsStore } from '../stores/agents'
 import { useNetworkStore } from '../stores/network'
-import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import { agentDisplayName, agentNameParts, agentNameTooltip } from '../utils/agentName'
+import { showsRuntimeBadgeInList } from '../utils/agentRuntime'
 import { isOrgTag } from '../utils/gridOrg'
 import { sortAgents } from '../utils/agentSort'
 import AgentAvatar from './AgentAvatar.vue'
