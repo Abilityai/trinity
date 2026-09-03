@@ -33,7 +33,9 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE = _ROOT / "packer" / "digitalocean" / "trinity.pkr.hcl"
 
-_WAIT_RE = re.compile(r"""inline\s*=\s*\[\s*["']cloud-init status --wait["']\s*\]""")
+# Matches the command wherever it sits in an `inline` list — the list holds more
+# than one entry, so anchoring on a single-element block is too tight.
+_WAIT_RE = re.compile(r"""["']cloud-init status --wait["']""")
 _FILE_PROVISIONER_RE = re.compile(r'provisioner\s+"file"\s*\{')
 _PROVISION_SCRIPT_RE = re.compile(r'scripts/01-provision\.sh')
 
@@ -67,4 +69,37 @@ def test_wait_precedes_every_other_provisioner() -> None:
     assert wait.start() < script.start(), (
         "the cloud-init wait must come BEFORE 01-provision.sh, whose first action "
         "is `apt-get update`."
+    )
+
+
+_MKDIR_RE = re.compile(r'"mkdir -p /tmp/trinity-files"')
+
+
+def test_upload_destination_is_created_before_the_file_provisioner() -> None:
+    """Packer flattens the bundle when the destination does not exist (#2281).
+
+    The `file` provisioner uploads `files/` to `/tmp/trinity-files`, and
+    `01-provision.sh` then installs from `/tmp/trinity-files/opt/...`,
+    `/etc/...`, `/var/...`. With the destination absent, Packer strips the
+    top-level directory names and the tree arrives as `trinity-firstboot/`,
+    `update-motd.d/`, `systemd/`, `lib/` — so every install fails with
+    "cannot stat", five minutes into the build and after all five image pulls.
+
+    Verified both ways against a live droplet. With `mkdir -p` first, the tree
+    arrives as `opt/ etc/ var/` exactly as laid out.
+
+    Nothing else could have caught this: the bundle-tracked guard checks git, not
+    the upload, and `packer build` had never been run — the bundle shipped with
+    install paths that could not resolve on any droplet.
+    """
+    t = _text()
+    mkdir = _MKDIR_RE.search(t)
+    assert mkdir, (
+        "trinity.pkr.hcl no longer creates /tmp/trinity-files before uploading "
+        "into it — Packer will flatten the bundle and every install will fail."
+    )
+    first_file = _FILE_PROVISIONER_RE.search(t)
+    assert first_file, "trinity.pkr.hcl no longer has a file provisioner"
+    assert mkdir.start() < first_file.start(), (
+        "the mkdir must run BEFORE the file provisioner; afterwards it is useless."
     )

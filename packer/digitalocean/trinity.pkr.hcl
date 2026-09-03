@@ -123,7 +123,18 @@ build {
   # It belongs in the template rather than at the top of 01-provision.sh because
   # the `file` provisioner below also runs before that script.
   provisioner "shell" {
-    inline = ["cloud-init status --wait"]
+    inline = [
+      "cloud-init status --wait",
+      # Create the file provisioner's destination BEFORE it runs. This is not
+      # tidiness — with the destination absent, Packer flattens the upload and
+      # strips the top-level directory names, so `files/opt/trinity-firstboot/
+      # firstboot.sh` lands at `/tmp/trinity-files/trinity-firstboot/
+      # firstboot.sh` and every `install /tmp/trinity-files/opt/...` below fails
+      # with "cannot stat". Verified both ways against a live droplet: absent,
+      # the tree comes up as trinity-firstboot/ update-motd.d/ systemd/ lib/;
+      # present, it comes up as opt/ etc/ var/ exactly as the bundle is laid out.
+      "mkdir -p /tmp/trinity-files",
+    ]
   }
 
   # Files first: the per-instance script and MOTD must exist before cleanup runs.
