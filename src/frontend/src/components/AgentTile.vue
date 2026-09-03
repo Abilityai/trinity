@@ -666,7 +666,7 @@ watch(
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   color: var(--gv-muted);
   user-select: all;
   -webkit-user-select: all;
