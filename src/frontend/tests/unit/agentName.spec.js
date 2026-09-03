@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parse as parseSfc } from 'vue/compiler-sfc'
 import {
   agentDisplayName,
   hasDistinctLabel,
@@ -292,6 +293,120 @@ describe('structural: the lg list is ONE column sizing context (#2358)', () => {
     }
     expect(PANEL).toContain('lg:ml-8')
     expect(PANEL).toContain('lg:mr-4')
+  })
+})
+
+/**
+ * The lg row's SHAPE, read from the parsed template rather than from a regex.
+ *
+ * The subgrid contract is arithmetic: ten tracks, nine children that
+ * auto-place across row 1, and two placed by hand (the secondary line on row
+ * 2, the meter in track 10 spanning both). Every one of those numbers is load
+ * bearing and none of them is visible in a class string, so a source regex
+ * cannot see them — and neither could the rest of this file: adding a twelfth
+ * child to the `lg:contents` wrapper leaves the whole suite green while the
+ * new cell auto-places into row 2, column 1, in the row's left gutter, and
+ * widens track 1 for the header and every row with it.
+ *
+ * `vue/compiler-sfc` is the parser Vite already uses on this file, reached
+ * through the declared `vue` dependency. Parsing rather than matching also
+ * makes the guard immune to re-indentation and to comments, which a
+ * whitespace- or line-based count is not.
+ */
+function templateAst(source) {
+  const { descriptor, errors } = parseSfc(source)
+  expect(errors, 'the SFC parses').toHaveLength(0)
+  expect(descriptor.template, 'the SFC has a <template>').toBeTruthy()
+  return descriptor.template.ast
+}
+
+/** Depth-first element walk over a template AST. */
+function eachElement(node, fn) {
+  if (node && node.type === 1) fn(node)
+  for (const child of node.children || []) {
+    if (child && typeof child === 'object') eachElement(child, fn)
+  }
+}
+
+/** Every class this element declares, static `class` and bound `:class` alike. */
+function declaredClasses(node) {
+  return (node.props || [])
+    .map((p) => {
+      if (p.type === 6 && p.name === 'class') return p.value ? p.value.content : ''
+      if (p.type === 7 && p.name === 'bind' && p.arg && p.arg.content === 'class') {
+        return p.exp ? p.exp.content : ''
+      }
+      return ''
+    })
+    .join(' ')
+}
+
+function staticAttr(node, name) {
+  const p = (node.props || []).find((p) => p.type === 6 && p.name === name)
+  return p && p.value ? p.value.content : null
+}
+
+function directiveNames(node) {
+  return (node.props || []).filter((p) => p.type === 7).map((p) => p.name)
+}
+
+function findElement(source, predicate) {
+  let found = null
+  eachElement(templateAst(source), (n) => {
+    if (found === null && predicate(n)) found = n
+  })
+  return found
+}
+
+const elementChildren = (node) => (node.children || []).filter((c) => c.type === 1)
+
+describe('structural: the lg row is ten tracks and eleven items (#2358)', () => {
+  const container = () =>
+    findElement(PANEL, (n) => declaredClasses(n).includes('lg:grid-cols-['))
+  const header = () => findElement(PANEL, (n) => staticAttr(n, 'data-testid') === 'list-header')
+  const lgCells = () => findElement(PANEL, (n) => declaredClasses(n).includes('lg:contents'))
+
+  it('gives the header exactly one cell per declared track', () => {
+    // The header's spacer widths no longer decide alignment, but its CELL
+    // COUNT still does: an eleventh header cell auto-places onto a second
+    // header row instead of erroring, and a tenth track with only nine cells
+    // leaves the last column unlabelled and unmeasured by the e2e.
+    const tracks = declaredClasses(container()).match(/lg:grid-cols-\[([^\]]+)\]/)
+    expect(tracks, 'the container declares the track template').toBeTruthy()
+    expect(tracks[1].split('_')).toHaveLength(10)
+    expect(elementChildren(header())).toHaveLength(10)
+  })
+
+  it('gives the row nine auto-placed cells plus the two it places by hand', () => {
+    const children = elementChildren(lgCells())
+    expect(children, 'the lg wrapper holds exactly eleven items').toHaveLength(11)
+
+    const placed = children.filter((c) => /lg:(row|col)-start-/.test(declaredClasses(c)))
+    // Exactly two: the secondary line (row 2, columns 4-9) and the meter
+    // (column 10, rows 1-2). A third would mean someone placed a cell by hand
+    // instead of letting the tracks do it; a first-through-ninth that auto-
+    // places past track 9 is what opens a phantom row.
+    expect(placed.map((c) => c.tag)).toEqual(['div', 'CapacityMeter'])
+    expect(children.length - placed.length, 'nine cells fill row 1, tracks 1-9').toBe(9)
+  })
+
+  it('makes every auto-placed cell unconditional', () => {
+    // Auto-placement is positional: a `v-if` on cell 5 shifts cells 6-9 one
+    // track left on THAT ROW ONLY, which is the per-row misalignment this
+    // whole change exists to remove. Reserve with `invisible` (the system
+    // row's Run toggle) or an empty box, never `v-if`, on a cell that owns a
+    // track. Definitely-placed items are exempt — their track is named, so a
+    // `v-if` there leaves a hole rather than a shift.
+    for (const cell of elementChildren(lgCells())) {
+      if (/lg:(row|col)-start-/.test(declaredClasses(cell))) continue
+      expect(
+        directiveNames(cell),
+        `the ${cell.tag} cell must not be conditional or repeated`
+      ).not.toEqual(expect.arrayContaining(['if']))
+      expect(directiveNames(cell)).not.toEqual(expect.arrayContaining(['for']))
+      expect(directiveNames(cell)).not.toEqual(expect.arrayContaining(['else-if']))
+      expect(directiveNames(cell)).not.toEqual(expect.arrayContaining(['else']))
+    }
   })
 })
 

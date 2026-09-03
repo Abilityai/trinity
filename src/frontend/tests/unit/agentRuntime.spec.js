@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_RUNTIME,
   DEFAULT_RUNTIME_IDS,
@@ -33,6 +36,35 @@ describe('agentRuntime — the default runtime', () => {
     // a Claude sunburst pill on a homogeneous Claude fleet, i.e. exactly the
     // noise this rule removes.
     expect([...DEFAULT_RUNTIME_IDS].sort()).toEqual(['claude', 'claude-code'])
+  })
+
+  /**
+   * …and keeps accepting it. `RuntimeBadge.vue` is a shared component this
+   * change deliberately does not edit, and its `isClaudeRuntime` predicate is
+   * a `computed` inside an SFC — there is nothing to import, so the mirror is
+   * DERIVED from its source rather than hand-copied. Hand-copying is what the
+   * assertion above is, and a hand-copy has no way to notice the day the
+   * original moves.
+   *
+   * Divergence is silent in both directions and neither is cosmetic. If the
+   * badge learns a new Claude id this set does not, that runtime reads as an
+   * exception here and wears a Claude sunburst pill on every row of a fleet
+   * that is entirely Claude — the texture #2358 removed, back again. If this
+   * set keeps an id the badge drops, a genuinely foreign runtime silently
+   * loses its badge and the list stops marking the one thing it is for.
+   */
+  it('derives that set from RuntimeBadge.vue rather than trusting the copy', () => {
+    const badge = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../src/components/RuntimeBadge.vue'),
+      'utf8'
+    )
+    const predicate = badge.match(/isClaudeRuntime\s*=\s*computed\([\s\S]*?\n\}\)/)
+    expect(predicate, 'RuntimeBadge.vue still defines isClaudeRuntime').toBeTruthy()
+    const ids = [...predicate[0].matchAll(/'([^']+)'/g)].map((m) => m[1])
+    expect(ids.sort()).toEqual([...DEFAULT_RUNTIME_IDS].sort())
+    // An absent/blank runtime is Claude there too — the arm that makes
+    // `isDefaultRuntime` safe to fail open on an older backend's payload.
+    expect(predicate[0]).toMatch(/!props\.runtime/)
   })
 })
 
