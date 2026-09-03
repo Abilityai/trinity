@@ -564,7 +564,7 @@ def dispatch_async_eligible(triggered_by: Optional[str]) -> bool:
 _background_breaker_tasks: "set[asyncio.Task[Any]]" = set()
 
 
-def _spawn_bg(coro: "Coroutine[Any, Any, None]") -> None:
+def _spawn_bg(coro: Coroutine[Any, Any, None]) -> None:
     """Schedule a fire-and-forget breaker task with a strong reference held until
     it finishes — prevents the asyncio weak-ref GC footgun (#526)."""
     task = asyncio.create_task(coro)

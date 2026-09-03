@@ -192,8 +192,8 @@ def roster_db(tmp_path, monkeypatch):
     # test that reaches portal_chat — register_enterprise() creates them in prod
     # via this same init. (history_db layers seeds on top; this makes the tables
     # unconditionally present, matching production.)
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -556,8 +556,8 @@ def signin_db(tmp_path, monkeypatch):
     m.create_all(get_engine(), tables=[agent_sharing, agent_ownership, users, email_login_codes])
     # ent#281: sign-in consults the block table, so the module's own schema must
     # exist here exactly as it does in production (`register()` creates it).
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -888,8 +888,8 @@ def test_image_media_type():
 @pytest.fixture()
 def history_db(roster_db):
     """roster_db + the private enterprise_portal_messages table."""
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
     yield roster_db
 
 

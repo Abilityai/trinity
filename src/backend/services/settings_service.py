@@ -58,7 +58,6 @@ def is_valid_public_channel_model(model: str) -> bool:
 from config import (  # noqa: E402
     COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
     COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
-    NON_ROW_RETENTION_OPS_KEYS,  # noqa: F401  (re-export)
     OPS_SETTINGS_DEFAULTS,  # noqa: F401  (re-export)
     RETENTION_OPS_KEYS,  # noqa: F401  (re-export)
 )

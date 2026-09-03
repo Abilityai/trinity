@@ -390,5 +390,3 @@ def pytest_collectstart(collector):
             _v = _SYS_MODULES_BASELINE_VALUES.get(_k)
             if _v is not None:
                 sys.modules[_k] = _v
-
-
