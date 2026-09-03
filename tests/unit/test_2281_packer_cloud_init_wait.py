@@ -103,3 +103,52 @@ def test_upload_destination_is_created_before_the_file_provisioner() -> None:
     assert mkdir.start() < first_file.start(), (
         "the mkdir must run BEFORE the file provisioner; afterwards it is useless."
     )
+
+
+def test_img_check_is_staged_outside_tmp() -> None:
+    """DO's own cleanup deletes the checker before it can run (#2281).
+
+    `90-cleanup-and-check.sh` clones DigitalOcean's tooling into
+    `/tmp/marketplace-partners`, runs their `90-cleanup.sh`, then runs their
+    `99-img-check.sh`. But `90-cleanup.sh` line 28 is::
+
+        rm -rf /tmp/* /var/tmp/*
+
+    so the checkout is gone by the time the checker is invoked::
+
+        bash: /tmp/marketplace-partners/scripts/99-img-check.sh: No such file or directory
+
+    The ordering is not fragile, it is impossible — which means DigitalOcean's
+    validation had never once run against this image. It went unnoticed because
+    `packer build` had never run either; the two failures hid each other, and the
+    check that would have caught the rest was the one being skipped.
+
+    The checker is staged in /dev/shm: tmpfs, so it survives the cleanup, is not
+    part of the snapshot, and needs no deletion afterwards — preserving the rule
+    that NOTHING runs after img_check.
+    """
+    script = (
+        _ROOT / "packer" / "digitalocean" / "scripts" / "90-cleanup-and-check.sh"
+    ).read_text()
+
+    invocations = re.findall(r"^\s*bash\s+(\S+)\s*$", script, re.MULTILINE)
+    assert invocations, "90-cleanup-and-check.sh no longer invokes anything with bash"
+
+    resolved = []
+    for raw in invocations:
+        if raw.startswith('"$') or raw.startswith("$"):
+            var = raw.strip('"').lstrip("$")
+            m = re.search(rf"^{re.escape(var)}=(\S+)\s*$", script, re.MULTILINE)
+            assert m, f"cannot resolve {raw} in 90-cleanup-and-check.sh"
+            resolved.append((raw, m.group(1)))
+        else:
+            resolved.append((raw, raw))
+
+    img_check = [(raw, path) for raw, path in resolved if "img-check" in path]
+    assert img_check, "90-cleanup-and-check.sh no longer runs img_check"
+    for raw, path in img_check:
+        assert not path.startswith("/tmp/"), (
+            f"img_check is invoked from {path} ({raw}), which DigitalOcean's own "
+            "90-cleanup.sh deletes with `rm -rf /tmp/*` immediately before. Stage "
+            "it outside /tmp."
+        )

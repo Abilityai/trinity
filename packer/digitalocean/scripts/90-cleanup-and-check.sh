@@ -22,10 +22,27 @@ git -C /tmp/marketplace-partners remote add origin \
 git -C /tmp/marketplace-partners fetch -q --depth 1 origin "$MP_COMMIT"
 git -C /tmp/marketplace-partners checkout -q FETCH_HEAD
 
+# Stage the checker OUTSIDE /tmp before cleanup runs. DigitalOcean's own
+# 90-cleanup.sh does `rm -rf /tmp/* /var/tmp/*`, which deletes the checkout it
+# was just cloned into — so running img_check.sh from /tmp after cleanup is not
+# merely fragile, it is impossible:
+#
+#     bash: /tmp/marketplace-partners/scripts/99-img-check.sh: No such file or directory
+#
+# This is why img_check had never actually run: `packer build` had never run
+# either, and the two failures hid each other.
+#
+# /dev/shm rather than /opt or /root, for two reasons. It is tmpfs, so the staged
+# copy is not part of the snapshot's filesystem and nothing has to be deleted
+# afterwards — which keeps the rule above intact, that NOTHING runs after
+# img_check. And it survives cleanup, which only clears /tmp and /var/tmp.
+IMG_CHECK=/dev/shm/99-img-check.sh
+cp /tmp/marketplace-partners/scripts/99-img-check.sh "$IMG_CHECK"
+
 echo "=== cleanup.sh ==="
 bash /tmp/marketplace-partners/scripts/90-cleanup.sh
 
 echo "=== img_check.sh ==="
 # img_check exits non-zero on any finding, which fails the Packer build — the
 # snapshot is never created from a droplet that would be rejected at review.
-bash /tmp/marketplace-partners/scripts/99-img-check.sh
+bash "$IMG_CHECK"
