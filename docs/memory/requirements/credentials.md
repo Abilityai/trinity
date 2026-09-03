@@ -88,6 +88,52 @@
 - **Writes** reuse the existing owner-gated inject path — no new write surface.
 - **Flow**: [`feature-flows/guided-credential-setup.md`](../feature-flows/guided-credential-setup.md)
 
+### 3.7 Credential Vault — Public Surfaces (ent#279)
+- **Status**: OSS-visible half shipped (MCP proxy tools + runtime secret-scrub
+  seam + a gated Settings tab). The vault control plane and the agent-facing
+  fetch are an **entitlement-gated module in the private submodule** — absent
+  (404) on an OSS or unentitled build. This entry documents only the public
+  half; the paid module's schema and internals are not in this repo.
+- **Description**: a governed platform credential vault lets an admin store
+  named, encrypted credentials and grant them per agent, so an agent can obtain
+  a **shared** secret **by name at runtime** instead of every agent carrying its
+  own injected copy. **Additive to CRED-002** — the file-injection path (§3.1–3.6)
+  is untouched.
+- **MCP proxy tools (license-blind, Invariant #13)**: `list_available_credentials`
+  and `fetch_credential({name, execution_id?})` are public MCP tools that proxy
+  to the entitlement-gated backend routes. On an OSS or unentitled build the
+  routes are absent, so the tools **degrade** rather than throw:
+  `list_available_credentials` returns the `enabled:false` shape (mirrors
+  `list_runnable_skills`), `fetch_credential` returns a `{success:false, error, …}`
+  flag shape (mirrors `call_a2a_agent`), each branching on the response body so
+  the three cases stay distinct — `agent_key_required` (call it from an agent
+  context) ≠ not-licensed ≠ not-available-on-this-build — and a human operator on
+  a user-scoped key is never told an entitled feature "doesn't exist".
+- **Entitlement-gate shape**: the control plane and the fetch surface sit behind
+  the generic `requires_entitlement("credential_vault")` seam (see §Enterprise
+  Modules in [architecture.md](../architecture.md)); `credential_vault` surfaces
+  in `enterprise_features` only on an entitled build. The MCP tools ship in the
+  OSS bundle regardless — they are the public proxy.
+- **Runtime secret-scrub seam** (`services/runtime_secret_scrub.py`): a fetched
+  credential reaches the agent as a plaintext MCP tool result **by design**, but
+  its live value must not survive verbatim into any durable backend sink (the
+  transcript, the exec-log, or an idempotency response-snapshot replayed for
+  24h). A generic OSS mechanism closes that: a producer **stages** the value by
+  identity (fail **closed** — an unstageable value refuses delivery), and the
+  execution-terminal persistence chokepoints **scrub** every staged value out of
+  the persisted output (marker `***REDACTED***`, three renditions, longest-first)
+  **before** the row is written. The scrub side fails **open** — the terminal
+  must persist, and the pattern-based `utils/credential_sanitizer` still runs.
+  Global 24h-TTL Redis store holding only encrypted envelopes; behaviour-neutral
+  when nothing is staged. Residuals (in-container `~/.claude/projects/*.jsonl`
+  holds tool results verbatim; the 24h window; encodings beyond the three
+  renditions) are stated in the flow doc.
+- **Vue gating**: a Settings **Vault** tab is gated `requires:'credential_vault'`
+  and renders only on an entitled build; the backend admin gate is the real
+  boundary (an entitled non-admin sees the tab and gets a named admin-required
+  state, matching the SSO-panel precedent).
+- **Flow**: [`feature-flows/runtime-secret-scrub.md`](../feature-flows/runtime-secret-scrub.md)
+
 ---
 
 ### 3.7 Platform Credential Settings Encrypted at Rest (ent#435)

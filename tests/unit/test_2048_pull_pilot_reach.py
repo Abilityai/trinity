@@ -26,6 +26,18 @@ rather than extending the reach. So these tests pin two things:
     (`note_unreachable_pull_trigger`), which is the acceptance criterion the
     original code failed in both directions.
 
+**#2391 fired this file's tripwire, deliberately.** Option 2 landed: the
+`reject` producer now dispatches with `overflow_policy="queue_persistent"` when
+— and only when — `pull_owns_dispatch` says a pilot owns the trigger, so
+`schedule`, `webhook` and `reminder` joined the reachable set. The structural
+test below was re-derived rather than relaxed: it now pins BOTH policies on that
+producer *and* pins that the wider one is gated, which is the property that was
+never asserted before and is the one that actually matters. Everything else in
+this file still holds — a stranded trigger is still stranded (`loop`, `fan_out`,
+`a2a`, `operator_response`, all four blocked by a synchronous result consumer
+rather than by the producer's policy), and the diagnostic still tells the
+operator so.
+
 Pure unit test — no Redis, no DB, no agent. Path bootstrap and lazy imports
 follow `test_1766_pull_pilot_exclusive.py`.
 """
@@ -49,22 +61,30 @@ pytestmark = pytest.mark.unit
 
 # The triggers that are declared autonomous but cannot reach the queue.
 #
-# `a2a` (ent#157) is stranded, and the classification is deliberate rather than
-# a default. `PULL_REACHABLE_TRIGGERS` is an explicit allow-list, so an
-# unlisted trigger lands here automatically — this comment is the review the
-# test below demands. A2A's `message/send` consumes `result.response`
-# synchronously to build the JSON-RPC artifact it returns to the remote caller;
-# a pull-claimed row is dispatched by the agent later and produces no
-# synchronous response, so pull dispatch structurally cannot serve this
-# trigger. Same reason `fan_out` and `loop` are here.
-# ent#329: `operator_response` joins the stranded set. It is dispatched by a
-# direct backend call from the respond endpoint, not by `POST /task`, so
-# `_derive_task_trigger` can never emit it and the pilot flag is inert for it —
-# the same shape as `schedule` and `reminder`.
-_STRANDED = ["schedule", "webhook", "loop", "fan_out", "reminder", "a2a",
-             "operator_response"]
-# The two that can.
-_REACHABLE = ["agent", "event"]
+# After #2391 none of these is stranded on the producer's overflow policy any
+# more — that producer can queue. They are stranded on their CALLER, which reads
+# the returned `TaskExecutionResult`; a row queued for a worker to claim later
+# gives it nothing to read. Three structural, one a scope choice.
+#
+#   `loop`     — `loop_service` renders the next iteration from `result.response`.
+#   `fan_out`  — `fan_out_service` builds each `FanOutTaskResult` from the result;
+#                the async fan-out join is #1081 Phase 4.
+#   `a2a`      — `routers/a2a`'s `message/send` consumes `result.response` to
+#                build the JSON-RPC artifact it hands back to the remote caller
+#                (ent#157).
+#   `operator_response` — out by CHOICE, not structurally: it dispatches through
+#                the same producer #2391 widened, but the respond endpoint records
+#                `result.status` as the dispatch receipt (audit row + #525
+#                idempotency completion) and ent#329 exists because this spends
+#                money on a person's answer. "queued" is not the outcome that
+#                contract reports. A deliberate follow-up, not an oversight.
+#
+# `PULL_REACHABLE_TRIGGERS` is an explicit allow-list, so an unlisted trigger
+# lands here automatically — this comment is the review the test below demands.
+_STRANDED = ["loop", "fan_out", "a2a", "operator_response"]
+# The five that can. `agent` + `event` arrive via `POST /task`; `schedule`,
+# `webhook` and `reminder` via the scheduler's async-poll dispatch (#2391).
+_REACHABLE = ["agent", "event", "schedule", "webhook", "reminder"]
 
 
 @pytest.fixture
@@ -83,21 +103,47 @@ def pilot(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_reachable_set_is_the_autonomous_triggers_post_task_can_actually_emit():
+def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     """The claim behind `PULL_REACHABLE_TRIGGERS`, stated as an assertion.
 
-    `POST /task` is the only `queue_persistent` producer, and its
-    `_derive_task_trigger` can only ever produce these five values. Intersect
-    with the autonomous set and exactly `agent` + `event` survive. Derived here
-    rather than hardcoded so the constant cannot quietly disagree with the
-    reasoning that justifies it.
+    Two producers can pass `overflow_policy="queue_persistent"` since #2391, and
+    the reachable set is exactly what they contribute from the autonomous set:
+
+      * `POST /task` (`chat_execution_service`) — `_derive_task_trigger` can only
+        ever produce `{self_task, agent, mcp, manual, event}`, which contributes
+        `agent` + `event`.
+      * `task_execution_service` — contributes the autonomous triggers with no
+        synchronous result consumer, i.e. everything the scheduler dispatches
+        async-and-polls: `schedule`, `webhook`, `reminder`.
+
+    Derived here rather than hardcoded so the constant cannot quietly disagree
+    with the reasoning that justifies it.
     """
     from services.pull_pilot import PULL_REACHABLE_TRIGGERS
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
     task_route_can_emit = {"self_task", "agent", "mcp", "manual", "event"}
-    assert PULL_REACHABLE_TRIGGERS == (task_route_can_emit & _AUTONOMOUS_TRIGGERS)
-    assert PULL_REACHABLE_TRIGGERS == {"agent", "event"}
+    scheduler_async_polled = {"schedule", "webhook", "reminder"}
+    assert PULL_REACHABLE_TRIGGERS == (
+        (task_route_can_emit | scheduler_async_polled) & _AUTONOMOUS_TRIGGERS
+    )
+    assert PULL_REACHABLE_TRIGGERS == {
+        "agent", "event", "schedule", "webhook", "reminder"
+    }
+
+
+def test_every_reachable_trigger_from_this_producer_is_also_1083_shaped():
+    """Why `{schedule, webhook, reminder}` and not "the rest of the autonomous
+    set": all three reach `execute_task` from the scheduler, which dispatches
+    with `async_mode=True` and then polls the DB — nobody holds a coroutine on
+    the return value. That is the same property #1083 selects on for
+    fire-and-forget, so its eligible set must be a SUBSET of what this producer
+    can queue. If someone widens `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS` to a trigger
+    with a synchronous consumer, this fails and names the contradiction."""
+    from config import ASYNC_DISPATCH_ELIGIBLE_TRIGGERS
+    from services.pull_pilot import PULL_REACHABLE_TRIGGERS
+
+    assert ASYNC_DISPATCH_ELIGIBLE_TRIGGERS <= PULL_REACHABLE_TRIGGERS
 
 
 def test_the_stranded_triggers_are_named_and_complete():
@@ -160,30 +206,35 @@ def test_a_stranded_trigger_on_a_pilot_is_reported(pilot, trigger, caplog):
 def test_the_message_contradicts_the_advice_that_used_to_misfire(pilot, caplog):
     """The operator-facing point of the line. §9 M1 said a pushed autonomous row
     means "check the backend actually has PULL_MODE_PILOT_AGENTS in its env" —
-    for a `schedule` row that sends them after a variable that is present and
-    correct. The log has to say so in words, not merely fire."""
+    for a stranded row that sends them after a variable that is present and
+    correct. The log has to say so in words, not merely fire.
+
+    Driven with `loop` since #2391: `schedule` is reachable now, and using it
+    here would assert the diagnostic over a case that no longer exists.
+    """
     with caplog.at_level("WARNING"):
-        pilot.note_unreachable_pull_trigger("pilot-a", "schedule")
+        pilot.note_unreachable_pull_trigger("pilot-a", "loop")
     assert "flag is applied and correct" in caplog.text
     assert "topology" in caplog.text
 
 
 def test_it_reports_once_per_agent_and_trigger(pilot, caplog):
-    """This sits on the cron dispatch path, which fires on every scheduled run.
-    An un-deduped warning would emit thousands of identical lines a day and
-    train operators to filter it — a signal meant to be noticed becoming noise."""
+    """This sits on the dispatch path of every loop iteration and fan-out
+    subtask. An un-deduped warning would emit thousands of identical lines a day
+    and train operators to filter it — a signal meant to be noticed becoming
+    noise."""
     with caplog.at_level("WARNING"):
-        first = pilot.note_unreachable_pull_trigger("pilot-a", "schedule")
-        repeats = [pilot.note_unreachable_pull_trigger("pilot-a", "schedule") for _ in range(50)]
+        first = pilot.note_unreachable_pull_trigger("pilot-a", "loop")
+        repeats = [pilot.note_unreachable_pull_trigger("pilot-a", "loop") for _ in range(50)]
     assert first is True
     assert not any(repeats)
     assert caplog.text.count("#2048") == 1
 
 
 def test_dedup_is_per_trigger_not_per_agent(pilot):
-    """A pilot firing cron AND webhooks has two distinct gaps to report."""
-    assert pilot.note_unreachable_pull_trigger("pilot-a", "schedule") is True
-    assert pilot.note_unreachable_pull_trigger("pilot-a", "webhook") is True
+    """A pilot running loops AND fan-out has two distinct gaps to report."""
+    assert pilot.note_unreachable_pull_trigger("pilot-a", "loop") is True
+    assert pilot.note_unreachable_pull_trigger("pilot-a", "fan_out") is True
 
 
 @pytest.mark.parametrize("trigger", _REACHABLE)
@@ -247,19 +298,49 @@ def _overflow_policies(relative_path: str) -> set:
 def test_the_producer_topology_this_fix_rests_on_still_holds():
     """The load-bearing fact, pinned as a test rather than a comment.
 
-    If someone later implements the issue's Option 2 — giving
-    `task_execution_service` a `queue_persistent` policy so cron can be claimed
-    — this fails, which is the intent: `PULL_REACHABLE_TRIGGERS` and §9's prose
-    both have to be revisited in that same change, and neither would otherwise
-    announce itself. A silently-stale reach set is exactly the bug #2048 is.
+    #2048 pinned `task_execution_service == {"reject"}` as a tripwire for its own
+    deferred Option 2. #2391 implemented Option 2, so the tripwire fired and is
+    re-derived here rather than deleted: the producer now carries BOTH literals,
+    which is the shape a *conditional* widening has and an unconditional one does
+    not. Pair it with `test_the_wider_policy_is_gated_on_the_pull_predicate`
+    below — that is the assertion #2048 could not make and the one that keeps the
+    blast radius equal to the pilot allowlist.
     """
-    assert _overflow_policies("services/task_execution_service.py") == {"reject"}, (
-        "task_execution_service no longer dispatches with overflow_policy='reject' — "
-        "cron may now be able to reach the durable queue. Re-derive "
-        "PULL_REACHABLE_TRIGGERS and update PULL_MIGRATION_TESTING.md §9 (#2048)."
+    assert _overflow_policies("services/task_execution_service.py") == {
+        "reject", "queue_persistent",
+    }, (
+        "task_execution_service's overflow policies changed. Since #2391 it must "
+        "carry exactly two: 'reject' (the default, unchanged for every non-pilot "
+        "agent) and 'queue_persistent' (pilot-gated). Losing 'reject' would mean "
+        "scheduled work is queued for the whole fleet — the reliability-spine "
+        "change #2048 declined to make. Re-derive PULL_REACHABLE_TRIGGERS and "
+        "update PULL_MIGRATION_TESTING.md §9."
     )
     assert "queue_persistent" in _overflow_policies("services/chat_execution_service.py")
     assert "queue_in_memory" in _overflow_policies("services/dispatch_admission_service.py")
+
+
+def test_the_wider_policy_is_gated_on_the_pull_predicate():
+    """The #2391 safety property, pinned structurally.
+
+    `queue_persistent` on this producer is reachable ONLY through a non-None
+    `pull_overflow_payload`, and the only thing that builds one is
+    `build_pull_queue_payload`, whose sole widening condition is
+    `pull_owns_dispatch` (false for every agent outside the allowlist). Assert
+    the chain so nobody can later make the policy unconditional — which would
+    change capacity-pressure semantics for the entire fleet, flag or no flag —
+    without this failing.
+    """
+    source = (_BACKEND / "services" / "task_execution_service.py").read_text(encoding="utf-8")
+
+    # The policy choice is a branch on the payload, not a constant.
+    assert 'if pull_overflow_payload is not None:\n                overflow_policy = "queue_persistent"' in source
+    assert 'overflow_policy = "reject"' in source
+    # The payload builder refuses unless the pull predicate says so.
+    builder = source[source.index("def build_pull_queue_payload("):]
+    builder = builder[: builder.index("\ndef ")]
+    assert "pull_owns_dispatch(agent_name, triggered_by)" in builder
+    assert "slot_already_held or not execution_id" in builder
 
 
 def test_the_reject_producer_reports_the_gap():

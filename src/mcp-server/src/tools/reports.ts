@@ -128,7 +128,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           "e.g. 'recon.weekly_summary', 'prospector.leads_found', 'ops.daily_health', 'custom.notes'."
         ),
         title: z.string().max(300).describe("Short human-readable title (required, max 300 chars)."),
-        payload: z.record(z.unknown()).describe(
+        payload: z.record(z.string(), z.unknown()).describe(
           // Keep in step with REPORT_PAYLOAD_MAX_BYTES (backend `models.py`).
           // This is the SECOND agent-facing statement of the ceiling; it was
           // left at 256 KB while #1537 raised the real cap to 5 MiB — the same
