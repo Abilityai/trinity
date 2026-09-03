@@ -40,10 +40,15 @@ class WorkspaceAsk(BaseModel):
 class WorkspaceAskAnswer(BaseModel):
     """An answer from the addressee.
 
-    `response` is the chosen option (or approve/deny); `response_text` is free
-    text. Both optional individually, at least one required — an empty answer is
-    not an answer, and recording one would clear the ask while telling the agent
-    nothing.
+    `response` is the DECISION — the chosen option or the typed answer — and it
+    is what the agent reads: the sync write-back copies it to the queue file
+    verbatim and the ent#329 resume framing presents it as "the answer".
+    `response_text` is an optional free-text NOTE riding alongside a decision;
+    it cannot stand alone (#2375: the Workspace panel used to post a typed
+    answer as `response_text`, the service coerced the missing `response` to
+    "", and the agent read an empty answer). Both stay Optional at the model so
+    the service can refuse with its own named 422 (`empty_answer`) instead of a
+    bare validation shape; the service is the gate.
     """
     response: Optional[str] = Field(default=None, max_length=500)
     response_text: Optional[str] = Field(default=None, max_length=4000)

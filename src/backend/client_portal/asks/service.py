@@ -169,10 +169,17 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None) -
 def answer_ask(item_id: str, email: str, is_platform: bool,
                response: Optional[str], response_text: Optional[str]) -> WorkspaceAsk:
     """Answer one ask as the addressee. Raises `AskError` with a named code."""
-    if not (response or response_text):
+    # #2375: the decision is REQUIRED. `response` is the field the agent reads
+    # (the write-back copies it to the queue file verbatim; the ent#329 resume
+    # frames it as "the answer"), so a note-only body would clear the ask while
+    # handing the agent an empty answer — exactly the bug this gate closes. The
+    # operator route's model (`OperatorResponse.response: str`) already requires
+    # it; this aligns the two contracts.
+    if not (response and response.strip()):
         raise AskError(422, "empty_answer",
-                       "An answer needs a choice or some text — an empty answer would "
-                       "clear the ask while telling the agent nothing.")
+                       "An answer needs a decision in `response` — that is the field "
+                       "the agent reads; `response_text` is only a note and cannot "
+                       "stand alone.")
 
     item = db.get_operator_queue_item(item_id)
     # Uniform 404 for missing / not-mine / off-roster: a distinguishable 403 would
@@ -216,7 +223,7 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
 
     updated = db.respond_to_operator_queue_item(
         item_id=item_id,
-        response=response or "",
+        response=response,
         response_text=response_text,
         responded_by_id=None,
         responded_by_email=email,
@@ -276,7 +283,7 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
 
             operator_resume_service.spawn_resume_dispatch(
                 updated,
-                response=response or "",
+                response=response,
                 response_text=response_text,
                 responded_by_email=email,
             )
