@@ -302,7 +302,9 @@ never celebrate); swap loading/loaded content inside the SLOT of one persistent 
 zone. During the arrival pass the track is wiped OUT behind the beam (complementary
 `clip-path`), so revealed pixels sit on their final background from the first frame — no
 end-of-pass background snap. Theme via `--scan-core`/`--scan-track` overrides (the Grid
-rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones — Dashboard-only
+rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones **and the Executions
+info tile's chart zone** (ent#449, via the chassis opt-in `owns-loading` — a tile may own its
+LOADING face inside `InfoTile`'s slot; the chassis keeps `error`/`empty`) — Dashboard-only
 for now by product decision; adopting any further surface = the ent#253 pass; do not build
 a new spinner.
 
