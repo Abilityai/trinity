@@ -520,6 +520,19 @@ describe('ent#449 chart zone — one loading motion', () => {
 
     const empty = headlineFace(headline([]), 'empty')
     expect(empty).toEqual({ total: '0', ok: '—', failed: 0 })
+
+    // The face is a function of the STATE, not of whatever `head` happens to
+    // hold. This pair — a head carrying numbers while the state still says
+    // loading — is the ONLY input that separates the real rule from a
+    // pass-through (`String(head.total || 0)` / `head.failed || 0`), which
+    // reads identically on every input the store can produce today because
+    // `execTimeline` is empty until the read that also ends `loading`.
+    // Without it, dropping the guard is a silent green — and the day some
+    // later change lets stale buckets survive into a loading state, the tile
+    // renders "9 runs · 66% ok · 3 failed" under the beam, asserting a fleet
+    // reading before anything has been read.
+    const stale = headlineFace({ total: 9, failed: 3, successRate: 66 }, 'loading')
+    expect(stale).toEqual({ total: '—', ok: '—', failed: 0 })
   })
 
   it('mounts exactly ONE ScanlineReveal, with the branch inside its slot', () => {
