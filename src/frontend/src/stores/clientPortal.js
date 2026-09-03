@@ -9,6 +9,12 @@
  */
 import { defineStore } from 'pinia'
 import { normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
+import {
+  applyBriefings,
+  briefingHydrationPlan,
+  mergeRosterBriefings,
+  shouldRequestBriefing,
+} from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 // #2162: the page size for a windowed report read. A dependency-free leaf
@@ -198,6 +204,16 @@ function installRotationInterceptor() {
 // Live from import, so a session restored from localStorage rotates too — not
 // only one created by a fresh sign-in in this tab.
 installRotationInterceptor()
+
+// #2163 — in-flight and per-session attempt bookkeeping for briefing
+// hydration. Module-level rather than store state on purpose: nothing renders
+// it, and reactive state that nothing renders is a re-render budget spent on
+// bookkeeping (the store's own precedent). `briefingAttempts` implements the
+// one-retry-per-agent-per-session rule from `shouldRequestBriefing`, so a
+// wedged agent costs one extra bounded call rather than one per chat open.
+const briefingsInFlight = new Set()
+const briefingAttempts = new Map()
+let briefingsBatchInFlight = false
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
@@ -1257,6 +1273,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchRoster() {
       this.loading = true
       this.error = null
+      // #2163: re-enter loading ONLY when there is no data on screen. A retry
+      // after a failed first load must show the stage's scanline rather than
+      // the "No agents shared with you yet" copy it flashed before (p15:
+      // loading is not empty); a refetch WITH a roster rendered keeps its
+      // verdict, so the standard motion stays invisible on a background
+      // refresh (p13). `loading` above is in-flight and is never the key.
+      if (!this.agents.length) this.rosterLoaded = false
       // Reset with `error`, not just alongside it: a 404 followed by a
       // successful retry would otherwise keep rendering "not available on this
       // instance" over a roster that loaded fine — and the retry button added
@@ -1267,12 +1290,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null
-        // Roster carries per-agent briefing (#138): description + capability
-        // hints as playbooks[]{title,description,starter_prompt} — exposed
-        // playbooks, else the template's "What You Can Ask" use-cases
-        // (ent#380) — shipped at sign-in so the new-chat screen renders with
-        // zero extra fetches.
-        this.agents = data.agents || []
+        // #2163: the roster no longer CARRIES the briefing — every card
+        // arrives `briefing_state: "pending"` and the description + hint
+        // cards (#138 / ent#380) are hydrated by `GET /briefings` below. That
+        // fan-out is what made the first paint wait for the slowest agent in
+        // the fleet, for every user, on every sign-in.
+        //
+        // `mergeRosterBriefings` is what keeps a REFETCH invisible: a card
+        // that is already hydrated keeps its fields instead of dropping back
+        // to `pending` and re-entering the loading phase (p13).
+        this.agents = mergeRosterBriefings(this.agents, data.agents || [])
         // #2128 — a SUCCESSFUL roster is the only thing that may RAISE this
         // flag, and strict `=== true` is what makes an older backend that omits
         // the field (or a proxy that returns the string "false", or an HTML
@@ -1286,6 +1313,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // refusal at an entitled client before taking it back.
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
         this.rosterLoaded = true
+        // #2163: fired HERE and not from `Portal.vue::bootstrap()`, because
+        // both "Try again" buttons call this action directly — a
+        // failed-then-retried first load would otherwise leave every
+        // non-active card pending for the whole session (design contract
+        // principle 21: loading behaviour lives in the store). Not awaited:
+        // the roster must not wait for it, which is the entire point.
+        if (briefingHydrationPlan(this.agents).batch) void this.hydrateBriefings()
       } catch (err) {
         // Two DIFFERENT failures, kept distinct — neither may swallow the other.
         //
@@ -1323,6 +1357,63 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } finally {
         this.loading = false
       }
+    },
+
+    /**
+     * Hydrate briefings (#2163). `names === null` briefs the whole roster (the
+     * background batch that fills the picker and the composer's `/` typeahead);
+     * a list briefs exactly those agents.
+     *
+     * Never throws and never leaves a card pending: a failure (network, 429, a
+     * backend with no such route) marks the requested names `unavailable`,
+     * which the zone renders as an honest "couldn't load" line rather than an
+     * agent that looks like it has nothing to offer.
+     */
+    async hydrateBriefings(names = null) {
+      const requested = Array.isArray(names) && names.length ? names : null
+      // One batch at a time. Two "Try again" clicks in a row would otherwise
+      // fire two whole-roster hydrations, each costing one bounded agent call
+      // per rostered agent — and the unfiltered form's limiter budget is
+      // deliberately small (10/min). A SINGLE is never coalesced into it: the
+      // active agent's hints must not inherit the batch's floor.
+      if (!requested) {
+        if (briefingsBatchInFlight) return
+        briefingsBatchInFlight = true
+      }
+      const url = '/api/enterprise/client-portal/briefings'
+      try {
+        const { data } = await portalHttp.get(url, {
+          headers: this.authHeader,
+          params: requested ? { agents: requested.join(',') } : undefined,
+        })
+        this.agents = applyBriefings(this.agents, data && data.briefings, requested)
+      } catch {
+        // Deliberately swallowed: a hydration failure is a degraded briefing,
+        // never a failed Workspace. `store.error` belongs to the roster.
+        this.agents = applyBriefings(this.agents, null, requested, { failed: true })
+      } finally {
+        if (requested) requested.forEach((n) => briefingsInFlight.delete(n))
+        else briefingsBatchInFlight = false
+      }
+    },
+
+    /**
+     * Hydrate ONE agent's briefing — the active chat's, so its hints arrive at
+     * its own speed instead of the background batch's slowest member.
+     *
+     * A single is NEVER coalesced into an in-flight batch: that would hand the
+     * active agent exactly the floor this issue removed. The duplicate bounded
+     * call for that one agent is the accepted cost.
+     */
+    async ensureBriefing(name) {
+      if (!name || briefingsInFlight.has(name)) return
+      const card = this.agents.find((a) => a && a.name === name)
+      if (!card) return
+      const attempts = briefingAttempts.get(name) || 0
+      if (!shouldRequestBriefing(card, attempts)) return
+      briefingsInFlight.add(name)
+      briefingAttempts.set(name, attempts + 1)
+      await this.hydrateBriefings([name])
     },
   },
 })

@@ -25,7 +25,7 @@
          consumer renders slot content during that phase. -->
     <div
       class="scan-content"
-      :class="{ wiping: phase === PHASE_REVEALING }"
+      :class="[contentClass, { wiping: phase === PHASE_REVEALING }]"
       :aria-hidden="phase === PHASE_LOADING ? 'true' : undefined"
       @animationend="handleAnimationEnd"
       @animationcancel="handleAnimationEnd"
@@ -74,7 +74,9 @@ import {
  * content inside the SLOT (`<template v-if="data">`), never as sibling
  * v-if branches around the component (a remount re-inits from
  * loading=false and the reveal never plays). The consumer sizes the zone
- * (height/min-height class) so loading and loaded share one footprint.
+ * (height/min-height class) so loading and loaded share one footprint;
+ * `content-class` sizes the CONTENT wrapper when the loaded content must
+ * fill the zone rather than be measured by it (a full-height flex column).
  *
  * Theming: --scan-core / --scan-halo / --scan-glow / --scan-track, with
  * semantic-token defaults; override from the consumer's palette (the grid
@@ -89,7 +91,19 @@ const props = defineProps({
   reveal: { type: Boolean, default: true },
   // Opt-in live region for solitary surfaces. Off by default: dozens of
   // grid-tile instances must not each announce on a mass reveal.
+  //
+  // ⚠️ `role="status"` lands on the zone ROOT, which is an implicit
+  // aria-live="polite" aria-atomic="true" region — so a zone wrapping
+  // CONTENT that keeps changing (a transcript, a composer) would re-announce
+  // the whole thing on every update. Pass this only for a zone whose loaded
+  // content is settled.
   announce: { type: Boolean, default: false },
+  // Classes for the CONTENT wrapper (#2163). `.scan-content` is the
+  // primitive's own element and the consumer cannot reach it (`:deep()` is
+  // forbidden here — child-owned DOM), so a zone whose loaded content must
+  // fill a flex column had no hook at all. Additive: default '' leaves every
+  // existing consumer byte-identical.
+  contentClass: { type: [String, Array, Object], default: '' },
 })
 
 const prefersReducedMotion =
