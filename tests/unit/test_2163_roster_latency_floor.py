@@ -401,6 +401,77 @@ def test_a_briefing_that_was_never_attempted_is_not_ready(svc, monkeypatch):
     assert briefed == []   # and it cost no agent call
 
 
+def test_a_shutdown_cancel_propagates_rather_than_reading_as_a_bound_trip(svc, monkeypatch):
+    """`except Exception`, never `except BaseException` — and that distinction
+    is invisible in the source to anyone "hardening" the swallow later.
+
+    `asyncio.CancelledError` has been a BaseException since 3.8. This helper sits
+    on two response paths and swallows everything else by design, so widening the
+    clause one word would make a backend shutdown read as a failed briefing:
+    the cancellation is absorbed, the coroutine returns a value, and the task
+    that was being torn down carries on.
+    """
+    s, _briefed, _counted = svc
+
+    async def cancelled(name, availability="ready"):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(s, "_agent_briefing", cancelled)
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await s._bounded_briefing("agent-3", "ready")
+
+    asyncio.run(run())
+
+
+def test_the_wall_clock_cancel_closes_the_agent_connection(svc, monkeypatch):
+    """The bound must RELEASE the socket it gave up on, not merely stop waiting.
+
+    `_agent_briefing` holds `agent_httpx_client` open across both GETs, so the
+    only thing that closes it when the wall clock fires is the cancellation
+    unwinding through `async with`. `asyncio.wait_for` cancels the inner
+    awaitable and AWAITS it before raising, which is what makes that true — a
+    refactor that stopped awaiting the cancellation (or moved the client outside
+    the bound) would leak one connection per trip, under exactly the condition
+    the bound exists for.
+    """
+    s, _briefed, _counted = svc
+    monkeypatch.setattr(s, "_BRIEFING_BUDGET_SECONDS", 0.02)
+    exits: list = []
+
+    class _Client:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            exits.append(exc_type)
+            return False
+
+    async def hangs_inside_the_client(name, availability="ready"):
+        async with _Client():
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(s, "_agent_briefing", hangs_inside_the_client)
+    briefing, ok = asyncio.run(s._bounded_briefing("agent-3", "ready"))
+
+    assert ok is False and briefing == s.AgentBriefing()
+    assert exits == [asyncio.CancelledError], "the client was not closed on the bound trip"
+
+
+def test_an_empty_filter_briefs_nobody(svc):
+    """An empty list is "brief nobody"; only `None` means the whole roster.
+
+    The two are opposite answers to one call, and the empty list is the one that
+    must never fan out — see the route test of the same name for the query-string
+    half.
+    """
+    s, briefed, _counted = svc
+
+    assert asyncio.run(s.get_briefings(EMAIL, [])).briefings == {}
+    assert briefed == []
+
+
 def test_bounded_briefing_reads_its_globals_at_call_time():
     """Neither `_agent_briefing` nor the budget may be captured as a default
     argument: every test here (and `test_2160`'s counting stub) steers this
@@ -530,6 +601,26 @@ def test_an_absent_filter_reaches_the_service_as_none(route):
     asyncio.run(portal_router.portal_briefings(agents=None, principal=_principal()))
 
     assert seen == [("bob@example.com", None, False)]
+
+
+def test_an_empty_filter_briefs_nobody_and_takes_the_filtered_bucket(route):
+    """`agents=` present but empty is "brief nobody", NEVER the whole roster.
+
+    The router separates the two on `agents is not None`, and they are opposite
+    answers: an empty list intersects the roster to nothing, `None` fans out to
+    every agent on it. Tightening that to `if agents:` — the obvious
+    simplification — would turn one empty query parameter into a whole-fleet
+    fan-out AND charge it to the filtered bucket, which is six times looser
+    precisely because a filtered call costs one agent.
+    """
+    portal_router, seen, rl = route
+
+    asyncio.run(portal_router.portal_briefings(agents="", principal=_principal()))
+    asyncio.run(portal_router.portal_briefings(agents=" , ", principal=_principal()))
+
+    assert seen == [("bob@example.com", [], False)] * 2
+    assert "portal_briefings:bob@example.com" in rl._inprocess_buckets
+    assert "portal_briefings_all:bob@example.com" not in rl._inprocess_buckets
 
 
 def test_include_owned_follows_the_principal(route):

@@ -1370,6 +1370,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
      * agent that looks like it has nothing to offer.
      */
     async hydrateBriefings(names = null) {
+      // An EMPTY list is "brief nobody", never "brief everybody". Only an
+      // omitted/null argument is the whole-roster batch. The two are opposite
+      // answers to one call and the server separates them the same way
+      // (`agents=` intersects the roster to nothing; no `agents=` fans out to
+      // all of it), so letting `[]` fall through to the batch would make a
+      // future caller that filtered its list down to nothing silently fan out
+      // across the whole fleet — on the one path in this store that costs a
+      // bounded agent request per rostered agent.
+      if (Array.isArray(names) && names.length === 0) return
       const requested = Array.isArray(names) && names.length ? names : null
       // One batch at a time. Two "Try again" clicks in a row would otherwise
       // fire two whole-roster hydrations, each costing one bounded agent call
