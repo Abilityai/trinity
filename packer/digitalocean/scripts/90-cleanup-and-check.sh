@@ -39,6 +39,24 @@ git -C /tmp/marketplace-partners checkout -q FETCH_HEAD
 IMG_CHECK=/dev/shm/99-img-check.sh
 cp /tmp/marketplace-partners/scripts/99-img-check.sh "$IMG_CHECK"
 
+# Purge DigitalOcean's own droplet-agent before their cleanup runs.
+#
+# The stock ubuntu-24-04-x64 base carries it (the build's apt sources show
+# repos-droplet.digitalocean.com/apt/droplet-agent), and img_check treats its
+# directory as a hard failure, not a warning:
+#
+#     [FAIL] DigitalOcean directory detected.
+#
+# Any FAIL makes img_check `exit 1`, which fails the build — so with this left in
+# place no snapshot can ever be produced. Their own 90-cleanup.sh does NOT remove
+# it; the remedy in img_check's own output is this purge. DigitalOcean installs
+# the agent per-droplet, so it must not be baked into a submitted image.
+echo "=== purging droplet-agent ==="
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -q droplet-agent || true
+# The package purge leaves empty directories behind on some base images, and the
+# check tests for the directory, not the package.
+rm -rf /opt/digitalocean
+
 echo "=== cleanup.sh ==="
 bash /tmp/marketplace-partners/scripts/90-cleanup.sh
 

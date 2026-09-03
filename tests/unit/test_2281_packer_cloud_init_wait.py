@@ -152,3 +152,43 @@ def test_img_check_is_staged_outside_tmp() -> None:
             "90-cleanup.sh deletes with `rm -rf /tmp/*` immediately before. Stage "
             "it outside /tmp."
         )
+
+
+def test_droplet_agent_is_purged_before_img_check() -> None:
+    """`/opt/digitalocean` is a hard img_check FAIL, so the build cannot pass (#2281).
+
+    The stock `ubuntu-24-04-x64` base ships DigitalOcean's droplet-agent. Their
+    own `99-img-check.sh` treats its directory as a failure rather than a
+    warning::
+
+        [FAIL] DigitalOcean directory detected.
+
+    and any FAIL ends the script with `exit 1`, which fails the Packer build — so
+    while it is present, no snapshot can be produced at all. Their `90-cleanup.sh`
+    does not remove it; the remedy quoted in img_check's own output is a purge.
+    DigitalOcean installs the agent per droplet, so it must not be baked in.
+
+    This only became visible once img_check could run — see
+    test_img_check_is_staged_outside_tmp.
+    """
+    script = (
+        _ROOT / "packer" / "digitalocean" / "scripts" / "90-cleanup-and-check.sh"
+    ).read_text()
+
+    purge = re.search(r"apt-get purge[^\n]*droplet-agent", script)
+    assert purge, (
+        "the droplet-agent is never purged, so img_check will FAIL on "
+        "'DigitalOcean directory detected' and no snapshot will be created."
+    )
+    # The INVOCATION, not the first mention — "90-cleanup.sh" also appears in the
+    # file's header comment, well above the purge.
+    cleanup_call = re.search(r"^\s*bash\s+\S*90-cleanup\.sh\s*$", script, re.MULTILINE)
+    assert cleanup_call, "90-cleanup-and-check.sh no longer invokes DO's cleanup"
+    assert purge.start() < cleanup_call.start(), (
+        "the purge must run before DigitalOcean's cleanup, so the image handed to "
+        "img_check is already clean."
+    )
+    assert "rm -rf /opt/digitalocean" in script, (
+        "img_check tests for the DIRECTORY, not the package — a purge that leaves "
+        "empty directories behind still fails."
+    )
