@@ -2815,4 +2815,24 @@ export class TrinityClient {
   ): Promise<unknown> {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
   }
+
+  // --- Credential vault (trinity-enterprise#279) ----------------------------
+  // Agent-facing discovery + fetch. Both are agent-scoped-key-only on the
+  // backend; `request()` throws a typed `ApiError` on any non-2xx so the tool
+  // can branch on the status + detail shape.
+
+  /** List the credentials granted to the calling key's agent (never values). */
+  async getAvailableCredentials(): Promise<
+    Array<{ name: string; description?: string | null; kind: string }>
+  > {
+    return this.request("GET", "/api/enterprise/credential-vault/available");
+  }
+
+  /** Fetch a granted credential's plaintext value by name (#279). */
+  async fetchCredential(body: {
+    name: string;
+    execution_id?: string;
+  }): Promise<{ name: string; kind: string; value: string }> {
+    return this.request("POST", "/api/enterprise/credential-vault/fetch", body);
+  }
 }
