@@ -41,6 +41,8 @@ from config import PORTAL_SOURCE_CHANNEL
 from . import db
 from .models import (
     PortalAgentCard,
+    PortalBriefing,
+    PortalBriefings,
     PortalExposureConfig,
     PortalExposureUpdate,
     PortalPlaybook,
@@ -512,9 +514,14 @@ async def get_agent_card(email: str | None, agent_name: str,
     availability = await _agent_availability(agent_name)
     card = _row_to_card(row, tts_service.is_available(), _default_voice_id(),
                         availability=availability)
-    briefing = await _agent_briefing(agent_name, availability)   # exactly one, not N
+    # #2163: exactly one briefing (not N), and now a BOUNDED one — this page's
+    # floor was the agent's own 5s-per-phase HTTP, so a wedged agent made its
+    # own page hang. `ok` is what makes a bound trip legible: without it an
+    # unreachable agent's card is byte-identical to one that has no hints.
+    briefing, ok = await _bounded_briefing(agent_name, availability)
     if isinstance(briefing, tuple):
         _apply_briefing(card, briefing)
+    card.briefing_state = "ready" if ok else "unavailable"
     return card
 
 
@@ -628,6 +635,38 @@ _MAX_SEARCHABLE_PLAYBOOKS = 200
 _MAX_HINT_TITLE_CHARS = 200
 _MAX_HINT_DESCRIPTION_CHARS = 300
 _MAX_HINT_STARTER_CHARS = 500
+
+# #2163 — the briefing's bound. Two values, because one is not enough.
+#
+# `_BRIEFING_HTTP_TIMEOUT_SECONDS` is httpx's PER-PHASE timeout (connect / read /
+# write / pool). The literal `5.0` it replaces was therefore never a ceiling on
+# the briefing: `_agent_briefing` makes two GETs, each of which may spend a full
+# timeout in each phase, so a trickling agent could hold the call far past five
+# seconds (the `a2a_client` tarpit lesson — a per-read timeout resets forever).
+#
+# `_BRIEFING_BUDGET_SECONDS` is the WALL CLOCK for one agent's whole briefing,
+# enforced by `_bounded_briefing`. That is the number that actually bounds the
+# agent page and the hint zone's wait.
+#
+# Why 2.0 / 3.0 rather than the issue's "say 1.5 s": with the briefing off the
+# roster's critical path the bound no longer protects the roster, and the agent
+# side of it — `GET /api/skills` — is a synchronous directory scan on the
+# agent-server's own event loop, so a HEALTHY agent that is mid-turn can
+# legitimately take more than a second. A tighter value buys nothing here and
+# trips on working agents. Both are still far below the old floor.
+#
+# Constants, not settings and not env vars: this is an engineering bound no
+# operator would tune at runtime (the `SAMPLE_INTERVAL_SECONDS` precedent,
+# #1644), and an env read that no compose file forwards is inert while reading
+# as configurable (#1039).
+_BRIEFING_HTTP_TIMEOUT_SECONDS = 2.0
+_BRIEFING_BUDGET_SECONDS = 3.0
+# Socket belt on the batch. Today's `gather` is unbounded; a 100-agent roster
+# would open 200 sockets to the agent network at once. Per REQUEST, never a
+# module-level primitive — an asyncio.Semaphore binds to the first loop that
+# creates a waiter on it, so a module-level one raises "bound to a different
+# event loop" the second time anything calls this under `asyncio.run`.
+_BRIEFING_CONCURRENCY = 16
 
 
 class AgentBriefing(NamedTuple):
@@ -748,26 +787,36 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
             return AgentBriefing()
 
         base = f"http://agent-{agent_name}:8000"
-        description, use_cases, live = None, [], []
-        async with agent_httpx_client(agent_name, timeout=5.0) as client:
-            try:
-                # /api/template/info is the canonical metadata route (the same
-                # one InfoPanel, A2A cards and avatars read). #138 shipped this
-                # call against a nonexistent `/info` — best-effort swallowed the
-                # 404, so descriptions were silently always None (ent#380).
-                r = await client.get(f"{base}/api/template/info")
-                if r.status_code == 200:
-                    info = r.json() or {}
-                    description = info.get("description") or None
-                    use_cases = info.get("use_cases") or []
-            except Exception:  # noqa: BLE001 — briefing is best-effort
-                pass
-            try:
-                r = await client.get(f"{base}/api/skills")
-                if r.status_code == 200:
-                    live = (r.json() or {}).get("skills", []) or []
-            except Exception:  # noqa: BLE001
-                pass
+        async with agent_httpx_client(agent_name, timeout=_BRIEFING_HTTP_TIMEOUT_SECONDS) as client:
+            async def _read_info():
+                try:
+                    # /api/template/info is the canonical metadata route (the same
+                    # one InfoPanel, A2A cards and avatars read). #138 shipped this
+                    # call against a nonexistent `/info` — best-effort swallowed the
+                    # 404, so descriptions were silently always None (ent#380).
+                    r = await client.get(f"{base}/api/template/info")
+                    if r.status_code == 200:
+                        info = r.json() or {}
+                        return info.get("description") or None, info.get("use_cases") or []
+                except Exception:  # noqa: BLE001 — briefing is best-effort
+                    pass
+                return None, []
+
+            async def _read_skills():
+                try:
+                    r = await client.get(f"{base}/api/skills")
+                    if r.status_code == 200:
+                        return (r.json() or {}).get("skills", []) or []
+                except Exception:  # noqa: BLE001
+                    pass
+                return []
+
+            # #2163: concurrently, not sequentially. Two reasons, both real —
+            # the healthy latency halves, and (the one that matters under the
+            # wall-clock bound) a cancel landing mid-second-GET no longer throws
+            # away the description the first GET already returned. Each keeps
+            # its own try/except, so one failing leg still yields the other.
+            (description, use_cases), live = await asyncio.gather(_read_info(), _read_skills())
 
         # Client-visible subset = the operator's connector allow-list ∩
         # user_invocable (same policy the MCP connector advertises). No connector
@@ -819,6 +868,63 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
                              searchable, total)
     except Exception:  # noqa: BLE001 — never let enrichment break the roster
         return AgentBriefing()
+
+
+async def _bounded_briefing(agent_name: str, availability: str = "ready"):
+    """`_agent_briefing` under a WALL-CLOCK bound → `(briefing, ok)` (#2163).
+
+    THE single briefing entry point for every caller that renders one. Never
+    raises: a trip, a raise, or an agent that was never attempted all yield
+    `(AgentBriefing(), False)`, and `ok` is what the caller stamps as
+    `briefing_state` — so a wedged agent reports `unavailable` instead of
+    passing for one that simply has no hints.
+
+    `ok=True` does NOT mean "we got data": `_agent_briefing` swallows its own
+    failures and an agent with nothing exposed legitimately returns empty
+    fields. It means the call REACHED A VERDICT inside its budget, which is
+    exactly the distinction the client needs to decide whether to retry.
+
+    Both `_agent_briefing` and `_BRIEFING_BUDGET_SECONDS` are looked up as
+    module globals at CALL time (never bound as default arguments), so a test
+    that monkeypatches either one still steers this function.
+
+    `asyncio.CancelledError` is a BaseException and deliberately propagates —
+    a backend shutdown must not be swallowed as a briefing failure.
+    """
+    if availability not in ("ready", "unknown"):
+        # Same early exit `_agent_briefing` makes, taken here so the caller
+        # learns the briefing was never attempted rather than reading an empty
+        # tuple as a completed one.
+        return AgentBriefing(), False
+    try:
+        briefing = await asyncio.wait_for(
+            _agent_briefing(agent_name, availability), _BRIEFING_BUDGET_SECONDS
+        )
+    except Exception as e:  # noqa: BLE001 — TimeoutError included; never raises
+        logger.debug("[#2163] briefing bound tripped for %s: %r", agent_name, e)
+        return AgentBriefing(), False
+    if not isinstance(briefing, tuple):
+        # A stub (or a future refactor) that returns something else must not
+        # reach `_apply_briefing`'s positional unpack.
+        return AgentBriefing(), False
+    return briefing, True
+
+
+def _briefing_to_model(briefing, ok: bool) -> PortalBriefing:
+    """A briefing tuple → the wire model, positional-tolerant.
+
+    Same tolerance and same reason as `_apply_briefing`: several test modules
+    stub `_agent_briefing` with the pre-#2213 2-tuple, and a 4-field unpack
+    against one raises ValueError inside the response build — turning a stale
+    double into a 500 rather than a failed assertion (the #2242 class).
+    """
+    return PortalBriefing(
+        description=briefing[0] if len(briefing) > 0 else None,
+        playbooks=list(briefing[1]) if len(briefing) > 1 else [],
+        searchable_playbooks=list(briefing[2]) if len(briefing) > 2 else [],
+        playbooks_total=briefing[3] if len(briefing) > 3 else 0,
+        state="ready" if ok else "unavailable",
+    )
 
 
 async def synthesize_portal_tts(agent_name: str, email: str, text: str,
