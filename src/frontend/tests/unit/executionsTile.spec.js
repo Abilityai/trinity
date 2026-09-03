@@ -34,11 +34,21 @@ import {
   legendFit,
   legendKeys,
   presentBuckets,
+  headlineFace,
   RAIL_HEIGHT,
+  scanlineProps,
   stackOrder,
   tileState,
 } from '@/utils/executionsTile'
 import { CELL_W } from '@/utils/gridLayout'
+import {
+  initialPhase,
+  onLoadingChange,
+  onRevealEnd,
+  PHASE_LOADED,
+  PHASE_LOADING,
+  PHASE_REVEALING,
+} from '@/utils/scanlinePhase'
 
 const ORDER = [
   'Chat/Tasks', 'MCP', 'Channels', 'Public',
@@ -383,5 +393,238 @@ describe('#2228 legend fitting', () => {
     const tallest = chartColumns([bucket('09', { Scheduled: { total: 9, failed: 9 } })])[0]
     expect(tallest.segments[0].px).toBeLessThanOrEqual(CHART_HEIGHT)
     expect(tallest.failPx).toBeLessThanOrEqual(RAIL_HEIGHT)
+  })
+})
+
+/**
+ * ent#449 — the chart zone's one loading motion.
+ *
+ * vitest runs node-environment here, so the phase↔DOM wiring is out of reach:
+ * what CAN be proven is (a) the pure rules the component binds, driven through
+ * the real phase machine over the exact inputs the store emits, and (b) the
+ * markup/stylesheet invariants the motion rests on, parsed from source (the
+ * #2228 pin style — a stylesheet and a JS constant cannot check each other).
+ *
+ * The invariants worth naming:
+ *   - ONE persistent ScanlineReveal, with the loaded/loading branch INSIDE its
+ *     slot. Sibling v-if branches around the component remount it, it re-inits
+ *     from loading=false, and the reveal never plays (the primitive's own usage
+ *     contract; learnings 2026-08-24 for the terminal-under-the-track half);
+ *   - the headline sits OUTSIDE the zone, so the em-dash is visible while
+ *     loading and the first frame of the wipe (`inset(0 100% 0 0)`) cannot
+ *     blink it away;
+ *   - loading is "no data yet", never "fetch in flight": a 60s background
+ *     refresh — success OR failure — can never re-raise the beam.
+ */
+describe('ent#449 chart zone — one loading motion', () => {
+  const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src')
+  const TILE_SRC = readFileSync(join(SRC_DIR, 'components', 'tiles', 'ExecutionsTile.vue'), 'utf8')
+  const INFOTILE_SRC = readFileSync(join(SRC_DIR, 'components', 'InfoTile.vue'), 'utf8')
+  const TEMPLATE = TILE_SRC.slice(0, TILE_SRC.indexOf('<script setup>'))
+
+  /** The store's own refs, in the shape the component reads them. */
+  const zoneFor = (store) => scanlineProps(tileState(store))
+  const DATA = [bucket('09', { Scheduled: { total: 4, failed: 1 } })]
+
+  it('derives the zone props from the pure state, and is total on junk', () => {
+    expect(scanlineProps('loading')).toEqual({ loading: true, reveal: false })
+    expect(scanlineProps('ready')).toEqual({ loading: false, reveal: true })
+    // A data-less terminal must SNAP: the reveal is a celebration of data
+    // arriving, and there is none (design-system §6).
+    expect(scanlineProps('empty')).toEqual({ loading: false, reveal: false })
+    expect(scanlineProps('error')).toEqual({ loading: false, reveal: false })
+    expect(scanlineProps(undefined)).toEqual({ loading: false, reveal: false })
+    expect(scanlineProps('nonsense')).toEqual({ loading: false, reveal: false })
+  })
+
+  it('first load with data plays exactly one reveal', () => {
+    const cold = zoneFor({ loaded: false, error: false, buckets: [] })
+    expect(cold.loading).toBe(true)
+    let phase = initialPhase(cold.loading)
+    expect(phase).toBe(PHASE_LOADING)
+
+    const arrived = zoneFor({ loaded: true, error: false, buckets: DATA })
+    phase = onLoadingChange(phase, arrived.loading, { reveal: arrived.reveal })
+    expect(phase).toBe(PHASE_REVEALING)
+    expect(onRevealEnd(phase)).toBe(PHASE_LOADED)
+  })
+
+  it('the 60s background refresh is invisible — success AND failure', () => {
+    // The property AC4 rests on: `execTimelineLoaded` latches true on the first
+    // success and is never set false, so no later refresh can re-raise the beam.
+    let phase = onLoadingChange(initialPhase(true), false, { reveal: true })
+    phase = onRevealEnd(phase)
+    expect(phase).toBe(PHASE_LOADED)
+
+    const refreshes = [
+      { loaded: true, error: false, buckets: DATA },
+      { loaded: true, error: true, buckets: DATA }, // refresh failed → `24h · stale`
+      { loaded: true, error: false, buckets: [...DATA, bucket('10', { MCP: { total: 2 } })] },
+    ]
+    for (const store of refreshes) {
+      expect(tileState(store)).not.toBe('loading')
+      const zone = zoneFor(store)
+      expect(zone.loading).toBe(false)
+      phase = onLoadingChange(phase, zone.loading, { reveal: zone.reveal })
+      expect(phase).toBe(PHASE_LOADED)
+    }
+  })
+
+  it('an error terminal snaps instead of celebrating', () => {
+    const store = { loaded: false, error: true, buckets: [] }
+    expect(tileState(store)).toBe('error')
+    const zone = zoneFor(store)
+    expect(zone.reveal).toBe(false)
+    expect(onLoadingChange(PHASE_LOADING, zone.loading, { reveal: zone.reveal })).toBe(PHASE_LOADED)
+  })
+
+  it('an empty terminal snaps instead of celebrating', () => {
+    const store = { loaded: true, error: false, buckets: [] }
+    expect(tileState(store)).toBe('empty')
+    const zone = zoneFor(store)
+    expect(zone.reveal).toBe(false)
+    expect(onLoadingChange(PHASE_LOADING, zone.loading, { reveal: zone.reveal })).toBe(PHASE_LOADED)
+  })
+
+  it('KNOWN GAP: a retry after a first-read error snaps, it does not re-beam', () => {
+    // The store never clears `execTimelineError` before a retry fetch (only on
+    // success), so 'error' → 'ready' skips 'loading' entirely and an explicit
+    // Retry gets no in-progress feedback. Recorded here rather than asserted as
+    // correct: the honest fix (clear the error on a RETRY-initiated fetch only,
+    // never on the background poll, which would blink the stale stamp every
+    // 60s) is a store change outside this issue.
+    const seq = [
+      { loaded: false, error: true, buckets: [] },
+      { loaded: true, error: false, buckets: DATA },
+    ]
+    const states = seq.map(tileState)
+    expect(states).toEqual(['error', 'ready'])
+    expect(states).not.toContain('loading')
+    expect(seq.map((s) => zoneFor(s).loading)).toEqual([false, false])
+  })
+
+  it('holds the headline at an em-dash until the first read lands', () => {
+    const loading = headlineFace(headline([]), 'loading')
+    expect(loading.total).toBe('—')
+    expect(loading.ok).toBe('—')
+    // Never "— failed": rendering a failure segment while loading asserts that
+    // failures exist before anything has been read.
+    expect(loading.failed).toBe(0)
+
+    const ready = headlineFace(headline(DATA), 'ready')
+    expect(ready).toEqual({ total: '4', ok: '75%', failed: 1 })
+
+    // The existing terminal-based rule survives: nothing terminated → '—', not 0%.
+    const running = headlineFace({ total: 3, failed: 0, successRate: null }, 'ready')
+    expect(running).toEqual({ total: '3', ok: '—', failed: 0 })
+
+    const empty = headlineFace(headline([]), 'empty')
+    expect(empty).toEqual({ total: '0', ok: '—', failed: 0 })
+  })
+
+  it('mounts exactly ONE ScanlineReveal, with the branch inside its slot', () => {
+    // A second instance, or a branch AROUND the component, remounts it: the
+    // machine re-inits from loading=false and the reveal never plays.
+    expect(TEMPLATE.match(/<ScanlineReveal\b/g)).toHaveLength(1)
+
+    const open = TEMPLATE.indexOf('<ScanlineReveal')
+    const close = TEMPLATE.indexOf('</ScanlineReveal>')
+    expect(close).toBeGreaterThan(open)
+    const branch = TEMPLATE.indexOf('<template v-if=', open)
+    expect(branch, 'the loaded branch must live INSIDE the slot').toBeGreaterThan(open)
+    expect(branch).toBeLessThan(close)
+    expect(TEMPLATE.slice(branch, close)).toMatch(/<template v-if="!zone\.loading">/)
+  })
+
+  it('keeps the headline outside the zone and the legend after it', () => {
+    // Order is load-bearing twice over: the first frame of `scan-wipe` clips
+    // ALL slot content to nothing, so a headline inside the zone blinks; and
+    // the `.ex-head ~ .ex-zone` theming selector needs the head to precede it.
+    const head = TEMPLATE.indexOf('class="ex-head"')
+    const open = TEMPLATE.indexOf('<ScanlineReveal')
+    const close = TEMPLATE.indexOf('</ScanlineReveal>')
+    const legend = TEMPLATE.indexOf('class="ex-legend"')
+    expect(head).toBeGreaterThan(-1)
+    expect(legend).toBeGreaterThan(-1)
+    expect(head).toBeLessThan(open)
+    expect(open).toBeLessThan(close)
+    expect(close).toBeLessThan(legend)
+  })
+
+  it('binds the zone to the pure rule, never to a fetch-in-flight flag', () => {
+    expect(TEMPLATE).toMatch(/:loading="zone\.loading"/)
+    expect(TEMPLATE).toMatch(/:reveal="zone\.reveal"/)
+    // "loading" means NO DATA YET (§6). Binding it to a request flag makes the
+    // beam replay on every 60s poll — the strobe #1927 exists to prevent.
+    const bound = [...TEMPLATE.matchAll(/:loading="([^"]*)"/g)].map((m) => m[1])
+    expect(bound).toEqual(['zone.loading'])
+    for (const expr of bound) {
+      expect(expr).not.toMatch(/Loaded|fetching|Fetching|pending/)
+    }
+  })
+
+  it('renders the headline through the face, so the em-dash cannot leak', () => {
+    expect(TEMPLATE).toMatch(/\{\{\s*face\.total\s*\}\}/)
+    expect(TEMPLATE).toMatch(/face\.ok/)
+    expect(TEMPLATE).toMatch(/v-if="face\.failed"/)
+    // A surviving `head.*` read in the template is a value that bypasses the
+    // loading face and shows "0 runs" before anything has been read.
+    expect(TEMPLATE).not.toMatch(/head\.total|head\.successRate|head\.failed/)
+  })
+
+  it('gives the zone and the chart ONE footprint, and stops the margin collapse', () => {
+    // The primitive's content wrapper is auto-height and EMPTY while loading,
+    // so the zone root must be sized or the track has no height at all; the
+    // inner box must be sized too, because a percentage height does not resolve
+    // inside that wrapper. One literal, so they cannot drift.
+    const shared = TILE_SRC.match(/\.ex-zone,\s*\n\s*\.ex-chart\s*\{[^}]*?\n\s*height:\s*(\d+)px/s)
+    expect(shared, 'zone and chart must share one height block').toBeTruthy()
+    expect(Number(shared[1])).toBe(CHART_HEIGHT + COL_GAP + RAIL_HEIGHT + CHART_PAD)
+
+    // `.scanline` is `position: relative` but not a BFC root, and `.scan-content`
+    // carries `margin: -4px`. That negative top margin collapses THROUGH the
+    // zone root and then with `.ex-head`'s 6px bottom margin: measured in
+    // Chromium the head→zone gap drops to 2px and the chart renders 4px BELOW
+    // the track for the whole 550ms wipe. `flow-root` makes the zone a BFC root.
+    // Never `overflow: hidden` — that clips the primitive's deliberate bleed.
+    expect(TILE_SRC).toMatch(/\.ex-zone\s*\{[^}]*display:\s*flow-root/s)
+    expect(TILE_SRC).not.toMatch(/\.ex-zone\s*\{[^}]*overflow:\s*hidden/s)
+  })
+
+  it('themes the beam from the grid palette, at a specificity that cannot lose', () => {
+    // The primitive's own `.dark .scanline` is (0,3,0); a two-class override
+    // ties with it and wins only by stylesheet injection order.
+    const rule = TILE_SRC.match(/([^}\n][^}]*\.ex-zone\.scanline[^{]*)\{([^}]*)\}/s)
+    expect(rule, 'the override must be scoped to the zone').toBeTruthy()
+    expect(rule[2]).toMatch(/--scan-core:\s*var\(--gv-blue\)/)
+    expect(rule[2]).toMatch(/--scan-track:\s*var\(--gv-bar-track\)/)
+    // Three classes + the scoped attribute = (0,4,0), order-independent.
+    expect(rule[1]).toContain('.ex-head ~')
+    // Theming belongs in the token layer, never a `.dark` selector in a
+    // component (design-system contract).
+    expect(TILE_SRC).not.toMatch(/\.dark\s+\.ex-zone/)
+  })
+
+  it('takes the chassis handoff explicitly rather than lying about its state', () => {
+    expect(TEMPLATE).toMatch(/:owns-loading="true"/)
+    // The tile must not fake `ready` to get its slot rendered — that is an
+    // invisible contract the chassis cannot honour or check.
+    expect(TEMPLATE).toMatch(/:state="state"/)
+  })
+
+  it('the chassis renders the slot for a tile that owns its loading face', () => {
+    // Term-by-term, not one frozen literal: a pin on the exact expression text
+    // goes red on any reformat, and a pin on `.it-skel` existing would go red
+    // on the very follow-up meant to delete it.
+    const gate = INFOTILE_SRC.match(/v-if="([^"]*)"\s+class="it-skel"/)
+    expect(gate, 'the skeleton branch must still be a v-if').toBeTruthy()
+    expect(gate[1]).toContain("state === 'loading'")
+    expect(gate[1]).toContain('!ownsLoading')
+    // error / empty still replace the slot, so a tile owns its LOADING face only.
+    expect(INFOTILE_SRC).toMatch(/v-else-if="state === 'error'"/)
+    expect(INFOTILE_SRC).toMatch(/v-else-if="state === 'empty'"/)
+    expect(INFOTILE_SRC).toMatch(/<slot v-else><\/slot>/)
+    // Default off: every tile that has not adopted keeps the chassis skeleton.
+    expect(INFOTILE_SRC).toMatch(/ownsLoading:\s*\{\s*type:\s*Boolean,\s*default:\s*false\s*\}/)
   })
 })
