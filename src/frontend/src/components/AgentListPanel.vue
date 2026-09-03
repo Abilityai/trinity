@@ -453,81 +453,81 @@
               </svg>
             </router-link>
 
-          <!-- Secondary line (grid row 2, under the name column through the
-               arrow). Definite placement in BOTH axes is load-bearing, here and
-               on the meter below: with sparse auto-placement this item's
-               definite column would bump the cursor to row 2, and the meter's
-               2-row span would then land in rows 2–3 — an implicit third row
-               hanging below every line. Always rendered, so a row is the same
-               height with or without content on it. `pl-[5.125rem]` is gone:
-               `col-start-4` puts it under the name column by construction. -->
-          <div
-            data-testid="row-secondary-lg"
-            class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10"
-          >
-            <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
-                 the row's one meta strip and it stays legible only while it has
-                 an order and a shrink policy — a future badge goes here, in
-                 this order, or it does not go in the row at all. The slug is
-                 the only shrinkable item, so the identity ellipsizes rather
-                 than the chips being crushed, and it is `select-all` because a
-                 double-click under plain text selection takes one hyphenated
-                 segment, not the slug. Meta ink sits on this container so the
-                 slug inherits it. -->
-            <code
-              v-if="agentNameParts(agent).secondary"
-              data-testid="agent-slug-lg"
-              class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
-            >{{ agentNameParts(agent).secondary }}</code>
-            <!-- #471: subscription-pressure badge (shared predicate, unchanged
-                 — only its home moved off the name cell). First in the line: a
-                 problem signal escalates to the front, as on the grid tile. -->
-            <span
-              v-if="pressureBadgeFor(agent.name)"
-              class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
-              :class="pressureBadgeFor(agent.name).level === 'crit'
-                ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
-                : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
-              :title="pressureBadgeFor(agent.name).title"
+            <!-- Secondary line (grid row 2, under the name column through the
+                 arrow). Definite placement in BOTH axes is load-bearing, here and
+                 on the meter below: with sparse auto-placement this item's
+                 definite column would bump the cursor to row 2, and the meter's
+                 2-row span would then land in rows 2–3 — an implicit third row
+                 hanging below every line. Always rendered, so a row is the same
+                 height with or without content on it. `pl-[5.125rem]` is gone:
+                 `col-start-4` puts it under the name column by construction. -->
+            <div
+              data-testid="row-secondary-lg"
+              class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10"
             >
-              {{ pressureBadgeFor(agent.name).text }}
-            </span>
-            <RuntimeBadge
-              v-if="showsRuntimeBadgeInList(agent)"
-              data-testid="runtime-badge"
-              :runtime="agent.runtime"
-              :show-label="false"
-              class="flex-shrink-0"
-            />
-            <template v-if="getAgentTags(agent).length > 0">
+              <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
+                   the row's one meta strip and it stays legible only while it has
+                   an order and a shrink policy — a future badge goes here, in
+                   this order, or it does not go in the row at all. The slug is
+                   the only shrinkable item, so the identity ellipsizes rather
+                   than the chips being crushed, and it is `select-all` because a
+                   double-click under plain text selection takes one hyphenated
+                   segment, not the slug. Meta ink sits on this container so the
+                   slug inherits it. -->
+              <code
+                v-if="agentNameParts(agent).secondary"
+                data-testid="agent-slug-lg"
+                class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
+              >{{ agentNameParts(agent).secondary }}</code>
+              <!-- #471: subscription-pressure badge (shared predicate, unchanged
+                   — only its home moved off the name cell). First in the line: a
+                   problem signal escalates to the front, as on the grid tile. -->
               <span
-                v-for="tag in getAgentTags(agent).slice(0, 3)"
-                :key="tag"
-                class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20 flex-shrink-0"
-                :title="'#' + tag"
+                v-if="pressureBadgeFor(agent.name)"
+                class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
+                :class="pressureBadgeFor(agent.name).level === 'crit'
+                  ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
+                  : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
+                :title="pressureBadgeFor(agent.name).title"
               >
-                #{{ tag }}
+                {{ pressureBadgeFor(agent.name).text }}
               </span>
-              <span
-                v-if="getAgentTags(agent).length > 3"
-                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
-              >
-                +{{ getAgentTags(agent).length - 3 }}
-              </span>
-            </template>
-          </div>
+              <RuntimeBadge
+                v-if="showsRuntimeBadgeInList(agent)"
+                data-testid="runtime-badge"
+                :runtime="agent.runtime"
+                :show-label="false"
+                class="flex-shrink-0"
+              />
+              <template v-if="getAgentTags(agent).length > 0">
+                <span
+                  v-for="tag in getAgentTags(agent).slice(0, 3)"
+                  :key="tag"
+                  class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20 flex-shrink-0"
+                  :title="'#' + tag"
+                >
+                  #{{ tag }}
+                </span>
+                <span
+                  v-if="getAgentTags(agent).length > 3"
+                  class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
+                >
+                  +{{ getAgentTags(agent).length - 3 }}
+                </span>
+              </template>
+            </div>
 
-          <!-- Capacity meter (track 10 — carries the row's right inset). Its
-               `ml-1` is gone: the container's `gap-x-4` supplies the spacing,
-               and the header's matching spacer is the meter's own 6px. -->
-          <CapacityMeter
-            data-testid="capacity-meter-lg"
-            :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
-            :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
-            :height="48"
-            :width="6"
-            class="flex-shrink-0 lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:self-stretch lg:mr-4"
-          />
+            <!-- Capacity meter (track 10 — carries the row's right inset). Its
+                 `ml-1` is gone: the container's `gap-x-4` supplies the spacing,
+                 and the header's matching spacer is the meter's own 6px. -->
+            <CapacityMeter
+              data-testid="capacity-meter-lg"
+              :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
+              :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
+              :height="48"
+              :width="6"
+              class="flex-shrink-0 lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:self-stretch lg:mr-4"
+            />
         </div>
 
         <!-- Tablet layout (md, < lg) -->
