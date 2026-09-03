@@ -337,3 +337,37 @@ describe('structural: all three List breakpoints render the same names (#2358 AC
     for (const b of badges) expect(b).toContain('showsRuntimeBadgeInList(agent)')
   })
 })
+
+describe('structural: the Grid tile shows the same two names (#2358 AC #3)', () => {
+  it('renders the primary via agentNameParts and no second resolution', () => {
+    const tpl = templateOf(TILE)
+    expect(tpl).toContain('agentNameParts(agent).primary')
+    expect(tpl).not.toContain('agentDisplayName(')
+  })
+
+  it('puts the slug on the EXISTING meta line, copyable, and not draggable', () => {
+    const tpl = templateOf(TILE)
+    const el = tpl.match(/<code[\s\S]{0,400}?agent-slug-tile[\s\S]{0,400}?<\/code>/)
+    expect(el, 'the tile slug renders').toBeTruthy()
+    expect(el[0]).toContain('agentNameParts(agent).secondary')
+    // `.gtile` sets `user-select: none` and FleetGrid.onTilePointerDown starts a
+    // drag unless the target is inside `.nodrag` — without both of these the
+    // slug can be neither selected nor copied, and a click drags the tile.
+    expect(el[0]).toContain('nodrag')
+    expect(TILE).toContain('user-select: all')
+    // It rides `.t-repo`, which is always rendered: a third identity line would
+    // compress the zone rhythm of labelled tiles only, inside a fixed cell.
+    expect(tpl).toMatch(/class="t-repo"[\s\S]{0,900}?agent-slug-tile/)
+  })
+
+  it('gives the slug its own ellipsis and ink rather than inheriting the line', () => {
+    // `.t-repo span` targets `span`, so a `code` gets no ellipsis from it; and
+    // `.t-repo.local` ghosts the whole line for a repo-less agent, which the
+    // identity must not be.
+    const rule = TILE.match(/\.t-slug\s*\{[\s\S]*?\}/)
+    expect(rule, '.t-slug rule exists').toBeTruthy()
+    expect(rule[0]).toContain('text-overflow: ellipsis')
+    expect(rule[0]).toContain('color: var(--gv-muted)')
+    expect(rule[0]).toContain('max-width')
+  })
+})
