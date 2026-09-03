@@ -540,10 +540,23 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     draws). No email ⇒ empty roster. Avatar URLs are relative to the portal host;
     the browser resolves them against whatever base it loaded the portal from.
 
-    #138: each card also carries its briefing — an agent ``description`` and the
-    client-visible ``playbooks`` — resolved at sign-in so the new-chat screen
-    renders with zero extra fetches. Enrichment is best-effort and parallel: a
-    stopped/slow agent leaves the defaults (None/[]) and never blocks the roster.
+    #138 shipped the briefing — an agent ``description`` and its client-visible
+    ``playbooks`` — ON this payload, resolved at sign-in so the new-chat screen
+    rendered with zero extra fetches. #2163 takes it OFF: this call now awaits
+    NO agent HTTP at all. It is two SQL reads and one Docker list, and its
+    latency is its own rather than the slowest agent's.
+
+    That fan-out was awaited with ``gather``, which waits for ALL — so the
+    Workspace's first paint was bounded by the worst agent in the fleet, for
+    every user, on every sign-in, and one wedged agent made everyone's sign-in
+    take five seconds. Enrichment being "best-effort and parallel" bounded the
+    BLAST RADIUS (a failing agent left defaults) but not the LATENCY.
+
+    Every card therefore ships ``briefing_state="pending"`` with the briefing
+    fields at their defaults; the client hydrates them through ``get_briefings``
+    (``GET /briefings``) off the critical path. A headless ent#83 consumer that
+    wants the briefing makes that second call — the state field is on the card
+    so it can tell "not fetched yet" from "fetched, and this agent has none".
     """
     from services import tts_service
     tts_ready = tts_service.is_available()  # global key check, once per roster load
@@ -570,21 +583,77 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      availability=availability.get(r["agent_name"], "unknown"))
         for r in rows
     ]
-
-    # #138 briefing enrichment — parallel + fail-soft (see _agent_briefing).
-    import asyncio
-    briefings = await asyncio.gather(
-        *[_agent_briefing(c.name, c.availability) for c in cards], return_exceptions=True
-    )
-    for card, b in zip(cards, briefings):
-        if isinstance(b, tuple):
-            _apply_briefing(card, b)
+    # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
+    # what keeps that honest — an empty briefing with no state marker is
+    # indistinguishable from an agent that has nothing to offer, and the client
+    # would either never hydrate or hydrate forever.
+    for card in cards:
+        card.briefing_state = "pending"
 
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
     )
+
+
+async def get_briefings(email: str | None, requested: list[str] | None = None,
+                        include_owned: bool = False) -> PortalBriefings:
+    """The briefings the roster no longer waits for (#2163).
+
+    ``requested is None`` means the whole roster (the client's background batch,
+    which fills the picker and the composer's ``/`` typeahead); a list filters
+    it (the active agent's own hints, so those arrive at that agent's speed
+    rather than the slowest one's).
+
+    **Scope is the roster, and the roster's own strings are what we iterate.**
+    ``requested`` is only ever tested for SET MEMBERSHIP; the name that reaches
+    ``agent-{name}:8000`` always comes from a DB row, so a crafted name cannot
+    steer the HTTP target. A name that is unknown or off-roster is dropped
+    silently rather than answered — there is no existence oracle here, and the
+    caller already knows its own roster (Invariant #8).
+
+    **No Docker read.** ``_agent_briefing`` ATTEMPTS ``unknown`` by design: it
+    reaches the agent by DNS over the agent network, so a container-state read
+    says nothing about whether the agent answers HTTP. A stopped or absent
+    container fails its connect immediately under the bound and lands as
+    ``unavailable`` — the same verdict a skip would have produced, for one
+    fewer fleet-wide Docker call moments after the roster made one.
+    ``get_agent_card`` still takes its single tri-state read, because the page
+    renders the availability chip.
+    """
+    roster_names = [r["agent_name"] for r in _roster_rows(email, include_owned)]
+    if requested is None:
+        selected = roster_names
+    else:
+        wanted = set(requested)
+        selected = [n for n in roster_names if n in wanted]
+    if not selected:
+        return PortalBriefings(briefings={})
+
+    # Per REQUEST, never module-level: an asyncio.Semaphore binds to the first
+    # loop that creates a waiter on it, so a module-level one raises "bound to a
+    # different event loop" the second time this runs under `asyncio.run`.
+    sem = asyncio.Semaphore(_BRIEFING_CONCURRENCY)
+
+    async def _one(name: str):
+        # Acquire OUTSIDE the wall clock. Inside it, an agent queued behind the
+        # permits would burn its whole budget waiting for a slot and time out
+        # spuriously — rounds 2+ of a large batch would all read `unavailable`.
+        async with sem:
+            return await _bounded_briefing(name, "unknown")
+
+    results = await asyncio.gather(*[_one(n) for n in selected], return_exceptions=True)
+
+    out: dict[str, PortalBriefing] = {}
+    for name, res in zip(selected, results):
+        briefing, ok = AgentBriefing(), False
+        if isinstance(res, tuple) and len(res) == 2:
+            candidate, flag = res
+            if isinstance(candidate, tuple):
+                briefing, ok = candidate, bool(flag)
+        out[name] = _briefing_to_model(briefing, ok)
+    return PortalBriefings(briefings=out)
 
 
 def _humanize_playbook(name: str) -> str:
