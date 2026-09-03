@@ -1759,8 +1759,8 @@ two per-viewer limiter keys: the unfiltered batch is far tighter, because one ca
 costs one bounded agent request per rostered agent. It makes **no Docker read** —
 `_agent_briefing` attempts `unknown` by design (it reaches the agent by DNS, so
 container state says nothing about whether it answers HTTP), so a stopped container
-fails its connect under the bound and lands `unavailable`, the same verdict a skip would
-give, one fleet Docker call cheaper. Every remaining briefing — the batch and the agent
+refuses the connect, no leg of the briefing gets an answer, and it lands `unavailable`
+— the same verdict a skip would give, one fleet Docker call cheaper. Every remaining briefing — the batch and the agent
 page's single one — runs under ONE bound: `_BRIEFING_HTTP_TIMEOUT_SECONDS` (2.0, httpx,
 PER PHASE) inside `_BRIEFING_BUDGET_SECONDS` (3.0, wall clock, `_bounded_briefing`); the
 literal `5.0` it replaces was never a ceiling, because the function makes two sequential
@@ -1768,8 +1768,21 @@ GETs. The result rides the card as **`briefing_state`** — `pending | ready |
 unavailable`, all three SERVER-owned, defaulting to `"ready"` so an older payload reads
 as resolved-inline. A bound trip must never pass for an agent that genuinely has no
 hints, and a headless ent#83 client must not have to reinvent the third value from empty
-fields; `ready` means "reached a verdict inside its budget", not "returned data". It is
-a **data-state marker, not a capability** — the #2128 rule below is untouched. API
+fields; `ready` means THE AGENT ANSWERED inside the budget, not "returned data". **The
+verdict follows reachability, never which door the failure exited by** — the first cut
+got that wrong and measurement caught it: `_agent_briefing` swallows HTTP failures in a
+`try/except` per GET leg AND an outer one, so a wedged agent (httpx `ReadTimeout`) and a
+missing container (`ConnectError`) both returned an ordinary empty briefing INSIDE the
+budget and read `ready`, i.e. exactly the hint-less card this field exists to prevent —
+and since the client retries only `unavailable`, it never asked again that session. Only
+the tarpit shape, which trips the wall clock, was correct. So reachability is now
+reported separately from content: every exit of `_agent_briefing` that got no answer out
+of the agent returns the `_UNREACHED` sentinel, which `_bounded_briefing` reads by
+IDENTITY (it compares EQUAL to an empty briefing an agent legitimately produced, and
+that one must stay `ready`). One leg answering is enough — the client renders
+`unavailable` INSTEAD of the fields, so a half-answered briefing must not throw away the
+description it did get. It is a **data-state marker, not a capability** — the #2128 rule
+below is untouched. API
 consumers that want the briefing make the second call. On the client, three
 `ScanlineReveal` zones (stage, conversation body, briefing) each key on their own "no
 data yet", and `ScanlineReveal` gained an additive `content-class` prop because

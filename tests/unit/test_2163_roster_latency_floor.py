@@ -708,3 +708,260 @@ def test_the_route_is_declared_in_the_viewer_scoped_block():
     src = _inspect.getsource(portal_router)
     assert src.index('@router.get("/sessions"') < src.index('@router.get("/briefings"')
     assert src.index('@router.get("/briefings"') < src.index('@router.get("/agents/{agent_name}/page"')
+
+
+# ---------------------------------------- the verdict follows REACHABILITY only
+#
+# Measured at verification and fixed here: `briefing_state` for the SAME unreachable
+# agent depended on which door the failure exited by —
+#
+#   tarpit  (bytes trickle, no per-phase timer fires)  -> unavailable  (correct)
+#   wedged  (`kill -STOP`, httpx ReadTimeout at 2.0 s) -> ready        (wrong)
+#   refused (container gone, ConnectError, ~0 s)       -> ready        (wrong)
+#
+# — because `_agent_briefing` swallows HTTP failures in a `try/except` per GET
+# leg AND an outer one, so the two COMMONEST shapes returned an ordinary empty
+# briefing well inside the budget and `_bounded_briefing` truthfully reported
+# "reached a verdict". The consequence is the one D4 exists to prevent: a
+# genuinely hint-less agent on screen, and no retry, because
+# `shouldRequestBriefing` retries only `unavailable`.
+#
+# These cases pin every shape to its verdict at BOTH doors — the agent page
+# (`get_agent_card`) and the batch (`get_briefings`) — because the measurement
+# found the behaviour shared, and one door drifting is exactly how it comes back.
+
+class _Resp:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+
+    def json(self):
+        return self._payload
+
+
+HEALTHY_INFO = {"description": "Atlas does research.", "use_cases": []}
+HEALTHY_SKILLS = {"skills": [{"name": "weekly-report", "user_invocable": True}]}
+
+
+def _wire_shape(monkeypatch, s, shape: str):
+    """Point the REAL `_agent_briefing`'s HTTP edge at an agent behaving like
+    `shape`, and return the URLs it was asked for.
+
+    The whole point of this fixture is that `_agent_briefing` runs for real:
+    stubbing it (as the `svc` fixture does) skips the very `try/except`s that
+    produced the defect, so a stubbed version of these tests would have passed
+    against the broken code.
+    """
+    from contextlib import asynccontextmanager
+
+    import httpx
+
+    calls: list[str] = []
+
+    async def _get(url, **kw):
+        calls.append(url)
+        if shape == "wedged":
+            # What `kill -STOP` produces: the connect is accepted, the read
+            # never answers, httpx gives up at its per-phase timeout.
+            raise httpx.ReadTimeout("read timed out")
+        if shape == "refused":
+            raise httpx.ConnectError("connection refused")
+        if shape == "connect_timeout":
+            raise httpx.ConnectTimeout("connect timed out")
+        if shape == "tarpit":
+            # Bytes trickle forever: no per-phase timer ever fires, so only the
+            # wall clock returns at all.
+            await asyncio.Event().wait()
+        if shape == "server_error":
+            return _Resp(500, {})
+        if shape == "half" and url.endswith("/api/skills"):
+            raise httpx.ReadTimeout("read timed out")
+        if url.endswith("/api/template/info"):
+            return _Resp(200, HEALTHY_INFO if shape in ("healthy", "half") else {})
+        return _Resp(200, HEALTHY_SKILLS if shape == "healthy" else {"skills": []})
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=_get)
+
+    @asynccontextmanager
+    async def _fake_client(name, timeout=None):
+        yield client
+
+    import services.agent_auth as agent_auth
+    monkeypatch.setattr(agent_auth, "agent_httpx_client", _fake_client)
+    return calls
+
+
+@pytest.fixture()
+def wired(monkeypatch):
+    """`svc`'s roster and Docker stubs, but the REAL `_agent_briefing` left in
+    place — the agent's HTTP edge is what gets wired, per shape."""
+    import database
+
+    from client_portal import service as s
+
+    monkeypatch.setattr(s.db, "get_shared_roster", lambda e: _rows(FLEET))
+    monkeypatch.setattr(s.db, "get_owned_roster", lambda e: [])
+
+    async def _map(names):
+        return {n: "ready" for n in names}
+
+    async def _one(name):
+        return "ready"
+
+    monkeypatch.setattr(s, "_availability_map", _map)
+    monkeypatch.setattr(s, "_agent_availability", _one)
+    monkeypatch.setattr(database.db, "get_connector_config", lambda name: None)
+
+    import services.tts_service as tts
+    monkeypatch.setattr(tts, "is_available", lambda: False)
+    return s
+
+
+def _card_state(s, name="agent-3"):
+    return asyncio.run(s.get_agent_card(EMAIL, name)).briefing_state
+
+
+def _batch_state(s, name="agent-3"):
+    return asyncio.run(s.get_briefings(EMAIL, [name])).briefings[name].state
+
+
+@pytest.mark.parametrize("shape", ["wedged", "refused", "connect_timeout"])
+def test_an_unreachable_agent_reads_unavailable_at_both_doors(wired, monkeypatch, shape):
+    """The defect. Each of these exits the briefing by a DIFFERENT door — a read
+    that never answers, a connect that is refused, a connect that times out —
+    and every one of them returned `ready` with empty fields before this fix,
+    i.e. a card indistinguishable from an agent that simply has no hints.
+
+    Both doors, because the measurement found the behaviour shared and a card
+    that disagrees with the batch about the same agent is its own bug.
+    """
+    s = wired
+    _wire_shape(monkeypatch, s, shape)
+
+    assert _card_state(s) == "unavailable"
+    assert _batch_state(s) == "unavailable"
+
+
+def test_a_tarpit_still_reads_unavailable(wired, monkeypatch):
+    """The one shape that was already correct — it must stay correct, and it
+    must reach that verdict through the wall clock, which is a different
+    mechanism from the reachability flag."""
+    s = wired
+    monkeypatch.setattr(s, "_BRIEFING_BUDGET_SECONDS", 0.05)
+    _wire_shape(monkeypatch, s, "tarpit")
+
+    started = time.perf_counter()
+    assert _card_state(s) == "unavailable"
+    assert _batch_state(s) == "unavailable"
+    assert time.perf_counter() - started < 1.0, "the wall clock did not bound it"
+
+
+def test_an_agent_that_answers_with_nothing_is_ready_not_unavailable(wired, monkeypatch):
+    """The line the fix must NOT cross. An agent that exposes no playbooks and
+    declares no description ANSWERED — retrying it cannot change that, and
+    showing "couldn't load" where the honest copy is "no hints" would trade one
+    dishonest state for another (D4)."""
+    s = wired
+    _wire_shape(monkeypatch, s, "completed_empty")
+
+    assert _card_state(s) == "ready"
+    assert _batch_state(s) == "ready"
+
+
+def test_an_agent_that_answers_an_error_is_still_reachable(wired, monkeypatch):
+    """A 500 on both legs is the agent talking. `answered` is therefore recorded
+    BEFORE the status check: a retry would fetch the same 500, so the honest
+    state is "no hints", not "couldn't reach it"."""
+    s = wired
+    _wire_shape(monkeypatch, s, "server_error")
+
+    assert _card_state(s) == "ready"
+    assert _batch_state(s) == "ready"
+
+
+def test_one_leg_answering_keeps_the_briefing_ready(wired, monkeypatch):
+    """Reachability is ANY leg, not every leg — deliberately. The client renders
+    `unavailable` INSTEAD of the fields, so calling a half-answered briefing
+    unreachable would hide the description the other leg did return."""
+    s = wired
+    _wire_shape(monkeypatch, s, "half")
+
+    card = asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
+    assert card.briefing_state == "ready"
+    assert card.description == "Atlas does research."
+    entry = asyncio.run(s.get_briefings(EMAIL, ["agent-3"])).briefings["agent-3"]
+    assert entry.state == "ready" and entry.description == "Atlas does research."
+
+
+def test_a_healthy_agent_is_ready_with_its_hints(wired, monkeypatch):
+    """The control. Without it every assertion above is satisfied by a fixture
+    that never reaches the agent at all."""
+    s = wired
+    calls = _wire_shape(monkeypatch, s, "healthy")
+
+    card = asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
+    assert card.briefing_state == "ready"
+    assert card.description == "Atlas does research."
+    assert [p.starter_prompt for p in card.playbooks] == ["/weekly-report "]
+    assert any(u.endswith("/api/template/info") for u in calls)
+    assert any(u.endswith("/api/skills") for u in calls)
+
+
+def test_a_failure_before_the_first_request_is_unreachable(wired, monkeypatch):
+    """The outer `except` covers everything from building the client to shaping
+    the answer. Which empty briefing it returns now depends on whether the agent
+    had answered: nothing was ever asked here, so this is not a verdict."""
+    s = wired
+
+    def _explodes(name, timeout=None):
+        raise RuntimeError("no agent here")
+
+    import services.agent_auth as agent_auth
+    monkeypatch.setattr(agent_auth, "agent_httpx_client", _explodes)
+
+    assert _card_state(s) == "unavailable"
+    assert _batch_state(s) == "unavailable"
+
+
+def test_unreached_is_read_by_identity_not_equality(wired, monkeypatch):
+    """Why `_bounded_briefing` uses `is`. The sentinel IS an empty
+    `AgentBriefing`, so it compares equal to one an agent legitimately produced
+    — swap `is` for `==` and every hint-less-but-healthy agent starts claiming
+    it could not be reached."""
+    s = wired
+
+    assert s._UNREACHED == s.AgentBriefing()      # equal...
+    assert s._UNREACHED is not s.AgentBriefing()  # ...but not the same object
+
+    async def completed_empty(name, availability="ready"):
+        return s.AgentBriefing()
+
+    monkeypatch.setattr(s, "_agent_briefing", completed_empty)
+    assert asyncio.run(s._bounded_briefing("agent-3", "ready"))[1] is True
+
+    async def unreached(name, availability="ready"):
+        return s._UNREACHED
+
+    monkeypatch.setattr(s, "_agent_briefing", unreached)
+    briefing, ok = asyncio.run(s._bounded_briefing("agent-3", "ready"))
+    assert ok is False
+    # And the sentinel does not ESCAPE the helper: callers get a fresh empty
+    # briefing, so the identity bit cannot be re-fed in and read a second time.
+    assert briefing is not s._UNREACHED
+
+
+def test_every_answerless_exit_of_the_briefing_returns_the_sentinel():
+    """A source guard, because the failure direction is silent: a new exit that
+    returns a bare `AgentBriefing()` reads as `ready` and the card goes back to
+    looking hint-less. Every exit that has no answer from the agent must route
+    through `_UNREACHED` — the availability skip, the both-legs-failed check,
+    and the outer `except`'s unanswered branch."""
+    from client_portal import service as s
+
+    src = inspect.getsource(s._agent_briefing)
+    bare = [ln.strip() for ln in src.splitlines()
+            if ln.strip() == "return AgentBriefing()"]
+    assert not bare, "an answerless exit returns a fresh empty briefing, not _UNREACHED"
+    assert src.count("_UNREACHED") >= 3
+    assert "_UNREACHED" in inspect.getsource(s._bounded_briefing)

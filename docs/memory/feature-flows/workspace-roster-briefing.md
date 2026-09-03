@@ -88,10 +88,13 @@ be a 500 on every background hydration.
 
 `_agent_briefing` **attempts** `unknown` by design — it reaches the agent by DNS
 over the agent network, so a backend Docker-socket fault says nothing about
-whether the agent answers HTTP. A stopped or absent container therefore fails
-its connect immediately under the bound and lands as `unavailable`: the same
-verdict a skip would produce, one fleet-wide Docker call cheaper, moments after
-the roster made one. `get_agent_card` keeps its single tri-state read, because
+whether the agent answers HTTP. A stopped or absent container therefore refuses
+the connect, no leg of the briefing gets an answer, and it lands as
+`unavailable`: the same verdict a skip would produce, one fleet-wide Docker call
+cheaper, moments after the roster made one. That verdict comes from the
+REACHABILITY flag, not the wall clock — a refused connect fails at once, so no
+bound is involved (see the finding below, which is what made this paragraph true
+rather than aspirational). `get_agent_card` keeps its single tri-state read, because
 the page renders the availability chip.
 
 ### The bound: two numbers, both constants
@@ -141,8 +144,32 @@ All three values are the server's. Letting the server say `"ready"` for a bound
 trip would make a wedged agent byte-identical to one that genuinely has nothing
 to offer — the "looks complete" class `playbooks_total` already guards one tier
 over — and would force every headless ent#83 client to reinvent the third value
-out of empty fields. `"ready"` means **reached a verdict inside its budget**, not
-"returned data": an agent exposing nothing legitimately briefs empty.
+out of empty fields. `"ready"` means **the agent answered, inside its budget**,
+not "returned data": an agent exposing nothing legitimately briefs empty.
+
+**The verdict follows reachability, never the door the failure exited by.** That
+distinction is the whole of it, and the first cut got it wrong — see the finding
+below. `_agent_briefing` swallows HTTP failures in a `try/except` per GET leg AND
+an outer one, so an unreachable agent returned an ordinary empty briefing well
+inside the budget and published `ready`. Reachability is therefore tracked
+separately from content, on one flag set where those excepts already are: every
+exit that got no answer out of the agent — the availability skip, both legs
+failing at the transport layer, a failure before the first request — returns the
+module-level `_UNREACHED` sentinel, and `_bounded_briefing` reads it by
+**identity**. Identity, not equality: `_UNREACHED` IS an empty `AgentBriefing`
+and compares equal to the one a healthy hint-less agent produces, which must stay
+`ready`. Deliberately not a fifth NamedTuple field (the tuple's positional shape
+is a published contract — `_apply_briefing` and `_briefing_to_model` are
+positional-tolerant by design and three test modules unpack all four fields) and
+deliberately not a raise (`_agent_briefing`'s "degrades to empty, never crashes"
+contract has its own tests, and the exits that still owe an empty briefing keep
+it). Two boundaries are drawn on purpose: a response of ANY status counts as
+reached — a 500 is the agent talking, and a retry fetches the same 500 — and ONE
+leg answering is enough, because the client renders `unavailable` INSTEAD of the
+fields, so calling a half-answered briefing unreachable would hide the
+description the other leg did return. Both doors inherit this from
+`_bounded_briefing`, so the agent page and the batch cannot disagree about the
+same agent.
 
 The default is the non-privileged direction: the field grants nothing and gates
 no affordance, it only says whether a fetch is owed, so an absent field (an
@@ -235,7 +262,16 @@ assertion on a 12-agent fixture passes against the old code too, which is how
 | `test_the_roster_source_no_longer_fans_out` | source pin: no `gather(` / `_agent_briefing(` in `get_roster` (docstring included) |
 | `test_one_hung_agent_does_not_delay_the_other_briefings` | the bound on the batch, budget patched to 0.05 s |
 | `test_a_bound_trip_is_reported_unavailable_not_hintless` | a trip is `unavailable`, on both paths |
-| `test_an_empty_briefing_that_COMPLETED_is_still_ready` | `ok` = verdict, not data |
+| `test_an_empty_briefing_that_COMPLETED_is_still_ready` | `ok` = the agent answered, not "returned data" |
+| `test_an_unreachable_agent_reads_unavailable_at_both_doors` | wedged / refused / connect-timeout, through the REAL `_agent_briefing`, at both doors |
+| `test_a_tarpit_still_reads_unavailable` | the shape that was already right stays right, via the wall clock |
+| `test_an_agent_that_answers_with_nothing_is_ready_not_unavailable` | the line the fix must not cross |
+| `test_an_agent_that_answers_an_error_is_still_reachable` | a 500 on both legs is the agent talking |
+| `test_one_leg_answering_keeps_the_briefing_ready` | reachability is ANY leg, and the description survives |
+| `test_a_healthy_agent_is_ready_with_its_hints` | the control — without it a fixture that never reaches the agent satisfies the rest |
+| `test_a_failure_before_the_first_request_is_unreachable` | the outer `except` owes `_UNREACHED`, not a fresh empty |
+| `test_unreached_is_read_by_identity_not_equality` | `is`, not `==` — the reason the sentinel works |
+| `test_every_answerless_exit_of_the_briefing_returns_the_sentinel` | source guard: a new bare `return AgentBriefing()` would silently read `ready` |
 | `test_briefings_are_roster_scoped_and_iterate_the_roster` | `AGENT-1` / `not-mine` dropped; the DB string is what is briefed |
 | `test_briefings_with_no_filter_cover_the_whole_roster` | the `requested is None` arm |
 | `test_briefings_make_no_docker_read` | both Docker seams stay at 0; every attempt carries `"unknown"` |
@@ -351,46 +387,67 @@ calls and time `GET /briefings?agents=Y` ×10 during it; if p95 exceeds
 `_BRIEFING_HTTP_TIMEOUT_SECONDS`, raise the constants (still well under 5 s).
 
 **The constants are UNCHANGED at 2.0 s / 3.0 s** — nothing measured contradicts
-them, and they are not moved on a guess. But note what the tightening from 5.0 s
-costs if the tail does turn out to be long: per the finding below, a healthy-but-
-slow agent does not render as `unavailable`, it renders as an agent with **no
-hints**, and the client never retries it.
+them, and they are not moved on a guess. What the tightening from 5.0 s costs if
+the tail does turn out to be long is now an HONEST failure rather than a silent
+one: before the fix below, a healthy-but-slow agent that tripped the per-phase
+timeout rendered as an agent with **no hints** and was never retried; it now
+reports `unavailable`, which says "couldn't load" and earns its one retry. The
+human tail step is still owed — the constants should be raised if p95 exceeds
+them — but the direction of failure while that is unknown is no longer silent.
 
-### Finding at verification — an unreachable agent does not always read `unavailable`
+### Finding at verification — an unreachable agent did not always read `unavailable` (FIXED)
 
-Measured, not inferred. `briefing_state` for the SAME unreachable agent depends
-on which door the failure exits by:
+Measured, not inferred. `briefing_state` for the SAME unreachable agent depended
+on which door the failure exited by:
 
 | Shape | `/briefings` entry | `get_agent_card` | Latency |
 |---|---|---|---|
 | **tarpit** | `unavailable` ✅ | `unavailable` ✅ | 3.0 s (wall clock) |
-| **wedged** (`kill -STOP`) | `ready` ⚠️ | `ready` ⚠️ | 2.0 s (httpx) |
-| **refused** (container gone) | `ready` ⚠️ | `ready` ⚠️ | ~0 s |
+| **wedged** (`kill -STOP`) | `ready` ⚠️ → **`unavailable`** ✅ | `ready` ⚠️ → **`unavailable`** ✅ | 2.0 s (httpx) |
+| **refused** (container gone) | `ready` ⚠️ → **`unavailable`** ✅ | `ready` ⚠️ → **`unavailable`** ✅ | ~0 s |
 
-The cause is structural, not a slip: `ok=False` is reachable only from the
+The cause was structural, not a slip: `ok=False` was reachable only from the
 `availability` early return, a non-tuple return, or the wall clock tripping.
 Every HTTP failure is swallowed one level down — `_agent_briefing` has a
 `try/except` per GET leg *and* an outer `except Exception` — so an httpx
-`ReadTimeout` or `ConnectError` returns a normal, empty `AgentBriefing()` well
-inside the budget, and `_bounded_briefing` correctly reports that it "reached a
-verdict", which is what its docstring defines `ok` to mean.
+`ReadTimeout` or `ConnectError` returned a normal, empty `AgentBriefing()` well
+inside the budget, and `_bounded_briefing` correctly reported that it "reached a
+verdict", which was what its docstring defined `ok` to mean.
 
-The consequence is the one D4 was written to prevent: the two commonest
-unreachable shapes render as a genuinely hint-less agent ("Start a conversation
-below."), and because `shouldRequestBriefing` retries only `unavailable`, the
-client never tries again for the rest of the session. It also makes
-`get_briefings`' own docstring wrong where it says a stopped or absent container
-"lands as `unavailable`" — measured, it lands as `ready`. Note `/briefings`
-passes `availability="unknown"` for every name by design (no Docker read), so
-the `availability` door — the one that *does* yield `unavailable` — is never
-taken on that route at all.
+The consequence was the one D4 was written to prevent: the two commonest
+unreachable shapes rendered as a genuinely hint-less agent ("Start a
+conversation below."), and because `shouldRequestBriefing` retries only
+`unavailable`, the client never tried again for the rest of the session. It also
+made `get_briefings`' own docstring wrong where it said a stopped or absent
+container "lands as `unavailable`" — measured, it landed as `ready`. Note
+`/briefings` passes `availability="unknown"` for every name by design (no Docker
+read), so the `availability` door — the one that *does* yield `unavailable` —
+is never taken on that route at all, which is why the reachability flag and not
+that door is what makes the batch honest.
 
-**Not changed here** (a verification stage measures; it does not redesign). The
-honest fix is for `_agent_briefing` to report *reachability* separately from
-*content* — one flag, set where the excepts already are — so `ok` can mean "the
-agent answered". Recorded for the lane owner's decision before the PR leaves
-draft: either the behaviour changes, or the two docstrings and D4's rationale
-are corrected to say that only the wall-clock shape is distinguishable.
+**Fixed before the PR left draft, exactly as the measurement prescribed**:
+`_agent_briefing` reports *reachability* separately from *content* — one flag,
+set where those excepts already are — so `ok` means "the agent answered". Every
+answerless exit returns the `_UNREACHED` sentinel and `_bounded_briefing` reads
+it by identity (see the tri-state section above for why identity and not a fifth
+tuple field). The verdict now depends on whether the agent could be reached and
+never on which exception path was taken, at BOTH doors, and the two docstrings
+this finding called wrong (`get_briefings`' "lands as `unavailable`" and
+`_bounded_briefing`'s "reached a verdict") are corrected rather than the code
+being left to contradict them.
+
+The alternative — correcting the docs to admit that only the wall-clock shape is
+distinguishable — was rejected against **AC2**: the two commonest shapes would
+keep rendering as a genuinely hint-less agent ("Start a conversation below."),
+which is the "silently empty" state AC2 forbids and ent#380's "no dead chrome"
+rule already outlawed, and `shouldRequestBriefing` would never retry it, so the
+client could not recover in-session. Documenting a user-visible failure is not
+the same as not having one.
+
+The client's retry rule is **unchanged** and needed no change: it already retried
+`unavailable` once per session (`shouldRequestBriefing`). The defect was that the
+server never reached that state for the two shapes that matter, so this fix is
+what activates the rule that was already there.
 
 **AC3 is unaffected** — it is a latency criterion, and the latency numbers above
 meet it in every shape.

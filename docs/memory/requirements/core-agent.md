@@ -932,10 +932,30 @@ box; the words are recorded either way and handed to the agent's
   `pending | ready | unavailable`, default `"ready"` so an older payload reads
   as resolved-inline. A bound trip reports `unavailable`; it must never pass for
   an agent that genuinely has no hints, and a headless ent#83 client must not
-  have to reinvent the third value from empty fields. `ready` means "reached a
-  verdict inside its budget", NOT "returned data". A data-state marker, never a
+  have to reinvent the third value from empty fields. `ready` means THE AGENT
+  ANSWERED inside the budget, NOT "returned data". A data-state marker, never a
   capability — #2128's rule (the roster payload is the portal capability
   channel) is untouched.
+- **The verdict follows REACHABILITY, not the door the failure exited by.**
+  Measured at verification and fixed before ship: `_agent_briefing` swallows
+  HTTP failures in a `try/except` per GET leg AND an outer one, so a wedged
+  agent (httpx `ReadTimeout`) and a missing container (`ConnectError`) — the two
+  commonest unreachable shapes — returned an ordinary empty briefing well inside
+  the budget and were published as `ready`. Only the tarpit shape, which trips
+  the wall clock, was correct. That is the hint-less-agent state this field
+  exists to prevent, and it is unrecoverable in-session because
+  `shouldRequestBriefing` retries only `unavailable`. Reachability is therefore
+  reported separately from content: every exit of `_agent_briefing` that got no
+  answer out of the agent (the availability skip, both legs failing at the
+  transport layer, a failure before the first request) returns the `_UNREACHED`
+  sentinel, read by IDENTITY in `_bounded_briefing` — equality would sweep up
+  the empty briefing a healthy agent legitimately produces. A response of ANY
+  status counts as reached (a 500 is the agent talking; retrying returns the
+  same 500), and ONE leg answering is enough, because the client renders
+  `unavailable` INSTEAD of the fields and a half-answered briefing must not
+  discard the description it did get. Both doors — `get_agent_card` and
+  `GET /briefings` — inherit it from `_bounded_briefing`, so they cannot
+  disagree about the same agent.
 - **Route**: `GET /api/enterprise/client-portal/briefings[?agents=a,b]`,
   viewer-scoped like `/sessions`. Scope is the roster and the ROSTER's strings
   are what is iterated, so a crafted name cannot steer the agent HTTP target;

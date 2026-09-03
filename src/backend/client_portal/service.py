@@ -516,8 +516,10 @@ async def get_agent_card(email: str | None, agent_name: str,
                         availability=availability)
     # #2163: exactly one briefing (not N), and now a BOUNDED one — this page's
     # floor was the agent's own 5s-per-phase HTTP, so a wedged agent made its
-    # own page hang. `ok` is what makes a bound trip legible: without it an
-    # unreachable agent's card is byte-identical to one that has no hints.
+    # own page hang. `ok` is what makes an unreachable agent legible: without it
+    # this card is byte-identical to one that simply has no hints. It answers
+    # "did the agent answer", not "which door did the failure exit by", so the
+    # page and the `/briefings` batch cannot disagree about the same agent.
     briefing, ok = await _bounded_briefing(agent_name, availability)
     if isinstance(briefing, tuple):
         _apply_briefing(card, briefing)
@@ -616,11 +618,14 @@ async def get_briefings(email: str | None, requested: list[str] | None = None,
     **No Docker read.** ``_agent_briefing`` ATTEMPTS ``unknown`` by design: it
     reaches the agent by DNS over the agent network, so a container-state read
     says nothing about whether the agent answers HTTP. A stopped or absent
-    container fails its connect immediately under the bound and lands as
-    ``unavailable`` — the same verdict a skip would have produced, for one
-    fewer fleet-wide Docker call moments after the roster made one.
-    ``get_agent_card`` still takes its single tri-state read, because the page
-    renders the availability chip.
+    container refuses the connect, no leg of the briefing gets an answer, and
+    the entry lands as ``unavailable`` — the same verdict a skip would have
+    produced, for one fewer fleet-wide Docker call moments after the roster made
+    one. (That is a REACHABILITY verdict, not the wall clock: the connect fails
+    at once, so no bound is involved — see ``_UNREACHED``, which is what makes
+    this paragraph true rather than aspirational. #2163.) ``get_agent_card``
+    still takes its single tri-state read, because the page renders the
+    availability chip.
     """
     roster_names = [r["agent_name"] for r in _roster_rows(email, include_owned)]
     if requested is None:
@@ -756,6 +761,35 @@ class AgentBriefing(NamedTuple):
     playbooks_total: int = 0
 
 
+# #2163 (measured at verification): the ONE "we never reached the agent" answer.
+#
+# `_bounded_briefing`'s `ok` is what the card publishes as `briefing_state`, and
+# it was reachable as `False` only from the availability skip, a non-tuple
+# return, or the wall clock. Every HTTP failure was swallowed one level down —
+# `_agent_briefing` keeps a `try/except` per GET leg AND an outer one — so a
+# `ReadTimeout` (a wedged agent) or a `ConnectError` (a container that is gone)
+# returned an ordinary empty briefing well inside the budget and the card said
+# `ready`. Measured: the SAME unreachable agent read `unavailable` in the tarpit
+# shape and `ready` in the two commonest ones, which is precisely the "looks
+# complete" class D4 exists to prevent — and since the client retries only
+# `unavailable`, it never asked again for the rest of the session.
+#
+# So reachability is reported SEPARATELY from content, and this is how: every
+# exit of `_agent_briefing` that did not get an answer out of the agent returns
+# THIS object, and `_bounded_briefing` reads it by IDENTITY. Deliberately not a
+# fifth NamedTuple field — the tuple's positional shape is a published contract
+# (`_apply_briefing` and `_briefing_to_model` are positional-tolerant by design,
+# and three test modules unpack all four fields), and deliberately not a raise —
+# `_agent_briefing`'s "degrades to empty, never crashes" contract has its own
+# tests and other exits legitimately keep it.
+#
+# It IS an ordinary empty `AgentBriefing`, so every equality assertion, stub and
+# positional consumer is unaffected; only identity carries the extra bit. A stub
+# or a caller that builds its own `AgentBriefing()` is therefore NOT unreached —
+# which is the right reading: it produced a briefing, it just has nothing in it.
+_UNREACHED = AgentBriefing()
+
+
 def _bound_briefing_hints(hints: list) -> list:
     """#2101: applied as one final slice at ``_agent_briefing``'s return so it
     binds whichever tier populated the list — never inside a tier's own
@@ -821,8 +855,19 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
     connector allow-list ∩ ``user_invocable``, from ``/api/skills``), falling
     back to the template-declared ``use_cases`` ("What You Can Ask") when no
     playbook is exposed. The curated exposable-skills config (ent#178) slots
-    into this same seam once it exists. Any failure (agent stopped, slow, no
-    connector) yields ``(None, [])`` so the roster stays fast and never errors.
+    into this same seam once it exists. A failure the agent itself answered for
+    (a 500 on one leg, no connector config, nothing exposed) yields empty fields
+    so the caller stays fast and never errors.
+
+    **Reachability is reported separately from content (#2163).** An exit that
+    never got an answer out of the agent — the availability skip, both GETs
+    failing at the transport layer (`ConnectError`, `ReadTimeout`, anything
+    else `client.get` can raise), or a failure before the first request —
+    returns the ``_UNREACHED`` sentinel instead of a fresh empty briefing, so
+    ``_bounded_briefing`` can tell "the agent said it has no hints" from "the
+    agent said nothing at all". ONE leg answering is enough to count as reached:
+    the client renders ``unavailable`` INSTEAD of the fields, so a half-answered
+    briefing that still carries a description must not throw it away.
 
     #2196: this used to make its OWN ``get_agent_container()`` call per card and
     throw the answer away, collapsing "no container" / "stopped" / "HTTP failed"
@@ -847,13 +892,20 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
     from services.connector_service import resolve_exposed_playbooks
     from database import db as core_db
 
+    # #2163: the reachability flag, kept where the excepts already are. A list
+    # rather than a bool because the two legs below are closures and this must be
+    # readable from the outer `except` as well — including on the paths that fail
+    # before either leg is ever defined.
+    answered: list[bool] = []
     try:
         if availability not in ("ready", "unknown"):
             # Four-tuple like every other exit (#2213): both call sites unpack all
             # four, so a 2-tuple here would raise ValueError for every stopped or
             # unavailable agent — i.e. it would break the roster on exactly the
-            # agents this early return exists to serve cheaply.
-            return AgentBriefing()
+            # agents this early return exists to serve cheaply. `_UNREACHED`
+            # rather than a fresh empty one: nothing was attempted, so this is
+            # not a completed briefing (#2163).
+            return _UNREACHED
 
         base = f"http://agent-{agent_name}:8000"
         async with agent_httpx_client(agent_name, timeout=_BRIEFING_HTTP_TIMEOUT_SECONDS) as client:
@@ -864,6 +916,10 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
                     # call against a nonexistent `/info` — best-effort swallowed the
                     # 404, so descriptions were silently always None (ent#380).
                     r = await client.get(f"{base}/api/template/info")
+                    # Reached, whatever it said (#2163). Recorded BEFORE the
+                    # status check on purpose: a 500 or a 404 is the agent
+                    # answering, and retrying it would not change the answer.
+                    answered.append(True)
                     if r.status_code == 200:
                         info = r.json() or {}
                         return info.get("description") or None, info.get("use_cases") or []
@@ -874,6 +930,7 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
             async def _read_skills():
                 try:
                     r = await client.get(f"{base}/api/skills")
+                    answered.append(True)   # reached (#2163) — see `_read_info`
                     if r.status_code == 200:
                         return (r.json() or {}).get("skills", []) or []
                 except Exception:  # noqa: BLE001
@@ -886,6 +943,13 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
             # away the description the first GET already returned. Each keeps
             # its own try/except, so one failing leg still yields the other.
             (description, use_cases), live = await asyncio.gather(_read_info(), _read_skills())
+
+        if not answered:
+            # Neither leg got a response out of the agent: connect refused, read
+            # never answered, DNS gone. That is NOT a briefing with no hints in
+            # it, and reporting it as one is what made a wedged agent read
+            # `ready` and never get retried (#2163).
+            return _UNREACHED
 
         # Client-visible subset = the operator's connector allow-list ∩
         # user_invocable (same policy the MCP connector advertises). No connector
@@ -936,22 +1000,36 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
         return AgentBriefing(description, _bound_briefing_hints(playbooks),
                              searchable, total)
     except Exception:  # noqa: BLE001 — never let enrichment break the roster
-        return AgentBriefing()
+        # Still degrades to empty rather than crashing (that contract is pinned
+        # by its own tests) — but WHICH empty depends on whether the agent had
+        # answered before this went wrong. A failure to even build the client
+        # never reached it; a failure while shaping an answer we already have
+        # did (#2163).
+        return AgentBriefing() if answered else _UNREACHED
 
 
 async def _bounded_briefing(agent_name: str, availability: str = "ready"):
     """`_agent_briefing` under a WALL-CLOCK bound → `(briefing, ok)` (#2163).
 
-    THE single briefing entry point for every caller that renders one. Never
-    raises: a trip, a raise, or an agent that was never attempted all yield
+    THE single briefing entry point for every caller that renders one — the
+    agent page and the `/briefings` batch, so the two doors cannot disagree
+    about the same agent. Never raises: a trip, a raise, an agent that was never
+    attempted, or an agent that could not be REACHED all yield
     `(AgentBriefing(), False)`, and `ok` is what the caller stamps as
     `briefing_state` — so a wedged agent reports `unavailable` instead of
     passing for one that simply has no hints.
 
-    `ok=True` does NOT mean "we got data": `_agent_briefing` swallows its own
-    failures and an agent with nothing exposed legitimately returns empty
-    fields. It means the call REACHED A VERDICT inside its budget, which is
-    exactly the distinction the client needs to decide whether to retry.
+    `ok=True` does NOT mean "we got data": `_agent_briefing` swallows the
+    failures the agent itself answered for, and an agent with nothing exposed
+    legitimately returns empty fields. It means THE AGENT ANSWERED, inside the
+    budget — which is exactly the distinction the client needs to decide whether
+    retrying could change anything.
+
+    That second half is why `_UNREACHED` is checked here (#2163): the verdict
+    must depend on whether the agent was reachable, never on which door the
+    failure exited by. Before it, a `ReadTimeout` and a `ConnectError` both
+    returned an ordinary empty briefing inside the budget and this function
+    truthfully — and uselessly — reported `ok=True`.
 
     Both `_agent_briefing` and `_BRIEFING_BUDGET_SECONDS` are looked up as
     module globals at CALL time (never bound as default arguments), so a test
@@ -975,6 +1053,10 @@ async def _bounded_briefing(agent_name: str, availability: str = "ready"):
     if not isinstance(briefing, tuple):
         # A stub (or a future refactor) that returns something else must not
         # reach `_apply_briefing`'s positional unpack.
+        return AgentBriefing(), False
+    if briefing is _UNREACHED:
+        # Identity, not equality: an empty briefing an agent actually produced
+        # compares equal to this one and must stay `ready` (#2163).
         return AgentBriefing(), False
     return briefing, True
 
