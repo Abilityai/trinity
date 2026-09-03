@@ -147,11 +147,20 @@ NavBar: Agents entry removed; Dashboard active on '/' || isAgentSection
   legacy tag-key migration block) are simply no longer read.
 - **System-row Run guard (item B)**: the list hides the Run toggle on system
   rows, matching the grid tile — two tabs of one widget must agree. Stopping
-  `trinity-system` remains available on its AgentDetail page. **Hidden means
-  RESERVED, at every breakpoint (#2358)**: `invisible` keeps the box and takes
-  no clicks, where md/base previously used `v-if` and dropped it — which moved
-  the success bar, meter and task counts on exactly the system and shared rows,
-  with no header there to line up against.
+  `trinity-system` remains available on its AgentDetail page. **At `md`, hidden
+  means RESERVED (#2358)**: the three toggles sit BEFORE the `flex-1` success
+  bar on line 2, so a `v-if` that dropped one pulled the success bar ~298px
+  left on exactly the system and shared rows (measured), with no header there
+  to line up against; `invisible` keeps the box, takes no clicks, and is sized
+  by the toggle itself so it cannot drift from a hand-written rem. The meter
+  and task counts never moved — they sit after the `flex-1`, which absorbs the
+  freed space. **At `base` the Run toggle stays DROPPED (`v-if`)**, the
+  opposite call for the opposite geometry: its group is `flex-shrink-0` behind
+  a `flex-1` name, so the chevron is already flush right on every row (measured
+  at 390px: same x present, absent or reserved). A reservation would align
+  nothing and would cost the system row the toggle's ~94px — enough to truncate
+  a labelled `trinity-system` at the narrowest supported width (name 221px →
+  119px, measured), which is what AC #6 forbids.
 - **Backend-authoritative visibility (item A)**: the old page's client-side
   admin gate on the system agent is dropped — `get_accessible_agents` already
   scopes the fleet list server-side, exactly as grid/timeline render it.

@@ -740,15 +740,26 @@
                  a marker that is identical on every row of a single-runtime
                  fleet. The runtime is on the grid tile and Agent Detail. -->
             <div class="flex items-center gap-2 flex-shrink-0">
-              <!-- Reserved, not dropped — see the md note. -->
-              <div :class="{ 'invisible': agent.is_system }">
-                <RunningStateToggle
-                  :model-value="agent.status === 'running'"
-                  :loading="networkStore.isTogglingRunning(agent.name)"
-                  size="sm"
-                  @toggle="handleRunningToggle(agent)"
-                />
-              </div>
+              <!-- DROPPED, not reserved — deliberately the opposite of the md
+                   rule one breakpoint up. This group is `flex-shrink-0` behind
+                   a `flex-1` name, so it is ALREADY flush to the row's right
+                   edge on every row: measured at 390px the chevron sits at the
+                   same x whether the toggle is present, absent or reserved.
+                   A reservation would therefore align nothing, and would take
+                   the toggle's ~94px (label + switch) off the one row that has
+                   no toggle — enough to truncate a labelled `trinity-system`
+                   at the narrowest supported width (name 221px -> 119px,
+                   measured). At md the toggles sit BEFORE the `flex-1` success
+                   bar, so there dropping one really does move a column (the
+                   bar starts ~298px further left) and the reservation earns
+                   its space. -->
+              <RunningStateToggle
+                v-if="!agent.is_system"
+                :model-value="agent.status === 'running'"
+                :loading="networkStore.isTogglingRunning(agent.name)"
+                size="sm"
+                @toggle="handleRunningToggle(agent)"
+              />
               <router-link
                 :to="`/agents/${agent.name}`"
                 class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 transition-colors"
