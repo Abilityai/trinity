@@ -62,19 +62,31 @@ async function mockWorkspace(page) {
     multi_agent_chat_available: false,
   })))
 
+  // `PortalAllSessionsItem` — `id`, not `session_id`. `Portal.vue` reads
+  // `t.id || t.session_id`, so the wrong key would still have worked here and
+  // left a mock that quietly documents a payload the backend never sends.
+  // `unread` is deliberately absent for the same reason: it belongs to
+  // `/chat-state`, and `decorate()` overwrites it from there anyway.
   await page.route(`${API}/sessions*`, (route) => route.fulfill(json({
     sessions: [{
-      session_id: SESSION,
+      id: SESSION,
       agent_name: AGENT,
       title: 'Deploying',
+      created_at: new Date().toISOString(),
       last_message_at: new Date().toISOString(),
-      unread: 0,
+      message_count: 2,
     }],
   })))
 
-  await page.route(`${API}/chat-state*`, (route) => route.fulfill(json({ items: [] })))
+  // `PortalChatState` — the key is `chats`. Empty either way today, so the
+  // wrong key was invisible; it would not have been the moment anyone gave this
+  // thread a star or an unread count.
+  await page.route(`${API}/chat-state*`, (route) => route.fulfill(json({ chats: [] })))
 
+  // `PortalHistory` — `agent_name` rides along on the real payload; the store
+  // never reads it, but the mock is the contract for whoever extends this next.
   await page.route(`${API}/agents/${AGENT}/history*`, (route) => route.fulfill(json({
+    agent_name: AGENT,
     session_id: SESSION,
     messages: [
       { id: 'm1', role: 'user', content: 'How do I run it?' },

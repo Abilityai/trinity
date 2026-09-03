@@ -196,7 +196,7 @@ makes, and on touch it competes with the thread's own scroll.
 | `portalAgentBubble.spec.js` | source structure of both components and both parents (one `v-html`, `:scope > pre`, constants restored, no `console.*`, no `overflow-x`, `gray-750`, tokens only, no bare loading gate) |
 | `portalComposerWiring.spec.js` | **rewritten** — used to require each transcript to define `prose-portal` locally; now requires that neither does |
 | `portalComposerTypeahead.spec.js` | **rewritten** — the conversation's `v-html` count 1 → 0 |
-| `e2e/workspace-code-blocks.spec.js` | @smoke, four `page.route` mocks (roster → sessions → chat-state → history); the FIRST Workspace-thread e2e |
+| `e2e/workspace-code-blocks.spec.js` | @smoke, four `page.route` mocks (roster → sessions → chat-state → history), each shaped from the response model it stands in for (`PortalRoster` / `PortalAllSessionsItem` — `id`, not `session_id` / `PortalChatState` — `chats`, not `items` / `PortalHistory`), so the mock documents the contract rather than whatever the client happens to tolerate; the FIRST Workspace-thread e2e |
 
 **The gap the e2e exists to cover.** vitest runs `environment: 'node'` with no
 DOM, so DOMPurify cannot run in a unit test at all. The `button[data-copy-code]`

@@ -192,7 +192,11 @@ describe('the pre-existing API this module already had', () => {
     expect(typeof copyToClipboard).toBe('function')
   })
 
-  it('and every caller of it still resolves', () => {
+  it('and every caller of it still IMPORTS it', () => {
+    // The import, not just the identifier: three of these files also define a
+    // LOCAL `copyText` wrapper that calls `copyToClipboard`, so a bare mention
+    // matches the call site and would keep passing with the import deleted —
+    // which is the shape of the failure this guard exists for.
     const callers = [
       'components/A2aPanel.vue',
       'components/ConnectorChannelPanel.vue',
@@ -201,7 +205,7 @@ describe('the pre-existing API this module already had', () => {
     ]
     for (const rel of callers) {
       const src = readFileSync(resolve(SRC, rel), 'utf8')
-      expect(src, rel).toMatch(/copyToClipboard/)
+      expect(src, rel).toMatch(/import \{[^}]*\bcopyToClipboard\b[^}]*\} from ['"][^'"]*utils\/clipboard['"]/)
     }
   })
 })
