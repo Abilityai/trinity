@@ -272,7 +272,7 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 
 ### Frontend (`src/frontend/`)
 
-**Key directories:** `src/views/` (page components), `src/stores/` (Pinia state), `src/components/` (reusable UI), `src/utils/` (WebSocket client, helpers, `markdown.js` with DOMPurify).
+**Key directories:** `src/views/` (page components), `src/stores/` (Pinia state), `src/components/` (reusable UI), `src/utils/` (WebSocket client, helpers, `markdown.js` with DOMPurify — plus the pure leaves `markedConfig.js`, `codeBlocks.js` and `clipboard.js` it composes, #2515).
 
 **Stores (domain-scoped, Invariant #6):**
 - `stores/agents.js` - Agent CRUD, chat, activity
@@ -724,7 +724,7 @@ Durable one-shot deferred self-trigger — the time-deferred sibling of loops (�
 
 `cached_claude_session_id` is the load-bearing field on both tables. The engine: runtime gate (drop the cached id for a runtime without `--resume`, i.e. Codex) → resume lock → `execute_task(persist_session=True, resume_session_id=…)` → **one** cold retry when Claude reports the JSONL missing. Callers pass `on_resume_failure` (clear the cache, count the failure, inside the lock) and may pass a distinct `cold_message` for that retry. `ResumeLockBusy` subclasses `HTTPException(429)` so the Session router surfaces it unchanged while the Workspace catches the precise type and re-raises `ClientPortalError(429)`.
 
-**Workspace absorbed the Session surface (ent#358).** Agent Detail no longer renders a Session surface: `SessionPanel.vue` and the Session-mode toggle are gone, the Chat tab is stateless-only (plus a "Continue in Workspace" link), and `?tab=session` **redirects** to `/workspace?agent=<name>` (query-preserving, `router.replace`, guarded first in both `onMounted` and `onActivated` since AgentDetail is KeepAlive-cached). The removal was gated on continuity parity, not on streaming — the Session surface never streamed (synchronous POST + reattach poller, #1376/#759), so Workspace streaming (ent#286) was **not** a prerequisite. What *was* a prerequisite: Workspace chat ran stateless with a history prefix, so it moved onto this engine first. `agent_sessions` rows, endpoints and store stay readable; only the entry point went away.
+**Workspace absorbed the Session surface (ent#358).** Agent Detail no longer renders a Session surface: `SessionPanel.vue` and the Session-mode toggle are gone, the Chat tab is stateless-only (plus a "Continue in Workspace" link), and `?tab=session` **redirects** to `/workspace?agent=<name>` (query-preserving, `router.replace`, guarded first in both `onMounted` and `onActivated` since AgentDetail is KeepAlive-cached). The removal was gated on continuity parity, not on streaming — the Session surface never streamed (synchronous POST + reattach poller, #1376/#759), so Workspace streaming (ent#286) was **not** a prerequisite. What *was* a prerequisite: Workspace chat ran stateless with a history prefix, so it moved onto this engine first. `agent_sessions` rows, endpoints and store stay readable; only the entry point went away. Since ent#456 the "Continue in Workspace" link and the NavBar entry open a NEW tab; the redirect stays same-tab.
 
 **Streaming a turn (ent#286).** The Workspace could not show live tool activity for one structural reason: the client never learned an execution id, because `portal_chat` only returns once the turn is over. The agent has streamed its log all along (`GET /api/executions/{id}/stream`, live subscribe + buffered replay + `stream_end`) and the backend already proxies it for public links — so the fix is an id, early. `start_portal_turn` creates the execution row FIRST, returns `{execution_id, session_id}` as a **202**, and runs the same `portal_chat` coroutine as an in-process background task (strong-ref set, so it cannot be GC'd mid-flight). `GET /api/enterprise/client-portal/agents/{name}/executions/{id}/stream` proxies the agent SSE behind three gates: roster scope, execution-belongs-to-agent, and **execution-started-by-this-caller** (`source_user_email`) — the last is load-bearing, since executions are agent-scoped and two clients of one shared agent can otherwise reach each other's ids. Deliberately **not** the #1083 fire-and-forget path: that is `DISPATCH_ASYNC`-gated and Claude-only (so streaming would ship dark and be absent on other runtimes), and it would have forced the resume lock into a lease, split the cold retry across a callback, and moved three terminal writes. In-process keeps every one of those unchanged. `POST .../chat` stays **synchronous** — ent#83 documented it as the headless integration surface — so streaming is an additive route (`POST .../chat/stream`), and the frontend falls back to the synchronous send on any streaming failure. Since #2214 the portal turn bound is **per-agent** (`execution_timeout_seconds`, resolved once per turn via the engine's `resolve_turn_timeout` — clamp 60–7200, fail-open 3600) with the in-flight marker TTL and both client wait budgets — the 202's `wait_budget_seconds` and the history response's reattach `in_flight_wait_budget_seconds` (the marker's remaining TTL) — derived from that same resolution, replacing the flat 300s.
 
@@ -1742,6 +1742,49 @@ decision (ent#440): deliberately ungated** — recorded explicitly because the
 default for an enterprise-tracker feature is gated-unless-ruled-otherwise (the
 ent#326/ent#384/ent#392 discipline). **No backend change, no new endpoint, no
 migration.** See [workspace-voice-conversation.md](feature-flows/workspace-voice-conversation.md).
+
+**Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
+`components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
+`v-html`, the one `.prose-portal` stylesheet, the one delegated code-copy handler — and
+`PortalAgentBubble.vue` is the chat chrome around it, mounted by both transcripts. Before this the
+stylesheet was applied in two SFCs and defined in both, kept "byte-identical so the two cannot
+drift", which is the shape a thing takes when it wants to be one thing; a future surface rendering
+agent markdown outside a bubble (the ent#486 Files tab) mounts `PortalMarkdown` and inherits render,
+style and copy as a unit instead of re-copying two of the three. **`renderMarkdownWithCodeBlocks` is
+a SECOND export, never a `marked` renderer override** — `renderMarkdown` has twelve consumers and a
+global override would sprout a Workspace copy control on dashboards, queue cards and reports; its
+body is byte-identical. **Order is the security of it:** `marked → stripCodeBlockMarkers →
+decorateCodeBlocks → DOMPurify.sanitize`. The markers are stripped from the INPUT first because
+marked passes raw HTML through and DOMPurify keeps `data-*`, so an agent could otherwise ship a
+forged wrapper whose Copy resolves to a hidden `<pre>` (pastejacking); decoration runs BEFORE
+sanitization so every byte reaching `v-html` has passed the one policy (H-005 stays literally true);
+and the decorator matches only the BARE `<pre><code` marked emits and only decorates a body with no
+literal `<` — marked escapes fence contents, so a `<` proves raw-HTML passthrough and a block that
+could nest a `display:none` element the copy would silently pick up. The one non-constant byte
+injected is the charset-validated language label; the scanner is a linear `indexOf` walk (the lazy
+regex it replaced was quadratic on adversarial input, on the render path). `utils/markedConfig.js`
+is the ONE marked configuration and exists so a spec can exercise the configured parser —
+`markdown.js` cannot be imported in a DOM-less node process (DOMPurify's stub has no `addHook`), so
+without the split a future highlighter could change fence output while the spec stayed green and
+every Copy button vanished. `utils/clipboard.js::copyText` returns a result, never throws, never
+logs the copied text (it may be the credential the operator just asked for), and falls back to
+`execCommand` on an insecure origin — plain http on a LAN or Tailscale address is a first-class
+Trinity topology — so the controls say "Copy unavailable / blocked / failed" only when copying
+genuinely cannot happen; its pre-existing sibling `copyToClipboard` (four settings-panel callers) is
+left byte-identical and converging them is a follow-up. Blocks WRAP (`pre-wrap` +
+`overflow-wrap: anywhere`, no `overflow-x`), so a bubble never widens its column; the copy reads
+`textContent`, so wrapping is display-only and ASCII-table alignment is the accepted cost. Both
+console entry links are `_blank` + `rel="noopener"` (Vue Router's `guardEvent` declines to intercept
+those and modified clicks, so there is no `window.open`) while the `?tab=session` redirect stays
+deliberately same-tab — it rewrites a navigation in flight rather than starting one. Sidebar search
+reuses `filterAgentCandidates` with **`requireMentionable: false`** (a row is not a mention, so
+`data.scout` stays findable) and bounds results through `visibleAgentRows`, so an ask-bearing match
+is never collapsed out of its own result; both empty lines are per-section, and the roster skeleton
+outranks them while the roster is still loading. **OSS-core by decision (ent#456 / ent#402):
+deliberately ungated** — no `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+because CLAUDE.md's default for an enterprise-tracker feature is *gated unless ruled otherwise*, so
+the ruling must never be inferred later from the mere fact that it merged. See
+[workspace-thread-code-blocks.md](feature-flows/workspace-thread-code-blocks.md).
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
 cannot read `GET /api/settings/feature-flags` — that endpoint is `get_current_user`-gated
