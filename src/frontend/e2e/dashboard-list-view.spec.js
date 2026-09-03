@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { pickLabelFixture, readLabel, writeLabel } from './helpers/agent-label.js'
+import { FIXTURE_LABEL, pickLabelFixture, readLabel, writeLabel } from './helpers/agent-label.js'
 
 /**
  * Dashboard List view e2e (trinity-enterprise#260).
@@ -140,9 +140,14 @@ test.describe('dashboard list view (trinity-enterprise#260)', () => {
  * worker asserting on the same fleet would see the borrowed label. No other
  * spec asserts the system agent's RENDERED name (they locate by `data-agent`
  * and assert `SYSTEM`), so the borrow is invisible to them.
+ *
+ * `serial` orders tests within THIS file only, and `dashboard-grid-view.spec.js`
+ * borrows the same agent. Locally (`workers` is only pinned to 1 on CI) the two
+ * files run in parallel, so use `--workers=1` to run both in one pass; the
+ * sentinel `FIXTURE_LABEL` makes the collision loud rather than stranding a
+ * label — see `helpers/agent-label.js`.
  */
 
-const FIXTURE_LABEL = 'Platform Orchestrator'
 const COLUMNS = ['name', 'status', 'controls', 'success', 'stats']
 
 /** Header/row x-parity for every labelled column, at the current viewport. */

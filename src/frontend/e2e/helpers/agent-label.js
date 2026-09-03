@@ -22,7 +22,38 @@ import { tokenFromStorageState } from './agent-probe.js'
  * must restore in `test.afterEach` (a `finally` inside a timed-out test body is
  * not reliably run) and must read the PRIOR label first, so a dev stack's own
  * label is restored rather than nulled.
+ *
+ * ⚠️ TWO SPEC FILES BORROW THE SAME AGENT. ⚠️
+ * `dashboard-list-view.spec.js` and `dashboard-grid-view.spec.js` both borrow
+ * whatever `pickLabelFixture` returns, and `mode: 'serial'` orders tests only
+ * WITHIN a file. `playwright.config.js` sets `workers: 1` on CI but leaves it
+ * at the default locally — which is exactly where both files are run together
+ * (the #2358 verify step names them on one command line). Two workers, one
+ * agent: the second one's "prior label" read can land after the first one's
+ * borrow, and it would then faithfully restore the FIXTURE label as if it were
+ * the operator's own — a permanent strand, on a live agent, from a green run.
+ *
+ * `FIXTURE_LABEL` is the sentinel that closes that: it is the only label these
+ * helpers ever write, and `readLabel` REFUSES to return it. The late worker
+ * therefore throws before it writes anything, its `afterEach` has nothing to
+ * restore, and the worker that actually holds the borrow still puts the agent
+ * back. The same refusal catches a run that was killed mid-borrow: the next
+ * run finds the sentinel still on the agent and says so, instead of adopting a
+ * test artefact as the value to restore forever. Run the two specs with
+ * `--workers=1` when you want them both green in one pass.
  */
+
+/**
+ * The one label these helpers ever write.
+ *
+ * Deliberately self-identifying rather than a plausible operator label: if a
+ * run is killed between the write and the restore, whoever finds it on a live
+ * agent has to be able to tell at a glance that it is a test artefact and safe
+ * to clear — on `trinity-system` they cannot even reach for the pencil. It
+ * doubles as the sentinel `readLabel` refuses (see above), so a stranded label
+ * is loud on the next run rather than inherited.
+ */
+export const FIXTURE_LABEL = 'Trinity e2e fixture - safe to clear'
 
 async function apiContext(baseURL) {
   const token = tokenFromStorageState()
@@ -33,7 +64,14 @@ async function apiContext(baseURL) {
 }
 
 /**
- * The agent's current label, or null when it has none.
+ * The agent's PRIOR label — the value a borrow must put back — or null.
+ *
+ * Throws rather than returning `FIXTURE_LABEL`: seeing the sentinel means a
+ * borrow is already in flight in another worker, or a previous run was killed
+ * before it restored. Returning it would make this caller restore a test
+ * artefact as though it were the operator's own label, which is the one
+ * failure here that is permanent.
+ *
  * @returns {Promise<string|null>}
  */
 export async function readLabel(baseURL, agent) {
@@ -47,7 +85,16 @@ export async function readLabel(baseURL, agent) {
           `e2e/.auth/admin.json?)`
       )
     }
-    return (await res.json()).label ?? null
+    const label = (await res.json()).label ?? null
+    if (label === FIXTURE_LABEL) {
+      throw new Error(
+        `${agent} already carries the fixture label "${FIXTURE_LABEL}". Either ` +
+          `another worker is borrowing it right now — run the label specs with ` +
+          `--workers=1 — or an earlier run was killed before restoring, in which ` +
+          `case clear it with: PUT /api/agents/${agent}/label {"label": null}`
+      )
+    }
+    return label
   } finally {
     await api.dispose()
   }

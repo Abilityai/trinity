@@ -200,7 +200,7 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
 // Imported here rather than beside the file's other imports so this whole
 // block is append-only: ES module imports are hoisted, and keeping the edit at
 // the end of the file makes a rebase against a concurrent change trivial.
-import { pickLabelFixture, readLabel, writeLabel } from './helpers/agent-label.js'
+import { FIXTURE_LABEL, pickLabelFixture, readLabel, writeLabel } from './helpers/agent-label.js'
 
 /**
  * Tile identity — the slug the label hides (#2358).
@@ -217,6 +217,10 @@ import { pickLabelFixture, readLabel, writeLabel } from './helpers/agent-label.j
  * reliably run), and runs serially because `playwright.config` is
  * `fullyParallel: true`. `AgentHeader.vue` hides the label pencil for system
  * agents, so a stranded label on `trinity-system` has no UI undo — API only.
+ * `serial` only orders tests within this file, and `dashboard-list-view.spec.js`
+ * borrows the same agent: run the two together with `--workers=1`. The sentinel
+ * `FIXTURE_LABEL` makes a collision loud rather than permanent — see
+ * `helpers/agent-label.js`.
  *
  * The drag specs above grab the tile CENTRE, so `.nodrag` on the slug does not
  * interfere with them.
@@ -252,10 +256,10 @@ test.describe('grid tile identity (#2358)', () => {
     await expect(tile).toBeVisible({ timeout: 15000 })
     await expect(tile.locator('[data-testid="agent-slug-tile"]')).toHaveCount(0)
 
-    await writeLabel(baseURL, fixtureAgent, 'Platform Orchestrator')
+    await writeLabel(baseURL, fixtureAgent, FIXTURE_LABEL)
     await page.reload()
     await expect(tile).toBeVisible({ timeout: 15000 })
-    await expect(tile.locator('.t-name')).toHaveText('Platform Orchestrator')
+    await expect(tile.locator('.t-name')).toHaveText(FIXTURE_LABEL)
 
     const slug = tile.locator('[data-testid="agent-slug-tile"]')
     await expect(slug).toBeVisible()
