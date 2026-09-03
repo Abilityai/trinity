@@ -44,7 +44,31 @@ if [ -s "$USER_SUPPLIED_PW" ]; then
     shred -u "$USER_SUPPLIED_PW" 2>/dev/null || rm -f "$USER_SUPPLIED_PW"
 fi
 if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    ADMIN_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
+    # --- password-generation (behaviour-tested; see test_2281_firstboot_password) ---
+    # NOT `tr -dc ... </dev/urandom | head -c 24`. Under this script's own
+    # `set -o pipefail` that is fatal, every time: head closes the pipe after 24
+    # bytes, tr dies of SIGPIPE against an endless source, and the non-zero
+    # status propagates out of the command substitution, where `set -e` ends the
+    # script. First boot died on this line on the very first droplet ever created
+    # from the snapshot — three lines in, before it had written anything but its
+    # own header, leaving a droplet with no Trinity, no certificate and no
+    # password.
+    #
+    # Reading a bounded chunk first means nothing closes a pipe early: head takes
+    # 1024 bytes and exits, tr drains all of them and exits 0. LC_ALL=C keeps tr
+    # byte-oriented rather than trusting the ambient locale to tolerate random
+    # bytes.
+    _pw_raw="$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+    ADMIN_PASSWORD="${_pw_raw:0:24}"
+    # 1024 random bytes yield ~635 alphanumerics on average, so this cannot
+    # plausibly fail — but it is a credential, and a short one must never be
+    # written rather than silently accepted.
+    if [ "${#ADMIN_PASSWORD}" -ne 24 ]; then
+        echo "FATAL: could not generate a 24-character admin password." >&2
+        exit 1
+    fi
+    unset _pw_raw
+    # --- end password-generation ---
 fi
 
 # The MOTD never echoes a password the operator chose — they already have it,
