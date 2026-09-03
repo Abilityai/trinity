@@ -221,7 +221,12 @@ function toggle() {
 **Notes**:
 - Controls column beside RunningStateToggle / ReadOnlyToggle
 - Loading state tracked per-agent via `autonomyLoading` ref
-- `invisible` (column-preserving) for system agents
+- `invisible` (column-preserving) for system agents — since #2358 that holds
+  at **every** List breakpoint. md and base used `v-if`, so the toggle was
+  removed rather than reserved and the success bar, capacity meter and task
+  counts beside it sat at a different x on exactly the system and shared rows;
+  the reservation is now a wrapper around the toggle, so its width comes from
+  the toggle itself and cannot drift from a hand-written one
 - Handler calls `networkStore.toggleAutonomy` and toasts off the returned
   `{success, error}` — the network store returns, never throws
 

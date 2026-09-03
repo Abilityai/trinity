@@ -147,7 +147,11 @@ NavBar: Agents entry removed; Dashboard active on '/' || isAgentSection
   legacy tag-key migration block) are simply no longer read.
 - **System-row Run guard (item B)**: the list hides the Run toggle on system
   rows, matching the grid tile — two tabs of one widget must agree. Stopping
-  `trinity-system` remains available on its AgentDetail page.
+  `trinity-system` remains available on its AgentDetail page. **Hidden means
+  RESERVED, at every breakpoint (#2358)**: `invisible` keeps the box and takes
+  no clicks, where md/base previously used `v-if` and dropped it — which moved
+  the success bar, meter and task counts on exactly the system and shared rows,
+  with no header there to line up against.
 - **Backend-authoritative visibility (item A)**: the old page's client-side
   admin gate on the system agent is dropped — `get_accessible_agents` already
   scopes the fleet list server-side, exactly as grid/timeline render it.
