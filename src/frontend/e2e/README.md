@@ -99,6 +99,17 @@ broke, and `agentExists` throws so the test fails with the real diagnosis
 instead of skipping under a false "agent not found". Use the shared
 `e2e/helpers/agent-probe.js` — do not hand-roll a probe.
 
+**Borrowing an agent's display label (#2358).** `e2e/helpers/agent-label.js`
+(`pickLabelFixture` / `readLabel` / `writeLabel`) is the shared borrow-and-
+restore for specs that must see a labelled agent. It prefers an agent that is
+already labelled and falls back to `trinity-system` (CI's whole fleet).
+**Read the prior label, restore it in `test.afterEach`, and keep such tests in
+a `serial` block**: a `finally` inside a body that times out is not reliably
+run, the config is `fullyParallel: true`, and `AgentHeader.vue` hides the label
+pencil for system agents — a label stranded on `trinity-system` can only be
+cleared through the API. Same loud-never-silent rule as the probe: every
+non-2xx throws with the real status.
+
 > **Known gap:** `circuit-breaker-badge.spec.js` still carries the legacy
 > unauthenticated probe, so both its tests skip on every run. It was left as-is
 > deliberately: with an authenticated probe its `@smoke` test **fails** — a

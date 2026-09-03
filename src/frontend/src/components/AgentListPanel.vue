@@ -461,7 +461,10 @@
                hanging below every line. Always rendered, so a row is the same
                height with or without content on it. `pl-[5.125rem]` is gone:
                `col-start-4` puts it under the name column by construction. -->
-          <div class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10">
+          <div
+            data-testid="row-secondary-lg"
+            class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10"
+          >
             <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
                  the row's one meta strip and it stays legible only while it has
                  an order and a shrink policy — a future badge goes here, in
@@ -518,6 +521,7 @@
                `ml-1` is gone: the container's `gap-x-4` supplies the spacing,
                and the header's matching spacer is the meter's own 6px. -->
           <CapacityMeter
+            data-testid="capacity-meter-lg"
             :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
             :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
             :height="48"
@@ -668,7 +672,10 @@
                is what makes it a safe home for the slug. Tagless md rows grow
                by this line's height — an intended density trade, release-noted
                in the flow doc. -->
-          <div class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] pl-[3.125rem] text-gray-500 dark:text-gray-400">
+          <div
+            data-testid="row-secondary-md"
+            class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] pl-[3.125rem] text-gray-500 dark:text-gray-400"
+          >
             <code
               v-if="agentNameParts(agent).secondary"
               data-testid="agent-slug-md"

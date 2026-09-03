@@ -196,3 +196,73 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await expect(page.locator('.fleet-canvas')).toBeVisible({ timeout: 15000 })
   })
 })
+
+// Imported here rather than beside the file's other imports so this whole
+// block is append-only: ES module imports are hoisted, and keeping the edit at
+// the end of the file makes a rebase against a concurrent change trivial.
+import { pickLabelFixture, readLabel, writeLabel } from './helpers/agent-label.js'
+
+/**
+ * Tile identity — the slug the label hides (#2358).
+ *
+ * Same defect as the List row, and the reason it is fixed on both at once: the
+ * fleet must not show one agent under two naming conventions depending on which
+ * Dashboard mode is open (§1.3.1 FR-3 names dashboard cards and grid tiles
+ * together). The slug rides `.t-repo`, the meta line the tile already always
+ * renders, so a labelled tile gains no third line inside its fixed 384x216
+ * cell.
+ *
+ * ⚠️ This test LABELS a live agent. ⚠️ It reads the prior label first and
+ * restores it in `test.afterEach` (a `finally` in a body that times out is not
+ * reliably run), and runs serially because `playwright.config` is
+ * `fullyParallel: true`. `AgentHeader.vue` hides the label pencil for system
+ * agents, so a stranded label on `trinity-system` has no UI undo — API only.
+ *
+ * The drag specs above grab the tile CENTRE, so `.nodrag` on the slug does not
+ * interfere with them.
+ */
+test.describe('grid tile identity (#2358)', () => {
+  test.describe.configure({ mode: 'serial' })
+
+  let fixtureAgent = null
+  let priorLabel = null
+  let labelBorrowed = false
+
+  test.afterEach(async ({ baseURL }) => {
+    if (!labelBorrowed) return
+    labelBorrowed = false
+    await writeLabel(baseURL, fixtureAgent, priorLabel)
+  })
+
+  test('a labelled tile shows the slug beside the repo, and an unlabelled one does not', async ({
+    page,
+    baseURL,
+  }) => {
+    fixtureAgent = await pickLabelFixture(baseURL)
+    priorLabel = await readLabel(baseURL, fixtureAgent)
+
+    await gotoGrid(page)
+    const tile = page.locator(`.gv-tile[data-agent="${fixtureAgent}"]`)
+    await expect(tile).toBeVisible({ timeout: 15000 })
+
+    // Unlabelled: the primary name IS the slug, so there is nothing to repeat.
+    labelBorrowed = true
+    await writeLabel(baseURL, fixtureAgent, null)
+    await page.reload()
+    await expect(tile).toBeVisible({ timeout: 15000 })
+    await expect(tile.locator('[data-testid="agent-slug-tile"]')).toHaveCount(0)
+
+    await writeLabel(baseURL, fixtureAgent, 'Platform Orchestrator')
+    await page.reload()
+    await expect(tile).toBeVisible({ timeout: 15000 })
+    await expect(tile.locator('.t-name')).toHaveText('Platform Orchestrator')
+
+    const slug = tile.locator('[data-testid="agent-slug-tile"]')
+    await expect(slug).toBeVisible()
+    await expect(slug).toHaveText(fixtureAgent)
+    // Copyable against `.gtile { user-select: none }`, and `nodrag` so a click
+    // selects the identity instead of starting a tile drag.
+    expect(await slug.evaluate((el) => getComputedStyle(el).userSelect)).toBe('all')
+    expect(await slug.evaluate((el) => Boolean(el.closest('.nodrag')))).toBe(true)
+  })
+})
