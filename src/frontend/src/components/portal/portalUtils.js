@@ -856,10 +856,21 @@ export function sidebarSearchState({
  * lines each state only what their own section knows, and neither can stand in
  * for the other: "nothing matched at all" is BOTH lines plus the hint, while
  * "agents matched, no chats" is the chats line alone.
+ *
+ * `agentsEmpty` exists because the STATE cannot express one real case. The chat
+ * request's own flag is set on every keystroke and stays set until the request
+ * settles, so `searching` covers the whole time someone is typing — and the
+ * agent half is a client-side filter that already knows its answer. Reading the
+ * agents line off the state alone left an agents section with a header, no rows
+ * and no sentence for the entire typing session, which is the dead state this
+ * function exists to prevent. `chats-only`/`none` already MEAN no agent matched,
+ * so the flag only adds the arm the state cannot reach; loading still outranks
+ * both (loading is not empty).
  */
-export function searchEmptyLines(state, query = '') {
+export function searchEmptyLines(state, query = '', { agentsEmpty = false } = {}) {
   const q = String(query ?? '')
-  const agents = (state === 'chats-only' || state === 'none') ? 'No agents match.' : null
+  const noAgents = agentsEmpty || state === 'chats-only' || state === 'none'
+  const agents = (state !== 'roster-loading' && noAgents) ? 'No agents match.' : null
   let chats = null
   if (state === 'searching') chats = 'Searching chats…'
   else if (state === 'agents-only' || state === 'none') chats = 'No chats match.'

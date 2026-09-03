@@ -408,7 +408,13 @@ const searchState = computed(() => sidebarSearchState({
   chatsSearching: props.searching,
   rosterLoading: props.loadingRoster && !props.roster.length,
 }))
-const emptyLines = computed(() => searchEmptyLines(searchState.value, props.search))
+// `agentsEmpty` is passed explicitly rather than inferred from the state: the
+// chat request's flag is set on every keystroke, so `searching` spans the whole
+// time someone is typing, and the agent half — a filter over a roster already in
+// hand — must still be able to say it matched nothing.
+const emptyLines = computed(() => searchEmptyLines(searchState.value, props.search, {
+  agentsEmpty: agentResults.value.total === 0,
+}))
 
 // ONE loop in the template feeds from this, so the row markup, its badges, its
 // availability chip and its open path are inherited by search rather than

@@ -142,6 +142,24 @@ describe('sidebarSearchState', () => {
     expect(sidebarSearchState({ agentTotal: 4, chatsSearching: true })).toBe('searching')
     expect(searchEmptyLines('searching').agents).toBeNull()
   })
+
+  it('still says so when the agent filter matched nothing mid-request', () => {
+    // Portal.vue sets `searching` on every keystroke and clears it only when
+    // the request settles, so this state covers the whole time someone is
+    // typing. Reading the agents line off the state alone left the section with
+    // a header, no rows and no sentence for that entire window.
+    expect(searchEmptyLines('searching', 'zzz', { agentsEmpty: true }).agents)
+      .toBe('No agents match.')
+    expect(searchEmptyLines('searching', 'zzz', { agentsEmpty: true }).chats)
+      .toBe('Searching chats…')
+    // ...but loading still outranks it: loading is not empty.
+    expect(searchEmptyLines('roster-loading', 'zz', { agentsEmpty: true }).agents)
+      .toBeNull()
+    // ...and an agent-bearing result is unaffected in every state.
+    for (const st of ['searching', 'both', 'agents-only']) {
+      expect(searchEmptyLines(st, 'sc', { agentsEmpty: false }).agents, st).toBeNull()
+    }
+  })
 })
 
 describe('searchEmptyLines — per section, never one line for the other fact', () => {
@@ -246,6 +264,10 @@ describe('what only source can answer — PortalSidebar.vue', () => {
     // mentionable-only), and not a hand-rolled includes() over roster names.
     expect(SIDEBAR).not.toMatch(/filterAgentCandidates\(/)
     expect(SIDEBAR).not.toMatch(/roster[\s\S]{0,40}\.filter\([\s\S]{0,80}\.includes\(/)
+  })
+
+  it('tells the agent half its own emptiness rather than inferring it from the chat request', () => {
+    expect(SIDEBAR).toMatch(/agentsEmpty: agentResults\.value\.total === 0/)
   })
 
   it('does not print "No agents match." over a roster that is simply empty', () => {

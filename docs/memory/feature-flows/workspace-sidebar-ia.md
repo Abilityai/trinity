@@ -279,10 +279,20 @@ combined sentence**:
 | State | Agents line | Chats line | Hint |
 |---|---|---|---|
 | `roster-loading` | — (skeleton stays) | — | — |
-| `searching` | — | `Searching chats…` | — |
+| `searching` | `No agents match.` **iff** the filter matched nothing | `Searching chats…` | — |
 | `agents-only` | — | `No chats match.` | — |
 | `chats-only` | `No agents match.` | — | — |
 | `none` | `No agents match.` | `No chats match.` | `Try another word, or clear the search.` |
+
+The `searching` row is why `searchEmptyLines` takes an explicit `agentsEmpty`
+rather than reading the agents line off the state alone. `Portal.vue` sets its
+`searching` flag on **every keystroke** and clears it only when the request
+settles, so that state covers the whole time someone is typing — and the agent
+half is a client-side filter that already knows its answer. Deriving the line
+from the state alone left the agents section with a header, no rows and no
+sentence for that entire window. `chats-only` and `none` already MEAN no agent
+matched, so the flag only supplies the arm the state cannot express;
+`roster-loading` still outranks it.
 
 Two properties this table exists to guarantee: "nothing matched at all" is
 distinguishable from "agents matched, no chats", and neither line ever stands in

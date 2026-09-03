@@ -1003,9 +1003,14 @@ already holds.
 - **FR-12 — Per-section honest states, and loading is not empty**: "nothing
   matched at all" (both lines + a next-action hint) is distinguishable from
   "agents matched, no chats" (the chat line alone); neither line ever stands in
-  for the other. While the roster has not loaded the skeleton stays — a two-
-  character query on a slow roster must never read "No agents match." over a
-  roster that has not arrived. The placeholder says agents **and** chats.
+  for the other. The agent half answers for itself: it is a client-side filter
+  over a roster already in hand, so it states its own emptiness even while the
+  chat request is still in flight — that request's flag is set on every
+  keystroke, so gating the agents line on it would withhold the sentence for the
+  whole time someone is typing. While the roster has not loaded the skeleton
+  stays — a two-character query on a slow roster must never read "No agents
+  match." over a roster that has not arrived. The placeholder says agents
+  **and** chats.
   *Known limitation*: a failed chat-search request is swallowed into `[]` by the
   view, so it currently reads as "No chats match."; fixing that is a change to
   `views/Portal.vue` and is tracked separately.
