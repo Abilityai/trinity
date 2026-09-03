@@ -86,11 +86,11 @@ lg row anatomy (#2358) — ONE sizing context:
   list container  flex flex-col gap-y-1.5
                   lg:grid lg:grid-cols-[auto auto auto 1fr 46px 22rem 180px auto auto auto]
                   lg:gap-x-4                      ← the template is declared HERE, once
-   ├─ header  hidden lg:grid lg:grid-cols-subgrid lg:col-span-full lg:px-0 py-2
+   ├─ header  hidden lg:grid lg:grid-cols-subgrid lg:col-span-full items-center py-2
    │            data-testid="list-header"; cells 1-3 / 9 / 10 are spacers; the five
    │            labelled cells carry data-col="name|status|controls|success|stats"
    └─ row ×N  … lg:grid lg:grid-cols-subgrid lg:col-span-full lg:items-center
-                lg:gap-y-1 lg:px-0 lg:py-3        ← still the visual box (bg/rounded/
+                lg:gap-y-1 lg:py-3                ← still the visual box (bg/rounded/
                                                      hover/border-l, avatar's abs parent)
          ├─ <div class="hidden lg:contents">      ← one breakpoint switch, adds no box
          │     9 row-1 cells (same data-col hooks as the header)
@@ -100,8 +100,10 @@ lg row anatomy (#2358) — ONE sizing context:
          │     + CapacityMeter  lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:mr-4
          ├─ md layout   (display:none at lg — never a grid item)
          └─ base layout (display:none at lg)
-  Edge insets are ITEM MARGINS (checkbox lg:ml-8, meter lg:mr-4), identical on the
-  header and every row — NOT padding on a subgrid item.
+  Neither the header nor the row carries ANY horizontal padding at lg — not even
+  an explicit `lg:px-0`, which the structural guard rejects along with the rest
+  of `lg:p[xlr]-`. Edge insets are ITEM MARGINS (checkbox lg:ml-8, meter
+  lg:mr-4), identical on the header and every row.
 
 router: /agents ─fn-redirect(query-preserving, view:'list')→ /
         (exact segment — /agents/:name and deeper untouched)
