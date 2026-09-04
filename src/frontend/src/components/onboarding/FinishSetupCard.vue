@@ -20,7 +20,7 @@
   preview loads on expand. Steady-state cost on a Dashboard load: zero.
 -->
 <template>
-  <div v-if="visible" data-testid="finish-setup-card" class="mx-4 mt-3 mb-3">
+  <div ref="rootEl" v-if="visible" data-testid="finish-setup-card" class="mx-4 mt-3 mb-3">
     <BaseCard flush>
       <div class="flex items-center justify-between gap-3 px-4 pt-3 pb-1">
         <h3 class="text-sm font-[550] text-gray-900 dark:text-gray-100">Finish setup</h3>
@@ -152,7 +152,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionsStore } from '../../stores/sessions'
@@ -245,18 +245,59 @@ const prettyPreview = computed(() =>
 )
 
 // The admin status route is called only once the section is going to render —
-// never on a Dashboard load it will not act on. The warm variant marks itself
-// shown the moment it renders, so it is one-shot per browser, and stays on
-// screen for this visit (the ref is not flipped until the next load).
+// never on a Dashboard load it will not act on.
 watch(
   consentVisible,
   (now) => {
     if (!now) return
     store.load({ preview: false })
-    if (variant.value === 'warm') persistWarmShown()
   },
   { immediate: true }
 )
+
+/*
+ * The warm ask is spent only once it has actually been SEEN.
+ *
+ * `consentVisible` answers "does this section want to render", which is not the
+ * same question. The Dashboard shows one onboarding card at a time (#2380), and
+ * a card hidden by that rule still mounts — so marking the warm variant shown
+ * when the predicate flipped burned the one re-ask ent#437 exists for while it
+ * sat behind the hardening guide, and the operator later met the weaker cold
+ * copy, if they met one at all.
+ *
+ * IntersectionObserver is the right instrument rather than a `display` check:
+ * the card becomes visible when a SIBLING is dismissed, which changes no state
+ * this component can watch. `rootEl` only exists while `visible` is true, so
+ * the observer is attached and torn down as the card comes and goes.
+ */
+const rootEl = ref(null)
+let visibilityObserver = null
+
+function markWarmAskSeen(entries) {
+  if (!entries.some((e) => e.isIntersecting)) return
+  if (!consentVisible.value || variant.value !== 'warm') return
+  // The ref is deliberately NOT flipped: the ask stays on screen for this
+  // visit, and the next load reads the persisted value.
+  persistWarmShown()
+}
+
+onMounted(() => {
+  if (typeof IntersectionObserver !== 'function') return
+  visibilityObserver = new IntersectionObserver(markWarmAskSeen)
+  watch(
+    rootEl,
+    (el, prev) => {
+      if (prev) visibilityObserver.unobserve(prev)
+      if (el) visibilityObserver.observe(el)
+    },
+    { immediate: true }
+  )
+})
+
+onBeforeUnmount(() => {
+  if (visibilityObserver) visibilityObserver.disconnect()
+  visibilityObserver = null
+})
 
 function loadPreview() {
   store.load({ preview: true, force: true })
