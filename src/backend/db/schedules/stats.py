@@ -397,6 +397,7 @@ class ScheduleStatsMixin:
                     source_user_id, source_user_email, source_agent_name,
                     source_mcp_key_id, source_mcp_key_name,
                     model_used, fan_out_id, business_status, validation_execution_id,
+                    turn_integrity,
                     queued_at
                 FROM schedule_executions
                 {where}

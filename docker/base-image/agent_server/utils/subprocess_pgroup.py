@@ -47,6 +47,21 @@ except ImportError:  # pragma: no cover - exercised by unit tests
 
 logger = logging.getLogger(__name__)
 
+# #2455: imported at module SCOPE on purpose — a lazy import inside the stuck
+# branch would take the import lock while the process is already wedged, which
+# is the worst possible moment for it.
+#
+# Dual-path because this module is deliberately importable FLAT: its own test
+# adds `agent_server/utils` to `sys.path` and imports it by bare name (see the
+# comment at the top of `tests/unit/test_subprocess_pgroup.py`), and a bare
+# relative import breaks that with "attempted relative import with no known
+# parent package". Both arms resolve at import time, so the no-lazy-import
+# property above is preserved either way.
+try:  # package import (production)
+    from .thread_diagnostics import dump_all_threads as _dump_all_threads
+except ImportError:  # flat import (that module's own test harness)
+    from thread_diagnostics import dump_all_threads as _dump_all_threads
+
 
 # Informational env tag set on every Claude Popen (#817). The cleanup
 # path used to look for this tag in /proc/<pid>/environ as its third
@@ -306,6 +321,21 @@ async def drain_reader_threads(
             "grace — force-closing pipes; some buffered data may be lost "
             "(pid=%s, stuck_count=%s)",
             elapsed, process.pid, len(still_stuck),
+        )
+        # #2455: capture WHERE, before force-closing pipes changes the picture.
+        # Three fixes in this family (#728 pipe block, #1502 grandchild holder,
+        # #1661 sanitizer regex) each assumed a location and each was followed
+        # by a recurrence in a new shape; the #2455 occurrence had the reader
+        # in state R at 93.8% CPU 603.7s after SIGKILL, which fits none of
+        # them. This is the only moment the stack is guaranteed to be the
+        # wedged one, and it costs nothing until it fires.
+        _dump_all_threads(
+            "reader thread(s) still stuck after post-kill grace",
+            context=(
+                f"pid={process.pid} pgid={pgid} stuck_count={len(still_stuck)} "
+                f"elapsed={elapsed:.1f}s "
+                f"names={[t.name for t in still_stuck]}"
+            ),
         )
         safe_close_pipes(process)
 

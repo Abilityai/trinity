@@ -107,6 +107,19 @@ ALLOWLIST = {
         "execute_task step 3 never opened a dispatch activity."
     ),
     (
+        "services/task_execution_service.py",
+        "_admission_gate",
+    ): (
+        "Step 2 of execute_task, extracted in-place by #2314. Its three "
+        "fast-fail terminals (CapacityFull / CircuitOpen / "
+        "EphemeralBudgetExhausted) fire when capacity.acquire refused the "
+        "turn — before execute_task step 3 opens the dispatch activity, so "
+        "there is no activity to close. Identical lifecycle position to the "
+        "chat_execution_service admission-path entries above; before #2314 "
+        "these writes sat inline in execute_task, whose own close calls "
+        "satisfied the function-level scan."
+    ),
+    (
         "client_portal/service.py",
         "_fail_unstarted_execution",
     ): (

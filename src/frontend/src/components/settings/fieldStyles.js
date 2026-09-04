@@ -24,23 +24,41 @@ export const SETTINGS_PRIMARY_BUTTON_CLASS =
   'rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50'
 
 /**
- * The text input used by Settings panels.
+ * The TEXT field used by every Settings panel (#2464).
  *
- * The shape the admin sign-in email field established, made shared for the
- * same reason as the number input above: ent#463's intake form declared only
- * `rounded-md border-gray-300 dark:bg-gray-700`, and this project does NOT
- * load `@tailwindcss/forms` — so a bare `border-<color>` sets a colour on a
- * zero-width border and the fields rendered as unpadded, borderless bars.
- * The width, the padding and the background have to be stated explicitly.
+ * SHAPE ONLY — no width. Callers add their own layout class (`w-full` in a
+ * grid, `flex-1` beside a button), because that is the one property the two
+ * existing call sites legitimately disagree about and baking either in would
+ * force the other to override it.
+ *
+ * Every property is stated explicitly, and that is the whole point of this
+ * constant rather than a stylistic preference. The repo does NOT load
+ * `@tailwindcss/forms` (`tailwind.config.js` plugins = typography only), so
+ * there are no form-element base styles to inherit:
+ *
+ *   - `border-gray-300` alone sets a border COLOUR on a border whose width is
+ *     0 under Tailwind preflight — nothing renders. The bare `border` is what
+ *     makes it visible, and its absence is invisible in review because the
+ *     class string reads as if it were complete.
+ *   - padding does not exist unless `px-3 py-2` says so.
+ *   - the light background is otherwise the UA default rather than a decision.
+ *
+ * That is exactly how ent#463's intake form shipped as five borderless,
+ * unpadded bars next to the Admin sign-in email field it was meant to match.
  */
 export const SETTINGS_TEXT_INPUT_CLASS =
-  'block w-full px-3 py-2 text-sm rounded-md shadow-sm ' +
+  'block px-3 py-2 text-sm rounded-md shadow-sm ' +
   'border border-gray-300 dark:border-gray-600 ' +
-  'bg-white dark:bg-gray-700 text-gray-900 dark:text-white ' +
-  'placeholder-gray-400 dark:placeholder-gray-500 ' +
+  'bg-white dark:bg-gray-700 dark:text-white placeholder-gray-400 ' +
   'focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 ' +
   'disabled:opacity-60 disabled:cursor-not-allowed'
 
-/** The label above a Settings field. */
+/**
+ * The label above a Settings field (#2464).
+ *
+ * Same argument as the input constants: "the labels on this tab look alike" is
+ * a property, not a coincidence. Shape only — a caller that needs a trailing
+ * "(optional)" hint styles that span itself.
+ */
 export const SETTINGS_FIELD_LABEL_CLASS =
   'block text-sm font-medium text-gray-700 dark:text-gray-300'

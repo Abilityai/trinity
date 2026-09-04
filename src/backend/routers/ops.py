@@ -1,3 +1,4 @@
+# mcp: none — Operating Room fleet ops (fleet restart, #1860) — an admin / ops-key surface, not an agent capability
 """
 Fleet Operations routes for the Trinity backend.
 

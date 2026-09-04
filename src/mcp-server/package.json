@@ -20,13 +20,13 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "fastmcp": "^4.15.1",
+    "fastmcp": "^4.16.13",
     "yaml": "^2.6.1",
-    "zod": "^3.24.1"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "tsx": "^4.23.12",
     "typescript": "^5.7.2"
   },

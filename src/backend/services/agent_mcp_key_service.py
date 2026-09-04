@@ -742,7 +742,7 @@ class _RegenLock:
             )
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, _exc_type, _exc, _tb):
         try:
             if self.client is not None and self.client.get(self.key) == self.token:
                 self.client.delete(self.key)

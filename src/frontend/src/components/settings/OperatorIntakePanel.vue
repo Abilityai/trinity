@@ -90,24 +90,24 @@
               maxlength="254"
               autocomplete="email"
               placeholder="you@company.com"
-              :class="['mt-1', INPUT_CLASS]"
+              :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']"
             />
           </label>
           <label class="block">
             <span :class="LABEL_CLASS">Company <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
-            <input v-model.trim="form.company" type="text" maxlength="200" autocomplete="organization" placeholder="Acme Inc." :class="['mt-1', INPUT_CLASS]" />
+            <input v-model.trim="form.company" type="text" maxlength="200" autocomplete="organization" placeholder="Acme Inc." :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
             <span :class="LABEL_CLASS">Name <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
-            <input v-model.trim="form.name" type="text" maxlength="200" autocomplete="name" placeholder="Ada Lovelace" :class="['mt-1', INPUT_CLASS]" />
+            <input v-model.trim="form.name" type="text" maxlength="200" autocomplete="name" placeholder="Ada Lovelace" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
             <span :class="LABEL_CLASS">Role <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
-            <input v-model.trim="form.role" type="text" maxlength="200" autocomplete="organization-title" placeholder="Platform engineer" :class="['mt-1', INPUT_CLASS]" />
+            <input v-model.trim="form.role" type="text" maxlength="200" autocomplete="organization-title" placeholder="Platform engineer" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
           <label class="block">
             <span :class="LABEL_CLASS">Primary use case <span class="font-normal text-gray-400 dark:text-gray-500">(optional)</span></span>
-            <input v-model.trim="form.use_case" type="text" maxlength="500" placeholder="What you plan to run on Trinity" :class="['mt-1', INPUT_CLASS]" />
+            <input v-model.trim="form.use_case" type="text" maxlength="500" placeholder="What you plan to run on Trinity" :class="[SETTINGS_TEXT_INPUT_CLASS, 'mt-1 w-full']" />
           </label>
         </div>
 
@@ -147,9 +147,9 @@ import { ref, computed, onMounted, reactive } from 'vue'
 import { useOperatorIntakeStore } from '../../stores/operatorIntake'
 import { SETTINGS_TEXT_INPUT_CLASS, SETTINGS_FIELD_LABEL_CLASS } from './fieldStyles'
 
-// Aliased for the template — the same field shape the admin sign-in email
-// uses, so the two forms on this tab cannot drift apart again.
-const INPUT_CLASS = SETTINGS_TEXT_INPUT_CLASS
+// Aliased for the template so the labels on this tab cannot drift from the
+// other Settings panels. The input class carries SHAPE ONLY (no width) by
+// design, so each call site adds its own layout class.
 const LABEL_CLASS = SETTINGS_FIELD_LABEL_CLASS
 
 const store = useOperatorIntakeStore()

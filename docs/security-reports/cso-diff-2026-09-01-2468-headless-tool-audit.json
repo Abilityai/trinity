@@ -1,0 +1,61 @@
+{
+  "version": "cso-1.1",
+  "date": "2026-09-01",
+  "mode": "diff",
+  "scope": "branch feature/2468-headless-tool-audit vs merge-base efc6d7db (dev tip)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "delta": {
+      "agent_visible_harness_tools": -11,
+      "prompt_sections_static": 1,
+      "operator_dev_scripts": 1,
+      "endpoints": 0,
+      "websocket_channels": 0,
+      "schema": 0,
+      "dependencies": 0,
+      "ci_workflows": 0,
+      "credential_paths": 0
+    }
+  },
+  "findings": [],
+  "observations": [
+    "containment improvement: SendMessage+ListAgents deny closes unaudited cross-execution channel (shared container HOME across concurrent executions)",
+    "trust residual: re-audit probe reads the container's own CLI output (forged-stream class, #2467 precedent); operator dev tool, not a control plane",
+    "drift residual mitigated in-diff: --disallowedTools silent no-op on rename; AUDIT_CLI_VERSION + exact-cover test + probe script; CI enforcement in debt inbox",
+    "mixed-fleet honesty: prompt family paragraph phrased as capability fact, true pre- and post-image-cut",
+    "FP cleared: sk- gitleaks pattern vs 'task-notification' (word-boundary analysis + PR #2472 empirical pass)"
+  ],
+  "supply_chain_summary": "no dependency changes",
+  "filter_stats": {
+    "raw_candidates": 0,
+    "gated_out": 0,
+    "verified": 0,
+    "tentative": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "previous": "cso-diff-2026-09-01-2467-turn-integrity (0 findings)",
+    "direction": "flat at zero"
+  }
+}

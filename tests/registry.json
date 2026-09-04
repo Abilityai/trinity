@@ -1789,7 +1789,7 @@
         "reliability",
         "pull-migration"
       ],
-      "description": "PULL_MODE_PILOT_AGENTS can only route agent-to-agent work (#2048). _AUTONOMOUS_TRIGGERS declares seven triggers autonomous and pull_owns_dispatch consulted all seven, but capacity_manager only offers a row to the durable queue when its producer passed overflow_policy='queue_persistent', and exactly one of the three producers does: task_execution_service uses 'reject' (scheduler/ALL cron + fan-out), dispatch_admission_service uses 'queue_in_memory' (sequential chat, human chat), only chat_execution_service (POST /task) uses 'queue_persistent'. So on a cron-driven agent the pilot flag is INERT and #1766's soak measures nothing - silently, because the gate sits behind an overflow_policy short-circuit, so for a schedule row pull_owns_dispatch is never called at all and the row is pushed indistinguishably from the flag being unset, while PULL_MIGRATION_TESTING.md section 9 M1 told the operator to go check an env var that is present and correct. Issue decision was Option 1 (make the reach honest, do not extend it). Corrects the issue's own table: the reachable set is {agent, event}, not {agent} - #1578's task-completion loopback POSTs to the same /task route and is tagged 'event' via an internal-secret-gated X-Event-Trigger, with no capacity bypass. Tests pin: the reach set derived from what _derive_task_trigger can emit rather than hardcoded; every autonomous trigger classified as reachable or stranded so a new one cannot join the stranded set unreviewed; the narrowing is a runtime NO-OP over the only producer that consults the predicate (it stops a false claim, it does not change a verdict); and note_unreachable_pull_trigger reports a stranded row once per (agent, trigger), never for a non-pilot / reachable / interactive trigger, and never raises. A structural guard asserts the three producers' overflow_policy literals, so implementing the deferred Option 2 (wiring cron to queue_persistent) fails this test and forces PULL_REACHABLE_TRIGGERS and section 9's prose to be revisited in the same change - a silently-stale reach set being exactly the bug. Also updates test_1766: its 'pilot owns EVERY autonomous trigger' case asserted reach the system never had (it passed only by calling the predicate outside the context that constrains it), and its producer-gate case drove a queue_persistent acquire carrying 'schedule' - a combination production cannot produce - now driven with 'agent', the shape that actually occurs."
+      "description": "PULL_MODE_PILOT_AGENTS can only route agent-to-agent work (#2048). _AUTONOMOUS_TRIGGERS declares seven triggers autonomous and pull_owns_dispatch consulted all seven, but capacity_manager only offers a row to the durable queue when its producer passed overflow_policy='queue_persistent', and exactly one of the three producers does: task_execution_service uses 'reject' (scheduler/ALL cron + fan-out), dispatch_admission_service uses 'queue_in_memory' (sequential chat, human chat), only chat_execution_service (POST /task) uses 'queue_persistent'. So on a cron-driven agent the pilot flag is INERT and #1766's soak measures nothing - silently, because the gate sits behind an overflow_policy short-circuit, so for a schedule row pull_owns_dispatch is never called at all and the row is pushed indistinguishably from the flag being unset, while PULL_MIGRATION_TESTING.md section 9 M1 told the operator to go check an env var that is present and correct. Issue decision was Option 1 (make the reach honest, do not extend it). Corrects the issue's own table: the reachable set is {agent, event}, not {agent} - #1578's task-completion loopback POSTs to the same /task route and is tagged 'event' via an internal-secret-gated X-Event-Trigger, with no capacity bypass. Tests pin: the reach set derived from what _derive_task_trigger can emit rather than hardcoded; every autonomous trigger classified as reachable or stranded so a new one cannot join the stranded set unreviewed; the narrowing is a runtime NO-OP over the only producer that consults the predicate (it stops a false claim, it does not change a verdict); and note_unreachable_pull_trigger reports a stranded row once per (agent, trigger), never for a non-pilot / reachable / interactive trigger, and never raises. A structural guard asserts the three producers' overflow_policy literals, so implementing the deferred Option 2 (wiring cron to queue_persistent) fails this test and forces PULL_REACHABLE_TRIGGERS and section 9's prose to be revisited in the same change - a silently-stale reach set being exactly the bug. Also updates test_1766: its 'pilot owns EVERY autonomous trigger' case asserted reach the system never had (it passed only by calling the predicate outside the context that constrains it), and its producer-gate case drove a queue_persistent acquire carrying 'schedule' - a combination production cannot produce - now driven with 'agent', the shape that actually occurs. SUPERSEDED IN PART BY #2391: the structural guard fired as designed when Option 2 landed and was re-derived, not relaxed - task_execution_service now carries BOTH 'reject' and 'queue_persistent', and a second assertion pins that the wider one is reachable only through pull_owns_dispatch, which is the property #2048 could not assert and the one that keeps the blast radius equal to the pilot allowlist. The reachable set is now {agent, event, schedule, webhook, reminder} and the stranded set {loop, fan_out, a2a, operator_response}; see unit/test_2391_scheduled_pull_reach.py."
     },
     {
       "file": "unit/test_2052_scrubber_authority_parity.py",
@@ -2592,9 +2592,60 @@
         "agent-server",
         "watchdog",
         "concurrency",
+        "regression",
+        "static-guard"
+      ],
+      "description": "PR #2435 review + re-review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (parked->calling is published in the same round-trip that reads the cancel key; the Redis-error residual is recorded, not claimed closed); the exited-but-registered set is TTL-bounded from first observation of the exit; a DISCOVERING guard walks every agent_server module that drives the process registry and requires each stdin.write to be paired with unregister either locally or at its caller (an enumerating list missed the live headless_executor site); the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
+    },
+    {
+      "file": "unit/test_2467_turn_integrity.py",
+      "feature": "#2467",
+      "added": "2026-09-01",
+      "categories": [
+        "backend",
+        "executions",
+        "observability",
         "regression"
       ],
-      "description": "PR #2435 review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (the parked->calling transition is published in the same round-trip that reads the cancel key); the exited-but-registered set is TTL-bounded so a leaked entry stops blocking orphan recovery; register() is paired with the stdin-write failure path; the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
+      "description": "#2467 backend fix: services/execution_integrity derives structured kill records + a response notice from the transcript's task lifecycle events at terminal write (apply_result), persisted to schedule_executions.turn_integrity. Covers: both incident shapes (tool-timeout promotion vs run_in_background), the AC-6 negative control (completed task never flags), the ledger-drain trap (detection keys on kill events, not snapshots), dedupe, kill-without-snapshot, notification-stopped-only belt, malformed-shape degradation, charset validation + entry cap (forged-stream containment, #640), the #2127 privacy rule (no description/output_file persisted), waited-path pending_at_exit riding the same column without a second notice, and apply_result golden kwargs (turn_integrity conditional; healthy path byte-identical; old-image envelope -> NULL)."
+    },
+    {
+      "file": "unit/test_2467_bg_kill_agent_negative_controls.py",
+      "feature": "#2467",
+      "added": "2026-09-01",
+      "categories": [
+        "backend",
+        "agent-server",
+        "regression"
+      ],
+      "description": "#2467 agent-side negative controls (permanent): the fix is backend-side by design, so these pin that the agent stays byte-identical - the #2127 marker stays scoped to waited types, no agent-side field or notice for a killed shell, the kill lifecycle events ARE present sanitized in raw_messages (the backend scan's input), and the ledger-widening 'fix' is provably inert (the CLI drains the ledger before exiting). Uses a _NaturalExitPopen harness that exits only when stdout is exhausted - the natural-exit path the #2127 fakes cannot express."
+    },
+    {
+      "file": "unit/test_ent467_ws_agent_scope.py",
+      "feature": "ent#467",
+      "added": "2026-09-02",
+      "categories": ["backend", "security", "websocket", "regression"],
+      "description": "ent#467 /ws agent scope: `/ws` was SCOPE_ALL and unfiltered, so any authenticated user could mint a ticket and read every tenant's agent names, execution ids and activity types (plus another user's email on agent_shared/agent_unshared). Pins the visibility rule (every agent a payload names must be accessible; admins short-circuit; an agent-less event stays fleet-visible), the payload agent-identity vocabulary against the live broadcast shapes, that BOTH delivery paths filter (live fan-out and the last-event-id replay, structurally), unchanged SCOPE_SCOPED (/ws/events) semantics, fail-closed identity resolution (unknown/suspended/db-error close the socket; emailless non-admin resolves to an empty roster), stream-driven roster refresh on access-changing events, and an AST discovery guard requiring every /ws broadcast payload in the OSS tree to be agent-keyed or explicitly allowlisted as fleet-level with a reason."
+    },
+    {
+      "file": "unit/test_2468_headless_tool_audit.py",
+      "feature": "#2468",
+      "added": "2026-09-01",
+      "categories": ["backend", "agent-server", "prompt", "regression"],
+      "description": "#2468 headless tool audit: PLATFORM_DENIED_TOOLS family (11 tools measured on claude 2.1.235) + PLATFORM_KEPT_TOOLS data + AUDIT_CLI_VERSION; every denied name has a recorded reason with verbatim description fragments; DENIED \u222a KEPT exactly covers the measured init list; CORE_TOOLS never-denied guard; guardrails merge/dedupe (AC 5); reverse vocabulary guard (prompt family paragraph \u2286 deny tuple); 'Nothing survives the end of your turn' counterweight registered always-tier, survives every tier/runtime, quotes the Bash promise, stays truthful about waited subagents and names the foreground wait idiom."
+    },
+    {
+      "file": "unit/test_2391_scheduled_pull_reach.py",
+      "feature": "#2391",
+      "added": "2026-09-03",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "scheduler"
+      ],
+      "description": "Scheduled work reaches the durable pull queue (#2391 - the Option 2 deferred by #2048). task_execution_service - the producer behind the scheduler, i.e. ALL cron plus webhooks, reminders, loops and fan-out - dispatched with overflow_policy='reject' unconditionally, and capacity_manager only offers a row to the durable queue when its producer passed 'queue_persistent', so PULL_MODE_PILOT_AGENTS was structurally inert for the fleet's dominant traffic class. It now passes 'queue_persistent' when - and only when - pull_owns_dispatch says a pilot owns the trigger, which widens PULL_REACHABLE_TRIGGERS from {agent, event} to {agent, event, schedule, webhook, reminder}. Tests pin the whole risk surface: with the flag OFF (the fleet default) the real acquire call still receives 'reject' with no payload for every trigger and a CapacityFull still writes the same 'Agent at capacity (N/N parallel tasks running)' FAILED terminal - verified against the call, not assumed; with the flag ON a schedule/webhook/reminder row returns TaskExecutionStatus.QUEUED without calling the agent, releasing a slot or writing the dispatch marker, and the payload carries the row's model/allowed_tools/timeout/resume_session_id plus the CALLER's uncomposed system_prompt (the claim path rebuilds the platform prompt around it, #1629); a full backlog names max_backlog_depth rather than parallel slots, because the pull branch never asks for a slot; loop/fan_out/a2a/operator_response stay pushed (each has a caller that reads the returned TaskExecutionResult - the first three structurally, operator_response by choice since it records result.status as the ent#329 dispatch receipt); interactive triggers are untouched (Open Question 7's scope cut); the payload builder refuses without an execution_id (the enqueue is a CAS RUNNING->QUEUED on an existing row) and when slot_already_held (queueing under a held slot leaks it for the lease TTL); #1083 fire-and-forget does not stack - pull wins by construction because a queued row is never dispatched, so no 202 can arrive, while a non-pilot's async_result dispatch is unchanged. An end-to-end class drives the REAL CapacityManager + BacklogService + _build_claim_response so 'it enqueued' is not mistaken for 'a worker can run it' (the #2317 failure mode). Scheduler side: 'queued' is NOT a terminal - _poll_execution_completion treated anything but 'running' as an outcome, so a queued row would have published schedule_execution_completed(status=queued), been classified a failure and handed to _maybe_schedule_retry, duplicating work that was queued and about to run; ExecutionStatus.QUEUED and _NON_TERMINAL_POLL_STATES fix that and are pinned here."
     }
   ]
 }

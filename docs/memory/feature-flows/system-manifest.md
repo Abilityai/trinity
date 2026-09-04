@@ -197,7 +197,7 @@ gated with it so the nav never points at a section that is not rendered. `/templ
 still redirects to `/library` with query **and** hash preserved, so older links survive. Note `hasMinRole` is a plain **function** — `composables/useRole.js`'s
 own usage docstring says `hasMinRole.value(...)` and is stale.
 
-**Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue`
+**Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue` (deleted in #2492)
 (zero consumers since the Process Engine was decommissioned) was **not** revived: the
 production CSP is `script-src 'self'` with no `unsafe-eval` and no `worker-src`, while the
 dev CSP *does* allow `unsafe-eval` — so `npm run dev` cannot prove production. Every
@@ -2257,6 +2257,94 @@ CLAUDE.md may name its collaborators literally (`acme-scout`,
 `research-network-researcher`, `vc-due-diligence-dd-founder`), and since
 deployed names are `f"{manifest.name}-{short}"`, a renamed system or short name
 deploys a healthy fleet that cannot talk to itself.
+
+## Post-deploy endpoints (#2373)
+
+The four post-deploy endpoints were essentially untouched since 2025 while every
+commit since ent#124 hardened the *deploy* half. What changed:
+
+**Membership is one predicate — `system_service.system_member_names`.**
+`get_system`, `restart_system` and `export_manifest` each matched
+`startswith(f"{system_name}-")`, so an operation on `acme` also captured every
+agent of a system named `acme-extra` — including `restart`, which stops and
+starts containers. Tags come first, because `configure_tags` already applies the
+system name to every member: a tag is a **record** of membership where a prefix
+is an inference from a naming convention. The prefix survives only as a fallback
+for pre-tag deployments, and it is narrowed — an agent carrying some other tag
+`T` whose own prefix claims it (`name.startswith(f"{T}-")`) is excluded, so a
+tagged `acme-extra` agent is never captured by `acme` even on that path. A tag
+read that fails degrades to the RAW PREFIX rather than 500ing, and deliberately
+narrows no further. Two narrower rules were tried there and both lost members of
+a healthy system: excluding any member whose short name contains a hyphen dropped
+all eleven `vc-due-diligence-dd-*` agents of the bundled flagship manifest, and
+excluding on roster evidence dropped `acme-api-worker` — an ordinary member whose
+manifest key is `api-worker` sitting beside key `api` — and returned an EMPTY set
+whenever an agent happened to be named after the system itself, since that name
+prefixes every member. The distinction does not exist in the names:
+`acme-extra-worker` is `worker` of `acme-extra` or `extra-worker` of `acme`, and
+only a tag can say which. Both errors are real and they are not symmetric —
+`restart_system` shares this predicate, so over-capture restarts one agent too
+many and logs it, while under-capture restarts a SUBSET and reports success. The
+fallback is pinned as a superset of the raw prefix so a third narrowing rule
+cannot be invented here. Residual, stated rather than hidden: while the tags are
+unreadable, `acme` may capture `acme-extra-worker` — the pre-#2373 behaviour, on
+an error path, ending when the read recovers. Two systems deployed BEFORE tagging
+where one name is a prefix of the other stay ambiguous for the same reason.
+This predicate
+is also the prerequisite for the teardown verb, where the same collision would
+delete rather than restart.
+
+**`GET /{name}` returns real schedules.** It called `db.get_agent_schedules`,
+which does not exist — the facade exposes `list_agent_schedules`, and
+`database.py` deliberately has no `__getattr__` fallback. The `AttributeError`
+was swallowed by the surrounding `except Exception`, so every response omitted
+`schedules` for every agent and logged one warning each, while the suite never
+asserted on the key. Exactly the failure mode the db facade's own comment warns
+about.
+
+**`POST /{name}/restart` is `require_role("creator")` AND human-only.** It was
+bare `get_current_user` — below `POST /deploy` and below even the read-only
+bundled-catalog routes — so any authenticated principal could stop and start
+every container in a system whose agents it could see.
+
+The second half is a separate gate, and an earlier draft of this paragraph got
+it backwards: **`require_role` does NOT reject agent principals.** It rejects
+CONNECTOR principals only, and its own docstring says so deliberately —
+`require_role("creator")` on `POST /api/agents` is what makes ent#69 Part 2
+agent-spawned creation work, so a blanket rejection there would break ghost
+spawning. Do not "fix" `require_role`; the guard belongs at the endpoint, which
+now calls `reject_agent_principal` explicitly.
+
+That rejection is not merely a wider gate — it closes a **bypass**. The
+per-agent equivalents (`POST /agents/{name}/start`, `/stop`, `/delete`) each
+call `enforce_agent_spawn_scope`, so an agent-scoped caller may only start or
+stop agents it actually SPAWNED (name *and* key id). `restart_system` loops
+every member calling `container_stop` + `start_agent_internal` with **no**
+per-member check, so reaching it with an agent key performs, in bulk and
+unscoped, exactly the operation that is spawn-scoped one at a time — and on a
+default admin-owned install an agent key resolves to its owner carrying the
+owner's role, so the role gate alone admits the whole fleet
+(trinity-ops-agent#232 class). Scoping per member was considered and rejected:
+a system whose every member the caller spawned is a near-empty set, so it would
+be a strange capability rather than a useful one.
+
+**Export round-trips.** The non-full-mesh permissions branch sliced
+`target_agent[len(system_name)+1:]` with no membership filter, so an edge
+pointing outside the system exported as a garbage short name that then failed
+`validate_manifest`'s unknown-agent check on re-deploy — the export broke its
+own round trip. Both branches now test membership. And the export no longer
+embeds the instance-global `trinity_prompt` as the manifest's `prompt:`:
+deploying that elsewhere overwrote *that* instance's platform-wide prompt, and
+since nothing records whether the source system ever set one, the only honest
+export of an unknown is to omit it.
+
+**Preview hardenings.** Unknown PER-AGENT keys now warn like top-level ones
+(ent#126) — `credentials:`, `skills:`, `display_label:` are the fields users try
+first and they vanished in silence. And preview and deploy resolve the identical
+resource default through `_manifest_default_resources()` → the create path's
+`_get_default_resource`; deploy hardcoded `{"cpu": "2", "memory": "4g"}` while
+the preflight validated against the admin-configurable value, so they disagreed
+the moment an admin moved the fleet default.
 
 ## Revision History
 

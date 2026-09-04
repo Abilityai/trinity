@@ -159,6 +159,17 @@ window. It is closed by ordering, not by narrowing —
 so an observed `parked` gives `W_remote(cancel) < R_remote(marker) <
 W_owner(marker) < R_owner(cancel)` and the grant is *guaranteed* to see the key
 and refuse to POST. Both sides spend the same one round-trip they already did.
+
+The one residual is the Redis-error path, and it is worth stating because
+"fails soft" covers the read half only: if the owner's publish pipeline raises
+transiently while the remote's connection is healthy, the transition is never
+published, the marker keeps saying `parked`, and the remote can still finalize
+CANCELLED under a live POST. It is bounded — the failure arms a 30s negative
+cache, so the window is `INFLIGHT_REDIS_RETRY_SECONDS + INFLIGHT_TICK_SECONDS`
+— and a HARD outage is safe by construction, since a process whose client is
+None never wrote a marker at all and the remote's first read routes through the
+agent. Failing closed was rejected (every other Redis touch here is fail-open,
+so a blip would fail every dispatch); a retry cannot close it either.
 The owner gates that publish on the ENTRY's age, not this attempt's park:
 `track_inflight_dispatch` wraps the whole retry loop, so a retry can grant
 instantly under a marker a tick left saying `parked`. The remote's scope check

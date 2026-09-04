@@ -1,3 +1,4 @@
+# mcp: none — trinity-system lifecycle, admin-only (#1816)
 """
 System Agent routes for the Trinity backend.
 

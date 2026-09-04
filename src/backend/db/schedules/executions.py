@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy import select, insert, update, and_, func, or_
 
 from ..engine import get_engine
 from ..query_helpers import latest_per_group
@@ -77,6 +77,8 @@ class ScheduleExecutionsMixin:
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
             # Auto-compact observability (Bundle B)
             compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
+            # Turn-integrity flags (#2467)
+            turn_integrity=row["turn_integrity"] if "turn_integrity" in row_keys else None,
             # Reader-race auto-retry (#678)
             retry_count=row["retry_count"] if "retry_count" in row_keys and row["retry_count"] is not None else 0,
             # Lease-reaper re-delivery counter (#1081 Phase 3, #429/#1402)
@@ -312,6 +314,15 @@ class ScheduleExecutionsMixin:
         (pull rows are owned by the lease reaper); a row that went terminal
         during the park is left alone.
 
+        **Why re-stamping the row is what reaches ``duration_ms``:** it is
+        computed in ``update_execution_status`` from THIS column, not from the
+        in-coroutine ``start_time`` in ``task_execution_service`` — that one is
+        taken before the capacity acquire and still spans the park, which is
+        why the sibling ``execution_time_ms`` continues to measure park + run
+        and is not a bug. Two clocks, two meanings: ``duration_ms`` answers
+        "how long did the agent run", ``execution_time_ms`` answers "how long
+        did the caller wait". (#2435 review verified this end-to-end.)
+
         Returns:
             True if the row was re-stamped.
         """
@@ -387,6 +398,7 @@ class ScheduleExecutionsMixin:
         compact_metadata: str = None,
         retry_count: Optional[int] = None,
         claim_token: Optional[str] = None,
+        turn_integrity: Optional[str] = None,
     ) -> bool:
         """Update execution status when completed.
 
@@ -458,6 +470,11 @@ class ScheduleExecutionsMixin:
             # don't accidentally zero it.
             if retry_count is not None:
                 values["retry_count"] = int(retry_count)
+            # #2467: same conditional shape — an unconditional None here would
+            # NULL the column on the documented FAILED→SUCCESS resurrect CAS
+            # and on every terminal writer that doesn't derive it.
+            if turn_integrity is not None:
+                values["turn_integrity"] = turn_integrity
 
             if status == TaskExecutionStatus.SUCCESS:
                 # Agent's own completion result wins over everything except a
@@ -571,8 +588,28 @@ class ScheduleExecutionsMixin:
                 for row in conn.execute(stmt).mappings()
             ]
 
-    def get_agent_executions_summary(self, agent_name: str, limit: int = 50) -> List[Dict]:
+    def get_agent_executions_summary(
+        self,
+        agent_name: str,
+        limit: int = 50,
+        *,
+        exclude_triggers: Optional[frozenset] = None,
+    ) -> List[Dict]:
         """Get execution summaries for list view - excludes large text fields.
+
+        `exclude_triggers` (#2423 review) filters BEFORE the LIMIT, which is the
+        whole point of it living here rather than in the caller. A caller that
+        fetches N rows and drops some in Python is bounded by how many of the
+        newest N survive, so a RUN of excluded rows starves the list — and for
+        the client Workspace page the excluded trigger is `loop`, whose
+        documented ceiling (`models.MAX_RUNS_LIMIT`) is 100 consecutive rows
+        from ONE loop. No over-fetch multiplier outruns that: the multiplier is
+        a constant a reviewer picks, the run length is a product limit.
+
+        NULL is deliberately NOT excluded. `triggered_by` is NOT NULL in the
+        schema, but SQL `NOT IN` evaluates to NULL for a NULL left side and the
+        row would vanish — an unclassified row is not a hidden one, and dropping
+        it silently is the failure this parameter exists to prevent.
 
         Returns only the columns needed for the Tasks list UI, excluding:
         - response (can be large)
@@ -609,11 +646,17 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.fan_out_id,
                 schedule_executions.c.business_status,
                 schedule_executions.c.validation_execution_id,
+                schedule_executions.c.turn_integrity,
             )
             .where(schedule_executions.c.agent_name == agent_name)
             .order_by(schedule_executions.c.started_at.desc())
             .limit(limit)
         )
+        if exclude_triggers:
+            stmt = stmt.where(or_(
+                schedule_executions.c.triggered_by.is_(None),
+                schedule_executions.c.triggered_by.notin_(sorted(exclude_triggers)),
+            ))
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():

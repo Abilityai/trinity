@@ -345,6 +345,11 @@ The full feature set is below and in the [documentation](#documentation).
 
 ## Architecture
 
+<p align="center">
+  <a href="docs/assets/trinity-deployment-topology.webp"><img src="docs/assets/trinity-deployment-topology.webp" alt="Trinity deployment topology — one host, two isolated Docker networks, VPN-private access, tunnel-published public endpoints" width="720"/></a>
+</p>
+<p align="center"><sub><b>Recommended production topology</b> — operators reach the full UI + API over your VPN (Tailscale recommended); public users and channel webhooks reach only routes published through an outbound tunnel, so the host opens no inbound ports; agents are physically isolated from the data plane on a separate Docker network. Local dev exposes ports directly, and SQLite remains the default store (PostgreSQL shown, supported via <code>DATABASE_URL</code>).</sub></p>
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Trinity Platform                           │

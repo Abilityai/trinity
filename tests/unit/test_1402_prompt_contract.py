@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 import pytest
 
 from services import platform_prompt_service
@@ -58,11 +60,15 @@ SENTINELS = (
 # The pre-#1402 wording that invited in-turn polling. Must not reappear.
 OLD_BLOCKING_PHRASE = "by reading the file and looking for items"
 
-# Section boundaries inside PLATFORM_INSTRUCTIONS (both survive every runtime
-# transform — the Codex adapter only rewrites mcp__trinity__ tokens and
-# prepends an orientation block).
+# Section boundary inside PLATFORM_INSTRUCTIONS. The START heading survives
+# every runtime transform (the Codex adapter only rewrites mcp__trinity__
+# tokens and prepends an orientation block). The END is DERIVED — the next
+# ``### `` heading — rather than named: a hardcoded successor makes an
+# unrelated section inserted after this one silently widen the slice, so the
+# runtime-identity and MCP-name-free assertions below start policing text that
+# is not the operator contract at all (#2454 tripped exactly that).
 SECTION_START = "### Operator Communication"
-SECTION_END = "### Package Persistence"
+_NEXT_HEADING = re.compile(r"^### ", re.MULTILINE)
 
 
 @pytest.fixture(autouse=True)
@@ -76,9 +82,9 @@ def _no_custom_prompt(monkeypatch):
 
 def _operator_section(prompt: str) -> str:
     start = prompt.index(SECTION_START)
-    end = prompt.index(SECTION_END)
-    assert start < end
-    return prompt[start:end]
+    nxt = _NEXT_HEADING.search(prompt, start + len(SECTION_START))
+    assert nxt is not None, "operator section must be followed by another ### section"
+    return prompt[start:nxt.start()]
 
 
 # ---------------------------------------------------------------------------

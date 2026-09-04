@@ -1,3 +1,4 @@
+# mcp: agents.ts (list_templates)
 """
 Template routes for the Trinity backend.
 """

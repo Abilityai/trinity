@@ -961,6 +961,11 @@ class SystemManifest(BaseModel):
     # nothing. Warned, never rejected — rejecting would 400 manifests that
     # deploy today.
     unknown_keys: List[str] = []
+    # #2373: the same record, one level down. `parse_manifest` reads five
+    # per-agent keys and dropped the rest in silence, so `agents.x.credentials:`
+    # / `skills:` / `display_label:` vanished with no warning while a top-level
+    # typo already warned. {agent short name: [unknown keys]}
+    unknown_agent_keys: Dict[str, List[str]] = {}
 
 
 class SystemDeployRequest(BaseModel):
@@ -1086,11 +1091,33 @@ class VersioningInfo(BaseModel):
     new_version: str
 
 
+class DeployManifestEntry(BaseModel):
+    """One entry of the embedded deploy integrity manifest (#2060).
+
+    The caller computes `.trinity-manifest.json` from the disk tree and ships
+    it INSIDE the archive; the backend verifies the extracted tree against it
+    (post-extract AND post-copy). Regular files carry `sha256`, symlinks carry
+    `link_target` (exactly one of the two — enforced at parse in
+    `deploy._load_manifest`, not here, so the parse error is a named 400
+    `MANIFEST_INVALID` rather than a generic validation shape). Directories
+    are omitted. Paths are relative to the agent root.
+    """
+    path: str
+    sha256: Optional[str] = None
+    link_target: Optional[str] = None
+
+
 class DeployLocalRequest(BaseModel):
     """Request to deploy a local agent."""
     archive: str  # Base64-encoded tar.gz
     name: Optional[str] = None  # Override name from template.yaml
     credentials: Optional[Dict[str, str]] = None  # Optional credentials to inject {KEY: value}
+    # #2060: when true, an archive without an embedded .trinity-manifest.json
+    # is refused (400 MANIFEST_REQUIRED). The MCP tool sets this in tool CODE
+    # (not a model-controlled parameter); the raw HTTP default stays False so
+    # manifest-less legacy deploys (shipped CLI, abilities plugin) keep working
+    # with `verified: false` + a warning.
+    require_manifest: Optional[bool] = False
 
 
 # Maximum credentials allowed per deploy-local request
@@ -1107,6 +1134,12 @@ class DeployLocalResponse(BaseModel):
     warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
+    # #2060 evidence fields — a deploy must prove what landed.
+    verified: bool = False  # True only when a manifest was present AND both verification points passed
+    files_expected: Optional[int] = None   # manifest regular-file entries (None = no manifest)
+    files_deployed: Optional[int] = None   # regular files at the deployed template (manifest member excluded)
+    symlinks_deployed: Optional[int] = None
+    compatibility_hard_count: Optional[int] = None  # post-deploy #668 STATIC report; None = unavailable (fail-open)
 
 
 # ============================================================================
@@ -1492,6 +1525,8 @@ class FleetExecutionSummary(BaseModel):
     fan_out_id: Optional[str] = None
     business_status: Optional[str] = None
     validation_execution_id: Optional[str] = None
+    # Turn-integrity flags (#2467) — small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
     queued_at: Optional[datetime] = None
 
     class Config:
@@ -3301,6 +3336,8 @@ class ExecutionSummary(BaseModel):
     validation_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B) - small JSON list
     compact_metadata: Optional[str] = None
+    # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -3353,6 +3390,8 @@ class ExecutionResponse(BaseModel):
     validates_execution_id: Optional[str] = None
     # Auto-compact observability (Bundle B)
     compact_metadata: Optional[str] = None
+    # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
+    turn_integrity: Optional[str] = None
 
     class Config:
         from_attributes = True

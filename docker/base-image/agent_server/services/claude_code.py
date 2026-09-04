@@ -32,6 +32,7 @@ from ._runtime_config import (
     _DEFAULT_EXECUTION_TIMEOUT_SEC,
     _DEFAULT_MAX_TURNS_CHAT,
     _load_guardrails,
+    merged_disallowed_tools,
 )
 from .execution_env import build_execution_env
 from .error_classifier import (
@@ -227,10 +228,11 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         max_turns_chat = int(guardrails.get("max_turns_chat") or _DEFAULT_MAX_TURNS_CHAT)
         cmd.extend(["--max-turns", str(max_turns_chat)])
         logger.info(f"[Chat] Limiting to {max_turns_chat} agentic turns")
-        disallowed_tools = guardrails.get("disallowed_tools") or []
+        # GUARD-003 deny-list ∪ the platform denials (#2454).
+        disallowed_tools = merged_disallowed_tools(guardrails)
         if disallowed_tools:
             cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
-            logger.info(f"[Chat] Guardrails disallow tools: {disallowed_tools}")
+            logger.info(f"[Chat] Disallowed tools: {disallowed_tools}")
         # GUARD-003 (#313): wall-clock cap so a stuck claude subprocess
         # (billing error, stalled stream, max-turns evasion) doesn't hang
         # the chat session until the container is killed externally.

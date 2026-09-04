@@ -1,5 +1,22 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-09-01 (#2467, turn-integrity derivation at terminal write):** `apply_result`'s
+> SUCCESS branch now derives turn-integrity flags from the transcript it already holds —
+> `services/execution_integrity.py::derive_turn_integrity(exec_log, metadata)` (a pure leaf; the
+> hotspot delta is ~8 lines by design) scans the CLI's task lifecycle events for background tasks
+> **killed at CLI exit** (`task_updated {"status":"killed"}` / `task_notification
+> {"status":"stopped"}`, keyed on the kill events because the ledger drains to `[]` before exit)
+> and plucks the #2127 waited-path `background_tasks_pending_at_exit` count from metadata. When
+> either is present it writes new nullable `schedule_executions.turn_integrity` (TEXT JSON; the
+> `update_execution_status` kwarg is **conditional**, the `retry_count` pattern — an unconditional
+> `None` would NULL the column on the FAILED→SUCCESS resurrect CAS) and, for kills only, prepends a
+> visible notice to `sanitized_resp` — which then reaches the stored response, the returned result,
+> the #1578 event summary and the channel completion report from the one variable. NULL ≡ "no
+> evidence", never "verified healthy". Backend-side deliberately (the #1741 no-rebuild precedent);
+> canonical description + privacy/validation rules:
+> [parallel-headless-execution.md](parallel-headless-execution.md) → *The Kill the Gate Correctly
+> Does Not Cover (#2467)*. Prior update follows.
+>
 > **Updated 2026-08-28 (#2433, in-flight dispatch proof-of-life):** an execution that was
 > **admitted** (row `running`, capacity slot held, `claude_session_id='dispatched'`) could park in
 > the backend agent-call semaphore (`services/agent_call_limiter.py`, acquired inside
@@ -110,6 +127,8 @@
 > **Updated 2026-05-13 (#678):** Builds on #520 (502 classification) and #531 (drain reordering) by closing the stdout reader-race loophole inside `execute_task`. New gate `_looks_like_reader_race(detail)` at `task_execution_service.py:110-128` matches 502 dict bodies with `num_turns < 5`, `raw_message_count == 0`, `parse_failure_count == 0` and triggers ONE in-line auto-retry reusing the same `execution_id` (around `task_execution_service.py:543`, `:558-602`, `:707`), with both call-side and remote timeout capped at 300s so a long task can't double its wallclock budget; previous-attempt cost is rolled forward via `prev_cost` (`:587`) and accumulated into the salvage write at `:841-847`, and `retry_count=retry_count or None` is persisted at `:707`. The agent server's `_classify_empty_result` (`docker/base-image/agent_server/services/error_classifier.py:341+`) now returns a structured dict body — `{message, metadata, raw_message_count, parse_failure_count, recovery_attempted}` — which the service's HTTPError handler at `task_execution_service.py:768-868` parses via the `partial_metadata` block (`:772`) and salvage cost/context block (`:824-858`), writing `cost=salvage_cost`, `context_used=salvage_context`, `context_max=salvage_context_max` onto the FAILED row at `:856-858` instead of nulling everything. The same salvage shape is mirrored in `routers/chat.py:466-516` (`isinstance(detail, dict)` at `:474`, salvage write at `:514-516`). Shared helper `_compute_context_used(metadata)` at `task_execution_service.py:83-108` is the single context-window math used by both the success path and the salvage path (`routers/chat.py:504`, `task_execution_service.py:832`); migration 59 in `db/schema.py` + `db/migrations.py` adds `schedule_executions.retry_count INTEGER DEFAULT 0`, and `db.get_execution_result()` in `db/schedules.py` surfaces it so the MCP `get_execution_result` tool and executions REST endpoint can display it.
 
 > **Updated 2026-05-11 (#686 UC1):** Interactive `/chat` endpoint now mirrors the service's dispatched-sentinel pattern + real-UUID persistence inline in `routers/chat.py` (parallel of #279). The dispatched-sentinel mechanism is no longer exclusive to `TaskExecutionService.execute_task()`.
+
+> **Updated 2026-09-03 (#2391):** `execute_task` is no longer a `reject`-only producer. `build_pull_queue_payload` returns a `PersistentTaskPayload` when — and only when — `pull_pilot.pull_owns_dispatch(agent, triggered_by)` is true (a `PULL_MODE_PILOT_AGENTS` agent on `schedule` / `webhook` / `reminder`), which selects `overflow_policy="queue_persistent"`; the row is enqueued, `execute_task` returns `TaskExecutionStatus.QUEUED` before any activity, agent call or dispatch marker, and the agent's own worker claims it. Everything else keeps `"reject"` byte-for-byte, so scheduled capacity semantics are unchanged for every non-pilot agent. Two hard preconditions: an existing `execution_id` (the enqueue is a CAS RUNNING→QUEUED on that row) and `slot_already_held=False` (queueing under a held slot would leak it for the lease TTL). #1083 fire-and-forget cannot stack on it — a queued row is never dispatched, so no 202 can arrive.
 
 > **Updated 2026-04-26 (#428):** Slot acquisition/release now goes through [`CapacityManager`](capacity-management.md) (`acquire(overflow_policy="reject")` + `release()`) rather than calling `SlotService` directly. The `slot_already_held` parameter still applies — routers pre-acquire via `CapacityManager` and pass `slot_already_held=True` so the service's `finally` block remains the single release point.
 

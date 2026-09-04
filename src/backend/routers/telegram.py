@@ -1,3 +1,4 @@
+# mcp: channels.ts (list_channel_groups, send_group_message → /telegram/groups); binding CRUD is an owner grant surface, human-only
 """
 Telegram bot integration router (TELEGRAM-001, TGRAM-GROUP).
 

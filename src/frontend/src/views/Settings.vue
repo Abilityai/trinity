@@ -67,6 +67,9 @@
           <!-- #32 — Single Sign-On (enterprise, gated by `sso`) -->
           <SsoPanel v-if="activeTab === 'sso'" />
 
+          <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
+          <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
+
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-5">
@@ -228,7 +231,7 @@
                   v-model="adminEmailInput"
                   :placeholder="adminEmailCurrent || 'you@company.com'"
                   :disabled="savingAdminEmail"
-                  class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                 />
                 <button
                   @click="saveAdminEmail"
@@ -284,7 +287,7 @@
                       v-model="publicUrl"
                       :placeholder="publicUrlCurrent || 'https://your-domain.com'"
                       :disabled="savingPublicUrl"
-                      class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                     />
                     <button
                       @click="savePublicUrl"
@@ -1286,6 +1289,30 @@ Example:
                   <dd class="font-mono text-gray-900 dark:text-white text-xs">{{ buildInfo.info.value.build_date }}</dd>
                 </div>
               </dl>
+
+              <!-- Install provenance (#2380). Deliberately OUTSIDE the branch
+                   ladder above. That ladder ends in `isMissing`, which is true
+                   when every git field is the literal "unknown" — a build-time
+                   fact about the IMAGE. Install source is a DB row written at
+                   first boot; one being absent says nothing about the other, and
+                   nesting them meant a locally-built image hid its provenance
+                   from the one surface an operator is told to read for it.
+                   `unknown` renders as "Not recorded" rather than hiding the row:
+                   the absence of a marker IS the answer, and a missing row would
+                   read as a missing feature. Humanised label plus the dimmed raw
+                   value, matching the Commit row. -->
+              <dl
+                v-if="buildInfo.info.value && !buildInfo.loading.value && !buildInfo.error.value"
+                class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm mt-3 pt-3 border-t border-gray-200 dark:border-gray-700"
+              >
+                <div>
+                  <dt class="text-gray-500 dark:text-gray-400">Install source</dt>
+                  <dd class="text-gray-900 dark:text-white">
+                    <span>{{ installSourceLabel }}</span>
+                    <span class="ml-2 text-xs font-mono opacity-60">{{ installSourceRaw }}</span>
+                  </dd>
+                </div>
+              </dl>
             </div>
           </div>
 
@@ -1588,7 +1615,7 @@ Example:
                   v-model="mcpUrlInput"
                   type="url"
                   :placeholder="mcpUrlConfig.default_url || 'https://your-domain.com/mcp'"
-                  class="flex-1 block rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'flex-1']"
                 />
                 <button
                   @click="saveMcpUrl"
@@ -1820,7 +1847,7 @@ Example:
                   id="quota-creator"
                   v-model="agentQuotaValues.max_agents_creator"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -1835,7 +1862,7 @@ Example:
                   id="quota-operator"
                   v-model="agentQuotaValues.max_agents_operator"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -1850,7 +1877,7 @@ Example:
                   id="quota-user"
                   v-model="agentQuotaValues.max_agents_user"
                   min="0"
-                  class="w-20 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-action-primary-500 focus:ring-action-primary-500 sm:text-sm text-center"
+                  :class="[SETTINGS_TEXT_INPUT_CLASS, 'w-20 text-center']"
                 />
               </div>
 
@@ -2104,12 +2131,13 @@ import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
-import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
+import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -2128,6 +2156,23 @@ const enterpriseStore = useEnterpriseStore()
 
 // #926: cached fetch of /api/version (singleton shared with NavBar).
 const buildInfo = useBuildInfo()
+
+// #2380: how this instance was installed, from the same /api/version payload.
+// The raw value is the machine truth and is always shown; the label exists
+// because "do-marketplace" means nothing to an operator reading a panel.
+const INSTALL_SOURCE_LABELS = {
+  'do-marketplace': 'DigitalOcean Marketplace',
+  'vultr-marketplace': 'Vultr Marketplace',
+  script: 'Install script',
+  unknown: 'Not recorded',
+}
+const installSourceRaw = computed(() => buildInfo.info.value?.install_source || 'unknown')
+// An unrecognised value falls through to itself rather than to "Not recorded":
+// a newer backend reporting a channel this bundle has not heard of is a fact
+// worth showing, not one to flatten into "we have no idea".
+const installSourceLabel = computed(
+  () => INSTALL_SOURCE_LABELS[installSourceRaw.value] || installSourceRaw.value
+)
 
 const loading = ref(true)
 const saving = ref(false)
@@ -2148,6 +2193,7 @@ const ALL_TABS = [
   { id: 'agent-permissions', label: 'Agent Permissions', adminOnly: false, requires: 'permissions_matrix' },
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
+  { id: 'credential-vault', label: 'Vault',    adminOnly: true,  requires: 'credential_vault' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;
@@ -3093,6 +3139,9 @@ async function savePublicUrl() {
     setTimeout(() => {
       publicUrlSaveSuccess.value = false
     }, 3000)
+    // Refresh the install_tls_posture flag this session gates on — what retires
+    // the #2380 hardening card in-session instead of on the next hard reload.
+    sessionsStore.loadFeatureFlags(true).catch(() => {})
   } catch (e) {
     error.value = e.response?.data?.detail || 'Failed to save public URL'
   } finally {

@@ -25,6 +25,7 @@ on:
       - 'src/backend/services/entitlement_service.py'
       - 'src/backend/services/a2a_gate.py'
       - 'src/backend/services/a2a_outbound.py'
+      - 'src/backend/services/runtime_secret_scrub.py'
       - '.github/workflows/enterprise-docs-guard.yml'
   push:
     branches: [dev, main]
@@ -35,6 +36,7 @@ on:
       - 'src/backend/services/entitlement_service.py'
       - 'src/backend/services/a2a_gate.py'
       - 'src/backend/services/a2a_outbound.py'
+      - 'src/backend/services/runtime_secret_scrub.py'
 
 # Least privilege: the guard only checks out and greps — no writes.
 permissions:
@@ -98,7 +100,10 @@ jobs:
           # `a2a_outbound.py` (#736) is the newest seam: it resolves outbound A2A
           # targets, and its docstring necessarily discusses which side owns the
           # registry — exactly the prose that drifts into naming a paid catalog.
-          SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py src/backend/services/a2a_gate.py src/backend/services/a2a_outbound.py'
+          # `runtime_secret_scrub.py` (ent#279) is a mechanism-only staging/scrub
+          # seam; its module docstring must describe only the generic mechanism
+          # and never name the private producer that stages values.
+          SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py src/backend/services/a2a_gate.py src/backend/services/a2a_outbound.py src/backend/services/runtime_secret_scrub.py'
           # Live docs only — exclude historical/point-in-time trees and this guard.
           # docs/ is recursive, so docs/user-docs/** (which auto-publishes to a public
           # search index via sync-docs-to-vertex.yml) is covered here too.
