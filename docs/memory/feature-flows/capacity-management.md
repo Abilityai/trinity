@@ -296,7 +296,7 @@ APIs.
 | `/task` async | `src/backend/routers/chat.py` | `queue_persistent` |
 | `/task` sync long-poll | `src/backend/routers/chat.py` (waits on `sync_waiter`) | `queue_persistent` |
 | Terminate endpoint | `src/backend/routers/chat.py` | `force_release` |
-| `TaskExecutionService` | `src/backend/services/task_execution_service.py` | `reject` (router pre-acquired) — or `queue_persistent` when the agent is a `PULL_MODE_PILOT_AGENTS` pilot and `pull_owns_dispatch` claims the trigger (#2391; `schedule`/`webhook`/`reminder`). The pilot-gated branch is what lets scheduled work be claimed by a pull worker; every non-pilot agent is unchanged. |
+| `TaskExecutionService` | `src/backend/services/task_execution_service.py` | `reject` (router pre-acquired) — or `queue_persistent` when the agent is a `PULL_MODE_PILOT_AGENTS` pilot and `pull_owns_dispatch` claims the trigger (`schedule`/`webhook`/`reminder` #2391, `loop` #2523). The pilot-gated branch is what lets scheduled work be claimed by a pull worker; every non-pilot agent is unchanged. |
 | Cleanup watchdog | `src/backend/services/cleanup_service.py` | `reclaim_stale` + `release_if_matches` |
 | Limiter refresher (parked entries, 15s tick) | `src/backend/services/agent_call_limiter.py` (`_tick_sync`) | `SlotService.renew_slot` — direct, not via the facade (#2433) |
 | Dispatch grant after a park ≥5s | `src/backend/services/task_execution_service.py` (`_on_dispatch_granted`) | `SlotService.renew_slot` — direct, beside `db.restamp_execution_dispatch` (#2433) |

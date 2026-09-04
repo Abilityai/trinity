@@ -66,12 +66,12 @@ pytestmark = pytest.mark.unit
 # the returned `TaskExecutionResult`; a row queued for a worker to claim later
 # gives it nothing to read. Three structural, one a scope choice.
 #
-#   `loop`     — `loop_service` renders the next iteration from `result.response`.
-#   `fan_out`  — `fan_out_service` builds each `FanOutTaskResult` from the result;
-#                the async fan-out join is #1081 Phase 4.
+#   `fan_out`  — `fan_out_service` builds each `FanOutTaskResult` from the result
+#                and `POST /fan-out` blocks on the aggregate; the async join +
+#                sync edge adapter is #2524 (#1081 Phase 4).
 #   `a2a`      — `routers/a2a`'s `message/send` consumes `result.response` to
 #                build the JSON-RPC artifact it hands back to the remote caller
-#                (ent#157).
+#                (ent#157). Falls out of #2524's adapter.
 #   `operator_response` — out by CHOICE, not structurally: it dispatches through
 #                the same producer #2391 widened, but the respond endpoint records
 #                `result.status` as the dispatch receipt (audit row + #525
@@ -81,10 +81,12 @@ pytestmark = pytest.mark.unit
 #
 # `PULL_REACHABLE_TRIGGERS` is an explicit allow-list, so an unlisted trigger
 # lands here automatically — this comment is the review the test below demands.
-_STRANDED = ["loop", "fan_out", "a2a", "operator_response"]
-# The five that can. `agent` + `event` arrive via `POST /task`; `schedule`,
-# `webhook` and `reminder` via the scheduler's async-poll dispatch (#2391).
-_REACHABLE = ["agent", "event", "schedule", "webhook", "reminder"]
+_STRANDED = ["fan_out", "a2a", "operator_response"]
+# The six that can. `agent` + `event` arrive via `POST /task`; `schedule`,
+# `webhook` and `reminder` via the scheduler's async-poll dispatch (#2391);
+# `loop` since #2523 made `loop_service` terminal-driven, so its dispatch has no
+# reader either.
+_REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop"]
 
 
 @pytest.fixture
@@ -113,8 +115,9 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
         ever produce `{self_task, agent, mcp, manual, event}`, which contributes
         `agent` + `event`.
       * `task_execution_service` — contributes the autonomous triggers with no
-        synchronous result consumer, i.e. everything the scheduler dispatches
-        async-and-polls: `schedule`, `webhook`, `reminder`.
+        synchronous result consumer: everything the scheduler dispatches
+        async-and-polls (`schedule`, `webhook`, `reminder`) plus `loop`, whose
+        driver became terminal-driven in #2523.
 
     Derived here rather than hardcoded so the constant cannot quietly disagree
     with the reasoning that justifies it.
@@ -124,11 +127,15 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
 
     task_route_can_emit = {"self_task", "agent", "mcp", "manual", "event"}
     scheduler_async_polled = {"schedule", "webhook", "reminder"}
+    # #2523: `loop_service` is advanced by execution terminals, so its dispatch
+    # has no synchronous reader either.
+    terminal_driven = {"loop"}
     assert PULL_REACHABLE_TRIGGERS == (
-        (task_route_can_emit | scheduler_async_polled) & _AUTONOMOUS_TRIGGERS
+        (task_route_can_emit | scheduler_async_polled | terminal_driven)
+        & _AUTONOMOUS_TRIGGERS
     )
     assert PULL_REACHABLE_TRIGGERS == {
-        "agent", "event", "schedule", "webhook", "reminder"
+        "agent", "event", "schedule", "webhook", "reminder", "loop"
     }
 
 
@@ -209,32 +216,32 @@ def test_the_message_contradicts_the_advice_that_used_to_misfire(pilot, caplog):
     for a stranded row that sends them after a variable that is present and
     correct. The log has to say so in words, not merely fire.
 
-    Driven with `loop` since #2391: `schedule` is reachable now, and using it
-    here would assert the diagnostic over a case that no longer exists.
+    Driven with `fan_out`: `schedule` became reachable in #2391 and `loop` in
+    #2523, so using either here would assert the diagnostic over a case that no
+    longer exists.
     """
     with caplog.at_level("WARNING"):
-        pilot.note_unreachable_pull_trigger("pilot-a", "loop")
+        pilot.note_unreachable_pull_trigger("pilot-a", "fan_out")
     assert "flag is applied and correct" in caplog.text
     assert "topology" in caplog.text
 
 
 def test_it_reports_once_per_agent_and_trigger(pilot, caplog):
-    """This sits on the dispatch path of every loop iteration and fan-out
-    subtask. An un-deduped warning would emit thousands of identical lines a day
-    and train operators to filter it — a signal meant to be noticed becoming
-    noise."""
+    """This sits on the dispatch path of every fan-out subtask. An un-deduped
+    warning would emit thousands of identical lines a day and train operators to
+    filter it — a signal meant to be noticed becoming noise."""
     with caplog.at_level("WARNING"):
-        first = pilot.note_unreachable_pull_trigger("pilot-a", "loop")
-        repeats = [pilot.note_unreachable_pull_trigger("pilot-a", "loop") for _ in range(50)]
+        first = pilot.note_unreachable_pull_trigger("pilot-a", "fan_out")
+        repeats = [pilot.note_unreachable_pull_trigger("pilot-a", "fan_out") for _ in range(50)]
     assert first is True
     assert not any(repeats)
     assert caplog.text.count("#2048") == 1
 
 
 def test_dedup_is_per_trigger_not_per_agent(pilot):
-    """A pilot running loops AND fan-out has two distinct gaps to report."""
-    assert pilot.note_unreachable_pull_trigger("pilot-a", "loop") is True
+    """A pilot running fan-out AND serving A2A has two distinct gaps to report."""
     assert pilot.note_unreachable_pull_trigger("pilot-a", "fan_out") is True
+    assert pilot.note_unreachable_pull_trigger("pilot-a", "a2a") is True
 
 
 @pytest.mark.parametrize("trigger", _REACHABLE)

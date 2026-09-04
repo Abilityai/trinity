@@ -2552,17 +2552,26 @@ class CleanupService:
 
     async def _cleanup_loop(self):
         """Main cleanup loop."""
-        # One-shot startup hook for #740: any non-terminal agent_loops left
-        # over from a prior process get marked `interrupted`. Loops do not
-        # auto-resume. Runs once on boot, not every cycle.
+        # One-shot startup hook for #740, rewritten by #2523. It used to call
+        # `db.mark_orphan_loops_interrupted()`, flipping EVERY non-terminal loop
+        # to `interrupted` — correct while a loop was an in-process
+        # `asyncio.Task` whose state died with the process, and pure data loss
+        # now that the loop lives on its row. `reconcile_after_restart` instead
+        # leaves alone every loop with an execution still in flight (that
+        # execution's terminal — or this service's own recovery of it, which
+        # writes one — advances the loop) and re-arms only the loops that lost
+        # their dispatch. Runs once on boot, not every cycle.
         try:
-            interrupted = db.mark_orphan_loops_interrupted()
-            if interrupted > 0:
+            from services.loop_service import get_loop_service
+
+            rearmed = await get_loop_service().reconcile_after_restart()
+            if rearmed > 0:
                 logger.info(
-                    f"[Cleanup] Startup: marked {interrupted} orphan agent_loops as interrupted (#740)"
+                    f"[Cleanup] Startup: re-armed {rearmed} agent_loops that lost "
+                    f"their dispatch to a restart (#2523)"
                 )
         except Exception as e:
-            logger.error(f"[Cleanup] Loop orphan sweep error: {e}")
+            logger.error(f"[Cleanup] Loop restart reconcile error: {e}")
 
         # One-shot startup hook for #1664: agents renamed BEFORE
         # `volume_base_name` existed have an unpinned row, so their (still

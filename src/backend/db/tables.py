@@ -316,6 +316,11 @@ agent_loops = Table(
     Column("created_at", Text),
     Column("started_at", Text),
     Column("completed_at", Text),
+    # #2523 — the two pieces of runner-local state that had no durable home once
+    # the in-process `for` loop was deleted. Everything else the runner held is
+    # already persisted here or derivable from `agent_loop_runs`.
+    Column("next_run_at", Text),        # ISO-Z; NULL = not waiting on a delay
+    Column("stop_requested_at", Text),  # ISO-Z; replaces the in-memory should_stop
 )
 
 agent_loop_runs = Table(
