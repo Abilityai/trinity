@@ -1,0 +1,17 @@
+name: Knos claims
+
+# Advisory only. This never fails a build: the check exits 0 on every path,
+# including when it finds a conflict and when it crashes.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claims:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: drexthealpha/Knos/action@v0.1.4
