@@ -1,0 +1,135 @@
+{
+  "version": "1.1",
+  "date": "2026-09-03",
+  "mode": "diff",
+  "scope": "abilityai/trinity-enterprise#437 PR1 \u2014 branch feature/437-opt-in-telemetry vs merge-base 00b6f025 (dev tip); 23 files, +2362/-303 (working tree, pre-commit)",
+  "phases_run": [
+    "P0 architecture",
+    "P1 attack surface (diff)",
+    "P2 secrets (diff + enterprise-docs guard)",
+    "P3 supply chain (no dependency changes)",
+    "P4 CI/CD (no workflow changes)",
+    "P5 infra (no Docker/compose changes; Redis key + ACL check)",
+    "P6 integrations (outbound intake POST)",
+    "P7 LLM/AI (payload content, rendering)",
+    "P8 skills (no skill changes)",
+    "P9 OWASP (diff)",
+    "P10 STRIDE (diff)",
+    "P11 data classification",
+    "P12 FP filter + verification",
+    "P13 report",
+    "P14 save"
+  ],
+  "attack_surface": {
+    "new_endpoints": [
+      {
+        "route": "POST /api/settings/telemetry-sharing/ask/dismiss",
+        "auth": "assert_admin + reject_agent_principal",
+        "audit": "telemetry_sharing_ask_dismissed"
+      }
+    ],
+    "changed_endpoints": [
+      {
+        "route": "GET /api/settings/telemetry-sharing",
+        "change": "query param preview (bool); response adds sharing_id, dismissed_at, first_value_at, backfill_delivered_at, recent_sends, receiver_hint; gains reject_agent_principal; builder runs off the event loop"
+      },
+      {
+        "route": "PUT /api/settings/telemetry-sharing",
+        "change": "audit details gain sharing_id_rotated (bool); consent-time send strong-ref'd"
+      },
+      {
+        "route": "GET /api/settings/feature-flags",
+        "change": "adds telemetry_sharing_hard_disabled / _dismissed / _first_value (bools, any authenticated user)"
+      }
+    ],
+    "new_settings_keys": [
+      "telemetry_sharing_id",
+      "telemetry_sharing_dismissed_at",
+      "telemetry_sharing_first_value_at",
+      "telemetry_sharing_backfill_delivered_at",
+      "telemetry_sharing_recent_sends"
+    ],
+    "settings_key_guard": "all five under the telemetry_sharing_ prefix the generic PUT refuses (routers/settings.py ~L2981); generic DELETE stays admin-gated and open for the prefix by design (reset path)",
+    "outbound": [
+      {
+        "target": "TELEMETRY_SHARING_URL (operator config, default intake.abilityai.dev)",
+        "change": "payload schema v2, validated before send (fail-closed); no credential; httpx timeout 10s; TLS default-verify"
+      }
+    ],
+    "redis": [
+      {
+        "key": "telemetry_share:tick",
+        "op": "SET NX EX via SingleFlightLock on the backend ACL user",
+        "note": "never released; TTL half the interval; fail-open"
+      }
+    ],
+    "frontend": [
+      "components/onboarding/FinishSetupCard.vue (new; admin-only render)",
+      "components/onboarding/telemetryConsent.js (pure)",
+      "components/settings/TelemetrySharingPanel.vue",
+      "stores/telemetrySharing.js",
+      "stores/sessions.js",
+      "views/Dashboard.vue"
+    ],
+    "websocket": [],
+    "docker": [],
+    "ci": [],
+    "dependencies_changed": false
+  },
+  "findings": [],
+  "observations": [
+    {
+      "id": "O1",
+      "sev": "INFO",
+      "conf": "4/10",
+      "title": "feature-flags now discloses the telemetry kill-switch state to any authenticated user",
+      "detail": "telemetry_sharing_hard_disabled reveals whether DO_NOT_TRACK / TELEMETRY_SHARING_ENABLED is off. Previously visible to admins only (the Settings panel). A boolean about telemetry configuration, no credential, no PII; the flag is what lets the consent card stay hidden without an admin round-trip. Below the daily gate; recorded so the choice is visible."
+    },
+    {
+      "id": "O2",
+      "sev": "INFO",
+      "conf": "3/10",
+      "title": "feature-flags discloses whether the install ever completed an autonomous run",
+      "detail": "telemetry_sharing_first_value is derived from schedule_executions (any SUCCESS with trigger schedule/webhook). Any authenticated user already sees executions they can access; a fleet-level boolean adds nothing exploitable."
+    },
+    {
+      "id": "O3",
+      "sev": "INFO",
+      "conf": "n/a",
+      "title": "test fixture used an sk- prefixed placeholder",
+      "detail": "test_ent437 asserted transport errors are logged by class only using a 'token=sk-...' placeholder; replaced with a neutral marker so the gitleaks per-PR scan (secret-scan.yml) cannot match it. Not a leak \u2014 a fixture string \u2014 but the public-repo rule is zero secret-shaped literals."
+    }
+  ],
+  "verification": {
+    "secrets_scan_diff": "known-prefix scan over the working diff: one match, the test placeholder above (replaced); no .env, no CI, no config credentials touched",
+    "enterprise_docs_guard": "guard PATTERN run locally over the five changed public docs: 0 hits",
+    "auth_gates": "POST dismiss and GET status: assert_admin + reject_agent_principal (routers/settings.py L326, L350, L407); generic DELETE: assert_admin (L3334); flags: get_current_user, booleans only",
+    "sql": "count_terminal_executions_by_status and first_autonomous_success_at: static SQL + :cutoff bind (db/schedules/stats.py L508-L545)",
+    "payload_identity": "validator bans installation_id (BANNED_KEYS) and non-UUID sharing_id; builder never calls get_or_create_installation_id; share id logged as an 8-char prefix; trinity_version is the release version",
+    "rendering": "no v-html; recent_sends payloads and share_url render through text interpolation",
+    "tests": "tests/unit/test_ent437_telemetry_consent.py (34) + ent#12 (10) + neighbouring flag suites green; frontend spec (27) green"
+  },
+  "supply_chain_summary": {
+    "python": "no requirement changes",
+    "node": "no package changes",
+    "install_scripts": "n/a"
+  },
+  "filter_stats": {
+    "raw_candidates": 4,
+    "hard_excluded": 1,
+    "below_gate": 2,
+    "fixed_during_audit": 1,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-09-02-2505-publish-images-raw-alias",
+    "comparable": false,
+    "note": "different branch; first diff audit for ent#437"
+  }
+}
