@@ -302,7 +302,9 @@ never celebrate); swap loading/loaded content inside the SLOT of one persistent 
 zone. During the arrival pass the track is wiped OUT behind the beam (complementary
 `clip-path`), so revealed pixels sit on their final background from the first frame — no
 end-of-pass background snap. Theme via `--scan-core`/`--scan-track` overrides (the Grid
-rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones, and — since
+rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones, the Executions
+info tile's chart zone (ent#449, via the chassis opt-in `owns-loading` — a tile may own its
+LOADING face inside `InfoTile`'s slot; the chassis keeps `error`/`empty`), and — since
 #2163 — the Workspace's three zones (the stage in `Portal.vue`, the conversation body in
 `PortalConversation.vue`, the hint zone in `PortalBriefing.vue`), each keyed on its own
 "no data yet" and each snapping rather than revealing on a failed/empty/refused terminal.

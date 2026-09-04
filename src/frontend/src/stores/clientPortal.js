@@ -1058,6 +1058,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Files a rostered agent has shared (FILES-001), each with a download URL
     // (`?sig=` token is the credential — the download route is public).
+    // ent#438 — the canvases this agent published to the people it works
+    // with. Metadata only; blocks come per canvas on open, the same split the
+    // reports pair uses and for the same reason (a canvas is capped at 512 KiB
+    // and a list of them is not a list view).
+    async fetchAgentCanvases(agentName) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas`,
+        { headers: this.authHeader }
+      )
+      return data.canvases || []
+    },
+
+    async fetchAgentCanvas(agentName, canvasId) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}`,
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     async fetchDocuments(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,

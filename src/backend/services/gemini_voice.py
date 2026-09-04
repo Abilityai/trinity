@@ -609,7 +609,79 @@ class GeminiVoiceService:
             session.panel_state = {
                 "type": "empty", "content": "", "title": None, "updated_at": now,
             }
+        self._persist_panel_to_canvas(session)
         return "Panel updated."
+
+    # ent#438 — the voice panel IS the canvas now.
+    #
+    # `panel_state` stays as the in-session buffer the live overlay reads, and
+    # every mutation is additionally written to the durable canvas. That is the
+    # whole of FR-7: the capability MOVED rather than being dropped with a
+    # stated reason, so an operator who talked to an agent yesterday can still
+    # see what it drew.
+    #
+    # Deliberately `audience="operator"`: a voice session runs on an
+    # operator-authenticated surface, and it always did. A voice panel that
+    # silently became client-visible would be exactly the widening FR-4 exists
+    # to prevent — publishing to a roster stays an explicit `set_canvas` call.
+    _CANVAS_ID = "voice"
+
+    _PANEL_TYPE_TO_BLOCK = {
+        "markdown": "markdown",
+        "html": "html",
+        # A mermaid diagram is fenced markdown to every renderer Trinity has —
+        # artifacts render ```mermaid natively and `renderMarkdown` passes the
+        # fence through, so this needs no new block kind.
+        "mermaid": "markdown",
+    }
+
+    def _panel_blocks(self, panel: dict) -> list:
+        """The current panel as canvas blocks, or [] for an empty panel."""
+        content = (panel or {}).get("content") or ""
+        if not content:
+            return []
+        panel_type = (panel or {}).get("type")
+        title = (panel or {}).get("title")
+        if panel_type == "mermaid":
+            return [{"kind": "markdown", "title": title,
+                     "payload": {"markdown": f"```mermaid\n{content}\n```"}}]
+        if panel_type == "image":
+            # An image has no block kind of its own; markdown carries it and is
+            # sanitized on render like every other markdown block.
+            caption = (panel or {}).get("caption") or ""
+            return [{"kind": "markdown", "title": title,
+                     "payload": {"markdown": f"![{caption}]({content})"}}]
+        kind = self._PANEL_TYPE_TO_BLOCK.get(panel_type)
+        if kind == "markdown":
+            return [{"kind": "markdown", "title": title, "payload": {"markdown": content}}]
+        if kind == "html":
+            return [{"kind": "html", "title": title, "payload": {"html": content}}]
+        return [{"kind": "json", "title": title, "payload": {"content": content}}]
+
+    def _persist_panel_to_canvas(self, session: "VoiceSession") -> None:
+        """Mirror the live panel onto the agent's durable canvas.
+
+        Fail-soft and deliberately so: the voice turn is the thing the operator
+        is watching, and a canvas write that fails must not break the panel in
+        front of them or the tool result the model is waiting on. The live
+        `panel_state` is already updated by the time this runs, so a failure
+        costs durability, never the session.
+        """
+        try:
+            from database import db
+
+            db.upsert_agent_canvas(
+                session.agent_name,
+                self._CANVAS_ID,
+                blocks=self._panel_blocks(session.panel_state),
+                title="Voice session",
+                audience="operator",
+                execution_id=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "voice panel: canvas persist failed for %s: %s", session.agent_name, e
+            )
 
     async def _execute_and_respond(self, session: VoiceSession, call_id: str, fc):
         """Execute a Gemini tool call and send the response back. Runs as a background task."""

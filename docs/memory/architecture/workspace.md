@@ -201,6 +201,52 @@ default for an enterprise-tracker feature is gated-unless-ruled-otherwise (the
 ent#326/ent#384/ent#392 discipline). **No backend change, no new endpoint, no
 migration.** See [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
 
+**Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
+`components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
+`v-html`, the one `.prose-portal` stylesheet, the one delegated code-copy handler — and
+`PortalAgentBubble.vue` is the chat chrome around it, mounted by both transcripts. Before this the
+stylesheet was applied in two SFCs and defined in both, kept "byte-identical so the two cannot
+drift", which is the shape a thing takes when it wants to be one thing; a future surface rendering
+agent markdown outside a bubble (the ent#486 Files tab) mounts `PortalMarkdown` and inherits render,
+style and copy as a unit instead of re-copying two of the three. **`renderMarkdownWithCodeBlocks` is
+a SECOND export, never a `marked` renderer override** — `renderMarkdown` has twelve consumers and a
+global override would sprout a Workspace copy control on dashboards, queue cards and reports; its
+body is byte-identical. **Order is the security of it:** `marked → stripCodeBlockMarkers →
+decorateCodeBlocks → DOMPurify.sanitize`. The markers are stripped from the INPUT first because
+marked passes raw HTML through and DOMPurify keeps `data-*`, so an agent could otherwise ship a
+forged wrapper whose Copy resolves to a hidden `<pre>` (pastejacking); decoration runs BEFORE
+sanitization so every byte reaching `v-html` has passed the one policy (H-005 stays literally true);
+and the decorator matches only the shapes marked actually emits — the BARE `<pre><code` opener
+carrying nothing but an optional `class`, over a body with no literal `<`. marked escapes fence
+contents, so a `<` proves raw-HTML passthrough (a block that could nest a `display:none` element
+the copy would silently pick up), and an attribute marked never writes proves the same thing on
+the opener: DOMPurify keeps `hidden` and `style`, so a raw `<pre><code hidden>` would otherwise get
+a real Copy button over a block that renders empty. The one non-constant byte
+injected is the charset-validated language label; the scanner is a linear `indexOf` walk (the lazy
+regex it replaced was quadratic on adversarial input, on the render path). `utils/markedConfig.js`
+is the ONE marked configuration and exists so a spec can exercise the configured parser —
+`markdown.js` cannot be imported in a DOM-less node process (DOMPurify's stub has no `addHook`), so
+without the split a future highlighter could change fence output while the spec stayed green and
+every Copy button vanished. `utils/clipboard.js::copyText` returns a result, never throws, never
+logs the copied text (it may be the credential the operator just asked for), and falls back to
+`execCommand` on an insecure origin — plain http on a LAN or Tailscale address is a first-class
+Trinity topology — so the controls say "Copy unavailable / blocked / failed" only when copying
+genuinely cannot happen; its pre-existing sibling `copyToClipboard` (four settings-panel callers) is
+left byte-identical and converging them is a follow-up. Blocks WRAP (`pre-wrap` +
+`overflow-wrap: anywhere`, no `overflow-x`), so a bubble never widens its column; the copy reads
+`textContent`, so wrapping is display-only and ASCII-table alignment is the accepted cost. Both
+console entry links are `_blank` + `rel="noopener"` (Vue Router's `guardEvent` declines to intercept
+those and modified clicks, so there is no `window.open`) while the `?tab=session` redirect stays
+deliberately same-tab — it rewrites a navigation in flight rather than starting one. Sidebar search
+reuses `filterAgentCandidates` with **`requireMentionable: false`** (a row is not a mention, so
+`data.scout` stays findable) and bounds results through `visibleAgentRows`, so an ask-bearing match
+is never collapsed out of its own result; both empty lines are per-section, and the roster skeleton
+outranks them while the roster is still loading. **OSS-core by decision (ent#456 / ent#402):
+deliberately ungated** — no `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+because CLAUDE.md's default for an enterprise-tracker feature is *gated unless ruled otherwise*, so
+the ruling must never be inferred later from the mere fact that it merged. See
+[workspace-thread-code-blocks.md](../feature-flows/workspace-thread-code-blocks.md).
+
 **The briefing is off the roster's critical path (#2163).** `get_roster` used to fan
 `_agent_briefing` across every card and `await asyncio.gather(...)`, which waits for
 ALL — so the Workspace's first paint was bounded by the SLOWEST agent in the fleet, for

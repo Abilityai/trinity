@@ -370,7 +370,9 @@
     deletes live Workspace JSONLs one hour after they are written, and continuity
     breaks with no error anywhere
   - `?tab=session` and legacy session deep links redirect to
-    `/workspace?agent=<name>`, query-preserving
+    `/workspace?agent=<name>`, query-preserving, and deliberately **same-tab**
+    (a URL rewrite of an in-flight navigation, not an entry point); the two
+    *click* entry points open a new tab instead (ent#456, §5.16)
   - Existing `agent_sessions` rows stay readable — endpoints, store, and data are
     untouched; only the Agent Detail entry point goes away
 - **Non-goal**: streaming. The Session surface never streamed (a synchronous POST
@@ -453,8 +455,9 @@
     "+N" chip), so a room is visually distinct from a 1:1
   - Clicking an agent that is waiting on you opens the conversation it is
     waiting in; with nothing unread it starts a new chat as before
-  - Search still replaces both lists while active; an empty roster still ends in
-    a next action (create an agent / ask whoever invited you)
+  - Search **filters the agents block in place** and swaps the chat lists for
+    results (ent#402, §5.16); an empty roster still ends in a next action
+    (create an agent / ask whoever invited you)
 - **Per-viewer state**: `enterprise_portal_chat_state`
   `(client_email, chat_kind, chat_id) → starred_at, last_read_at`. Deliberately
   **not** a column on the chat row: a room is shared between participants, so a
@@ -978,6 +981,217 @@ box; the words are recorded either way and handed to the agent's
   the remaining bespoke Workspace indicators (`PortalFilesPanel`'s spinner,
   `PortalSidebar`'s skeleton) — those stay on #1921.
 - **Flow**: `docs/memory/feature-flows/workspace-roster-briefing.md`
+### 5.17 Workspace thread & sidebar — code blocks and copy (#2515), new-tab entry (trinity-enterprise#456), agent search (trinity-enterprise#402)
+
+**Description**: Three changes to the same OSS-core Workspace surface. A fenced
+code block in an agent's reply now reads as code and can be copied; the two
+console entry points to the Workspace open a new tab; and the sidebar search
+filters the agent roster, not only the chat list.
+
+**OSS-core by decision (ent#456 / ent#402): deliberately ungated** — no
+`requires_entitlement`, no registry read, logic stays in the OSS tree. Recorded
+explicitly because CLAUDE.md's default for an enterprise-tracker feature is
+*gated unless ruled otherwise*, so the ruling must never be inferred later from
+the mere fact that it merged (the ent#326 / ent#384 / ent#392 discipline). Both
+change a surface that moved to OSS core in ent#356 and carry no gate-able
+capability: a link target, and a client-side filter over a roster the caller
+already holds.
+
+#### Code blocks read as code, and the thread can be copied (#2515)
+
+- **FR-1 — One markdown body, one stylesheet, one copy handler**:
+  `components/portal/PortalMarkdown.vue` is the single home of the rendered
+  assistant body — the one `v-html`, the one `.prose-portal` block, the one
+  delegated copy handler. `PortalAgentBubble.vue` is the chat chrome around it
+  and both transcripts (`PortalConversation.vue`, `PortalRoom.vue`) mount that.
+  The previous shape had the same stylesheet copied into two SFCs *specifically
+  so the two could not drift* — which is the drift this closes rather than
+  restates. A future consumer that renders agent markdown outside a chat bubble
+  (the ent#486 Files tab) mounts `PortalMarkdown.vue` and inherits render, style
+  and copy as one unit instead of re-copying two of the three.
+- **FR-2 — Decoration is opt-in per consumer**: `renderMarkdown` has twelve
+  consumers (dashboards, queue cards, reports, executions, loops, compatibility,
+  Agent Detail chat, both portal transcripts). A global `marked` renderer
+  override for the `code` token would sprout a Workspace copy control on all of
+  them, so the code-block treatment is a **separate export**,
+  `renderMarkdownWithCodeBlocks`, and `renderMarkdown`'s body is unchanged.
+- **FR-3 — Decoration runs BEFORE sanitization, and forged markers are stripped
+  first**: the pipeline is `marked → stripCodeBlockMarkers → decorateCodeBlocks
+  → DOMPurify.sanitize → v-html`, so every byte that reaches `v-html` has passed
+  the one DOMPurify policy (H-005 stays literally true). marked passes raw HTML
+  in markdown through unescaped and DOMPurify keeps `data-*` and `style`, so an
+  agent could otherwise emit a *forged* wrapper whose Copy button resolves to a
+  hidden `<pre style="display:none">` — pastejacking. Agent-supplied
+  `data-code-block` / `data-copy-code` markers are therefore removed from the
+  input before decoration, so only decorator-built wrappers ever carry them, and
+  the handler reads `:scope > pre` (the wrapper's own child) and nothing else.
+  The decorator additionally refuses any opener marked would not have written —
+  the `<code>` tag must carry nothing but an optional `class` — because DOMPurify
+  keeps `hidden` and `style`, so a raw `<pre><code hidden>` would otherwise be
+  handed a real Copy button over a block that renders empty: the same pastejack
+  through the opener rather than through a forged wrapper.
+  The only non-constant byte the decorator injects is the language label, which
+  is charset-validated (`^[a-z0-9][a-z0-9_+#.-]{0,23}$`, so it cannot contain
+  `<>&"'`) and falls back to a neutral "code".
+- **FR-4 — Wrap at the edge, never a horizontal scroller**: a block wraps
+  (`white-space: pre-wrap`, `overflow-wrap: anywhere`) and never widens the
+  bubble or the column at any width. Copied text is still exact — the copy reads
+  `textContent`, so wrapping is a display property only. Accepted cost: ASCII
+  tables and box-drawing inside a block lose their alignment on a narrow column.
+- **FR-5 — Two copy controls, both keyboard-reachable**: a per-block **Copy** in
+  the block's own bar (always visible — it is chrome, not a hover overlay, so it
+  is discoverable on touch with no `@media` rule) copying that block's text, and
+  a per-message **Copy message** in an action row beneath the bubble copying the
+  raw markdown. Both are native `<button>`s (Enter/Space work), both carry an
+  `aria-label`, and feedback is mirrored into an `aria-live="polite"` region.
+- **FR-6 — Clipboard failure is named, never silent, and has a working
+  fallback**: `utils/clipboard.js::copyText` returns a result and never throws or
+  logs the copied text. `navigator.clipboard` is undefined on an insecure origin
+  — plain `http://<lan-or-tailscale-ip>` is a first-class Trinity topology — so a
+  missing `writeText` falls back to a temporary off-screen `<textarea>` +
+  `execCommand('copy')`. Only when both fail does the control say so: "Copy
+  unavailable" / "Copy blocked" (a denied permission) / "Copy failed", for ~2 s,
+  in text **and** colour. `writeText` is the first await in the click task
+  (Safari's transient-activation rule), and the control's label and `aria-label`
+  are restored from constants after the window — never from a captured previous
+  value, so two clicks inside the window cannot freeze it on "Copied".
+
+#### The console's Workspace links open a new tab (trinity-enterprise#456)
+
+- **FR-7 — Two links, `target="_blank" rel="noopener"`**: the NavBar
+  **Workspace** entry and Agent Detail's **Continue in Workspace →** link. Vue
+  Router's `guardEvent` skips interception on `_blank` and on modified clicks, so
+  `<router-link>` still resolves the `href` while the browser owns the click —
+  **no `window.open`**, and cmd/ctrl/shift-click keep their native behaviour.
+- **FR-8 — The `?tab=session` redirect stays same-tab**: it is a `router.replace`
+  rewrite of an in-flight navigation, not an entry point; a redirect that spawned
+  a tab would leave the user's original tab on a URL they never asked for.
+- **Not in scope**: any preference for the behaviour — the new tab is simply the
+  default.
+
+#### Sidebar search filters agents, not just chats (trinity-enterprise#402)
+
+- **FR-9 — One matching rule, reused**: agent matching is
+  `filterAgentCandidates` (the ent#392 composer rule), called through
+  `searchAgents` with **`requireMentionable: false`** — the flag lives inside
+  that helper so a caller cannot forget it. A dotted slug like `data.scout` is
+  openable even though it is not @mentionable; excluding it would hide a real
+  agent from a search for its own name. No second hand-rolled predicate.
+- **FR-10 — An ask-bearing match is never hidden by the results window**:
+  results are bounded by `visibleAgentRows` — the same #2424 rule the steady
+  state uses — so an agent waiting on you cannot be collapsed out of its own
+  search result, and the same single persistent "Show all (N)" toggle expands
+  both modes (#2159: alternating two `v-if` buttons drops keyboard focus).
+  Search reaches agents beyond the collapse limit.
+- **FR-11 — Agents first, in a labelled section, with the steady state's row**:
+  the row markup, badges, availability chip and `open-agent` emit are written
+  once and reused in both modes, so they are inherited rather than copied.
+- **FR-12 — Per-section honest states, and loading is not empty**: "nothing
+  matched at all" (both lines + a next-action hint) is distinguishable from
+  "agents matched, no chats" (the chat line alone); neither line ever stands in
+  for the other. The agent half answers for itself: it is a client-side filter
+  over a roster already in hand, so it states its own emptiness even while the
+  chat request is still in flight — that request's flag is set on every
+  keystroke, so gating the agents line on it would withhold the sentence for the
+  whole time someone is typing. While the roster has not loaded the skeleton
+  stays — a two-character query on a slow roster must never read "No agents
+  match." over a roster that has not arrived. The placeholder says agents
+  **and** chats.
+  *Known limitation*: a failed chat-search request is swallowed into `[]` by the
+  view, so it currently reads as "No chats match."; fixing that is a change to
+  `views/Portal.vue` and is tracked separately.
+
+- **Flows**: `docs/memory/feature-flows/workspace-thread-code-blocks.md`,
+  `workspace-sidebar-ia.md`, `workspace-absorbs-session.md`
+### 5.18 Agent canvas — a durable surface an agent renders onto (trinity-enterprise#438)
+
+- **Status**: ✅ Implemented (2026-09-02)
+- **Requirement ID**: AGENT_CANVAS
+- **GitHub Issue**: abilityai/trinity-enterprise#438
+- **Description**: Every agent gets a **canvas** — a named, durable surface it
+  writes structured blocks onto and *updates over time*. Reports (§5.14) are the
+  immutable half: a thing published once, addressed to a person, accumulating as
+  a record. A canvas is the living half: one addressable surface per topic that
+  the agent keeps current. Before this, the only canvas Trinity had was
+  `VoiceSession.panel_state` — in-memory, written only by the Gemini Live voice
+  tools, on one page, gated behind `WORKSPACE_ENABLED && GEMINI_API_KEY`, and
+  gone when the session ended.
+- **OSS-core by decision (ent#438): deliberately ungated** — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because the default for an enterprise-tracker feature is *gated unless ruled
+  otherwise*, so the ruling must never be inferred later from the mere fact that
+  it merged (the ent#326 / ent#384 / ent#392 discipline). Rationale, on operator
+  instruction: Workspace and everything around it is OSS.
+
+- **FR-1 — One workspace, not two** (AC 1): `/agents/:name/workspace` — the
+  voice-orb-plus-panel page — is **deleted**, and the route becomes a
+  query-preserving redirect to `/workspace?agent=<name>`. It is safe to delete
+  because ent#440 already put voice conversation *inside* the Workspace, so once
+  the canvas moves the page has no capability of its own left. Same shape as the
+  §5.9 (ent#358) and ent#381 retirements: the surface goes, the route keeps
+  working.
+- **FR-2 — The canvas is a row, addressed by (agent, canvas_id)**:
+  `agent_canvases` with a composite primary key, so "update it over time" is an
+  upsert and addressability is structural rather than a convention. `canvas_id`
+  is agent-chosen and charset-validated (`^[A-Za-z0-9._-]{1,64}$`) — the same
+  guard the #919 pipeline ids carry, for the same reason: it lands in a URL.
+  Survives reload and agent restart because it is a row and not process state
+  (AC 5).
+- **FR-3 — Blocks are typed, and the renderer is the one that already exists**
+  (AC 4): a canvas is an ordered list of blocks, each
+  `{kind, title?, payload}`. `table` / `kpi` / `markdown` / `timeline` / `json`
+  delegate to the shared `components/reports/` dispatch — *reused, not forked*,
+  because those renderer keys are CI-pinned as the canonical contract
+  (`test_1535_report_prompt_guidance.py`), and forking them is what §5.11 and
+  §5.14 both refused. The canvas adds two kinds that dispatch cannot serve:
+  `chart` (over the existing `TrendLineChart`) and `html` (DOMPurify-sanitised
+  at render, H-005). The report `display_hint` enum is deliberately **not**
+  widened: a canvas is a superset of a report's rendering, not a change to what
+  a report is.
+- **FR-4 — Visibility is an explicit agent act, defaulting to operator-only**
+  (AC 8): each canvas carries `audience` ∈ `operator` (default) | `roster`.
+  `operator` is visible only on Agent Detail; `roster` additionally appears on
+  the agent's Workspace page to anyone already rostered on that agent. Default
+  operator-only is the fail-closed direction and is what makes "a canvas never
+  widens who can see the agent's output" true by construction — publishing to a
+  client is a thing the agent has to *say*, mirroring §5.14's rule that an
+  unaddressed report stays operator-only. The audience is a validated column,
+  never a key inside `blocks`, for the ent#364 reason: `blocks` is agent-authored
+  and a prompt-injected agent must not be able to decide who reads it.
+- **FR-5 — Staleness is derived, not a clock** (AC 7): the canvas always renders
+  `updated_at`, and is marked **may be out of date** when the agent has had a
+  terminal execution *after* the canvas was last written — i.e. it did work and
+  did not refresh this surface. An arbitrary age threshold was rejected: a canvas
+  has no inherent freshness expectation, so a clock would either cry wolf on a
+  monthly report or stay silent on a minute-by-minute one, whereas "the agent has
+  run since" is a fact about *this* canvas. `updated_by_execution_id` records
+  which run wrote it, so the claim is checkable.
+- **FR-6 — Writes are self-gated, bounded, and provenance-stamped**: the write
+  routes take `AuthorizedAgentByName` **plus** the #918 self-check
+  (`current_user.agent_name == name` for an agent-scoped key), so a sibling agent
+  an owner also shares cannot paint on this agent's canvas. Per-agent rate limit
+  and a byte cap on the serialized blocks (413 over cap), both reusing the #918
+  primitives. `execution_id` is validated through `resolve_and_validate_execution`
+  (the MEM-001 rule) rather than trusted.
+- **FR-7 — The voice panel becomes the canvas**: `gemini_voice`'s
+  `show_markdown` / `update_panel` / `append_to_panel` / `clear_panel` now write
+  the durable canvas (`canvas_id="voice"`) instead of session memory, so AC 2 is
+  met by the capability *moving* rather than by being dropped with a stated
+  reason. They inherit `audience="operator"`, which is what a voice session on an
+  operator-authenticated page always was.
+- **FR-8 — Empty state offers the next action** (AC 6): a canvas-less agent
+  renders what a canvas is and the one-line tool call that creates one on the
+  operator surface; on the Workspace it says the agent has not published one and
+  offers the chat, since a client has no way to write one and a dead panel would
+  be the §5.11 blank-panel defect.
+- **Cascade + retention**: `agent_canvases` is registered in `AGENT_REFS`
+  (CASCADE) so rename re-keys and the #834 hard purge wipes it — CI-blocking via
+  `test_agent_cleanup_parity`. Deliberately **no** retention window: a canvas is
+  bounded by construction (one row per `(agent, canvas_id)`, replaced on write),
+  unlike the append-only tables `RETENTION_OPS_KEYS` governs.
+- **Migrations**: dual-track — `db/migrations.py::agent_canvases_table` + Alembic
+  `0050_agent_canvases`.
+- **Flow**: `docs/memory/feature-flows/agent-canvas.md`
 
 ## 6. Activity Monitoring
 
@@ -1100,13 +1314,14 @@ box; the words are recorded either way and handed to the agent's
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Info tiles)
 
 ### 9.13 Grid Info Tile — Executions (trinity-enterprise#96)
-- **Status**: ✅ Implemented (2026-08-14) · OSS-core (the epic's gating decision — the Grid ships OSS and these tiles summarize data the OSS operator already has)
+- **Status**: ✅ Implemented (2026-08-14; loading motion 2026-09-03, ent#449) · OSS-core (the epic's gating decision — the Grid ships OSS and these tiles summarize data the OSS operator already has)
 - **Description**: Fleet executions over the last 24h as 24 hourly columns stacked by trigger bucket, with a failure rail, headline totals, and live running/queued chips. Per-agent tiles already carry 14d activity; there was no fleet-level execution chart anywhere on the dashboard. Default-on; toggled in the Tiles ▾ menu like any other tile.
 - **One request, two dimensions (`split=trigger`, extends ent#326)**: the stack needs hour × trigger, and `GET /api/executions/timeline` grouped one dimension at a time — so the endpoint gained an optional `split=trigger` rather than the tile issuing one call per bucket name. Each bucket gains `by_trigger: {label: {total, failed}}` and the response carries `trigger_order`. **Per-bucket totals are re-summed from the split rows server-side**, so a column and its segments cannot disagree; gap-filled intervals carry `{}` rather than a missing key, so a chart never distinguishes "no runs" from "no field". `split` is a named 422 over a categorical `group_by` (splitting `trigger` by trigger is a tautology) — the ent#326 rule that an axis the caller did not ask for is a quietly wrong chart, applied to one they asked for and did not get.
 - **One vocabulary, one order (AC1)**: bucket names come from `_TRIGGER_BUCKETS` and their stack order is **served by the backend** (`trigger_order` ← `_BUCKET_ORDER`), so tile, legend and the #1107 Overview chart cannot name or order the same buckets differently. A bucket present in the data but absent from the order is **appended**, never dropped — otherwise it would count toward a column total while missing from its stack.
 - **Failures beside the stack, not inside it (AC2)**: failures render as a rail beneath each column on their own scale, not as a stack segment. A "Failed" segment would have to be subtracted from its trigger's segment to keep the column honest, which silently redefines every other segment as "succeeded"; the rail keeps the column equal to runs while making failures visible. Per-label `failed` still rides in the payload, so the hover breakdown names which trigger failed.
 - **Honest states**: `successRate` is terminal-based and reports `—` (not 0%) when nothing has terminated; "No executions in the last 24h" requires a successful read (the ent#100 manufactured-green rule); a failed background refresh keeps the last good chart with a `24h · stale` stamp; the running/queued chips degrade to absent rather than to zero, since a failed `/stats` is not evidence that nothing is running.
 - **No new timer, no new poll**: both GETs ride `stores/fleetGrid.js::refreshBatchData()`, gated on the tile being enabled. The tile never fetches on mount — viewport culling unmounts tiles, so a fetch there re-issues on every pan.
+- **Loading motion (trinity-enterprise#449)**: the chart zone loads with the standard scanline (`ScanlineReveal`, design-system §6) — ONE persistent instance keyed off the pure `tileState` ("no data yet", never fetch-in-flight; the store's `execTimelineLoaded` latch means the 60s refresh can never re-enter it), `reveal` only for a data terminal (error/empty snap), headline `—` while loading, one fixed 70px zone through every phase, beam themed from the grid's own `--gv-*` palette, reduced motion honoured by the primitive. `InfoTile` gains an `owns-loading` opt-in so a tile may render its own loading face inside the default slot; the chassis `.it-skel` stays the default for the two row-list tiles until `TileRowList` adopts (decision recorded in the flow — `TileRowList`'s `height: 100%` tracks collapse to `auto` inside the primitive's auto-height wrapper, so adopting there is a layout change to two shipped tiles, not a look).
 - **Tokens**: seven new `--gv-bk-*` bucket colours defined in BOTH theme blocks (`gridTokens.spec.js`). `AgentTile` collapses ten buckets to three because a 60px sparkline cannot carry ten; the fleet tile stacks all ten, so each needs its own hue.
 - **Out of scope**: WS-driven early refresh (rides the poll); a window selector (24h fixed, as filed).
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Info tiles)

@@ -350,6 +350,41 @@ onto an earlier, answered turn.
 Residual: the synchronous `POST .../chat` path records no outcome — it raises
 into a live request, where the client already gets a real HTTP error.
 
+## Entry points open a new tab (trinity-enterprise#456)
+
+Two links reach the Workspace from the operator console: the NavBar
+**Workspace** entry, and this flow's **Continue in Workspace →** on the Chat
+tab. Both now carry `target="_blank" rel="noopener"`.
+
+The reason is what this flow established: the Workspace is where the continuing
+conversation lives, so following a link to it replaced whatever the operator was
+looking at, and getting back meant re-finding the agent, the tab and the scroll
+position.
+
+`target` alone is the whole mechanism. Vue Router's `guardEvent` declines to
+intercept a click whose target is `_blank` (and any modified click), so
+`<router-link>` still resolves the href while the browser owns the click.
+Hand-rolling `window.open` would take that back and break cmd/ctrl/shift-click
+with it — which is why there is none.
+
+**The `?tab=session` redirect deliberately stays same-tab.** It is a
+`router.replace` rewrite of a navigation already in flight, not an entry point;
+spawning a tab from it would leave the original tab sitting on a URL nobody
+asked for. Its existing @smoke specs above are the guard, and
+`workspaceNewTab.spec.js` pins the same-tab shape from the other side.
+
+Also pinned there: **`views/Portal.vue` mounts no NavBar.** NavBar is mounted
+per view (`App.vue` renders none), so the entry's active-class expression can
+never be true in the new tab — pinning that ABSENCE is the real guarantee, where
+pinning the expression would be pinning dead code.
+
+The AC's "a portal-token session in a fresh tab" is unreachable through these
+links: a portal-token client never sees the NavBar or Agent Detail. Stated here
+rather than claimed as verified.
+
+There is deliberately no preference for the behaviour — the new tab is simply
+the default.
+
 ## Known Limitations
 
 | Limitation | Detail |

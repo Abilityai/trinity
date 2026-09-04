@@ -117,6 +117,7 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.canvas import CanvasOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
@@ -964,6 +965,7 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._canvas_ops = CanvasOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
@@ -2171,6 +2173,25 @@ class DatabaseManager:
     def get_report_for_client(self, report_id: str, client_email: str):
         """ent#365 — one report, only if addressed to this person."""
         return self._report_ops.get_report_for_client(report_id, client_email)
+
+    # =========================================================================
+    # Agent canvas (ent#438, delegated to db/canvas.py)
+    # =========================================================================
+
+    def list_agent_canvases(self, agent_name: str, audience: str = None):
+        return self._canvas_ops.list_canvases(agent_name, audience)
+
+    def get_agent_canvas(self, agent_name: str, canvas_id: str, audience: str = None):
+        return self._canvas_ops.get_canvas(agent_name, canvas_id, audience)
+
+    def upsert_agent_canvas(self, agent_name: str, canvas_id: str, **kwargs):
+        return self._canvas_ops.upsert_canvas(agent_name, canvas_id, **kwargs)
+
+    def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
+        return self._canvas_ops.delete_canvas(agent_name, canvas_id)
+
+    def last_completed_execution_at(self, agent_name: str):
+        return self._canvas_ops.last_completed_execution_at(agent_name)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
                               hours: int = None, search: str = None,

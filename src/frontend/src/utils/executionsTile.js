@@ -198,6 +198,51 @@ export function tileState({ loaded, error, buckets }) {
   return total ? 'ready' : 'empty'
 }
 
+/**
+ * The chart zone's `ScanlineReveal` props, derived from the state above
+ * (trinity-enterprise#449, design-system §6).
+ *
+ * `loading` is "no data yet", NEVER "a request is in flight": `tileState` is
+ * `'loading'` only before the first successful read, and the store's
+ * `execTimelineLoaded` latch is written `= true` on that success and never
+ * written false — so the 60s batch refresh can never re-raise the beam.
+ *
+ * `reveal` is the celebration of DATA arriving, so only `'ready'` earns it: an
+ * error or an empty window snaps to loaded with no pass. (Those two terminals
+ * also replace the slot with the chassis message, so the zone is unmounted
+ * there — the prop is the belt.)
+ *
+ * Total on unknown input: an unrecognised state renders the loaded face, which
+ * is the direction that cannot strand a tile behind a permanent beam.
+ */
+export function scanlineProps(state) {
+  return { loading: state === 'loading', reveal: state === 'ready' }
+}
+
+/**
+ * The headline's rendered face (trinity-enterprise#449).
+ *
+ * The headline sits OUTSIDE the scanline zone — the first frame of the reveal
+ * wipe clips all slot content to nothing, so a headline inside it would blink
+ * at arrival. Being outside, it renders during loading and must therefore have
+ * a loading face of its own: `—`, never `0 runs`, which is a claim about the
+ * fleet made before anything has been read (the ent#100 manufactured-green
+ * rule, applied to the number rather than to the empty state).
+ *
+ * `failed` stays 0 while loading for the same reason — the segment is rendered
+ * only for a non-zero count, and "— failed" would assert failures exist.
+ * `ok` keeps `headline`'s terminal-based rule: nothing terminated → `—`, not 0%.
+ */
+export function headlineFace(head, state) {
+  const loading = state === 'loading'
+  const rate = head?.successRate
+  return {
+    total: loading ? '—' : String(head?.total || 0),
+    ok: loading || rate === null || rate === undefined ? '—' : `${rate}%`,
+    failed: loading ? 0 : head?.failed || 0,
+  }
+}
+
 /* -------------------------------------------------------------------------
  * Legend fitting (#2228)
  *
