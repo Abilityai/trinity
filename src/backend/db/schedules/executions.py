@@ -109,6 +109,7 @@ class ScheduleExecutionsMixin:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        fan_out_task_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
         source_channel: str = None,
@@ -130,6 +131,9 @@ class ScheduleExecutionsMixin:
             source_mcp_key_name: MCP API key name (denormalized)
             model_used: Model used for this execution (MODEL-001)
             fan_out_id: Parent fan-out operation ID (FANOUT-001)
+            fan_out_task_id: The caller's own id for this subtask within the
+                batch (#2524). Persisted so the aggregate can be rebuilt from
+                the rows rather than from a dict in the dispatching process.
             loop_id: Parent loop ID (#740) — iterations of a sequential loop
             subscription_id: Subscription active at record time (SUB-004)
             source_channel_agent: Binding-agent for channel report-back (ent#265).
@@ -160,6 +164,7 @@ class ScheduleExecutionsMixin:
                     source_mcp_key_name=source_mcp_key_name,
                     model_used=model_used,
                     fan_out_id=fan_out_id,
+                    fan_out_task_id=fan_out_task_id,
                     loop_id=loop_id,
                     subscription_id=subscription_id,
                     source_channel=source_channel,
@@ -668,6 +673,68 @@ class ScheduleExecutionsMixin:
                 d["completed_at"] = _norm_ts(d.get("completed_at"))
                 rows.append(d)
             return rows
+
+    # ------------------------------------------------------------------
+    # Fan-out batch (#2524)
+    # ------------------------------------------------------------------
+
+    # A fan-out subtask is finished when its row leaves these. Mirrors
+    # `sync_waiter.TERMINAL_TASK_STATUSES` — `queued` (waiting for a pull
+    # worker) and `pending_retry` are explicitly NOT terminal, which is the
+    # whole point: the batch must keep waiting through them.
+    _FAN_OUT_OPEN_STATUSES = (
+        TaskExecutionStatus.QUEUED,
+        TaskExecutionStatus.RUNNING,
+        TaskExecutionStatus.PENDING_RETRY,
+    )
+
+    def list_fan_out_executions(self, fan_out_id: str) -> List[Dict]:
+        """Every execution row in one fan-out batch, oldest first (#2524).
+
+        The aggregate `FanOutResult` is rebuilt from this rather than from a
+        dict in the dispatching coroutine, so it survives the request that
+        started the batch — which is what makes `async_mode` and the status
+        endpoint possible, and what lets the subtasks be claimed by a pull
+        worker instead of pushed.
+        """
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.fan_out_task_id,
+                schedule_executions.c.status,
+                schedule_executions.c.response,
+                schedule_executions.c.error,
+                schedule_executions.c.cost,
+                schedule_executions.c.context_used,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+            )
+            .where(schedule_executions.c.fan_out_id == fan_out_id)
+            .order_by(schedule_executions.c.started_at.asc())
+        )
+        with get_engine().connect() as conn:
+            return [dict(row) for row in conn.execute(stmt).mappings()]
+
+    def count_fan_out_open(self, fan_out_id: str) -> int:
+        """How many of a batch's rows have not reached a terminal (#2524).
+
+        Runs on every fan-out terminal, so it is a COUNT against the
+        `(fan_out_id, status)` index rather than a fetch of the whole batch.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(schedule_executions)
+            .where(
+                and_(
+                    schedule_executions.c.fan_out_id == fan_out_id,
+                    schedule_executions.c.status.in_(self._FAN_OUT_OPEN_STATUSES),
+                )
+            )
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
 
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""

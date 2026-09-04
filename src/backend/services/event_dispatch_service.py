@@ -383,12 +383,13 @@ def spawn_task_terminal_event(
     other:
 
     * ``emit_task_terminal_event`` (#1578) — the agent.task.* pub/sub emit.
-    * ``loop_service.advance_loop_on_terminal`` (#2523) — advances the loop this
-      execution belongs to, if any. This is what replaced the in-process ``for``
-      loop in ``LoopService``, and it has to hang HERE rather than inside the
-      emit: the emit returns early when no event subscription matches, which is
-      the common case, so a loop advance nested inside it would almost never
-      run.
+    * ``_terminal_side_effects`` — the orchestration primitives that used to hold
+      their state in a coroutine and now react to terminals instead: the loop
+      advance (#2523) and the fan-out join (#2524).
+
+    Both hang HERE rather than inside the emit, because the emit returns early
+    when no event subscription matches — the common case — so anything nested
+    inside it would almost never run.
     """
     _spawn_named(
         "#1578",
@@ -401,24 +402,32 @@ def spawn_task_terminal_event(
             cost=cost,
         ),
     )
-    _spawn_named("#2523", _advance_loop(execution_id))
+    _spawn_named("#2523/#2524", _terminal_side_effects(execution_id))
 
 
-async def _advance_loop(execution_id: Optional[str]) -> None:
-    """Lazy-import shim for the loop advance (#2523).
+async def _terminal_side_effects(execution_id: Optional[str]) -> None:
+    """React to one execution terminal on behalf of the orchestrators.
 
-    ``loop_service`` imports ``database`` and (lazily) ``task_execution_service``;
-    importing it at this module's top level would put the dispatch stack behind
-    the event stack for every consumer of this module. Never raises — the
-    advance is already fail-safe internally, and this is belt-and-braces on the
-    terminal path.
+    Lazy-import shim: ``loop_service`` and ``fan_out_service`` both import
+    ``task_execution_service``, which imports THIS module — a top-level import
+    either way would close the cycle. Each consumer is guarded separately so a
+    fault in one cannot skip the other, and neither can raise: this runs on the
+    path of an already-billed terminal.
     """
+    if not execution_id:
+        return
     try:
         from services.loop_service import advance_loop_on_terminal
 
         await advance_loop_on_terminal(execution_id)
     except Exception as e:  # noqa: BLE001 — never affect the billed terminal
         logger.warning("[#2523] loop advance failed for %s: %s", execution_id, e)
+    try:
+        from services.fan_out_service import join_fan_out_on_terminal
+
+        await join_fan_out_on_terminal(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#2524] fan-out join failed for %s: %s", execution_id, e)
 
 
 def _spawn_named(tag: str, coro: "Any") -> None:

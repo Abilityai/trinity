@@ -126,6 +126,10 @@ def api_client():
 @pytest.fixture(autouse=True)
 def cleanup_after_test():
     yield
+    # #2524: `_install_rows` swaps the `database` module so the LATE import
+    # inside `sync_waiter.wait_for_fan_out_batch` resolves to the fake too.
+    # Put it back, per the file's _STUBBED_MODULE_NAMES contract.
+    _restore_sys_modules()
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +191,71 @@ def _make_success_result():
     return r
 
 
-def _install_mock_task_service(call_log: list):
-    """Install a mock task execution service that records each call."""
+class _FanOutRows:
+    """The `schedule_executions` surface a fan-out batch needs (#2524).
+
+    The aggregate is a query over `fan_out_id` now, not a dict in the
+    dispatching coroutine, so a bare `MagicMock()` db no longer stands in for
+    it — `count_fan_out_open` has to return a real integer or the batch never
+    completes, and `list_fan_out_executions` has to return real rows or there is
+    no aggregate to assert on.
+    """
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+        self._n = 0
+
+    def create_task_execution(self, **kw):
+        self._n += 1
+        eid = f"exec_{self._n}"
+        self.rows[eid] = {
+            "id": eid,
+            "agent_name": kw.get("agent_name"),
+            "fan_out_id": kw.get("fan_out_id"),
+            "fan_out_task_id": kw.get("fan_out_task_id"),
+            "status": "running",
+            "response": None,
+            "error": None,
+            "cost": None,
+            "context_used": None,
+            "duration_ms": None,
+        }
+        return types.SimpleNamespace(id=eid, fan_out_id=kw.get("fan_out_id"))
+
+    def finish(self, execution_id, status="success", response="ok", error=None):
+        self.rows[execution_id].update(status=status, response=response, error=error)
+
+    def list_fan_out_executions(self, fan_out_id):
+        return [dict(r) for r in self.rows.values() if r["fan_out_id"] == fan_out_id]
+
+    def count_fan_out_open(self, fan_out_id):
+        return sum(
+            1 for r in self.rows.values()
+            if r["fan_out_id"] == fan_out_id
+            and r["status"] in ("queued", "running", "pending_retry")
+        )
+
+    def get_execution(self, execution_id):
+        row = self.rows.get(execution_id)
+        return types.SimpleNamespace(**row) if row else None
+
+    def get_execution_timeout(self, agent_name):
+        return 600
+
+    def update_execution_status(self, **_kw):
+        return True
+
+
+def _install_mock_task_service(call_log: list, rows: "_FanOutRows"):
+    """Install a mock task execution service that records each call.
+
+    #2524: it also writes the terminal onto the row, because the batch's outcome
+    is read from the rows — a fake that only returned a result would exercise a
+    path production does not have.
+    """
     async def _execute_task(**kwargs):
         call_log.append(kwargs)
+        rows.finish(kwargs["execution_id"])
         return _make_success_result()
 
     svc = MagicMock()
@@ -199,11 +264,28 @@ def _install_mock_task_service(call_log: list):
     return svc
 
 
+def _install_rows() -> "_FanOutRows":
+    """Point every `db` a fan-out batch reaches at a fresh row store.
+
+    Two bindings, because there are two import styles in play: `fan_out_service`
+    binds `db` at module import (`from database import db`), while
+    `sync_waiter.wait_for_fan_out_batch` late-imports it per call to keep that
+    module dependency-light. Patching only one leaves the batch wait talking to
+    the real singleton, which is how this harness first failed — the service
+    stopped being db-free the moment the aggregate became a query (#2524).
+    """
+    rows = _FanOutRows()
+    fos.db = rows
+    sys.modules["database"] = types.SimpleNamespace(db=rows)
+    return rows
+
+
 def test_fan_out_service_forwards_none_per_subtask_without_outer_deadline():
     """Issue #418: each sub-task is dispatched with timeout_seconds=None so
     TaskExecutionService resolves the agent's configured timeout."""
     calls: list = []
-    _install_mock_task_service(calls)
+    rows = _install_rows()
+    _install_mock_task_service(calls, rows)
 
     service = FanOutService()
     tasks = [FanOutTaskInput(id=f"t{i}", message=f"task {i}") for i in range(3)]
@@ -232,7 +314,8 @@ def test_fan_out_service_forwards_none_per_subtask_with_outer_deadline():
     """Outer fan-out deadline wraps the gather, but each sub-task is still
     dispatched with timeout_seconds=None (per-agent config applies)."""
     calls: list = []
-    _install_mock_task_service(calls)
+    rows = _install_rows()
+    _install_mock_task_service(calls, rows)
 
     service = FanOutService()
     tasks = [FanOutTaskInput(id="t1", message="one")]
@@ -253,10 +336,26 @@ def test_fan_out_service_forwards_none_per_subtask_with_outer_deadline():
 
 
 def test_fan_out_service_outer_deadline_actually_applies():
-    """Pre-existing behaviour: when outer deadline is set and subtasks
-    exceed it, remaining tasks are marked deadline-exceeded."""
+    """The outer deadline still ends the WAIT — but no longer the work (#2524).
+
+    It used to wrap the `gather` in `asyncio.timeout`, cancelling in-flight
+    subtasks and reporting them `failed`/`timeout`. A queued or claimed row is
+    not the backend's to cancel, and on push that cancellation was always
+    half-illusory: it abandoned the HTTP call while the agent kept running (and
+    billing for) the turn.
+
+    So the batch still reports `deadline_exceeded`, and the subtask now reports
+    `running` — the honest answer, since nothing stopped it. Reporting `failed`
+    would be a lie the moment it succeeds, which it usually does. The status
+    endpoint is the source of truth after a deadline.
+    """
+    rows = _install_rows()
+    started = asyncio.Event()
+
     async def _slow_task(**kwargs):
-        await asyncio.sleep(5)
+        started.set()
+        await asyncio.sleep(30)  # outlives the deadline; never completes here
+        rows.finish(kwargs["execution_id"])
         return _make_success_result()
 
     svc = MagicMock()
@@ -276,4 +375,84 @@ def test_fan_out_service_outer_deadline_actually_applies():
     )
 
     assert result.status == "deadline_exceeded"
-    assert result.results[0].error_code == "timeout"
+    assert result.total == 1
+    assert result.completed == 0
+    assert result.failed == 0, "an unfinished subtask is not a failed one (#2524)"
+    assert result.results[0].status == "running"
+    # The row is still open — the deadline did not touch the execution.
+    assert rows.count_fan_out_open(result.fan_out_id) == 1
+
+
+def test_fan_out_async_mode_returns_a_receipt_without_waiting():
+    """#2524: `async_mode` returns as soon as the rows exist. The whole point is
+    that the batch outlives the request that started it, which is also what a
+    pull-claimed subtask needs — its turn runs later, in the agent's worker."""
+    rows = _install_rows()
+
+    async def _never_finishes(**kwargs):
+        await asyncio.sleep(30)
+        return _make_success_result()
+
+    svc = MagicMock()
+    svc.execute_task = AsyncMock(side_effect=_never_finishes)
+    fos.get_task_execution_service = lambda: svc
+
+    service = FanOutService()
+    tasks = [FanOutTaskInput(id=f"t{i}", message=f"task {i}") for i in range(3)]
+
+    async def _drive():
+        return await asyncio.wait_for(
+            service.execute(
+                agent_name="delegate-4",
+                tasks=tasks,
+                max_concurrency=3,
+                async_mode=True,
+            ),
+            timeout=2,  # must NOT block on the subtasks
+        )
+
+    result = asyncio.run(_drive())
+
+    assert result.status == "accepted"
+    assert result.fan_out_id.startswith("fo_")
+    assert result.total == 3
+    assert result.results == []
+    # The rows exist before the caller is answered, so the batch is already
+    # discoverable by `fan_out_id` — a status poll can never 404 a live batch.
+    assert len(rows.list_fan_out_executions(result.fan_out_id)) == 3
+
+
+def test_fan_out_status_rebuilds_the_aggregate_from_the_rows():
+    """The join, and the reason `fan_out_task_id` had to become a column: the
+    caller's own subtask ids have to survive into an aggregate assembled long
+    after the dispatching coroutine is gone."""
+    rows = _install_rows()
+    service = FanOutService()
+
+    fan_out_id = "fo_status_test"
+    for task_id, status, response in (
+        ("alpha", "success", "A"),
+        ("beta", "failed", None),
+        ("gamma", "running", None),
+    ):
+        execution = rows.create_task_execution(
+            agent_name="delegate-5", fan_out_id=fan_out_id, fan_out_task_id=task_id,
+        )
+        if status != "running":
+            rows.finish(execution.id, status=status, response=response,
+                        error=None if status == "success" else "boom")
+
+    result = service.get_status(fan_out_id)
+    assert result is not None
+    assert result.total == 3
+    assert result.completed == 1
+    assert result.failed == 1
+    assert result.status == "running"  # one subtask still open
+    by_id = {r.id: r for r in result.results}
+    assert by_id["alpha"].status == "completed" and by_id["alpha"].response == "A"
+    assert by_id["beta"].status == "failed" and by_id["beta"].error == "boom"
+    assert by_id["gamma"].status == "running"
+
+    assert service.get_status("fo_does_not_exist") is None
+    assert service.batch_belongs_to(fan_out_id, "delegate-5") is True
+    assert service.batch_belongs_to(fan_out_id, "someone-else") is False

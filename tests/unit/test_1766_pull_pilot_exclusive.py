@@ -180,7 +180,9 @@ class TestPullOwnsDispatch:
         assert pull_owns_dispatch("bob", "schedule") is False
 
     @pytest.mark.parametrize(
-        "trigger", ["agent", "event", "schedule", "webhook", "reminder", "loop"]
+        "trigger",
+        ["agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
+         "a2a", "operator_response"],
     )
     def test_pilot_owns_the_autonomous_triggers_dispatch_can_deliver(self, pilot, trigger):
         """Narrowed by #2048, re-widened by #2391 and #2523.
@@ -191,24 +193,31 @@ class TestPullOwnsDispatch:
         that constrains it. #2048 cut it to what ``POST /task`` can emit. #2391
         then gave ``task_execution_service`` a pilot-gated ``queue_persistent``
         policy, so the scheduler's async-polled triggers genuinely reach the
-        queue and belong here, and #2523 added ``loop`` by making its driver
-        terminal-driven. See ``test_2048_pull_pilot_reach.py``.
+        queue and belong here; #2523 added ``loop`` by making its driver
+        terminal-driven, and #2524 added ``fan_out`` (aggregate as a query) plus
+        ``a2a`` and ``operator_response`` (the sync edge adapter). The set is
+        now every autonomous trigger. See ``test_2048_pull_pilot_reach.py``.
         """
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is True
 
-    @pytest.mark.parametrize(
-        "trigger", ["fan_out", "a2a", "operator_response"]
-    )
-    def test_pilot_does_not_own_a_trigger_dispatch_cannot_deliver(self, pilot, trigger):
-        """The #2048 correction as a positive assertion, on the three triggers
-        #2391 and #2523 left stranded: each one's caller reads the
-        ``TaskExecutionResult`` synchronously, so a queued row returns nothing
-        for it to consume."""
+    def test_pilot_does_not_own_a_trigger_the_reach_set_omits(self, pilot, monkeypatch):
+        """The #2048 correction as a positive assertion.
+
+        #2524 emptied the stranded set — every autonomous trigger reaches the
+        queue now — so this drives the narrowing itself against a synthetic
+        omission. That is the behaviour worth keeping: the next trigger declared
+        autonomous must be classified, not inherit reach.
+        """
+        import services.pull_pilot as pp
         from services.agent_service.pull_mode import pull_owns_dispatch
 
-        assert pull_owns_dispatch("alice", trigger) is False
+        monkeypatch.setattr(
+            pp, "PULL_REACHABLE_TRIGGERS", pp.PULL_REACHABLE_TRIGGERS - {"schedule"}
+        )
+        assert pull_owns_dispatch("alice", "schedule") is False
+        assert pull_owns_dispatch("alice", "agent") is True
 
     @pytest.mark.parametrize("trigger", ["manual", "user", "chat", "voip", "voice", None])
     def test_pilot_does_not_own_interactive_triggers(self, pilot, trigger):

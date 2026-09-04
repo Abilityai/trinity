@@ -2662,6 +2662,11 @@ class FanOutRequest(BaseModel):
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
+    # #2524: return `{fan_out_id, status="accepted"}` as soon as the rows exist,
+    # without holding the connection for the whole batch. The caller polls
+    # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
+    # blocking contract every existing caller depends on.
+    async_mode: Optional[bool] = False
 
     @field_validator("tasks")
     @classmethod

@@ -265,6 +265,11 @@ schedule_executions = Table(
     Column("queued_at", Text),
     Column("backlog_metadata", Text),
     Column("fan_out_id", Text),
+    # #2524: the CALLER's subtask id within a fan-out batch. The aggregate
+    # is a query over `fan_out_id` now, so the id the caller keyed its tasks
+    # by has to live on the row — it used to be a dict key in the service's
+    # process, which no async batch or status endpoint can reach.
+    Column("fan_out_task_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
     Column("claim_token", Text),  # #1081 Phase 0 — dark pull-coordination columns

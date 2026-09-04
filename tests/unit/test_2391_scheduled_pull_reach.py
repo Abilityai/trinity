@@ -300,30 +300,21 @@ class TestFlagOnQueuesScheduledWork:
 
 
 class TestStrandedTriggersStayPushed:
-    @pytest.mark.parametrize(
-        "trigger", ["fan_out", "a2a", "operator_response"]
-    )
-    def test_a_result_reading_caller_keeps_its_trigger_on_push(
-        self, pilot, trigger
-    ):
-        """Each of these callers reads the returned `TaskExecutionResult`, and a
-        queued row gives them nothing to read.
+    def test_nothing_autonomous_is_stranded_any_more(self, pilot):
+        """#2391 opened this producer; #2523 and #2524 finished the job.
 
-        `fan_out_service` builds each `FanOutTaskResult` from it and
-        `routers/a2a` turns it into the JSON-RPC artifact it hands a remote
-        caller — two structural blocks; widening those is #2524 (#1081 Phase 4's
-        async join + sync edge adapter), not this change. `loop` was here too
-        until #2523 made its driver terminal-driven. `operator_response` is NOT
-        structural: it dispatches through this same producer, but the
-        respond endpoint records `result.status` as the dispatch receipt (audit
-        row + #525 idempotency completion) for a turn that spends money on a
-        person's answer (ent#329), and "queued" is not the outcome that contract
-        reports. Out by choice, and this test is what makes the choice explicit
-        rather than incidental."""
-        _, m = _run(triggered_by=trigger)
-        kw = _acquire_kwargs(m["capacity"])
-        assert kw["overflow_policy"] == "reject"
-        assert kw["overflow_payload"] is None
+        `a2a` and `operator_response` were the last two, and they needed the
+        sync edge adapter (`dispatch_and_await_terminal`) rather than a policy
+        change: their callers genuinely need the answer in-line, they just do
+        not need it from the dispatch's return value.
+        """
+        from services.task_execution_service import _AUTONOMOUS_TRIGGERS
+
+        for trigger in sorted(_AUTONOMOUS_TRIGGERS):
+            _, m = _run(triggered_by=trigger)
+            kw = _acquire_kwargs(m["capacity"])
+            assert kw["overflow_policy"] == "queue_persistent", trigger
+            assert kw["overflow_payload"] is not None, trigger
 
     @pytest.mark.parametrize("trigger", ["manual", "mcp", "chat", "public", "voice"])
     def test_interactive_triggers_are_untouched(self, pilot, trigger):

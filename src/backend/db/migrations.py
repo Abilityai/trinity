@@ -2857,6 +2857,34 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_fan_out_task_id(cursor, conn):
+    """#2524 — the caller's subtask id, on the row.
+
+    `FanOutService` used to hold the batch in one coroutine and key its results
+    by the caller's task id in a local dict. The aggregate is a query over
+    `fan_out_id` now — that is what lets a fan-out run on the durable queue and
+    what lets a status endpoint answer after the dispatching request is gone —
+    so the id has to be persisted next to the execution it belongs to.
+
+    Also adds a composite index: the join counts non-terminal rows for one
+    `fan_out_id` on every fan-out terminal, which the existing single-column
+    `idx_executions_fan_out` cannot serve without reading every row of the batch.
+
+    Mirrored by the Alembic revision 0051_execution_fan_out_task_id.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "fan_out_task_id",
+        "ALTER TABLE schedule_executions ADD COLUMN fan_out_task_id TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_fan_out_status "
+        "ON schedule_executions(fan_out_id, status)"
+    )
+    conn.commit()
+
+
 def _migrate_agent_loops_terminal_driven(cursor, conn):
     """#2523 — the two columns that let a loop live without an in-process runner.
 
@@ -4019,6 +4047,7 @@ MIGRATIONS = [
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
     ("agent_loops_terminal_driven", _migrate_agent_loops_terminal_driven),
+    ("execution_fan_out_task_id", _migrate_execution_fan_out_task_id),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
     ("agent_ownership_display_label", _migrate_agent_ownership_display_label),

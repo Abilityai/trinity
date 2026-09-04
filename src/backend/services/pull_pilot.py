@@ -62,38 +62,34 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # (#2391) reach it from the scheduler, which dispatches with ``async_mode=True``
 # and then polls ``schedule_executions`` for the terminal, so nobody holds a
 # coroutine waiting on a return value — the same property
-# ``ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`` (#1083) selects on. ``loop`` (#2523)
-# joined them once ``loop_service`` stopped being an in-process ``for`` loop:
-# it is now advanced by execution terminals, so the dispatch it makes has no
-# reader either.
+# ``ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`` (#1083) selects on. ``loop`` (#2523) and
+# ``fan_out`` (#2524) joined them once their orchestrators stopped holding the
+# work in a coroutine: a loop is advanced by execution terminals, and a fan-out
+# batch's aggregate is a query over ``fan_out_id``. Neither dispatch has a
+# reader any more.
 #
-# The three autonomous triggers that stay OUT have a caller that reads the
-# returned ``TaskExecutionResult``, so a row queued for a worker to claim later
-# gives that caller nothing to read. Two are structural; one is a scope choice.
+# ``a2a`` and ``operator_response`` joined in #2524 too, through
+# ``task_execution_service.dispatch_and_await_terminal``. Both have a caller that
+# genuinely needs the answer in-line — ``routers/a2a`` turns ``result.response``
+# into the JSON-RPC artifact it hands a remote caller (ent#157), and
+# ``operator_resume_service`` records ``result.status`` as the dispatch receipt
+# for a turn that spends money on a person's answer (ent#329). Neither needs a
+# receipt to poll; each needs to BLOCK CORRECTLY while the turn happens
+# elsewhere, which the adapter does by waiting out the queue and rebuilding the
+# result from the row.
 #
-#   fan_out            ``fan_out_service`` builds each ``FanOutTaskResult`` from
-#                      the returned result, and ``POST /fan-out`` blocks on the
-#                      aggregate. The async join + sync edge adapter is #2524
-#                      (#1081 Phase 4). Structural.
-#   a2a                ``routers/a2a``'s ``message/send`` consumes
-#                      ``result.response`` to build the JSON-RPC artifact it
-#                      hands back to a remote caller (ent#157). Structural;
-#                      falls out of #2524's adapter.
-#   operator_response  NOT structural — ``operator_resume_service`` dispatches
-#                      through this same producer, so it *could* be queued. It is
-#                      out by choice: the respond endpoint records
-#                      ``result.status`` as the dispatch receipt (the
-#                      ``operator_resume_dispatch`` audit row and the #525
-#                      idempotency completion), and ent#329 exists because this
-#                      spends money on a person's answer — "queued" is not the
-#                      outcome that contract reports. Widening it is a deliberate
-#                      follow-up, not an oversight.
+# **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
+# explicit allow-list anyway.** That is the point of it: a trigger added to the
+# autonomous set later must be reviewed against dispatch topology rather than
+# inheriting reach by default. ``note_unreachable_pull_trigger`` below is the
+# runtime half of the same guard and is, deliberately, currently unreachable.
 #
 # Intersected with ``_AUTONOMOUS_TRIGGERS`` rather than replacing it, so this
 # stays a NARROWING of the single source of truth: dropping a trigger there
 # still drops it here, and widening reach is a deliberate edit to this set.
 PULL_REACHABLE_TRIGGERS = frozenset(
-    {"agent", "event", "schedule", "webhook", "reminder", "loop"}
+    {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
+     "a2a", "operator_response"}
 )
 
 
@@ -154,7 +150,8 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
 # every cron fire, so an un-deduped warning would emit thousands of identical
 # lines a day and train operators to filter it out — which is how a signal
 # meant to be noticed becomes noise. Unbounded growth is not a concern: the key
-# space is (pilot agents × 3 unreachable triggers), and only pilots ever reach it.
+# space is (pilot agents × unreachable triggers, currently zero), and only
+# pilots ever reach it.
 _UNREACHABLE_NOTED: Set[tuple] = set()
 
 
@@ -179,11 +176,11 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
     why gets a truthful answer from the backend log instead of a wrong one from
     the runbook.
 
-    #2391 and #2523 shrank what it fires on rather than retiring it:
-    ``schedule``, ``webhook``, ``reminder`` and ``loop`` are reachable now, so
-    the remaining callers are ``fan_out`` / ``a2a`` / ``operator_response``,
-    which are stranded on a synchronous result consumer rather than on the
-    producer's policy.
+    #2391, #2523 and #2524 emptied the stranded set entirely, so this is
+    currently **unreachable by design** — kept as the runtime half of the
+    ``PULL_REACHABLE_TRIGGERS`` allow-list, for the trigger somebody adds to
+    ``_AUTONOMOUS_TRIGGERS`` next without checking whether dispatch can deliver
+    it. A silently-stale reach set is exactly the bug #2048 was.
 
     Fail-safe like everything else here: a bookkeeping error must never
     interfere with dispatching a real execution.
@@ -211,8 +208,9 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
             "so this row is dispatched with overflow_policy='reject' and pushed "
             "regardless of PULL_MODE_PILOT_AGENTS. The flag is applied and correct; "
             "the dispatch topology is the limit. Reachable triggers today: %s. "
-            "Cron/webhook/reminder work IS pullable since #2391, and loops "
-            "since #2523 — see docs/testing/PULL_MIGRATION_TESTING.md §9.",
+            "Every autonomous trigger is pullable as of #2524, so seeing this "
+            "at all means a NEW trigger was added without being classified — "
+            "see docs/testing/PULL_MIGRATION_TESTING.md §9.",
             agent_name, triggered_by, sorted(PULL_REACHABLE_TRIGGERS),
         )
         return True

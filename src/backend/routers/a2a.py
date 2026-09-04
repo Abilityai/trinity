@@ -62,6 +62,7 @@ from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.task_execution_service import (
+    dispatch_and_await_terminal,
     get_task_execution_service,
     terminate_execution_on_agent,
 )
@@ -392,9 +393,20 @@ def _authorize_inbound(current_user: User, agent_name: str) -> None:
 
 
 async def _run_a2a_task(agent_name: str, text: str, current_user: User):
-    """Bridge one inbound A2A message into the Trinity execution stack."""
-    svc = get_task_execution_service()
-    return await svc.execute_task(
+    """Bridge one inbound A2A message into the Trinity execution stack.
+
+    #2524: goes through `dispatch_and_await_terminal`, not `execute_task`
+    directly. Both callers below consume `result.status` / `result.response` to
+    build the JSON-RPC artifact they hand a remote caller, and under
+    `PULL_MODE_PILOT_AGENTS` a dispatch returns `QUEUED` as soon as the row is on
+    the durable queue — the turn runs later, in the agent's worker. The adapter
+    waits out that queue and rebuilds the result from the row, so the artifact is
+    the same whether the turn ran inside this await or somewhere else. That is
+    what lets `a2a` join `pull_pilot.PULL_REACHABLE_TRIGGERS` without touching the
+    JSON-RPC contract, which is one request / one artifact and has no receipt to
+    hand back.
+    """
+    return await dispatch_and_await_terminal(
         agent_name=agent_name,
         message=text,
         triggered_by="a2a",

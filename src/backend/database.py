@@ -1775,6 +1775,7 @@ class DatabaseManager:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        fan_out_task_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
         source_channel: str = None,
@@ -1793,6 +1794,7 @@ class DatabaseManager:
             source_mcp_key_name=source_mcp_key_name,
             model_used=model_used,
             fan_out_id=fan_out_id,
+            fan_out_task_id=fan_out_task_id,
             loop_id=loop_id,
             subscription_id=subscription_id,
             source_channel=source_channel,
@@ -3703,6 +3705,14 @@ class DatabaseManager:
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""
         return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
+
+    # ---- Fan-out batch (#2524) ---------------------------------------------
+
+    def list_fan_out_executions(self, fan_out_id: str):
+        return self._schedule_ops.list_fan_out_executions(fan_out_id)
+
+    def count_fan_out_open(self, fan_out_id: str) -> int:
+        return self._schedule_ops.count_fan_out_open(fan_out_id)
 
     # =========================================================================
     # Sequential Agent Loops (delegated to db/loops.py) - #740

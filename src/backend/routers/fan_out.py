@@ -3,8 +3,15 @@
 Fan-out router — parallel task dispatch and result collection (FANOUT-001).
 
 POST /api/agents/{name}/fan-out
-    Dispatches N independent tasks to an agent in parallel, waits for results,
-    and returns aggregated per-task results.
+    Dispatches N independent tasks to an agent in parallel and returns
+    aggregated per-task results. With `async_mode` the batch is accepted and the
+    caller polls the status endpoint instead of holding the connection (#2524).
+
+GET /api/agents/{name}/fan-out/{fan_out_id}
+    Aggregate for a batch, rebuilt from its execution rows. Answers after the
+    dispatching request is gone, which is what makes `async_mode` usable — and
+    is the source of truth after a deadline, since a deadline stops the WAIT,
+    not the subtasks (#2524).
 """
 
 import logging
@@ -96,6 +103,7 @@ async def fan_out(
 
     try:
         result = await service.execute(
+            async_mode=bool(request.async_mode),
             agent_name=name,
             tasks=task_inputs,
             max_concurrency=request.max_concurrency,
@@ -136,6 +144,52 @@ async def fan_out(
         ],
     )
 
-    # Store the aggregated batch result so a duplicate replays it (#525).
+    # Store the aggregated batch result so a duplicate replays it (#525). On the
+    # async path that snapshot is the ACCEPTED receipt, not the outcome — which
+    # is the right thing to replay, since re-dispatching N subtasks is exactly
+    # what the key exists to prevent.
     idempotency_service.complete(idem, result.fan_out_id, response.model_dump())
     return response
+
+
+@router.get("/{name}/fan-out/{fan_out_id}", response_model=FanOutResponse)
+async def fan_out_status(
+    fan_out_id: str,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """Aggregate for one fan-out batch, rebuilt from its execution rows (#2524).
+
+    Authorization is the agent's — `get_authorized_agent` has already checked
+    the caller may act on `{name}` — plus an explicit check that the batch
+    belongs to that agent, so a valid `fan_out_id` from another agent cannot be
+    read through an agent the caller happens to own.
+    """
+    service = get_fan_out_service()
+    result = service.get_status(fan_out_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Fan-out batch not found")
+    if not service.batch_belongs_to(fan_out_id, name):
+        raise HTTPException(status_code=404, detail="Fan-out batch not found")
+
+    return FanOutResponse(
+        fan_out_id=result.fan_out_id,
+        status=result.status,
+        total=result.total,
+        completed=result.completed,
+        failed=result.failed,
+        results=[
+            FanOutTaskResponse(
+                id=r.id,
+                status=r.status,
+                response=r.response,
+                error=r.error,
+                error_code=r.error_code,
+                execution_id=r.execution_id,
+                cost=r.cost,
+                context_used=r.context_used,
+                duration_ms=r.duration_ms,
+            )
+            for r in result.results
+        ],
+    )

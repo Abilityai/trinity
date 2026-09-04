@@ -268,6 +268,7 @@ TABLES = {
             queued_at TEXT,
             backlog_metadata TEXT,
             fan_out_id TEXT,
+            fan_out_task_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
             claim_token TEXT,
@@ -1860,6 +1861,10 @@ INDEXES = [
 
     # Execution fan-out / backlog / retry partial indexes
     "CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)",
+    # #2524: the join counts non-terminal rows for one batch on every fan-out
+    # terminal; the single-column index above cannot serve that without
+    # reading every row of the batch.
+    "CREATE INDEX IF NOT EXISTS idx_executions_fan_out_status ON schedule_executions(fan_out_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
     "ON schedule_executions(agent_name, queued_at) "
     "WHERE status = 'queued'",

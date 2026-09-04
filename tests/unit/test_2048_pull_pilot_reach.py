@@ -59,34 +59,22 @@ if _BACKEND_STR not in sys.path:
 
 pytestmark = pytest.mark.unit
 
-# The triggers that are declared autonomous but cannot reach the queue.
+# **There are no stranded autonomous triggers left.** #2391 (cron/webhook/
+# reminder), #2523 (loop) and #2524 (fan_out, then a2a + operator_response via
+# `dispatch_and_await_terminal`) emptied the set.
 #
-# After #2391 none of these is stranded on the producer's overflow policy any
-# more — that producer can queue. They are stranded on their CALLER, which reads
-# the returned `TaskExecutionResult`; a row queued for a worker to claim later
-# gives it nothing to read. Three structural, one a scope choice.
-#
-#   `fan_out`  — `fan_out_service` builds each `FanOutTaskResult` from the result
-#                and `POST /fan-out` blocks on the aggregate; the async join +
-#                sync edge adapter is #2524 (#1081 Phase 4).
-#   `a2a`      — `routers/a2a`'s `message/send` consumes `result.response` to
-#                build the JSON-RPC artifact it hands back to the remote caller
-#                (ent#157). Falls out of #2524's adapter.
-#   `operator_response` — out by CHOICE, not structurally: it dispatches through
-#                the same producer #2391 widened, but the respond endpoint records
-#                `result.status` as the dispatch receipt (audit row + #525
-#                idempotency completion) and ent#329 exists because this spends
-#                money on a person's answer. "queued" is not the outcome that
-#                contract reports. A deliberate follow-up, not an oversight.
-#
-# `PULL_REACHABLE_TRIGGERS` is an explicit allow-list, so an unlisted trigger
-# lands here automatically — this comment is the review the test below demands.
-_STRANDED = ["fan_out", "a2a", "operator_response"]
-# The six that can. `agent` + `event` arrive via `POST /task`; `schedule`,
-# `webhook` and `reminder` via the scheduler's async-poll dispatch (#2391);
-# `loop` since #2523 made `loop_service` terminal-driven, so its dispatch has no
-# reader either.
-_REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop"]
+# The narrowing MECHANISM stays, and these tests keep exercising it against a
+# synthetic stranded trigger, because the mechanism is the point: a trigger added
+# to `_AUTONOMOUS_TRIGGERS` later must be reviewed against dispatch topology
+# rather than inheriting reach by default. A silently-stale reach set is exactly
+# the bug #2048 was.
+_STRANDED: list = []
+# All of them, now.
+_REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop",
+              "fan_out", "a2a", "operator_response"]
+# Stands in for "a trigger somebody adds without classifying it", so the
+# diagnostic below is still covered now that nothing real trips it.
+_SYNTHETIC_STRANDED = "agent"
 
 
 @pytest.fixture
@@ -116,8 +104,9 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
         `agent` + `event`.
       * `task_execution_service` — contributes the autonomous triggers with no
         synchronous result consumer: everything the scheduler dispatches
-        async-and-polls (`schedule`, `webhook`, `reminder`) plus `loop`, whose
-        driver became terminal-driven in #2523.
+        async-and-polls (`schedule`, `webhook`, `reminder`), plus `loop` (#2523)
+        and `fan_out` (#2524), whose orchestrators stopped holding the work in a
+        coroutine.
 
     Derived here rather than hardcoded so the constant cannot quietly disagree
     with the reasoning that justifies it.
@@ -127,16 +116,19 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
 
     task_route_can_emit = {"self_task", "agent", "mcp", "manual", "event"}
     scheduler_async_polled = {"schedule", "webhook", "reminder"}
-    # #2523: `loop_service` is advanced by execution terminals, so its dispatch
-    # has no synchronous reader either.
-    terminal_driven = {"loop"}
+    # #2523 / #2524: `loop_service` is advanced by execution terminals and a
+    # fan-out's aggregate is a query over `fan_out_id`, so neither dispatch has
+    # a synchronous reader either.
+    db_joined = {"loop", "fan_out"}
+    # #2524: these two DO need the answer in-line, and get it from
+    # `dispatch_and_await_terminal` — the sync edge adapter — rather than from
+    # the dispatch's return value.
+    adapter_served = {"a2a", "operator_response"}
     assert PULL_REACHABLE_TRIGGERS == (
-        (task_route_can_emit | scheduler_async_polled | terminal_driven)
+        (task_route_can_emit | scheduler_async_polled | db_joined | adapter_served)
         & _AUTONOMOUS_TRIGGERS
     )
-    assert PULL_REACHABLE_TRIGGERS == {
-        "agent", "event", "schedule", "webhook", "reminder", "loop"
-    }
+    assert PULL_REACHABLE_TRIGGERS == _AUTONOMOUS_TRIGGERS
 
 
 def test_every_reachable_trigger_from_this_producer_is_also_1083_shaped():
@@ -154,21 +146,48 @@ def test_every_reachable_trigger_from_this_producer_is_also_1083_shaped():
 
 
 def test_the_stranded_triggers_are_named_and_complete():
-    """No autonomous trigger is left unclassified: every one is either reachable
-    or stranded, so a trigger added to `_AUTONOMOUS_TRIGGERS` later shows up here
-    as an unreviewed addition rather than silently joining the stranded set."""
+    """No autonomous trigger is left unclassified. As of #2524 that means the
+    stranded set is EMPTY — every autonomous trigger can reach the durable
+    queue."""
     from services.pull_pilot import PULL_REACHABLE_TRIGGERS
     from services.task_execution_service import _AUTONOMOUS_TRIGGERS
 
-    assert _AUTONOMOUS_TRIGGERS - PULL_REACHABLE_TRIGGERS == set(_STRANDED)
+    assert _AUTONOMOUS_TRIGGERS - PULL_REACHABLE_TRIGGERS == set(_STRANDED) == set()
     assert PULL_REACHABLE_TRIGGERS <= _AUTONOMOUS_TRIGGERS
 
 
-@pytest.mark.parametrize("trigger", _STRANDED)
-def test_pull_does_not_own_dispatch_for_a_stranded_trigger(pilot, trigger):
-    """The defect, stated directly: the predicate used to answer True for these
-    while dispatch could never honour it."""
-    assert pilot.pull_owns_dispatch("pilot-a", trigger) is False
+def test_the_reach_set_stays_an_explicit_allowlist_even_though_it_is_complete():
+    """The guard that outlives its own findings.
+
+    `PULL_REACHABLE_TRIGGERS` now equals `_AUTONOMOUS_TRIGGERS`, which makes
+    `PULL_REACHABLE_TRIGGERS = _AUTONOMOUS_TRIGGERS` look like a tidy
+    simplification. It is not: it would hand reach to the next trigger somebody
+    declares autonomous, without anyone checking that dispatch can deliver it —
+    which is precisely the defect #2048 filed. Pinned structurally so the
+    "cleanup" fails here instead of shipping.
+    """
+    source = (_BACKEND / "services" / "pull_pilot.py").read_text(encoding="utf-8")
+    literal = source[source.index("PULL_REACHABLE_TRIGGERS = "):]
+    literal = literal[: literal.index("\n\n")]
+    assert "frozenset(" in literal, "the reach set must be an enumerated literal"
+    assert "_AUTONOMOUS_TRIGGERS" not in literal, (
+        "PULL_REACHABLE_TRIGGERS must not be derived from _AUTONOMOUS_TRIGGERS — "
+        "a new autonomous trigger has to be classified, not inherit reach (#2048)."
+    )
+
+
+def test_pull_does_not_own_dispatch_for_a_stranded_trigger(pilot, monkeypatch):
+    """The defect, stated directly: the predicate used to answer True for a
+    trigger dispatch could never honour.
+
+    Driven against a synthetic narrowing, since #2524 left nothing really
+    stranded — the behaviour under test is the narrowing itself, which is what
+    protects the next trigger somebody adds."""
+    narrowed = pilot.PULL_REACHABLE_TRIGGERS - {_SYNTHETIC_STRANDED}
+    monkeypatch.setattr(pilot, "PULL_REACHABLE_TRIGGERS", narrowed)
+    assert pilot.pull_owns_dispatch("pilot-a", _SYNTHETIC_STRANDED) is False
+    # …and every other autonomous trigger is unaffected by that narrowing.
+    assert pilot.pull_owns_dispatch("pilot-a", "schedule") is True
 
 
 @pytest.mark.parametrize("trigger", _REACHABLE)
@@ -200,48 +219,61 @@ def test_narrowing_is_a_runtime_no_op_on_the_only_producer_that_consults_it(pilo
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("trigger", _STRANDED)
-def test_a_stranded_trigger_on_a_pilot_is_reported(pilot, trigger, caplog):
+def test_a_stranded_trigger_on_a_pilot_is_reported(pilot, monkeypatch, caplog):
     """AC: "A pushed row for a trigger that *should* have been pulled is
-    distinguishable from one that was never eligible (today both are silent)."."""
+    distinguishable from one that was never eligible (today both are silent)."
+
+    Unreachable in production as of #2524 — kept, and kept tested, because it is
+    the runtime half of the allow-list above."""
+    narrowed = pilot.PULL_REACHABLE_TRIGGERS - {_SYNTHETIC_STRANDED}
+    monkeypatch.setattr(pilot, "PULL_REACHABLE_TRIGGERS", narrowed)
     with caplog.at_level("WARNING"):
-        assert pilot.note_unreachable_pull_trigger("pilot-a", trigger) is True
+        assert pilot.note_unreachable_pull_trigger("pilot-a", _SYNTHETIC_STRANDED) is True
     assert "#2048" in caplog.text
-    assert trigger in caplog.text
+    assert _SYNTHETIC_STRANDED in caplog.text
 
 
-def test_the_message_contradicts_the_advice_that_used_to_misfire(pilot, caplog):
+def test_the_message_contradicts_the_advice_that_used_to_misfire(pilot, monkeypatch, caplog):
     """The operator-facing point of the line. §9 M1 said a pushed autonomous row
     means "check the backend actually has PULL_MODE_PILOT_AGENTS in its env" —
     for a stranded row that sends them after a variable that is present and
     correct. The log has to say so in words, not merely fire.
 
-    Driven with `fan_out`: `schedule` became reachable in #2391 and `loop` in
-    #2523, so using either here would assert the diagnostic over a case that no
-    longer exists.
+    Driven with `a2a`: `schedule` became reachable in #2391, `loop` in #2523 and
+    `fan_out` in #2524, so any of those here would assert the diagnostic over a
+    case that no longer exists.
     """
+    narrowed = pilot.PULL_REACHABLE_TRIGGERS - {_SYNTHETIC_STRANDED}
+    monkeypatch.setattr(pilot, "PULL_REACHABLE_TRIGGERS", narrowed)
     with caplog.at_level("WARNING"):
-        pilot.note_unreachable_pull_trigger("pilot-a", "fan_out")
+        pilot.note_unreachable_pull_trigger("pilot-a", _SYNTHETIC_STRANDED)
     assert "flag is applied and correct" in caplog.text
     assert "topology" in caplog.text
 
 
-def test_it_reports_once_per_agent_and_trigger(pilot, caplog):
-    """This sits on the dispatch path of every fan-out subtask. An un-deduped
+def test_it_reports_once_per_agent_and_trigger(pilot, monkeypatch, caplog):
+    """This sits on the dispatch path of every inbound A2A task. An un-deduped
     warning would emit thousands of identical lines a day and train operators to
     filter it — a signal meant to be noticed becoming noise."""
+    narrowed = pilot.PULL_REACHABLE_TRIGGERS - {_SYNTHETIC_STRANDED}
+    monkeypatch.setattr(pilot, "PULL_REACHABLE_TRIGGERS", narrowed)
     with caplog.at_level("WARNING"):
-        first = pilot.note_unreachable_pull_trigger("pilot-a", "fan_out")
-        repeats = [pilot.note_unreachable_pull_trigger("pilot-a", "fan_out") for _ in range(50)]
+        first = pilot.note_unreachable_pull_trigger("pilot-a", _SYNTHETIC_STRANDED)
+        repeats = [
+            pilot.note_unreachable_pull_trigger("pilot-a", _SYNTHETIC_STRANDED)
+            for _ in range(50)
+        ]
     assert first is True
     assert not any(repeats)
     assert caplog.text.count("#2048") == 1
 
 
-def test_dedup_is_per_trigger_not_per_agent(pilot):
-    """A pilot running fan-out AND serving A2A has two distinct gaps to report."""
-    assert pilot.note_unreachable_pull_trigger("pilot-a", "fan_out") is True
-    assert pilot.note_unreachable_pull_trigger("pilot-a", "a2a") is True
+def test_dedup_is_per_trigger_not_per_agent(pilot, monkeypatch):
+    """Two unclassified triggers are two distinct gaps to report."""
+    narrowed = pilot.PULL_REACHABLE_TRIGGERS - {"agent", "event"}
+    monkeypatch.setattr(pilot, "PULL_REACHABLE_TRIGGERS", narrowed)
+    assert pilot.note_unreachable_pull_trigger("pilot-a", "agent") is True
+    assert pilot.note_unreachable_pull_trigger("pilot-a", "event") is True
 
 
 @pytest.mark.parametrize("trigger", _REACHABLE)
