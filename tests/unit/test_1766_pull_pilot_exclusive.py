@@ -180,10 +180,10 @@ class TestPullOwnsDispatch:
         assert pull_owns_dispatch("bob", "schedule") is False
 
     @pytest.mark.parametrize(
-        "trigger", ["agent", "event", "schedule", "webhook", "reminder"]
+        "trigger", ["agent", "event", "schedule", "webhook", "reminder", "loop"]
     )
     def test_pilot_owns_the_autonomous_triggers_dispatch_can_deliver(self, pilot, trigger):
-        """Narrowed from "every autonomous trigger" by #2048, re-widened by #2391.
+        """Narrowed by #2048, re-widened by #2391 and #2523.
 
         This case originally parametrized all seven of ``_AUTONOMOUS_TRIGGERS``
         and asserted True for each — encoding reach the system did not have; it
@@ -191,19 +191,21 @@ class TestPullOwnsDispatch:
         that constrains it. #2048 cut it to what ``POST /task`` can emit. #2391
         then gave ``task_execution_service`` a pilot-gated ``queue_persistent``
         policy, so the scheduler's async-polled triggers genuinely reach the
-        queue now and belong here. See ``test_2048_pull_pilot_reach.py``.
+        queue and belong here, and #2523 added ``loop`` by making its driver
+        terminal-driven. See ``test_2048_pull_pilot_reach.py``.
         """
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is True
 
     @pytest.mark.parametrize(
-        "trigger", ["loop", "fan_out", "a2a", "operator_response"]
+        "trigger", ["fan_out", "a2a", "operator_response"]
     )
     def test_pilot_does_not_own_a_trigger_dispatch_cannot_deliver(self, pilot, trigger):
-        """The #2048 correction as a positive assertion, on the four triggers
-        #2391 left stranded: each one's caller reads the ``TaskExecutionResult``
-        synchronously, so a queued row returns nothing for it to consume."""
+        """The #2048 correction as a positive assertion, on the three triggers
+        #2391 and #2523 left stranded: each one's caller reads the
+        ``TaskExecutionResult`` synchronously, so a queued row returns nothing
+        for it to consume."""
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is False

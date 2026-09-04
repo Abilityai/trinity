@@ -3735,9 +3735,6 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def mark_orphan_loops_interrupted(self) -> int:
-        return self._loop_ops.mark_orphans_interrupted()
-
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
@@ -3746,6 +3743,26 @@ class DatabaseManager:
 
     def list_loop_runs(self, loop_id: str):
         return self._loop_ops.list_runs(loop_id)
+
+    # ---- Terminal-driven advance (#2523) -----------------------------------
+
+    def get_loop_run_by_execution(self, execution_id: str):
+        return self._loop_ops.get_run_by_execution(execution_id)
+
+    def claim_loop_advance(self, loop_id: str, run_number: int) -> bool:
+        return self._loop_ops.claim_loop_advance(loop_id, run_number)
+
+    def request_loop_stop(self, loop_id: str) -> bool:
+        return self._loop_ops.request_loop_stop(loop_id)
+
+    def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
+        return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
+        return self._loop_ops.claim_due_loop(loop_id, next_run_at)
+
+    def list_due_loops(self, now: str, *, limit: int = 100):
+        return self._loop_ops.list_due_loops(now, limit=limit)
 
 
 # Global database manager instance

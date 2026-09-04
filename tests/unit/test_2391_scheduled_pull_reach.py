@@ -301,7 +301,7 @@ class TestFlagOnQueuesScheduledWork:
 
 class TestStrandedTriggersStayPushed:
     @pytest.mark.parametrize(
-        "trigger", ["loop", "fan_out", "a2a", "operator_response"]
+        "trigger", ["fan_out", "a2a", "operator_response"]
     )
     def test_a_result_reading_caller_keeps_its_trigger_on_push(
         self, pilot, trigger
@@ -309,12 +309,12 @@ class TestStrandedTriggersStayPushed:
         """Each of these callers reads the returned `TaskExecutionResult`, and a
         queued row gives them nothing to read.
 
-        `loop_service` renders the next iteration's template from it,
-        `fan_out_service` builds each `FanOutTaskResult` from it, and
+        `fan_out_service` builds each `FanOutTaskResult` from it and
         `routers/a2a` turns it into the JSON-RPC artifact it hands a remote
-        caller — three structural blocks; widening those is #1081 Phase 4's
-        async join, not this change. `operator_response` is the fourth and is
-        NOT structural: it dispatches through this same producer, but the
+        caller — two structural blocks; widening those is #2524 (#1081 Phase 4's
+        async join + sync edge adapter), not this change. `loop` was here too
+        until #2523 made its driver terminal-driven. `operator_response` is NOT
+        structural: it dispatches through this same producer, but the
         respond endpoint records `result.status` as the dispatch receipt (audit
         row + #525 idempotency completion) for a turn that spends money on a
         person's answer (ent#329), and "queued" is not the outcome that contract

@@ -1,7 +1,7 @@
 # Feature: Sequential Agent Loops (#740)
 
 ## Overview
-Server-managed sequential bounded repetition of an agent task. Caller fires `run_agent_loop` once, gets back a `loop_id`, and can disconnect — the loop runs in-process in the backend, dispatching each iteration through the standard task execution path. Companions `get_loop_status` and `stop_loop` cover observability and graceful termination.
+Server-managed sequential bounded repetition of an agent task. Caller fires `run_agent_loop` once, gets back a `loop_id`, and can disconnect — the backend dispatches each iteration through the standard task execution path and advances to the next one when that iteration's execution reaches a terminal (#2523; it used to be an in-process `asyncio.Task` per loop). Companions `get_loop_status` and `stop_loop` cover observability and graceful termination.
 
 Complements `chat_with_agent` (single turn) and `fan_out` (parallel batch) with the third execution pattern: sequential, ordered, optionally chained.
 
@@ -45,20 +45,20 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - `GET /api/loops/{id}` returns `max_duration_seconds` plus a computed `elapsed_seconds` (from `started_at`), and `max_cost_usd` plus `total_cost` (computed on read = sum of `agent_loop_runs.cost`, NULL→0; `0.0` for a zero-run loop, #1155).
 
 ### Service
-- `src/backend/services/loop_service.py` — `LoopService.start_loop()` creates the `agent_loops` row and spawns an `asyncio.Task` via `_run()`. One in-process handle per active loop (`_handles: dict[str, _LoopHandle]`) tracks the cooperative stop flag.
+- `src/backend/services/loop_service.py` — **terminal-driven since #2523.** `LoopService.start_loop()` creates the `agent_loops` row and dispatches iteration 1; `advance_on_terminal(execution_id)` closes that iteration and decides the next. There is no `_run()` coroutine and no `_handles` dict — the DB row *is* the loop, so it survives a backend restart and, crucially, can run on the durable pull queue (a pull-claimed row returns no `TaskExecutionResult`, so the old `for` loop was structurally push-only; `loop` is in `pull_pilot.PULL_REACHABLE_TRIGGERS` as of #2523).
+  - **Where the advance is called from:** `event_dispatch_service.spawn_task_terminal_event`, the wrapper every CAS-won terminal writer already goes through (push applier, pull sink, lease reaper, cleanup). Deliberately NOT inside `emit_task_terminal_event`, which returns early when no event subscription matches — the common case. `_run_and_advance` also calls it directly for `execute_task`'s fast-fail returns (capacity / circuit-open / ephemeral budget), which write a FAILED row without ever reaching a terminal writer.
+  - **Idempotency:** `db.claim_loop_advance(loop_id, run_number)` is a CAS on `runs_completed` from N-1 to N. Pull is at-least-once, so the same terminal can arrive twice; the loser returns without dispatching. That is also what makes the double call site above safe.
+  - **Derived state:** everything the old runner held in locals is rebuilt per advance from `agent_loop_runs` (`_DerivedState`): accumulated cost, `failed_runs`, consecutive failures, and the #1157 fingerprint chain. `MAX_RUNS_LIMIT` is 100, so that is at most 100 rows read once per iteration.
 - **Wall-clock deadline (#1156):** when `max_duration_seconds` is set, the runner checks `now - started_at` only at iteration boundaries (before the next run, and before/after the inter-run delay — which is itself capped to the remaining budget). An in-flight run is never killed mid-turn, so total overshoot is bounded by one `timeout_per_run`; on expiry the loop exits `stopped` / `stop_reason="deadline_exceeded"`. Complements the `max_runs` count cap with a time cap.
-- **Cost budget (#1155):** when `max_cost_usd` is set, the runner keeps an in-memory `accumulated_cost`, incrementing it only in the success branch (the sole path that loops back to a boundary check) and only for finite, positive costs (a NaN/inf cost is ignored so it can't poison the accumulator; a NULL/unknown cost counts as 0 fail-open). Both unusable-cost cases emit a distinct `logger.warning` under an active budget (metering blind spot stays greppable). At each iteration boundary — *after* the deadline check — it stops the loop *before the next run* with `stopped` / `stop_reason="budget_exhausted"` once `accumulated_cost >= max_cost_usd`. Boundary-only: the current run always finishes (first-run overshoot is by design), and a run that crosses the budget but is the final `max_runs` run or matches `stop_signal` yields those reasons instead.
-- **No-progress detection (#1157):** when `no_progress_threshold` is truthy (NULL/0 disable), the runner fingerprints each successful run's full response — `_fingerprint(text) = sha256(" ".join((text or "").split()))` — and keeps a runner-local `last_fingerprint`/`repeat_count`. After the stop-signal check, if `repeat_count >= threshold` AND no higher-precedence stop is pending (`handle.should_stop` / passed deadline), the loop exits `stopped` / `stop_reason="no_progress"`. Counter resets when a fingerprint differs. No persistence; exact-hash only.
-- Iteration body:
-  1. Cooperative stop check (`handle.should_stop`); then the deadline check; then the cost-budget check.
-  2. Template substitution: `{{run}}` → 1-indexed; `{{previous_response}}` → trailing 2000 chars of last response (empty on iteration 1).
-  3. Insert `agent_loop_runs` row in `running` status.
-  4. `await task_execution_service.execute_task(triggered_by="loop", loop_id=...)`.
-  5. Finalize the run row with `cost`, `duration_ms`, `execution_id`; accumulate the run's cost toward `max_cost_usd` (success branch).
-  6. Broadcast `loop_run_completed` event.
-  7. Stop-signal substring check; on match → exit with `stop_reason="stop_signal_matched"`.
-  8. No-progress check (#1157): fingerprint the response; if `repeat_count >= no_progress_threshold` and no user-stop/deadline pending → exit `stopped` / `stop_reason="no_progress"`.
-  9. Optional `delay_seconds` sleep before next iteration.
+- **Cost budget (#1155):** when `max_cost_usd` is set, accumulated cost is summed from the completed `agent_loop_runs` rows (#2523 — it was an in-memory accumulator), counting only the success rows (the sole path that loops back to a boundary check) and only for finite, positive costs (a NaN/inf cost is ignored so it can't poison the accumulator; a NULL/unknown cost counts as 0 fail-open). Both unusable-cost cases emit a distinct `logger.warning` under an active budget (metering blind spot stays greppable). At each iteration boundary — *after* the deadline check — it stops the loop *before the next run* with `stopped` / `stop_reason="budget_exhausted"` once `accumulated_cost >= max_cost_usd`. Boundary-only: the current run always finishes (first-run overshoot is by design), and a run that crosses the budget but is the final `max_runs` run or matches `stop_signal` yields those reasons instead.
+- **No-progress detection (#1157):** when `no_progress_threshold` is truthy (NULL/0 disable), the runner fingerprints each successful run's full response — `_fingerprint(text) = sha256(" ".join((text or "").split()))` — and rebuilds `last_fingerprint`/`repeat_count` from the run rows on each advance (#2523 — it was runner-local, so a restart reset it). After the stop-signal check, if `repeat_count >= threshold` AND no higher-precedence stop is pending (`stop_requested_at` / passed deadline), the loop exits `stopped` / `stop_reason="no_progress"`. Counter resets when a fingerprint differs. Exact-hash only; the chain advances on SUCCESS rows only, so a tolerated failure between two identical successes does not reset it.
+- Iteration cycle (#2523 — the same steps, split across a dispatch and a terminal):
+  1. `_dispatch_run`: template substitution (`{{run}}` → 1-indexed; `{{previous_response}}` → trailing 2000 chars of `agent_loops.last_response`, empty on iteration 1), **create the `schedule_executions` row**, insert the `agent_loop_runs` row carrying its `execution_id`, then dispatch without awaiting the turn. The execution row is created here rather than inside `execute_task` precisely so the run row can be stamped with its id *before* a terminal can arrive — the advance starts from an execution id and must be able to find its iteration.
+  2. …the turn runs. Under push that is `execute_task` awaiting the agent; under pull the row sits on the durable queue until a worker claims it. Either way no backend coroutine is held across iterations.
+  3. `advance_on_terminal`: CAS-claim the advance, finalize the run row from the execution row (`cost`, `duration_ms`, `response`/`error`), update `runs_completed` / `last_response` / `failed_runs`, broadcast `loop_run_completed`.
+  4. Post-run gates, in this order: stop-signal substring check (unguarded — it wins even over a pending stop); then no-progress (#1157), skipped when a stop or a passed deadline outranks it; on a failed run, the #1167 failure policy instead.
+  5. `_continue_or_finalize`: `max_runs` (ends the loop before any gate), then `user_stopped` > `deadline_exceeded` > `budget_exhausted`.
+  6. Optional `delay_seconds`: **park**, don't sleep. `agent_loops.next_run_at` is stamped (capped to the remaining #1156 deadline) and a 5s sweep in `main.py` brings the loop back — `LoopService.dispatch_due_loops`, whose claim is a CAS on the exact `next_run_at` so every backend worker can run it. Granularity is the sweep period, so `delay_seconds` is a pacing knob, not a precision timer.
 - Terminal states + reasons:
   - `completed` / `max_runs_reached`
   - `completed` / `stop_signal_matched`
@@ -67,27 +67,31 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
   - `stopped` / `no_progress` (K consecutive identical responses, #1157)
   - `stopped` / `user_stopped` (via `stop_loop`)
   - `failed` / `error` (any iteration's `TaskExecutionResult.status != "success"` or an unhandled exception)
-  - `interrupted` / `interrupted` (backend restart, swept by cleanup-service)
+  - `interrupted` / `interrupted` — **no longer produced by a restart (#2523).** The status and its handling remain for rows written by older builds.
 - `loop_completed` event broadcast on every terminal transition.
 
 ### DB layer
 - `src/backend/db/loops.py` — `LoopOperations`:
-  - `create_loop`, `get_loop`, `mark_loop_running`, `update_loop_progress`, `finalize_loop`, `list_loops_for_agent`, `list_non_terminal_loops`, `mark_orphans_interrupted`.
-  - `start_loop_run`, `attach_execution_to_run`, `finalize_loop_run`, `list_runs`.
+  - `create_loop`, `get_loop`, `mark_loop_running`, `update_loop_progress`, `finalize_loop`, `list_loops_for_agent`, `list_non_terminal_loops`.
+  - `start_loop_run`, `finalize_loop_run`, `list_runs`, `get_run_by_execution` (#2523 — the indexed point read every execution terminal makes to ask "is this a loop run?").
+  - #2523 claims/parking: `claim_loop_advance` (the CAS idempotency gate), `request_loop_stop`, `schedule_next_run`, `claim_due_loop`, `list_due_loops`. `mark_orphans_interrupted` was **removed** — nothing calls it now that a restart no longer interrupts loops.
 - Facade: `src/backend/database.py` exposes all of the above on `db`.
 
 ### Schema + migration
 - `src/backend/db/schema.py` / `db/tables.py` — `agent_loops`, `agent_loop_runs`, plus `loop_id TEXT` column on `schedule_executions` + index `idx_executions_loop`. `agent_loops.max_duration_seconds INTEGER` (NULL = no deadline) added for #1156; `agent_loops.max_cost_usd REAL` (NULL = no budget) added for #1155; `agent_loops.no_progress_threshold INTEGER` (NULL = disabled / legacy) added for #1157.
 - **Dual-track migration (Invariant #9)** for `max_duration_seconds`: SQLite `_migrate_agent_loops_max_duration` in `db/migrations.py` (`_safe_add_column`) **and** Alembic revision `src/backend/migrations/versions/0005_agent_loops_max_duration.py` (`ADD COLUMN IF NOT EXISTS`, chained after `0004_agent_ownership_voice_name`) for the Postgres backend.
 - **Dual-track migration (Invariant #9)** for `no_progress_threshold` (#1157): SQLite `_migrate_agent_loops_no_progress` in `db/migrations.py` (`_safe_add_column`) **and** Alembic revision `src/backend/migrations/versions/0007_agent_loops_no_progress.py` (`ADD COLUMN IF NOT EXISTS`, chained after `0006_agent_reports`). `_loop_row_to_dict` (explicit per-column map) carries the column through GET.
+- **Dual-track migration (Invariant #9)** for `next_run_at` + `stop_requested_at` (#2523): SQLite `_migrate_agent_loops_terminal_driven` in `db/migrations.py` **and** Alembic revision `src/backend/migrations/versions/0050_agent_loops_terminal_driven.py` (chained after `0049_execution_turn_integrity`). Both also create `idx_loops_next_run` (the due-loop sweep would otherwise scan every loop ever created every 5s) and `idx_loop_runs_execution` (every execution terminal in the fleet does a point read here).
 - **Dual-track migration (Invariant #9)** for `max_cost_usd` (#1155): SQLite `_migrate_agent_loops_max_cost` in `db/migrations.py` (`_safe_add_column`, registered as a new `MIGRATIONS` entry after `agent_reports_table`) **and** Alembic revision `src/backend/migrations/versions/0008_agent_loops_max_cost.py` (`ADD COLUMN IF NOT EXISTS ... DOUBLE PRECISION`, chained after `0007_agent_loops_no_progress`) for the Postgres backend.
 - `src/backend/db/migrations.py` — `_migrate_agent_loops_tables` (idempotent `CREATE TABLE IF NOT EXISTS` + `_safe_add_column` for the existing executions table).
 
 ### Execution dispatch
 - `src/backend/services/task_execution_service.py:246` — `loop_id` parameter added to `execute_task()` and forwarded into `db.create_task_execution`, which writes the new `loop_id` column on `schedule_executions`. Every iteration shows up as a normal execution row tagged with its parent loop.
 
-### Restart recovery
-- `src/backend/services/cleanup_service.py` — `_cleanup_loop()` startup hook calls `db.mark_orphan_loops_interrupted()`. Any non-terminal `agent_loops` rows from a prior process flip to `interrupted`; loops do not auto-resume.
+### Restart recovery (#2523 — loops now resume)
+- `src/backend/services/cleanup_service.py` — `_cleanup_loop()`'s startup hook calls `LoopService.reconcile_after_restart()`. It used to call `db.mark_orphan_loops_interrupted()`, flipping EVERY non-terminal loop to `interrupted` — correct while the loop was an `asyncio.Task` whose state died with the process, and pure data loss once the loop lives on its row.
+- The reconcile, per non-terminal loop: parked on `next_run_at` → left to the sweep. Open run whose execution is still non-terminal → **left alone** (that execution's terminal, or this service's own recovery of it, advances the loop). Open run whose execution is already terminal (or gone) → **advanced from that terminal**, because the event was lost with the restart and `runs_completed` has not moved — re-arming here would dispatch a second row for the same `run_number`. No open run at all → the dispatch was lost, so it is re-armed by making it due now. Nothing is marked `interrupted`.
+- Ordering with execution recovery does not matter: whichever runs first, `claim_loop_advance`'s CAS means the loop advances exactly once.
 
 ## WebSocket Events
 - `loop_run_completed` per iteration: `{type, loop_id, agent_name, run_number, execution_id, cost, duration_ms, timestamp}`.

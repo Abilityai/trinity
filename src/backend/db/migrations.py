@@ -2857,6 +2857,53 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_loops_terminal_driven(cursor, conn):
+    """#2523 — the two columns that let a loop live without an in-process runner.
+
+    `LoopService._run` used to hold the whole loop in one `asyncio.Task`: a
+    `for` loop over iterations, with the stop flag on an in-memory `_LoopHandle`
+    and the inter-run pause as `asyncio.sleep`. Neither survives a restart, so
+    startup recovery flipped every in-flight loop to `interrupted`. The loop is
+    now driven by execution terminals instead, which needs those two pieces of
+    state on the row:
+
+      * `next_run_at`       — when the next iteration is due (the `delay_seconds`
+                              pause). NULL means "not waiting"; a due-loop sweep
+                              dispatches rows whose time has come.
+      * `stop_requested_at` — replaces `_LoopHandle.should_stop`, so `stop_loop`
+                              works on a loop this process never started.
+
+    Everything else the runner kept locally was already persisted
+    (`last_response`, `runs_completed`, `failed_runs`) or is derivable from
+    `agent_loop_runs` (accumulated cost, consecutive failures, the #1157
+    no-progress fingerprints), which is why only two columns are needed.
+
+    Mirrored by the Alembic revision 0050_agent_loops_terminal_driven.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "next_run_at",
+        "ALTER TABLE agent_loops ADD COLUMN next_run_at TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "stop_requested_at",
+        "ALTER TABLE agent_loops ADD COLUMN stop_requested_at TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loops_next_run ON agent_loops(next_run_at)"
+    )
+    # Every execution terminal asks "is this a loop run?" — an indexed point
+    # read, not a scan of every loop run ever recorded.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_runs_execution "
+        "ON agent_loop_runs(execution_id)"
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_mcp_exposed(cursor, conn):
     """#846 — per-agent MCP exposure toggle.
 
@@ -3971,6 +4018,7 @@ MIGRATIONS = [
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
+    ("agent_loops_terminal_driven", _migrate_agent_loops_terminal_driven),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
     ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
