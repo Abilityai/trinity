@@ -91,7 +91,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
               "html = {html} (sanitised on render) · json = raw.",
             ),
             title: z.string().max(300).optional().describe("Optional heading for this block."),
-            payload: z.union([z.record(z.unknown()), z.array(z.unknown())]).optional()
+            payload: z.union([z.record(z.string(), z.unknown()), z.array(z.unknown())]).optional()
               .describe("The block's data, in the shape its kind describes."),
           }),
         ).max(50).describe(
