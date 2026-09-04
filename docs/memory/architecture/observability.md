@@ -73,7 +73,7 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   part of. The portal read is reader-scoped — `db.get_reports_for_client` — which
   replaced a call to the operator accessor that had shown every client of a shared agent
   every report it ever published (the ent#428 defect on the sibling ask surface). See
-  [workspace-deliverables.md](feature-flows/workspace-deliverables.md).
+  [workspace-deliverables.md](../feature-flows/workspace-deliverables.md).
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
@@ -143,10 +143,10 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   (`_redact_for_agent_principal` → `comment_withheld`): a readable score is a loop an
   agent may optimise for, and client free text handed verbatim to the agent being
   criticised is a prompt-injection path into it. See
-  [workspace-ratings.md](feature-flows/workspace-ratings.md).
+  [workspace-ratings.md](../feature-flows/workspace-ratings.md).
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.
 
-See [agent-evaluations.md](feature-flows/agent-evaluations.md).
+See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

@@ -18,6 +18,7 @@ from typing import Optional, Literal
 from database import db
 from services import idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,15 @@ class ProactiveMessageService:
             ChannelDeliveryError: Channel delivery failed
         """
         recipient_email = recipient_email.lower()
+
+        # ent#279: scrub the body at the TOP -- before channel delivery AND before
+        # the durable persist in _persist_outbound (D19). The normal reply path is
+        # already scrub-before-send transitively (the applier scrubs before result
+        # construction); an agent pasting a fetched vault value into a proactive
+        # message adds nothing the operator does not already hold in Settings.
+        _staged = get_staged_values()
+        if _staged:
+            text = scrub_text(_staged, text)
 
         # Effect-scoped dedup (#1084): guard at the entry, keyed on the resolved
         # recipient + channel (never the body). A chunked message is ONE effect —

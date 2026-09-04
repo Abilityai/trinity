@@ -1091,11 +1091,33 @@ class VersioningInfo(BaseModel):
     new_version: str
 
 
+class DeployManifestEntry(BaseModel):
+    """One entry of the embedded deploy integrity manifest (#2060).
+
+    The caller computes `.trinity-manifest.json` from the disk tree and ships
+    it INSIDE the archive; the backend verifies the extracted tree against it
+    (post-extract AND post-copy). Regular files carry `sha256`, symlinks carry
+    `link_target` (exactly one of the two — enforced at parse in
+    `deploy._load_manifest`, not here, so the parse error is a named 400
+    `MANIFEST_INVALID` rather than a generic validation shape). Directories
+    are omitted. Paths are relative to the agent root.
+    """
+    path: str
+    sha256: Optional[str] = None
+    link_target: Optional[str] = None
+
+
 class DeployLocalRequest(BaseModel):
     """Request to deploy a local agent."""
     archive: str  # Base64-encoded tar.gz
     name: Optional[str] = None  # Override name from template.yaml
     credentials: Optional[Dict[str, str]] = None  # Optional credentials to inject {KEY: value}
+    # #2060: when true, an archive without an embedded .trinity-manifest.json
+    # is refused (400 MANIFEST_REQUIRED). The MCP tool sets this in tool CODE
+    # (not a model-controlled parameter); the raw HTTP default stays False so
+    # manifest-less legacy deploys (shipped CLI, abilities plugin) keep working
+    # with `verified: false` + a warning.
+    require_manifest: Optional[bool] = False
 
 
 # Maximum credentials allowed per deploy-local request
@@ -1112,6 +1134,12 @@ class DeployLocalResponse(BaseModel):
     warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
+    # #2060 evidence fields — a deploy must prove what landed.
+    verified: bool = False  # True only when a manifest was present AND both verification points passed
+    files_expected: Optional[int] = None   # manifest regular-file entries (None = no manifest)
+    files_deployed: Optional[int] = None   # regular files at the deployed template (manifest member excluded)
+    symlinks_deployed: Optional[int] = None
+    compatibility_hard_count: Optional[int] = None  # post-deploy #668 STATIC report; None = unavailable (fail-open)
 
 
 # ============================================================================

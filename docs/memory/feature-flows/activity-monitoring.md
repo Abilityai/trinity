@@ -22,12 +22,12 @@ As an agent operator, I want to see what tools Claude is using in real-time so t
 | Performance | Fast (in-memory) | Indexed queries |
 
 ## Entry Points
-- **UI**: `src/frontend/src/components/UnifiedActivityPanel.vue` - Activity panel component (exists but not integrated)
+- **UI**: none on this path — `UnifiedActivityPanel.vue` was never integrated and was deleted in #2492 (the Operations page, #1109, is the live activity surface)
 - **API**: `GET /api/agents/{name}/activity` - Poll for activity summary
 - **API**: `GET /api/agents/{name}/activity/{tool_id}` - Get full tool call details
 - **API**: `DELETE /api/agents/{name}/activity` - Clear session activity
 
-**Note**: The `UnifiedActivityPanel.vue` component exists but is **not currently integrated** into the AgentDetail view. Activity polling runs in the background via `useSessionActivity.js` composable but the data is not displayed in the UI.
+**Note**: `UnifiedActivityPanel.vue` was never integrated into AgentDetail and was **deleted in #2492**. Activity polling still runs via the `useSessionActivity.js` composable; the sections below that describe the panel are a historical record.
 
 ---
 
@@ -487,7 +487,7 @@ Both systems track the same tool executions but serve different purposes. The in
 
 ## Known Limitations
 
-1. **UI Not Integrated**: The `UnifiedActivityPanel.vue` component exists (312 lines) but is not imported/used in `AgentDetail.vue`. Activity data is polled but not displayed.
+1. **UI Not Integrated (resolved by deletion)**: `UnifiedActivityPanel.vue` was never imported by `AgentDetail.vue` and was deleted in #2492; the Operations page owns the activity UI.
 
 2. **Data Loss on Restart**: All activity data is lost when the agent container restarts (by design - ephemeral).
 

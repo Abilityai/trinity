@@ -41,10 +41,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 try:
     import redis.asyncio as aioredis
-    from redis.exceptions import ResponseError as RedisResponseError
 except Exception:  # pragma: no cover — redis is a hard dependency
     aioredis = None
-    RedisResponseError = Exception
 
 from config import REDIS_URL
 

@@ -137,6 +137,31 @@
 - **Known gap**: `T-004`/`T-005` (`resources.cpu`/`resources.memory` in `template.yaml`) still fail for the three starters, so those report 2 HARD findings rather than 0 (the 11 `dd-*` reach 0 — they already pin `resources`). Pinning `resources` in a bundled template is an existing catalog convention, but it *overrides* the admin's fleet-wide default (RES-001, `PUT /api/settings/agent-defaults/resources`) — so whether the default starters should pin or inherit is a **product decision**, and arguably these two checks should `skip` rather than `fail` when a template deliberately inherits. Tracked as a follow-up; the guard waives exactly those two ids and fails if the waiver goes stale.
 - **Not retroactive**: `startup.sh` copies `/template` only when `/home/developer/.trinity-initialized` is absent, so agents already created keep their existing `.gitignore`. They are served by the per-agent auto-fix (`POST /api/agents/{name}/compatibility/fix`) and the sync-time merge.
 
+### 4.1.2 Deploy-Local Integrity Contract (#2060)
+- **Status**: ✅ Implemented
+- **Description**: `POST /api/agents/deploy-local` (and its MCP tool `deploy_local_agent` / the `trinity deploy` CLI) verifies the deployed content against an **embedded manifest** and refuses to deploy silently-incomplete agents. Before this, the archive rode the calling model's own turn as a base64 tool argument with **zero** integrity verification — a pruned-but-well-formed archive (extra tar `--exclude`s, paste truncation, macOS AppleDouble pollution, dereferenced symlinks) deployed `status: "success"`.
+- **Embedded manifest** (`.trinity-manifest.json`): a JSON array the caller computes **from the disk tree** and writes into the agent directory, so the tar carries it as an ordinary member. Entry schema (`DeployManifestEntry`): `{path, sha256?, link_target?}` — regular files carry `sha256`, symlinks carry `link_target` (exactly one of the two), directories omitted; paths relative to the agent root. Embedding (not a request field) is load-bearing: a 5000-file manifest as a JSON tool argument would blow the same output-token ceiling as the archive and recreate the bug one level up; embedding costs zero extra transport and works identically on the base64 arm, the CLI, and the future upload arm (FU-1). Parse bounds (400 `MANIFEST_INVALID`): file read cap 5 MB, ≤ `MAX_FILES` entries, path ≤ 1024 chars, no duplicates, no absolute/`..` paths, `sha256` XOR `link_target` per entry. The manifest file itself is excluded from verification (cannot self-hash; its transport integrity is the gzip's) and from the response counts; it lands in the workspace as inert metadata (future F4 reconciliation input).
+- **Verification points** (fail-closed 400 `MANIFEST_DRIFT` naming `missing`/`altered`/`extra`/`link_mismatch` paths, each list capped at 50 + full counts): (1) **post-extract**, before ANY side effect (precedes quota, stop-previous-version, and the copy — the #2006 gate-ordering rationale), with extras counted as drift; (2) **post-copy** into `/data/deployed-templates/<version>`, immediately after `copytree` and **before** the request-credentials `.env` merge mutates the tree (ordering load-bearing — the merge would otherwise false-drift `.env`). Post-`put_archive` verification is deliberately skipped: the volume copy is a local `tar.add` from the just-verified `dest_path` and `put_archive` failures already raise. The `MANIFEST_DRIFT` recovery text directs the caller to rebuild without extra excludes / regenerate the manifest / use the CLI — it deliberately does NOT suggest removing entries from the manifest (that would teach consistent pruning).
+- **Layered requiredness**: the MCP tool's `execute()` unconditionally sets `require_manifest: true` in the POST body (tool *code*, not a model-controlled parameter) → flag set + no manifest in archive = 400 `MANIFEST_REQUIRED` carrying the generation snippet. On the raw HTTP API `require_manifest` defaults to `false`: manifest-less legacy deploys (shipped PyPI CLI, abilities plugin) still succeed with `status: "success"` but `verified: false` + a warning — flipping `status` would make every legacy deploy *report* failure after succeeding (the shipped CLI hard-fails on `status != "success"`). The in-repo CLI computes the manifest during its archive walk, injects it into the tar in-memory (never mutates the user's source dir), and sets `require_manifest: true`.
+- **Honesty note (accident-proof, not adversary-proof)**: the manifest is computed by a command walking the FULL disk tree, so every *accident* class diverges from a pruned archive and is refused loudly; a passing incomplete deploy requires the caller to consistently edit both the tar and the manifest commands — deliberate evasion, visible in the calling transcript, out of this bug's scope. The tool argument is also **token-bound** (~100–200 KB of base64 per model turn in practice), so large agents must deploy via the turn-bypassing transports that already exist: the `trinity` CLI or `curl` from bash (MCP keys are valid Bearer tokens). The integrated direct-upload channel (removing the payload from the turn entirely) is the FU-1 follow-up.
+- **Symlink contract** (matrix; escape refusals pre-date #2060 and are regression-pinned):
+
+  | Case | Contract |
+  |---|---|
+  | Absolute symlink target | 400 `INVALID_ARCHIVE` naming path + target (unchanged) |
+  | Symlink resolving outside the extraction root | 400 `INVALID_ARCHIVE` naming path + target (unchanged; non-strict resolve covers dangling-escaping) |
+  | Chain where any hop exits the root | each exiting link is itself a member → refused individually (unchanged, now chain-pinned) |
+  | In-root symlink, target present | **preserved as a symlink end to end** (extract → `/data/deployed-templates` → prepop tar → workspace volume) via `copytree(symlinks=True)`; counted in `symlinks_deployed` |
+  | Dangling in-root symlink | **preserved + named warning** (`dangling symlink preserved: {path} -> {target}`); a pruned *target* still listed in the manifest is refused as `missing` (the pruning signal at the right layer). Rationale: links to runtime-created dirs (`content/`, `data/`) are legitimate |
+  | Hardlink | contained-or-refused (unchanged); manifest treats as a regular file |
+
+- **Layering rule (load-bearing)**: *security validation* (containment, link targets, member types — `_validate_tar_member` over `tar.getmembers()`) runs strictly **before any extraction**, exactly as before; *drift verification* (manifest matching) runs post-extract. Moving containment checks post-extract would reopen the tar-slip class. `extractall` is pinned to `filter='tar'` (Py3.14 flips the unpinned default to `'data'`, changing symlink/metadata semantics under us; `'tar'` is behavior-stable, strips setuid/setgid/sticky as defense-in-depth, and leaves `_validate_tar_member` the single authoritative link barrier).
+- **Caps** (every rejection carries `observed` + `limit`): `MAX_ARCHIVE_SIZE` 50 MB compressed (unchanged — 50 MB decoded ≈ 67 MB base64 JSON body; raising it without a real byte channel is FU-1's call), `MAX_FILES` 10000 (was 1000 — a Cornelius-class KB agent exceeds 1000 members; byte caps are the true resource bound), **new** `MAX_EXTRACTED_SIZE` 500 MB summed from member headers pre-extraction (400 `ARCHIVE_EXTRACTED_TOO_LARGE`; closes the gzip-bomb hole), manifest read cap 5 MB. macOS AppleDouble `._*` members are skipped with a warning (and `COPYFILE_DISABLE=1` documented in the tool description) so they neither pollute the workspace nor false-drift the manifest.
+- **Evidence-bearing response**: `DeployLocalResponse` gains `verified` (true only when a manifest was present and both verification points passed), `files_expected` (manifest file entries), `files_deployed` / `symlinks_deployed` (counted at `dest_path` at verification time, manifest member excluded), and `compatibility_hard_count` — a post-create #668 STATIC-only report (fail-open: `None` + warning when the report is unavailable; never blocks a deploy).
+- **Idempotency + concurrency**: the endpoint accepts an optional `Idempotency-Key` (Invariant #18; scope `agent_deploy:{user_id}`, mirroring `agent_create` including the #2040-F3 staleness branch — a completed replay is honored only while the recorded `versioning.new_version` is live; in-flight duplicate → 409 `DEPLOY_IN_FLIGHT`). The MCP tool derives a deterministic key over `[userId, tool, name, archive]` — this protects transport-level retries (same args ⇒ same key, closing the retry-double-fork); a re-run bash pipeline produces new gzip bytes ⇒ new key ⇒ a visible version fork, correct by design (content-derived keys would false-replay intentional identical-content redeploys). A per-base-name Redis lock (`agent:deploy_op:{base_name}` — the shared `redis_breaker_util.SingleFlightLock` #1920: SETNX + 10-min TTL, per-acquire token, compare-and-delete release; fail-open on Redis down, 409 `DEPLOY_IN_PROGRESS` on contention) closes the concurrent same-version-name race; registered in `agent_runtime_state.EXEMPT_KEYSPACES`.
+- **Residue + compensation**: `dest_created` is assigned *before* the rmtree/`copytree` pair so a mid-copy failure is cleaned by `_remove_partial_deploy` (#2006 class; the copy failure itself is a named 500 `TEMPLATE_COPY_FAILED`, replacing the opaque `shutil.Error` 500). The prepopulated workspace volume is tracked and removed best-effort on failure (label + unattached double-guard, #1581 shape). A pre-existing volume under the new version name is removed-and-recreated when unattached; **attached** → 409 `WORKSPACE_VOLUME_IN_USE` (never `put_archive` into a mounted volume — an attached volume here means a concurrent/zombie deploy). A previous version stopped by step 7 is best-effort **restarted on any failed deploy** (including a `create_agent_fn` raise — crud rollback + ent#313 reclaim remove the failed container first; log-only on restart failure, never masks the original error). The compensation window **closes when `create_agent_fn` returns**: from that point the new version is live, and a late failure (response construction) must not restart the previous version alongside it — one base name running two live versions is the F5 double-run hazard. The final catch-all 500 carries `code: "DEPLOY_FAILED"`.
+- **Out of scope (follow-ups named at ship)**: FU-1 direct-upload transport (staged owner-bound handle; carries AC 1), FU-2 redeploy-in-place (F5; carries AC 7), `.env` value quoting (#2023 / PR #2030).
+
 ### 4.2 GitHub Templates
 - **Status**: ✅ Implemented
 - **Description**: Clone via `github:Org/repo` format with PAT authentication
@@ -668,9 +693,11 @@
 - **Honest empty state.** A source with nothing in it shows one line; a query
   that matches nothing **closes** the popup. The copy never claims what the
   client cannot observe: `_agent_briefing` returns `[]` for a stopped or slow
-  agent exactly as it does for one with no playbooks, and the roster is fetched
-  once at mount — so "no playbooks exposed" would be a false claim about
-  operator configuration for the ordinary state of an idle fleet. "No peers" and
+  agent exactly as it does for one with no playbooks, and the briefing arrives
+  AFTER the roster (§5.16, #2163) — so "no playbooks exposed" would be a false
+  claim about operator configuration for the ordinary state of an idle fleet.
+  The typeahead self-heals when playbooks arrive late (its source is a computed
+  over the card), which is what makes the deferred hydration invisible to it. "No peers" and
   "peers exist but none is mentionable" are separate statements.
 - **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
   scoped to the room's **agent participants**. That scope was established by
@@ -867,6 +894,91 @@ box; the words are recorded either way and handed to the agent's
   `comment`, `updated_at`) and the partial UNIQUE above.
 - **Flow**: `docs/memory/feature-flows/workspace-ratings.md`
 
+### 5.16 Workspace roster latency floor — briefing hydration off the critical path (#2163)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_ROSTER_BRIEFING_DEFERRED`
+- **Description**: `GET /my-agents` fanned `_agent_briefing` across every card
+  and awaited `asyncio.gather`, which waits for ALL — so the Workspace's first
+  paint was bounded by the SLOWEST agent in the fleet, for every user, on every
+  sign-in, regardless of fleet size. The briefing is now hydrated after the
+  roster, and every briefing that still runs is bounded.
+
+- **AC-1 — one unresponsive agent does not delay the roster**: `get_roster`
+  awaits no agent HTTP at all (two SQL reads and one Docker list). Pinned by a
+  stub that never resolves: under the old code the call could not return.
+- **AC-2 — the briefing still renders hints, never silently empty**: an explicit
+  loading treatment, then a terminal that is hints, an honest "no hints" line,
+  or an honest "couldn't load" line (ent#380's "no dead chrome").
+- **AC-3 — measured before/after with a deliberately unresponsive agent**: the
+  wedged case is *container running, server not answering* (`kill -STOP` on
+  `agent-server.py` inside the container). `docker pause` measures nothing —
+  a non-`running` container reads `availability="stopped"`, which the briefing
+  skips before any HTTP.
+- **AC-4 — the standard first-load motion**: three `ScanlineReveal` zones, each
+  keyed on its own "no data yet" — the stage, the conversation body, and the
+  briefing hint zone. The static "Opening this conversation…" / "Loading…" lines
+  are gone. A background refetch never re-enters loading.
+
+- **The bound (option 2, the belt)**: `_BRIEFING_HTTP_TIMEOUT_SECONDS = 2.0`
+  (httpx, PER PHASE) and `_BRIEFING_BUDGET_SECONDS = 3.0` (wall clock, via
+  `_bounded_briefing`). The literal `5.0` it replaces was never a ceiling — two
+  sequential GETs, each with a per-phase timeout. Constants, not settings and
+  not env vars (`SAMPLE_INTERVAL_SECONDS` precedent #1644; an unforwarded env
+  read is inert while reading as configurable, #1039). Both values confirmed
+  against the healthy-busy tail at verification: `GET /api/skills` is a
+  synchronous directory scan on the agent-server's own event loop, so a healthy
+  agent mid-turn can legitimately exceed a second.
+- **`briefing_state` is a SERVER-owned tri-state** on the card —
+  `pending | ready | unavailable`, default `"ready"` so an older payload reads
+  as resolved-inline. A bound trip reports `unavailable`; it must never pass for
+  an agent that genuinely has no hints, and a headless ent#83 client must not
+  have to reinvent the third value from empty fields. `ready` means THE AGENT
+  ANSWERED inside the budget, NOT "returned data". A data-state marker, never a
+  capability — #2128's rule (the roster payload is the portal capability
+  channel) is untouched.
+- **The verdict follows REACHABILITY, not the door the failure exited by.**
+  Measured at verification and fixed before ship: `_agent_briefing` swallows
+  HTTP failures in a `try/except` per GET leg AND an outer one, so a wedged
+  agent (httpx `ReadTimeout`) and a missing container (`ConnectError`) — the two
+  commonest unreachable shapes — returned an ordinary empty briefing well inside
+  the budget and were published as `ready`. Only the tarpit shape, which trips
+  the wall clock, was correct. That is the hint-less-agent state this field
+  exists to prevent, and it is unrecoverable in-session because
+  `shouldRequestBriefing` retries only `unavailable`. Reachability is therefore
+  reported separately from content: every exit of `_agent_briefing` that got no
+  answer out of the agent (the availability skip, both legs failing at the
+  transport layer, a failure before the first request) returns the `_UNREACHED`
+  sentinel, read by IDENTITY in `_bounded_briefing` — equality would sweep up
+  the empty briefing a healthy agent legitimately produces. A response of ANY
+  status counts as reached (a 500 is the agent talking; retrying returns the
+  same 500), and ONE leg answering is enough, because the client renders
+  `unavailable` INSTEAD of the fields and a half-answered briefing must not
+  discard the description it did get. Both doors — `get_agent_card` and
+  `GET /briefings` — inherit it from `_bounded_briefing`, so they cannot
+  disagree about the same agent.
+- **Route**: `GET /api/enterprise/client-portal/briefings[?agents=a,b]`,
+  viewer-scoped like `/sessions`. Scope is the roster and the ROSTER's strings
+  are what is iterated, so a crafted name cannot steer the agent HTTP target;
+  unknown names are dropped (no existence oracle, Invariant #8). No `?agents=`
+  briefs the whole roster; a filter briefs the active agent so its hints arrive
+  at its own speed. Per-viewer rate limits, the unfiltered form far tighter
+  (10/min vs 60/min) because one call costs one bounded agent request per
+  rostered agent. No Docker read. No MCP tool (read-only, portal-principal-only,
+  no operator consumer — Invariant #13); no `Idempotency-Key` (a read, not a
+  trigger boundary); no DB change, no migration.
+- **Client**: the background batch fires from the store's roster-SUCCESS branch
+  (both "Try again" buttons bypass `bootstrap()`) at >= 1 pending card; the
+  active agent's single is driven by `Portal.vue`'s `activeAgent` watcher and is
+  never coalesced into the batch. A hydrated card survives a roster refetch;
+  `unavailable` is re-armed as `pending` by an explicit refetch and retried at
+  most once per session otherwise.
+- **Out of scope, deliberately**: a server-side briefing cache (needs Redis +
+  invalidation under `--workers 2`; off the critical path the per-agent cost is
+  no longer user-visible), bounding the roster's Docker read, and the sweep of
+  the remaining bespoke Workspace indicators (`PortalFilesPanel`'s spinner,
+  `PortalSidebar`'s skeleton) — those stay on #1921.
+- **Flow**: `docs/memory/feature-flows/workspace-roster-briefing.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
@@ -941,7 +1053,7 @@ box; the words are recorded either way and handed to the agent's
 - **Status**: ✅ Implemented (2026-07-30)
 - **Description**: Third dashboard mode **List** (Timeline / Grid / List) that replaces the standalone Agents page — the dashboard is the single canonical fleet surface. The Agents page's row list (three responsive layouts, per-row toggles, bulk tag ops, filters, empty states) is extracted into `components/AgentListPanel.vue`, mounted through the existing view-mode machinery (`VIEW_MODES` + `localStorage['trinity-dashboard-view']` — selection persists per user like the other modes). `views/Agents.vue` is deleted.
 - **Key Features**:
-  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared/Runtime badges, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter; filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → onboarding wizard) states; toast feedback.
+  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared badges in the name cell and the subscription-pressure badge plus a **non-default-runtime** badge on the row's secondary line beside the slug, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter (#2358 — at `lg` the header and every row are items of ONE CSS grid (subgrid), so columns resolve in one sizing context, and the label leads with the slug following as selectable secondary text per §1.3.1 FR-4); filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → onboarding wizard) states; toast feedback.
   - **Filters migrated to chassis controls**: the page's single-tag dropdown and owner dropdown are superseded by the dashboard's existing quick-tag filter (multi-tag, server-side, counts) and owner filter, which apply to all three views; the List's Clear-all clears both layers (local name/status + chassis tags/owner via a `clear-chassis-filters` emit). The "X/Y" badge counts Y as the full fleet.
   - **Create Agent moved to the chassis header** — available in all three modes (previously the Agents page was the only persistent create surface); modal close refreshes the fleet.
   - **System-row Run guard adopted from the grid**: the List hides the Run toggle on system rows (the grid tile already refused it); stopping the system agent remains available on its Agent Detail page.

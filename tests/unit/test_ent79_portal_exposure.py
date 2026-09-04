@@ -192,8 +192,8 @@ def roster_db(tmp_path, monkeypatch):
     # test that reaches portal_chat — register_enterprise() creates them in prod
     # via this same init. (history_db layers seeds on top; this makes the tables
     # unconditionally present, matching production.)
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -253,9 +253,14 @@ def test_roster_empty_for_no_email(roster_db):
     assert _run(service.get_roster("")).agents == []
 
 
-def test_roster_carries_briefing(roster_db, monkeypatch):
-    """#138: the roster ships each agent's description + client-visible playbooks
-    (best-effort enrichment), so the new-chat briefing needs no extra fetch."""
+def test_the_briefing_carries_description_and_playbooks(roster_db, monkeypatch):
+    """#138's content, at its #2163 home.
+
+    This used to assert the same fields on the ROSTER's cards, because #138
+    shipped the briefing there — which is precisely what made the Workspace's
+    first paint bound to the slowest agent in the fleet. The payload is
+    unchanged; only the call that resolves it moved off the critical path.
+    """
     from client_portal import service
     from client_portal.models import PortalPlaybook
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)   # skip the global key check
@@ -269,19 +274,38 @@ def test_roster_carries_briefing(roster_db, monkeypatch):
         return (None, [])
 
     monkeypatch.setattr(service, "_agent_briefing", fake_briefing)
+    briefings = _run(service.get_briefings("bob@example.com", None)).briefings
+    assert briefings["atlas"].description == "Atlas does research."
+    assert len(briefings["atlas"].playbooks) == 1
+    assert briefings["atlas"].playbooks[0].title == "Weekly report"
+    assert briefings["atlas"].playbooks[0].starter_prompt == "/weekly-report "
+    # An agent with nothing exposed still REACHED a verdict — empty, not failed.
+    assert briefings["cornelius"].description is None
+    assert briefings["cornelius"].playbooks == []
+    assert briefings["cornelius"].state == "ready"
+
+
+def test_the_roster_ships_no_briefing_at_all(roster_db, monkeypatch):
+    """#2163: the roster's own payload carries the defaults plus the state that
+    says a hydration call is owed. Without the marker an un-hydrated card is
+    indistinguishable from an agent that genuinely has nothing to offer."""
+    from client_portal import service
+    monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
+
+    async def never(name, availability="ready"):
+        raise AssertionError("the roster must not brief")
+
+    monkeypatch.setattr(service, "_agent_briefing", never)
     cards = {c.name: c for c in _run(service.get_roster("bob@example.com")).agents}
-    assert cards["atlas"].description == "Atlas does research."
-    assert len(cards["atlas"].playbooks) == 1
-    assert cards["atlas"].playbooks[0].title == "Weekly report"
-    assert cards["atlas"].playbooks[0].starter_prompt == "/weekly-report "
-    # An un-enriched (e.g. stopped) agent keeps the fast defaults.
-    assert cards["cornelius"].description is None
-    assert cards["cornelius"].playbooks == []
+
+    assert set(cards) == {"atlas", "cornelius", "defaultpic"}
+    assert all(c.briefing_state == "pending" for c in cards.values())
+    assert all(c.description is None and list(c.playbooks) == [] for c in cards.values())
 
 
-def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
-    """A slow/erroring agent must not break the roster — gather swallows it and
-    that card keeps the (None, []) defaults."""
+def test_briefing_hydration_is_fail_soft(roster_db, monkeypatch):
+    """A slow/erroring agent must not break the hydration call either — it lands
+    as `unavailable` for that agent and the response still carries the rest."""
     from client_portal import service
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
 
@@ -289,9 +313,10 @@ def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
         raise RuntimeError("agent unreachable")
 
     monkeypatch.setattr(service, "_agent_briefing", boom)
-    roster = _run(service.get_roster("bob@example.com"))
-    assert {c.name for c in roster.agents} == {"atlas", "cornelius", "defaultpic"}
-    assert all(c.description is None and c.playbooks == [] for c in roster.agents)
+    briefings = _run(service.get_briefings("bob@example.com", None)).briefings
+    assert set(briefings) == {"atlas", "cornelius", "defaultpic"}
+    assert all(b.state == "unavailable" for b in briefings.values())
+    assert all(b.description is None and b.playbooks == [] for b in briefings.values())
 
 
 def test_playbook_helpers():
@@ -556,8 +581,8 @@ def signin_db(tmp_path, monkeypatch):
     m.create_all(get_engine(), tables=[agent_sharing, agent_ownership, users, email_login_codes])
     # ent#281: sign-in consults the block table, so the module's own schema must
     # exist here exactly as it does in production (`register()` creates it).
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -888,8 +913,8 @@ def test_image_media_type():
 @pytest.fixture()
 def history_db(roster_db):
     """roster_db + the private enterprise_portal_messages table."""
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
     yield roster_db
 
 

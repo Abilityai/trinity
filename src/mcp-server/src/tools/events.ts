@@ -50,7 +50,7 @@ export function createEventTools(
             "Namespaced event type identifier (e.g., 'prediction.resolved', 'data.processed'). " +
             "Use dot-separated words to namespace your events."
           ),
-        payload: z.record(z.unknown()).optional()
+        payload: z.record(z.string(), z.unknown()).optional()
           .describe("Structured data to include with the event. Subscribers can reference fields via {{payload.field}} in their message templates."),
       }),
       execute: async (

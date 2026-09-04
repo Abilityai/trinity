@@ -12,7 +12,7 @@
 
 ### Real-time Delivery (RELIABILITY-003, #306)
 
-**Transport** (`event_bus.py`, details in [websocket-event-bus.md](feature-flows/websocket-event-bus.md)): Redis Streams. `ConnectionManager`/`FilteredWebSocketManager` are thin shims that `XADD` to the MAXLEN-trimmed `trinity:events` stream; one `StreamDispatcher` per backend process runs `XREAD BLOCK` and fans out, evicting a client after 3 consecutive delivery failures. New broadcast sites keep calling `manager.broadcast(...)` / `filtered_manager.broadcast_filtered(...)` — never publish to the stream directly (Invariant #10).
+**Transport** (`event_bus.py`, details in [websocket-event-bus.md](../feature-flows/websocket-event-bus.md)): Redis Streams. `ConnectionManager`/`FilteredWebSocketManager` are thin shims that `XADD` to the MAXLEN-trimmed `trinity:events` stream; one `StreamDispatcher` per backend process runs `XREAD BLOCK` and fans out, evicting a client after 3 consecutive delivery failures. New broadcast sites keep calling `manager.broadcast(...)` / `filtered_manager.broadcast_filtered(...)` — never publish to the stream directly (Invariant #10).
 
 **Reconnect replay**: `/ws` and `/ws/events` accept `?last-event-id=<stream_id>`, regex-gated (`^\d+-\d+$`) by `validate_last_event_id()` before `XRANGE`. Catchup capped at `REPLAY_GAP_LIMIT=5000` — larger gaps return `{"type": "resync_required", "reason": "gap_too_large"}`. Authorization (`accessible_agents` for `/ws/events`) is re-applied on replay. The frontend tracks `_eid` per message, appends `&last-event-id=` on reconnect, and on `resync_required` clears the cursor and refetches via REST.
 
@@ -28,7 +28,7 @@ Download URL: `{public_chat_url}/api/files/{file_id}?sig={token}` — `?sig=` (N
 
 ### VoIP Telephony (VOIP-001, #1056)
 
-Outbound phone calls from agents via Twilio Media Streams + Gemini Live (details in [voip-telephony.md](feature-flows/voip-telephony.md)). Feature-flag gated: `voip_available = VOIP_ENABLED && bool(GEMINI_API_KEY)`, default OFF; also requires a per-agent `voip_bindings` row (Twilio-voice creds, validated via Twilio Account fetch, AuthToken AES-256-GCM encrypted). A voice transport, NOT a text `ChannelAdapter`.
+Outbound phone calls from agents via Twilio Media Streams + Gemini Live (details in [voip-telephony.md](../feature-flows/voip-telephony.md)). Feature-flag gated: `voip_available = VOIP_ENABLED && bool(GEMINI_API_KEY)`, default OFF; also requires a per-agent `voip_bindings` row (Twilio-voice creds, validated via Twilio Account fetch, AuthToken AES-256-GCM encrypted). A voice transport, NOT a text `ChannelAdapter`.
 
 **Call flow:** MCP tool `call_user` → `POST /api/agents/{name}/voip/call` → `voip_service.py`: gate checks (flag/binding) + abuse controls (rate limit per `(owner, destination)`, durable per-agent daily cap), stages a Gemini session intent in Redis keyed by `call_id` (distinct from the `vs_` VoiceSession id), mints a call-bound WSS ticket, calls Twilio `calls.create(<Connect><Stream>)`. Never calls `connect_and_stream` itself (cross-worker safety — the WS handler does). Optional `Idempotency-Key` honored (Invariant #18).
 
@@ -82,7 +82,7 @@ never bypassed.
   `0009_agent_ownership_mcp_exposed`).
 - **Connect surface (#1575):** the Expose-via-MCP panel (`components/McpExposedPanel.vue`)
   gains a one-click **Copy connection config** action when exposed — it reuses the
-  existing [MCP connector](feature-flows/mcp-connector.md) (scoped `scope='connector'`
+  existing [MCP connector](../feature-flows/mcp-connector.md) (scoped `scope='connector'`
   key + playbooks-as-tools + `build_snippets`) to hand an external client a
   ready-to-paste `.mcp.json` with a least-privilege, agent-scoped, revocable key
   already embedded. No new endpoint/key type — the connector endpoints are reused
@@ -108,7 +108,7 @@ injection. Mirrors the workspace page (gated per-agent route) and the
 agent-owned read-surface pattern (pipelines #919, reports #918): the agent owns
 generation + scope state (Invariant #8), Trinity reads/renders + brokers
 control. Default OFF — no impact on other agents. Full flow:
-[brain-orb.md](feature-flows/brain-orb.md).
+[brain-orb.md](../feature-flows/brain-orb.md).
 
 **Default Cornelius (trinity-enterprise#107):** a **fresh install** auto-seeds a
 default "Cornelius" second-brain agent from the public `github:Abilityai/cornelius`
@@ -118,7 +118,7 @@ tokenless path (`services/cornelius_agent_service.py`) — and existence-guarded
 `cornelius_seeded` system-setting flag — deleting Cornelius does not re-provision)
 and skipped when any non-system agent already exists (established fleets are never
 surprised); Redis SETNX lock (`cornelius:provision`) guards the `--workers 2` race (ownership-checked via `SingleFlightLock` #1920 — a verbatim twin of system_seed's constant-"1" + unconditional-delete bug, fixed with it).
-Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md).
+Full flow: [cornelius-default-agent.md](../feature-flows/cornelius-default-agent.md).
 
 - **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
   page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/
