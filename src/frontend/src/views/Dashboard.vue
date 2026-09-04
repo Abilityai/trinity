@@ -220,6 +220,15 @@
           </div>
         </div>
 
+        <!--
+          Onboarding stack (#2380). At most ONE card renders, ever — see the
+          `.onboarding-stack` rule below. Four independent surfaces landed here
+          from four issues, none aware of the others, and on a first login all
+          four can be true at once: ~520px of chrome above the product the
+          operator installed Trinity for, with four dismiss buttons. DOM order
+          IS priority order, highest first.
+        -->
+        <div class="onboarding-stack">
         <!-- Instance hardening guide (#2380). FIRST in the stack on purpose: a
              security-posture prompt outranks a getting-started nudge — a
              marketplace droplet is answering the public internet right now,
@@ -240,6 +249,7 @@
              One chassis rather than a fifth stacked nudge. Each section decides
              its own visibility; the card renders nothing when none applies. -->
         <FinishSetupCard />
+        </div>
 
     <!-- Timeline View (only visible in timeline mode) -->
     <template v-if="isTimelineMode">
@@ -1073,6 +1083,25 @@ function handleClickOutside(event) {
 </script>
 
 <style scoped>
+/*
+  One onboarding card at a time (#2380).
+
+  Every card in the stack is `v-if`'d, so a card that has nothing to say leaves
+  no element behind — which makes "the first ELEMENT child" exactly "the
+  highest-priority card that currently wants to speak". Hiding the rest in CSS
+  keeps each card's visibility predicate where it already lives (its own store,
+  its own localStorage dismissal) instead of lifting four of them into this
+  view, and dismissing the top card reveals the next one for free.
+
+  The wrapper carries no margin of its own on purpose: with every card hidden
+  it collapses to a zero-height empty div rather than a phantom gap. Each card
+  owns `mt-3 mb-3`, so whichever one shows is spaced on both sides — the pane
+  below is a full-bleed surface with no top padding of its own.
+*/
+.onboarding-stack > * ~ * {
+  display: none;
+}
+
 
 /*
  * Stats bar progressive degrade (#1830).
