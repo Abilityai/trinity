@@ -24,6 +24,7 @@ from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +482,9 @@ def _build_context_summary(chat_session_id: str) -> str:
 def _save_transcript(session) -> int:
     """Save voice transcript entries as ChatMessage rows."""
     saved = 0
+    # ent#279: one staged-set read for the whole transcript; scrub each entry's
+    # text before it lands in chat_messages.content.
+    _staged = get_staged_values()
     for entry in session.transcript:
         try:
             db.add_chat_message(
@@ -489,7 +493,7 @@ def _save_transcript(session) -> int:
                 user_id=session.user_id,
                 user_email=session.user_email,
                 role=entry.role,
-                content=entry.text,
+                content=scrub_text(_staged, entry.text),
                 source="voice",
             )
             saved += 1

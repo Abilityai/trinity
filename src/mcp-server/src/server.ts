@@ -39,6 +39,7 @@ import { createAuthTools } from "./tools/auth.js";
 import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
+import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { withAudit } from "./audit.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
@@ -618,6 +619,7 @@ export async function createServer(config: ServerConfig = {}) {
     createRoomTools(client, requireApiKey),          // Shared sessions / rooms (ent#169)
     createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
+    createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {

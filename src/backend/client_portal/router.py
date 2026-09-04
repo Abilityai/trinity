@@ -71,7 +71,7 @@ from .models import (
     PortalUpload,
     PortalUploads,
 )
-from .portal_auth import PortalPrincipal, get_portal_identity, get_portal_principal
+from .portal_auth import PortalPrincipal, get_portal_principal
 from .service import ClientPortalError
 
 logger = logging.getLogger(__name__)

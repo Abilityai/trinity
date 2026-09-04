@@ -284,7 +284,7 @@ reasons instead of re-deriving them: the boundary rule is **non-word** rather
 than whitespace (CJK / emoji / punctuation); the scan carries a **forward** pass
 so a mid-token caret does not leave a tail; the separator is decided by the
 splice rather than baked into the inserted string; and Enter **never** accepts
-implicitly. The dead `components/rooms/RoomComposer.vue` was read, not revived —
+implicitly. The dead `components/rooms/RoomComposer.vue` (since deleted in #2492) was read, not revived —
 it has no boundary check at all and papers over the token tail with `.trimStart()`.
 
 The one genuine *contract* — the mention grammar — is single-sourced by

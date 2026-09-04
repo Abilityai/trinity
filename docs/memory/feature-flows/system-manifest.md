@@ -197,7 +197,7 @@ gated with it so the nav never points at a section that is not rendered. `/templ
 still redirects to `/library` with query **and** hash preserved, so older links survive. Note `hasMinRole` is a plain **function** — `composables/useRole.js`'s
 own usage docstring says `hasMinRole.value(...)` and is stale.
 
-**Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue`
+**Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue` (deleted in #2492)
 (zero consumers since the Process Engine was decommissioned) was **not** revived: the
 production CSP is `script-src 'self'` with no `unsafe-eval` and no `worker-src`, while the
 dev CSP *does* allow `unsafe-eval` — so `npm run dev` cannot prove production. Every

@@ -62,7 +62,7 @@ export function createNotificationTools(
           .describe("Priority level: 'low', 'normal' (default), 'high', or 'urgent'"),
         category: z.string().optional()
           .describe("Free-form category for grouping (e.g., 'progress', 'anomaly', 'health', 'error')"),
-        metadata: z.record(z.unknown()).optional()
+        metadata: z.record(z.string(), z.unknown()).optional()
           .describe("Any structured data to include with the notification"),
       }),
       execute: async (

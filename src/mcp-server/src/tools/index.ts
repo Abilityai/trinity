@@ -16,3 +16,4 @@ export { createMemoryTools } from "./memory.js";
 export { createLoopTools } from "./loops.js";
 export { createOperatorQueueTools } from "./operator_queue.js";
 export { createVoiceReplyTools } from "./voice.js";
+export { createCredentialVaultTools } from "./credential_vault.js";
