@@ -20,7 +20,7 @@
   preview loads on expand. Steady-state cost on a Dashboard load: zero.
 -->
 <template>
-  <div v-if="visible" data-testid="finish-setup-card" class="mx-4 mt-3">
+  <div v-if="visible" data-testid="finish-setup-card" class="mx-4 mt-3 mb-3">
     <BaseCard flush>
       <div class="flex items-center justify-between gap-3 px-4 pt-3 pb-1">
         <h3 class="text-sm font-[550] text-gray-900 dark:text-gray-100">Finish setup</h3>

@@ -61,6 +61,31 @@ const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)),
 const GUIDE_SFC = read('../../src/components/onboarding/HardeningGuide.vue')
 const SETTINGS_SFC = read('../../src/views/Settings.vue')
 
+/**
+ * The rendered copy, with the HTML comments removed.
+ *
+ * The comments here EXPLAIN decisions the copy must not state — the VPN the
+ * card no longer offers, the Tailscale install it must not appear over — so
+ * asserting "the card never says VPN" against the raw file would fail on the
+ * paragraph that records why. The assertion is about what a user reads.
+ *
+ * Stripped to a FIXPOINT rather than in one pass: a single
+ * `replace(/<!--[\s\S]*?-->/g, '')` leaves a live `<!--` behind on nested
+ * input (`<!--<!-- -->` -> `<!--`), which CodeQL flags as
+ * js/incomplete-multi-character-sanitization. Nothing untrusted reaches this —
+ * it reads a checked-in file — but the loop is both the rule's prescribed fix
+ * and the more correct strip, so there is no reason to carry the weaker one.
+ */
+const withoutComments = (source) => {
+  let out = source
+  let previous
+  do {
+    previous = out
+    out = out.replace(/<!--[\s\S]*?-->/g, '')
+  } while (out !== previous)
+  return out
+}
+
 /** A marketplace droplet still advertising HTTPS at its bare IP, seen by an admin. */
 const marketplaceIp = {
   featureFlagsLoaded: true,
@@ -310,11 +335,45 @@ describe('the two paths are complementary, not alternatives', () => {
     // the address and hardening the reach.
     expect(GUIDE_SFC).toContain('These two stack')
     expect(GUIDE_SFC).toMatch(/Give it a real name/)
-    expect(GUIDE_SFC).toMatch(/Decide who can reach it/)
-    expect(GUIDE_SFC).toMatch(/Tailscale/)
+    expect(GUIDE_SFC).toMatch(/Serve it without exposing it/)
     expect(GUIDE_SFC).toMatch(/A record/)
     // Deep-links at the field that actually writes `public_chat_url`.
     expect(GUIDE_SFC).toContain("/settings?tab=general")
+  })
+
+  it('offers a Cloudflare Tunnel, not a VPN (#2380, decided 2026-09-01)', () => {
+    // The second path was VPN/Tailscale until the issue recorded the swap: a
+    // VPN reaches the same posture but breaks every inbound integration, since
+    // Telegram, WhatsApp, VoIP, public links, x402, inbound A2A and webhook
+    // triggers all call us. PR #2431 shipped the pre-decision copy; this is the
+    // guard that stops it coming back.
+    const prose = withoutComments(GUIDE_SFC)
+    expect(prose).toMatch(/Cloudflare/)
+    expect(prose).toMatch(/cloudflared/)
+    expect(prose).toMatch(/TUNNEL_TOKEN/)
+    expect(prose).not.toMatch(/Tailscale/)
+    expect(prose.toLowerCase()).not.toMatch(/\bvpn\b/)
+  })
+
+  it('states the tunnel prerequisite and the step Trinity cannot take', () => {
+    const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
+    // Not an alternative to the domain — it NEEDS the domain (explicit AC).
+    expect(prose).toMatch(/With that domain on Cloudflare/)
+    expect(prose).toMatch(/The tunnel needs the name/)
+    // Honest about the half it cannot finish: the token reaches `.env` and the
+    // tunnel starts under a compose profile, from the host.
+    expect(prose).toMatch(/happens on the host rather than from this page/)
+  })
+
+  it('keeps one action on the card face and the reasoning behind a disclosure', () => {
+    // The card is a first-login nudge on a droplet that is answering the public
+    // internet; it must be actionable at a glance, not two columns of prose.
+    expect(GUIDE_SFC).toContain('<details')
+    expect(GUIDE_SFC).toContain('data-testid="hardening-guide-why"')
+    // Exactly one non-dismiss button, and it is the one collectable-in-app step.
+    expect(GUIDE_SFC).toMatch(/variant="primary"[\s\S]{0,200}Add a domain/)
+    const buttons = GUIDE_SFC.match(/<BaseButton/g) || []
+    expect(buttons.length, 'one action + one dismiss').toBe(2)
   })
 
   it('does not promise a certificate change Trinity does not perform', () => {
@@ -323,7 +382,7 @@ describe('the two paths are complementary, not alternatives', () => {
     // may promise the NAME changes, and must attribute the certificate to
     // whatever actually terminates TLS.
     // Template copy wraps across lines, so match on collapsed whitespace.
-    const prose = GUIDE_SFC.replace(/<!--[\s\S]*?-->/g, '').replace(/\s+/g, ' ')
+    const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
     expect(prose).not.toMatch(/90-day certificate then replaces/)
     expect(prose).not.toMatch(/certificate then replaces|replaces the short-lived/)
     expect(prose).toContain('Trinity does not issue certificates itself')
@@ -332,7 +391,7 @@ describe('the two paths are complementary, not alternatives', () => {
   })
 
   it('does not phrase them as an either/or', () => {
-    const prose = GUIDE_SFC.replace(/<!--[\s\S]*?-->/g, '') // comments explain, copy asserts
+    const prose = withoutComments(GUIDE_SFC) // comments explain, copy asserts
     expect(prose.toLowerCase()).not.toMatch(/\beither\b|\bor instead\b|\balternatively\b/)
   })
 

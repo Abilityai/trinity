@@ -36,9 +36,9 @@
   neighbouring onboarding cards, which hand-roll their shell and are pre-ratchet.
 -->
 <template>
-  <div v-if="visible" data-testid="hardening-guide" class="mx-4 mt-3">
+  <div v-if="visible" data-testid="hardening-guide" class="mx-4 mt-3 mb-3">
     <BaseCard flush>
-      <div class="flex items-start justify-between gap-3 px-4 pt-3">
+      <div class="flex items-start justify-between gap-3 px-4 py-3">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
             <h3 class="text-sm font-[550] text-gray-900 dark:text-gray-100">
@@ -51,9 +51,110 @@
           <p class="mt-1 text-sm text-gray-600 dark:text-gray-300">
             {{ copy.headline }}
           </p>
-          <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-            {{ copy.detail }}
-          </p>
+
+          <!--
+            ONE action on the card face. Adding a domain is the only step that is
+            collectable in-app, and it is also the completion condition that
+            retires this card — so it is the primary, and everything explanatory
+            moves behind the disclosure below. A first login should be able to
+            act on this in one glance without reading two columns of prose.
+          -->
+          <div class="mt-3">
+            <BaseButton
+              variant="primary"
+              size="sm"
+              data-testid="hardening-guide-settings"
+              @click="openSettings"
+            >
+              Add a domain
+            </BaseButton>
+          </div>
+
+          <!--
+            Native <details>: keyboard-accessible, no JS, no state to manage, and
+            not a primitive the catalog covers. The card is a nudge on a first
+            login — the reasoning has to be reachable, not unavoidable.
+          -->
+          <details class="mt-3" data-testid="hardening-guide-why">
+            <summary
+              class="cursor-pointer select-none text-[12.5px] text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-500 dark:hover:text-action-primary-400"
+            >
+              Why this matters
+            </summary>
+
+            <div class="mt-3 space-y-3 border-t border-gray-200 dark:border-gray-750 pt-3">
+              <p class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+                {{ copy.detail }}
+              </p>
+
+              <!--
+                Two paths, presented as COMPLEMENTARY (issue AC): one settles how
+                the instance is addressed, the other settles who can reach it at
+                all — and the second BUILDS ON the first, because a tunnel needs
+                the domain. The wording never offers them as an either/or.
+              -->
+              <div class="min-w-0">
+                <h4 class="text-sm font-[550] text-gray-900 dark:text-gray-100">
+                  Give it a real name
+                </h4>
+                <!--
+                  Trinity does not issue, renew, or install certificates: `public_chat_url`
+                  is a display/webhook-base setting and nothing in the tree reconfigures a
+                  proxy or a listener from it. So this promises only what setting it does —
+                  change the name Trinity hands out — and attributes the certificate change
+                  to whatever actually terminates TLS.
+                -->
+                <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+                  Point a domain’s A record at this server, then set it as the
+                  <span class="text-gray-600 dark:text-gray-300">Public URL</span>
+                  in Settings → General so Trinity hands out the name instead of the IP. Trinity
+                  does not issue certificates itself — whatever terminates TLS in front of it
+                  picks up the name and can then use an ordinary long-lived certificate instead
+                  of a short-lived IP one.
+                </p>
+              </div>
+
+              <div class="min-w-0">
+                <h4 class="text-sm font-[550] text-gray-900 dark:text-gray-100">
+                  Serve it without exposing it
+                </h4>
+                <!--
+                  #2380, decision recorded 2026-09-01: a Cloudflare Tunnel, NOT a VPN.
+                  A VPN reaches the same posture but breaks every inbound integration —
+                  Telegram, WhatsApp, VoIP, public agent links, x402, inbound A2A and
+                  webhook triggers all call US. Slack survives on Socket Mode; nothing
+                  else does. VPN remains a documented deployment mode in
+                  docs/DEPLOYMENT.md; it is removed from this card only.
+
+                  The honest limitation is stated in the copy rather than hidden: the
+                  token has to reach `.env` and the tunnel starts under a compose
+                  profile, and Trinity runs in a container with no host privileges. So
+                  this path is guidance, and deliberately carries no button that could
+                  not finish the job.
+                -->
+                <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+                  With that domain on Cloudflare, a tunnel lets this server stop listening on
+                  the public internet altogether:
+                  <span class="font-mono text-gray-600 dark:text-gray-300">cloudflared</span>
+                  connects outward to Cloudflare, and traffic arrives back through that
+                  connection. Inbound integrations — Telegram, WhatsApp, VoIP, public agent
+                  links, webhook triggers — keep working, because they still reach a public
+                  hostname. Trinity ships the service behind the
+                  <span class="font-mono text-gray-600 dark:text-gray-300">tunnel</span>
+                  compose profile, driven by
+                  <span class="font-mono text-gray-600 dark:text-gray-300">TUNNEL_TOKEN</span>
+                  in <span class="font-mono text-gray-600 dark:text-gray-300">.env</span>, so that
+                  last step happens on the host rather than from this page.
+                </p>
+              </div>
+
+              <p class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+                These two stack. A name settles how the instance is addressed; a tunnel
+                settles who can reach it at all. The tunnel needs the name, so it is the
+                second step rather than a different one.
+              </p>
+            </div>
+          </details>
         </div>
 
         <BaseButton
@@ -69,60 +170,6 @@
           </svg>
         </BaseButton>
       </div>
-
-      <!--
-        Two paths, presented as COMPLEMENTARY (issue AC): one settles how the
-        instance is addressed, the other settles who can reach it at all. The
-        wording below never offers them as an either/or.
-      -->
-      <div class="px-4 pt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div class="min-w-0">
-          <h4 class="text-sm font-[550] text-gray-900 dark:text-gray-100">
-            Give it a real name
-          </h4>
-          <!--
-            Trinity does not issue, renew, or install certificates: `public_chat_url`
-            is a display/webhook-base setting and nothing in the tree reconfigures a
-            proxy or a listener from it. So this promises only what setting it does —
-            change the name Trinity hands out — and attributes the certificate change
-            to whatever actually terminates TLS.
-          -->
-          <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-            Point a domain’s A record at this server, then set it as the
-            <span class="text-gray-600 dark:text-gray-300">Public URL</span>
-            in Settings → General so Trinity hands out the name instead of the IP. Trinity
-            does not issue certificates itself — whatever terminates TLS in front of it
-            picks up the name and can then use an ordinary long-lived certificate instead
-            of a short-lived IP one.
-          </p>
-          <div class="mt-2">
-            <BaseButton
-              variant="secondary"
-              size="sm"
-              data-testid="hardening-guide-settings"
-              @click="openSettings"
-            >
-              Open Settings → General
-            </BaseButton>
-          </div>
-        </div>
-
-        <div class="min-w-0">
-          <h4 class="text-sm font-[550] text-gray-900 dark:text-gray-100">
-            Decide who can reach it
-          </h4>
-          <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-            Put the instance behind a VPN — Tailscale is what the managed fleet runs — and stop
-            serving the UI on the public internet. It stays reachable from the devices you
-            enrol, and from nowhere else.
-          </p>
-        </div>
-      </div>
-
-      <p class="px-4 py-3 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-        These two stack. A name settles how the instance is addressed; a VPN settles who can
-        reach it at all. Most instances end up wanting both.
-      </p>
     </BaseCard>
   </div>
 </template>
