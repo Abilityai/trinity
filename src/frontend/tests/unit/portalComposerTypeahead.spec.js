@@ -767,9 +767,11 @@ describe('PortalTypeahead markup', () => {
     expect(convSource()).not.toContain('aria-activedescendant')
   })
 
-  it('keeps the conversation file free of NEW v-html sites', () => {
-    // A whole-file assertion is unwritable — the assistant message body
-    // legitimately uses one, through renderMarkdown()/DOMPurify.
-    expect((convSource().match(/v-html/g) || []).length).toBe(1)
+  it('keeps the conversation file free of v-html sites', () => {
+    // Was `toBe(1)`: the assistant body legitimately used one, through
+    // renderMarkdown()/DOMPurify. #2515 moved that body into PortalMarkdown.vue,
+    // so this file should now have NONE — and the mirror pin (exactly one
+    // v-html there, fed by the markdown util) lives in portalAgentBubble.spec.js.
+    expect((convSource().match(/v-html/g) || []).length).toBe(0)
   })
 })

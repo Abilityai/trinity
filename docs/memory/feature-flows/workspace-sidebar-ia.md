@@ -225,6 +225,97 @@ destination with its own content, not a shortcut to a conversation).
   starred rows makes that advice true, and unstarring a chat with no read cursor
   deletes its row outright so the table cannot only ever grow.
 
+## Search filters agents too (trinity-enterprise#402)
+
+The search box sits directly above the agents block, and typing **unmounted
+that block**: `isSearching` (≥2 chars) swapped the whole steady state for chat
+results. So the one control in front of the roster did nothing to it, and on a
+fleet larger than the collapsed window there was no way to reach an agent by
+name from the surface built to list them.
+
+Now only the CHAT half swaps. The agents section stays mounted in both modes —
+which also keeps the sidebar's footprint stable across the first two keystrokes
+— and its rows narrow to the matches.
+
+### One matching rule, two rules inside it
+
+`searchAgents(roster, query, { askCounts, expanded })` in `portalUtils.js`
+returns `{ items, visible, total, hidden }`. Both of the things that are easy to
+get wrong live INSIDE it, so a caller cannot forget either:
+
+- **`requireMentionable: false`.** `filterAgentCandidates` (ent#392) defaults it
+  TRUE for the composer, where an un-mentionable pick is a dead end. A sidebar
+  row is not a mention — `data.scout` opens perfectly well — so inheriting that
+  default would hide a real agent from a search for its own name.
+- **The window is `visibleAgentRows`**, the #2424 rule the steady state already
+  uses, not a fresh `boundCandidates` slice. A rank-ordered slice can drop an
+  agent with an open ask past the window — exactly the failure #2424 fixed for
+  the collapsed list, which a second bounding rule would quietly reintroduce for
+  search. An ask-bearing match is never collapsed out of its own result.
+
+### One row, one toggle, five preserved identifiers
+
+The agent row is written **once** and mode-switched through `shownAgents`, so
+its badges, availability chip, title and `open-agent` emit are inherited by
+search rather than copied into it. Extracting a `PortalAgentRow.vue` was
+rejected: `PortalChatRow` was extracted (#2149) because the same row rendered
+from THREE places, and here it renders from one in both modes — the precedent's
+trigger is not met, and the extraction would have broken five live source pins
+in `portalRosterRow.spec.js` and `portalAvailabilityChip.spec.js` for no
+drift benefit.
+
+The "Show all" control stays the ONE persistent `<button>` (#2159: alternating
+two `v-if` buttons drops keyboard focus). Its `v-if` is unchanged; a `v-show`
+is what varies, because while searching it is only meaningful when something is
+actually hidden — and the label states the list it is actually bounding
+(`Show all (12)` vs `Show all (12 matches)`).
+
+### Honest states, per section
+
+`sidebarSearchState` → `roster-loading | searching | both | agents-only |
+chats-only | none`, and `searchEmptyLines` renders **per-section lines, never a
+combined sentence**:
+
+| State | Agents line | Chats line | Hint |
+|---|---|---|---|
+| `roster-loading` | — (skeleton stays) | — | — |
+| `searching` | `No agents match.` **iff** the filter matched nothing | `Searching chats…` | — |
+| `agents-only` | — | `No chats match.` | — |
+| `chats-only` | `No agents match.` | — | — |
+| `none` | `No agents match.` | `No chats match.` | `Try another word, or clear the search.` |
+
+The `searching` row is why `searchEmptyLines` takes an explicit `agentsEmpty`
+rather than reading the agents line off the state alone. `Portal.vue` sets its
+`searching` flag on **every keystroke** and clears it only when the request
+settles, so that state covers the whole time someone is typing — and the agent
+half is a client-side filter that already knows its answer. Deriving the line
+from the state alone left the agents section with a header, no rows and no
+sentence for that entire window. `chats-only` and `none` already MEAN no agent
+matched, so the flag only supplies the arm the state cannot express;
+`roster-loading` still outranks it.
+
+Two properties this table exists to guarantee: "nothing matched at all" is
+distinguishable from "agents matched, no chats", and neither line ever stands in
+for the other. A single combined "Nothing matches" would **over-claim** — the
+chat half is a server request, the agent half a filter over a roster already in
+hand, and they can fail in different ways at the same time.
+
+`roster-loading` wins outright because loading is not empty: a two-character
+query typed while the roster is in flight must not read "No agents match." over
+a roster that has not arrived.
+
+With an EMPTY roster the agents line is suppressed and ent#357's next action
+("No agents shared with you yet — ask whoever invited you") stands, because that
+is the truer sentence; printing both would state one absence twice.
+
+### Known limitation
+
+A **failed** chat search is swallowed into `[]` by `views/Portal.vue`, so it
+currently reads as "No chats match." — a wrong answer rather than a missing one.
+Fixing it is a change to that view (Lane B territory here) and is tracked
+separately; the wording above never claims more than the per-section facts it
+can actually see.
+
 ## Tests
 
 | Test | Pins |

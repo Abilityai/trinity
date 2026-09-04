@@ -370,7 +370,9 @@
     deletes live Workspace JSONLs one hour after they are written, and continuity
     breaks with no error anywhere
   - `?tab=session` and legacy session deep links redirect to
-    `/workspace?agent=<name>`, query-preserving
+    `/workspace?agent=<name>`, query-preserving, and deliberately **same-tab**
+    (a URL rewrite of an in-flight navigation, not an entry point); the two
+    *click* entry points open a new tab instead (ent#456, §5.16)
   - Existing `agent_sessions` rows stay readable — endpoints, store, and data are
     untouched; only the Agent Detail entry point goes away
 - **Non-goal**: streaming. The Session surface never streamed (a synchronous POST
@@ -453,8 +455,9 @@
     "+N" chip), so a room is visually distinct from a 1:1
   - Clicking an agent that is waiting on you opens the conversation it is
     waiting in; with nothing unread it starts a new chat as before
-  - Search still replaces both lists while active; an empty roster still ends in
-    a next action (create an agent / ask whoever invited you)
+  - Search **filters the agents block in place** and swaps the chat lists for
+    results (ent#402, §5.16); an empty roster still ends in a next action
+    (create an agent / ask whoever invited you)
 - **Per-viewer state**: `enterprise_portal_chat_state`
   `(client_email, chat_kind, chat_id) → starred_at, last_read_at`. Deliberately
   **not** a column on the chat row: a room is shared between participants, so a
@@ -978,6 +981,128 @@ box; the words are recorded either way and handed to the agent's
   the remaining bespoke Workspace indicators (`PortalFilesPanel`'s spinner,
   `PortalSidebar`'s skeleton) — those stay on #1921.
 - **Flow**: `docs/memory/feature-flows/workspace-roster-briefing.md`
+### 5.17 Workspace thread & sidebar — code blocks and copy (#2515), new-tab entry (trinity-enterprise#456), agent search (trinity-enterprise#402)
+
+**Description**: Three changes to the same OSS-core Workspace surface. A fenced
+code block in an agent's reply now reads as code and can be copied; the two
+console entry points to the Workspace open a new tab; and the sidebar search
+filters the agent roster, not only the chat list.
+
+**OSS-core by decision (ent#456 / ent#402): deliberately ungated** — no
+`requires_entitlement`, no registry read, logic stays in the OSS tree. Recorded
+explicitly because CLAUDE.md's default for an enterprise-tracker feature is
+*gated unless ruled otherwise*, so the ruling must never be inferred later from
+the mere fact that it merged (the ent#326 / ent#384 / ent#392 discipline). Both
+change a surface that moved to OSS core in ent#356 and carry no gate-able
+capability: a link target, and a client-side filter over a roster the caller
+already holds.
+
+#### Code blocks read as code, and the thread can be copied (#2515)
+
+- **FR-1 — One markdown body, one stylesheet, one copy handler**:
+  `components/portal/PortalMarkdown.vue` is the single home of the rendered
+  assistant body — the one `v-html`, the one `.prose-portal` block, the one
+  delegated copy handler. `PortalAgentBubble.vue` is the chat chrome around it
+  and both transcripts (`PortalConversation.vue`, `PortalRoom.vue`) mount that.
+  The previous shape had the same stylesheet copied into two SFCs *specifically
+  so the two could not drift* — which is the drift this closes rather than
+  restates. A future consumer that renders agent markdown outside a chat bubble
+  (the ent#486 Files tab) mounts `PortalMarkdown.vue` and inherits render, style
+  and copy as one unit instead of re-copying two of the three.
+- **FR-2 — Decoration is opt-in per consumer**: `renderMarkdown` has twelve
+  consumers (dashboards, queue cards, reports, executions, loops, compatibility,
+  Agent Detail chat, both portal transcripts). A global `marked` renderer
+  override for the `code` token would sprout a Workspace copy control on all of
+  them, so the code-block treatment is a **separate export**,
+  `renderMarkdownWithCodeBlocks`, and `renderMarkdown`'s body is unchanged.
+- **FR-3 — Decoration runs BEFORE sanitization, and forged markers are stripped
+  first**: the pipeline is `marked → stripCodeBlockMarkers → decorateCodeBlocks
+  → DOMPurify.sanitize → v-html`, so every byte that reaches `v-html` has passed
+  the one DOMPurify policy (H-005 stays literally true). marked passes raw HTML
+  in markdown through unescaped and DOMPurify keeps `data-*` and `style`, so an
+  agent could otherwise emit a *forged* wrapper whose Copy button resolves to a
+  hidden `<pre style="display:none">` — pastejacking. Agent-supplied
+  `data-code-block` / `data-copy-code` markers are therefore removed from the
+  input before decoration, so only decorator-built wrappers ever carry them, and
+  the handler reads `:scope > pre` (the wrapper's own child) and nothing else.
+  The decorator additionally refuses any opener marked would not have written —
+  the `<code>` tag must carry nothing but an optional `class` — because DOMPurify
+  keeps `hidden` and `style`, so a raw `<pre><code hidden>` would otherwise be
+  handed a real Copy button over a block that renders empty: the same pastejack
+  through the opener rather than through a forged wrapper.
+  The only non-constant byte the decorator injects is the language label, which
+  is charset-validated (`^[a-z0-9][a-z0-9_+#.-]{0,23}$`, so it cannot contain
+  `<>&"'`) and falls back to a neutral "code".
+- **FR-4 — Wrap at the edge, never a horizontal scroller**: a block wraps
+  (`white-space: pre-wrap`, `overflow-wrap: anywhere`) and never widens the
+  bubble or the column at any width. Copied text is still exact — the copy reads
+  `textContent`, so wrapping is a display property only. Accepted cost: ASCII
+  tables and box-drawing inside a block lose their alignment on a narrow column.
+- **FR-5 — Two copy controls, both keyboard-reachable**: a per-block **Copy** in
+  the block's own bar (always visible — it is chrome, not a hover overlay, so it
+  is discoverable on touch with no `@media` rule) copying that block's text, and
+  a per-message **Copy message** in an action row beneath the bubble copying the
+  raw markdown. Both are native `<button>`s (Enter/Space work), both carry an
+  `aria-label`, and feedback is mirrored into an `aria-live="polite"` region.
+- **FR-6 — Clipboard failure is named, never silent, and has a working
+  fallback**: `utils/clipboard.js::copyText` returns a result and never throws or
+  logs the copied text. `navigator.clipboard` is undefined on an insecure origin
+  — plain `http://<lan-or-tailscale-ip>` is a first-class Trinity topology — so a
+  missing `writeText` falls back to a temporary off-screen `<textarea>` +
+  `execCommand('copy')`. Only when both fail does the control say so: "Copy
+  unavailable" / "Copy blocked" (a denied permission) / "Copy failed", for ~2 s,
+  in text **and** colour. `writeText` is the first await in the click task
+  (Safari's transient-activation rule), and the control's label and `aria-label`
+  are restored from constants after the window — never from a captured previous
+  value, so two clicks inside the window cannot freeze it on "Copied".
+
+#### The console's Workspace links open a new tab (trinity-enterprise#456)
+
+- **FR-7 — Two links, `target="_blank" rel="noopener"`**: the NavBar
+  **Workspace** entry and Agent Detail's **Continue in Workspace →** link. Vue
+  Router's `guardEvent` skips interception on `_blank` and on modified clicks, so
+  `<router-link>` still resolves the `href` while the browser owns the click —
+  **no `window.open`**, and cmd/ctrl/shift-click keep their native behaviour.
+- **FR-8 — The `?tab=session` redirect stays same-tab**: it is a `router.replace`
+  rewrite of an in-flight navigation, not an entry point; a redirect that spawned
+  a tab would leave the user's original tab on a URL they never asked for.
+- **Not in scope**: any preference for the behaviour — the new tab is simply the
+  default.
+
+#### Sidebar search filters agents, not just chats (trinity-enterprise#402)
+
+- **FR-9 — One matching rule, reused**: agent matching is
+  `filterAgentCandidates` (the ent#392 composer rule), called through
+  `searchAgents` with **`requireMentionable: false`** — the flag lives inside
+  that helper so a caller cannot forget it. A dotted slug like `data.scout` is
+  openable even though it is not @mentionable; excluding it would hide a real
+  agent from a search for its own name. No second hand-rolled predicate.
+- **FR-10 — An ask-bearing match is never hidden by the results window**:
+  results are bounded by `visibleAgentRows` — the same #2424 rule the steady
+  state uses — so an agent waiting on you cannot be collapsed out of its own
+  search result, and the same single persistent "Show all (N)" toggle expands
+  both modes (#2159: alternating two `v-if` buttons drops keyboard focus).
+  Search reaches agents beyond the collapse limit.
+- **FR-11 — Agents first, in a labelled section, with the steady state's row**:
+  the row markup, badges, availability chip and `open-agent` emit are written
+  once and reused in both modes, so they are inherited rather than copied.
+- **FR-12 — Per-section honest states, and loading is not empty**: "nothing
+  matched at all" (both lines + a next-action hint) is distinguishable from
+  "agents matched, no chats" (the chat line alone); neither line ever stands in
+  for the other. The agent half answers for itself: it is a client-side filter
+  over a roster already in hand, so it states its own emptiness even while the
+  chat request is still in flight — that request's flag is set on every
+  keystroke, so gating the agents line on it would withhold the sentence for the
+  whole time someone is typing. While the roster has not loaded the skeleton
+  stays — a two-character query on a slow roster must never read "No agents
+  match." over a roster that has not arrived. The placeholder says agents
+  **and** chats.
+  *Known limitation*: a failed chat-search request is swallowed into `[]` by the
+  view, so it currently reads as "No chats match."; fixing that is a change to
+  `views/Portal.vue` and is tracked separately.
+
+- **Flows**: `docs/memory/feature-flows/workspace-thread-code-blocks.md`,
+  `workspace-sidebar-ia.md`, `workspace-absorbs-session.md`
 
 ## 6. Activity Monitoring
 
