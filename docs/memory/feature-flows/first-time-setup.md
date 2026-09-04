@@ -36,7 +36,7 @@ First-time setup wizard for admin password and API key configuration. On an inst
 >    ([telemetry-sharing.md](telemetry-sharing.md)).
 >
 > Canonical description: `docs/memory/architecture.md` →
-> [First-Run Provisioning](../architecture.md#first-run-provisioning--honest-setup_completed-2381).
+> [First-Run Provisioning](../architecture/agent-lifecycle.md#first-run-provisioning--honest-setup_completed-2381).
 
 ## User Story
 As a platform administrator deploying Trinity for the first time, I want to be guided through initial configuration so that the platform is secured with a proper password and agents have access to the required API key.
