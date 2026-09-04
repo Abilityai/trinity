@@ -696,9 +696,11 @@
 - **Honest empty state.** A source with nothing in it shows one line; a query
   that matches nothing **closes** the popup. The copy never claims what the
   client cannot observe: `_agent_briefing` returns `[]` for a stopped or slow
-  agent exactly as it does for one with no playbooks, and the roster is fetched
-  once at mount — so "no playbooks exposed" would be a false claim about
-  operator configuration for the ordinary state of an idle fleet. "No peers" and
+  agent exactly as it does for one with no playbooks, and the briefing arrives
+  AFTER the roster (§5.16, #2163) — so "no playbooks exposed" would be a false
+  claim about operator configuration for the ordinary state of an idle fleet.
+  The typeahead self-heals when playbooks arrive late (its source is a computed
+  over the card), which is what makes the deferred hydration invisible to it. "No peers" and
   "peers exist but none is mentionable" are separate statements.
 - **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
   scoped to the room's **agent participants**. That scope was established by
@@ -895,7 +897,91 @@ box; the words are recorded either way and handed to the agent's
   `comment`, `updated_at`) and the partial UNIQUE above.
 - **Flow**: `docs/memory/feature-flows/workspace-ratings.md`
 
-### 5.16 Workspace thread & sidebar — code blocks and copy (#2515), new-tab entry (trinity-enterprise#456), agent search (trinity-enterprise#402)
+### 5.16 Workspace roster latency floor — briefing hydration off the critical path (#2163)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_ROSTER_BRIEFING_DEFERRED`
+- **Description**: `GET /my-agents` fanned `_agent_briefing` across every card
+  and awaited `asyncio.gather`, which waits for ALL — so the Workspace's first
+  paint was bounded by the SLOWEST agent in the fleet, for every user, on every
+  sign-in, regardless of fleet size. The briefing is now hydrated after the
+  roster, and every briefing that still runs is bounded.
+
+- **AC-1 — one unresponsive agent does not delay the roster**: `get_roster`
+  awaits no agent HTTP at all (two SQL reads and one Docker list). Pinned by a
+  stub that never resolves: under the old code the call could not return.
+- **AC-2 — the briefing still renders hints, never silently empty**: an explicit
+  loading treatment, then a terminal that is hints, an honest "no hints" line,
+  or an honest "couldn't load" line (ent#380's "no dead chrome").
+- **AC-3 — measured before/after with a deliberately unresponsive agent**: the
+  wedged case is *container running, server not answering* (`kill -STOP` on
+  `agent-server.py` inside the container). `docker pause` measures nothing —
+  a non-`running` container reads `availability="stopped"`, which the briefing
+  skips before any HTTP.
+- **AC-4 — the standard first-load motion**: three `ScanlineReveal` zones, each
+  keyed on its own "no data yet" — the stage, the conversation body, and the
+  briefing hint zone. The static "Opening this conversation…" / "Loading…" lines
+  are gone. A background refetch never re-enters loading.
+
+- **The bound (option 2, the belt)**: `_BRIEFING_HTTP_TIMEOUT_SECONDS = 2.0`
+  (httpx, PER PHASE) and `_BRIEFING_BUDGET_SECONDS = 3.0` (wall clock, via
+  `_bounded_briefing`). The literal `5.0` it replaces was never a ceiling — two
+  sequential GETs, each with a per-phase timeout. Constants, not settings and
+  not env vars (`SAMPLE_INTERVAL_SECONDS` precedent #1644; an unforwarded env
+  read is inert while reading as configurable, #1039). Both values confirmed
+  against the healthy-busy tail at verification: `GET /api/skills` is a
+  synchronous directory scan on the agent-server's own event loop, so a healthy
+  agent mid-turn can legitimately exceed a second.
+- **`briefing_state` is a SERVER-owned tri-state** on the card —
+  `pending | ready | unavailable`, default `"ready"` so an older payload reads
+  as resolved-inline. A bound trip reports `unavailable`; it must never pass for
+  an agent that genuinely has no hints, and a headless ent#83 client must not
+  have to reinvent the third value from empty fields. `ready` means THE AGENT
+  ANSWERED inside the budget, NOT "returned data". A data-state marker, never a
+  capability — #2128's rule (the roster payload is the portal capability
+  channel) is untouched.
+- **The verdict follows REACHABILITY, not the door the failure exited by.**
+  Measured at verification and fixed before ship: `_agent_briefing` swallows
+  HTTP failures in a `try/except` per GET leg AND an outer one, so a wedged
+  agent (httpx `ReadTimeout`) and a missing container (`ConnectError`) — the two
+  commonest unreachable shapes — returned an ordinary empty briefing well inside
+  the budget and were published as `ready`. Only the tarpit shape, which trips
+  the wall clock, was correct. That is the hint-less-agent state this field
+  exists to prevent, and it is unrecoverable in-session because
+  `shouldRequestBriefing` retries only `unavailable`. Reachability is therefore
+  reported separately from content: every exit of `_agent_briefing` that got no
+  answer out of the agent (the availability skip, both legs failing at the
+  transport layer, a failure before the first request) returns the `_UNREACHED`
+  sentinel, read by IDENTITY in `_bounded_briefing` — equality would sweep up
+  the empty briefing a healthy agent legitimately produces. A response of ANY
+  status counts as reached (a 500 is the agent talking; retrying returns the
+  same 500), and ONE leg answering is enough, because the client renders
+  `unavailable` INSTEAD of the fields and a half-answered briefing must not
+  discard the description it did get. Both doors — `get_agent_card` and
+  `GET /briefings` — inherit it from `_bounded_briefing`, so they cannot
+  disagree about the same agent.
+- **Route**: `GET /api/enterprise/client-portal/briefings[?agents=a,b]`,
+  viewer-scoped like `/sessions`. Scope is the roster and the ROSTER's strings
+  are what is iterated, so a crafted name cannot steer the agent HTTP target;
+  unknown names are dropped (no existence oracle, Invariant #8). No `?agents=`
+  briefs the whole roster; a filter briefs the active agent so its hints arrive
+  at its own speed. Per-viewer rate limits, the unfiltered form far tighter
+  (10/min vs 60/min) because one call costs one bounded agent request per
+  rostered agent. No Docker read. No MCP tool (read-only, portal-principal-only,
+  no operator consumer — Invariant #13); no `Idempotency-Key` (a read, not a
+  trigger boundary); no DB change, no migration.
+- **Client**: the background batch fires from the store's roster-SUCCESS branch
+  (both "Try again" buttons bypass `bootstrap()`) at >= 1 pending card; the
+  active agent's single is driven by `Portal.vue`'s `activeAgent` watcher and is
+  never coalesced into the batch. A hydrated card survives a roster refetch;
+  `unavailable` is re-armed as `pending` by an explicit refetch and retried at
+  most once per session otherwise.
+- **Out of scope, deliberately**: a server-side briefing cache (needs Redis +
+  invalidation under `--workers 2`; off the critical path the per-agent cost is
+  no longer user-visible), bounding the roster's Docker read, and the sweep of
+  the remaining bespoke Workspace indicators (`PortalFilesPanel`'s spinner,
+  `PortalSidebar`'s skeleton) — those stay on #1921.
+- **Flow**: `docs/memory/feature-flows/workspace-roster-briefing.md`
+### 5.17 Workspace thread & sidebar — code blocks and copy (#2515), new-tab entry (trinity-enterprise#456), agent search (trinity-enterprise#402)
 
 **Description**: Three changes to the same OSS-core Workspace surface. A fenced
 code block in an agent's reply now reads as code and can be copied; the two
@@ -1092,7 +1178,7 @@ already holds.
 - **Status**: ✅ Implemented (2026-07-30)
 - **Description**: Third dashboard mode **List** (Timeline / Grid / List) that replaces the standalone Agents page — the dashboard is the single canonical fleet surface. The Agents page's row list (three responsive layouts, per-row toggles, bulk tag ops, filters, empty states) is extracted into `components/AgentListPanel.vue`, mounted through the existing view-mode machinery (`VIEW_MODES` + `localStorage['trinity-dashboard-view']` — selection persists per user like the other modes). `views/Agents.vue` is deleted.
 - **Key Features**:
-  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared/Runtime badges, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter; filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → onboarding wizard) states; toast feedback.
+  - **Full Agents-page parity** (28-item inventory audited, zero silent losses): name search (slug + display label, #1642) and status filter live in the List toolbar under NEW persisted keys `trinity-dashboard-list-filter-name` / `-status` (a clean break — the old page-scoped `trinity-agents-filter-*` keys are no longer read); sort dropdown bound to `agentsStore.sortBy` with the comparator extracted to `utils/agentSort.js` (system rows pinned first; `success_desc` gains a no-data-to-bottom tiebreak); row checkboxes + sticky bulk toolbar with bulk Add/Remove Tag; avatar-half-out rows with SYSTEM/GHOST/Shared badges in the name cell and the subscription-pressure badge plus a **non-default-runtime** badge on the row's secondary line beside the slug, activity + sync-health dots, success-rate bar, exec/schedule stats, CapacityMeter (#2358 — at `lg` the header and every row are items of ONE CSS grid (subgrid), so columns resolve in one sizing context, and the label leads with the slug following as selectable secondary text per §1.3.1 FR-4); filtered-empty ("No matching agents" + Clear all) and chassis-level true-empty ("Get started" → onboarding wizard) states; toast feedback.
   - **Filters migrated to chassis controls**: the page's single-tag dropdown and owner dropdown are superseded by the dashboard's existing quick-tag filter (multi-tag, server-side, counts) and owner filter, which apply to all three views; the List's Clear-all clears both layers (local name/status + chassis tags/owner via a `clear-chassis-filters` emit). The "X/Y" badge counts Y as the full fleet.
   - **Create Agent moved to the chassis header** — available in all three modes (previously the Agents page was the only persistent create surface); modal close refreshes the fleet.
   - **System-row Run guard adopted from the grid**: the List hides the Run toggle on system rows (the grid tile already refused it); stopping the system agent remains available on its Agent Detail page.

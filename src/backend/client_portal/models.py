@@ -80,6 +80,29 @@ class PortalAgentCard(BaseModel):
     # today's behaviour rather than failing validation.
     searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
     playbooks_total: int = 0
+    # #2163 — has this card's briefing been RESOLVED yet, and did it work?
+    #
+    #   pending      the roster shipped without it; call GET /briefings
+    #   ready        a briefing completed (its fields may still be empty —
+    #                that is a genuinely hint-less agent, not a failure)
+    #   unavailable  the briefing tripped its bound, raised, or was never
+    #                attempted (the agent is not `ready`/`unknown`)
+    #
+    # All three are SERVER-owned. Letting the server say `ready` for a bound
+    # trip would make a wedged agent indistinguishable from one that genuinely
+    # has nothing to offer — the "looks complete" class `playbooks_total`
+    # already exists to prevent one tier over — and would force every headless
+    # ent#83 client to reinvent the third value from empty fields.
+    #
+    # Default `"ready"`, so a payload from a build that predates this field
+    # (or any caller that builds a card inline) reads as "resolved inline,
+    # nothing to hydrate" — today's behaviour. That is the NON-privileged
+    # direction: the field grants nothing and gates no affordance, it only
+    # says whether a fetch is still owed, so an absent field must not leave a
+    # client waiting forever on a hydration call it will never make. It is a
+    # data-state marker, NOT a capability — #2128's rule (the roster payload is
+    # the portal capability channel) is untouched.
+    briefing_state: Literal["pending", "ready", "unavailable"] = "ready"
     # #2196 — whether this agent can currently run. Roster MEMBERSHIP is a DB
     # fact (`agent_ownership` / `agent_sharing`); this is a Docker fact
     # PROJECTED onto the card, and is never a membership filter. A live
@@ -101,6 +124,31 @@ class PortalAgentCard(BaseModel):
     # customer's roster over an infrastructure fault. When Docker is unreadable
     # every card reads `unknown` and the roster renders exactly as it does today.
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
+
+
+class PortalBriefing(BaseModel):
+    """ONE agent's briefing, hydrated off the roster's critical path (#2163).
+
+    The same four fields `PortalAgentCard` carries, plus the state that says
+    whether they are real. `state` is `"unavailable"` by default because an
+    entry that failed to build must never read as a completed empty briefing.
+    """
+    description: Optional[str] = None
+    playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    playbooks_total: int = 0
+    state: Literal["ready", "unavailable"] = "unavailable"
+
+
+class PortalBriefings(BaseModel):
+    """`GET /briefings` — briefings keyed by agent name (#2163).
+
+    Keys are always a SUBSET of the caller's roster: an unknown or off-roster
+    name in `?agents=` is dropped silently rather than answered, so the route
+    is no existence oracle (Invariant #8) and the caller learns nothing beyond
+    what its own roster already told it.
+    """
+    briefings: dict[str, PortalBriefing] = Field(default_factory=dict)
 
 
 class PortalTtsRequest(BaseModel):

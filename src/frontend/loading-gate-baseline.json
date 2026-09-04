@@ -1,6 +1,6 @@
 {
-  "generated": "2026-09-02",
-  "commit": "49bac7498d6e255ef828a46bddb9f98d9bc2f87e",
+  "generated": "2026-09-03",
+  "commit": "aa7f5c763a67cdfc156b81f1caa18c23f5b6a251",
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
@@ -42,7 +42,7 @@
     "src/frontend/src/components/chat/ChatHistoryDropdown.vue": 1,
     "src/frontend/src/components/chat/ChatMessages.vue": 1,
     "src/frontend/src/components/file-manager/FilePreview.vue": 1,
-    "src/frontend/src/components/portal/PortalConversation.vue": 2,
+    "src/frontend/src/components/portal/PortalConversation.vue": 1,
     "src/frontend/src/components/portal/PortalFilesPanel.vue": 1,
     "src/frontend/src/components/portal/PortalRoom.vue": 1,
     "src/frontend/src/components/process/TemplateSelector.vue": 1,
@@ -63,7 +63,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 75,
+    "bare_loading_gates": 74,
     "files_with_gates": 58
   }
 }

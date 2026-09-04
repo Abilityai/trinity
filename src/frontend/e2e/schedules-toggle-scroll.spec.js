@@ -226,8 +226,10 @@ async function openSchedulesTab(page) {
  * panel is still mounted on Schedules when we land on B.
  *
  * LOCATOR NOTE — the agent row is addressed by `data-agent` + `href`, never by
- * link text. `AgentListPanel` renders `agentDisplayName(agent)`, which is the
- * owner-settable `display_label` when one is set (ent#181/#1640), so a
+ * link text. `AgentListPanel` renders `agentNameParts(agent).primary` (#2358 —
+ * the same resolution `agentDisplayName` performs, now composed so the slug can
+ * ride the row's secondary line), which is the owner-settable `display_label`
+ * when one is set (ent#181/#1640), so a
  * `getByRole('link', { name: <slug> })` would silently stop matching the moment
  * anyone labels the agent. `dashboard-list-view.spec.js` already states this as
  * the house rule: "Rows carry `data-agent="<slug>"` … so locators never

@@ -6,6 +6,13 @@
 # snapshot: the admin password, the droplet's own IP, the certificate.
 set -euo pipefail
 
+# Same exposure as 01-provision.sh: this script's load-bearing tools — iptables
+# and netfilter-persistent, which close the Docker-past-ufw gap — live in
+# /usr/sbin. cloud-init normally supplies a root PATH that covers them, but the
+# cost of not depending on that is one line, and the failure it prevents is the
+# container ports staying open to the internet.
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
+
 STATE_DIR=/etc/trinity
 CRED_FILE="${STATE_DIR}/admin-credentials"
 USER_SUPPLIED_PW="${STATE_DIR}/admin-password"
@@ -37,7 +44,31 @@ if [ -s "$USER_SUPPLIED_PW" ]; then
     shred -u "$USER_SUPPLIED_PW" 2>/dev/null || rm -f "$USER_SUPPLIED_PW"
 fi
 if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    ADMIN_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
+    # --- password-generation (behaviour-tested; see test_2281_firstboot_password) ---
+    # NOT `tr -dc ... </dev/urandom | head -c 24`. Under this script's own
+    # `set -o pipefail` that is fatal, every time: head closes the pipe after 24
+    # bytes, tr dies of SIGPIPE against an endless source, and the non-zero
+    # status propagates out of the command substitution, where `set -e` ends the
+    # script. First boot died on this line on the very first droplet ever created
+    # from the snapshot — three lines in, before it had written anything but its
+    # own header, leaving a droplet with no Trinity, no certificate and no
+    # password.
+    #
+    # Reading a bounded chunk first means nothing closes a pipe early: head takes
+    # 1024 bytes and exits, tr drains all of them and exits 0. LC_ALL=C keeps tr
+    # byte-oriented rather than trusting the ambient locale to tolerate random
+    # bytes.
+    _pw_raw="$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+    ADMIN_PASSWORD="${_pw_raw:0:24}"
+    # 1024 random bytes yield ~635 alphanumerics on average, so this cannot
+    # plausibly fail — but it is a credential, and a short one must never be
+    # written rather than silently accepted.
+    if [ "${#ADMIN_PASSWORD}" -ne 24 ]; then
+        echo "FATAL: could not generate a 24-character admin password." >&2
+        exit 1
+    fi
+    unset _pw_raw
+    # --- end password-generation ---
 fi
 
 # The MOTD never echoes a password the operator chose — they already have it,
@@ -102,46 +133,21 @@ set_env TRINITY_INSTALL_SOURCE do-marketplace
 chmod 0600 .env
 
 # --- 4. Close the Docker/ufw gap --------------------------------------------
-# docker-compose.hosted.yml publishes 8000 (backend), 8080 (MCP), 8686 (Vector),
-# the OTel collector's four ports, and the frontend's own FRONTEND_PORT on
-# 0.0.0.0. Docker's iptables rules are consulted BEFORE ufw's chain, so those
-# ports are reachable from the internet on a droplet whose ufw says otherwise —
-# `ufw deny 8000` is silently inert.
-#
-# 8081 is the entry that matters most and was missing (#2281 review C1): it is
-# the SPA itself, moved off :80 in step 3 so Caddy can own 80/443. Compose
-# publishes it with the short syntax `"${FRONTEND_PORT:-80}:8080"`, which binds
-# 0.0.0.0 — so without it the login page answers plain HTTP on
-# http://<ip>:8081, past both the TLS termination and the http→https redirect
-# this whole image is built around.
-#
-# One variable feeds both the probe and the insert: two hand-maintained lists
-# that disagree means the -C probe never matches its own rule and every re-run
-# stacks another. tests/unit/test_2281_firstboot_port_exposure.py keeps this
-# list from drifting from what compose actually publishes.
-#
-# DOCKER-USER is the one chain Docker leaves for the operator and evaluates
-# first, so the drop belongs here. Everything a user needs is served by Caddy on
-# 80/443; the container ports stay reachable from the host (Caddy proxies
-# 127.0.0.1:8081) and from other containers, which is what the platform uses.
-DROP_PORTS=8000,8080,8081,8686,4317,4318,8889,13133
-if ! iptables -C DOCKER-USER -i eth0 -p tcp -m multiport \
-       --dports "$DROP_PORTS" -j DROP 2>/dev/null; then
-    iptables -I DOCKER-USER -i eth0 -p tcp -m multiport \
-      --dports "$DROP_PORTS" -j DROP
+# The rule list and the apply logic live in docker-firewall.sh, which is also
+# what trinity-docker-firewall.service runs on every subsequent boot — one
+# script, one DROP_PORTS list, two callers. Calling it here as well (rather than
+# relying on the unit alone) removes an ordering question: cloud-init's
+# per-instance scripts and the unit are both in multi-user.target, and the rules
+# must be in place before step 6 starts the containers. The script is idempotent.
+if ! /opt/trinity-firstboot/docker-firewall.sh; then
+    echo "WARNING: could not apply the DOCKER-USER DROP rules. Container ports" >&2
+    echo "         may be reachable from the internet." >&2
+    echo "         Re-run: /opt/trinity-firstboot/docker-firewall.sh" >&2
 fi
 
-# iptables-persistent is installed at BUILD time (01-provision.sh). Installing
-# it here was `>/dev/null 2>&1 || true` (#2281 review I1) — at the busiest apt
-# moment a droplet ever has, and a transient mirror failure then made the save
-# silently impossible: the boot still reported success and the DROP rules were
-# simply gone at the next reboot, the ports reopening with no symptom anywhere.
-# Only the save remains, and its failure is now loud.
-if ! netfilter-persistent save; then
-    echo "WARNING: netfilter-persistent save failed. The DOCKER-USER DROP rules" >&2
-    echo "         are active NOW but will not survive a reboot." >&2
-    echo "         Re-run: /opt/trinity-firstboot/firstboot.sh" >&2
-fi
+# Enabled at build time; re-asserted here so a droplet whose snapshot predates
+# that step still gets the rules back after a reboot.
+systemctl enable trinity-docker-firewall.service >/dev/null 2>&1 || true
 
 # --- 5. Caddy ----------------------------------------------------------------
 # Let's Encrypt issues certificates for bare IP addresses as of 2026-01-15, via
