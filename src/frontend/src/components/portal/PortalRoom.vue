@@ -87,7 +87,12 @@
             <PortalAvatar :name="m.sender_identity" :size="28" class="mt-0.5" />
             <div class="max-w-[85%]">
               <div class="text-xs text-gray-500 dark:text-gray-400 mb-0.5">{{ m.sender_identity }}</div>
-              <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal" v-html="render(m.content)"></div>
+              <!-- #2515: the sender label stays out here (a room row is
+                   attributed, a 1:1 is not); the bubble itself is the shared
+                   component, so both transcripts render agent markdown the
+                   same way by construction rather than by two copies kept in
+                   step by a comment. -->
+              <PortalAgentBubble :content="m.content" />
             </div>
           </div>
         </div>
@@ -205,7 +210,7 @@
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { renderMarkdown } from '@/utils/markdown'
+import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalLoops from './PortalLoops.vue'
 import PortalStarButton from './PortalStarButton.vue'
@@ -260,8 +265,6 @@ const dismissed = ref(null)
 
 let pollTimer = null
 const POLL_MS = 3000
-
-const render = (c) => renderMarkdown(c || '')
 
 const agentParticipants = computed(() =>
   (room.value?.participants || []).filter((p) => p.kind === 'agent' && !p.left_at).map((p) => p.identity)
@@ -626,23 +629,3 @@ onBeforeUnmount(() => {
   stopPolling()
 })
 </script>
-
-<style scoped>
-/* Review finding: `prose-portal` was applied in this file's template but DEFINED
-   only in PortalConversation's scoped block, so it was inert here — room transcripts
-   got neither the #2211 paragraph rhythm nor the pre-existing overflow guard, and a
-   wide code block overflowed the bubble. Kept byte-identical to the conversation's
-   copy so the two surfaces cannot drift; a shared stylesheet is the follow-up, not a
-   change to smuggle into a readability fix. */
-.prose-portal :deep(p) { margin: 0.5rem 0; }
-.prose-portal :deep(p:first-child) { margin-top: 0; }
-.prose-portal :deep(p:last-child) { margin-bottom: 0; }
-.prose-portal :deep(pre) { overflow-x: auto; padding: 0.5rem; border-radius: 0.375rem; }
-/* Token-based tint rather than an `rgba()` literal: the design contract
-   forbids hardcoded colors, and the raw-color ratchet counts them. Applied
-   via @apply so light/dark both come from the gray scale. */
-.prose-portal :deep(pre) { @apply bg-gray-100 dark:bg-gray-800; }
-.prose-portal :deep(code) { font-size: 0.8em; }
-.prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
-.prose-portal :deep(a) { text-decoration: underline; }
-</style>
