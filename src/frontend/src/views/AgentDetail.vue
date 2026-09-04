@@ -151,8 +151,14 @@
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   Stateless chat — each message starts fresh.
                 </span>
+                <!-- ent#456: opens a new tab, so the agent page you were on is
+                     still here when you come back. The ?tab=session REDIRECT
+                     below deliberately stays same-tab — it rewrites a navigation
+                     already in flight rather than starting one. -->
                 <router-link
                   :to="{ path: '/workspace', query: { agent: agent.name } }"
+                  target="_blank"
+                  rel="noopener"
                   class="text-xs font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
                   title="The Workspace keeps one continuous conversation — memory, tool results and reasoning carry across turns."
                 >
