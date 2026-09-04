@@ -227,11 +227,14 @@ other two — Recent failures and Subscription pressure — both render
 `TileRowList`, whose four tracks are `repeat(var(--tr-rows), minmax(0,1fr))` at
 `height: 100%`. Inside the primitive's deliberately auto-height `.scan-content`
 that percentage does not resolve, and the row block stops matching the body.
-Measured on the running Grid with a throwaway prototype (never committed):
-`.tr` renders **138.3px into a 133.3px body** — 5px of silent overflow clipped by
-`.it-body { overflow: hidden }`, with the second row sliced through its glyphs,
+Measured on the running Grid with a throwaway prototype (never committed),
+against a control: bare `.tr` renders **135.5px into a 135.5px body** — an exact
+fit, no overflow — while the same list wrapped in the primitive renders
+**138.38px**, i.e. **+2.88px of silent overflow** clipped by
+`.it-body { overflow: hidden }`, with the last row pushed past the clip edge,
 identically in both themes and with or without an explicit height on the
-wrapper. Adopting there therefore means re-basing `TileRowList`'s row geometry
+wrapper. The control is the load-bearing half: it is what shows the overflow is
+caused by the wrapping rather than pre-existing in the row list. Adopting there therefore means re-basing `TileRowList`'s row geometry
 on definite heights FIRST: a layout change to two shipped tiles that ent#449 did
 not scope. It is the follow-up's natural home — one change, both consumers,
 per-row tracks under the beam — after which `owns-loading`, `.it-skel` and
