@@ -37,12 +37,18 @@ _BUNDLE_ROOT = _REPO_ROOT / "packer" / "digitalocean" / "files"
 
 # `install -D -m 0755 /tmp/trinity-files/<src> \` — the packer `file` provisioner
 # uploads `files/` to `/tmp/trinity-files`, so <src> is a path inside the bundle.
-_INSTALL_RE = re.compile(r"/tmp/trinity-files/(\S+)")
+# The mode is captured rather than assumed: the bundle now installs a systemd
+# unit at 0644, and a unit file must NOT be executable.
+_INSTALL_RE = re.compile(r"install\s+-D\s+-m\s+(\d{4})\s+/tmp/trinity-files/(\S+)")
+
+
+def _bundle_installs() -> list[tuple[str, str]]:
+    text = _PROVISION.read_text()
+    return sorted({(m.group(2), m.group(1)) for m in _INSTALL_RE.finditer(text)})
 
 
 def _bundle_sources() -> list[str]:
-    text = _PROVISION.read_text()
-    return sorted({m.group(1) for m in _INSTALL_RE.finditer(text)})
+    return [src for src, _ in _bundle_installs()]
 
 
 def _tracked_bundle_files() -> dict[str, str]:
@@ -82,9 +88,17 @@ def test_every_installed_source_is_tracked():
     )
 
 
-@pytest.mark.parametrize("source", _bundle_sources())
-def test_installed_source_is_executable(source: str):
-    # Every current install site uses `-m 0755`; a 0644 source would still install
-    # 0755, but the intent should be visible in the tree the reviewer reads.
+@pytest.mark.parametrize("source,install_mode", _bundle_installs())
+def test_tracked_mode_matches_install_mode(source: str, install_mode: str):
+    """The tree a reviewer reads should say what the droplet gets.
+
+    `install -m` decides the mode on the droplet regardless, so this is about the
+    source being honest — a boot hook committed 0644 reads as inert, and a systemd
+    unit committed 0755 reads as a script someone can run.
+    """
+    expected = "100755" if install_mode == "0755" else "100644"
     mode = _tracked_bundle_files().get(source)
-    assert mode == "100755", f"{source} is tracked as {mode}, expected 100755"
+    assert mode == expected, (
+        f"{source} is installed -m {install_mode} but tracked as {mode}, "
+        f"expected {expected}"
+    )
