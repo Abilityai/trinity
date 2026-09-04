@@ -103,14 +103,23 @@ def test_one_agents_page_costs_one_briefing(svc):
     assert briefed == ["agent-3"]
 
 
-def test_the_roster_still_briefs_everyone(svc):
-    """The comparison that makes the number above meaningful — and the roster's
-    own behaviour is deliberately unchanged (its cards all need briefings)."""
+def test_the_roster_briefs_nobody_now(svc):
+    """#2163 INVERTED this. It used to read `len(briefed) == len(FLEET)` — the
+    comparison that made the number above meaningful — because the roster's
+    fan-out was deliberately unchanged by #2160.
+
+    That fan-out is exactly what made the Workspace's first paint bound to the
+    slowest agent in the fleet, so the roster now awaits no briefing at all and
+    the client hydrates through `GET /briefings`. The agent page's count above
+    is unaffected: it was never the roster's cost that #2160 removed, it was
+    the page paying it.
+    """
     s, briefed, _counted = svc
 
-    asyncio.run(s.get_roster(EMAIL))
+    roster = asyncio.run(s.get_roster(EMAIL))
 
-    assert len(briefed) == len(FLEET)
+    assert briefed == []
+    assert all(c.briefing_state == "pending" for c in roster.agents)
 
 
 def test_the_cost_does_not_grow_with_the_fleet(svc, monkeypatch):

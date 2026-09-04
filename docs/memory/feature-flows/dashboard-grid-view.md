@@ -1,6 +1,6 @@
 # Feature Flow: Dashboard Grid View (magnetic tile canvas)
 
-> **Last Updated**: 2026-08-20 (#2352/#2353: a rejected token is not a rate limit)
+> **Last Updated**: 2026-09-03 (#2358: the tile's identity zone shows the slug)
 > **Status**: Implemented — third dashboard mode, not default
 > **Issue**: trinity-enterprise#47 (design of record embedded in the issue)
 > **Requirements**: `docs/memory/requirements/core-agent.md` §9.8, §9.12 (info tiles)
@@ -60,6 +60,29 @@ views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pill
 | ⟳ sync failing / git ✓ chips | `GET /api/agents/sync-health` (#389, batch) |
 | ⚠ needs response / approval pending chip | `GET /api/operator-queue?status=pending` (batch, grouped per agent) |
 | ▶ working + elapsed timer | WS `agent_activity` events → `workingState` map, reconciled by the context-stats poll; fallback `activityState === 'active'` |
+
+### Identity zone — the label leads, the slug follows (#2358)
+
+`.t-name` renders `agentNameParts(agent).primary` (the display label when there
+is one, else the slug). When a distinct label hides the slug, the ALREADY
+always-rendered `.t-repo` meta line leads with it —
+`<code class="t-slug nodrag">` + a `·` separator, then the existing
+`owner/repo` (or `Local agent`) segment. The tile therefore gains **no third
+identity line**: `.gtile` is `justify-content: space-between` inside a fixed
+384×216 cell, so a third line only on labelled tiles would compress their zone
+rhythm and squeeze the charts on those tiles alone.
+
+Three details are load-bearing. `.t-slug` carries its own
+`nowrap/overflow/text-overflow` (the `.t-repo span` ellipsis rule targets `span`
+only) plus `flex: none; max-width: 55%`, so a long slug ellipsizes instead of
+painting over the repo text. It is `user-select: all` + `cursor: text` against
+the tile root's `user-select: none`, so the identity stays copyable in one
+click (§1.3.1 FR-4 says visible **and** copyable). And it is `nodrag`, because
+`FleetGrid.onTilePointerDown` bails on `.closest('.nodrag')` — without it a
+click would start a tile drag rather than selecting. **By design the slug does
+not navigate**: it is a copy affordance; navigation stays on `.t-name` and the
+Details button. Ink is `var(--gv-muted)`, the same token as the repo text it
+sits beside — no new `--gv-*` var.
 
 ### Trigger-bucket collapse (tile scale)
 

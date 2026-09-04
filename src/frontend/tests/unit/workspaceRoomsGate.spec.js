@@ -235,15 +235,37 @@ describe('#2128 structure guards', () => {
     // The honest-copy split: a transient 5xx on an ENTITLED instance must not
     // render "aren't enabled here", which is a false statement about the
     // operator's build.
-    for (const term of ['store.rosterLoaded', 'store.unavailable', 'store.error']) {
+    //
+    // #2163 moved ONE of the three arms up a level rather than removing it. The
+    // branch used to lead with `v-if="!store.rosterLoaded || store.loading"` →
+    // a static "Opening this conversation…" line, which AC4 deletes; the whole
+    // stage is now wrapped in a ScanlineReveal whose `loading` is derived from
+    // `store.rosterLoaded`, and the chain renders only when that is false. So
+    // the qualification is stronger than before (it covers every stage branch,
+    // not just this one) and the assertion follows it there.
+    for (const term of ['store.unavailable', 'store.error']) {
       expect(branch, `the room branch must distinguish ${term}`).toContain(term)
     }
     const claimAt = branch.indexOf("isn't available on this instance")
     expect(claimAt, 'the room branch never states the capability is absent').toBeGreaterThan(-1)
-    // …and that claim must come last, after all three qualifying arms.
-    for (const term of ['store.rosterLoaded', 'store.unavailable', 'store.error']) {
+    // …and that claim must come last, after both qualifying arms.
+    for (const term of ['store.unavailable', 'store.error']) {
       expect(branch.indexOf(term), `${term} must be tested before the claim`).toBeLessThan(claimAt)
     }
+
+    // The roster-verdict arm, at its new home: the branch is unreachable while
+    // the roster has no verdict, because the stage zone above it is in its
+    // loading phase and its slot is gated on `!stage.loading`.
+    const zoneAt = src.lastIndexOf('<ScanlineReveal', branchAt)
+    expect(zoneAt, 'the stage is no longer wrapped in a loading zone').toBeGreaterThan(-1)
+    const zone = src.slice(zoneAt, branchAt)
+    expect(zone, 'the stage zone must key on the stage verdict').toContain(':loading="stage.loading"')
+    expect(zone, 'the branches must sit INSIDE the zone gate').toContain('v-if="!stage.loading"')
+    expect(
+      src,
+      'the stage verdict must derive from the roster verdict, never from an in-flight flag'
+    ).toContain('rosterLoaded: store.rosterLoaded')
+    expect(src).not.toContain('rosterLoaded: store.loading')
   })
 
   it('F24 every exit from the stage leaves ANY stage route, not a listed one', () => {

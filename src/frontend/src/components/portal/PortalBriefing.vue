@@ -2,10 +2,39 @@
   <div class="py-8 sm:py-12 text-center">
     <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="64" class="mx-auto" />
     <h1 class="mt-4 text-xl font-semibold tracking-tight">{{ agent.name }}</h1>
-    <p v-if="agent.description" class="mt-1.5 mx-auto max-w-lg text-sm text-gray-500 dark:text-gray-400">
+    <!-- #2163: the briefing is hydrated AFTER the roster (it used to ship with
+         it, which is what made the Workspace's first paint wait for the slowest
+         agent in the fleet). So this zone carries the app's standard loading
+         motion, keyed on the card's own `briefing_state` — "no data yet", never
+         a fetch-in-flight flag.
+
+         Avatar and name stay OUTSIDE it: they come from the roster and are
+         already correct, and sweeping a beam over an identity that is not
+         loading would be motion about nothing.
+
+         No `announce`: this zone sits inside the conversation's history zone,
+         and the primitive puts role="status" on the ROOT of whichever zone
+         declares it — one live region per navigation, not three nested.
+
+         `min-h` reserves the header plus one hint row, so the common shapes
+         (no hints; a description and a row) do not jump on arrival. A taller
+         grid grows DOWNWARD into the empty pane below — the composer is pinned
+         to the bottom of the flex column, so nothing visible moves. -->
+    <ScanlineReveal
+      :loading="zone.loading"
+      :reveal="zone.reveal"
+      class="mt-1.5 mx-auto max-w-2xl min-h-[6.5rem] rounded-xl"
+    >
+    <template v-if="!zone.loading">
+    <p v-if="agent.description" class="mx-auto max-w-lg text-sm text-gray-500 dark:text-gray-400">
       {{ agent.description }}
     </p>
-    <p v-else class="mt-1.5 text-sm text-gray-400">Start a conversation below.</p>
+    <!-- ONE element, two sentences. A failed hydration must say so — an agent
+         whose briefing could not be fetched is not an agent with nothing to
+         offer (ent#380's "never silently empty", and the same "looks complete"
+         class `playbooks_total` guards one tier over). Reusing the element
+         rather than adding a second keeps the raw-gray count flat. -->
+    <p v-else class="text-sm text-gray-400">{{ fallbackLine }}</p>
 
     <!-- Capability hints as clickable cards (pre-fill the composer, no auto-run).
          Exposed playbooks when the operator curated a set; the template's
@@ -13,7 +42,7 @@
          #2101: bounded — described-first order, first 6 collapsed, counted toggle
          expands IN PLACE (no nested scroll region: the chat pane stays the single
          scroll axis, and the set itself is belted server-side at ≤24). -->
-    <div v-if="playbooks.length" class="mt-7 mx-auto max-w-2xl">
+    <div v-if="playbooks.length" class="mt-7">
       <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 text-left">Things you can ask</div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         <button
@@ -48,13 +77,17 @@
         {{ expanded ? 'Show fewer' : `Show all ${hintPlan.total}` }}
       </button>
     </div>
+    </template>
+    </ScanlineReveal>
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import ScanlineReveal from '../ScanlineReveal.vue'
 import { planHintDisplay, starterFor } from './portalUtils'
+import { briefingZone } from './portalBriefingState'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -62,6 +95,18 @@ const props = defineProps({
 defineEmits(['use-playbook'])
 
 const playbooks = computed(() => props.agent.playbooks || [])
+
+// #2163 — presentational: the fetch is driven by `Portal.vue`'s active-agent
+// watcher, not from here. This component renders only in the conversation's
+// `#empty` slot, so a deep link into an EXISTING thread never mounts it — a
+// hydration call owned here would never fire for those agents, and their `/`
+// typeahead reads the same `playbooks`.
+const zone = computed(() => briefingZone(props.agent))
+const fallbackLine = computed(() =>
+  zone.value.unavailable
+    ? "Couldn't load suggestions for this agent right now."
+    : 'Start a conversation below.'
+)
 
 // #2101: local by design. Portal.vue keys PortalConversation (and this slot
 // content with it) by `${agent}#${convGen}`, so an agent/thread switch remounts

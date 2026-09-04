@@ -51,6 +51,7 @@ def test_the_fence_is_a_single_route_not_a_prefix():
         ("GET", "/api/users"),                                     # other humans
         ("POST", "/api/agents/atlas/chat"),                        # chat as the owner
         ("GET", "/api/enterprise/client-portal/my-agents"),        # the portal itself
+        ("GET", "/api/enterprise/client-portal/briefings"),        # #2163 — fenced by construction
         ("GET", "/api/enterprise/client-portal/agents/a/history"), # someone's history
         ("POST", "/api/mcp/keys"),                                 # minting more keys
         ("GET", "/api/enterprise/client-portal/auth/exchange"),    # right path, wrong method

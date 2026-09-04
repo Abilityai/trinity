@@ -46,6 +46,33 @@ variable "image_tag" {
   }
 }
 
+# Optional: build with an SSH key that ALREADY exists on the account, instead of
+# letting the builder import a temporary one per run.
+#
+# Left unset (the default) the builder imports a key and creates the droplet in
+# the next API call — and DigitalOcean does not reliably resolve the new key id
+# that fast. The first real build of this bundle lost that race on 4 of 5
+# creates, each failing in ~7 seconds with
+# "422 ... <id> are invalid key identifiers for Droplet creation", and each
+# leaking the temporary key (Packer's own cleanup then 404s on it).
+#
+# Supplying a pre-made key removes the window entirely, because nothing is
+# created during the build. Both must be given together; `ssh_key_id = 0` and an
+# empty path mean "unset", which is exactly the old behaviour.
+#
+#   doctl compute ssh-key import trinity-packer-build --public-key-file ~/.ssh/id_ed25519.pub
+variable "ssh_key_id" {
+  type        = number
+  default     = 0
+  description = "ID of an existing DigitalOcean SSH key. 0 = let Packer create a temporary one."
+}
+
+variable "ssh_private_key_file" {
+  type        = string
+  default     = ""
+  description = "Private key matching ssh_key_id. Required when ssh_key_id is set."
+}
+
 variable "region" {
   type    = string
   default = "nyc3"
@@ -70,10 +97,45 @@ source "digitalocean" "trinity" {
   size          = var.build_size
   ssh_username  = "root"
   snapshot_name = local.snapshot_name
+
+  # Both zero-valued unless the operator supplied them; the builder then falls
+  # back to importing a temporary key, which is the pre-existing behaviour.
+  ssh_key_id           = var.ssh_key_id
+  ssh_private_key_file = var.ssh_private_key_file
 }
 
 build {
   sources = ["source.digitalocean.trinity"]
+
+  # FIRST, before anything touches apt. Ubuntu's cloud images run apt-daily and
+  # unattended-upgrades on boot, and they hold /var/lib/dpkg/lock-frontend while
+  # Packer's SSH session is already open — so 01-provision.sh's opening
+  # `apt-get update` races them and the build dies with
+  # "E: Could not get lock /var/lib/dpkg/lock-frontend" (apt exit 100).
+  # Intermittent, so it reads as a flake; it is not one, and a build that only
+  # succeeds sometimes is not something to hand a Marketplace reviewer.
+  #
+  # This is DigitalOcean's own prescribed remedy, not an invention: their
+  # reference template (marketplace-partners/marketplace-image.json, the same
+  # repo 90-cleanup-and-check.sh already pins) opens with exactly this
+  # provisioner. Ours had no wait of any kind.
+  #
+  # It belongs in the template rather than at the top of 01-provision.sh because
+  # the `file` provisioner below also runs before that script.
+  provisioner "shell" {
+    inline = [
+      "cloud-init status --wait",
+      # Create the file provisioner's destination BEFORE it runs. This is not
+      # tidiness — with the destination absent, Packer flattens the upload and
+      # strips the top-level directory names, so `files/opt/trinity-firstboot/
+      # firstboot.sh` lands at `/tmp/trinity-files/trinity-firstboot/
+      # firstboot.sh` and every `install /tmp/trinity-files/opt/...` below fails
+      # with "cannot stat". Verified both ways against a live droplet: absent,
+      # the tree comes up as trinity-firstboot/ update-motd.d/ systemd/ lib/;
+      # present, it comes up as opt/ etc/ var/ exactly as the bundle is laid out.
+      "mkdir -p /tmp/trinity-files",
+    ]
+  }
 
   # Files first: the per-instance script and MOTD must exist before cleanup runs.
   provisioner "file" {

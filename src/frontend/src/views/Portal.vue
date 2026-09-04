@@ -162,8 +162,27 @@
           @open-menu="mobileNav = true"
         />
 
+        <!-- #2163 (AC4): the Workspace stage carries the app's standard
+             first-load motion while the roster AND the deep link's target
+             resolve. ONE persistent instance — the branches swap INSIDE the
+             slot, never as sibling v-ifs around it, or a remount re-inits from
+             loading=false and the reveal never plays.
+
+             No `announce`: the primitive puts role="status" on the zone ROOT,
+             which is an implicit aria-live region — and this zone wraps the
+             whole conversation including the composer, so every appended or
+             streamed message would be re-announced in full. `aria-busy` still
+             rides the root while loading. -->
+        <ScanlineReveal
+          v-else
+          :loading="stage.loading"
+          :reveal="stage.reveal"
+          class="flex-1 min-h-0 flex flex-col rounded-none"
+          content-class="flex-1 min-h-0 flex flex-col"
+        >
+        <template v-if="!stage.loading">
         <PortalRoom
-          v-else-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
+          v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
           :key="activeRoomIdFromRoute"
           :room-id="activeRoomIdFromRoute"
           :roster="store.agents"
@@ -192,10 +211,12 @@
              the one surface whose whole bar is honest status. -->
         <div v-else-if="activeRoomIdFromRoute" :class="STAGE_WRAP">
           <svg :class="STAGE_ICON" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-          <template v-if="!store.rosterLoaded || store.loading">
-            <p :class="STAGE_BODY_LEAD">Opening this conversation…</p>
-          </template>
-          <template v-else-if="store.unavailable">
+          <!-- #2163: the "Opening this conversation…" line that used to lead
+               this block is gone. It was unreachable copy AND a static one: the
+               stage zone above is in `loading` for exactly the window it
+               covered (`!rosterLoaded`), so a verdict always exists by the time
+               this renders. -->
+          <template v-if="store.unavailable">
             <p :class="STAGE_TITLE">{{ WORKSPACE_UNAVAILABLE_TITLE }}</p>
             <p :class="STAGE_BODY">
               It isn't enabled here. Ask an administrator if you expected access.
@@ -286,6 +307,8 @@
           </template>
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
         </div>
+        </template>
+        </ScanlineReveal>
       </main>
     </div>
 
@@ -318,6 +341,8 @@ import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
+import ScanlineReveal from '@/components/ScanlineReveal.vue'
+import { stageZone } from '@/components/portal/portalBriefingState'
 import { resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
@@ -412,6 +437,10 @@ const prefill = ref('')
 const filesOpen = ref(false)
 const mobileNav = ref(false)
 const convGen = ref(0)                // bumps on explicit thread switches → remount
+// #2163 — `bootstrap()` has finished placing the caller (see the function).
+// Deliberately a separate bit from `store.rosterLoaded`: that one says the
+// ROSTER reached a verdict, this one says the deep link did.
+const bootstrapResolved = ref(false)
 
 const activeSessionId = computed(() => route.params.sessionId || null)
 // ent#361: `/workspace/r/:roomId` is the multi-agent chat.
@@ -427,6 +456,31 @@ const activeAgent = computed(() => {
 // Remount the conversation on agent/thread switches, but NOT when a session-less
 // first turn adopts an id (that just updates the route in place).
 const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.name) || ''}#${convGen.value}`)
+
+// #2163 — the stage's loading verdict (AC4). Keyed on `rosterLoaded` (a
+// VERDICT) and never on `store.loading` (fetch in flight), so a background
+// refetch with a roster on screen is invisible; `viewState` owns that rule.
+const stage = computed(() => stageZone({
+  rosterLoaded: store.rosterLoaded,
+  resolved: bootstrapResolved.value,
+  error: store.error,
+  agents: store.agents,
+  unreachable: !!unreachableAgent.value,
+}))
+
+// #2163 — hydrate the ACTIVE agent's briefing, driven from HERE rather than
+// from `PortalBriefing`'s mount. `PortalBriefing` renders only in the
+// conversation's `#empty` slot, so a deep link into an EXISTING thread never
+// mounts it — and that agent's `/` typeahead reads the same `playbooks`, so it
+// would have waited for the background batch's slowest member. Watching the
+// active agent covers deep links, thread opens and agent switches; the
+// component stays presentational. The store's own guards make repeat calls
+// free (`ready` never re-requests; `unavailable` retries once per session).
+watch(
+  () => activeAgent.value?.name,
+  (name) => { if (name) store.ensureBriefing(name) },
+  { immediate: true }
+)
 
 // ---- Navigation handlers ------------------------------------------------------
 // ent#361: "+ New chat" is now an explicit act — pick who is in it. The old
@@ -578,9 +632,6 @@ const STAGE_WRAP = 'flex-1 flex flex-col items-center justify-center text-center
 const STAGE_ICON = 'w-10 h-10 text-gray-300 dark:text-gray-700 mb-3'
 const STAGE_TITLE = 'text-sm text-gray-700 dark:text-gray-300 font-medium'
 const STAGE_BODY = 'mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs'
-// The neutral "still resolving" line stands alone (no title above it), so it
-// carries the body ink without the top margin the paired form needs.
-const STAGE_BODY_LEAD = 'text-sm text-gray-500 dark:text-gray-400'
 const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
 
 function openRoom(roomId) {
@@ -873,19 +924,32 @@ function stopAsksPoll() {
 }
 
 async function bootstrap() {
-  await store.fetchRoster()
-  await refreshThreads()
-  startAsksPoll()
-  const sid = route.params.sessionId
-  if (sid) {
-    const known = threads.value.find((t) => (t.id || t.session_id) === sid)
-    if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
-    else pendingSession.value = sid   // let the conversation resolve/load it
-    convGen.value++
-    markRead('thread', sid)           // a deep-linked open is still an open
-    return
+  // #2163: the stage stays in its loading phase until this whole function has
+  // run, not merely until the roster lands. `activeAgentName`/`pendingSession`
+  // are assigned only AFTER `refreshThreads()`, so a `/workspace/c/:sid` deep
+  // link (or `?agent=X`) would otherwise reveal the stage for `agents[0]`,
+  // flash that agent's briefing and fire a wasted hydration, then remount for
+  // the real target. AC4 says "while the roster AND a thread's history
+  // hydrate". The `finally` is load-bearing: the deep-link branch returns
+  // early, and a throw must not strand the stage in loading forever.
+  bootstrapResolved.value = false
+  try {
+    await store.fetchRoster()
+    await refreshThreads()
+    startAsksPoll()
+    const sid = route.params.sessionId
+    if (sid) {
+      const known = threads.value.find((t) => (t.id || t.session_id) === sid)
+      if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
+      else pendingSession.value = sid   // let the conversation resolve/load it
+      convGen.value++
+      markRead('thread', sid)           // a deep-linked open is still an open
+      return
+    }
+    resolveAgentQuery()
+  } finally {
+    bootstrapResolved.value = true
   }
-  resolveAgentQuery()
 }
 
 onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })

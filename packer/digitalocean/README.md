@@ -43,6 +43,44 @@ specific artifact.
 The build fails if DigitalOcean's own `99-img-check.sh` finds anything, so a
 snapshot is never created from a droplet that would be rejected at review.
 
+### If the build fails immediately with "invalid key identifiers"
+
+```
+Error creating droplet: POST .../v2/droplets: 422 ... 59080294 are invalid key
+identifiers for Droplet creation.
+```
+
+Pass a pre-existing key and it cannot happen at all:
+
+```bash
+doctl compute ssh-key import trinity-packer-build \
+  --public-key-file ~/.ssh/id_ed25519.pub --format ID --no-header
+packer build -var "image_tag=v0.9.5-rc2" \
+  -var "ssh_key_id=<that id>" \
+  -var "ssh_private_key_file=$HOME/.ssh/id_ed25519" \
+  trinity.pkr.hcl
+```
+
+This is a DigitalOcean API consistency window, not a fault in the template:
+left to itself Packer imports a temporary SSH key and creates the droplet in the
+very next call, and the new key id is not reliably resolvable that fast. It cost
+**4 of 5** creates during the first real build of this bundle, each failing in
+~7 seconds; the same import/create pair spaced one command apart succeeds every
+time. Supplying a key removes the window rather than retrying into it — nothing
+is created during the build.
+
+Each failed attempt **leaks the temporary key**, and Packer's own cleanup then
+404s on it, so reap any strays or they accumulate on the account:
+
+```bash
+doctl compute ssh-key list --format ID,Name --no-header \
+  | awk '$2 ~ /^packer-/ {print $1}' \
+  | xargs -r -n1 doctl compute ssh-key delete --force
+```
+
+Check `doctl compute droplet list` too — a failure later in the build can leave
+the build droplet running.
+
 ## Per-release update runbook
 
 1. Cut the Trinity release; confirm the `v*` tag published all five images and
