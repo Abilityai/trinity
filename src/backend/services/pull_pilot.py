@@ -46,8 +46,8 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # ``overflow_policy="queue_persistent"``, and two of the three producers do:
 #
 #   task_execution_service   → "reject" | "queue_persistent"  ← #2391, pilot-gated
-#                              scheduler/ALL cron, webhooks, reminders, fan-out,
-#                              loops, A2A, operator resumes
+#                              scheduler/ALL cron, webhooks, reminders, loops,
+#                              fan-out, A2A, operator resumes
 #   dispatch_admission_svc   → "queue_in_memory"   — sequential chat, human chat
 #   chat_execution_service   → "queue_persistent"  — POST /task
 #
@@ -57,26 +57,28 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # (#1578's task-completion loopback, which POSTs to the same route under an
 # internal-secret-gated ``X-Event-Trigger``).
 #
-# ``task_execution_service`` contributes the three autonomous triggers that have
-# **no synchronous result consumer** — ``schedule``, ``webhook`` and
-# ``reminder``. All three reach it from the scheduler, which dispatches with
-# ``async_mode=True`` and then polls ``schedule_executions`` for the terminal, so
-# nobody is holding a coroutine waiting on a return value. That is exactly the
-# property a claim-and-run-later queue needs, and it is the same property
-# ``ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`` (#1083) selects on.
+# ``task_execution_service`` contributes the autonomous triggers with **no
+# synchronous result consumer**. ``schedule``, ``webhook`` and ``reminder``
+# (#2391) reach it from the scheduler, which dispatches with ``async_mode=True``
+# and then polls ``schedule_executions`` for the terminal, so nobody holds a
+# coroutine waiting on a return value — the same property
+# ``ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`` (#1083) selects on. ``loop`` (#2523)
+# joined them once ``loop_service`` stopped being an in-process ``for`` loop:
+# it is now advanced by execution terminals, so the dispatch it makes has no
+# reader either.
 #
-# The four autonomous triggers that stay OUT all have a caller that reads the
+# The three autonomous triggers that stay OUT have a caller that reads the
 # returned ``TaskExecutionResult``, so a row queued for a worker to claim later
-# gives that caller nothing to read. Three are structural; one is a scope choice.
+# gives that caller nothing to read. Two are structural; one is a scope choice.
 #
-#   loop               ``loop_service`` renders the next iteration's template
-#                      from ``result.response`` (#740). Structural.
 #   fan_out            ``fan_out_service`` builds each ``FanOutTaskResult`` from
-#                      the returned result. Structural — the async fan-out join
-#                      is #1081 Phase 4, not this change.
+#                      the returned result, and ``POST /fan-out`` blocks on the
+#                      aggregate. The async join + sync edge adapter is #2524
+#                      (#1081 Phase 4). Structural.
 #   a2a                ``routers/a2a``'s ``message/send`` consumes
 #                      ``result.response`` to build the JSON-RPC artifact it
-#                      hands back to a remote caller (ent#157). Structural.
+#                      hands back to a remote caller (ent#157). Structural;
+#                      falls out of #2524's adapter.
 #   operator_response  NOT structural — ``operator_resume_service`` dispatches
 #                      through this same producer, so it *could* be queued. It is
 #                      out by choice: the respond endpoint records
@@ -91,7 +93,7 @@ def is_pull_pilot_agent(agent_name: str) -> bool:
 # stays a NARROWING of the single source of truth: dropping a trigger there
 # still drops it here, and widening reach is a deliberate edit to this set.
 PULL_REACHABLE_TRIGGERS = frozenset(
-    {"agent", "event", "schedule", "webhook", "reminder"}
+    {"agent", "event", "schedule", "webhook", "reminder", "loop"}
 )
 
 
@@ -152,7 +154,7 @@ def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
 # every cron fire, so an un-deduped warning would emit thousands of identical
 # lines a day and train operators to filter it out — which is how a signal
 # meant to be noticed becomes noise. Unbounded growth is not a concern: the key
-# space is (pilot agents × 4 unreachable triggers), and only pilots ever reach it.
+# space is (pilot agents × 3 unreachable triggers), and only pilots ever reach it.
 _UNREACHABLE_NOTED: Set[tuple] = set()
 
 
@@ -177,10 +179,11 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
     why gets a truthful answer from the backend log instead of a wrong one from
     the runbook.
 
-    #2391 shrank what it fires on rather than retiring it: ``schedule``,
-    ``webhook`` and ``reminder`` are reachable now, so the remaining callers are
-    ``loop`` / ``fan_out`` / ``a2a`` / ``operator_response``, which are stranded
-    on a synchronous result consumer rather than on the producer's policy.
+    #2391 and #2523 shrank what it fires on rather than retiring it:
+    ``schedule``, ``webhook``, ``reminder`` and ``loop`` are reachable now, so
+    the remaining callers are ``fan_out`` / ``a2a`` / ``operator_response``,
+    which are stranded on a synchronous result consumer rather than on the
+    producer's policy.
 
     Fail-safe like everything else here: a bookkeeping error must never
     interfere with dispatching a real execution.
@@ -208,8 +211,8 @@ def note_unreachable_pull_trigger(agent_name: str, triggered_by: Optional[str]) 
             "so this row is dispatched with overflow_policy='reject' and pushed "
             "regardless of PULL_MODE_PILOT_AGENTS. The flag is applied and correct; "
             "the dispatch topology is the limit. Reachable triggers today: %s. "
-            "Cron/webhook/reminder work IS pullable since #2391 — see "
-            "docs/testing/PULL_MIGRATION_TESTING.md §9.",
+            "Cron/webhook/reminder work IS pullable since #2391, and loops "
+            "since #2523 — see docs/testing/PULL_MIGRATION_TESTING.md §9.",
             agent_name, triggered_by, sorted(PULL_REACHABLE_TRIGGERS),
         )
         return True

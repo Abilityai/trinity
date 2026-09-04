@@ -363,20 +363,27 @@ name for `'<agent>'`.
 
 ### Pre-flight — pick a viable pilot, then capture a baseline
 
-**First, check the candidate can be piloted at all.** Five triggers reach the
-durable queue — `agent`, `event`, `schedule`, `webhook`, `reminder` — and four
-do not (`loop`, `fan_out`, `a2a`, `operator_response`). Run the
+**First, check the candidate can be piloted at all.** Six triggers reach the
+durable queue — `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` —
+and three do not (`fan_out`, `a2a`, `operator_response`). Run the
 pull-eligible-volume query under M1 below and pick from its `pull_eligible`
 column *before* flipping anything; a week of soak on an agent whose traffic is
-all loops and fan-out measures nothing.
+all fan-out measures nothing.
 
-> **Changed by #2391.** Before it, `task_execution_service` dispatched with
-> `overflow_policy="reject"` unconditionally, so **no** cron, webhook or reminder
-> row could ever be claimed — the pilot flag was inert for the fleet's dominant
-> traffic class, and a cron-driven agent was explicitly not a viable pilot. It
-> now dispatches with `"queue_persistent"` when `pull_owns_dispatch` says a pilot
-> owns the trigger, and with `"reject"` otherwise. **A cron-driven agent is a
-> viable pilot now** — see "Choosing a pilot" below.
+> **Changed by #2391, widened again by #2523.** Before #2391,
+> `task_execution_service` dispatched with `overflow_policy="reject"`
+> unconditionally, so **no** cron, webhook or reminder row could ever be claimed —
+> the pilot flag was inert for the fleet's dominant traffic class, and a
+> cron-driven agent was explicitly not a viable pilot. It now dispatches with
+> `"queue_persistent"` when `pull_owns_dispatch` says a pilot owns the trigger,
+> and with `"reject"` otherwise. **A cron-driven agent is a viable pilot now** —
+> see "Choosing a pilot" below.
+>
+> #2523 added `loop`. That one was not a policy change: `loop_service` was an
+> in-process `for` loop that `await`ed each iteration's `TaskExecutionResult`, so
+> no policy could have helped it. It is now advanced by execution terminals, its
+> state lives on `agent_loops` / `agent_loop_runs`, and a loop **survives a
+> backend restart** instead of being flipped `interrupted`.
 
 Then run M4 + M6 + M7 + M9 on the pilot for the 7 days *preceding* the flip and
 keep the output. Without a baseline, a 4% success-rate dip during the soak is
@@ -444,8 +451,8 @@ WHERE agent_name = '<agent>'
   AND started_at::timestamptz > now() - interval '24 hours';
 ```
 
-Expected after the #1766 gate + #2391: **`agent`, `event`, `schedule`, `webhook`
-and `reminder` rows ~100% `pulled`; `loop`, `fan_out`, `a2a` and
+Expected after the #1766 gate + #2391 + #2523: **`agent`, `event`, `schedule`,
+`webhook`, `reminder` and `loop` rows ~100% `pulled`; `fan_out`, `a2a` and
 `operator_response` 100% `pushed`.** That second half is correct behaviour, not a
 fault — read the reach table below before concluding anything from it. Confirm
 the split per trigger with:
@@ -460,47 +467,48 @@ WHERE agent_name = '<agent>'
 GROUP BY 1 ORDER BY 1;
 ```
 
-#### Which triggers can be pulled at all (#2048, widened by #2391)
+#### Which triggers can be pulled at all (#2048, widened by #2391 and #2523)
 
 `capacity_manager` offers a row to the durable queue solely when its producer
 passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 
 | Producer | Carries | `overflow_policy` | Pullable? |
 |---|---|---|---|
-| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for `schedule` / `webhook` / `reminder` |
+| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for `schedule` / `webhook` / `reminder` / `loop` |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
 | `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
 
 `POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
 event}`, contributing `agent` + `event`. `task_execution_service` contributes the
-autonomous triggers with **no synchronous result consumer** — `schedule`,
+autonomous triggers with **no synchronous result consumer**: `schedule`,
 `webhook` and `reminder`, all three of which reach it from the scheduler, which
-dispatches `async_mode=True` and then polls the DB for the terminal. The pullable
-set is therefore **`{agent, event, schedule, webhook, reminder}`**
+dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
+since #2523 made its driver terminal-driven. The pullable set is therefore
+**`{agent, event, schedule, webhook, reminder, loop}`**
 (`pull_pilot.PULL_REACHABLE_TRIGGERS`).
 
-The four that stay pushed are stranded on their **caller**, not on the
+The three that stay pushed are stranded on their **caller**, not on the
 producer's policy — a queued row is claimed and run later and returns nothing for
-any of them to read. Three are structural: `loop` (renders the next iteration
-from `result.response`), `fan_out` (builds each `FanOutTaskResult` from the
-returned result — the async join is #1081 Phase 4) and `a2a` (turns the result
-into the JSON-RPC artifact it hands a remote caller). `operator_response` is out
-by **choice**: it dispatches through the same producer #2391 widened, but the
-respond endpoint records `result.status` as the dispatch receipt (the
-`operator_resume_dispatch` audit row + the #525 idempotency completion) for a
-turn that spends money on a person's answer (ent#329). Widening it is a
-follow-up, not a blocker.
+any of them to read. Two are structural: `fan_out` (builds each
+`FanOutTaskResult` from the returned result, and `POST /fan-out` blocks on the
+aggregate — the async join + sync edge adapter is **#2524**) and `a2a` (turns the
+result into the JSON-RPC artifact it hands a remote caller; falls out of #2524's
+adapter). `operator_response` is out by **choice**: it dispatches through the
+same producer #2391 widened, but the respond endpoint records `result.status` as
+the dispatch receipt (the `operator_resume_dispatch` audit row + the #525
+idempotency completion) for a turn that spends money on a person's answer
+(ent#329). Widening it is a follow-up, not a blocker.
 
 **Reading a pushed autonomous row.** Two different situations, previously
 indistinguishable:
 
-- `triggered_by` ∈ `{loop, fan_out, a2a, operator_response}` → **expected.**
+- `triggered_by` ∈ `{fan_out, a2a, operator_response}` → **expected.**
   The flag is applied and correct; the dispatch topology is the limit. The
   backend logs this once per (agent, trigger) — grep `[#2048]` to confirm:
   ```bash
   docker logs trinity-backend 2>&1 | grep '\[#2048\]'
   ```
-- `triggered_by` ∈ `{agent, event, schedule, webhook, reminder}` → **a real
+- `triggered_by` ∈ `{agent, event, schedule, webhook, reminder, loop}` → **a real
   fault.** This is the case where the old advice applies: check the backend
   actually has `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose
   must forward it).
@@ -514,9 +522,9 @@ SELECT agent_name,
        COUNT(*)                                          AS total,
        COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
        COUNT(*) FILTER (WHERE triggered_by IN
-         ('agent','event','schedule','webhook','reminder'))     AS pull_eligible,
+         ('agent','event','schedule','webhook','reminder','loop')) AS pull_eligible,
        COUNT(*) FILTER (WHERE triggered_by IN
-         ('loop','fan_out','a2a','operator_response'))          AS not_pullable
+         ('fan_out','a2a','operator_response'))                    AS not_pullable
 FROM schedule_executions
 WHERE started_at::timestamptz > now() - interval '7 days'
 GROUP BY 1 ORDER BY pull_eligible DESC;
@@ -573,6 +581,41 @@ The gate is `pull_owns_dispatch` and nothing else, so:
   onto a mechanism built on re-running the same execution, and `effect_guard`
   still fails open when the agent omits the execution id. Do not run a
   side-effect-bearing cron pilot before reading it.
+
+#### What #2523 changed for loops
+
+- **A loop survives a backend restart.** `cleanup_service`'s startup hook used to
+  call `db.mark_orphan_loops_interrupted()`, flipping every in-flight loop to
+  `interrupted` because its runner coroutine died with the process. It now calls
+  `LoopService.reconcile_after_restart()`: a loop with an execution still in
+  flight is left alone (that execution's terminal advances it), one whose
+  execution already went terminal is advanced from it, and only a loop with
+  nothing in flight is re-armed. **Expect zero new `interrupted` loops after a
+  restart; a run of them means the reconcile is not running.**
+- **`delay_seconds` is a park, not a sleep.** The inter-run pause is
+  `agent_loops.next_run_at` and a 5s backend sweep brings the loop back, so a
+  delayed loop holds no coroutine. Granularity is the sweep period plus jitter,
+  i.e. a `delay_seconds=5` pause can land at ~6s. It is a pacing knob, not a
+  precision timer.
+- **Watch `agent_loops` rows stuck `running` with no in-flight execution.** That
+  is the shape of a lost advance, and it is the one failure mode a `for` loop
+  could not have. Query:
+  ```sql
+  SELECT l.id, l.agent_name, l.runs_completed, l.next_run_at
+  FROM agent_loops l
+  LEFT JOIN agent_loop_runs r ON r.loop_id = l.id AND r.status = 'running'
+  LEFT JOIN schedule_executions e ON e.id = r.execution_id
+  WHERE l.status IN ('queued','running')
+    AND l.next_run_at IS NULL
+    AND (e.id IS NULL OR e.status NOT IN ('queued','running','pending_retry'));
+  ```
+  A restart heals this on its own (the reconcile re-arms exactly these rows); a
+  row that persists across one is a real defect.
+- **The advance is idempotent by CAS**, not by luck: `claim_loop_advance` moves
+  `runs_completed` from N-1 to N and the loser does nothing, so a re-delivered
+  pull terminal cannot double-fire an iteration. If you ever see
+  `runs_completed` exceed the number of `agent_loop_runs` rows, that CAS has
+  been bypassed.
 
 **M2 — split over time.** Confirms the flip took effect at the moment you think
 it did, and shows drift.

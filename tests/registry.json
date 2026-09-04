@@ -2679,6 +2679,19 @@
         "regression"
       ],
       "description": "ent#438 agent canvas + workspace merge: audience defaults to operator and an unrecognised stored value reads as operator (allowlist, so a canvas never widens who sees agent output); the Workspace read narrows IN THE QUERY; staleness is derived (agent finished a run after the write) not a clock, never claims more than it observed, and is computed once per agent; canvas ids are charset-validated with a named 400 and the pattern is anchored; blocks are count- AND byte-capped; writes are self-gated while reads are not; a foreign execution_id degrades rather than refusing (provenance, not authorization); the retired /agents/:name/workspace route still resolves and carries its agent, the page is gone and nothing references it; every advertised block kind has a renderer and the five shared ones delegate to the CI-pinned components/reports/ dispatch without widening the report display_hint enum; agent-authored html is DOMPurify-sanitised; the voice panel writes the durable canvas at operator audience and still has a caller; dual-track migration present and the table is AGENT_REFS-registered."
+    },
+    {
+      "file": "unit/test_2523_loops_terminal_driven.py",
+      "feature": "#2523",
+      "added": "2026-09-04",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration",
+        "loops"
+      ],
+      "description": "Loops run off execution terminals instead of an in-process for loop (#2523). LoopService._run used to be one long-lived asyncio.Task per loop that awaited execute_task inside a for over iterations and kept every cross-iteration value (previous response, accumulated cost, consecutive failures, the #1157 fingerprints, the stop flag, the inter-run sleep) in Python locals. That made the loop structurally push-only - a pull-claimed row returns no TaskExecutionResult - so 'loop' sat in the stranded half of PULL_REACHABLE_TRIGGERS (#2048); and it made a loop unable to survive a restart, so cleanup_service flipped every in-flight loop to 'interrupted'. test_loop_service.py still covers the behaviour that had to stay identical (the seven stop conditions and their precedence, template substitution, cost budget, failure policy); this file covers what a terminal-driven driver newly has to get right. The advance is idempotent under at-least-once delivery - db.claim_loop_advance is a CAS on runs_completed from N-1 to N, so a re-delivered pull terminal cannot double-fire iteration N+1, an unknown execution is ignored, and a late terminal cannot resurrect a finalized loop. A QUEUED dispatch (the pull path) does NOT advance - the worker's terminal does - and agent_loop_runs.execution_id is stamped before dispatch so the advance can find its iteration from an execution id. The terminal fan-out actually reaches the advance: it hangs off event_dispatch_service.spawn_task_terminal_event, the wrapper every CAS-won terminal writer already calls, and NOT inside emit_task_terminal_event, which returns early when no event subscription matches (the common case); a broken advance never breaks the already-billed terminal. A fast-fail dispatch still advances - a raise, and execute_task's capacity/circuit-open/ephemeral returns, write a FAILED row without reaching a terminal writer, so without the direct advance in _run_and_advance the loop would stall forever with one open run row. And the due-loop sweep (the replacement for asyncio.sleep(delay_seconds), a parked agent_loops.next_run_at plus a 5s tick) dispatches a parked loop exactly once: not before it is due, once across two workers sweeping the same row (the claim is a CAS on the exact next_run_at), re-evaluating rather than dispatching blind so a stop that arrived while parked wins, and one bad loop does not stall the rest of the sweep."
     }
   ]
 }

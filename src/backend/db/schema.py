@@ -315,7 +315,9 @@ TABLES = {
             source_mcp_key_name TEXT,
             created_at TEXT NOT NULL,
             started_at TEXT,
-            completed_at TEXT
+            completed_at TEXT,
+            next_run_at TEXT,
+            stop_requested_at TEXT
         )
     """,
 
@@ -1908,7 +1910,13 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_loops_agent ON agent_loops(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_loops_status ON agent_loops(status)",
     "CREATE INDEX IF NOT EXISTS idx_loops_user ON agent_loops(started_by_user_id)",
+    # #2523: the due-loop sweep runs every few seconds; without this it is a
+    # full scan of every loop ever created.
+    "CREATE INDEX IF NOT EXISTS idx_loops_next_run ON agent_loops(next_run_at)",
     "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number)",
+    # #2523: every execution terminal looks up "is this a loop run?" here, so
+    # it must be an indexed point read, not a scan of every loop run ever.
+    "CREATE INDEX IF NOT EXISTS idx_loop_runs_execution ON agent_loop_runs(execution_id)",
     "CREATE INDEX IF NOT EXISTS idx_executions_loop ON schedule_executions(loop_id) "
     "WHERE loop_id IS NOT NULL",
 

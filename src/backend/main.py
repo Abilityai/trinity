@@ -712,6 +712,31 @@ async def _start_capacity_and_canary() -> None:
     except Exception as e:
         logger.error(f"Error wiring CapacityManager: {e}")
 
+    # #2523: due-loop sweep. A loop's inter-run pause used to be an
+    # `asyncio.sleep` inside the runner coroutine; the runner is gone, so the
+    # pause is `agent_loops.next_run_at` and this brings the loop back when it
+    # comes due. Short period because `delay_seconds` is a user-visible pacing
+    # knob — a 60s tick would round every small delay up to a minute. The claim
+    # is a CAS, so every worker can run this safely; the read is an index scan
+    # of `idx_loops_next_run` and returns nothing at all when no loop is parked.
+    try:
+        from services.loop_service import get_loop_service
+
+        async def _loop_due_sweep():
+            await asyncio.sleep(8 + random.uniform(0, 2))
+            service = get_loop_service()
+            while True:
+                try:
+                    await service.dispatch_due_loops()
+                except Exception as exc:
+                    logger.warning(f"[Loop] due sweep tick failed: {exc}")
+                await asyncio.sleep(5 + random.uniform(0, 1))
+
+        asyncio.create_task(_loop_due_sweep())
+        logger.info("Loop due-run sweep running (5s)")
+    except Exception as e:
+        logger.error(f"Error wiring the loop due-run sweep: {e}")
+
 
 async def _schedule_watch_loops() -> None:
     """Heartbeat watch (#307) and the lifespan-resumed monitoring loop (#1121).
