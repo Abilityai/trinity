@@ -407,7 +407,11 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
     monkeypatch.setattr(
         settings_module,
         "telemetry_sharing_service",
-        SimpleNamespace(is_consent_enabled=lambda: False),
+        SimpleNamespace(
+            is_consent_enabled=lambda: False,
+            # ent#437: the flags document now spreads the four consent bools.
+            public_flags=lambda: {"telemetry_sharing_enabled": False},
+        ),
     )
     monkeypatch.setattr(settings_module.db, "has_any_subscription", lambda: False)
 

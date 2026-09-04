@@ -115,13 +115,17 @@ describe('visibility', () => {
   })
 
   it('stays hidden while the profile is still unverified', () => {
-    // `authStore.userRole` answers 'user' until /api/users/me lands, so the SFC
+    // `authStore.role` answers 'user' until /api/users/me lands, so the SFC
     // ANDs `profileVerified` in before asking the predicate — otherwise the card
-    // flashes for a non-admin on every page load (AdminEmailNudge, #2198).
-    const unverifiedAdmin = false // profileVerified && userRole === 'admin'
+    // flashes for a non-admin on every page load (#2198). The getter is `role`:
+    // this spec used to pin `userRole`, which the store never defined, so the
+    // card it guards had been permanently hidden (ent#437 eyeball finding;
+    // `authRoleGetterContract.spec.js` now pins the name repo-wide).
+    const unverifiedAdmin = false // profileVerified && role === 'admin'
     expect(isHardeningGuideVisible({ ...marketplaceIp, isAdmin: unverifiedAdmin })).toBe(false)
     expect(GUIDE_SFC).toContain('authStore.profileVerified')
-    expect(GUIDE_SFC).toMatch(/authStore\.userRole === 'admin'/)
+    expect(GUIDE_SFC).toMatch(/authStore\.role === 'admin'/)
+    expect(GUIDE_SFC).not.toMatch(/authStore\.userRole/)
     // The gate lives in the pure module, not in Dashboard.vue, so it is testable.
     expect(GUIDE_SFC).toMatch(/isAdmin:\s*authStore\.profileVerified/)
   })
