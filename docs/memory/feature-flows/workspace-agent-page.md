@@ -84,7 +84,11 @@ would silently vanish — an unclassified row is not a hidden one.
 ```
 GET /api/enterprise/client-portal/agents/{name}/page?window=7d
   ├─ _require_roster ............ uniform 404 for an agent off the roster
-  ├─ get_roster ................. identity + "what it can do" (briefing, #138/ent#380)
+  ├─ get_agent_card ............. identity + "what it can do" (ONE briefing, #2160;
+  │                                bounded since #2163 — the page's own floor was the
+  │                                agent's 5s-per-phase HTTP, so a wedged agent hung
+  │                                its OWN page; a trip reports briefing_state
+  │                                "unavailable" rather than an empty briefing)
   └─ agent_page.build_page
        ├─ _health ............... last persisted health check
        ├─ _stats ................ db.get_agent_analytics (#1107) + first_try_stats
@@ -626,4 +630,4 @@ requires the shared escape and asserts the enumeration is gone.
 | **Asks are read-only** | Answering writes to the operator queue, an operator surface with its own auth. Rather than render a control that 403s for a client, the card offers "Reply in chat →". |
 | **Files tab is a list, not the panel** | It lists documents and uploads; the upload flow stays in the existing files panel. |
 | **Non-scheduled rows still carry no context** (#2161) | `schedule_name` answers for schedule- and webhook-backed work. A chat, loop or reminder row has no equivalent safe label, and its message is a prompt — so those rows keep trigger, duration and time. AC #3 is met for scheduled rows only. |
-| **"What it can do" is the briefing** | A projection of the roster briefing (#138/ent#380). ent#178 (unified exposable-skills config) is the mechanism this becomes a view of; it deliberately does not build a competing one. |
+| **"What it can do" is the briefing** | The same briefing the Workspace's new-chat screen shows (#138/ent#380) — built here by `get_agent_card`'s own single, bounded call since #2160/#2163, not projected out of a whole-fleet roster build. ent#178 (unified exposable-skills config) is the mechanism this becomes a view of; it deliberately does not build a competing one. |

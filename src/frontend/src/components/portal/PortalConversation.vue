@@ -93,8 +93,16 @@
 
     <!-- Messages -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <div class="max-w-4xl mx-auto space-y-6">
-        <div v-if="loadingHistory" class="text-center text-sm text-gray-400 mt-10">Loading…</div>
+      <!-- #2163 (AC4): standard first-load motion, replacing a static "Loading…".
+           Keyed on the VERDICT `historyLoaded`, never on `loadingHistory` (the
+           session-adoption path re-runs loadThread with the transcript on
+           screen). No `announce`: role="status" lands on the zone root. -->
+      <ScanlineReveal
+        :loading="!historyLoaded"
+        :reveal="messages.length > 0"
+        class="max-w-4xl mx-auto min-h-[10rem]"
+      >
+      <div class="space-y-6">
 
         <!-- Briefing (new-chat state) rendered by the parent via slot -->
         <slot v-if="!loadingHistory && messages.length === 0 && !sending" name="empty" />
@@ -168,6 +176,7 @@
           :refresh-key="deliverableTick"
         />
       </div>
+      </ScanlineReveal>
     </div>
 
     <!-- ent#458: loops this agent is running, above the asks. Quiet unless
@@ -380,6 +389,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
+import ScanlineReveal from '../ScanlineReveal.vue'
 import PortalRating from './PortalRating.vue'
 import {
   deliveryFailureReason,
@@ -472,6 +482,10 @@ const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
 const loadingHistory = ref(false)
+// #2163 — "a verdict exists for this thread's history" (mirrors `onMounted`'s
+// condition). Never goes false again on this instance, so the adoption-path
+// refetch swaps messages in place with no beam; `convKey` remounts re-derive it.
+const historyLoaded = ref(!(props.sessionId && !props.newChat))
 const input = ref('')
 const sending = ref(false)
 // ent#155 — stopping an in-flight turn. The id arrives with the 202, so Stop is
@@ -549,7 +563,7 @@ async function loadThread(sessionId) {
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
   } catch { /* start empty */ }
-  finally { loadingHistory.value = false; await scrollDown() }
+  finally { loadingHistory.value = false; historyLoaded.value = true; await scrollDown() }
 
   // ent#286: a turn was still running when this client loaded — reattach to it
   // rather than showing a thread that looks finished. The user's message is
