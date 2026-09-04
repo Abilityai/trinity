@@ -4,6 +4,19 @@
 # from it — so nothing droplet-specific and nothing secret may be produced here.
 set -euo pipefail
 
+# Packer's shell provisioner runs a non-login, non-interactive SSH shell, whose
+# PATH does not reliably carry the sbin directories. Every tool used up to the
+# firewall block lives in /usr/bin (apt-get, gpg, systemctl, git, docker), so the
+# first /usr/sbin binary reached is `ufw` — and the build died there with
+# "ufw: command not found" (exit 127) AFTER pulling all five images, five and a
+# half minutes in. Ubuntu 24.04 also merged /sbin into /usr/sbin, so both names
+# are listed for older bases.
+#
+# Set once at the top rather than absolute-pathing each call: the next sbin tool
+# added below would otherwise reintroduce the same failure, at the same late
+# point in the build.
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
+
 : "${TRINITY_IMAGE_TAG:?TRINITY_IMAGE_TAG must be passed by the Packer build}"
 
 echo "=== Trinity 1-Click build: baking ${TRINITY_IMAGE_TAG} ==="
@@ -24,20 +37,22 @@ apt-get update -q
 apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable docker
 
-# --- iptables-persistent -----------------------------------------------------
-# Installed HERE rather than at first boot (#2281 review I1). First boot did it
-# as `>/dev/null 2>&1 || true` at the busiest apt moment a droplet ever has, so
-# a transient mirror failure left the DOCKER-USER DROP rules unsaved and gone at
-# the next reboot — silently. Baked once at build time it is deterministic for
-# every droplet from this snapshot, and first boot only has to run the save.
+# --- Docker firewall persistence (NOT iptables-persistent) -------------------
+# iptables-persistent cannot be installed here. `ufw` declares
+# `Breaks: iptables-persistent, netfilter-persistent` with no version, so apt
+# resolves `apt-get install iptables-persistent` by REMOVING ufw — silently, and
+# the build then died 90 lines later at `ufw --force reset` with
+# "ufw: command not found" (exit 127), after pulling all five images.
 #
-# The debconf answers must be preseeded: the package otherwise prompts to save
-# the CURRENT ruleset, and a prompt in a non-interactive Packer run hangs until
-# the provisioner times out. `false` on both — first boot saves the ruleset that
-# actually matters, after Docker and the DROP rules exist.
-echo iptables-persistent iptables-persistent/autosave_v4 boolean false | debconf-set-selections
-echo iptables-persistent iptables-persistent/autosave_v6 boolean false | debconf-set-selections
-apt-get install -y -q iptables-persistent
+# ufw is the one that has to stay: DigitalOcean's own 99-img-check.sh calls
+# `ufw status` unconditionally on Ubuntu and reports "No firewall is configured"
+# if it is missing, which is not something to hand a Marketplace reviewer.
+#
+# The DOCKER-USER rules are persisted instead by trinity-docker-firewall.service,
+# installed below. That is also the better mechanism on its own merits:
+# netfilter-persistent restores rules at boot with no ordering against
+# docker.service, and the DOCKER-USER chain does not exist until Docker creates
+# it — so the thing being replaced was itself racy.
 
 # --- Caddy (reverse proxy + automatic certificates) --------------------------
 # PINNED, and the floor is load-bearing rather than hygiene. The whole
@@ -145,6 +160,13 @@ install -D -m 0755 /tmp/trinity-files/var/lib/cloud/scripts/per-instance/001-tri
   /var/lib/cloud/scripts/per-instance/001-trinity
 install -D -m 0755 /tmp/trinity-files/etc/update-motd.d/99-trinity \
   /etc/update-motd.d/99-trinity
+install -D -m 0755 /tmp/trinity-files/opt/trinity-firstboot/docker-firewall.sh \
+  /opt/trinity-firstboot/docker-firewall.sh
+install -D -m 0644 /tmp/trinity-files/etc/systemd/system/trinity-docker-firewall.service \
+  /etc/systemd/system/trinity-docker-firewall.service
+# Enabled at BUILD time so the rules are reapplied on every boot of every droplet,
+# including reboots that never re-run first boot (cloud-init is per-instance).
+systemctl enable trinity-docker-firewall.service
 rm -rf /tmp/trinity-files
 
 # Ubuntu's stock MOTD is noisy and pushes ours off the first screen; the

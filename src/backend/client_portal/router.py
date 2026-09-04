@@ -57,6 +57,7 @@ from .models import (
     PortalHistory,
     PortalExposureConfig,
     PortalExposureUpdate,
+    PortalBriefings,
     PortalRoster,
     PortalSearchResults,
     PortalSession,
@@ -474,8 +475,11 @@ async def my_agents(principal: PortalPrincipal = Depends(get_portal_principal)):
     Not admin-only — this is the client-facing surface. Identity comes from
     `get_portal_identity`: a portal session token (a verified email, no platform
     account) OR a platform user's email (operator preview). Agents are resolved
-    from `agent_sharing` for that email. Async (#138): the roster now enriches
-    each card with its briefing (description + client-visible playbooks).
+    from `agent_sharing` for that email.
+
+    #2163: this no longer waits for any agent HTTP. Each card ships
+    `briefing_state="pending"` and the description + hint cards #138 used to
+    resolve here are fetched by `GET /briefings` off the critical path.
     """
     # ent#357: a platform session also sees the agents it OWNS. Trinity refuses
     # a self-share, so without this an owner's roster is always empty — one
@@ -527,6 +531,83 @@ def portal_all_sessions(principal: PortalPrincipal = Depends(get_portal_principa
     rate_limiter.enforce(f"portal_sessions_all:{email}", 120, 60)
     try:
         return service.list_all_sessions(email, include_owned=include_owned)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# #2163 — how many agent names one `?agents=` filter may carry. The filtered
+# form exists for ONE agent (the active chat); this is a shape belt on a query
+# string, not a product limit, and the unfiltered form covers the whole roster
+# with no cap at all.
+_MAX_BRIEFING_NAMES = 200
+
+
+@router.get("/briefings", response_model=PortalBriefings)
+async def portal_briefings(
+    agents: Optional[str] = Query(None),
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The briefings `GET /my-agents` no longer waits for (#2163).
+
+    The roster used to carry each agent's description + hint cards, resolved by
+    fanning agent HTTP across the whole fleet and awaiting `gather` — so the
+    Workspace's first paint was bounded by the slowest agent, for every user, on
+    every sign-in. That work moved here, off the critical path.
+
+    Two shapes, one route: no `agents=` briefs the caller's whole roster (the
+    client's background batch, which fills the picker and the composer's `/`
+    typeahead), while `agents=a,b` briefs a subset — used for the ACTIVE agent,
+    so its hints arrive at its own speed instead of the batch's slowest member.
+    A per-agent route would have re-created the N+1 #2198 removed; a batch with
+    no filter would have moved the floor from the roster onto the hint zone.
+
+    Invariant #4: declared in the viewer-scoped block beside `/my-agents`,
+    `/sessions`, `/search` and `/chat-state`. This router has no top-level
+    `/{param}` catch-all today, so `briefings` cannot be shadowed — keeping it
+    here means a future one could not capture it either.
+
+    Invariant #8: no agent path parameter, and an unknown or off-roster name in
+    the filter is dropped rather than answered, so there is no existence oracle
+    — strictly less enumerable than the per-agent page route.
+    """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can SEE.
+    include_owned = principal.is_platform
+
+    names: Optional[list[str]] = None
+    if agents is not None:
+        names, seen = [], set()
+        for raw in agents.split(","):
+            n = raw.strip()
+            if not n or n in seen:
+                continue
+            seen.add(n)
+            names.append(n)
+        # Raised BEFORE the limiter so an over-cap request is work-free and
+        # cannot be used to burn the caller's own bucket. Named, not silent
+        # truncation: a caller that asked for 300 agents and got 200 back has
+        # no way to tell which 100 are missing.
+        if len(names) > _MAX_BRIEFING_NAMES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"agents: at most {_MAX_BRIEFING_NAMES} names per request",
+            )
+
+    from services import rate_limiter
+
+    # Per viewer, like every other bounded portal surface (there is no global
+    # limiter middleware). A READ still needs one here because it fans out to
+    # agent containers: the two forms get two keys, and the unfiltered one is
+    # much tighter because a single call to it costs one bounded agent request
+    # per rostered agent — a 100-agent viewer could otherwise drive ~12k agent
+    # calls a minute through a GET.
+    if names is None:
+        rate_limiter.enforce(f"portal_briefings_all:{email}", 10, 60)
+    else:
+        rate_limiter.enforce(f"portal_briefings:{email}", 60, 60)
+
+    try:
+        return await service.get_briefings(email, names, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 

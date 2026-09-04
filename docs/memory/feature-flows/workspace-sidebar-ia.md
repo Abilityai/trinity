@@ -3,7 +3,7 @@
 > **Status**: ✅ Implemented (2026-08-12)
 > **Issue**: abilityai/trinity-enterprise#359
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.10
-> **Related**: [workspace-absorbs-session.md](workspace-absorbs-session.md) (why the roster's role changed)
+> **Related**: [workspace-absorbs-session.md](workspace-absorbs-session.md) (why the roster's role changed) · [workspace-roster-briefing.md](workspace-roster-briefing.md) (#2163 — the stage and briefing carry the standard scanline motion; the sidebar's own `animate-pulse` roster skeleton stays on #1921's sweep)
 
 ## Overview
 
