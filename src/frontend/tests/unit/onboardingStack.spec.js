@@ -77,4 +77,39 @@ describe('the visible card is spaced on both sides', () => {
   it('puts no margin on the wrapper itself', () => {
     expect(DASHBOARD).toContain('<div class="onboarding-stack">')
   })
+
+  /*
+   * The one-card rule hides with CSS, so every hidden card still MOUNTS. Any
+   * "shown once" bookkeeping a card does off a Vue predicate is therefore spent
+   * behind whichever card is holding the slot.
+   *
+   * ent#437's warm re-ask is the live case: one shot per browser, and it exists
+   * precisely because a cold ask at first login converts badly. Marking it on
+   * `consentVisible` burned it while the hardening guide sat on top, and the
+   * operator met the weaker cold copy later — if they met one at all.
+   */
+  it('marks the warm ask shown only once it has really been seen', () => {
+    const sfc = read('../../src/components/onboarding/FinishSetupCard.vue')
+
+    // Real visibility, not the render predicate. A sibling being dismissed
+    // changes no state this component can watch, so an observer is the only
+    // instrument that sees the card arrive.
+    expect(sfc).toContain('IntersectionObserver')
+    expect(sfc).toMatch(/isIntersecting/)
+    expect(sfc).toContain('persistWarmShown()')
+
+    // The regression itself: persisting from inside the consentVisible watcher.
+    const watcher = sfc.slice(sfc.indexOf('watch(\n  consentVisible'))
+    const body = watcher.slice(0, watcher.indexOf('{ immediate: true }'))
+    expect(body, 'the visibility watcher must not spend the warm ask').not.toContain(
+      'persistWarmShown'
+    )
+
+    // Intersecting is necessary, not sufficient — the observer re-checks that
+    // the section still wants to render and is still the warm variant.
+    const marker = sfc.slice(sfc.indexOf('function markWarmAskSeen'))
+    const markerBody = marker.slice(0, marker.indexOf('\n}'))
+    expect(markerBody).toContain('consentVisible.value')
+    expect(markerBody).toContain("variant.value !== 'warm'")
+  })
 })
