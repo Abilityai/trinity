@@ -363,12 +363,11 @@ name for `'<agent>'`.
 
 ### Pre-flight — pick a viable pilot, then capture a baseline
 
-**First, check the candidate can be piloted at all.** Six triggers reach the
-durable queue — `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` —
-and three do not (`fan_out`, `a2a`, `operator_response`). Run the
-pull-eligible-volume query under M1 below and pick from its `pull_eligible`
-column *before* flipping anything; a week of soak on an agent whose traffic is
-all fan-out measures nothing.
+**Every autonomous trigger reaches the durable queue as of #2524.** There is no
+longer a "can this agent be piloted at all?" question — `agent`, `event`,
+`schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a` and
+`operator_response` are all pullable. Pick a pilot on volume and traffic mix,
+not on eligibility.
 
 > **Changed by #2391, widened again by #2523.** Before #2391,
 > `task_execution_service` dispatched with `overflow_policy="reject"`
@@ -379,11 +378,16 @@ all fan-out measures nothing.
 > and with `"reject"` otherwise. **A cron-driven agent is a viable pilot now** —
 > see "Choosing a pilot" below.
 >
-> #2523 added `loop`. That one was not a policy change: `loop_service` was an
-> in-process `for` loop that `await`ed each iteration's `TaskExecutionResult`, so
-> no policy could have helped it. It is now advanced by execution terminals, its
-> state lives on `agent_loops` / `agent_loop_runs`, and a loop **survives a
-> backend restart** instead of being flipped `interrupted`.
+> #2523 added `loop`; #2524 added `fan_out`, `a2a` and `operator_response`, which
+> **empties the stranded set**. None was a policy change: every one of these
+> orchestrators held the work in a coroutine and read the `TaskExecutionResult`
+> back, so no overflow policy could have helped them. A loop is advanced by
+> execution terminals now (state on `agent_loops` / `agent_loop_runs`, and it
+> **survives a backend restart** instead of being flipped `interrupted`); a
+> fan-out batch's aggregate is a query over `fan_out_id`, which also bought
+> `async_mode` and a status endpoint; `a2a` and `operator_response` go through
+> `dispatch_and_await_terminal`, which waits out the queue and rebuilds the
+> result from the row for the callers that genuinely need it in-line.
 
 Then run M4 + M6 + M7 + M9 on the pilot for the 7 days *preceding* the flip and
 keep the output. Without a baseline, a 4% success-rate dip during the soak is
@@ -451,11 +455,10 @@ WHERE agent_name = '<agent>'
   AND started_at::timestamptz > now() - interval '24 hours';
 ```
 
-Expected after the #1766 gate + #2391 + #2523: **`agent`, `event`, `schedule`,
-`webhook`, `reminder` and `loop` rows ~100% `pulled`; `fan_out`, `a2a` and
-`operator_response` 100% `pushed`.** That second half is correct behaviour, not a
-fault — read the reach table below before concluding anything from it. Confirm
-the split per trigger with:
+Expected after the #1766 gate + #2391 + #2523 + #2524: **every autonomous
+trigger ~100% `pulled`; only the interactive ones (`manual`, `mcp`, `chat`,
+`public`, `session`, `voice`, `room`) stay `pushed`, by the Open Question 7 scope
+cut (#1989).** Confirm the split per trigger with:
 
 ```sql
 SELECT triggered_by,
@@ -467,14 +470,14 @@ WHERE agent_name = '<agent>'
 GROUP BY 1 ORDER BY 1;
 ```
 
-#### Which triggers can be pulled at all (#2048, widened by #2391 and #2523)
+#### Which triggers can be pulled at all (#2048, widened by #2391 / #2523 / #2524)
 
 `capacity_manager` offers a row to the durable queue solely when its producer
 passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 
 | Producer | Carries | `overflow_policy` | Pullable? |
 |---|---|---|---|
-| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for `schedule` / `webhook` / `reminder` / `loop` |
+| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
 | `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
 
@@ -483,60 +486,65 @@ event}`, contributing `agent` + `event`. `task_execution_service` contributes th
 autonomous triggers with **no synchronous result consumer**: `schedule`,
 `webhook` and `reminder`, all three of which reach it from the scheduler, which
 dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
-since #2523 made its driver terminal-driven. The pullable set is therefore
-**`{agent, event, schedule, webhook, reminder, loop}`**
-(`pull_pilot.PULL_REACHABLE_TRIGGERS`).
+(#2523) and `fan_out` (#2524) since their orchestrators stopped holding the work
+in a coroutine, plus `a2a` and `operator_response` (#2524) through
+`task_execution_service.dispatch_and_await_terminal`. The pullable set is
+therefore **every autonomous trigger** (`pull_pilot.PULL_REACHABLE_TRIGGERS`,
+which stays an enumerated allow-list on purpose — a trigger added to
+`_AUTONOMOUS_TRIGGERS` later must be classified, not inherit reach).
 
-The three that stay pushed are stranded on their **caller**, not on the
-producer's policy — a queued row is claimed and run later and returns nothing for
-any of them to read. Two are structural: `fan_out` (builds each
-`FanOutTaskResult` from the returned result, and `POST /fan-out` blocks on the
-aggregate — the async join + sync edge adapter is **#2524**) and `a2a` (turns the
-result into the JSON-RPC artifact it hands a remote caller; falls out of #2524's
-adapter). `operator_response` is out by **choice**: it dispatches through the
-same producer #2391 widened, but the respond endpoint records `result.status` as
-the dispatch receipt (the `operator_resume_dispatch` audit row + the #525
-idempotency completion) for a turn that spends money on a person's answer
-(ent#329). Widening it is a follow-up, not a blocker.
+**Nothing autonomous is stranded any more.** `a2a` and `operator_response` were
+the last two, and they were not a policy problem: their callers genuinely need
+the answer in-line (`routers/a2a` builds a JSON-RPC artifact from
+`result.response`; `operator_resume_service` records `result.status` as the
+ent#329 dispatch receipt). Neither needs a receipt to poll — each needs to
+**block correctly while the turn happens somewhere else**, which
+`dispatch_and_await_terminal` does by waiting on `sync_waiter` and rebuilding the
+result from the row. ⚠️ Nothing signals that waiter on the pull path, so the wake
+comes from its 5s DB poll: expect up to ~5s of extra tail latency on an `a2a`
+call against a pilot agent. Deliberate — a turn is seconds-to-minutes, and a
+second signalling path is not worth it.
 
 **Reading a pushed autonomous row.** Two different situations, previously
 indistinguishable:
 
-- `triggered_by` ∈ `{fan_out, a2a, operator_response}` → **expected.**
-  The flag is applied and correct; the dispatch topology is the limit. The
-  backend logs this once per (agent, trigger) — grep `[#2048]` to confirm:
-  ```bash
-  docker logs trinity-backend 2>&1 | grep '\[#2048\]'
-  ```
-- `triggered_by` ∈ `{agent, event, schedule, webhook, reminder, loop}` → **a real
-  fault.** This is the case where the old advice applies: check the backend
-  actually has `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose
-  must forward it).
+Any pushed **autonomous** row on a pilot is now a real fault: check the backend
+actually has `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose must
+forward it). The `[#2048]` diagnostic still exists but is unreachable by design —
+if you ever see it, a NEW trigger was added to `_AUTONOMOUS_TRIGGERS` without
+being classified against dispatch topology:
+```bash
+docker logs trinity-backend 2>&1 | grep '\[#2048\]'
+```
 
-#### Choosing a pilot: cron-driven agents are viable since #2391
+#### Choosing a pilot: any agent is viable since #2524
 
-Verify pull-eligible volume *before* selecting a pilot, not after a week of soak:
+Eligibility is no longer the constraint — every autonomous trigger is pullable.
+The query below is now about **traffic mix**: pick an agent whose `pull_eligible`
+volume is high AND whose mix resembles what you want the soak to prove.
 
 ```sql
 SELECT agent_name,
        COUNT(*)                                          AS total,
        COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
        COUNT(*) FILTER (WHERE triggered_by IN
-         ('agent','event','schedule','webhook','reminder','loop')) AS pull_eligible,
+         ('agent','event','schedule','webhook','reminder','loop','fan_out',
+          'a2a','operator_response'))                            AS pull_eligible,
        COUNT(*) FILTER (WHERE triggered_by IN
-         ('fan_out','a2a','operator_response'))                    AS not_pullable
+         ('manual','mcp','chat','public','session','voice','room'))
+                                                                 AS interactive
 FROM schedule_executions
 WHERE started_at::timestamptz > now() - interval '7 days'
 GROUP BY 1 ORDER BY pull_eligible DESC;
 ```
 
-Pick from the `pull_eligible` column. **The advice this replaces was the
-opposite**: before #2391 cron could not reach the queue, so a cron-driven agent
-read ~0 `pulled` on M1 no matter how the flag was set, and the only viable pilot
-was a **fan-in hub fed by parallel `chat_with_agent`** — on `eu2` exactly one
-agent (`cornelius-oracle`, 329/329) qualified, while the cron-driven oracles sat
-at 2–5 and `brier-hq` at 0. Under the same query today those cron-driven oracles
-score ~128 each. Prefer one of them for the next soak arm: they exercise the
+**The advice this replaces was the opposite**: before #2391 cron could not reach
+the queue, so a cron-driven agent read ~0 `pulled` on M1 no matter how the flag
+was set, and the only viable pilot was a **fan-in hub fed by parallel
+`chat_with_agent`** — on `eu2` exactly one agent (`cornelius-oracle`, 329/329)
+qualified, while the cron-driven oracles sat at 2–5 and `brier-hq` at 0. Under
+the same query today those cron-driven oracles score ~128 each. Prefer one of
+them for the next soak arm: they exercise the
 traffic class the fleet actually runs, which `cornelius-oracle` never did.
 
 `tests/unit/test_2048_pull_pilot_reach.py` pins both this producer's policies
@@ -616,6 +624,34 @@ The gate is `pull_owns_dispatch` and nothing else, so:
   pull terminal cannot double-fire an iteration. If you ever see
   `runs_completed` exceed the number of `agent_loop_runs` rows, that CAS has
   been bypassed.
+
+#### What #2524 changed for fan-out
+
+- **`max_concurrency` becomes a no-op under pull, by construction.** The
+  semaphore still wraps the `execute_task` call, which on push spans the whole
+  turn and on pull returns as soon as the row is queued. So the same code paces
+  push exactly as before and lets the worker pool be the cap under pull — expect
+  a pilot's fan-out concurrency to track `max_parallel_tasks`, not
+  `max_concurrency`.
+- **A deadline no longer fails the subtasks.** `POST /fan-out` reports the batch
+  `deadline_exceeded` and each still-open subtask `running`; the executions keep
+  going under their own `execution_timeout_seconds`. **After a deadline, read
+  `GET /api/agents/{name}/fan-out/{fan_out_id}`, not the returned aggregate.**
+- **Watch for batches stuck open with no live execution** — the fan-out
+  equivalent of a lost loop advance:
+  ```sql
+  SELECT fan_out_id, count(*) AS open_rows, min(started_at) AS oldest
+  FROM schedule_executions
+  WHERE fan_out_id IS NOT NULL
+    AND status IN ('queued','running','pending_retry')
+  GROUP BY 1 HAVING min(started_at)::timestamptz < now() - interval '6 hours';
+  ```
+  A batch here is either a genuinely long agent turn or a subtask whose terminal
+  was lost. The lease reaper and `cleanup_service` own recovering the row; the
+  join re-fires on whatever terminal they write.
+- **`fan_out_task_id` is a new column and it is the caller's own string.** If a
+  batch's rows carry NULL there, they predate #2524 and the aggregate falls back
+  to the execution id as the subtask id.
 
 **M2 — split over time.** Confirms the flip took effect at the moment you think
 it did, and shows drift.

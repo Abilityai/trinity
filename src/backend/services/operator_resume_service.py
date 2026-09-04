@@ -117,7 +117,7 @@ async def maybe_dispatch_resume(
     # DEFINED `task_execution_service` — manufacturing the very symbol whose
     # absence was the bug. Verified against a live instance: flag on, answer
     # recorded, zero executions created.
-    from services.task_execution_service import get_task_execution_service
+    from services.task_execution_service import dispatch_and_await_terminal
 
     agent_name = item.get("agent_name")
     item_id = item.get("id")
@@ -152,7 +152,17 @@ async def maybe_dispatch_resume(
         return None
 
     try:
-        result = await get_task_execution_service().execute_task(
+        # #2524: through the sync edge adapter, not `execute_task` directly.
+        # This function records `result.status` as the dispatch receipt (the
+        # `operator_resume_dispatch` audit row below and the #525 idempotency
+        # completion), and under `PULL_MODE_PILOT_AGENTS` a dispatch returns
+        # `QUEUED` as soon as the row is on the durable queue — "queued" is not
+        # an outcome that contract can report. The adapter waits out the queue so
+        # the receipt is the real terminal either way, which is what lets
+        # `operator_response` join `pull_pilot.PULL_REACHABLE_TRIGGERS`. This
+        # already runs as a spawned task (`spawn_resume_dispatch`), so waiting
+        # here blocks nobody's request.
+        result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=_framed_message(item, response, response_text),
             triggered_by=TRIGGERED_BY,
