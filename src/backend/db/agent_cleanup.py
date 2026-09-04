@@ -209,6 +209,13 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
+    # ent#438 — the agent canvas is agent-authored output on the same footing
+    # as a report: CASCADE so a purge wipes it and a rename re-keys it. The
+    # rename half is load-bearing rather than tidy — `agent_name` is half the
+    # PRIMARY KEY, so an unregistered table would leave the canvas addressed to
+    # a name nothing resolves, and the agent's next write would silently mint a
+    # SECOND canvas under the new name while the old one stayed visible.
+    AgentRef("agent_canvases",               "agent_name",        Policy.CASCADE),
 
     # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
     # connector KEY is an mcp_api_keys row (scope='connector') already covered
