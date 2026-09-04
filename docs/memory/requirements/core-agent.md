@@ -1103,6 +1103,95 @@ already holds.
 
 - **Flows**: `docs/memory/feature-flows/workspace-thread-code-blocks.md`,
   `workspace-sidebar-ia.md`, `workspace-absorbs-session.md`
+### 5.18 Agent canvas — a durable surface an agent renders onto (trinity-enterprise#438)
+
+- **Status**: ✅ Implemented (2026-09-02)
+- **Requirement ID**: AGENT_CANVAS
+- **GitHub Issue**: abilityai/trinity-enterprise#438
+- **Description**: Every agent gets a **canvas** — a named, durable surface it
+  writes structured blocks onto and *updates over time*. Reports (§5.14) are the
+  immutable half: a thing published once, addressed to a person, accumulating as
+  a record. A canvas is the living half: one addressable surface per topic that
+  the agent keeps current. Before this, the only canvas Trinity had was
+  `VoiceSession.panel_state` — in-memory, written only by the Gemini Live voice
+  tools, on one page, gated behind `WORKSPACE_ENABLED && GEMINI_API_KEY`, and
+  gone when the session ended.
+- **OSS-core by decision (ent#438): deliberately ungated** — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because the default for an enterprise-tracker feature is *gated unless ruled
+  otherwise*, so the ruling must never be inferred later from the mere fact that
+  it merged (the ent#326 / ent#384 / ent#392 discipline). Rationale, on operator
+  instruction: Workspace and everything around it is OSS.
+
+- **FR-1 — One workspace, not two** (AC 1): `/agents/:name/workspace` — the
+  voice-orb-plus-panel page — is **deleted**, and the route becomes a
+  query-preserving redirect to `/workspace?agent=<name>`. It is safe to delete
+  because ent#440 already put voice conversation *inside* the Workspace, so once
+  the canvas moves the page has no capability of its own left. Same shape as the
+  §5.9 (ent#358) and ent#381 retirements: the surface goes, the route keeps
+  working.
+- **FR-2 — The canvas is a row, addressed by (agent, canvas_id)**:
+  `agent_canvases` with a composite primary key, so "update it over time" is an
+  upsert and addressability is structural rather than a convention. `canvas_id`
+  is agent-chosen and charset-validated (`^[A-Za-z0-9._-]{1,64}$`) — the same
+  guard the #919 pipeline ids carry, for the same reason: it lands in a URL.
+  Survives reload and agent restart because it is a row and not process state
+  (AC 5).
+- **FR-3 — Blocks are typed, and the renderer is the one that already exists**
+  (AC 4): a canvas is an ordered list of blocks, each
+  `{kind, title?, payload}`. `table` / `kpi` / `markdown` / `timeline` / `json`
+  delegate to the shared `components/reports/` dispatch — *reused, not forked*,
+  because those renderer keys are CI-pinned as the canonical contract
+  (`test_1535_report_prompt_guidance.py`), and forking them is what §5.11 and
+  §5.14 both refused. The canvas adds two kinds that dispatch cannot serve:
+  `chart` (over the existing `TrendLineChart`) and `html` (DOMPurify-sanitised
+  at render, H-005). The report `display_hint` enum is deliberately **not**
+  widened: a canvas is a superset of a report's rendering, not a change to what
+  a report is.
+- **FR-4 — Visibility is an explicit agent act, defaulting to operator-only**
+  (AC 8): each canvas carries `audience` ∈ `operator` (default) | `roster`.
+  `operator` is visible only on Agent Detail; `roster` additionally appears on
+  the agent's Workspace page to anyone already rostered on that agent. Default
+  operator-only is the fail-closed direction and is what makes "a canvas never
+  widens who can see the agent's output" true by construction — publishing to a
+  client is a thing the agent has to *say*, mirroring §5.14's rule that an
+  unaddressed report stays operator-only. The audience is a validated column,
+  never a key inside `blocks`, for the ent#364 reason: `blocks` is agent-authored
+  and a prompt-injected agent must not be able to decide who reads it.
+- **FR-5 — Staleness is derived, not a clock** (AC 7): the canvas always renders
+  `updated_at`, and is marked **may be out of date** when the agent has had a
+  terminal execution *after* the canvas was last written — i.e. it did work and
+  did not refresh this surface. An arbitrary age threshold was rejected: a canvas
+  has no inherent freshness expectation, so a clock would either cry wolf on a
+  monthly report or stay silent on a minute-by-minute one, whereas "the agent has
+  run since" is a fact about *this* canvas. `updated_by_execution_id` records
+  which run wrote it, so the claim is checkable.
+- **FR-6 — Writes are self-gated, bounded, and provenance-stamped**: the write
+  routes take `AuthorizedAgentByName` **plus** the #918 self-check
+  (`current_user.agent_name == name` for an agent-scoped key), so a sibling agent
+  an owner also shares cannot paint on this agent's canvas. Per-agent rate limit
+  and a byte cap on the serialized blocks (413 over cap), both reusing the #918
+  primitives. `execution_id` is validated through `resolve_and_validate_execution`
+  (the MEM-001 rule) rather than trusted.
+- **FR-7 — The voice panel becomes the canvas**: `gemini_voice`'s
+  `show_markdown` / `update_panel` / `append_to_panel` / `clear_panel` now write
+  the durable canvas (`canvas_id="voice"`) instead of session memory, so AC 2 is
+  met by the capability *moving* rather than by being dropped with a stated
+  reason. They inherit `audience="operator"`, which is what a voice session on an
+  operator-authenticated page always was.
+- **FR-8 — Empty state offers the next action** (AC 6): a canvas-less agent
+  renders what a canvas is and the one-line tool call that creates one on the
+  operator surface; on the Workspace it says the agent has not published one and
+  offers the chat, since a client has no way to write one and a dead panel would
+  be the §5.11 blank-panel defect.
+- **Cascade + retention**: `agent_canvases` is registered in `AGENT_REFS`
+  (CASCADE) so rename re-keys and the #834 hard purge wipes it — CI-blocking via
+  `test_agent_cleanup_parity`. Deliberately **no** retention window: a canvas is
+  bounded by construction (one row per `(agent, canvas_id)`, replaced on write),
+  unlike the append-only tables `RETENTION_OPS_KEYS` governs.
+- **Migrations**: dual-track — `db/migrations.py::agent_canvases_table` + Alembic
+  `0050_agent_canvases`.
+- **Flow**: `docs/memory/feature-flows/agent-canvas.md`
 
 ## 6. Activity Monitoring
 

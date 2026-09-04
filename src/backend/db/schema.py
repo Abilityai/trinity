@@ -490,6 +490,35 @@ TABLES = {
     # -------------------------------------------------------------------------
     # Agent Reports (#918) — agent-published structured telemetry/domain reports
     # -------------------------------------------------------------------------
+    # ent#438 — the agent canvas. One ROW per (agent, canvas_id), so "update it
+    # over time" is an upsert and the surface is addressable by construction.
+    # Deliberately not modelled on `agent_reports`: a report is an immutable
+    # thing published once and accumulated; a canvas is one living surface the
+    # agent keeps current. No retention window — the table is bounded by that
+    # composite key rather than growing per publish.
+    "agent_canvases": """
+        CREATE TABLE IF NOT EXISTS agent_canvases (
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            title TEXT,
+            -- Ordered JSON array of {kind, title?, payload} blocks. Agent-
+            -- authored and free-form INSIDE a block's payload, which is why
+            -- `audience` below is a sibling column and never a key in here
+            -- (the ent#364 rule).
+            blocks TEXT NOT NULL,
+            -- 'operator' (default) | 'roster'. An explicit agent act is what
+            -- puts a canvas in front of a client; the default is fail-closed.
+            audience TEXT NOT NULL DEFAULT 'operator',
+            schema_version INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            -- Which execution last wrote it. Provenance, and the thing that
+            -- makes the derived staleness claim checkable rather than a guess.
+            updated_by_execution_id TEXT,
+            PRIMARY KEY (agent_name, canvas_id)
+        )
+    """,
+
     "agent_reports": """
         CREATE TABLE IF NOT EXISTS agent_reports (
             id TEXT PRIMARY KEY,
@@ -1667,6 +1696,8 @@ INDEXES = [
 
     # Agent report indexes (#918)
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
+    # ent#438 — the agent-page read is "this agent's canvases, newest first".
+    "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     # ent#366 — one rating per person per thing. The UNIQUE is what makes

@@ -54,3 +54,21 @@ export function renderMarkdown(content) {
   const html = marked(content)
   return DOMPurify.sanitize(html)
 }
+
+/**
+ * Sanitize agent-authored HTML for `v-html` (ent#438).
+ *
+ * The sibling of `renderMarkdown` for content that arrives as markup rather
+ * than markdown — the canvas `html` block, which is what the Gemini voice
+ * panel tools write. It goes through the SAME DOMPurify instance, so the
+ * link hardening configured above (`target=_blank`, `rel=noopener
+ * noreferrer`) applies to it too; a second sanitizer would be a second policy
+ * to keep in step, which is the H-005 failure one level up.
+ *
+ * @param {string} html - Raw agent-authored HTML
+ * @returns {string} Sanitized HTML safe for v-html
+ */
+export function sanitizeHtml(html) {
+  if (!html) return ''
+  return DOMPurify.sanitize(String(html))
+}

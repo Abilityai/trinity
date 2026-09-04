@@ -270,6 +270,23 @@
       </template>
 
       <!-- ----------------------------- FILES ------------------------------ -->
+      <!-- Canvas (ent#438) — the surface this agent keeps current. Renders
+           through the SAME `components/reports/` dispatch the reports tab uses,
+           via CanvasBlock; nothing here is a second rendering layer. -->
+      <template v-else-if="tab === 'canvas'">
+        <div v-if="!canvasLoaded" class="space-y-2" aria-busy="true">
+          <div v-for="row in 2" :key="row" class="animate-pulse h-24 rounded-xl bg-gray-100 dark:bg-gray-800/60"></div>
+          <span class="sr-only">Loading this agent's canvas…</span>
+        </div>
+        <CanvasPanel
+          v-else
+          :canvases="canvases"
+          :fetch-detail="fetchCanvasDetail"
+          viewer="client"
+          @start-chat="$emit('start-chat', agentName)"
+        />
+      </template>
+
       <template v-else-if="tab === 'files'">
         <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Shared with you</h2>
         <p v-if="!documents.length" class="text-sm text-gray-400 mb-5">No files yet.</p>
@@ -346,6 +363,7 @@ import { BUCKET_COLORS, bucketsForChart, hasChartActivity } from '@/utils/execut
 import StackedBarChart from '@/components/StackedBarChart.vue'
 import InlineError from '@/components/InlineError.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
+import CanvasPanel from '../canvas/CanvasPanel.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAsks from '@/components/portal/PortalAsks.vue'
@@ -365,6 +383,11 @@ const store = useClientPortalStore()
 const TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'reports', label: 'Reports' },
+  // ent#438 — the canvas the agent keeps current, beside the reports it
+  // published once. Always offered: the tab owns an empty state that says what
+  // a canvas is and points at the chat, which is a better answer than a tab
+  // that appears and disappears as the agent writes and clears one.
+  { id: 'canvas', label: 'Canvas' },
   { id: 'files', label: 'Files' },
   { id: 'capabilities', label: 'What it can do' },
   { id: 'activity', label: 'Activity' },
@@ -488,6 +511,8 @@ watch(tab, async (t) => {
     // failed fetch would look identical to an empty one (contract #15).
     if (t === 'reports' && !reportsLoaded.value) {
       await loadReports()
+    } else if (t === 'canvas' && !canvasLoaded.value) {
+      await loadCanvases()
     } else if (t === 'files' && !documents.value.length && !uploads.value.length) {
       const [d, u] = await Promise.all([
         store.fetchDocuments(props.agentName).catch(() => []),
@@ -511,6 +536,10 @@ watch(() => props.agentName, () => {
   // to add at all (it would otherwise make a transient wrong-render permanent).
   store.resetAgentReports(props.agentName)
   openReport.value = null
+  // ent#438 — same reason as the report reset above: showing one agent's
+  // canvas under another's name is the bug class ent#359's review found twice.
+  canvases.value = []
+  canvasLoaded.value = false
   documents.value = []
   uploads.value = []
   tab.value = 'overview'
@@ -521,6 +550,28 @@ onMounted(load)
 
 function loadReports() {
   return store.loadAgentReports(props.agentName)
+}
+
+// ent#438 — canvases this agent published to the people it works with. The
+// backend narrows to `audience='roster'` in the query, so an operator-only
+// canvas is not merely hidden here, it never leaves the service.
+const canvases = ref([])
+const canvasLoaded = ref(false)
+
+async function loadCanvases() {
+  try {
+    canvases.value = await store.fetchAgentCanvases(props.agentName)
+  } catch {
+    canvases.value = []
+  } finally {
+    // Set even on failure, so the tab does not refetch on every entry. The
+    // panel's own empty state is the honest answer either way (contract #15).
+    canvasLoaded.value = true
+  }
+}
+
+function fetchCanvasDetail(canvasId) {
+  return store.fetchAgentCanvas(props.agentName, canvasId)
 }
 
 async function toggleReport(id) {

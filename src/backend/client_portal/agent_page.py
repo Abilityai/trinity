@@ -46,7 +46,9 @@ import logging
 from typing import Optional
 
 from database import db
+from db.canvas import AUDIENCE_ROSTER as CANVAS_AUDIENCE_ROSTER
 from models import REPORT_ROWS_PAGE_MAX
+from services import canvas_service
 
 from . import db as portal_db
 
@@ -410,6 +412,49 @@ def reports(agent_name: str, client_email: str, *, limit: int = 20, offset: int 
         "period_end": r.get("period_end"),
         "created_at": r.get("created_at"),
     } for r in rows]
+
+
+def canvases(agent_name: str) -> list[dict]:
+    """The agent's canvases a Workspace client may see (ent#438).
+
+    Narrowed **in the query** to `audience='roster'`, not filtered afterwards:
+    a read that loads every canvas and drops some in Python has already put an
+    operator-only surface in this process's memory one edit away from the
+    response, which is the ent#365 FR-2 lesson restated. A canvas is
+    operator-only unless the agent explicitly published it, so the default is
+    an empty Workspace tab rather than an accidental disclosure.
+
+    Fail-soft, like every other block on this page: a read error costs the
+    canvases, never the page.
+    """
+    try:
+        rows = db.list_agent_canvases(agent_name, audience=CANVAS_AUDIENCE_ROSTER)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("agent page: canvas read failed for %s: %s", agent_name, e)
+        return []
+    return canvas_service.decorate(rows, agent_name)
+
+
+def canvas_detail(agent_name: str, canvas_id: str) -> Optional[dict]:
+    """One roster-visible canvas with its blocks, or None (ent#438).
+
+    The audience narrowing is a REQUIRED argument on the accessor rather than a
+    check here, for the ent#365 FR-2 reason: a gate applied after the fetch has
+    already loaded what it was meant to withhold, and a default would make it
+    fail open.
+    """
+    try:
+        canvas_service.validate_canvas_id(canvas_id)
+    except canvas_service.CanvasError:
+        return None
+    try:
+        row = db.get_agent_canvas(
+            agent_name, canvas_id, audience=CANVAS_AUDIENCE_ROSTER
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("agent page: canvas detail failed for %s: %s", agent_name, e)
+        return None
+    return canvas_service.decorate([row], agent_name)[0] if row else None
 
 
 def _rating_tally(agent_name: str) -> dict:
