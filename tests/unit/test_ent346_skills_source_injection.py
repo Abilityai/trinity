@@ -82,7 +82,8 @@ def test_the_put_refuses_before_it_reaches_set_setting():
     a block placed *after* `db.set_setting` would satisfy any text search while
     the value had already landed.
     """
-    src = (_BACKEND / "routers" / "settings.py").read_text()
+    # #1028: the catch-all PUT lives in the package's `generic` module.
+    src = (_BACKEND / "routers" / "settings" / "generic.py").read_text()
     tree = ast.parse(src)
 
     fn = next(
@@ -110,7 +111,8 @@ def test_the_put_refuses_before_it_reaches_set_setting():
 def test_the_refusal_points_at_the_gated_route():
     """A 422 that does not say where to go turns a security control into a
     mystery, and the next person routes around it."""
-    src = (_BACKEND / "routers" / "settings.py").read_text()
+    # #1028: the catch-all PUT lives in the package's `generic` module.
+    src = (_BACKEND / "routers" / "settings" / "generic.py").read_text()
     block = src[src.index("if key in LEGACY_SKILLS_LIBRARY_KEYS"):][:900]
     assert "POST /api/skills/sources" in block
     assert "422" in block

@@ -21,6 +21,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+# #1028: gitignore-owned names read as data by these tests.
+from services.git_service import gitignore as gs_gitignore
+
 
 _project_root = Path(__file__).resolve().parents[2]
 backend_path = str(_project_root / "src" / "backend")
@@ -46,7 +49,10 @@ def _load_git_service():
         for key in list(sys.modules.keys()):
             if key.startswith("services.git_service"):
                 del sys.modules[key]
-        import services.git_service as gs
+        # #1028: git_service is a package; the alias names the module that
+        # owns the functions under test, so patches land where the code looks.
+        import services.git_service.provisioning as gs
+        from services.git_service import gitignore as gs_gitignore
     return gs
 
 
@@ -57,7 +63,7 @@ def _run_merge(tmp_path: Path) -> str:
     gs = _load_git_service()
     # The production helper hardcodes the path that the agent container
     # passes in; for tests we just point it at the temp dir.
-    cmd = gs._build_gitignore_merge_command(str(tmp_path))
+    cmd = gs_gitignore._build_gitignore_merge_command(str(tmp_path))
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True, timeout=10
     )
@@ -121,7 +127,7 @@ def test_full_documented_exclusion_list_present(tmp_path):
     content = _run_merge(tmp_path)
     lines = content.splitlines()
 
-    for pattern in gs._GITIGNORE_PATTERNS:
+    for pattern in gs_gitignore._GITIGNORE_PATTERNS:
         assert pattern in lines, (
             f"pattern {pattern!r} from _GITIGNORE_PATTERNS missing — got:\n"
             f"{content}"
@@ -139,7 +145,7 @@ def test_idempotent_double_run(tmp_path):
 
     # Each pattern must appear exactly once.
     gs = _load_git_service()
-    for pattern in gs._GITIGNORE_PATTERNS:
+    for pattern in gs_gitignore._GITIGNORE_PATTERNS:
         count = lines.count(pattern)
         assert count == 1, (
             f"pattern {pattern!r} appears {count} times after double run — "
@@ -170,7 +176,7 @@ def test_doc_and_constant_in_sync():
     )
     doc_lines = set(match.group(1).splitlines())
 
-    missing = [p for p in gs._GITIGNORE_PATTERNS if p not in doc_lines]
+    missing = [p for p in gs_gitignore._GITIGNORE_PATTERNS if p not in doc_lines]
     assert not missing, (
         f"_GITIGNORE_PATTERNS entries missing from doc block: {missing}. "
         f"Update the gitignore code block in {doc_path.name} to match "
@@ -228,8 +234,8 @@ def test_rm_cached_for_newly_ignored_files(tmp_path):
 
     # Run the real migration: gitignore merge + rm-cached for ignored files.
     for build in (
-        gs._build_gitignore_merge_command,
-        gs._build_rm_cached_ignored_command,
+        gs_gitignore._build_gitignore_merge_command,
+        gs_gitignore._build_rm_cached_ignored_command,
     ):
         result = subprocess.run(
             build(str(tmp_path)),
@@ -313,8 +319,8 @@ def test_rm_cached_exempts_brain_orb_hooks(tmp_path):
 
     # Run the real migration: fleet merge (appends `.trinity/`) + rm-cached.
     for build in (
-        gs._build_gitignore_merge_command,
-        gs._build_rm_cached_ignored_command,
+        gs_gitignore._build_gitignore_merge_command,
+        gs_gitignore._build_rm_cached_ignored_command,
     ):
         result = subprocess.run(
             build(str(tmp_path)),

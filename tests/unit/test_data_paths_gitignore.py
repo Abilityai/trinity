@@ -23,6 +23,9 @@ from unittest.mock import Mock
 
 import pytest
 
+# #1028: gitignore-owned names read as data by these tests.
+from services.git_service import gitignore as gs_gitignore
+
 _project_root = Path(__file__).resolve().parents[2]
 _backend_path = str(_project_root / "src" / "backend")
 if _backend_path not in sys.path:
@@ -76,13 +79,16 @@ def _load_git_service():
     sys.modules["database"].GitSyncResult = Mock
 
     sys.modules.pop("services.git_service", None)
-    import services.git_service as gs
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.trinity_files as gs
+    from services.git_service import gitignore as gs_gitignore
     return gs
 
 
 def _run_append(tmp_path: Path, patterns: list[str]) -> str:
     gs = _load_git_service()
-    cmd = gs._build_gitignore_append_command(str(tmp_path), patterns)
+    cmd = gs_gitignore._build_gitignore_append_command(str(tmp_path), patterns)
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True, timeout=10
     )

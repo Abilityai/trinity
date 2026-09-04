@@ -46,7 +46,9 @@ pytestmark = pytest.mark.unit
 
 def _gs():
     try:
-        import services.git_service as gs
+        # #1028: git_service is a package; the alias names the module that
+        # owns the functions under test, so patches land where the code looks.
+        import services.git_service.gitignore as gs
     except Exception:  # pragma: no cover - backend venv required
         pytest.skip("backend venv required")
     return gs

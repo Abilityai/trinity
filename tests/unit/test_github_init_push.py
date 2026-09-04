@@ -43,7 +43,9 @@ def _load_git_service():
         for key in list(sys.modules.keys()):
             if key.startswith("services.git_service"):
                 del sys.modules[key]
-        import services.git_service as gs
+        # #1028: git_service is a package; the alias names the module that
+        # owns the functions under test, so patches land where the code looks.
+        import services.git_service.provisioning as gs
     return gs
 
 
@@ -95,7 +97,9 @@ async def test_empty_remote_force_pushes():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=False)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -123,7 +127,9 @@ async def test_existing_remote_pushes_after_commit():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=True)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -149,7 +155,9 @@ async def test_existing_remote_reset_precedes_commit():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=True)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake):
         await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",
@@ -187,7 +195,9 @@ async def test_existing_remote_nothing_to_commit_still_pushes():
     gs = _load_git_service()
     fake = _FakeExec(remote_has_main=True, commit_succeeds=False)
 
-    with patch.object(gs, "execute_command_in_container", fake):
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake):
         result = await gs.initialize_git_in_container(
             agent_name="test-agent",
             github_repo="owner/repo",

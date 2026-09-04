@@ -61,7 +61,7 @@ _ALLOWED_CALLERS = {
         "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
-    ("services/agent_client.py", "_emit_dormant_alert"):
+    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
