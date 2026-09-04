@@ -5,8 +5,8 @@
 
 ## Decisions
 
-- **rule 1** - ❌ API keys, tokens, PATs, or any credentials (even in comments or docs) _(source: CLAUDE.md)_
-- **rule 2** - ❌ Internal company URLs, production domains, IP addresses. _(source: CLAUDE.md)_
+- ❌ API keys, tokens, PATs, or any credentials (even in comments or docs) _(source: CLAUDE.md)_
+- ❌ Internal company URLs, production domains, IP addresses. _(source: CLAUDE.md)_
 
 ## Being worked on right now
 
