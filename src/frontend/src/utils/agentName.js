@@ -42,9 +42,48 @@ export function hasDistinctLabel(agent) {
 }
 
 /**
- * Tooltip text for a name rendered in a constrained surface (list row, grid
- * tile) where the slug has no room of its own: shows the label AND the slug
+ * The two names a surface renders when it shows both: `{ primary, secondary }`.
+ *
+ *  - `primary` — what a human reads: the label if there is one, else the slug.
+ *  - `secondary` — the slug, and ONLY when a distinct label would otherwise
+ *    hide it; `null` when the primary already IS the slug, so a surface can
+ *    render it without reserving a phantom second line (§1.3.1 FR-4).
+ *
+ * Composed from the two helpers above rather than re-deriving the rule, so
+ * "which name wins" has exactly one definition (§1.3.1 FR-3). Call sites use
+ * this instead of an inline `display_label || name` chain; a chain in one
+ * component and this helper in another is how one agent ends up under two
+ * names, which is the confusion the label was supposed to remove.
+ *
+ * `secondary` is either `null` or exactly `agent.name` — never the label. It is
+ * the string a reader pastes into a URL, a `docker` command or an MCP key
+ * lookup, so a presentation name appearing there would be worse than showing
+ * nothing.
+ *
+ * Accepts the same inputs as `agentDisplayName`: an agent object, a bare slug
+ * string (legacy callers → `{ primary: str, secondary: null }`), or
+ * null/undefined (→ `{ primary: '', secondary: null }`).
+ *
+ * @param {{name?: string, display_label?: string|null}|string|null|undefined} agent
+ * @returns {{primary: string, secondary: string|null}}
+ */
+export function agentNameParts(agent) {
+  return {
+    primary: agentDisplayName(agent),
+    secondary: hasDistinctLabel(agent) ? agent.name : null,
+  }
+}
+
+/**
+ * Tooltip text for a name that may be truncated: shows the label AND the slug
  * when they differ, so the identity is always one hover away (§1.3.1 FR-4).
+ *
+ * This is a BELT, not the slug's home. It used to be the only place the slug
+ * appeared on the dense surfaces (list row, grid tile), which is the shortcut
+ * #2358 reverses — a `title` is invisible on touch, unreachable by keyboard and
+ * impossible to copy from. Those surfaces now render the slug as real text via
+ * `agentNameParts`; the tooltip still earns its place for a long label that
+ * ellipsizes.
  * @param {{name?: string, display_label?: string|null}|null|undefined} agent
  * @returns {string}
  */

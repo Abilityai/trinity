@@ -15,14 +15,14 @@ from ``agent_loop_runs``, which is why only two columns are needed.
 
 Mirrors the SQLite ``agent_loops_terminal_driven`` migration.
 
-Revision ID: 0050_agent_loops_terminal_driven
-Revises: 0049_execution_turn_integrity
+Revision ID: 0051_agent_loops_terminal_driven
+Revises: 0050_agent_canvases
 """
 from alembic import op
 
 
-revision = "0050_agent_loops_terminal_driven"
-down_revision = "0049_execution_turn_integrity"
+revision = "0051_agent_loops_terminal_driven"
+down_revision = "0050_agent_canvases"
 branch_labels = None
 depends_on = None
 

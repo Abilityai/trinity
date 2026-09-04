@@ -99,6 +99,26 @@ broke, and `agentExists` throws so the test fails with the real diagnosis
 instead of skipping under a false "agent not found". Use the shared
 `e2e/helpers/agent-probe.js` — do not hand-roll a probe.
 
+**Borrowing an agent's display label (#2358).** `e2e/helpers/agent-label.js`
+(`FIXTURE_LABEL` / `pickLabelFixture` / `readLabel` / `writeLabel`) is the
+shared borrow-and-restore for specs that must see a labelled agent. It prefers
+an agent that is already labelled and falls back to `trinity-system` (CI's
+whole fleet). **Read the prior label, restore it in `test.afterEach`, and keep
+such tests in a `serial` block**: a `finally` inside a body that times out is
+not reliably run, the config is `fullyParallel: true`, and `AgentHeader.vue`
+hides the label pencil for system agents — a label stranded on
+`trinity-system` can only be cleared through the API. Same loud-never-silent
+rule as the probe: every non-2xx throws with the real status.
+
+`serial` orders tests within ONE file, and two specs borrow the same agent
+(`dashboard-list-view` and `dashboard-grid-view`), so **run them together with
+`--workers=1`** — `workers` is pinned to 1 on CI but left at the default
+locally. `FIXTURE_LABEL` is the only label these helpers write and is
+deliberately self-identifying; `readLabel` REFUSES to return it, so a second
+worker (or a run killed mid-borrow) fails loudly before writing instead of
+restoring a test artefact as if it were the operator's own label. If you ever
+see it on a live agent: `PUT /api/agents/<name>/label {"label": null}`.
+
 > **Known gap:** `circuit-breaker-badge.spec.js` still carries the legacy
 > unauthenticated probe, so both its tests skip on every run. It was left as-is
 > deliberately: with an authenticated probe its `@smoke` test **fails** — a

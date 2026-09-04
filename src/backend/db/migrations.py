@@ -2878,7 +2878,7 @@ def _migrate_agent_loops_terminal_driven(cursor, conn):
     `agent_loop_runs` (accumulated cost, consecutive failures, the #1157
     no-progress fingerprints), which is why only two columns are needed.
 
-    Mirrored by the Alembic revision 0050_agent_loops_terminal_driven.
+    Mirrored by the Alembic revision 0051_agent_loops_terminal_driven.
     """
     _safe_add_column(
         cursor,
@@ -3924,6 +3924,39 @@ def _migrate_execution_turn_integrity(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_table(cursor, conn):
+    """Create agent_canvases (ent#438).
+
+    The durable agent canvas — one row per (agent_name, canvas_id), so a write
+    is an upsert and the surface is addressable. Schema is also in
+    db/schema.py for fresh installs; this handles existing ones. Idempotent.
+    Mirrored by Alembic revision 0050_agent_canvases for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_canvases)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_canvases (
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            title TEXT,
+            blocks TEXT NOT NULL,
+            audience TEXT NOT NULL DEFAULT 'operator',
+            schema_version INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by_execution_id TEXT,
+            PRIMARY KEY (agent_name, canvas_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent "
+        "ON agent_canvases(agent_name, updated_at DESC)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4045,4 +4078,5 @@ MIGRATIONS = [
     ("channel_report_client", _migrate_channel_report_client),
     ("workspace_ratings", _migrate_workspace_ratings),
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
+    ("agent_canvases_table", _migrate_agent_canvases_table),
 ]

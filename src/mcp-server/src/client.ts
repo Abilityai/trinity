@@ -1519,6 +1519,55 @@ export class TrinityClient {
     );
   }
 
+  // =========================================================================
+  // Agent canvas (ent#438)
+  // =========================================================================
+
+  /**
+   * Write (create or replace) one canvas. PUT, because the operation is
+   * idempotent on (agent, canvas_id) — that is the surface's whole contract.
+   */
+  async writeCanvas(
+    agentName: string,
+    canvasId: string,
+    data: {
+      title?: string;
+      blocks: Array<{ kind: string; title?: string; payload?: unknown }>;
+      audience?: "operator" | "roster";
+      execution_id?: string;
+    }
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "PUT",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`,
+      data
+    );
+  }
+
+  /** One canvas with its blocks. */
+  async getCanvas(agentName: string, canvasId: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`
+    );
+  }
+
+  /** Canvas metadata for one agent, newest-updated first (no blocks). */
+  async listCanvases(agentName: string): Promise<Array<Record<string, unknown>>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas`
+    );
+  }
+
+  /** Remove a canvas. Idempotent — clearing an absent canvas succeeds. */
+  async clearCanvas(agentName: string, canvasId: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "DELETE",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`
+    );
+  }
+
   /**
    * List reports across accessible agents — METADATA only, no payload (#1538).
    * The backend scopes to the caller's accessible agents; an agent-scoped key is

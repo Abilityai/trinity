@@ -632,6 +632,85 @@ def _validate_iso8601(value: Optional[str]) -> Optional[str]:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Agent canvas (ent#438)
+# ---------------------------------------------------------------------------
+
+# A canvas id lands in a URL and is half a primary key, so it is
+# charset-validated the way #919's pipeline ids are, not merely length-capped.
+CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# Serialized blocks ceiling. An order of magnitude under the report cap by
+# intent: a report is an archive that may legitimately carry a large table,
+# whereas a canvas is a surface re-sent in full on every update and re-read on
+# every page load.
+CANVAS_BLOCKS_MAX_BYTES = 512 * 1024  # 512 KiB
+CANVAS_MAX_BLOCKS = 50
+
+CANVAS_RATE_LIMIT = int(os.getenv("CANVAS_RATE_LIMIT", "60"))
+CANVAS_RATE_WINDOW = int(os.getenv("CANVAS_RATE_WINDOW", "60"))
+
+# Block kinds. The first five delegate to the shared `components/reports/`
+# dispatch — reused, never forked, because those renderer keys are CI-pinned as
+# the canonical contract (`test_1535_report_prompt_guidance.py`). `chart` and
+# `html` are the two the canvas adds; the report `display_hint` enum is
+# deliberately NOT widened, because a canvas is a superset of a report's
+# rendering rather than a change to what a report is.
+CanvasBlockKind = Literal["table", "kpi", "markdown", "timeline", "json", "chart", "html"]
+
+# `operator` (default) is fail-closed: a canvas reaches a Workspace client only
+# because the agent explicitly said `roster`.
+CanvasAudience = Literal["operator", "roster"]
+
+
+class CanvasBlock(BaseModel):
+    """One rendered block on a canvas (ent#438)."""
+    kind: CanvasBlockKind
+    title: Optional[str] = Field(None, max_length=300)
+    # Free-form per kind, byte-capped as a whole at the router. A dict OR a
+    # list, because `table` rows and `kpi` tiles are naturally arrays and
+    # forcing a wrapper object on the agent buys nothing.
+    payload: Union[Dict, List] = Field(default_factory=dict)
+
+
+class CanvasWrite(BaseModel):
+    """Request body for an agent writing its canvas (ent#438).
+
+    The agent is resolved server-side from the auth context, never from this
+    body, and `audience` is a validated field rather than a key inside a block
+    — `blocks` is agent-authored free-form content, so an audience buried there
+    would let a prompt-injected agent choose who reads it (the ent#364 rule).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = Field(None, max_length=300)
+    blocks: List[CanvasBlock] = Field(default_factory=list, max_length=CANVAS_MAX_BLOCKS)
+    audience: CanvasAudience = "operator"
+    # The turn this write came from. Validated against the agent
+    # (`resolve_and_validate_execution`, the MEM-001 rule) — provenance, and
+    # what makes the derived staleness claim checkable.
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+
+class CanvasSummary(BaseModel):
+    """List-response model — metadata only, never carries ``blocks`` (ent#438)."""
+    agent_name: str
+    canvas_id: str
+    title: Optional[str] = None
+    audience: str
+    schema_version: Optional[int] = 1
+    created_at: str
+    updated_at: str
+    updated_by_execution_id: Optional[str] = None
+    # Derived, never stored: the agent has run since this canvas was written.
+    stale: bool = False
+
+
+class Canvas(CanvasSummary):
+    """Detail-response model — summary plus the blocks (ent#438)."""
+    blocks: List[Dict] = Field(default_factory=list)
+
+
 class ReportCreate(BaseModel):
     """Request body for an agent publishing a structured report (#918).
 

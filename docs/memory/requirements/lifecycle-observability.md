@@ -566,8 +566,94 @@ transport); only the **reciprocity benchmark view** is entitlement-gated
   the comparison.
 
 **Deferred**: the hosted aggregation/benchmark service (separate issue); v2/v3
-carrots (targeted alerts, live in-app benchmark panel, roadmap influence);
-warm-ask-after-value prompt.
+carrots (targeted alerts, live in-app benchmark panel, roadmap influence).
+The warm-ask-after-value prompt shipped with §45.2.
+
+### 45.2 Opt-in Instance Telemetry — prominent ask, share id, outcome mix (trinity-enterprise#437)
+
+**Description**: the second cut of the Tier-2 channel (§45.1): a consent ask
+that every install actually reaches, an anonymous share identity that cannot be
+joined to the identified operator record, an enforced payload schema with the
+sent payloads inspectable afterwards, and an outcome mix that says how autonomous
+work ends. Sovereignty is unchanged and re-checked at every gate: **off by
+default, nothing leaves the box without consent, no agent content, no prompts, no
+credentials, no agent names.**
+
+**Open-core split** (**OSS-core by decision**, ent#437 — consistent with the
+§45.1 ruling, recorded here so it is never inferred from the merge): the ask,
+the share id, the schema, the send log and the outcome mix are all OSS code with
+no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry`).
+
+- **FR-1 — A reachable, prominent, non-nagging ask**: the wizard ask (§45.1
+  FR-5) only renders on a zero-agent install, which first-run seeding makes
+  permanently false, and #2385 removed the welcome form on every install with a
+  pre-provisioned admin. The ask now lives in the post-login **"Finish setup"**
+  card on the Dashboard (`components/onboarding/FinishSetupCard.vue`, admin +
+  `profileVerified`-gated, one section per open item: the sign-in-email nudge
+  from #2381 and usage sharing). **Not now** is a 14-day per-browser snooze;
+  **Don't ask again** writes the server marker `telemetry_sharing_dismissed_at`
+  (`POST /api/settings/telemetry-sharing/ask/dismiss`, admin + human-only,
+  audit-logged); consent writes it too. A **warm re-ask** returns once per
+  browser with value-framed copy after the install's first successful autonomous
+  execution (schedule/webhook), derived on read and memoised in
+  `telemetry_sharing_first_value_at` — no hook in the dispatch path. The card
+  reads four booleans from `GET /api/settings/feature-flags`
+  (`telemetry_sharing_enabled` / `_hard_disabled` / `_dismissed` /
+  `_first_value`) and calls the admin status route only when it will render;
+  the payload preview loads lazily on expand (`?preview=0` skips the builder).
+  Steady-state cost on a Dashboard load: zero telemetry queries.
+- **FR-2 — Share identity is separate from the install identity**:
+  `installation_id` (§43.1) travels with the operator's email and company in the
+  intake POST, so a share keyed on it is linkable to a person. The aggregate
+  carries **`sharing_id`** (UUID4) instead — minted on the off→on consent
+  transition with `insert_setting_if_absent` (atomic across workers), unchanged
+  while consent stays on, **deleted on revoke**, re-minted on re-consent (revoke
+  = forget locally; anything already sent stays with the receiver until a
+  deletion signal exists — an ent#190 contract item). `installation_id` is banned
+  from the payload by the validator, the id is logged only as an 8-char prefix,
+  and `instance.trinity_version` is the release version (never a commit SHA) so
+  adoption timing cannot re-join this stream to the presence/intake streams.
+  Honest scope: the payload is not traceable **by itself**; unlinkability also
+  depends on the receiver keeping the streams apart (ent#190, ent#466).
+- **FR-3 — Documented and enforced schema (`schema_version: 2`)**:
+  `PAYLOAD_SCHEMA_V2` is a nested allow-list; `validate_payload` raises on any
+  unknown key, wrong type, `installation_id`, or non-UUID share id, and
+  `share_now` **refuses to send** on a violation (fail-closed egress, ERROR log,
+  recorded as a failed send). Vocabularies that reach the wire are
+  telemetry-owned enums — trigger buckets map to `chat | mcp | channel | public |
+  schedule | loop | reminder | room | operator_queue | agent | voice | other`,
+  funnel steps derive from `_FUNNEL_STEPS` — with parity tests, so a new product
+  bucket lands in `other` instead of halting telemetry fleet-wide.
+- **FR-4 — Outcome mix, install lane, release version**: `outcomes.by_trigger`
+  (`{total, success, failed}` per wire bucket, projected from the executions
+  timeline reader — cost and context never ship), `outcomes.by_status`
+  (terminal rows by status), `outcomes.provider_failures` (`rate_limit` / `auth`
+  counts from `subscription_rate_limit_events`, retention-bounded even for an
+  all-time backfill), `instance.install_source` (#2380, `unknown` stays
+  `unknown`). Labelled **outcome mix**, never "failure taxonomy" — the
+  error-class taxonomy is ent#418's.
+- **FR-5 — Inspect afterwards**: the last 5 send attempts (success and failure,
+  with HTTP status or error class, never `str(e)`) are kept in
+  `telemetry_sharing_recent_sends` and rendered in Settings → Usage sharing. A
+  404 from the default URL is worded as "the hosted service is not live yet"
+  unless `TELEMETRY_SHARING_URL` was overridden — the receiver (ent#190) does
+  not exist at the time of writing, so every send fails and the UI says so.
+- **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
+  is retried by the 24h heartbeat until the first 2xx
+  (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
+  `last_shared_at`; a Redis tick marker (`telemetry_share:tick`, TTL half the
+  interval, never released, fail-open) makes one worker send per interval.
+- **FR-7 — Reset paths**: every consent-family key sits under the
+  `telemetry_sharing_` prefix the generic `PUT /api/settings/{key}` already
+  refuses; the generic `DELETE` stays open for it by design — deleting a key
+  only moves toward off / ask again / re-mint. The builder runs off the event
+  loop (`asyncio.to_thread`) and every reader is fenced so a stubbed or failing
+  source degrades a field, never the payload.
+
+**Deferred**: feature-usage / click-through coverage (PR2, child issue); an
+edition-differentiated ask (when ent#190 exists); the taxonomy field (ent#418);
+a deletion signal on revoke (ent#190); `main.py` adopting
+`utils/app_version.py` (debt inbox `2026-09-03-main-version-resolver-adopt-util`).
 
 ---
 

@@ -302,9 +302,21 @@ never celebrate); swap loading/loaded content inside the SLOT of one persistent 
 zone. During the arrival pass the track is wiped OUT behind the beam (complementary
 `clip-path`), so revealed pixels sit on their final background from the first frame — no
 end-of-pass background snap. Theme via `--scan-core`/`--scan-track` overrides (the Grid
-rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones — Dashboard-only
-for now by product decision; adopting any further surface = the ent#253 pass; do not build
-a new spinner.
+rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones, the Executions
+info tile's chart zone (ent#449, via the chassis opt-in `owns-loading` — a tile may own its
+LOADING face inside `InfoTile`'s slot; the chassis keeps `error`/`empty`), and — since
+#2163 — the Workspace's three zones (the stage in `Portal.vue`, the conversation body in
+`PortalConversation.vue`, the hint zone in `PortalBriefing.vue`), each keyed on its own
+"no data yet" and each snapping rather than revealing on a failed/empty/refused terminal.
+Adopting any further surface = the ent#253 pass; do not build a new spinner.
+
+`content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
+`.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
+loaded content must FILL the zone (a full-height flex column, rather than be measured by
+it) had no way to say so. Default `''`; sizing the ZONE stays the consumer's job either
+way. Note `announce` puts `role="status"` on the zone ROOT, which is an implicit
+aria-live region — never pass it for a zone wrapping content that keeps changing (a
+transcript, a composer), or every update is re-announced in full.
 
 ### Rules (all mandatory)
 

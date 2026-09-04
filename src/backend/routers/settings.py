@@ -292,24 +292,47 @@ async def get_public_feature_flags(
         "enterprise_features": entitlement_service.list_entitled_features(),
         # ent#12 Tier-2 opt-in sharing — observability only (the egress gate is
         # the stored consent + config switch). Default-off; the UI reads it to
-        # show the sharing state without a second round-trip. Non-sensitive bool.
-        "telemetry_sharing_enabled": telemetry_sharing_service.is_consent_enabled(),
+        # show the sharing state without a second round-trip. Non-sensitive
+        # bools. ent#437 adds three siblings (`_hard_disabled`, `_dismissed`,
+        # `_first_value`) so the Finish-setup consent card decides whether to
+        # render from THIS document alone and never calls the admin status route
+        # on a Dashboard load it will not act on. Fail-safe in the hidden
+        # direction inside `public_flags` — a raise here would zero every flag.
+        **telemetry_sharing_service.public_flags(),
     }
 
 
 @router.get("/telemetry-sharing")
-async def get_telemetry_sharing(current_user: User = Depends(get_current_user)):
+async def get_telemetry_sharing(
+    preview: bool = True,
+    current_user: User = Depends(get_current_user),
+):
     """Tier-2 opt-in sharing status + an inspectable preview of the exact
-    anonymized payload that would be sent (ent#12). Admin-only. Local read — no
-    egress. The preview lets the operator see precisely what is shared before
-    consenting (AC: payload documented and inspectable before send)."""
+    anonymized payload that would be sent (ent#12). Local read — no egress. The
+    preview lets the operator see precisely what is shared before consenting
+    (AC: payload documented and inspectable before send).
+
+    ent#437: `?preview=0` returns the status alone — what the Finish-setup
+    consent card needs to decide and render; the preview loads lazily when the
+    operator expands "See what would be sent". The response now also carries
+    the share identity and the last sent payloads, so the read is human-only as
+    well as admin-only (an agent-scoped key resolves to its owner carrying the
+    owner's role; `assert_admin` already rejects it since #1890 — this is the
+    explicit belt the PUT wears). Both reads run off the event loop: the
+    aggregate is three table scans.
+    """
+    from dependencies import reject_agent_principal
     assert_admin(current_user)
-    status = telemetry_sharing_service.get_status()
-    # Preview over the configured backfill window — what a consent-time share
-    # would contain. Coarse aggregates only; never any PII.
-    status["payload_preview"] = telemetry_sharing_service.build_aggregate_payload(
-        window_days=status.get("backfill_days"), backfill=True
-    )
+    reject_agent_principal(current_user)
+    status = await asyncio.to_thread(telemetry_sharing_service.get_status)
+    if preview:
+        # Preview over the configured backfill window — what a consent-time
+        # share would contain. Coarse aggregates only; never any PII.
+        status["payload_preview"] = await asyncio.to_thread(
+            telemetry_sharing_service.build_aggregate_payload,
+            status.get("backfill_days"),
+            backfill=True,
+        )
     return status
 
 
@@ -344,15 +367,55 @@ async def set_telemetry_sharing(
             event_action="telemetry_sharing_consent",
             source="api",
             actor_user=current_user,
-            details={"enabled": body.enabled, "backfill_days": status.get("backfill_days")},
+            # ent#437: whether a fresh share id was minted rides as a BOOL only —
+            # audit rows are exported and 365-day retained; the id itself never
+            # enters them.
+            details={
+                "enabled": body.enabled,
+                "backfill_days": status.get("backfill_days"),
+                "sharing_id_rotated": bool(status.get("sharing_id_rotated")),
+            },
         )
     except Exception:  # audit is best-effort
         logger.debug("[telemetry-share] audit log failed", exc_info=True)
 
-    # Consent-time backfill: only on the off→on transition, fire-and-forget.
+    # Consent-time backfill: only on the off→on transition, fire-and-forget —
+    # strong-ref'd (ent#437): a bare create_task can be GC'd mid-flight and the
+    # first send would vanish with nothing in the send log to say so.
     if body.enabled and not was_enabled:
-        asyncio.create_task(telemetry_sharing_service.share_now(backfill=True))
+        telemetry_sharing_service.spawn_share(backfill=True)
 
+    return status
+
+
+@router.post("/telemetry-sharing/ask/dismiss")
+async def dismiss_telemetry_ask(current_user: User = Depends(get_current_user)):
+    """"Don't ask again" for the Finish-setup consent card (ent#437).
+
+    Writes the once-per-install server marker (`telemetry_sharing_dismissed_at`)
+    so the card stops asking on every browser and device. Idempotent — the first
+    stamp wins. Admin + human-only: it silences a consent surface, which is a
+    grant-shaped act (learnings 2026-07-24), and the generic PUT /api/settings/
+    {key} already refuses the whole `telemetry_sharing_*` family, so this route
+    is the only writer. The softer "Not now" is a per-browser snooze the client
+    keeps to itself and never reaches the server. Reset: an admin DELETE of the
+    key on the generic route — deleting it only makes the card ask again.
+    Audit-logged.
+    """
+    from dependencies import reject_agent_principal
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+    status = telemetry_sharing_service.mark_ask_dismissed()
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="telemetry_sharing_ask_dismissed",
+            source="api",
+            actor_user=current_user,
+            details={"dismissed_at": status.get("dismissed_at")},
+        )
+    except Exception:  # audit is best-effort
+        logger.debug("[telemetry-share] audit log failed", exc_info=True)
     return status
 
 

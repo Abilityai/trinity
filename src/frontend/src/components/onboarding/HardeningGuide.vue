@@ -159,7 +159,9 @@ const visible = computed(
       // `profileVerified` (#2198) is load-bearing, not defensive: `userRole`
       // falls back to 'user' until /api/users/me lands, so without it the card
       // would flash for a non-admin on every page load and then vanish.
-      isAdmin: authStore.profileVerified && authStore.userRole === 'admin',
+      // `role`, not `userRole` — the latter never existed on the auth store, so
+      // this card had been permanently hidden (found by the ent#437 eyeball).
+      isAdmin: authStore.profileVerified && authStore.role === 'admin',
       marketplaceInstall: store.marketplaceInstall,
       installTlsPosture: store.installTlsPosture,
       dismissed: dismissed.value,
