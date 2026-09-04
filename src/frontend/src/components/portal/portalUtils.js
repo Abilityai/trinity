@@ -774,6 +774,144 @@ export function boundCandidates(list, limit = TYPEAHEAD_LIMIT) {
   return { visible: all.slice(0, n), overflow: Math.max(0, all.length - n) }
 }
 
+// ---------------------------------------------------------------------------
+// ent#402 — sidebar search filters the AGENT roster too, not only the chats.
+//
+// Everything decidable lives here rather than in PortalSidebar.vue, because
+// vitest runs `environment: 'node'` with no component-mount harness: a rule
+// written inside the SFC is a rule no test can reach (the ent#392 precedent).
+// ---------------------------------------------------------------------------
+
+// Its own constant, deliberately not TYPEAHEAD_LIMIT: a sidebar row is taller
+// than a typeahead row (avatar + label + slug + chips), so the two windows are
+// answering different questions about the same list.
+export const SIDEBAR_AGENT_RESULT_LIMIT = 8
+
+export const SEARCH_PLACEHOLDER = 'Search agents and chats…'
+
+/**
+ * Agent matches for the sidebar search.
+ *
+ * Two properties are load-bearing and both live HERE rather than at the call
+ * site, so a caller cannot get them wrong:
+ *
+ *  1. `requireMentionable: false`. `filterAgentCandidates` defaults it TRUE for
+ *     the composer, where an un-mentionable slug is a dead-end pick. A sidebar
+ *     row is not a mention — a dotted slug like `data.scout` opens perfectly
+ *     well — so filtering by mentionability here would hide a real agent from a
+ *     search for its own name.
+ *  2. The window is `visibleAgentRows`, the #2424 rule the steady state already
+ *     uses, NOT a plain `boundCandidates` slice. A slice is rank-ordered, so an
+ *     agent with an open ask can fall past the window and be hidden from the
+ *     result set — the exact failure #2424 fixed for the collapsed list, which a
+ *     second bounding rule would quietly reintroduce for search.
+ *
+ * Returns a RECORD, because the section header, the toggle and the empty line
+ * each need a different fact about the same result and must not re-derive it.
+ */
+export function searchAgents(roster, query, {
+  askCounts = {},
+  expanded = false,
+  limit = SIDEBAR_AGENT_RESULT_LIMIT,
+} = {}) {
+  const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
+  const visible = visibleAgentRows(items, { expanded, askCounts, limit })
+  return {
+    items,
+    visible,
+    total: items.length,
+    hidden: Math.max(0, items.length - visible.length),
+  }
+}
+
+/**
+ * Which shape the search region is in.
+ *
+ * `roster-loading` wins outright: a two-character query typed while the roster
+ * is still in flight must not read "No agents match." over a roster that has
+ * not arrived — loading is not empty (design-system p15). `searching` describes
+ * the CHAT request only; agents are filtered client-side over a roster already
+ * in hand, so they render regardless of what the chat request is doing.
+ */
+export function sidebarSearchState({
+  agentTotal = 0,
+  chatCount = 0,
+  chatsSearching = false,
+  rosterLoading = false,
+} = {}) {
+  if (rosterLoading) return 'roster-loading'
+  if (chatsSearching) return 'searching'
+  if (agentTotal > 0 && chatCount > 0) return 'both'
+  if (agentTotal > 0) return 'agents-only'
+  if (chatCount > 0) return 'chats-only'
+  return 'none'
+}
+
+/**
+ * The honest lines, PER SECTION — never one combined sentence.
+ *
+ * A combined "Nothing matches" over-claims: the chat half is a server request
+ * whose failure the view currently swallows into `[]`, so "nothing matches"
+ * would assert something about chats that was never actually answered. Two
+ * lines each state only what their own section knows, and neither can stand in
+ * for the other: "nothing matched at all" is BOTH lines plus the hint, while
+ * "agents matched, no chats" is the chats line alone.
+ *
+ * `agentsEmpty` exists because the STATE cannot express one real case. The chat
+ * request's own flag is set on every keystroke and stays set until the request
+ * settles, so `searching` covers the whole time someone is typing — and the
+ * agent half is a client-side filter that already knows its answer. Reading the
+ * agents line off the state alone left an agents section with a header, no rows
+ * and no sentence for the entire typing session, which is the dead state this
+ * function exists to prevent. `chats-only`/`none` already MEAN no agent matched,
+ * so the flag only adds the arm the state cannot reach; loading still outranks
+ * both (loading is not empty).
+ */
+export function searchEmptyLines(state, query = '', { agentsEmpty = false } = {}) {
+  const q = String(query ?? '')
+  const noAgents = agentsEmpty || state === 'chats-only' || state === 'none'
+  const agents = (state !== 'roster-loading' && noAgents) ? 'No agents match.' : null
+  let chats = null
+  if (state === 'searching') chats = 'Searching chats…'
+  else if (state === 'agents-only' || state === 'none') chats = 'No chats match.'
+  const hint = state === 'none'
+    ? (q ? 'Try another word, or clear the search.' : null)
+    : null
+  return { agents, chats, hint }
+}
+
+// The count, not the overflow — the toggle beside it already states how many
+// are hidden, and a header that repeats it says the same thing twice.
+export function agentResultsLabel(total) {
+  const n = Number(total) || 0
+  return n > 0 ? `Agents · ${n}` : 'Agents'
+}
+
+/**
+ * The label on the ONE persistent toggle (#2159 — two v-if-alternated buttons
+ * drop keyboard focus on collapse). Its count changes with the mode because it
+ * expands a different list: the whole roster in the steady state, the match set
+ * while searching.
+ */
+export function agentToggleLabel({
+  searching = false,
+  expanded = false,
+  rosterCount = 0,
+  matchCount = 0,
+} = {}) {
+  if (expanded) return 'Show fewer'
+  return searching
+    ? `Show all (${Number(matchCount) || 0} matches)`
+    : `Show all (${Number(rosterCount) || 0})`
+}
+
+// While searching the toggle is only meaningful when it has something to do:
+// something is hidden, or the list is expanded and can be collapsed back.
+export function showAgentToggle({ searching = false, hidden = 0, expanded = false } = {}) {
+  if (!searching) return true
+  return expanded || (Number(hidden) || 0) > 0
+}
+
 /**
  * The room's `@` wake-set.
  *

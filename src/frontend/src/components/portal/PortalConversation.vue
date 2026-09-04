@@ -128,21 +128,23 @@
             </button>
           </div>
           <div v-else class="max-w-[85%]">
-            <div
-              class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal"
-              v-html="render(m.content)"
-            ></div>
-            <!-- ent#366: one click, on the answer being judged. Only on a
-                 PERSISTED agent message — a reply composed locally during the
-                 live turn has no row id yet, and a thumb needs something to
-                 point at. It becomes rateable on the next load. -->
-            <PortalRating
-              v-if="m.id"
-              :agent-name="agent.name"
-              target-kind="message"
-              :target-id="m.id"
-              :initial-rating="m.myRating"
-            />
+            <!-- #2515: the bubble, its markdown body, its stylesheet and both
+                 copy controls are ONE component now. The rating lands in the
+                 bubble's action row beside the message Copy — same row, one
+                 line of controls under the answer they are about. -->
+            <PortalAgentBubble :content="m.content">
+              <!-- ent#366: one click, on the answer being judged. Only on a
+                   PERSISTED agent message — a reply composed locally during the
+                   live turn has no row id yet, and a thumb needs something to
+                   point at. It becomes rateable on the next load. -->
+              <PortalRating
+                v-if="m.id"
+                :agent-name="agent.name"
+                target-kind="message"
+                :target-id="m.id"
+                :initial-rating="m.myRating"
+              />
+            </PortalAgentBubble>
           </div>
         </div>
 
@@ -381,8 +383,8 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
+import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalLoops from './PortalLoops.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
@@ -533,8 +535,6 @@ const composerWrap = ref(null)
 const typeaheadTrigger = ref(null)
 const activeIndex = ref(-1)
 const dismissed = ref(null)
-
-const render = (c) => renderMarkdown(c || '')
 
 // ---- Load history when the thread/agent changes -------------------------------
 async function loadThread(sessionId) {
@@ -1970,22 +1970,3 @@ function monitorTick() {
 
 defineExpose({ focusComposer: () => textarea.value?.focus() })
 </script>
-
-<style scoped>
-/* #2211: 8px between paragraphs, not 4px. At `text-sm` with the bubble's own
-   padding, 4px read as a single dense block; 8px is the next step on the 4px
-   grid the design contract defines (4 tight / 8 related / 12 grouped). */
-.prose-portal :deep(p) { margin: 0.5rem 0; }
-/* First and last paragraph must not double up with the bubble padding, or the
-   looser rhythm reads as a lopsided bubble. */
-.prose-portal :deep(p:first-child) { margin-top: 0; }
-.prose-portal :deep(p:last-child) { margin-bottom: 0; }
-.prose-portal :deep(pre) { overflow-x: auto; padding: 0.5rem; border-radius: 0.375rem; }
-/* Token-based tint rather than an `rgba()` literal: the design contract
-   forbids hardcoded colors, and the raw-color ratchet counts them. Applied
-   via @apply so light/dark both come from the gray scale. */
-.prose-portal :deep(pre) { @apply bg-gray-100 dark:bg-gray-800; }
-.prose-portal :deep(code) { font-size: 0.8em; }
-.prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
-.prose-portal :deep(a) { text-decoration: underline; }
-</style>
