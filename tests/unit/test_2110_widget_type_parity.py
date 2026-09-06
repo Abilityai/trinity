@@ -45,7 +45,9 @@ Design:
 
 **Authoring rule this imposes:** on any line that says "widget type(s)" in
 `docs/user-docs/**`, the agent guide (outside Revision History) or the spec,
-never backtick `chart`, `badge` or `countdown`. Name them in plain prose.
+never backtick `chart`, `badge` or `countdown` — bare or as `type: chart`.
+Name them in plain prose. Quoting D-002's own output in a longer code span is
+fine (the backticks are not adjacent to the token).
 
 CI: `tests/unit/` is the only directory the per-PR job collects
 (`backend-unit-test.yml` → `pytest unit/`), which is why the guard lives here.
@@ -192,7 +194,11 @@ def _faq_widget_sentence(text: str) -> set:
 # ---------------------------------------------------------------------------
 
 _WIDGET_TYPE_LINE = re.compile(r"widget types?", re.I)
-_FICTIONAL_TOKEN = re.compile(r"`(" + "|".join(_FICTIONAL) + r")`")
+# A bare token (`chart`) or its YAML-key spelling (`type: chart`) — the two ways a
+# doc presents a name AS a widget type. A longer code span that merely contains
+# the word (the spec quoting D-002's own `… 'chart' ×5 …` output) is truthful and
+# must not fire; the meta-test below pins both sides of that line.
+_FICTIONAL_TOKEN = re.compile(r"`(?:type:\s*)?(" + "|".join(_FICTIONAL) + r")`")
 
 
 def _signature_violations(text: str, label: str) -> list:
@@ -339,6 +345,13 @@ def test_meta_signature_check_flags_the_original_lying_line_and_spares_a_truthfu
     # plain prose on a widget-type line is the sanctioned way to mention them
     assert _signature_violations(
         "Widget types: there is no chart, badge, or countdown widget.", "planted.md") == []
+    # the YAML-key spelling presents the name as a type just as much as a bare token does
+    assert _signature_violations(
+        "Widget types: use `type: chart` for trends.", "planted.md") == ["planted.md:1 `chart`"]
+    # …but a longer code span that quotes D-002's own output is truthful and must not fire
+    assert _signature_violations(
+        "Widget types: D-002 reads `unsupported dashboard widget type(s): 'chart' ×5 — not rendered`.",
+        "planted.md") == []
 
 
 def test_meta_literal_assign_rejects_missing_duplicate_and_mutated_bindings():
