@@ -60,18 +60,22 @@ export async function openOrb(page) {
 }
 
 /**
- * Make the inspector tall the way a long note does, then show it.
+ * Populate the inspector the way a note does, then show it. Defaults make it
+ * TALL (the #2539 case); pass a short `paragraphText` for a short note.
  * The first injected paragraph carries `id="e2eInspPara"` so specs can target
  * a deep element inside `#inspContent` by id.
  */
-export async function growInspector(page, { title = LONG_TITLE, paragraphs = 40, connections = 6 } = {}) {
+export async function growInspector(
+  page,
+  { title = LONG_TITLE, paragraphs = 40, connections = 6, paragraphText = 'lorem ipsum dolor sit amet '.repeat(6) } = {}
+) {
   await page.evaluate(
-    ({ title, paragraphs, connections }) => {
+    ({ title, paragraphs, connections, paragraphText }) => {
       document.getElementById('inspTitle').textContent = title
       const body = document.getElementById('inspContent')
       body.innerHTML = Array.from(
         { length: paragraphs },
-        (_, i) => `<p${i === 0 ? ' id="e2eInspPara"' : ''}>paragraph ${i + 1} — ${'lorem ipsum dolor sit amet '.repeat(6)}</p>`
+        (_, i) => `<p${i === 0 ? ' id="e2eInspPara"' : ''}>${paragraphText}</p>`
       ).join('')
       const conns = document.getElementById('inspConns')
       conns.innerHTML = Array.from(
@@ -83,7 +87,7 @@ export async function growInspector(page, { title = LONG_TITLE, paragraphs = 40,
       body.scrollTop = 0
       insp.classList.add('show')
     },
-    { title, paragraphs, connections }
+    { title, paragraphs, connections, paragraphText }
   )
 }
 
