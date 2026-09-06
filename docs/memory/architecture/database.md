@@ -891,7 +891,10 @@ head; custom sources, whose write access the operator controls, track a branch. 
 tag that resolves to a different commit than the last sync is **refused**
 (`moved_tag`), never adopted. The refusal covers **both** materialization paths, which is
 the whole of it: the update path via a `fetch` without `--force` plus an explicit SHA
-comparison, and the **clone** path via `_refuse_moved_pin_after_clone`, which also deletes
+comparison — against the tag **peeled** (`^{commit}`), since the recorded SHA is the commit
+and a bare rev-parse of an *annotated* tag is the tag object, which read an unmoved tag as
+moved on every sync after the first (#2550) — and the **clone** path via
+`_refuse_moved_pin_after_clone`, which also deletes
 the checkout (a failed sync that leaves the tree on disk would still serve the moved tag's
 content to `list_skills` and to injection). Enforcing only the update path leaves the pin
 bypassed exactly when the checkout was lost — a quarantine rename, a restored `/data`
