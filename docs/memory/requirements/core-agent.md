@@ -1337,6 +1337,113 @@ already holds.
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (slice 2 section),
   `workspace-loops.md`, `agent-canvas.md`
 
+### 5.21 Workspace chats as tabs, New chat hotkey, and renameable titles (trinity-enterprise#451 remaining slice, trinity-enterprise#473)
+
+- **Status**: ✅ Implemented (2026-09-06) · **ID**: `WORKSPACE_CHAT_TABS_TITLES`
+- **Description**: #2430 shipped the half of #451 that made **New chat** honest
+  (`new_thread`). This lands the rest as ruled on 2026-09-06, together with
+  #473: the agent's chats render as **tabs above the thread**, **New chat**
+  lives in the conversation header with a hotkey, and a person can **rename**
+  any chat or room from the sidebar row and the header — with generated titles
+  made trustworthy (never over a person's title, one more pass after a greeting
+  or a failed first attempt, and a failing generator that is visible once).
+- **AC-1 — tabs (#451)**: `PortalChatTabs.vue` renders this user's threads
+  with the active agent as `OverflowTabs` (`dense`, counted `moreLabel` —
+  "N more"), most recent first, as many as the width fits, the rest under the
+  menu; it repacks on rail (#492) and window resize because the primitive
+  re-measures on `ResizeObserver`. A room is not an agent's tab; another
+  agent's thread is not this agent's. An unsaved new chat is **not a tab**
+  ("a new chat exists — tab and sidebar row — once its first message is sent"),
+  so the strip renders no chrome when the list is empty. The pinned **Main**
+  tab is #523's first slot in this list; nothing here assumes it is absent.
+  The full list stays on the agent page ("Your chats with …").
+- **AC-2 — New chat in the header, ⌘J / Ctrl+J (#451)**: the conversation
+  header carries **New chat** (label + `<kbd>` at `lg`) that starts a fresh
+  thread with *this* agent (`newChatWithAgent`); the sidebar's button stays the
+  cross-agent picker. The hotkey (`isNewChatHotkey`: plain ⌘ or Ctrl + J, never
+  Shift/Alt, never both) is armed on `window` at mount above bootstrap's await
+  (contract #23), inert until signed in, and resolves the agent in front of
+  the person — the agent page's, or the open conversation's; in a room or on
+  the roster root it opens the picker.
+- **AC-3 — sidebar recent chats (#451)**: unchanged — the merged, recency-sorted
+  list across agents, with a row opening the thread. The ruled "agent page with
+  that chat active" is the shape #523 gives the page; until then the thread
+  view carries the agent's tabs, so opening a row already lands inside that
+  agent's chat list.
+- **AC-4 — title endpoints (#473)**:
+  `PATCH /api/enterprise/client-portal/agents/{agent}/sessions/{id}` `{title}`
+  and `PATCH /api/rooms/{room_id}` `{name}`. Validation is ONE leaf,
+  `services/chat_title.py::normalize_chat_title` — outer trim, inner collapse,
+  control characters dropped, an **inner** line break refused (never silently
+  joined), non-empty, ≤ 100 chars — applied in each service, so both surfaces
+  refuse the same titles for the same reasons with the same **named 400**
+  (`detail = {code: "invalid_title", reason, message}`; the message names the
+  rule, the fix and an example — principle 17). Pydantic bounds the body at
+  4000 only against abuse, so a real over-long title gets the named 400, not a
+  422. Thread: roster gate, then the UPDATE itself is scoped to (agent, client)
+  — an unowned id is the uniform 404 (Invariant #8); per-viewer rate limit.
+  Room: membership first (uniform 404), then **person-only** — a member agent
+  may talk in a room but not rename it (403 `not_a_person`, the ent#220 line,
+  one notch below moderator since a rename is neither lifecycle nor roster);
+  the broadcast is a thin `room_renamed` trigger carrying only the id (#918).
+- **AC-5 — inline rename**: `PortalEditableTitle.vue` is the one editor for
+  its three homes — the sidebar row (dense, pencil revealed on hover from `sm`,
+  always visible below it, the star's reason), the 1:1 header (the thread's
+  title beside the agent picker; hidden below `sm`, where the tab strip still
+  names the chat) and the room header. Enter/blur commit, Esc abandons, an
+  unchanged draft is an abandon; every click and key stops inside it so the
+  row's open handlers never fire from a rename. Client-side
+  `normalizeChatTitle` mirrors the leaf so the person is told before the
+  request; a server refusal renders verbatim in an `InlineError` beside the
+  field (principle 18) — a 404 says the chat is no longer theirs. The shell
+  (`Portal.vue::renameChat`) updates the list optimistically, reverts and
+  rethrows on refusal, and re-reads the list after success.
+- **AC-6 — a person's title stands**: `enterprise_portal_sessions.title_source`
+  (NULL = derived fallback or pre-#473 row · `'generated'` · `'user'`; SQLite
+  `portal_session_title_source` + Alembic `0052`, no backfill). The generated
+  write is guarded **in the UPDATE** (`title_source != 'user'`) — generation
+  runs off the reply path, so a rename inside the first turn's 15 s window
+  races the model's guess and a read-then-write would leave a window. A
+  stood-down generation is logged, never retried.
+- **AC-7 — one more generation pass**: `_title_plan(row, history)` decides on
+  the pre-turn row: `first` when the title is empty (ent#186, unchanged);
+  `retry` on the exchange after the opener (`message_count <= 2`) when the
+  first attempt never landed (hand still NULL — a failed call, an unusable
+  generation, or a failed first turn) **or** the opener was greeting-shaped
+  (`is_greeting`: short and opening with a salutation / check-in / test word);
+  `None` for a person's title, past the window, or an unreadable row. The retry
+  feeds THIS exchange — the first one with a topic in it. Exactly one more:
+  a thread with a second exchange on record is past the window whatever
+  happened.
+- **AC-8 — a failing generator is observable once**: an in-process health
+  record (`title_generation_health()`: state `unknown|ok|no_credential|failing`,
+  consecutive failures, timestamps, a bounded credential-free reason, the
+  model). A credential miss is an episode from the first hit; transport/API
+  failures need 3 in a row. The transition INTO a bad state logs one WARNING;
+  the steady state is quiet; a recovery logs INFO and re-arms. Surfaced on
+  `GET /api/settings/portal-session-policy` → `title_generation`, which the
+  **Workspace sessions** settings panel renders as a warning notice
+  (`titleGenerationNotice`: nothing while `ok`/`unknown`; the missing
+  credential names the next action; a failing episode counts and quotes the
+  reason).
+- **AC-9 — search matches user titles**: the rename writes the column
+  `search_portal_sessions` already reads; pinned by test, no build.
+- **AC-10 — existing threads keep their titles**: one nullable column, no
+  data migration; NULL is the honest hand for a row nobody can attribute and
+  still lets generation land.
+- **Not this slice**: the pinned Main chat, Reset, the merged agent page and
+  the sidebar's "agent page with that chat active" (#523); an MCP rename tool
+  (the rooms/portal MCP surfaces are unchanged — rename is a person's verb on
+  the UI, and the routers' `# mcp:` headers stand).
+- **OSS-core by decision** (inherits ent#356 / ent#451's ruling for the whole
+  client-portal surface): deliberately ungated — no `requires_entitlement`,
+  logic stays in the OSS tree. Recorded explicitly so it is never inferred
+  from the mere fact that it merged.
+- **Tests**: `tests/unit/test_ent473_chat_titles.py`,
+  `tests/unit/test_ent79_portal_exposure.py` (the second-pass pins),
+  `src/frontend/tests/unit/portalChatTabsAndTitles.spec.js`.
+- **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
+
 ### 5.21 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_TAB`

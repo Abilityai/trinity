@@ -6,8 +6,15 @@
         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
       </button>
 
-      <div class="min-w-0">
-        <div class="font-semibold truncate text-sm">{{ room?.name || 'Chat' }}</div>
+      <div class="min-w-0 flex-1">
+        <!-- ent#473: the room's name, renameable in place by any human member. -->
+        <PortalEditableTitle
+          :value="room?.name || ''"
+          placeholder="Chat"
+          :rename="rename ? saveName : null"
+          label="Rename this chat"
+          text-class="font-semibold text-sm"
+        />
         <div class="flex items-center gap-1 mt-0.5">
           <PortalAvatar
             v-for="a in agentParticipants"
@@ -31,7 +38,7 @@
         {{ budgetWarning }}
       </div>
 
-      <div class="flex items-center gap-1" :class="{ 'ml-auto': !budgetWarning }">
+      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !budgetWarning }">
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -224,6 +231,7 @@ import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
+import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import { workSignalFromRoom } from './portalRail'
 import {
@@ -245,6 +253,9 @@ import {
 import { agentDisplayName } from '@/utils/agentName'
 
 const props = defineProps({
+  // ent#473: async (roomId, title) => void — the shell owns the request and
+  // the sidebar list; null when renaming is unavailable.
+  rename: { type: Function, default: null },
   roomId: { type: String, required: true },
   roster: { type: Array, default: () => [] },
   // ent#359: star state is per-viewer and owned by the shell, not by the room —
@@ -259,6 +270,13 @@ const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'particip
 const store = useClientPortalStore()
 
 const room = ref(null)
+// ent#473: the header's rename. The shell renames and re-reads the list; the
+// room keeps its own header in step without a refetch, then tells the shell.
+async function saveName(title) {
+  await props.rename(props.roomId, title)
+  if (room.value) room.value = { ...room.value, name: title }
+  emit('rooms-changed')
+}
 const messages = ref([])
 const loading = ref(true)
 const sending = ref(false)

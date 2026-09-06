@@ -113,6 +113,7 @@
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
+          :rename="renameChat"
           @new-chat="newChat"
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
@@ -135,6 +136,7 @@
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
+            :rename="renameChat"
             @new-chat="() => { mobileNav = false; newChat() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
@@ -182,6 +184,7 @@
           :roster="store.agents"
           :starred="isStarred('room', activeRoomIdFromRoute)"
           :prefill="prefill"
+          :rename="renameRoom"
           @open-menu="mobileNav = true"
           @rooms-changed="refreshThreads"
           @toggle-star="toggleStar"
@@ -247,7 +250,10 @@
           :new-chat="startingNewChat"
           :prefill="prefill"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
+          :threads="threads"
+          :rename="renameChat"
           @switch-agent="switchAgent"
+          @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
           @sessions-changed="onConversationTurnDone"
           @open-files="openRailOn('files')"
@@ -429,7 +435,7 @@ import {
   visibleTabs,
 } from '@/components/portal/portalRail'
 import { stageZone } from '@/components/portal/portalBriefingState'
-import { resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
+import { isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
@@ -1017,6 +1023,45 @@ async function toggleStar(t) {
   }
 }
 
+// ent#473: a person renames a chat. Optimistic like the star — the row and
+// the header redraw at once — and reverted in place on refusal, with the
+// error RETHROWN so the editor that asked can show the server's own sentence
+// (a named 400 says which rule; a 404 says the chat is no longer theirs).
+// The list is re-read afterwards so a title the generator landed meanwhile,
+// or a rename from another tab, is what the sidebar shows next.
+async function renameChat(t, title) {
+  const key = chatKey(t)
+  const id = t.id || t.session_id
+  const before = threads.value
+  threads.value = threads.value.map((x) => (chatKey(x) === key
+    ? { ...x, title, ...(x.is_room ? { name: title } : {}) }
+    : x))
+  try {
+    if (t.is_room) await store.renameRoom(id, title)
+    else await store.renameThread(t.agent_name, id, title)
+  } catch (err) {
+    threads.value = before
+    throw err
+  }
+  refreshThreads()
+}
+function renameRoom(roomId, title) {
+  return renameChat({ id: roomId, is_room: true }, title)
+}
+
+// ent#451: ⌘J / Ctrl+J — New chat with the agent in front of you (the page
+// or the conversation); with no agent in front of you, the picker. Armed at
+// mount, above bootstrap's await (contract #23), and inert until signed in.
+function onGlobalKeydown(e) {
+  if (!isNewChatHotkey(e)) return
+  if (!store.isClientSignedIn) return
+  e.preventDefault()
+  const name = activeAgentPageName.value
+    || (!activeRoomIdFromRoute.value && !unreachableAgent.value ? activeAgent.value?.name : null)
+  if (name) newChatWithAgent(name)
+  else newChat()
+}
+
 // Opening a chat is what "reading" it means here. Clear the badge locally first
 // so the count does not linger for a round trip, then persist.
 // Returns the write promise. Callers that refresh afterwards MUST await it:
@@ -1173,8 +1218,12 @@ async function bootstrap() {
   }
 }
 
-onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })
+onMounted(async () => {
+  window.addEventListener('keydown', onGlobalKeydown)
+  if (store.isClientSignedIn) await bootstrap()
+})
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
   stopAsksPoll()          // ent#364 — the poll must not outlive the view
   clearInterval(resendTimer)
   clearTimeout(searchTimer)

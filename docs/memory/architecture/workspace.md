@@ -111,6 +111,40 @@ enterprise-tracker feature is *gated unless ruled otherwise*, so the ruling must
 be inferred later from the mere fact that it merged; it inherits ent#356's move of the
 whole client-portal surface into OSS core.
 
+**The agent's chats are tabs, and a title has three hands (ent#451 remaining slice,
+ent#473).** Above the thread, `PortalChatTabs.vue` renders this user's threads with the
+active agent as `OverflowTabs` (`dense`, counted `moreLabel` → "N more"), most recent
+first — a slice of the sidebar's list, never a second fetch; a room is not an agent's
+tab, and an unsaved new chat is not a tab until its first message is sent (ruling
+2026-09-06). **New chat** is in the conversation header with ⌘J / Ctrl+J, armed on
+`window` at mount above `bootstrap()`'s await and resolving the agent in front of the
+person (page or conversation; a room or the root opens the picker). A title is written
+by three hands — the derived fallback, the ent#186 generator, and a person — and
+`enterprise_portal_sessions.title_source` (NULL · `generated` · `user`; SQLite
+`portal_session_title_source` + Alembic `0052`, no backfill) records which. **The
+generated write is guarded in the UPDATE itself** (`set_portal_session_title` →
+`title_source != 'user'`, returning whether it landed): generation runs off the reply
+path, so a rename typed inside the first turn's window races the model's guess and a
+read-then-write in the caller would leave exactly that window open. `_title_plan(row,
+history)` earns a turn `first` (empty title), `retry` (the exchange after the opener,
+`message_count <= 2`, when the hand is still NULL or the opener `is_greeting`) or
+nothing — exactly one more, never a person's title. The validator is one leaf,
+`services/chat_title.py`, imported by BOTH `client_portal` and `shared_sessions` so a
+thread and a room refuse the same titles with the same named 400 (`invalid_title` +
+reason + a sentence with an example); the thread UPDATE is (agent, client)-scoped
+(uniform 404), the room rename is membership-then-person (a member agent talks, it does
+not rename — 403 `not_a_person`, the ent#220 line) and broadcasts a thin `room_renamed`
+trigger with the id only (#918). Generator health is an in-process record
+(`title_generation_health()`) that WARNS once on the transition into `no_credential`
+or `failing` (3 consecutive), stays quiet in it, re-arms on recovery, and rides
+`GET /api/settings/portal-session-policy` → `title_generation` for the Workspace
+sessions panel's notice — the operator side of a path that is otherwise fail-soft by
+design. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
+room header (its clicks and keys stop inside it, or a rename would open the chat it is
+renaming). **OSS-core by decision, deliberately ungated** — the ent#356/ent#451 ruling
+for the whole surface, recorded here so it is never inferred from the merge. See
+[workspace-chat-tabs-and-titles.md](../feature-flows/workspace-chat-tabs-and-titles.md).
+
 **New-chat briefing hints (ent#138 / ent#380):** each agent has a briefing —
 description + capability hint cards `playbooks[]{title,description,starter_prompt}` —
 resolved best-effort by `service.py::_agent_briefing` from the agent's

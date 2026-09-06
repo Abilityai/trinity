@@ -3957,6 +3957,32 @@ def _migrate_agent_canvases_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_session_title_source(cursor, conn):
+    """ent#473 — which hand wrote a Workspace thread's title.
+
+    `enterprise_portal_sessions.title` is written by three hands: the derived
+    fallback (`touch_portal_session`, first message prefix), the ent#186
+    generated title, and — from ent#473 — a person renaming the chat. The
+    generator must never overwrite a person's title, and the ent#473 second
+    pass has to know whether the first attempt landed at all, so the hand is
+    recorded beside the value: NULL = derived fallback (or any row that
+    predates this column), 'generated', 'user'.
+
+    No backfill, deliberately: a pre-#473 title keeps working exactly as
+    before (AC "existing threads keep their titles; no migration"), and NULL is
+    the honest reading of a row nobody can attribute.
+
+    Mirrored by the Alembic revision 0052_portal_session_title_source.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "title_source",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN title_source TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4079,4 +4105,5 @@ MIGRATIONS = [
     ("workspace_ratings", _migrate_workspace_ratings),
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
     ("agent_canvases_table", _migrate_agent_canvases_table),
+    ("portal_session_title_source", _migrate_portal_session_title_source),
 ]
