@@ -1820,19 +1820,28 @@ addEventListener('pointermove',e=>{
 const ZMIN=112, ZMAX=720;   // ZMIN keeps the deepest zoom just inside the node shell
 const zclamp=v=>Math.max(ZMIN,Math.min(ZMAX,v));
 const markZoom=()=>{ lastZoom=performance.now()/1000; };   // freeze ambient motion; resume after FREEZE_IDLE_S
-// can any scrollable element between `node` and `stop` actually scroll in direction dy?
-function panelCanScroll(node, stop, dy){
-  let el=node;
-  while(el){
-    if(el.scrollHeight>el.clientHeight+1){
+// #2538 — wheel routing is GESTURE-latched. A gesture is a run of wheel events whose gaps stay under
+// WHEEL_GAP_MS. Its FIRST vertical event picks the route — native panel scroll or camera zoom — from
+// the scroll container under the pointer, and every later event of the gesture keeps that route.
+// macOS inertia keeps emitting `wheel` at frame cadence (8–17 ms) long after the fingers lift, so a
+// per-event decision turned the tail that ran out of scroll into a zoom-out. A FRESH gesture (gap >
+// WHEEL_GAP_MS) over an already-edged panel still zooms — deliberate edge-chaining is preserved.
+// 150 ms = the top of the issue's 120–150 ms range: ≥9 frames of jank tolerance at 60 Hz (Chrome
+// coalesces wheel to rAF; a heavy WebGL frame stretches one gap to ~50–100 ms) and still under the
+// ~200 ms+ a human needs to lift and re-flick. Scrollability is read from computed style — the CSS
+// is the single source of truth (the old selector allowlist missed #scopePanel).
+const WHEEL_GAP_MS=150;
+let wheelAt=-1e9, wheelMode=null;          // 'panel' | 'zoom' | null (no gesture in flight)
+// can any scroll container between `node` and <body> (exclusive) actually scroll in direction dy?
+function panelCanScroll(node, dy){
+  for(let el=node; el && el!==document.body && el!==document.documentElement; el=el.parentElement){
+    if(el.scrollHeight>el.clientHeight+1){                       // size check first — cheap; no style query for the void
       const oy=getComputedStyle(el).overflowY;
       if(oy==='auto'||oy==='scroll'){
         const atTop=el.scrollTop<=0, atBottom=el.scrollTop+el.clientHeight>=el.scrollHeight-1;
         if((dy<0 && !atTop)||(dy>0 && !atBottom)) return true;   // it has somewhere to go
       }
     }
-    if(el===stop) break;
-    el=el.parentElement;
   }
   return false;
 }
@@ -1841,10 +1850,17 @@ addEventListener('wheel',e=>{
     e.preventDefault();
     camTargetDist=zclamp(camTargetDist + e.deltaY*1.6); markZoom(); return;
   }
-  // over a scrollable panel: let it scroll, but only while it can — once it hits the edge, zoom out
-  const panel = e.target.closest && e.target.closest('#brief3,#reading,#inspector,#searchResults,#voiceTile,#tensionBox');
-  if(panel && panelCanScroll(e.target, panel, e.deltaY)) return;
-  e.preventDefault();
+  // input-time gaps. Chromium COALESCES events queued behind a stalled frame into ONE, so a stall longer
+  // than WHEEL_GAP_MS still ends the gesture — bounded to one re-decided step (the per-event behaviour
+  // this replaced took that step for every event).
+  const now=e.timeStamp||performance.now();
+  if(now-wheelAt>WHEEL_GAP_MS) wheelMode=null;              // gap exceeded → whatever comes next is a new gesture
+  wheelAt=now;
+  const t=e.target, el=t&&t.nodeType===3?t.parentElement:(t&&t.nodeType===1?t:null);   // Text-node targets (old WebKit) walk from their parent
+  const can=!!el&&panelCanScroll(el,e.deltaY);
+  if(!wheelMode&&e.deltaY!==0) wheelMode=can?'panel':'zoom'; // the first VERTICAL event of a gesture decides
+  if(wheelMode==='panel'){ if(!can) e.preventDefault(); return; }   // scroll natively, or die at the edge — never zoom
+  e.preventDefault();                                        // zoom-latched, or a pure-horizontal event with no gesture in flight
   camTargetDist=zclamp(camTargetDist + e.deltaY*0.28); markZoom();
 },{passive:false});
 let _gd=0;
