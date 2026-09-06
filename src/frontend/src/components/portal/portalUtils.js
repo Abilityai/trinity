@@ -258,6 +258,124 @@ export function threadTitle(t) {
   return (t.title || '').trim() || 'New chat'
 }
 
+// --- Chat titles (ent#473) --------------------------------------------------
+// The client-side mirror of `services/chat_title.py::normalize_chat_title`,
+// so a person is told BEFORE the request; the server stays the authority and
+// its named 400 (`invalid_title`) is rendered verbatim when the two disagree.
+export const CHAT_TITLE_MAX_CHARS = 100
+export const TITLE_EXAMPLE = 'Q3 invoice discrepancy'
+
+// Control characters other than \t/\n/\r are dropped as whitespace; a line
+// break INSIDE the trimmed text is a refusal rather than a silent join.
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/g
+
+export function normalizeChatTitle(raw) {
+  if (typeof raw !== 'string') return { ok: false, reason: 'empty', message: chatTitleProblem('empty') }
+  const s0 = raw.trim()
+  if (/[\n\r]/.test(s0)) return { ok: false, reason: 'multiline', message: chatTitleProblem('multiline') }
+  const s = s0.replace(CONTROL_RE, ' ').split(/\s+/).filter(Boolean).join(' ')
+  if (!s) return { ok: false, reason: 'empty', message: chatTitleProblem('empty') }
+  if (s.length > CHAT_TITLE_MAX_CHARS) {
+    return { ok: false, reason: 'too_long', message: chatTitleProblem('too_long', s.length) }
+  }
+  return { ok: true, title: s }
+}
+
+export function chatTitleProblem(reason, have = 0) {
+  if (reason === 'multiline') return `A title is one line — remove the line breaks. Example: ${TITLE_EXAMPLE}`
+  if (reason === 'too_long') {
+    return `Keep the title to ${CHAT_TITLE_MAX_CHARS} characters or fewer (this one is ${have}). Example: ${TITLE_EXAMPLE}`
+  }
+  return `A title can't be empty. Example: ${TITLE_EXAMPLE}`
+}
+
+// The sentence for a rename the SERVER refused. A named 400 carries the
+// rule's own sentence; anything else degrades to one that still names the
+// next action, never a bare status.
+export function renameFailureMessage(err) {
+  const detail = err?.response?.data?.detail
+  if (detail && typeof detail === 'object' && detail.code === 'invalid_title' && detail.message) {
+    return String(detail.message)
+  }
+  if (err?.response?.status === 404) return "This chat isn't yours to rename any more — reload to see the current list."
+  return "Couldn't save the new title. Check your connection and try again."
+}
+
+// --- The agent's chats as tabs (ent#451) ------------------------------------
+// This user's threads with the active agent, most recent first, as the tab
+// strip above the thread. Rooms are not an agent's tabs (a room has no single
+// agent subject), and another agent's threads are not this agent's. A chat
+// that has not sent its first message is not a tab yet (ruling 2026-09-06:
+// "a new chat exists — tab and sidebar row — once its first message is sent"),
+// so an unsaved new chat renders no active tab rather than a phantom one.
+// #523's pinned Main chat is this list's first slot when it lands; nothing
+// here assumes there is not one.
+export function agentChatTabs(threads, agentName) {
+  if (!agentName) return []
+  const mine = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName)
+  const ts = (t) => {
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    return Number.isNaN(n) ? 0 : n
+  }
+  return mine
+    .slice()
+    .sort((a, b) => ts(b) - ts(a))
+    .map((t) => ({ id: t.id || t.session_id, label: threadTitle(t), thread: t }))
+}
+
+// The overflow trigger's label: counted, as the contract asks ("N more").
+export function moreTabsLabel(n) {
+  return `${n} more`
+}
+
+// --- New chat hotkey (ent#451) ----------------------------------------------
+// ⌘J on Mac, Ctrl+J elsewhere — ruled 2026-09-06 (⌘N is the browser's, ⌘⇧O
+// declined). Plain modifier only: Shift/Alt variants are someone else's.
+export function isNewChatHotkey(e) {
+  if (!e || typeof e.key !== 'string') return false
+  if (e.key.toLowerCase() !== 'j') return false
+  if (e.shiftKey || e.altKey) return false
+  return !!(e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey)
+}
+
+export function isMacLike(platform) {
+  return /mac|iphone|ipad|ipod/i.test(String(platform || ''))
+}
+
+// --- Generated-title health → an operator notice (ent#473) -------------------
+// The settings panel renders what `GET /api/settings/portal-session-policy`
+// reports under `title_generation`. Only a BAD state earns a notice: "ok" and
+// "unknown" (no attempt yet this process) say nothing, because a panel that
+// reassures on every load trains people to skip it.
+export function titleGenerationNotice(health) {
+  if (!health || typeof health !== 'object') return null
+  const when = health.last_failure_at ? ` Last attempt: ${health.last_failure_at}.` : ''
+  if (health.state === 'no_credential') {
+    return {
+      level: 'warning',
+      title: "Workspace chat titles aren't being generated",
+      body: `No Anthropic API key and no subscription token was available for the agent, so new chats keep a title taken from their first message. Add an API key under Credentials, or assign the agent a subscription.${when}`,
+    }
+  }
+  if (health.state === 'failing') {
+    const n = Number(health.consecutive_failures) || 0
+    const why = health.last_failure ? ` (${health.last_failure})` : ''
+    return {
+      level: 'warning',
+      title: 'Workspace chat titles are failing to generate',
+      body: `${n} attempt${n === 1 ? '' : 's'} in a row failed${why}; new chats keep a title taken from their first message until the model call succeeds again.${when}`,
+    }
+  }
+  return null
+}
+
+export function newChatHotkeyLabel(platform) {
+  return isMacLike(platform) ? '⌘J' : 'Ctrl+J'
+}
+
 // #2101: bounded briefing hint grid. Order deterministically — a card with a
 // real frontmatter description is a useful hint, a bare humanized slug is
 // noise, so described cards come first (stable within each group; the backend

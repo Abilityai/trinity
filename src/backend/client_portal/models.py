@@ -250,6 +250,14 @@ class PortalSessionSummary(BaseModel):
     message_count: int = 0
 
 
+class PortalSessionRename(BaseModel):
+    """ent#473 — a person's title for their thread. Bounded here only against
+    abuse; the one-line / non-empty / 100-char rules are `services/chat_title`'s,
+    applied in the service so the refusal is a NAMED 400 (`invalid_title`) the
+    person can act on rather than a 422 about a schema."""
+    title: str = Field(max_length=4000)
+
+
 class PortalSessions(BaseModel):
     """A client's conversation threads with a rostered agent (most-recent first)."""
     agent_name: str

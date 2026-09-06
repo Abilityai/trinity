@@ -25,6 +25,14 @@ const props = defineProps({
   tabs: { type: Array, required: true },
   // active tab id
   modelValue: { type: [String, null], required: true },
+  // ent#451: the overflow trigger's label, given the hidden count — the
+  // contract's counted "N more". Default keeps every existing strip's "More".
+  // The mirror row measures the WIDEST label this strip can need (every tab
+  // hidden), so a count that grows never reflows the fit decision.
+  moreLabel: { type: Function, default: () => 'More' },
+  // ent#451: a compact strip for a chat's tabs above the thread — smaller
+  // pad and type, same measurement, same overflow behaviour.
+  dense: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -48,6 +56,11 @@ let lastWidth = -1
 
 const EPSILON = 1 // px tolerance for sub-pixel rounding in the fit decision
 
+const tabPad = computed(() => (props.dense ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'))
+const morePad = computed(() => (props.dense ? 'px-3 py-2 text-xs' : 'px-4 py-3 text-sm'))
+const moreText = computed(() => props.moreLabel(overflowTabs.value.length))
+const moreMeasureText = computed(() => props.moreLabel(props.tabs.length))
+
 const inlineTabs = computed(() => props.tabs.slice(0, inlineCount.value))
 const overflowTabs = computed(() => props.tabs.slice(inlineCount.value))
 const hasOverflow = computed(() => overflowTabs.value.length > 0)
@@ -59,6 +72,7 @@ const activeInOverflow = computed(() =>
 // `flush: 'post'` runs after the mirror row has rendered the new content.
 const tabsSignature = computed(() =>
   props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}`).join('|')
+  + `#${moreMeasureText.value}`
 )
 watch(tabsSignature, () => measure(), { flush: 'post' })
 
@@ -192,7 +206,8 @@ onUnmounted(() => {
         type="button"
         @click="select(tab.id)"
         :class="[
-          'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap inline-flex items-center',
+          tabPad,
+          'border-b-2 font-medium transition-colors whitespace-nowrap inline-flex items-center',
           modelValue === tab.id
             ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
             : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600'
@@ -227,13 +242,14 @@ onUnmounted(() => {
         :aria-expanded="open"
         aria-controls="overflow-tabs-menu"
         :class="[
-          'ml-auto px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap inline-flex items-center gap-1',
+          morePad,
+          'ml-auto border-b-2 font-medium transition-colors whitespace-nowrap inline-flex items-center gap-1',
           activeInOverflow
             ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
             : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600'
         ]"
       >
-        More
+        {{ moreText }}
         <span
           v-if="activeInOverflow"
           class="w-1.5 h-1.5 rounded-full bg-action-primary-500"
@@ -310,7 +326,8 @@ onUnmounted(() => {
           data-measure-tab
           type="button"
           tabindex="-1"
-          class="px-4 py-3 border-b-2 font-medium text-sm whitespace-nowrap inline-flex items-center"
+          :class="tabPad"
+          class="border-b-2 font-medium whitespace-nowrap inline-flex items-center"
         >
           {{ tab.label }}
           <span
@@ -330,9 +347,10 @@ onUnmounted(() => {
           data-measure-more
           type="button"
           tabindex="-1"
-          class="ml-auto px-4 py-3 border-b-2 font-medium text-sm whitespace-nowrap inline-flex items-center gap-1"
+          :class="morePad"
+          class="ml-auto border-b-2 font-medium whitespace-nowrap inline-flex items-center gap-1"
         >
-          More
+          {{ moreMeasureText }}
           <span class="w-1.5 h-1.5 rounded-full"></span>
           <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M19 9l-7 7-7-7" />

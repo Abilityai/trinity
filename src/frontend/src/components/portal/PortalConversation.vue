@@ -41,7 +41,37 @@
         </div>
       </div>
 
-      <div class="ml-auto flex items-center gap-1">
+      <!-- ent#473: the thread's title, renameable in place. Below `sm` the
+           picker and the controls already fill the bar; the tab strip under
+           it still names the active chat. -->
+      <PortalEditableTitle
+        v-if="currentThread"
+        class="hidden sm:flex"
+        :value="currentTitle"
+        placeholder="New chat"
+        :rename="rename ? saveTitle : null"
+        label="Rename this chat"
+        text-class="text-sm font-medium"
+      />
+      <span v-else-if="!currentSessionId" class="hidden sm:inline min-w-0 flex-1 truncate text-sm text-gray-500 dark:text-gray-400">New chat</span>
+
+      <div class="ml-auto flex items-center gap-1 shrink-0">
+        <!-- ent#451: New chat lives in the header, with its hotkey (⌘J /
+             Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
+             the sidebar's button is the cross-agent one (the picker). -->
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition"
+          :title="`New chat (${newChatHotkey})`"
+          :aria-label="`New chat (${newChatHotkey})`"
+          :aria-keyshortcuts="newChatHotkey === '⌘J' ? 'Meta+J' : 'Control+J'"
+          data-testid="new-chat-header"
+          @click="emit('new-chat')"
+        >
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+          <span class="hidden md:inline">New chat</span>
+          <kbd class="hidden lg:inline text-[11px] font-mono text-gray-400 dark:text-gray-500">{{ newChatHotkey }}</kbd>
+        </button>
         <!-- ent#359 AC #4: star from the header too. Hidden until the thread
              exists — a chat with no id yet cannot be pinned, and rendering a
              control that silently does nothing is the dead end this family of
@@ -90,6 +120,16 @@
         </button>
       </div>
     </header>
+
+    <!-- ent#451: this user's chats with the agent, as tabs (OverflowTabs) —
+         most recent first, the rest under "N more". Selecting one is an
+         ordinary thread open through the shell. -->
+    <PortalChatTabs
+      :threads="threads"
+      :agent-name="agent.name"
+      :active-id="currentSessionId"
+      @select="(t) => emit('open-thread', t)"
+    />
 
     <!-- Messages -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
@@ -405,6 +445,9 @@ import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, itemById } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
+import PortalEditableTitle from './PortalEditableTitle.vue'
+import PortalChatTabs from './PortalChatTabs.vue'
+import { newChatHotkeyLabel } from './portalUtils'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
@@ -489,8 +532,26 @@ const props = defineProps({
   // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
+  // ent#451: the shell's thread list — the tab strip above the thread is this
+  // agent's slice of it, and the header's title is the active thread's.
+  threads: { type: Array, default: () => [] },
+  // ent#473: async (thread, title) => void, or null when renaming is unavailable.
+  rename: { type: Function, default: null },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat'])
+
+// ent#451/#473: the active thread as the shell's list knows it. Null until the
+// list carries the thread (a just-adopted session lands on the next refresh),
+// and the header shows no title rather than a guessed one meanwhile.
+const currentThread = computed(() => (props.threads || []).find(
+  (t) => t && !t.is_room && (t.id || t.session_id) === currentSessionId.value,
+) || null)
+const currentTitle = computed(() => (currentThread.value?.title || '').trim())
+const newChatHotkey = newChatHotkeyLabel(typeof navigator !== 'undefined' ? navigator.platform : '')
+async function saveTitle(title) {
+  if (!props.rename || !currentThread.value) return
+  await props.rename(currentThread.value, title)
+}
 
 const store = useClientPortalStore()
 // ent#364: one list, filtered — never a second fetch for this surface.
