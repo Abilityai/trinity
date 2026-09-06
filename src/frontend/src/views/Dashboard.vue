@@ -142,12 +142,12 @@
               >/</button>
 
               <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
-                   trinity-enterprise#260 list; Graph decommissioned #1689). This
-                   v-for is the second home of the mode list — keep in sync with
-                   VIEW_MODES in stores/network.js. -->
+                   trinity-enterprise#260 list; Graph decommissioned #1689). The
+                   list is VIEW_MODES from utils/viewModes.js — the ONE home shared
+                   with the store whitelist and the e2e specs (#2536). -->
               <div class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700">
                 <button
-                  v-for="mode in ['timeline', 'grid', 'list']"
+                  v-for="mode in VIEW_MODES"
                   :key="mode"
                   @click="toggleMode(mode)"
                   :class="[
@@ -517,6 +517,7 @@ import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
 import { isOrgTag } from '@/utils/gridOrg'
+import { VIEW_MODES } from '@/utils/viewModes'
 import AgentListPanel from '@/components/AgentListPanel.vue'
 import CreateAgentModal from '@/components/CreateAgentModal.vue'
 import { useNotification } from '@/composables/useNotification'
