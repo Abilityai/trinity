@@ -1277,6 +1277,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // ent#525: the chat's work — what its participants are doing now and did
+    // recently — one request for every participant. Platform door only: the
+    // route 404s a portal token, and the rail never feeds the store for one.
+    // Throws (the store reads the failure as "couldn't load", never as empty).
+    async fetchWork(agentNames, chatId = null) {
+      const params = { agents: (agentNames || []).filter(Boolean).join(',') }
+      if (chatId) params.chat_id = chatId
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/work', {
+        headers: this.authHeader,
+        params,
+      })
+      return data
+    },
+
     // Answer one ask. The row is removed from local state on success rather than
     // patched: the server's answer is authoritative, and a client that keeps a
     // stale "pending" copy would offer to answer it twice.

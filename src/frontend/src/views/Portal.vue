@@ -187,6 +187,7 @@
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"
+          @open-work="openRailOn('work')"
         >
           <template #rail-strip>
             <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
@@ -255,6 +256,7 @@
           @toggle-star="toggleStar"
           @open-thread="openThread"
           @work-state="onWorkState"
+          @open-work="openRailOn('work')"
         >
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
@@ -336,6 +338,9 @@
         <!-- ent#475: the three re-homed tabs dock into the shell's slots. Each
              body READS a shell-owned store (`usePortalRailFeeds`) and never
              fetches, so the collapsed rail can signal with nothing mounted. -->
+        <template #tab-work="{ participants, tab }">
+          <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+        </template>
         <template #tab-loops="{ participants, tab }">
           <PortalLoops :participants="participants" :tab="tab" />
         </template>
@@ -364,6 +369,9 @@
       <!-- ent#475: the same three re-homed tabs dock into the shell's slots. Each
            body READS a shell-owned store (`usePortalRailFeeds`) and never
            fetches, so the collapsed rail can signal with nothing mounted. -->
+      <template #tab-work="{ participants, tab }">
+        <PortalWork :participants="participants" :tab="tab" :chat-id="railChatId" @open-thread="openThread" @see-hints="seeHints" @ask-about-it="askAboutIt" />
+      </template>
       <template #tab-loops="{ participants, tab }">
         <PortalLoops :participants="participants" :tab="tab" />
       </template>
@@ -398,6 +406,7 @@ import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalLoops from '@/components/portal/PortalLoops.vue'
 import PortalRailCanvas from '@/components/portal/PortalRailCanvas.vue'
+import PortalWork from '@/components/portal/PortalWork.vue'
 import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
@@ -585,6 +594,9 @@ const railVisible = computed(() => railVisibleFor({
 // participant list the rail renders from — nothing is fetched for a tab this
 // session cannot see, or before the stage verdict — and hands back the three
 // store-derived signals. The Work signal still rides the emits below (#457).
+// ent#525: the open 1:1 thread, for the Work feed's delegated children. A
+// room has no portal session, so it passes nothing.
+const railChatId = computed(() => (activeRoomIdFromRoute.value ? null : (activeSessionId.value || pendingSession.value || null)))
 const rail = usePortalRailFeeds({
   visible: railVisible,
   tabs: railTabs,
@@ -593,8 +605,12 @@ const rail = usePortalRailFeeds({
   open: computed(() => railState.value.open),
   sheetOpen: railSheetOpen,
   storage: safeStorage,
+  chatId: railChatId,
+  workEmit: workSignal,
 })
-const railSignals = computed(() => ({ work: workSignal.value, ...rail.signals.value }))
+// ent#525: the Work signal is store-derived now — the owner merges the
+// conversation's emit into the feed's running rows BY EXECUTION ID.
+const railSignals = computed(() => ({ ...rail.signals.value }))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
 function setRailTab(tab) { railState.value = { ...railState.value, tab } }
@@ -605,6 +621,10 @@ function onWorkState(sig) {
   // `working` list went idle) — the moment a canvas or a file may have
   // changed. One trigger for both chats, no timer.
   if (wasLive && !workSignal.value.live) rail.refresh()
+  // ent#525: a turn STARTING is when its row (and, soon, its delegated
+  // children) appear — read the feed once the row exists; the 12 s poll then
+  // runs while it is live. A room's `working` list starts the same way.
+  if (!wasLive && workSignal.value.live) rail.work.scheduleRefresh(1500)
 }
 
 // ent#475: "open the rail on <tab>" — the header paperclip. The column at
@@ -620,6 +640,11 @@ function openRailOn(tab) {
 function askForCanvas() {
   railSheetOpen.value = false
   usePlaybook(askCanvasPrefill(railParticipants.value))
+}
+// ent#525: the Work tab's "Ask about it" — the same prefill path, never a send.
+function askAboutIt(text) {
+  railSheetOpen.value = false
+  usePlaybook(text)
 }
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 

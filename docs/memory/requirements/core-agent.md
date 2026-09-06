@@ -1330,12 +1330,82 @@ already holds.
   `visibleTabs` (`feedsFor`), so an external client — who sees Canvas ·
   Files — never causes a loops request, and a session that fails a door never
   fetches that tab's data.
-- **Out of scope**: the Work tab's content (#457), the State tab (#439), the
-  resize handles (#492), the conversation-wide drop target (#524), and a
-  backend broadcast for canvas writes / shared files (registered in the
-  debt inbox).
+- **Out of scope**: the State tab (#439), the resize handles (#492), the
+  conversation-wide drop target (#524), and a backend broadcast for canvas
+  writes / shared files (registered in the debt inbox). The Work tab's
+  content landed as §5.21 (ent#525).
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (slice 2 section),
   `workspace-loops.md`, `agent-canvas.md`
+
+### 5.21 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_TAB`
+- **Description**: When a message starts a long-running job, the Workspace
+  shows it happening: a **live card** under that message (status word,
+  elapsed, the current step, the steps of a pipeline with the agent holding
+  each one, Stop, Open in Work), and the rail's **Work** tab — *Waiting on
+  you*, *Now*, *Earlier*. The user-facing noun is **work**. The report-back
+  contract (ent#457 AC 3) is abilityai/trinity#2386; this is the surface.
+  Built to the approved artboards (ent#457, 2026-08-24 / 2026-09-06) and the
+  three PM answers of 2026-09-02: an honest "Ask about it" instead of a fake
+  restart; a visible "this agent doesn't report steps"; today's roster scope.
+- **AC-1 — the live card**: `PortalWorkCard` replaces the bouncing dots in
+  `PortalConversation` while a turn is in flight — the feed's row for THIS
+  turn (matched by execution id, never "latest running"), a synthetic item
+  until the feed has it; the stream's last line is the current step (ent#286);
+  elapsed from the server's reading. Live push = `agent_activity` (started and
+  terminal) + loop events for a participant, debounced; degrade = a 12 s poll
+  **only while something is live**; a RUNNING row past 1.5× the agent's turn
+  bound is `stale` and not live — never a stuck "running".
+- **AC-2 — pipelines and holders**: steps come from the agent's published
+  #919 files (`~/.trinity/pipelines/*.yaml` + `pipeline-state/`), read
+  best-effort by the backend under `pipelines.ts`'s hardening rules; the
+  current stage's holder is named (roster-masked; "another agent" otherwise).
+  Delegated children are found by the CHAT (`source_channel_chat_id`) and
+  render as "held by B". Three states: stages · **"doesn't report steps"**
+  (reachable, publishing nothing) · **"could not be read right now"**
+  (stopped, unreachable, unreadable, or two runs on one agent).
+- **AC-3 — honest terminals**: failed / timed out / stopped by you / no longer
+  tracked, each its own word; the terminal card renders FROM the durable
+  #2320 verdict (applied on load and on reattach), so it survives a reload;
+  success collapses into the reply. The lesser control is **Ask about it** —
+  a composer prefill that names the job, never a send. Stop works after a
+  reload (`reattach` sets the execution id).
+- **AC-4 — the Work tab** (`PortalWork`, docked into `#tab-work` in both rail
+  mounts): *Waiting on you* = `PortalAsks` over `store.asks` filtered to the
+  participants (the fourth rendering of the same operator-queue row, ent#428;
+  a computed, never a narrowed fetch); *Now* = a card per live row with Stop
+  where `can_stop`; *Earlier* = "N in the last 30 days · latest 3 shown", Show
+  all expands in place inside the rail's own scroll axis, "30+" when the
+  server's page is full (principle 28).
+- **AC-5 — rooms**: grouped by participating agent, a row for every
+  participant, absence visible (`groupByParticipant`); the room renders the
+  live card for the agents the SERVER says are working.
+- **AC-6 — platform door only**: the route (`GET
+  …/client-portal/work`) 404s a portal token before any read; the rail's
+  `visibleTabs` never renders the tab for a client. Roster = today's
+  `roster_agent_names` (inherit ent#367 later); off-roster names dropped from
+  the request and masked on the payload.
+- **AC-7 — empty state teaches**: the registry's copy + "See what you can
+  ask"; per-section lines otherwise; loading is a skeleton on the feed's
+  verdict, a failed first load is `LoadFailed`, a failed refresh keeps the
+  rows under `InlineError`.
+- **AC-8 — loop history is one execution kind** (`kind: loop`, from the
+  `loop` trigger / `loop_id`), rendered in *Now* and *Earlier* — no parallel
+  surface (ent#458 AC 3 lands here).
+- **Backend**: `client_portal/work/` (router · models · service ·
+  `pipeline_state`); `get_fleet_executions` gains `source_channel`,
+  `source_channel_chat_id`, `loop_id`; new `get_running_for_chat` on the
+  executions mixin (driven by `idx_executions_status`, no migration). No
+  table, no migration, no MCP tool (`# mcp: none`).
+- **Tests**: `tests/unit/test_ent525_portal_work.py` (door, narrowing, the
+  kind/outcome/can_stop tables, sanitizing, the read, the hardened pipeline
+  read); `src/frontend/tests/unit/portalWork.spec.js` (pure rules, the store
+  under Pinia, the owner wiring, source guards on both hosts).
+- **Out of scope (stated)**: a step-level restart (#919 territory, ruled
+  out); ent#367's profile scope; a backend broadcast for pipeline-state
+  writes (steps ride the poll while running).
+- **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
 ## 6. Activity Monitoring
 

@@ -321,6 +321,42 @@ its `#tab-work` slot; loops / canvas / files re-home in #472's second child; #49
 the grid variables the rail's widths then follow. See
 [workspace-rail.md](../feature-flows/workspace-rail.md).
 
+**Work — the live card and the rail's first tab (trinity-enterprise#525, the visual half
+of ent#457).** `client_portal/work/` is the read (`GET …/client-portal/work?agents=&chat_id=`,
+**platform door only** — a portal token gets a uniform 404 before any read, ent#78's
+auth-path invariant restated by the 2026-09-06 ruling; the frontend's `visibleTabs` gate is
+UX, this line is containment). It projects the executions ledger for the person who asked:
+*Now* (in-flight rows), *Earlier* (terminal rows inside a 30-day window, bounded at 30 with the
+window total counted server-side) and, given the open thread, that chat's **delegated
+children** — found by `source_channel_chat_id`, never by agent, because a child's
+`agent_name` is the delegate (ent#265 D0 / #2386 copy the chat binding onto the child row;
+`idx_executions_status` drives the in-flight selector, so no migration). The DB queries are the
+fleet dashboard's (`get_fleet_executions` / `get_fleet_execution_stats`, which gained
+`source_channel`, `source_channel_chat_id`, `loop_id`) under the **portal roster** — never the
+operator fleet ACL, which resolves through `list_all_agents_fast()` and answers `[]` on a
+Docker fault (the #2196 class). Every name on the payload is roster-masked (a child on an agent
+the caller cannot see is a step, unnamed — the ent#467 disclosure class); `title`/`error` are
+sanitized and bounded; only a `portal` stamp becomes a `chat_id`. **Honesty rules:** a RUNNING
+row past 1.5× the agent's turn bound (floor 30 min) is `stale` — not live, no clock, no
+signal, no poll — because the 120-minute sweep leaves ghost rows after a restart; `can_stop`
+mirrors exactly what the terminate route accepts; steps are **three-state** (`reported` /
+`none` = "doesn't report steps" / `unknown` = stopped, unreachable, unreadable, or two runs on
+one agent so no instance can be attributed) — a stopped agent must never be described as one
+that does not report. The #919 read (`work/pipeline_state.py`) mirrors `pipelines.ts`'s
+hardening: id grammar before any path, `size` from the listing before the download, a streamed
+byte budget, `safe_yaml`, no retries, 2 s per call in a 3 s wall budget, a 10 s per-agent
+cache. Frontend: `stores/portalWork.js` is fed by `usePortalRailFeeds` (the ONE owner), polls
+12 s **only while something is live**, refreshes on `agent_activity` (started AND terminal) and
+loop events for a participant (debounced 2 s); the Work signal is **one merged set** — the
+feed's live rows plus the conversation's in-flight emit joined **by execution id**
+(`workSignalFromItems`), never two signals summed. `PortalWorkCard` is the one card for the chat
+(under the message; the stream's last line is the current step while live; the terminal card
+renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it** is a prefill,
+never a send — the ruled lesser control) and for `PortalWork`, the tab body (Waiting on you =
+`PortalAsks` over `store.asks` filtered to participants, the fourth rendering of the ask row;
+rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
+ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
+
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
 cannot read `GET /api/settings/feature-flags` — that endpoint is `get_current_user`-gated

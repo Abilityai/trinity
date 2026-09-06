@@ -677,3 +677,57 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    # ent#525 — the in-flight rows a Workspace chat is waiting on.
+    _CHAT_INFLIGHT_STATUSES = ("running", "queued")
+
+    def get_running_for_chat(self, chat_id: str) -> List[Dict]:
+        """Every RUNNING / QUEUED execution bound to one chat, newest first.
+
+        The Work tab's agent filter cannot find a delegated child: the child's
+        ``agent_name`` is the DELEGATE, not the participant (A asks B → the row
+        says B). What the child does carry is the chat it was started from —
+        ``source_channel_chat_id`` is copied from the parent at creation
+        (ent#265 D0, #2386) — so the card under a message finds its steps by
+        the chat, not by the agent.
+
+        Only in-flight statuses, by design: the selector has no index of its
+        own, and ``idx_executions_status`` makes ``status IN (running, queued)``
+        the driving predicate — a handful of rows on any install — so this
+        needs no migration. History stays on the agent-keyed read.
+
+        Summary columns only (never ``response`` / ``execution_log``).
+        """
+        if not chat_id:
+            return []
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
+                schedule_executions.c.triggered_by,
+                schedule_executions.c.source_user_email,
+                schedule_executions.c.source_agent_name,
+                schedule_executions.c.source_channel,
+                schedule_executions.c.source_channel_chat_id,
+                schedule_executions.c.loop_id,
+            )
+            .where(and_(
+                schedule_executions.c.status.in_(self._CHAT_INFLIGHT_STATUSES),
+                schedule_executions.c.source_channel_chat_id == chat_id,
+            ))
+            .order_by(schedule_executions.c.started_at.desc())
+            .limit(50)
+        )
+        with get_engine().connect() as conn:
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
