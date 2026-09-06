@@ -119,17 +119,31 @@ describe('#2540 — the three Workspace zones load with a skeleton keyed on a ve
     expect(src).toContain('id="portal-briefing"')
   })
 
+  it('the rail tab bodies load with the rail skeleton keyed on a verdict, never a spinner (ent#475, AC 6 as amended)', () => {
+    for (const rel of ['components/portal/PortalLoops.vue', 'components/portal/PortalRailFiles.vue', 'components/portal/PortalRailCanvas.vue']) {
+      const body = code(rel)
+      expect(body, rel).toContain(`<PortalSkeleton v-if="view.state === 'loading'" variant="rail" />`)
+      expect(body, rel).toContain(`v-else-if="view.state === 'failed'"`)
+      expect(body, rel).toContain('<LoadFailed')
+      expect(body, rel).toContain('<InlineError v-if="view.stale"')
+      // The bespoke spinner the Files drawer carried is gone with it.
+      expect(body, rel).not.toContain('animate-spin')
+      expect(body, rel).not.toMatch(/v-if="(?:store|feeds)\.loading"/)
+      expect(body, rel).not.toMatch(/import\s+ScanlineReveal/)
+    }
+  })
+
   it('the skeleton recipe carries its own rules', () => {
     const src = read('components/portal/PortalSkeleton.vue')
-    for (const variant of ['stage', 'thread', 'briefing']) {
+    for (const variant of ['stage', 'thread', 'briefing', 'rail']) {
       expect(src).toContain(`variant === '${variant}'`)
       expect(src).toContain(`data-testid="portal-skeleton-${variant}"`)
     }
     // Static under prefers-reduced-motion (§6); busy + one sr-only line.
     expect(src).toContain('animate-pulse motion-reduce:animate-none')
     expect(src).not.toMatch(/import\s+ScanlineReveal/)
-    expect((src.match(/aria-busy/g) || []).length).toBeGreaterThanOrEqual(3)
-    expect((src.match(/sr-only/g) || []).length).toBeGreaterThanOrEqual(3)
+    expect((src.match(/aria-busy/g) || []).length).toBeGreaterThanOrEqual(4)
+    expect((src.match(/sr-only/g) || []).length).toBeGreaterThanOrEqual(4)
   })
 })
 

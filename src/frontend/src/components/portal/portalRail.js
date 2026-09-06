@@ -28,6 +28,8 @@
  */
 
 import { byAgent } from './portalLoopUtils'
+import { parseUTC } from '@/utils/timestamps'
+import { viewState } from '@/utils/loadingState'
 
 // ---------------------------------------------------------------- vocabulary
 
@@ -60,9 +62,12 @@ export const RAIL_DEFAULT_TAB = 'work'
 export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files'])
 
 /**
- * The registry. v1 of the shell docks ONE tab — Work (#457's Activity) — and
- * docks it empty by the operator's own split: the shell is the frame the other
- * slices dock into, and the Work tab's content lands with #457.
+ * The registry. Slice 1 (ent#474) docked ONE tab — Work (#457's Activity),
+ * empty by the operator's own split. Slice 2 (ent#475) docks the three the
+ * order already named: Loops (ent#458's panel), Canvas (ent#438's canvas) and
+ * Files (the drawer). Each brings its body as a `#tab-<id>` slot of
+ * `PortalRail`; the `empty` entry here is the contract every tab must state
+ * even when its body renders its own copy, so the registry stays honest.
  *
  * `empty.body(participants)` is a function because the copy names the agent in
  * a 1:1 and "an agent in this room" otherwise; `empty.action` is the next step
@@ -79,15 +84,81 @@ export const RAIL_TABS = Object.freeze([
     empty: Object.freeze({
       title: 'Nothing running right now',
       body: (participants) => {
-        const list = participantList(participants)
-        const who = list.length === 1 ? list[0] : 'an agent in this room'
+        const who = whoIs(participants)
         return `When ${who} takes on a longer job from this chat — a report, a research pass — it shows up here step by step, and reports back to the chat when it's done.`
       },
       action: 'See what you can ask',
       event: 'see-hints',
     }),
   }),
+  // ent#475 — platform-only (ent#78's auth-path invariant, restated by
+  // ent#458): the body calls the operator loop endpoints with the platform
+  // JWT, and the shell feeds `stores/portalLoops.js` only when this tab
+  // passes its door.
+  Object.freeze({
+    id: 'loops',
+    label: 'Loops',
+    door: RAIL_DOORS.PLATFORM,
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_LIVE,
+    icon: 'refresh',
+    empty: Object.freeze({
+      title: 'No loops running',
+      body: (participants) => {
+        const who = whoIs(participants)
+        return `A loop runs the same instruction several times in a row — working through a list, retrying until something succeeds, refining a draft. Start one on ${who} from here; it stops at its run limit, and you can stop it any time.`
+      },
+      action: 'Start a loop',
+      event: 'start-loop',
+    }),
+  }),
+  // ent#475 — rendered for every session; the SERVER narrows to the canvases
+  // the agent published to the people it works with (ent#438: the Workspace
+  // reads `audience='roster'` for every principal).
+  Object.freeze({
+    id: 'canvas',
+    label: 'Canvas',
+    door: RAIL_DOORS.AUDIENCE,
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_UPDATED,
+    icon: 'template',
+    empty: Object.freeze({
+      title: 'No canvas yet',
+      body: (participants) => {
+        const who = whoIs(participants)
+        return `A canvas is a surface ${who} keeps current — a status board, a running tally, the latest version of an analysis. Ask for one in the chat and it appears here.`
+      },
+      action: 'Ask for a canvas',
+      event: 'ask-canvas',
+    }),
+  }),
+  // ent#475 — per-agent inbox scoping (2026-08-07): the same client-portal
+  // routes the drawer used, so who may send to and download from an agent is
+  // unchanged.
+  Object.freeze({
+    id: 'files',
+    label: 'Files',
+    door: RAIL_DOORS.AGENT,
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_UPDATED,
+    icon: 'paperclip',
+    empty: Object.freeze({
+      title: 'No files yet',
+      body: (participants) => {
+        const who = whoIs(participants)
+        return `Send ${who} a file to work from, or download what it shares back with you.`
+      },
+      action: 'Send a file',
+      event: 'send-file',
+    }),
+  }),
 ])
+
+/** "scout" in a 1:1, "an agent in this room" otherwise — one rule for every empty copy. */
+function whoIs(participants) {
+  const list = participantList(participants)
+  return list.length === 1 ? list[0] : 'an agent in this room'
+}
 
 // ---------------------------------------------------------------- doors
 
@@ -385,6 +456,168 @@ export function railVisibleFor({
   if (stageState !== 'ready') return false
   if (roomId) return roomsAvailable === true
   return Boolean(activeAgent) && !unreachable
+}
+
+// ---------------------------------------------------------------- slice 2 (ent#475): feeds, seen markers, openers
+
+/**
+ * Which feeds the shell must keep alive for THIS session — read off the
+ * visible tab list, never the registry, so the door gate extends from
+ * "mount" to "fetch": an external client (Canvas · Files) never causes a
+ * loops request, and a session that fails a door never fetches that tab's
+ * data.
+ */
+export function feedsFor(visible) {
+  const ids = new Set((Array.isArray(visible) ? visible : []).map((t) => t && t.id))
+  return { loops: ids.has('loops'), canvas: ids.has('canvas'), files: ids.has('files') }
+}
+
+/** The Loops signal: the store's active loops, derived on every render. */
+export function loopsSignalFrom(activeLoops) {
+  const agents = (Array.isArray(activeLoops) ? activeLoops : [])
+    .map((l) => (l && typeof l.agent_name === 'string' ? l.agent_name.trim() : ''))
+    .filter(Boolean)
+  return { live: agents.length, updated: false, agents }
+}
+
+/**
+ * A server timestamp as epoch ms, or null. Never compared as a string:
+ * `created_at` / `updated_at` arrive in more than one ISO spelling
+ * (Invariant #16), and a client marker written by `toISOString()` is a third.
+ * `parseUTC` reads a naive value as UTC, which is what the backend writes.
+ */
+export function timestampMs(value) {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const ms = parseUTC(value.trim()).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+/** The newest parseable `field` across `items`, as the server wrote it, or null. */
+export function newestTimestamp(items, field) {
+  let best = null
+  let bestMs = null
+  for (const it of Array.isArray(items) ? items : []) {
+    const ms = it && typeof it === 'object' ? timestampMs(it[field]) : null
+    if (ms === null) continue
+    if (bestMs === null || ms > bestMs) { bestMs = ms; best = it[field].trim() }
+  }
+  return best
+}
+
+/**
+ * The "updated since last view" signal for a feed-backed tab (Canvas, Files).
+ *
+ * Per participant: the newest SERVER timestamp of that agent's items is newer
+ * than the agent's seen marker — or nothing was ever seen and the feed is
+ * non-empty (there is something you have not looked at). An empty feed never
+ * signals, a null timestamp never signals, and the marker is itself the last
+ * server timestamp observed (`markSeen`), so clock skew between the browser
+ * and the server cannot keep a dot lit after the tab was viewed.
+ */
+export function updatedSignal({ itemsByAgent = {}, seen = {}, field, participants = [] } = {}) {
+  const agents = participantList(participants).filter((agent) => {
+    const newest = timestampMs(newestTimestamp(itemsByAgent && itemsByAgent[agent], field))
+    if (newest === null) return false
+    const mark = timestampMs(seen && seen[agent])
+    return mark === null || newest > mark
+  })
+  return { live: 0, updated: agents.length > 0, agents }
+}
+
+/** The second persisted key (ent#475): per-tab, per-agent "last seen" markers. */
+export const RAIL_SEEN_STORAGE_KEY = 'trinity-workspace-rail-seen'
+export const RAIL_SEEN_TABS = Object.freeze(['canvas', 'files'])
+
+/** `{ canvas: {agent: iso}, files: {agent: iso} }` — unknown tabs, non-string agents and unparseable stamps dropped. */
+export function normalizeSeen(raw) {
+  const out = {}
+  for (const tab of RAIL_SEEN_TABS) {
+    out[tab] = {}
+    const entry = raw && typeof raw === 'object' && raw[tab] && typeof raw[tab] === 'object' ? raw[tab] : {}
+    for (const [agent, ts] of Object.entries(entry)) {
+      if (typeof agent !== 'string' || !agent.trim()) continue
+      if (timestampMs(ts) === null) continue
+      out[tab][agent.trim()] = String(ts).trim()
+    }
+  }
+  return out
+}
+
+export function loadSeen(storage) {
+  try {
+    const raw = storage && typeof storage.getItem === 'function'
+      ? storage.getItem(RAIL_SEEN_STORAGE_KEY)
+      : null
+    return normalizeSeen(raw ? JSON.parse(raw) : null)
+  } catch {
+    return normalizeSeen(null)
+  }
+}
+
+export function saveSeen(storage, seen) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false
+    storage.setItem(RAIL_SEEN_STORAGE_KEY, JSON.stringify(normalizeSeen(seen)))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Mark every participant's newest item as seen for `tab`. Returns the SAME
+ * object when nothing moved, so a watcher keyed on identity does not loop;
+ * a participant with no items keeps whatever marker it had.
+ */
+export function markSeen(seen, tab, { itemsByAgent = {}, field, participants = [] } = {}) {
+  if (!RAIL_SEEN_TABS.includes(tab)) return seen
+  const base = normalizeSeen(seen)
+  let changed = false
+  for (const agent of participantList(participants)) {
+    const newest = newestTimestamp(itemsByAgent && itemsByAgent[agent], field)
+    if (!newest) continue
+    if (base[tab][agent] !== newest) { base[tab][agent] = newest; changed = true }
+  }
+  return changed ? base : seen
+}
+
+/**
+ * How a feed-backed tab body reads its store: `viewState` over the verdict —
+ * and `loading` while a room's participants have not landed yet, because a
+ * body with nobody to show is not "empty", it is "not yet".
+ */
+export function feedView({ participants = [], hasLoaded = false, error = null, count = 0 } = {}) {
+  if (!participantList(participants).length) return { state: 'loading', stale: false }
+  return viewState({ hasLoaded, error, count })
+}
+
+/**
+ * How "open the rail on <tab>" lands on this viewport: the column at and above
+ * Tailwind's `sm` (640px), the sheet below it. The mobile plan never persists
+ * `open: true` — that is the desktop layout's preference, and a phone tap
+ * must not change what the same account sees on a laptop.
+ */
+export function railOpenPlan({ wide = true } = {}) {
+  return wide === true ? { open: true, sheet: false } : { open: null, sheet: true }
+}
+
+export const RAIL_WIDE_QUERY = '(min-width: 640px)'
+
+/** `matchMedia` is absent in node and in some embedded webviews: the column wins then. */
+export function isWideViewport(win) {
+  try {
+    if (!win || typeof win.matchMedia !== 'function') return true
+    return win.matchMedia(RAIL_WIDE_QUERY).matches === true
+  } catch {
+    return true
+  }
+}
+
+/** The composer text "Ask for a canvas" pre-fills — never sent by the rail. */
+export function askCanvasPrefill(participants) {
+  const list = participantList(participants)
+  const ask = 'an you publish a canvas with where things stand right now — a short status board I can keep coming back to?'
+  return list.length > 1 ? `${list[0]}, c${ask}` : `C${ask}`
 }
 
 // ---------------------------------------------------------------- internals
