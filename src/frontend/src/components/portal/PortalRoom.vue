@@ -125,11 +125,6 @@
       </div>
     </div>
 
-    <!-- ent#458: loops any agent PARTICIPANT is running. Scoped to the room's
-         participants, so a loop on an agent that is not in this room does not
-         appear here. -->
-    <PortalLoops :participants="agentParticipants" />
-
     <!-- ent#474: the rail's mobile collapsed form — see PortalConversation. -->
     <slot name="rail-strip" />
 
@@ -215,7 +210,6 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalAvatar from './PortalAvatar.vue'
-import PortalLoops from './PortalLoops.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import { workSignalFromRoom } from './portalRail'
@@ -243,6 +237,9 @@ const props = defineProps({
   // ent#359: star state is per-viewer and owned by the shell, not by the room —
   // a room is shared, a star is not.
   starred: { type: Boolean, default: false },
+  // ent#475: text to seed the composer with — the rail's "Ask for a canvas"
+  // pre-fills, never sends. Same contract as `PortalConversation`'s.
+  prefill: { type: String, default: '' },
 })
 const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state'])
 
@@ -262,6 +259,12 @@ const addError = ref(null)
 // ent#392 — composer typeahead state (`@` only; see the block below for why
 // there is no `/` here).
 const textarea = ref(null)
+
+// ent#475 — a prefill lands in the composer and focuses it; the person
+// decides whether to send. Mirrors `PortalConversation`'s watcher.
+watch(() => props.prefill, (v) => {
+  if (v) { input.value = v; nextTick(() => { autoGrow(); textarea.value?.focus() }) }
+})
 const composerWrap = ref(null)
 const typeaheadTrigger = ref(null)
 const activeIndex = ref(-1)

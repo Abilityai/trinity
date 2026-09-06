@@ -121,4 +121,17 @@ watch(
   },
   { immediate: true },
 )
+
+// ent#475 — the selected canvas was REWRITTEN (same id, newer `updated_at`) by
+// a refresh of the metadata list: re-read its blocks. Without this the rail's
+// "updated" dot could light, the tab open, and the blocks on screen be the
+// ones fetched before the agent's last write — the header would say "updated
+// just now" over content that was not.
+watch(
+  () => props.canvases.find((c) => c.canvas_id === selectedId.value)?.updated_at,
+  (updatedAt) => {
+    if (!updatedAt || !detail.value) return
+    if (detail.value.updated_at !== updatedAt) select(selectedId.value)
+  },
+)
 </script>

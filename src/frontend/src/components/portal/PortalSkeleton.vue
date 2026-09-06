@@ -12,6 +12,8 @@
               lands on the same footprint (principle 4)
     thread    the transcript, while a thread's history loads
     briefing  the new-chat hint zone, while the agent's briefing hydrates
+    rail      a rail tab body (ent#475) — an overline, three row blocks and a
+              second overline, the footprint of a grouped list
 
   Rules the recipe carries so its consumers cannot forget them:
     * `aria-busy` on the placeholder root and ONE `sr-only` line — a screen
@@ -73,6 +75,21 @@
     <span v-if="announce" class="sr-only">Loading this conversation…</span>
   </div>
 
+  <!-- ================================= RAIL ================================ -->
+  <!-- A rail tab body while its feed has no verdict (ent#475): what the loaded
+       Loops / Canvas / Files bodies land on — an overline and rows. -->
+  <div
+    v-else-if="variant === 'rail'"
+    class="space-y-2"
+    aria-busy="true"
+    data-testid="portal-skeleton-rail"
+  >
+    <div :class="[BLOCK_STRONG, 'h-2.5 w-20 rounded mb-3']"></div>
+    <div v-for="row in 3" :key="row" :class="[BLOCK, 'h-14 rounded-xl']"></div>
+    <div :class="[BLOCK_STRONG, 'h-2.5 w-24 rounded mt-5']"></div>
+    <span class="sr-only">Loading…</span>
+  </div>
+
   <!-- =============================== BRIEFING ============================== -->
   <!-- What the hint zone's wrapper reserves room for: a description line, the
        overline, and one row of two hint cards. -->
@@ -94,7 +111,7 @@
 
 <script setup>
 defineProps({
-  // 'stage' | 'thread' | 'briefing'
+  // 'stage' | 'thread' | 'briefing' | 'rail'
   variant: { type: String, required: true },
   // The `thread` variant is also nested inside `stage`, which already carries
   // the live-region text; the nested copy stays silent so a screen reader

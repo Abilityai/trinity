@@ -189,6 +189,7 @@ operator or the tool result the model is waiting on.
 |---|---|---|
 | Agent Detail → **Canvas** tab | `GET /api/agents/{name}/canvas[/{id}]` | every canvas |
 | Workspace agent page → **Canvas** tab | `GET /api/enterprise/client-portal/agents/{name}/canvas[/{id}]` | `audience='roster'` only |
+| Workspace conversation rail → **Canvas** tab (ent#475) | the same routes, the same `CanvasPanel` per participating agent | `audience='roster'` only; "updated since last view" dot on the collapsed rail |
 | MCP | `set_canvas` · `get_canvas` · `list_canvases` · `clear_canvas` | its own |
 
 There is **no `append_to_canvas` tool, by design**: `set_canvas` replaces, so
@@ -218,3 +219,4 @@ would be an instruction they cannot follow, so they get the chat instead.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-09-02 | claude | Initial — canvas surface, workspace merge, voice-panel bridge (ent#438) |
+| 2026-09-06 | claude | Conversation-side placement in the Workspace rail; `CanvasPanel` re-reads blocks when the selected canvas's `updated_at` moves (ent#475) |

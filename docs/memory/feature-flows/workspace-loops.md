@@ -95,10 +95,11 @@ ceiling, not a security gate, and the prior behaviour was no check at all.
 |------|------|
 | `routers/loops.py` | `_reject_timeout_above_cap` (ent#338) |
 | `components/portal/portalLoopUtils.js` | every decidable rule — labels, tones, headroom, strip text, form pre-flight, payload |
-| `components/portal/PortalLoops.vue` | the strip, the rows, the start form, Stop |
+| `components/portal/PortalLoops.vue` | the rail's Loops tab body (ent#475): the rows, the start form, Stop, the teaching empty state |
 | `stores/portalLoops.js` | participant-scoped state, poll backstop, partial-failure tolerance |
+| `composables/usePortalRailFeeds.js` | the ONE owner of the store's participants (ent#475) — fed off the rail's door gate |
 | `utils/websocket.js` | the second route for the existing loop broadcast |
-| `PortalConversation.vue`, `PortalRoom.vue` | mount points (1 participant / N) |
+| `views/Portal.vue` | mount point: the rail's `#tab-loops` slot (ent#475; the strip above the composer is gone) |
 | `tests/unit/test_ent338_loop_timeout_cap.py`, `tests/unit/portalLoops.spec.js` | the rules |
 
 ## Testing
@@ -127,6 +128,17 @@ Live pass on a running instance (recorded in the PR): start from a chat, watch
 runs arrive over the existing broadcast, Stop mid-run, and a `timeout_per_run`
 above the agent cap refused with the bound named — with the bounds visible in
 the form before Start, which is why the ceiling refuses rather than clamps.
+
+## Re-homed into the rail (trinity-enterprise#475)
+
+The collapsed strip above the composer is gone. `PortalLoops` is the body of
+the rail's **Loops** tab (`docs/memory/feature-flows/workspace-rail.md`, slice
+2); the collapsed rail carries the "1 running" signal (`loopsSignalFrom` over
+the store's active loops), and a room groups by participant through the rail's
+one grouping rule. Ownership of `stores/portalLoops.js` moved to the shell
+(`composables/usePortalRailFeeds.js`) so the signal is live with no body
+mounted — the `ownedKey` / incoming-vs-outgoing races are gone rather than
+guarded, because there is one mount point.
 
 ## Known gaps, stated
 

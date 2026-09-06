@@ -102,7 +102,7 @@ holdovers are on #1921.
 
 ## Tests
 
-`tests/unit/portalRail.spec.js` — the pure contract (registry shape, doors,
+`tests/unit/portalRail.spec.js` — the pure contract (+ ent#475: the four-tab registry, `feedsFor`, timestamps as instants, `updatedSignal`, seen markers, `feedView`, `railOpenPlan`, the removed placements, the owner's wiring); `tests/unit/portalRailFeeds.spec.js` — the feed store and the owner composable under Pinia in node (door-gated fetching, partial failure, the stale-response token, uploads on request, debounced push, the room's first beat, seen-on-open) (registry shape, doors,
 ordering, state normalization and persistence, signal precedence and leakage,
 room grouping, empty copy, placement) plus source guards (sibling of `<main>`
 with no key; `store.isPlatformSession` never a literal; the reset watch; the
@@ -113,10 +113,97 @@ the Docker frontend: collapsed → open → persisted across reload; light and d
 the mobile strip → sheet → Escape; the stage skeleton under a slowed roster; no
 console errors.
 
+## Slice 2 — Loops, Canvas and Files re-homed (trinity-enterprise#475)
+
+The three placements #472 found — the loops strip above the composer (ent#458),
+the Files slide-over, the canvas on the agent page only (ent#438) — dock into
+the frame. The old placements are **removed, not duplicated**: `PortalLoops` is
+no longer mounted by `PortalConversation` / `PortalRoom`, and
+`PortalFilesPanel.vue` is deleted (its sheet chrome already lived in
+`PortalRail`).
+
+```
+Portal.vue (shell)
+├─ rail = usePortalRailFeeds({ visible: railVisible, tabs: railTabs, participants, activeTab, open, sheetOpen, storage })
+│    ├─ wants = feedsFor(railTabs)                    ← THE door gate, extended from "mount" to "fetch"
+│    ├─ watch([visible, participantsKey, wantsKey])   hidden → reset() ; empty participants → return (no blank) ;
+│    │      loops ∈ wants → portalLoops.setParticipants + fetchLoops ; feeds.setFeeds + refresh()
+│    ├─ watch(shown)      files opened → refresh({uploads:true}) ; canvas opened → refresh()
+│    ├─ seen  = loadSeen(localStorage['trinity-workspace-rail-seen'])   re-marked on [shown, feeds.version]
+│    └─ signals = { loops: loopsSignalFrom(loops.active), canvas|files: updatedSignal(newest server ts vs seen) }
+├─ railSignals = { work, ...rail.signals }
+├─ onWorkState: live → 0  ─► rail.refresh()          (a turn ended: 1:1 `sending`, room `working`)
+├─ watch([convKey, roomId]) ─► rail.reset()
+├─ @open-files ─► openRailOn('files')  = railOpenPlan({ wide: isWideViewport(window) })   column ≥ sm, sheet < sm
+├─ @ask-canvas ─► usePlaybook(askCanvasPrefill(participants))   a PREFILL (conversation AND room), never a send
+└─ <PortalRail> #tab-loops → PortalLoops · #tab-canvas → PortalRailCanvas → CanvasPanel × participant · #tab-files → PortalRailFiles
+utils/websocket.js: loop_* and agent_activity (terminal) → portalRailFeeds.handleWebSocketEvent (debounced 2s, participant-filtered)
+```
+
+### One owner, so the collapsed rail can signal
+
+The strip owned `stores/portalLoops.js` from inside two mount points and
+guarded three races (`ownedKey`, the late `isPlatformSession`, the re-fire
+resetting the chosen agent). The rail needs the loops signal with **no body
+mounted**, so ownership moves to the shell — `composables/usePortalRailFeeds.js`
+— which is one mount, keyed on the joined participant key and the feed set
+(so a late auth confirmation that makes `loops` appear re-fires it). The
+bodies only read. `stores/portalRailFeeds.js` is the same shape for canvases
+and documents: `allSettled` per participant, partial failure keeps rows, a
+fetch token drops a response that lands after a chat switch, **no timer while
+idle**. `uploads` (the viewer's own inbox) is a container read on the backend
+and never signals, so it is fetched only while Files is the open active tab
+and after an upload.
+
+### Fetching follows the door, and the stage verdict
+
+`feedsFor(visibleTabs)` decides what exists: an external client (Canvas ·
+Files) never causes a loops request; a session with no participant fetches
+nothing; `visible` false (agent page, a loading / failed / empty stage, a deep
+link to an unreachable agent) clears both stores — so URL text never drives a
+request. A room's first beat, with participants not yet landed, returns
+without clearing, so the rail does not blank and refill.
+
+### "Updated since last view"
+
+No backend event exists for a canvas write or a shared file (registered as
+debt). The dot derives from data on every render: the newest **server**
+timestamp per participant (`updated_at` / `created_at`, compared as epoch ms
+through `parseUTC` — never lexicographically, Invariant #16) is newer than the
+agent's seen marker, or nothing was ever seen and the feed is non-empty. The
+marker is the newest server stamp observed, so browser clock skew cannot keep
+a dot lit. Markers persist under a **second** key
+(`trinity-workspace-rail-seen`), so the approved `{open, tab}` key is
+untouched. Refresh triggers: participants change, a turn ending (both chats,
+through the Work signal's live → 0 edge), `loop_*` and terminal
+`agent_activity` events for a participant (platform sessions), the tab being
+opened, a successful upload. An external client with a scheduled canvas
+rewrite and no chat turn sees the dot at its next turn or tab open — stated.
+
+### One rendering layer for the canvas
+
+`PortalRailCanvas` renders `CanvasPanel` per participant with
+`store.fetchAgentCanvas` injected — the Workspace agent page's exact pair.
+The audience is the ent#438 ruling, unchanged: `audience='roster'` for every
+Workspace principal. `CanvasPanel` gained one watch: when the selected
+canvas's `updated_at` moves on a list refresh, it re-reads the blocks, so a
+lit dot never opens onto stale content.
+
+### Loading and failure, per AC 6 as amended
+
+Every body renders `PortalSkeleton variant="rail"` keyed on the feed's
+verdict (`feedView` → `viewState`; `loading` while a room's participants have
+not landed), `LoadFailed` + Retry on a failed first fetch, and keeps its rows
+under an `InlineError` on a failed refresh. The Files drawer's `animate-spin`
+is gone with the drawer.
+
 ## Residuals (stated)
 
 - The Work signal rides component emits until #457 gives executions a store;
-  a store-derived signal is the shape every later tab uses (loops already can).
+  Loops / Canvas / Files are store-derived through `usePortalRailFeeds` (ent#475).
+- On a phone the hidden column (`hidden sm:flex`) and the open sheet both mount
+  the active tab's body; bodies never fetch, so the cost is a second form
+  instance, not a second request.
 - "See what you can ask" opens the agent page when the briefing is not on
   screen (a thread with messages) — the nearest home for "what it can do".
 - The Reset-on-Main, sidebar, thread tab strip, top band, Agent-details panel

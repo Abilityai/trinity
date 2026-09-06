@@ -181,6 +181,7 @@
           :room-id="activeRoomIdFromRoute"
           :roster="store.agents"
           :starred="isStarred('room', activeRoomIdFromRoute)"
+          :prefill="prefill"
           @open-menu="mobileNav = true"
           @rooms-changed="refreshThreads"
           @toggle-star="toggleStar"
@@ -248,7 +249,7 @@
           @switch-agent="switchAgent"
           @session-adopted="onSessionAdopted"
           @sessions-changed="onConversationTurnDone"
-          @open-files="filesOpen = true"
+          @open-files="openRailOn('files')"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -331,10 +332,23 @@
         @update:open="setRailOpen"
         @update:active-tab="setRailTab"
         @see-hints="seeHints"
-      />
+      >
+        <!-- ent#475: the three re-homed tabs dock into the shell's slots. Each
+             body READS a shell-owned store (`usePortalRailFeeds`) and never
+             fetches, so the collapsed rail can signal with nothing mounted. -->
+        <template #tab-loops="{ participants, tab }">
+          <PortalLoops :participants="participants" :tab="tab" />
+        </template>
+        <template #tab-canvas="{ participants, tab }">
+          <PortalRailCanvas :participants="participants" :tab="tab" @ask-canvas="askForCanvas" />
+        </template>
+        <template #tab-files="{ participants }">
+          <PortalRailFiles :participants="participants" />
+        </template>
+      </PortalRail>
     </div>
 
-    <!-- ent#474: the rail's mobile form (the `PortalFilesPanel` sheet). Same
+    <!-- ent#474: the rail's mobile form (the former Files drawer's sheet). Same
          component, same tabs, same signals; `sheet` only changes the chrome. -->
     <PortalRail
       v-if="railVisible && railSheetOpen"
@@ -346,7 +360,20 @@
       @update:active-tab="setRailTab"
       @close="railSheetOpen = false"
       @see-hints="seeHints"
-    />
+    >
+      <!-- ent#475: the same three re-homed tabs dock into the shell's slots. Each
+           body READS a shell-owned store (`usePortalRailFeeds`) and never
+           fetches, so the collapsed rail can signal with nothing mounted. -->
+      <template #tab-loops="{ participants, tab }">
+        <PortalLoops :participants="participants" :tab="tab" />
+      </template>
+      <template #tab-canvas="{ participants, tab }">
+        <PortalRailCanvas :participants="participants" :tab="tab" @ask-canvas="askForCanvas" />
+      </template>
+      <template #tab-files="{ participants }">
+        <PortalRailFiles :participants="participants" />
+      </template>
+    </PortalRail>
 
     <!-- ent#361: picking who is in a chat is an explicit act now -->
     <PortalAgentPicker
@@ -358,9 +385,6 @@
       @confirm="onPickerConfirm"
       @cancel="() => { pickerOpen = false; pickerError = null }"
     />
-
-    <!-- Files panel -->
-    <PortalFilesPanel v-if="filesOpen && activeAgent" :agent="activeAgent" @close="filesOpen = false" />
   </div>
 </template>
 
@@ -372,7 +396,9 @@ import { useAuthStore } from '@/stores/auth'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
-import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
+import PortalLoops from '@/components/portal/PortalLoops.vue'
+import PortalRailCanvas from '@/components/portal/PortalRailCanvas.vue'
+import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
@@ -380,8 +406,12 @@ import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
+import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
 import {
   RAIL_TABS,
+  askCanvasPrefill,
+  isWideViewport,
+  railOpenPlan,
   emptySignal,
   loadRailState,
   railParticipantsFor,
@@ -481,7 +511,6 @@ const activeRoomId = ref(null)
 const unreachableAgent = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
-const filesOpen = ref(false)
 const mobileNav = ref(false)
 const convGen = ref(0)                // bumps on explicit thread switches → remount
 // #2163 — `bootstrap()` has finished placing the caller (see the function).
@@ -551,17 +580,60 @@ const railVisible = computed(() => railVisibleFor({
   activeAgent: activeAgent.value?.name,
   unreachable: !!unreachableAgent.value,
 }))
-const railSignals = computed(() => ({ work: workSignal.value }))
+// ent#475: the ONE owner of what the Loops / Canvas / Files tabs read. It
+// feeds `portalLoops` and `portalRailFeeds` off the same door gate and
+// participant list the rail renders from — nothing is fetched for a tab this
+// session cannot see, or before the stage verdict — and hands back the three
+// store-derived signals. The Work signal still rides the emits below (#457).
+const rail = usePortalRailFeeds({
+  visible: railVisible,
+  tabs: railTabs,
+  participants: railParticipants,
+  activeTab: computed(() => railState.value.tab),
+  open: computed(() => railState.value.open),
+  sheetOpen: railSheetOpen,
+  storage: safeStorage,
+})
+const railSignals = computed(() => ({ work: workSignal.value, ...rail.signals.value }))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
 function setRailTab(tab) { railState.value = { ...railState.value, tab } }
-function onWorkState(sig) { workSignal.value = sig || emptySignal() }
+function onWorkState(sig) {
+  const wasLive = workSignal.value.live > 0
+  workSignal.value = sig || emptySignal()
+  // ent#475: a turn just ended (1:1: `sending` fell; room: the server's
+  // `working` list went idle) — the moment a canvas or a file may have
+  // changed. One trigger for both chats, no timer.
+  if (wasLive && !workSignal.value.live) rail.refresh()
+}
+
+// ent#475: "open the rail on <tab>" — the header paperclip. The column at
+// and above `sm`, the sheet below it; a phone tap never persists `open`.
+function openRailOn(tab) {
+  const plan = railOpenPlan({ wide: isWideViewport(typeof window !== 'undefined' ? window : null) })
+  setRailTab(tab)
+  if (plan.open) setRailOpen(true)
+  if (plan.sheet) railSheetOpen.value = true
+}
+
+// ent#475: the Canvas tab's empty action — a PREFILL, never a send.
+function askForCanvas() {
+  railSheetOpen.value = false
+  usePlaybook(askCanvasPrefill(railParticipants.value))
+}
 function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
 
 // A signal belongs to the chat that reported it. The conversation is keyed by
 // `convKey` and the room by its id, so a switch unmounts the reporter; reset
 // here as well, so nothing can read as still running across the switch — the
 // "never a stuck indicator" half of #474's AC.
+// ent#475: NO `rail.reset()` here. Watchers run in creation order, and the
+// feeds owner (`usePortalRailFeeds`, created above) reacts to the same route
+// change FIRST — it has already re-scoped both stores to the new chat and
+// started their fetches by the time this runs, so a reset here would wipe the
+// new chat's data and nothing would refetch. A participant change IS the
+// reset (`setParticipants` clears each store); the owner clears on its own
+// when the rail leaves the screen.
 watch([convKey, activeRoomIdFromRoute], () => {
   workSignal.value = emptySignal()
   roomParticipants.value = []

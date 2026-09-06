@@ -1266,6 +1266,77 @@ already holds.
   follow; the shell keeps the flex row and sets its own widths until then).
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md`
 
+### 5.20 Workspace conversation rail — Loops, Canvas and Files re-homed (trinity-enterprise#475, slice 2 of #472)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_RAIL_TABS`
+- **Description**: The three conversation-side surfaces that #472 found in
+  three placements move into the rail: the loops strip above the composer
+  (ent#458) becomes the **Loops** tab, the Files slide-over becomes the
+  **Files** tab, and the agent canvas (ent#438) gets its conversation-side
+  placement as the **Canvas** tab. The old placements are **removed, not
+  duplicated**. Everything the collapsed rail needs to signal is fed by the
+  shell, so a dot can light with no tab body mounted.
+- **AC-1 — Loops tab**: everything `PortalLoops` did — the empty state that
+  teaches + **Start a loop**, the start form with the guardrails visible
+  before Start, rows with honest status words and headroom bars, **Stop**
+  always available, per-agent grouping in a room (absence visible). The strip
+  above the composer is gone from `PortalConversation` and `PortalRoom`.
+  Participant ownership of `stores/portalLoops.js` moves to the shell
+  (`composables/usePortalRailFeeds.js`), the one owner: it feeds the store
+  only when `loops` passes the door (`loops ∈ visibleTabs`), only while the
+  rail is visible (a deep link to an unreachable agent never issues a
+  request), and never for an empty participant list (a room's first beat).
+- **AC-2 — Files tab**: send (drop zone or picker; an agent select in a room)
+  + download + the two lists ("Files you sent" / "Files from {agent}") the
+  drawer had; the header paperclip opens the tab (the column at ≥ `sm`, the
+  sheet below — `railOpenPlan`, which never persists `open: true` from a
+  mobile tap); `PortalFilesPanel.vue` is deleted; per-agent inbox scoping is
+  unchanged (the same client-portal routes). Uploads are read from the
+  container inbox, so they are fetched only while Files is the open active
+  tab and after an upload.
+- **AC-3 — Canvas tab**: the participating agents' canvases through the
+  SAME `CanvasPanel` + `store.fetchAgentCanvas(es)` the Workspace agent page
+  uses — one rendering layer, one store, the #438 staleness mark included.
+  Audience narrowing is the ent#438 ruling, unchanged: the Workspace shows
+  `audience='roster'` canvases for every principal. `CanvasPanel` now
+  refetches the selected canvas's blocks when its `updated_at` moves, so a
+  lit dot never opens onto stale blocks. Empty: "No canvas yet" + **Ask for a
+  canvas**, which pre-fills the composer (conversation AND room) and never
+  sends.
+- **AC-4 — activity signals**: Loops = live (`loopsSignalFrom` over the
+  store's active loops, derived on every render). Canvas and Files =
+  *updated since last view* (`updatedSignal`): the newest server timestamp
+  per participant (`updated_at` / `created_at`, compared as epoch ms via
+  `parseUTC`, never lexicographically — Invariant #16) is newer than that
+  agent's seen marker, or nothing was ever seen and the feed is non-empty.
+  Markers live under `localStorage['trinity-workspace-rail-seen']`
+  (`{canvas: {agent: iso}, files: {agent: iso}}`, per browser like the rail
+  key), and are re-marked on every load while the tab is the open active
+  tab. Feeds refresh on: participants change, a conversation turn ending, a
+  room's `working` list going idle, `loop_*` and terminal `agent_activity`
+  events for a participant (platform sessions, debounced 2s), the tab being
+  opened, and a successful upload. No timer while idle.
+- **AC-5 — nothing lost**: checked against ent#458's and ent#438's lists —
+  start with guardrails, Stop, grouping, teaching empty state, live push →
+  poll backstop (unchanged in the store); canvas kinds, addressability,
+  staleness, audience, per-viewer empty state.
+- **AC-6 (amended 2026-09-06) — the bespoke spinner is gone**: the Files
+  body (and the Loops and Canvas bodies) render `PortalSkeleton
+  variant="rail"` keyed on the feed's VERDICT (`viewState` over `hasLoaded`
+  / `error` / count), never a fetch-in-flight flag; a failed first fetch
+  renders `LoadFailed` with Retry, a failed refresh keeps the data and shows
+  `InlineError`.
+- **Doors, restated**: the shell decides which feeds exist from
+  `visibleTabs` (`feedsFor`), so an external client — who sees Canvas ·
+  Files — never causes a loops request, and a session that fails a door never
+  fetches that tab's data.
+- **Out of scope**: the Work tab's content (#457), the State tab (#439), the
+  resize handles (#492), the conversation-wide drop target (#524), and a
+  backend broadcast for canvas writes / shared files (registered in the
+  debt inbox).
+- **Flow**: `docs/memory/feature-flows/workspace-rail.md` (slice 2 section),
+  `workspace-loops.md`, `agent-canvas.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
