@@ -1532,6 +1532,8 @@ sections:
 | `divider` | - | Horizontal line |
 | `spacer` | - | Vertical space |
 
+This table is the closed set. Anything else — a chart, badge, or countdown widget, for example — is stripped by the agent server before render, appears in the Dashboard tab's warning banner, and fails compatibility check D-002 by name. For trend lines, give `metric`/`progress` widgets a stable `id:` — Trinity records their values on every fetch and draws the sparkline itself.
+
 ### Widget Examples (All Types)
 
 **IMPORTANT**: Use exact field names shown below. Common mistakes:
@@ -2051,6 +2053,7 @@ Closing stdout only (not stderr) preserves error messages from a failing
 
 | Date | Changes |
 |------|---------|
+| 2026-09-06 | **Widget Types**: stated as a closed set; no chart/badge/countdown widget exists (#2110) |
 | 2026-02-05 | **Credential System Refactor (CRED-002)**: Updated Credential Management section for new simplified system; Direct file injection replaces Redis-based assignments; Export/Import with encrypted `.credentials.enc` for git storage; Auto-import on agent startup |
 | 2026-01-27 | **Advanced Skills & CLAUDE.md**: Added 8 new skill frontmatter fields (`disable-model-invocation`, `user-invocable`, `argument-hint`, `model`, `context`, `agent`, `hooks`); Added invocation control table; Added string substitutions (`$ARGUMENTS`, `$N`, `${CLAUDE_SESSION_ID}`); Added dynamic context injection (`!`command``); Added skill size guidelines; Added CLAUDE.md imports (`@path` syntax) and best practices table |
 | 2026-01-26 | **Platform Skills Best Practices**: Expanded Platform Skills section with comprehensive skill writing guidance; Added SKILL.md format, frontmatter fields, description best practices, `allowed-tools` for restricting tool access, multi-file skill patterns, Skills vs Commands vs CLAUDE.md comparison table; Emphasized skills as the recommended way to encode reusable knowledge |

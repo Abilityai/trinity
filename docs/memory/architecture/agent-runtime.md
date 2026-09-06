@@ -4,7 +4,7 @@
 >
 > **Owns**: `docker/base-image/**`
 >
-> **Read this before changing the paths above**: `.env` is re-read at every spawn (#1999), but it must NOT be authoritative for `ANTHROPIC_API_KEY` while subscription auth is active: Claude Code prefers that key over the OAuth token, no recreate ever cleans it off the workspace volume, and SUB-003 then mis-attributes the failure to each healthy subscription in turn (#2114). Four policy modules here are byte-identical vendored mirrors of backend files (Invariant #5) and are parity-tested.
+> **Read this before changing the paths above**: `.env` is re-read at every spawn (#1999), but it must NOT be authoritative for `ANTHROPIC_API_KEY` while subscription auth is active: Claude Code prefers that key over the OAuth token, no recreate ever cleans it off the workspace volume, and SUB-003 then mis-attributes the failure to each healthy subscription in turn (#2114). Four policy modules here are byte-identical vendored mirrors of backend files (Invariant #5) and are parity-tested. `routers/dashboard.py::validate_widget.valid_types` is a **semantic twin** of the backend's `_WIDGET_TYPES` (not one of the four byte mirrors) — parity-tested by `tests/unit/test_2110_widget_type_parity.py`; change both together (#2110).
 >
 > **Write path**: changes to this area land here, not in the core (core editorial rule 4). Keep the core's map row in step if the owned paths change.
 

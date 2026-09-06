@@ -434,7 +434,7 @@ Parse the file; syntax errors prevent the dashboard from rendering.
 
 **D-002** — All widget types are supported  
 Severity: SOFT | Type: STATIC  
-Allowed types: `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`. Unknown types are silently ignored by the UI.
+Allowed types: `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`. An unknown type is never rendered: the agent server strips the widget before the dashboard reaches the UI and lists it in the Dashboard tab's warning banner (a file with no `sections:` is rejected whole), and D-002 names each offending type with its count, e.g. `unsupported dashboard widget type(s): 'chart' ×5 — not rendered; supported: …`. The list above is closed — there is no chart, badge, or countdown type; trend lines come from the platform's metric history (DASH-001), not from a widget.
 
 **D-003** — Widget required fields present  
 Severity: HARD | Type: STATIC  

@@ -25,13 +25,14 @@
 ### 13.4 Agent Dashboard
 - **Status**: ✅ Implemented (2026-01-12, Updated 2026-02-23)
 - **Description**: Agent-defined dashboard via `dashboard.yaml` with widget system
-- **Key Features**: 11 widget types (metric, status, progress, table, etc.), auto-refresh, historical tracking with sparklines (DASH-001), platform metrics injection
+- **Key Features**: 11 widget types — the closed set `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer` (no chart/badge/countdown type exists — #2110; trends are DASH-001 sparklines on metric/progress widgets keyed by a stable `id`), auto-refresh, historical tracking with sparklines (DASH-001), platform metrics injection
 - **DASH-001 Enhancements** (2026-02-23):
   - Historical value tracking in `agent_dashboard_values` table
   - Sparkline charts showing metric trends
   - Trend indicators (up/down/stable with percentage)
   - Auto-injected platform metrics section (Tasks 24h, Success Rate, Cost, Health)
   - Query params: `include_history`, `history_hours`, `include_platform_metrics`
+- **Allowlist parity** (#2110): the backend D-002 set, the agent-server gate that strips unknown widgets, and the renderer chain are pinned together by `tests/unit/test_2110_widget_type_parity.py`
 - **Flow**: `docs/memory/feature-flows/agent-dashboard.md`
 
 ### 13.5 Tasks Tab
