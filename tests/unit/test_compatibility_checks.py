@@ -16,6 +16,8 @@ REDIS_URL / tmp TRINITY_DB_PATH so backend imports succeed without a stack.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
 import re
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -280,6 +282,166 @@ class TestStaticChecks:
         snap["files"]["dashboard.yaml"] = _f("widgets:\n  - type: text\n    value: oops\n")  # text needs 'content'
         assert _run_one("D-003", snap)[0] == "fail"
 
+    # -- D block: self-explaining messages + hardening against real YAML (#2110) --
+
+    _SUPPORTED = "metric, status, progress, text, markdown, table, list, link, image, divider, spacer"
+
+    @staticmethod
+    def _dash(snap, yaml_text):
+        snap["files"]["dashboard.yaml"] = _f(yaml_text)
+        return snap
+
+    def test_d002_names_each_unsupported_type_with_count(self):
+        # the issue's shape: widgets nested under sections, five chart widgets
+        snap = self._dash(good_snapshot(), (
+            "title: Ops\n"
+            "sections:\n"
+            "  - title: A\n"
+            "    widgets:\n"
+            "      - type: chart\n"
+            "      - type: chart\n"
+            "      - type: chart\n"
+            "      - type: metric\n"
+            "        label: x\n"
+            "        value: 1\n"
+            "  - title: B\n"
+            "    widgets:\n"
+            "      - type: chart\n"
+            "      - type: gauge\n"
+            "      - type: chart\n"
+        ))
+        status, msg, detail = _run_one("D-002", snap)
+        assert status == "fail"
+        assert msg.startswith("unsupported dashboard widget type(s)")  # prefix byte-identical
+        assert "'chart' ×5, 'gauge' ×1" in msg
+        assert f"— not rendered; supported: {self._SUPPORTED}" in msg
+        assert "there is no chart widget" in msg
+        assert detail == {"types": ["chart", "gauge"]}
+
+    def test_d002_passes_when_every_type_is_supported_and_scalars_are_ignored(self):
+        # pins `_dashboard`'s dict filter: non-dict list entries never reach a check
+        types = "".join(f"  - type: {t}\n" for t in self._SUPPORTED.split(", "))
+        snap = self._dash(good_snapshot(), "widgets:\n" + types + "  - plain-string\n  - 42\n")
+        assert _run_one("D-002", snap)[0] == "pass"
+
+    def test_d002_falsy_types_are_not_counted(self):
+        # missing/empty type is the agent server's "missing 'type'" strip — not D-002's finding
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n"
+            "  - type: \"\"\n"
+            "  - type: null\n"
+            "  - type: 0\n"
+            "  - type: false\n"
+            "  - type: text\n"
+            "    content: hi\n"
+        ))
+        assert _run_one("D-002", snap)[0] == "pass"
+
+    def test_d002_is_deterministic_and_caps_named_types(self):
+        shuffled = ["zeta", "alpha", "gamma", "beta", "eta", "delta", "theta", "epsilon"]
+        yaml_text = "widgets:\n" + "".join(f"  - type: {t}\n" for t in shuffled)
+        first = _run_one("D-002", self._dash(good_snapshot(), yaml_text))
+        second = _run_one("D-002", self._dash(good_snapshot(), yaml_text))
+        assert first == second  # identical string every run
+        status, msg, detail = first
+        assert status == "fail"
+        assert msg.count(" ×") == 5  # at most five named …
+        assert "'alpha' ×1, 'beta' ×1, 'delta' ×1, 'epsilon' ×1, 'eta' ×1, +3 more" in msg  # … alphabetical
+        assert detail["types"] == sorted(shuffled)  # detail keeps all eight
+
+    def test_d002_non_string_types_are_named_not_check_errors(self):
+        # at HEAD `sorted({5, "chart"})` raised TypeError → "check could not be evaluated"
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n"
+            "  - type: 5\n"
+            "  - type: true\n"
+            "  - type: {a: 1}\n"
+            "  - type: chart\n"
+        ))
+        status, msg, detail = _run_one("D-002", snap)
+        assert status == "fail"
+        assert "'5' ×1" in msg
+        assert "'True' ×1" in msg
+        assert "'chart' ×1" in msg
+        assert "check_error" not in (detail or {})
+        assert "TypeError" not in msg
+
+    def test_d002_clips_long_agent_authored_type_names(self):
+        # 120 printable chars + a newline, an ANSI escape and a bidi override; and a blank name
+        hostile = "x" * 50 + "\\n" + "y" * 30 + "\\e[31m" + "z" * 30 + "\\u202E" + "w" * 10
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n"
+            f'  - type: "{hostile}"\n'
+            '  - type: "   "\n'
+        ))
+        status, msg, detail = _run_one("D-002", snap)
+        assert status == "fail"
+        named = re.findall(r"'([^']*)' ×1", msg)
+        assert len(named) == 2
+        blank, clipped = named  # '(' sorts before 'x'
+        assert blank == "(blank)"
+        assert len(clipped) <= 40 and clipped.endswith("…")
+        assert "\n" not in clipped and "\x1b" not in clipped and "‮" not in clipped
+        assert detail["types"] == [blank, clipped]  # same bounded strings in message and detail
+
+    def test_d002_trend_hint_only_when_chart_is_involved(self):
+        gauge = _run_one("D-002", self._dash(good_snapshot(), "widgets:\n  - type: gauge\n"))
+        chart = _run_one("D-002", self._dash(good_snapshot(), "widgets:\n  - type: chart\n"))
+        assert gauge[0] == "fail" and "trend lines" not in gauge[1]
+        assert chart[0] == "fail" and "trend lines" in chart[1]
+
+    def test_d003_message_names_type_and_missing_field(self):
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n"
+            "  - type: text\n"
+            "    value: oops\n"
+            "  - type: list\n"
+            "    label: things\n"
+        ))
+        status, msg, _detail = _run_one("D-003", snap)
+        assert status == "fail"
+        assert msg.startswith("dashboard widgets missing required fields (won't render)")  # prefix byte-identical
+        assert "'list' needs items, 'text' needs content" in msg
+
+    def test_d003_non_string_type_is_not_a_hard_check_error(self):
+        # at HEAD `req.get({'a': 1})` raised (unhashable) → a spurious HARD "check could not be evaluated"
+        snap = self._dash(good_snapshot(), "widgets:\n  - type: {a: 1}\n  - type: text\n    content: hi\n")
+        status, _msg, detail = _run_one("D-003", snap)
+        assert status == "pass"
+        assert "check_error" not in (detail or {})
+
+    def test_d004_detail_is_json_safe_for_date_labels(self):
+        # the hardened loader hands back a `datetime.date` for `label: 2026-01-01`;
+        # at HEAD that reached `detail` raw and `json.dumps(checks)` in upsert_result raised
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n"
+            "  - type: progress\n"
+            "    label: 2026-01-01\n"
+            "    value: 150\n"
+            "  - type: progress\n"
+            "    value: -3\n"
+        ))
+        status, msg, detail = _run_one("D-004", snap)
+        assert status == "fail"
+        assert msg == "progress widget values outside 0–100"  # unchanged
+        json.dumps(detail)
+        assert detail["widgets"] == ["2026-01-01", -3]
+
+    def test_d005_colors_are_json_safe_and_mixed_types_do_not_crash(self):
+        # at HEAD `sorted({"teal", 5})` raised TypeError → "check could not be evaluated"
+        snap = self._dash(good_snapshot(), (
+            "widgets:\n"
+            "  - {type: status, label: a, value: x, color: teal}\n"
+            "  - {type: status, label: b, value: x, color: 5}\n"
+            "  - {type: status, label: c, value: x, color: 2026-01-01}\n"
+        ))
+        status, msg, detail = _run_one("D-005", snap)
+        assert status == "fail"
+        assert msg == "status widget colors not in the allowed palette"  # unchanged
+        json.dumps(detail)
+        assert detail["colors"] == ["2026-01-01", "5", "teal"]
+        assert "check_error" not in (detail or {})
+
     def test_p006_approval_gate_in_scheduled_skill(self):
         snap = good_snapshot()
         snap["files"]["template.yaml"] = _f(
@@ -405,6 +567,44 @@ class TestBuildReport:
         persisted = svc.db.get_compatibility_result("acme-bot")
         assert persisted is not None
         assert persisted["agent_name"] == "acme-bot"
+
+    def test_persisted_d002_message_names_the_type(self, monkeypatch):
+        """#2110 surfaces (iii) and (ii): the self-explaining message survives the
+        persistence round-trip AND the response model the router returns."""
+        import services.compatibility as svc
+        from models import CompatibilityCheck
+
+        snap = good_snapshot()
+        snap["files"]["dashboard.yaml"] = _f("sections:\n  - widgets:\n      - type: chart\n")
+
+        async def fake_collect(name):
+            return {"status": "ok", "snapshot": snap, "runtime": "claude-code"}
+
+        monkeypatch.setattr(svc, "collect", fake_collect)
+        asyncio.run(svc.build_report("chart-agent-2110", include_ai=False))
+
+        persisted = svc.db.get_compatibility_result("chart-agent-2110")
+        entry = next(c for c in persisted["checks"] if c["check_id"] == "D-002")
+        assert entry["status"] == "fail"
+        assert "'chart' ×1" in entry["message"]
+        assert entry["detail"]["types"] == ["chart"]
+        CompatibilityCheck(**entry)  # what `CompatibilityReport(**report)` constructs per check
+
+    def test_upsert_result_tolerates_non_json_natives_in_detail(self):
+        """#2110 sink belt: one check's YAML-native `detail` value must not fail
+        the persistence of the whole report."""
+        import services.compatibility as svc
+
+        svc.db.upsert_compatibility_result(
+            "date-detail-2110",
+            overall_status="issues",
+            checks=[{"check_id": "D-004", "status": "fail", "message": "m",
+                     "detail": {"widgets": [datetime.date(2026, 1, 1)]}}],
+            hard_count=0, soft_count=1, info_count=0,
+            container_running=True, ai_ran_at=None, static_ran_at="2026-01-01T00:00:00Z",
+        )
+        row = svc.db.get_compatibility_result("date-detail-2110")
+        assert row["checks"][0]["detail"]["widgets"] == ["2026-01-01"]
 
     def test_codex_runtime_omits_claude_only_checks(self, monkeypatch):
         import services.compatibility as svc

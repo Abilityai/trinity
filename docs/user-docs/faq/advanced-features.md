@@ -32,7 +32,7 @@ The Generate dialog shows a classified reason rather than a generic error. `not_
 
 ## Can my agent build its own dashboard?
 
-Yes. An agent controls its Dashboard tab entirely by writing a `dashboard.yaml` file in its workspace — no API call needed, the file is read on each dashboard request. Eleven widget types are supported (`metric`, `status`, `progress`, `table`, `list`, `chart`, `text`, `badge`, `countdown`, `link`, `image`), values are tracked historically so metrics grow sparklines and trend arrows, and a Platform Metrics section (tasks, success rate, cost, health) is auto-injected at the bottom of every dashboard. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
+Yes. An agent controls its Dashboard tab entirely by writing a `dashboard.yaml` file in its workspace — no API call needed, the file is read on each dashboard request. Eleven widget types are supported (`metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`) — there is no chart widget; sparklines and trend arrows are drawn by the platform from each metric's history — and a Platform Metrics section (tasks, success rate, cost, health) is auto-injected at the bottom of every dashboard. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
 
 ## What's the difference between Source mode and Working Branch mode in GitHub sync?
 
