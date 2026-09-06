@@ -1,6 +1,8 @@
 import { computed, ref, watch } from 'vue'
 import { usePortalLoopsStore } from '@/stores/portalLoops'
 import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
+import { usePortalWorkStore } from '@/stores/portalWork'
+import { workSignalFromItems } from '@/components/portal/portalWork'
 import {
   feedsFor,
   loadSeen,
@@ -47,6 +49,15 @@ import {
  *   open         Ref<boolean>   the column is open
  *   sheetOpen    Ref<boolean>   the mobile sheet is open
  *   storage      () => Storage|null
+ *   chatId       Ref<string|null>  the open 1:1 thread (ent#525) — scopes the
+ *                Work feed's delegated children; a room passes null
+ *   workEmit     Ref<object>    the conversation's in-flight signal
+ *                (`workSignalFrom`), merged BY EXECUTION ID into the Work feed
+ *
+ * ent#525 adds the Work feed to the same owner: `stores/portalWork.js` is
+ * scoped here off the door gate (`feedsFor(...).work`), refreshed by the same
+ * turn-end trigger, and its signal is ONE merged set — the feed's running rows
+ * plus the emit, joined by id — never the sum of two signals (review A1).
  */
 export function usePortalRailFeeds({
   visible,
@@ -56,13 +67,17 @@ export function usePortalRailFeeds({
   open,
   sheetOpen,
   storage = () => null,
+  chatId = ref(null),
+  workEmit = ref(null),
 }) {
   const loops = usePortalLoopsStore()
   const feeds = usePortalRailFeedsStore()
+  const work = usePortalWorkStore()
 
   const wants = computed(() => feedsFor(tabs.value))
   const participantsKey = computed(() => participants.value.join(' '))
-  const wantsKey = computed(() => `${wants.value.loops}|${wants.value.canvas}|${wants.value.files}`)
+  const wantsKey = computed(() => `${wants.value.work}|${wants.value.loops}|${wants.value.canvas}|${wants.value.files}`)
+  const chatKey = computed(() => (typeof chatId.value === 'string' ? chatId.value : ''))
 
   // Which feed-backed tab is on screen right now, if any.
   const shown = computed(() => (open.value === true || sheetOpen.value === true) ? activeTab.value : null)
@@ -73,6 +88,14 @@ export function usePortalRailFeeds({
     const names = participants.value
     if (!names.length) return
     const w = wants.value
+    // ent#525: the Work feed follows the door like the others — a session
+    // that fails the Work tab's door (a client) never issues the read.
+    if (w.work) {
+      work.setScope(names, chatKey.value || null)
+      work.refresh()
+    } else if (work.participants.length) {
+      work.clear()
+    }
     if (w.loops) {
       loops.setParticipants(names)
       loops.fetchLoops()
@@ -83,6 +106,15 @@ export function usePortalRailFeeds({
     feeds.setFeeds({ canvas: w.canvas, files: w.files })
     if (w.canvas || w.files) feeds.refresh({ uploads: filesShown.value })
   }, { immediate: true })
+
+  // ent#525: the open thread changed under the same participants (a new chat
+  // adopted its id, a thread switch within one agent) — only the Work feed's
+  // scope moves; loops, canvases and files are per agent and stay put.
+  watch(chatKey, (chat) => {
+    if (!visible.value || !wants.value.work || !participants.value.length) return
+    work.setScope(participants.value, chat || null)
+    work.refresh()
+  })
 
   // Opening a feed-backed tab is itself a trigger ("since last view"), and
   // the only time the container-backed inbox is read.
@@ -111,6 +143,12 @@ export function usePortalRailFeeds({
   // ---- signals ------------------------------------------------------------------
   // Derived on every render from the stores — never a latched flag.
   const signals = computed(() => ({
+    // ent#525: ONE merged set — the feed's live rows plus the conversation's
+    // in-flight turn (by id) plus a room's server `working` list (by name).
+    work: workSignalFromItems(work.now, {
+      emit: workEmit.value && workEmit.value.live ? { executionId: workEmit.value.executionId || null, agent: workEmit.value.agents?.[0] || null } : null,
+      extraAgents: workEmit.value && workEmit.value.live && !workEmit.value.executionId ? (workEmit.value.agents || []).slice(1) : [],
+    }),
     loops: loopsSignalFrom(loops.active),
     canvas: updatedSignal({
       itemsByAgent: feeds.canvases, seen: seen.value.canvas, field: 'updated_at', participants: participants.value,
@@ -123,6 +161,7 @@ export function usePortalRailFeeds({
   /** A conversation turn ended / a room went idle: re-read what may have changed. */
   function refresh() {
     if (!visible.value || !participants.value.length) return
+    if (wants.value.work) work.refresh()
     if (wants.value.loops) loops.fetchLoops()
     feeds.refresh({ uploads: filesShown.value })
   }
@@ -131,7 +170,8 @@ export function usePortalRailFeeds({
   function reset() {
     loops.clear()
     feeds.clear()
+    work.clear()
   }
 
-  return { signals, seen, loops, feeds, refresh, reset, filesShown }
+  return { signals, seen, loops, feeds, work, refresh, reset, filesShown }
 }

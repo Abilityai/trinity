@@ -1891,6 +1891,14 @@ class DatabaseManager:
         """Cross-fleet execution list (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_executions(agent_names, **kwargs)
 
+    def get_running_for_chat(self, chat_id: str):
+        """ent#525 — the in-flight rows bound to one Workspace chat (delegated
+        children included; see `ScheduleExecutionsMixin.get_running_for_chat`).
+        Re-exported here because this facade delegates by name, not by
+        `__getattr__` — the ent#277 trap, guarded by
+        `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
+        return self._schedule_ops.get_running_for_chat(chat_id)
+
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)

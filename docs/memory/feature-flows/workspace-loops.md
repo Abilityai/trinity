@@ -142,9 +142,8 @@ guarded, because there is one mount point.
 
 ## Known gaps, stated
 
-- **AC #3 (history in the Activity tab) is deferred to ent#457**, which builds
-  that tab. The issue explicitly says history lives there and forbids a parallel
-  surface, so the honest sequencing is to render into it once it exists.
+- **AC #3 (history)** landed with ent#525: loop runs are one execution kind in the
+  rail's Work tab (`workspace-work.md`); no parallel surface.
 - **One request per participant** on refresh. The loops API is agent-scoped and
   this is a chat's participants (typically 1–3), not the roster — the ent#2198
   N+1 was per-agent across the *whole* roster on every thread refresh. A batched

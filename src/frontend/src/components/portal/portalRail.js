@@ -351,9 +351,14 @@ export function stripSegments(signals, visible) {
  * every change, so it clears the instant the turn ends — including a failed
  * one, whose `finally` flips the same flag.
  */
-export function workSignalFrom({ sending = false, agent = null } = {}) {
+export function workSignalFrom({ sending = false, agent = null, executionId = null } = {}) {
   const on = sending === true
-  return { live: on ? 1 : 0, updated: false, agents: on && agent ? [agent] : [] }
+  // ent#525: the execution id rides along so the shell can MERGE this with
+  // the feed's running rows by id rather than summing two signals — a turn
+  // both sources can see must count once (`portalWork.workSignalFromItems`).
+  const sig = { live: on ? 1 : 0, updated: false, agents: on && agent ? [agent] : [] }
+  if (on && executionId) sig.executionId = String(executionId)
+  return sig
 }
 
 /**
@@ -469,7 +474,8 @@ export function railVisibleFor({
  */
 export function feedsFor(visible) {
   const ids = new Set((Array.isArray(visible) ? visible : []).map((t) => t && t.id))
-  return { loops: ids.has('loops'), canvas: ids.has('canvas'), files: ids.has('files') }
+  // ent#525: `work` — the executions feed behind the first docked tab.
+  return { work: ids.has('work'), loops: ids.has('loops'), canvas: ids.has('canvas'), files: ids.has('files') }
 }
 
 /** The Loops signal: the store's active loops, derived on every render. */

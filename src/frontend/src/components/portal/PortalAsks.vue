@@ -140,6 +140,11 @@ const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
   // render one agent's (the agent page).
   agentName: { type: String, default: null },
+  // ent#525: or several — the rail's Work tab renders the asks of a chat's
+  // PARTICIPANTS ("Waiting on you"), the fourth rendering of the same row. A
+  // computed over `store.asks`, never a narrowed fetch: `fetchAsks(agentName)`
+  // replaces the shared list the sidebar badge reads.
+  agentNames: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
   // The thread on screen, when there is one. Only used to suppress a link that
   // would go where the reader already is (ent#429).
@@ -155,9 +160,14 @@ const picks = reactive({})    // approval: the selected option
 const notes = reactive({})    // approval: the optional free-text note
 const errors = reactive({})
 
-const items = computed(() =>
-  props.agentName ? store.asksForAgent(props.agentName) : store.asks
-)
+const items = computed(() => {
+  if (props.agentName) return store.asksForAgent(props.agentName)
+  if (Array.isArray(props.agentNames)) {
+    const names = new Set(props.agentNames.filter(Boolean))
+    return store.asks.filter((a) => names.has(a.agent_name))
+  }
+  return store.asks
+})
 const visible = computed(() => store.asksAvailable && items.value.length > 0)
 
 // #2375: one label set and one controls rule across desktop, /m and the
