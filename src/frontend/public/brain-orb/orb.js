@@ -1860,6 +1860,9 @@ addEventListener('wheel',e=>{
   const can=!!el&&panelCanScroll(el,e.deltaY);
   if(!wheelMode&&e.deltaY!==0) wheelMode=can?'panel':'zoom'; // the first VERTICAL event of a gesture decides
   if(wheelMode==='panel'){ if(!can) e.preventDefault(); return; }   // scroll natively, or die at the edge — never zoom
+  // 'zoom' is just as sticky: a gesture that began over the void keeps zooming even when the pointer drifts onto a
+  // scrollable panel (`can` is true there). Symmetric BY DESIGN — re-deciding per event at this line is the reported
+  // bug's mirror image (a zoom flick suddenly scrolling the inspector); spec A4 pins it. Only the first event decides.
   e.preventDefault();                                        // zoom-latched, or a pure-horizontal event with no gesture in flight
   camTargetDist=zclamp(camTargetDist + e.deltaY*0.28); markZoom();
 },{passive:false});
