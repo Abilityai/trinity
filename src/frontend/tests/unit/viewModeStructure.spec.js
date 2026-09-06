@@ -26,6 +26,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, relative } from 'path'
+import { parse as parseSfc } from 'vue/compiler-sfc'
 
 const FRONTEND_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const SRC_DIR = join(FRONTEND_ROOT, 'src')
@@ -126,5 +127,117 @@ describe('#2536 view-mode list has one home and the hotkeys share one listener',
     // On COMMENT-STRIPPED source: the header's prose mentions both old copies,
     // and a match there would let the real export drift to a different shape.
     expect(stripComments(readFileSync(MODULE, 'utf8'))).toMatch(MODE_LIST_LITERAL)
+  })
+})
+
+/*
+ * The layout invariant (#2536), read from the parsed template rather than a
+ * regex: the switcher is the LAST element child of the header's right-anchored
+ * controls cluster. In a right-aligned, non-shrinking flex row a child's x
+ * depends only on the siblings to its RIGHT, so with none it cannot move when
+ * the grid-only Tidy up / Reset pair or the history spinner mounts. A
+ * `<template v-if>` is an ELEMENT node here, so a conditional sibling appended
+ * after the switcher fails this exactly as an unconditional one would.
+ *
+ * Why an AST and not a regex: the property is a RELATIONSHIP between nodes, and
+ * the cluster is ~170 lines of markup with comments, interpolations and bound
+ * attributes between them. `vue/compiler-sfc` is the parser Vite already uses
+ * on this file (the shape `agentName.spec.js` established).
+ */
+const ELEMENT = 1 // NodeTypes.ELEMENT (element, component, slot, template)
+const ATTRIBUTE = 6 // NodeTypes.ATTRIBUTE (static)
+const DIRECTIVE = 7 // NodeTypes.DIRECTIVE (v-if, :bind, ...)
+const SWITCHER_TESTID = 'view-mode-switcher'
+
+function templateAst(source) {
+  const { descriptor, errors } = parseSfc(source)
+  expect(errors, 'the SFC parses').toHaveLength(0)
+  expect(descriptor.template, 'the SFC has a <template>').toBeTruthy()
+  return descriptor.template.ast
+}
+
+function staticAttr(node, name) {
+  const p = (node.props || []).find((p) => p.type === ATTRIBUTE && p.name === name)
+  return p && p.value ? p.value.content : null
+}
+
+function directiveExp(node, name) {
+  const p = (node.props || []).find((p) => p.type === DIRECTIVE && p.name === name)
+  return p && p.exp ? p.exp.content : null
+}
+
+/** Depth-first element walk that also hands the caller each element's parent. */
+function eachElement(node, fn, parent = null) {
+  if (node && node.type === ELEMENT) fn(node, parent)
+  for (const child of node.children || []) {
+    if (child && typeof child === 'object') eachElement(child, fn, node)
+  }
+}
+
+function describeNode(n) {
+  const testid = staticAttr(n, 'data-testid')
+  const vIf = directiveExp(n, 'if')
+  return `<${n.tag}${testid ? ` data-testid="${testid}"` : ''}${vIf ? ` v-if="${vIf}"` : ''}>`
+}
+
+/**
+ * Pure: where the switcher sits among its parent's ELEMENT children.
+ * Returns `{ found: false }` when no element carries the testid, so a caller
+ * can never confuse "not found" with "last".
+ */
+function switcherPlacement(source) {
+  let hit = null
+  eachElement(templateAst(source), (node, parent) => {
+    if (!hit && staticAttr(node, 'data-testid') === SWITCHER_TESTID) hit = { node, parent }
+  })
+  if (!hit) return { found: false }
+  const siblings = hit.parent.children.filter((c) => c && c.type === ELEMENT)
+  const i = siblings.indexOf(hit.node)
+  const prev = siblings[i - 1] || null
+  return {
+    found: true,
+    node: hit.node,
+    isLast: i === siblings.length - 1,
+    trailing: siblings.slice(i + 1).map(describeNode),
+    prev: prev && { tag: prev.tag, vIf: directiveExp(prev, 'if') },
+  }
+}
+
+describe('#2536 the view-mode switcher is the LAST child of the header controls cluster', () => {
+  const source = readFileSync(VIEW, 'utf8')
+
+  it('the switcher exists, is the last element child, and Tidy up / Reset are the element immediately before it', () => {
+    const placement = switcherPlacement(source)
+    expect(placement.found, `no element carries data-testid="${SWITCHER_TESTID}" — the e2e and this guard both key on it`).toBe(true)
+    expect(
+      placement.isLast,
+      `The view-mode switcher must be the LAST element child of the header controls ` +
+        `cluster. In a right-anchored, non-shrinking flex row a child's x depends only ` +
+        `on the siblings to its right, so anything after it — conditional or not — ` +
+        `re-opens the jump #2536 fixed. Found after it: ${placement.trailing.join(', ')}`
+    ).toBe(true)
+    // Adjacency is part of the chosen design (plan Choice 1): the grid tools
+    // appear beside the Grid button that summons them.
+    expect(placement.prev, 'the switcher has a previous element sibling').toBeTruthy()
+    expect(placement.prev.tag, 'the element before the switcher is the grid-controls <template>').toBe('template')
+    expect(placement.prev.vIf, 'that <template> is the grid-only v-if').toMatch(/viewMode\s*===\s*['"]grid['"]/)
+  })
+
+  it('mutation control: the same probe reports a sibling appended after the switcher (the guard is not vacuous)', () => {
+    // Splice a conditional sibling into the REAL source right after the
+    // switcher's closing tag, using the parser's own offsets, and prove the
+    // probe sees it. If offsets ever stopped being whole-file relative, the
+    // span would land elsewhere and this control fails loudly.
+    const { node } = switcherPlacement(source)
+    const end = node.loc.end.offset
+    const mutated = source.slice(0, end) + '\n              <span v-if="late">late</span>' + source.slice(end)
+    const placement = switcherPlacement(mutated)
+    expect(placement.found).toBe(true)
+    expect(placement.isLast).toBe(false)
+    expect(placement.trailing).toEqual(['<span v-if="late">'])
+    // The adjacency half is exercised the same way: strip the testid and the
+    // probe must say "not found" rather than pass on an unrelated element.
+    const stripped = source.replace(`data-testid="${SWITCHER_TESTID}"`, 'data-testid="renamed"')
+    expect(switcherPlacement(stripped).found).toBe(false)
   })
 })

@@ -141,42 +141,6 @@
                 data-testid="filter-kbd-hint"
               >/</button>
 
-              <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
-                   trinity-enterprise#260 list; Graph decommissioned #1689). The
-                   list is VIEW_MODES from utils/viewModes.js — the ONE home shared
-                   with the store whitelist and the e2e specs (#2536). -->
-              <div class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700">
-                <button
-                  v-for="mode in VIEW_MODES"
-                  :key="mode"
-                  @click="toggleMode(mode)"
-                  :class="[
-                    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
-                    viewMode === mode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                  ]"
-                >
-                  {{ mode }}
-                </button>
-              </div>
-
-              <!-- Grid-mode controls (trinity-enterprise#47) -->
-              <template v-if="viewMode === 'grid'">
-                <button
-                  @click="fleetGridRef?.tidyUp()"
-                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
-                  title="Compact tiles row-by-row, preserving reading order"
-                >
-                  Tidy up
-                </button>
-                <button
-                  @click="fleetGridRef?.resetToDefault()"
-                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
-                  title="Restore the default tile layout"
-                >
-                  Reset
-                </button>
-              </template>
-
               <!-- Time Range -->
               <select
                 v-model="selectedTimeRange"
@@ -200,7 +164,7 @@
               ></div>
 
               <!-- Loading -->
-              <svg v-if="isLoadingHistory" class="animate-spin h-4 w-4 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24">
+              <svg v-if="isLoadingHistory" class="animate-spin h-4 w-4 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" data-testid="history-loading">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
@@ -211,11 +175,66 @@
                 :disabled="isLoadingHistory"
                 class="p-1.5 text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors disabled:opacity-50"
                 title="Refresh"
+                data-testid="refresh-all"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
               </button>
+
+              <!-- Grid-mode controls (trinity-enterprise#47) — immediately
+                   before the switcher (#2536), so the grid tools appear beside
+                   the Grid button that summons them. -->
+              <template v-if="viewMode === 'grid'">
+                <button
+                  @click="fleetGridRef?.tidyUp()"
+                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                  title="Compact tiles row-by-row, preserving reading order"
+                >
+                  Tidy up
+                </button>
+                <button
+                  @click="fleetGridRef?.resetToDefault()"
+                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                  title="Restore the default tile layout"
+                >
+                  Reset
+                </button>
+              </template>
+
+              <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
+                   trinity-enterprise#260 list; Graph decommissioned #1689). The
+                   list is VIEW_MODES from utils/viewModes.js — the ONE home shared
+                   with the store whitelist, the `v` cycle and the e2e specs
+                   (#2536). LAST child of this cluster ON PURPOSE (#2536): in a
+                   right-anchored, non-shrinking flex row a child's x depends only
+                   on the siblings to its RIGHT, so with none it cannot move when
+                   Tidy up / Reset or the history spinner mount. Do not append
+                   anything after this element — a conditional sibling here
+                   re-opens the jump. Tidy up / Reset sit immediately before it so
+                   the grid tools appear beside the Grid button. If #1754 ever
+                   collapses this cluster at narrow widths, collapse from the LEFT
+                   (Create's label already degrades) — this control is last for
+                   stability and must be the last to go. Pinned by
+                   tests/unit/viewModeStructure.spec.js (required CI gate) and
+                   e2e/dashboard-mode-switcher.spec.js. -->
+              <div
+                class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700"
+                data-testid="view-mode-switcher"
+                title="Switch view (press v to cycle)"
+              >
+                <button
+                  v-for="mode in VIEW_MODES"
+                  :key="mode"
+                  @click="toggleMode(mode)"
+                  :class="[
+                    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
+                    viewMode === mode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+                  ]"
+                >
+                  {{ mode }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
