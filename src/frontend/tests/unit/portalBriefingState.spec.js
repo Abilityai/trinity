@@ -156,29 +156,35 @@ describe('briefingHydrationPlan', () => {
 })
 
 describe('briefingZone', () => {
-  it('beams while pending', () => {
+  // #2540: the zone's placeholder is a skeleton keyed on `state === 'pending'`
+  // — the scanline (and its `reveal` verdict) is the chart motion and is gone
+  // from this zone. `pending` is the ONE state that shows a placeholder.
+  it('is the placeholder state while pending', () => {
     const z = briefingZone(card('a', { briefing_state: BRIEFING_PENDING }))
+    expect(z.state).toBe(BRIEFING_PENDING)
     expect(z.loading).toBe(true)
-    expect(z.reveal).toBe(false)
   })
 
-  it('reveals for hints and for a description alone', () => {
-    expect(briefingZone(card('a', { briefing_state: BRIEFING_READY,
-                                    playbooks: [{ title: 'x' }] })).reveal).toBe(true)
-    expect(briefingZone(card('a', { briefing_state: BRIEFING_READY,
-                                    description: 'd' })).reveal).toBe(true)
+  it('is ready with hints, with a description alone, and with nothing at all', () => {
+    // A completed briefing renders whatever it holds — including nothing. An
+    // empty ready zone is an agent with nothing exposed, not a loading one.
+    for (const extra of [{ playbooks: [{ title: 'x' }] }, { description: 'd' }, {}]) {
+      const z = briefingZone(card('a', { briefing_state: BRIEFING_READY, ...extra }))
+      expect(z.state).toBe(BRIEFING_READY)
+      expect(z.loading).toBe(false)
+    }
   })
 
-  it('snaps when a completed briefing has nothing in it', () => {
-    // The celebratory pass over an empty zone is motion about nothing.
-    const z = briefingZone(card('a', { briefing_state: BRIEFING_READY }))
-    expect(z.loading).toBe(false)
-    expect(z.reveal).toBe(false)
-  })
-
-  it('snaps on unavailable — no beam, no reveal, and it says which', () => {
+  it('is unavailable — no placeholder, and it says which', () => {
     const z = briefingZone(card('a', { briefing_state: BRIEFING_UNAVAILABLE }))
-    expect(z).toMatchObject({ loading: false, reveal: false, unavailable: true })
+    expect(z).toMatchObject({ state: BRIEFING_UNAVAILABLE, loading: false, unavailable: true })
+  })
+
+  it('carries no reveal verdict any more', () => {
+    // The field fed ScanlineReveal's celebratory pass; a skeleton has no
+    // arrival animation, so a surviving `reveal` would be a dead output that
+    // invites the primitive back.
+    expect('reveal' in briefingZone(card('a'))).toBe(false)
   })
 })
 
@@ -210,9 +216,9 @@ describe('stageZone', () => {
 
   it('keeps loading until bootstrap has placed the caller', () => {
     // A deep link assigns activeAgentName/pendingSession only after
-    // refreshThreads(); revealing on the roster alone flashes agents[0].
+    // refreshThreads(); landing on the roster alone flashes agents[0].
     expect(stageZone({ rosterLoaded: true, resolved: false, agents }).loading).toBe(true)
-    expect(stageZone({ rosterLoaded: true, resolved: true, agents }).reveal).toBe(true)
+    expect(stageZone({ rosterLoaded: true, resolved: true, agents }).state).toBe('ready')
   })
 
   it('ignores an in-flight refetch once data is on screen', () => {
@@ -220,12 +226,12 @@ describe('stageZone', () => {
     // refresh must be invisible.
     const z = stageZone({ rosterLoaded: true, resolved: true, agents })
     expect(z.loading).toBe(false)
-    expect(z.reveal).toBe(true)
+    expect(z.state).toBe('ready')
   })
 
-  it('snaps on a failed roster', () => {
+  it('is failed on a failed roster, never the placeholder', () => {
     const z = stageZone({ rosterLoaded: true, resolved: true, error: 'boom', agents: [] })
-    expect(z).toMatchObject({ state: 'failed', loading: false, reveal: false })
+    expect(z).toMatchObject({ state: 'failed', loading: false })
   })
 
   it('never treats a failure as still-loading', () => {
@@ -233,15 +239,15 @@ describe('stageZone', () => {
     expect(stageZone({ rosterLoaded: false, resolved: true, error: 'boom' }).loading).toBe(false)
   })
 
-  it('snaps on an empty roster instead of celebrating it', () => {
+  it('is empty on an empty roster, never the placeholder', () => {
     const z = stageZone({ rosterLoaded: true, resolved: true, agents: [] })
-    expect(z).toMatchObject({ state: 'empty', loading: false, reveal: false })
+    expect(z).toMatchObject({ state: 'empty', loading: false })
   })
 
-  it('snaps on an unreachable deep link', () => {
-    // The roster loaded fine; the access-denied card must not wipe in.
-    const z = stageZone({ rosterLoaded: true, resolved: true, agents, unreachable: true })
-    expect(z.loading).toBe(false)
-    expect(z.reveal).toBe(false)
+  it('carries no reveal verdict any more (#2540)', () => {
+    // The stage is a skeleton now; the `reveal` bit (and the `unreachable`
+    // input that only ever fed it) are gone rather than left as dead output.
+    const z = stageZone({ rosterLoaded: true, resolved: true, agents })
+    expect('reveal' in z).toBe(false)
   })
 })

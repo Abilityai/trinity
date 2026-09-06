@@ -238,11 +238,13 @@ describe('#2128 structure guards', () => {
     //
     // #2163 moved ONE of the three arms up a level rather than removing it. The
     // branch used to lead with `v-if="!store.rosterLoaded || store.loading"` →
-    // a static "Opening this conversation…" line, which AC4 deletes; the whole
-    // stage is now wrapped in a ScanlineReveal whose `loading` is derived from
-    // `store.rosterLoaded`, and the chain renders only when that is false. So
-    // the qualification is stronger than before (it covers every stage branch,
-    // not just this one) and the assertion follows it there.
+    // a static "Opening this conversation…" line, which AC4 deleted; the
+    // stage's loading treatment is now ONE placeholder arm ahead of the whole
+    // chain, keyed on a verdict derived from `store.rosterLoaded`, and the
+    // chain is its `v-else`. So the qualification is stronger than before (it
+    // covers every stage branch, not just this one) and the assertion follows
+    // it there. (#2540 swapped the placeholder from the scanline primitive to
+    // a skeleton; the gate and its position are unchanged.)
     for (const term of ['store.unavailable', 'store.error']) {
       expect(branch, `the room branch must distinguish ${term}`).toContain(term)
     }
@@ -254,13 +256,17 @@ describe('#2128 structure guards', () => {
     }
 
     // The roster-verdict arm, at its new home: the branch is unreachable while
-    // the roster has no verdict, because the stage zone above it is in its
-    // loading phase and its slot is gated on `!stage.loading`.
-    const zoneAt = src.lastIndexOf('<ScanlineReveal', branchAt)
-    expect(zoneAt, 'the stage is no longer wrapped in a loading zone').toBeGreaterThan(-1)
+    // the roster has no verdict, because the stage placeholder ahead of the
+    // chain takes that state and the chain is its `v-else`. The gate reads
+    // `stage.state`, never a bare `stage.loading` path — that spelling is what
+    // the #1927 ratchet (`loadingGateRatchet.spec.js`) counts as a bare gate.
+    const zoneAt = src.lastIndexOf('<PortalSkeleton', branchAt)
+    expect(zoneAt, 'the stage no longer has a loading placeholder ahead of the chain').toBeGreaterThan(-1)
     const zone = src.slice(zoneAt, branchAt)
-    expect(zone, 'the stage zone must key on the stage verdict').toContain(':loading="stage.loading"')
-    expect(zone, 'the branches must sit INSIDE the zone gate').toContain('v-if="!stage.loading"')
+    expect(zone, 'the stage placeholder must be the stage variant').toContain('variant="stage"')
+    expect(zone, 'the stage placeholder must key on the stage verdict').toContain(`v-else-if="stage.state === 'loading'"`)
+    expect(zone, 'the branches must be the placeholder\'s v-else').toContain('<template v-else>')
+    expect(zone, 'a bare stage.loading gate would trip the #1927 ratchet').not.toContain('v-if="stage.loading"')
     expect(
       src,
       'the stage verdict must derive from the roster verdict, never from an in-flight flag'

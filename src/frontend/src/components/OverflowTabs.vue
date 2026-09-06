@@ -18,7 +18,10 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 
 const props = defineProps({
-  // [{ id: string, label: string, badge?: string|number }]
+  // [{ id: string, label: string, badge?: string|number, signal?: 'live'|'updated' }]
+  // `signal` (ent#474) draws the rail's activity dot after the label — the
+  // ringed "live" shape or the plain "updated" one — in the visible row, the
+  // overflow menu AND the mirror row, so the measured width includes it.
   tabs: { type: Array, required: true },
   // active tab id
   modelValue: { type: [String, null], required: true },
@@ -55,7 +58,7 @@ const activeInOverflow = computed(() =>
 // Re-measure when the tab set OR any label/badge changes (widths shift).
 // `flush: 'post'` runs after the mirror row has rendered the new content.
 const tabsSignature = computed(() =>
-  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}`).join('|')
+  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}`).join('|')
 )
 watch(tabsSignature, () => measure(), { flush: 'post' })
 
@@ -202,6 +205,14 @@ onUnmounted(() => {
         >
           {{ tab.badge }}
         </span>
+        <span
+          v-if="tab.signal"
+          class="ml-1.5 rounded-full bg-action-primary-500"
+          :class="tab.signal === 'live'
+            ? 'w-2 h-2 ring-[3px] ring-action-primary-500/[.28] motion-safe:animate-pulse'
+            : 'w-1.5 h-1.5'"
+          aria-hidden="true"
+        ></span>
       </button>
 
       <!-- More trigger (kept fixed-width "More ▾"; reflects active state when
@@ -274,6 +285,12 @@ onUnmounted(() => {
         >
           {{ tab.badge }}
         </span>
+        <span
+          v-else-if="tab.signal"
+          class="rounded-full bg-action-primary-500"
+          :class="tab.signal === 'live' ? 'w-2 h-2 ring-[3px] ring-action-primary-500/[.28]' : 'w-1.5 h-1.5'"
+          aria-hidden="true"
+        ></span>
       </button>
     </div>
 
@@ -302,6 +319,11 @@ onUnmounted(() => {
           >
             {{ tab.badge }}
           </span>
+          <span
+            v-if="tab.signal"
+            class="ml-1.5 rounded-full"
+            :class="tab.signal === 'live' ? 'w-2 h-2' : 'w-1.5 h-1.5'"
+          ></span>
         </button>
         <button
           ref="measureMoreEl"

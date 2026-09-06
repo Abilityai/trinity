@@ -279,7 +279,7 @@ failure. Inspect the settlement and report the count that did not apply.
 
 ## 6. Motion — the data-loading standard
 
-The app has **one** data-loading motion (design session, 2026-07). Bespoke per-component spinners and skeletons do not survive adoption.
+The app has **two** data-loading treatments, decided by the surface (design session 2026-07; amended by the operator ruling of 2026-09-06, #2540): the **scanline beam + wipe-in reveal is the chart-loading motion** — `StackedBarChart`, `TrendLineChart`, the grid tile charts, metrics panels — and **every other first load is a skeleton placeholder** keyed on "no data yet": pages, panels, lists, message threads. Bespoke per-component spinners do not survive adoption; a skeleton follows the recipe below, never a hand-rolled one.
 
 ### Scanline beam — anatomy
 
@@ -302,13 +302,16 @@ never celebrate); swap loading/loaded content inside the SLOT of one persistent 
 zone. During the arrival pass the track is wiped OUT behind the beam (complementary
 `clip-path`), so revealed pixels sit on their final background from the first frame — no
 end-of-pass background snap. Theme via `--scan-core`/`--scan-track` overrides (the Grid
-rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones, the Executions
-info tile's chart zone (ent#449, via the chassis opt-in `owns-loading` — a tile may own its
-LOADING face inside `InfoTile`'s slot; the chassis keeps `error`/`empty`), and — since
-#2163 — the Workspace's three zones (the stage in `Portal.vue`, the conversation body in
-`PortalConversation.vue`, the hint zone in `PortalBriefing.vue`), each keyed on its own
-"no data yet" and each snapping rather than revealing on a failed/empty/refused terminal.
-Adopting any further surface = the ent#253 pass; do not build a new spinner.
+rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones and the
+Executions info tile's chart zone (ent#449, via the chassis opt-in `owns-loading` — a tile
+may own its LOADING face inside `InfoTile`'s slot; the chassis keeps `error`/`empty`). The
+Workspace's stage, thread and briefing adopted it under #2163 and were moved back to
+skeletons by #2540 — a conversation is not a chart. Adopting a further CHART surface = the
+ent#253 pass; adopting it on a page, list or thread is a violation, and
+`tests/unit/portalLoadingTreatment.spec.js` pins the importer set as an allowlist so a new
+non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection` and
+`onboarding/FinishSetupCard`, are recorded on #1921's sweep and shrink that list as they
+convert).
 
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
@@ -317,6 +320,28 @@ it) had no way to say so. Default `''`; sizing the ZONE stays the consumer's job
 way. Note `announce` puts `role="status"` on the zone ROOT, which is an implicit
 aria-live region — never pass it for a zone wrapping content that keeps changing (a
 transcript, a composer), or every update is re-announced in full.
+
+### Skeleton placeholder — pages, panels, lists, threads (#2540)
+
+The non-chart first load. Two sanctioned forms: `components/SkeletonLoader.vue` (generic
+stacked rows / node placeholders — the Dashboard's) and a **content-shaped** placeholder
+that mirrors the loaded surface's own footprint (the #2159 sidebar rows, `PortalAgentPage`'s
+section blocks, the Workspace's `components/portal/PortalSkeleton.vue` — stage / thread /
+briefing). Either way the recipe is:
+
+- pulse blocks in the two chrome fills — `bg-gray-100 dark:bg-gray-800/60` for content,
+  `bg-gray-200 dark:bg-gray-800` for heavier "heading" bars — with
+  `animate-pulse motion-reduce:animate-none` (a static placeholder under reduced motion);
+- `aria-busy="true"` on the placeholder root and ONE `sr-only` "Loading…" line;
+- keyed on a **verdict** — `hasLoaded`, `state === 'loading'`, `!historyLoaded` — never a
+  fetch-in-flight flag, and never a bare `<x>.loading` path (the #1927 ratchet counts that
+  spelling as a bare gate, so `stage.loading` as a `v-if` is a regression even when the
+  value is a verdict);
+- the same footprint as the loaded state, owned by a wrapper BOTH faces sit inside
+  (principle 4) — a stage-shaped placeholder draws the frame the common terminal takes
+  (header, thread, composer);
+- the placeholder is the FIRST arm of the branch chain, so no terminal arm can render under
+  it (the ent#253 lesson holds for skeletons as much as for the beam).
 
 ### Rules (all mandatory)
 
@@ -356,7 +381,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 
 ### D. Data loading & refresh
 
-12. One loading motion app-wide: scanline beam + wipe-in reveal (design session, 2026-07); no bespoke spinners or skeletons.
+12. Two loading treatments, decided by the surface (design session 2026-07; amended 2026-09-06, #2540): the scanline beam + wipe-in reveal on **chart** surfaces only; a skeleton placeholder keyed on "no data yet" on every other first load — pages, panels, lists, threads. No bespoke spinners; no scanline over a non-chart surface.
 13. First load animates; background refresh is invisible — stale-while-revalidate, in-place swap.
 14. Loading means "no data yet", never "fetch in flight"; cache hits skip the animation; reduced motion is honored.
 
@@ -387,6 +412,8 @@ The recurring failure modes, in one place:
 | Hand-rolled `<button class="…">` | `BaseButton` |
 | `dark:text-gray-500` on meta text | `dark:text-gray-300` (secondary) or `-400` (tertiary) |
 | A new skeleton/spinner for a loading chart | The scanline primitive, keyed off store state |
+| A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
+| A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
 | Tabs wrapping to two rows | OverflowTabs with "+N more" |
 | A table that grows the page unbounded | Bounded viewport + sticky header + stated total |

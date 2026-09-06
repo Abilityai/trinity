@@ -142,19 +142,19 @@ export function briefingHydrationPlan(agents) {
 /**
  * The briefing hint zone's loading verdict.
  *
- * `unavailable` is neither: no beam (there is nothing coming) and no reveal
- * (nothing arrived) — an honest snap to the "couldn't load" line. `ready` with
- * neither hints nor a description is also a snap: revealing an empty zone is
- * the celebratory pass over nothing.
+ * `pending` is the one state that shows the placeholder — a skeleton keyed on
+ * this verdict, never a fetch-in-flight flag (#2540: the scanline beam is the
+ * CHART motion; a hint zone is a list). `unavailable` is the honest "couldn't
+ * load" line; `ready` renders whatever it holds, including nothing.
+ *
+ * The template gates on `state`, not on `loading`: a bare `<zone>.loading`
+ * path is exactly what the #1927 ratchet counts as a bare loading gate.
  */
 export function briefingZone(card) {
   const state = briefingStateOf(card)
-  const hints = (card && card.playbooks) || []
-  const hasContent = hints.length > 0 || Boolean(card && card.description)
   return {
     state,
     loading: state === BRIEFING_PENDING,
-    reveal: state === BRIEFING_READY && hasContent,
     unavailable: state === BRIEFING_UNAVAILABLE,
   }
 }
@@ -174,36 +174,34 @@ export function shouldRequestBriefing(card, attempts = 0) {
 }
 
 /**
- * The Workspace STAGE's loading verdict — the AC4 zone.
+ * The Workspace STAGE's loading verdict.
  *
  * Over `viewState`, so the "loading means no data yet, never fetch in flight"
- * rule has one home (#1927). Four inputs, each load-bearing:
+ * rule has one home (#1927). Three inputs, each load-bearing:
  *
  *   rosterLoaded  the roster reached a VERDICT (never `store.loading`, which is
  *                 in-flight and would re-enter loading on every refetch)
- *   resolved      `bootstrap()` finished. Without it the stage can reveal while
+ *   resolved      `bootstrap()` finished. Without it the stage can land while
  *                 `activeAgentName`/`pendingSession` are still unset — those are
  *                 assigned only after `refreshThreads()` — so a deep link would
  *                 mount the conversation for `agents[0]`, flash ITS briefing,
- *                 then remount for the real target. AC4 says "while the roster
- *                 AND a thread's history hydrate".
- *   error         a failed roster snaps to its own copy, never a reveal
- *   unreachable   a link naming an agent this caller cannot reach resolves the
- *                 roster fine; that refusal card must snap, not wipe in.
+ *                 then remount for the real target. #2163's AC4 says "while the
+ *                 roster AND a thread's history hydrate".
+ *   error         a failed roster is its own copy, never a placeholder
+ *
+ * `state === 'loading'` is what the stage skeleton keys on (#2540); the
+ * `loading` bit is the same verdict for callers that read it as a boolean.
+ * The template gates on `state` — a bare `stage.loading` path is what the
+ * #1927 ratchet counts as a bare loading gate.
  */
 export function stageZone({
   rosterLoaded = false,
   resolved = false,
   error = null,
   agents = [],
-  unreachable = false,
 } = {}) {
   const list = Array.isArray(agents) ? agents : []
   const hasLoaded = Boolean(rosterLoaded && resolved && !error)
   const { state } = viewState({ hasLoaded, error, count: list.length })
-  return {
-    state,
-    loading: state === 'loading',
-    reveal: state === 'ready' && !unreachable,
-  }
+  return { state, loading: state === 'loading' }
 }

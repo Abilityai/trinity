@@ -50,9 +50,10 @@ Portal.vue::bootstrap()
 
   agent page: GET /agents/{name}/page ──► get_agent_card ──► _bounded_briefing (one, bounded)
 
-Zones:  <main> ScanlineReveal(stageZone ← viewState)
-          ⊃ PortalConversation ScanlineReveal(!historyLoaded)
-              ⊃ PortalBriefing ScanlineReveal(briefingZone)
+Zones:  <main> PortalSkeleton[stage]    v-else-if="stage.state === 'loading'"   (stageZone ← viewState)
+          ⊃ PortalConversation PortalSkeleton[thread]    v-if="!historyLoaded"
+              ⊃ PortalBriefing PortalSkeleton[briefing]  v-if="zone.state === 'pending'"   (briefingZone)
+        (#2540: skeletons, not the scanline — that motion is for charts)
 ```
 
 ## Design decisions
@@ -180,17 +181,37 @@ roster payload is *the* portal capability channel) is untouched.
 The client stamps `unavailable` too, for a failed or 429'd hydration call, using
 the same word rather than inventing a fourth.
 
-## The three loading zones (AC4)
+## The three loading zones (AC4, as amended by #2540)
 
 All decidable rules are pure, in `components/portal/portalBriefingState.js`
 (`vitest.config.js` pins `environment: 'node'` with no mount harness — a rule
 inside an SFC is a rule no test can reach).
 
-| Zone | File | Key | Snaps (no reveal) when |
+#2163 shipped these three zones as `ScanlineReveal` adopters. The operator
+ruling of 2026-09-06 (#2540) made the scanline beam the CHART-loading motion
+and nothing else, so each zone now renders a **skeleton placeholder**
+(`components/portal/PortalSkeleton.vue` — stage / thread / briefing) while its
+verdict says "no data yet". The verdicts, and everything below about them, are
+unchanged; only the placeholder drawn under them changed. The `reveal` bit the
+zones used to compute is gone with the primitive.
+
+| Zone | File | Gate | Placeholder |
 |---|---|---|---|
-| Stage | `views/Portal.vue` | `stageZone(...)` over `viewState` | failed / empty roster, unreachable deep-link agent |
-| Conversation body | `components/portal/PortalConversation.vue` | `!historyLoaded` | no messages |
-| Briefing hints | `components/portal/PortalBriefing.vue` | `briefingZone(card)` | `unavailable`, or `ready` with nothing in it |
+| Stage | `views/Portal.vue` | `v-else-if="stage.state === 'loading'"` (`stageZone` over `viewState`) | the conversation frame: header, three rows, composer |
+| Conversation body | `components/portal/PortalConversation.vue` | `v-if="!historyLoaded"` | three message-shaped rows |
+| Briefing hints | `components/portal/PortalBriefing.vue` | `v-if="zone.state === 'pending'"` (`briefingZone`) | a description line and one row of hint cards |
+
+* **Gates read `state`, never a bare `<x>.loading` path.** `stage.loading` is a
+  verdict, but the #1927 ratchet (`scripts/scan-loading-gates.mjs`) counts any
+  whole-expression path containing "loading" as a bare gate — so the spelling
+  matters even when the value does not.
+* **The wrapper owns the footprint.** `min-h-[10rem]` (thread) and
+  `min-h-[6.5rem] max-w-2xl` (briefing) sit on a wrapper BOTH faces render
+  inside, so the swap never shifts (principle 4).
+* **The placeholder is the first arm of the chain.** The stage skeleton is a
+  `v-else-if` ahead of the whole branch chain and the chain is its `v-else`,
+  so no terminal arm can render under it — the ent#253 lesson, which held for
+  the beam and holds for a skeleton.
 
 * **The stage waits for `bootstrapResolved`, not just the roster.**
   `activeAgentName` / `pendingSession` are assigned only after
@@ -207,27 +228,24 @@ inside an SFC is a rule no test can reach).
   mount for a brand-new chat, set in `loadThread`'s `finally` (a verdict either
   way), and never goes false again on that instance; `convKey` remounts
   re-derive it.
-* **No zone passes `announce`.** The primitive puts `role="status"` — an
-  implicit `aria-live="polite" aria-atomic="true"` region — on the zone ROOT. The
-  stage zone wraps the whole conversation including the composer and the history
-  zone wraps the transcript, so every appended or streamed message would be
-  re-announced in full. `aria-busy` still rides each root while loading. Moving
-  the live region onto the primitive's `sr-only` span is a one-line follow-up
-  recorded for #1921/ent#245.
-* **`ScanlineReveal` gained `content-class`.** `.scan-content` is the
-  primitive's own wrapper and `:deep()` is forbidden by its contract, so a zone
-  whose loaded content must FILL a flex column had no hook. Two lines, default
-  `''`, no existing consumer changes.
+* **A screen reader hears one line per zone.** Each placeholder carries
+  `aria-busy` and ONE `sr-only` "Loading…" line; the thread rows nested inside
+  the stage placeholder stay silent (`announce=false`) so a reader does not hear
+  two. (The `announce`/`role="status"` concern #2163 documented was the
+  primitive's; a skeleton has no live region to misplace.)
+* **`ScanlineReveal` keeps `content-class`.** #2163 added it for the stage;
+  the prop stays (additive, default `''`) for the chart consumers.
 * **A background refetch is invisible.** `mergeRosterBriefings` carries hydrated
   cards across a roster refetch (no rising loading edge), and `fetchRoster`
   re-enters loading only when there is no data on screen — so a "Try again"
   after a failed first load shows the scanline instead of flashing "No agents
   shared with you yet" (a pre-existing p15 lie the AC4 line sat next to).
 
-Deliberately NOT swept here: `PortalFilesPanel.vue`'s `animate-spin`,
-`PortalSidebar.vue`'s `animate-pulse` roster skeleton (#2159's), and
-`PortalAgentPage.vue`'s own loading. Those stay on #1921 per the operator's
-ruling.
+Deliberately NOT swept here: `PortalFilesPanel.vue`'s `animate-spin` (a
+bespoke spinner — #1921's sweep, now re-pointed to skeletons) and
+`PortalRoom.vue`'s "Loading…" line. `PortalSidebar.vue`'s roster skeleton
+(#2159's) and `PortalAgentPage.vue`'s section skeletons are the pattern the
+amended rule blesses and stay as they are.
 
 ## Client hydration rules
 

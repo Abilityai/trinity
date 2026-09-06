@@ -1,31 +1,29 @@
 <template>
-  <div class="py-8 sm:py-12 text-center">
+  <div id="portal-briefing" class="py-8 sm:py-12 text-center">
     <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="64" class="mx-auto" />
     <h1 class="mt-4 text-xl font-semibold tracking-tight">{{ agent.name }}</h1>
     <!-- #2163: the briefing is hydrated AFTER the roster (it used to ship with
          it, which is what made the Workspace's first paint wait for the slowest
-         agent in the fleet). So this zone carries the app's standard loading
-         motion, keyed on the card's own `briefing_state` — "no data yet", never
-         a fetch-in-flight flag.
+         agent in the fleet). So this zone shows a placeholder keyed on the
+         card's own `briefing_state` — "no data yet", never a fetch-in-flight
+         flag. #2540: the placeholder is a SKELETON of the hint zone, not the
+         scanline beam — that motion is for charts; this is a list.
 
          Avatar and name stay OUTSIDE it: they come from the roster and are
-         already correct, and sweeping a beam over an identity that is not
+         already correct, and a placeholder over an identity that is not
          loading would be motion about nothing.
 
-         No `announce`: this zone sits inside the conversation's history zone,
-         and the primitive puts role="status" on the ROOT of whichever zone
-         declares it — one live region per navigation, not three nested.
+         The wrapper owns the footprint: `min-h` reserves the header plus one
+         hint row for BOTH the skeleton and the loaded zone, so the common
+         shapes (no hints; a description and a row) do not jump on arrival. A
+         taller grid grows DOWNWARD into the empty pane below — the composer is
+         pinned to the bottom of the flex column, so nothing visible moves.
 
-         `min-h` reserves the header plus one hint row, so the common shapes
-         (no hints; a description and a row) do not jump on arrival. A taller
-         grid grows DOWNWARD into the empty pane below — the composer is pinned
-         to the bottom of the flex column, so nothing visible moves. -->
-    <ScanlineReveal
-      :loading="zone.loading"
-      :reveal="zone.reveal"
-      class="mt-1.5 mx-auto max-w-2xl min-h-[6.5rem] rounded-xl"
-    >
-    <template v-if="!zone.loading">
+         `zone.state`, not `zone.loading`: a bare `<x>.loading` gate is what
+         the #1927 ratchet counts. -->
+    <div class="mt-1.5 mx-auto max-w-2xl min-h-[6.5rem]">
+    <PortalSkeleton v-if="zone.state === 'pending'" variant="briefing" />
+    <template v-else>
     <p v-if="agent.description" class="mx-auto max-w-lg text-sm text-gray-500 dark:text-gray-400">
       {{ agent.description }}
     </p>
@@ -78,14 +76,14 @@
       </button>
     </div>
     </template>
-    </ScanlineReveal>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
-import ScanlineReveal from '../ScanlineReveal.vue'
+import PortalSkeleton from './PortalSkeleton.vue'
 import { planHintDisplay, starterFor } from './portalUtils'
 import { briefingZone } from './portalBriefingState'
 

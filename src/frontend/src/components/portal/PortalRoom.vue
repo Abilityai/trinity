@@ -130,6 +130,9 @@
          appear here. -->
     <PortalLoops :participants="agentParticipants" />
 
+    <!-- ent#474: the rail's mobile collapsed form — see PortalConversation. -->
+    <slot name="rail-strip" />
+
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
       <div class="max-w-4xl mx-auto">
@@ -215,6 +218,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalLoops from './PortalLoops.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import { workSignalFromRoom } from './portalRail'
 import {
   applyTypeaheadInsert,
   boundCandidates,
@@ -240,7 +244,7 @@ const props = defineProps({
   // a room is shared, a star is not.
   starred: { type: Boolean, default: false },
 })
-defineEmits(['open-menu', 'rooms-changed', 'toggle-star'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state'])
 
 const store = useClientPortalStore()
 
@@ -275,6 +279,13 @@ const isClosed = computed(() => room.value?.status === 'closed')
 // covers the gap between posting and the first poll, when nobody has been
 // marked working yet.
 const workingAgents = computed(() => room.value?.working || [])
+
+// ent#474 — the shell scopes the rail to the room's participants and derives
+// its Work signal from the SERVER's `working` list (never a local flag), so
+// both survive a reload and follow the room's own poll — live push degrades
+// to poll, never to a stuck indicator.
+watch(agentParticipants, (list) => emit('participants-changed', list), { immediate: true, deep: true })
+watch(workingAgents, (list) => emit('work-state', workSignalFromRoom(list)), { immediate: true, deep: true })
 
 // ent#381: the near-limit signal the Sessions page used to own. Same 80%
 // threshold, same two budgets — messages and cost — so a client sees a room
