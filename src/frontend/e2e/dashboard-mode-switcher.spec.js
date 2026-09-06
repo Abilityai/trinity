@@ -145,4 +145,98 @@ test.describe('dashboard view-mode switcher (#2536)', () => {
       'the switcher must be the LAST element child of the controls cluster — a sibling after it is what re-opens the jump'
     ).toBe(true)
   })
+
+  test('@smoke `v` cycles Timeline → Grid → List → Timeline and persists through setViewMode', async ({ page }) => {
+    await page.goto('/')
+    // Belt-and-braces: clear the saved mode ONCE, in the page, then reload.
+    // Never `addInitScript` for this key — it re-runs on `page.reload()` and
+    // would wipe the persisted mode the last step asserts on.
+    await page.evaluate((k) => localStorage.removeItem(k), MODE_KEY)
+    await page.reload()
+    await expectMode(page, VIEW_MODES[0])
+
+    for (const next of [...VIEW_MODES.slice(1), VIEW_MODES[0]]) {
+      await page.keyboard.press('v')
+      await expectMode(page, next)
+      // Same store path as a click → the saved selection follows the pane.
+      // Read in the BROWSER context — Playwright specs run in Node.
+      await expect
+        .poll(() => page.evaluate((k) => localStorage.getItem(k), MODE_KEY), {
+          message: `localStorage['${MODE_KEY}'] follows the hotkey to ${next}`,
+        })
+        .toBe(next)
+    }
+
+    // Persistence across a reload (persist: true — distinct from the `/agents`
+    // redirect's one-shot `persist: false`, which dashboard-list-view pins).
+    await page.keyboard.press('v')
+    await expectMode(page, 'grid')
+    await page.reload()
+    await expectMode(page, 'grid')
+  })
+
+  test('@smoke guards: `v` is inert in editable targets, under chords and Shift, and inside the filter pill; the switcher advertises the key', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await expectMode(page, 'timeline')
+
+    // Editable target (guard 4): the TIME-RANGE select specifically — the first
+    // <select> is the Owner filter on any multi-owner stack, and a native
+    // type-ahead on `v` there could pick an owner starting with "v" and filter
+    // trinity-system away. The time-range options (1h/6h/24h/3d/7d) have no "v".
+    const timeRange = page.locator('select').filter({ hasText: '24h' })
+    await timeRange.focus()
+    await expect(timeRange).toBeFocused()
+    await page.keyboard.press('v')
+    await expectMode(page, 'timeline')
+    await timeRange.blur()
+
+    // Chords (guard 2) and Shift+V (reserved — the letter never needs Shift).
+    for (const chord of ['Control+v', 'Alt+v', 'Meta+v', 'Shift+v']) {
+      await page.keyboard.press(chord)
+      await expectMode(page, 'timeline')
+    }
+
+    // Inside the filter pill (guard 4 again): `v` is a character, not a hotkey.
+    await page.keyboard.press('/')
+    const pillInput = page.getByTestId('filter-pill').getByRole('textbox', { name: 'Filter agents' })
+    await expect(pillInput).toBeFocused()
+    await page.keyboard.type('v')
+    await expect(pillInput).toHaveValue('v')
+    // The typed `v` is now a live QUERY, and `trinity-system` has no "v" in
+    // it — its timeline row is legitimately filtered out. So assert the PANE
+    // stayed Timeline (neither other pane mounted), not the row.
+    await expect(page.locator('.fleet-canvas'), 'grid pane not mounted by the typed v').toHaveCount(0)
+    await expect(page.getByPlaceholder('Search agents...'), 'list pane not mounted by the typed v').toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('filter-pill')).toBeHidden()
+    // Query cleared → the row is back, and all three timeline markers hold.
+    await expectMode(page, 'timeline')
+
+    // POSITIVE CONTROL: the listener was armed and the presses above were
+    // SUPPRESSED, not lost — a bare `v` now switches.
+    await page.keyboard.press('v')
+    await expectMode(page, 'grid')
+
+    // Open modal (guard 5): focus a BUTTON inside the Create Agent modal so
+    // guard 4 (editable targets) cannot be the one suppressing the key —
+    // this step proves the modal gate specifically.
+    await page.getByRole('button', { name: 'Create Agent' }).click()
+    const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
+    await expect(cancel).toBeVisible()
+    await cancel.focus()
+    await page.keyboard.press('v')
+    await expectMode(page, 'grid')
+    await cancel.click()
+    await expect(cancel).toBeHidden()
+
+    // Discoverability: the wrapper's tooltip names the key, the way the filter
+    // button advertises `/`. A `title`, never an `aria-label` — the buttons'
+    // accessible names (`timeline` / `grid` / `list`) are contract.
+    await expect(switcher(page)).toHaveAttribute('title', /press v/i)
+    for (const mode of VIEW_MODES) {
+      await expect(modeButton(page, mode)).not.toHaveAttribute('aria-label')
+    }
+  })
 })

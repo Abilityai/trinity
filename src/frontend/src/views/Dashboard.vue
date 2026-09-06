@@ -536,7 +536,7 @@ import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
 import { isOrgTag } from '@/utils/gridOrg'
-import { VIEW_MODES } from '@/utils/viewModes'
+import { VIEW_MODES, nextViewMode } from '@/utils/viewModes'
 import AgentListPanel from '@/components/AgentListPanel.vue'
 import CreateAgentModal from '@/components/CreateAgentModal.vue'
 import { useNotification } from '@/composables/useNotification'
@@ -786,8 +786,9 @@ function toggleFilterPill() {
   else openFilterPill()
 }
 
-// Document keydown: `/` opens (guards 0-5), Esc is the clear backstop so
-// "Esc to clear" stays true after focus wanders out of the pill input.
+// Document keydown: `/` opens the filter and `v` cycles the view mode
+// (guards 0-5, shared — #2536); Esc is the clear backstop so "Esc to clear"
+// stays true after focus wanders out of the pill input.
 function handleDashboardKeydown(e) {
   // Guard 0: respect consumers + ignore key-hold repeat.
   if (e.defaultPrevented || e.repeat) return
@@ -816,9 +817,17 @@ function handleDashboardKeydown(e) {
     return
   }
 
-  // Guard 1: layout-produced `/` only (fires for Shift+7 on de-DE — do NOT
-  // exclude shiftKey).
-  if (e.key !== '/') return
+  // Guard 1: layout-produced keys only — `/` opens the filter (ent#261), `v`
+  // cycles the view mode (#2536). `/` must NOT exclude shiftKey (de-DE `/` is
+  // Shift+7); `v` DOES exclude it — the letter never needs Shift on any
+  // layout, so Shift+V stays free (a future reverse cycle) while `V` from
+  // Caps Lock (shiftKey false) still works. Guards 2–5 below are shared by
+  // every hotkey — add a key HERE, never a second document listener
+  // (mountListenerOrdering.spec.js + viewModeStructure.spec.js).
+  const action = e.key === '/' ? openFilterPill
+    : (e.key === 'v' || e.key === 'V') && !e.shiftKey ? cycleViewMode
+    : null
+  if (!action) return
   // Guard 2: don't shadow browser/OS chords.
   if (e.ctrlKey || e.metaKey || e.altKey) return
   // Guard 3: IME composition.
@@ -829,8 +838,8 @@ function handleDashboardKeydown(e) {
   // Guard 5: open modals.
   if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
 
-  e.preventDefault() // blocks Firefox quick-find
-  openFilterPill()
+  e.preventDefault() // `/`: blocks Firefox quick-find. `v`: no browser default — harmless, kept uniform.
+  action()
 }
 
 // Agents executing right now: WS-observed in-flight work unioned with the
@@ -902,7 +911,7 @@ onMounted(async () => {
   // Do NOT move these below an await. Guarded by
   // tests/unit/mountListenerOrdering.spec.js.
   document.addEventListener('click', handleClickOutside) // tag dropdown dismiss
-  document.addEventListener('keydown', handleDashboardKeydown) // ent#261 type-to-filter + Esc backstop
+  document.addEventListener('keydown', handleDashboardKeydown) // ent#261 type-to-filter + Esc backstop; #2536 `v` view cycle
 
   // Initialize system views store (restores persisted view selection)
   systemViewsStore.initialize()
@@ -1011,6 +1020,13 @@ function formatTime(timestamp) {
 // View Mode Functions
 function toggleMode(mode) {
   networkStore.setViewMode(mode)
+}
+
+// `v` hotkey (#2536): advance Timeline → Grid → List → Timeline through the
+// same store path a switcher click takes, so localStorage and the active
+// button can never disagree with the pane.
+function cycleViewMode() {
+  networkStore.setViewMode(nextViewMode(viewMode.value))
 }
 
 function handlePlay() {
