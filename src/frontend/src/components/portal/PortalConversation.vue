@@ -93,16 +93,15 @@
 
     <!-- Messages -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <!-- #2163 (AC4): standard first-load motion, replacing a static "Loading…".
-           Keyed on the VERDICT `historyLoaded`, never on `loadingHistory` (the
-           session-adoption path re-runs loadThread with the transcript on
-           screen). No `announce`: role="status" lands on the zone root. -->
-      <ScanlineReveal
-        :loading="!historyLoaded"
-        :reveal="messages.length > 0"
-        class="max-w-4xl mx-auto min-h-[10rem]"
-      >
-      <div class="space-y-6">
+      <!-- #2540: a skeleton while the thread's history loads — the scanline is
+           the chart motion, not a page's. Keyed on the VERDICT `historyLoaded`,
+           never on `loadingHistory`: the session-adoption path re-runs
+           loadThread with the transcript on screen, and an in-flight key would
+           swap the transcript the user just watched arrive for a placeholder.
+           The wrapper owns the footprint, so the swap never shifts (principle 4). -->
+      <div class="max-w-4xl mx-auto min-h-[10rem]">
+      <PortalSkeleton v-if="!historyLoaded" variant="thread" />
+      <div v-else class="space-y-6">
 
         <!-- Briefing (new-chat state) rendered by the parent via slot -->
         <slot v-if="!loadingHistory && messages.length === 0 && !sending" name="empty" />
@@ -178,7 +177,7 @@
           :refresh-key="deliverableTick"
         />
       </div>
-      </ScanlineReveal>
+      </div>
     </div>
 
     <!-- ent#458: loops this agent is running, above the asks. Quiet unless
@@ -199,6 +198,12 @@
         />
       </div>
     </div>
+
+    <!-- ent#474: the rail's mobile collapsed form — a strip above the
+         composer, supplied by the shell, which owns the rail's tabs and
+         signals. Renders nothing above `sm`, where the column beside the
+         stage is the collapsed rail. -->
+    <slot name="rail-strip" />
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
@@ -391,7 +396,8 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
-import ScanlineReveal from '../ScanlineReveal.vue'
+import PortalSkeleton from './PortalSkeleton.vue'
+import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
 import {
   deliveryFailureReason,
@@ -472,7 +478,7 @@ const props = defineProps({
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state'])
 
 const store = useClientPortalStore()
 // ent#364: one list, filtered — never a second fetch for this surface.
@@ -1969,4 +1975,17 @@ function monitorTick() {
 
 
 defineExpose({ focusComposer: () => textarea.value?.focus() })
+
+// ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
+// on every change and never latched: it clears in the same `finally` that ends
+// a turn, failed or not. The unmount emit is the belt for a chat switch
+// mid-turn (this component is keyed by the shell and remounts on a switch);
+// the shell resets on every switch as well, so neither side can leave the
+// rail reading "running" for a conversation that is no longer on screen.
+watch(
+  sending,
+  (on) => emit('work-state', workSignalFrom({ sending: on, agent: props.agent?.name })),
+  { immediate: true }
+)
+onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))
 </script>

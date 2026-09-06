@@ -917,10 +917,15 @@ box; the words are recorded either way and handed to the agent's
   `agent-server.py` inside the container). `docker pause` measures nothing —
   a non-`running` container reads `availability="stopped"`, which the briefing
   skips before any HTTP.
-- **AC-4 — the standard first-load motion**: three `ScanlineReveal` zones, each
-  keyed on its own "no data yet" — the stage, the conversation body, and the
-  briefing hint zone. The static "Opening this conversation…" / "Loading…" lines
-  are gone. A background refetch never re-enters loading.
+- **AC-4 — a first-load placeholder keyed on "no data yet"** (as amended by
+  #2540, operator ruling 2026-09-06): three zones — the stage, the conversation
+  body, and the briefing hint zone — each show a **skeleton placeholder**
+  (`components/portal/PortalSkeleton.vue`: stage / thread / briefing) keyed on
+  its own verdict (`stage.state`, `historyLoaded`, `zone.state`). #2163 shipped
+  them as `ScanlineReveal` zones; the scanline beam is the CHART-loading motion
+  (design-system principle 12 as amended) and a conversation is not a chart.
+  The static "Opening this conversation…" / "Loading…" lines stay gone. A
+  background refetch never re-enters loading.
 
 - **The bound (option 2, the belt)**: `_BRIEFING_HTTP_TIMEOUT_SECONDS = 2.0`
   (httpx, PER PHASE) and `_BRIEFING_BUDGET_SECONDS = 3.0` (wall clock, via
@@ -1192,6 +1197,74 @@ already holds.
 - **Migrations**: dual-track — `db/migrations.py::agent_canvases_table` + Alembic
   `0050_agent_canvases`.
 - **Flow**: `docs/memory/feature-flows/agent-canvas.md`
+
+### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
+
+- **Status**: ✅ Implemented (shell) · **ID**: `WORKSPACE_RAIL_SHELL`
+- **Description**: A collapsible third column beside the conversation — the
+  frame every conversation-side capability (Work, Loops, Canvas, Files, later
+  State) docks into, so the Workspace stops placing each capability wherever
+  was locally convenient (#472's finding: five capabilities in five
+  placements). The shell ships the **tab contract**, the **collapsed-state
+  activity signal**, participant scoping with **room grouping**, persistence,
+  and the mobile forms. The first docked tab is **Work**, docked **empty** by
+  the operator's own split: its content (#457's Activity) and the re-homing of
+  loops / files / canvas are the next slices, and they dock into this frame.
+  Built to the approved design pass (ent#474 comment thread, 2026-09-06).
+- **AC-1 — renders beside `PortalConversation` and `PortalRoom`, collapsed by
+  default**: a sibling of `<main>` in `Portal.vue`, 48px collapsed / 384px
+  open. Hidden on the agent page and on every stage that holds no conversation
+  (`railVisibleFor` — keyed on the route and the stage VERDICT, never on data
+  still arriving, so a room whose participants have not landed keeps its rail).
+  Open/collapsed and the active tab persist under
+  `localStorage['trinity-workspace-rail']` and survive chat switches: the
+  state is a setup ref of the view, outside the conversation's remount key.
+- **AC-2 — the tab contract** (`components/portal/portalRail.js`): a tab
+  declares `id`, `label`, `door` (`platform` / `audience` / `agent`), `scope`
+  (participants), `empty` (title, body, the next action it teaches) and
+  `signal` (the shape it carries). `visibleTabs(tabs, session)` is the ONE gate
+  for render AND mount: a tab whose door the session fails has no icon, no
+  label and no mounted body, so nothing it would fetch is ever requested. An
+  unknown door fails closed. Fixed order Work · Loops · Canvas · Files.
+- **AC-3 — the collapsed rail signals live activity without opening**: two
+  shapes, one hue (principle 24) — *live now* (8px dot in a 3px ring,
+  `motion-safe:animate-pulse`, static under reduced motion) and *updated since
+  last view* (6px plain dot). The Work signal is DERIVED on every render from
+  the conversation's in-flight turn (1:1) or the room's server-reported
+  `working` list — never a latched flag — and the shell resets it on every
+  chat switch; the conversation also clears it on unmount. Native `title`
+  "Work · 1 running"; the same dot after the tab label when open
+  (`OverflowTabs` gained an optional `signal` per tab, measured in its mirror
+  row).
+- **AC-4 — a room shows one rail; tabs group by participating agent**:
+  `groupByParticipant` (over `portalLoopUtils.byAgent`) yields a row per
+  participant in participant order with absence visible ("nothing in flight");
+  a participant with live work wears the `1 running` info badge (`BaseBadge`).
+- **AC-5 — mobile (`< sm`)**: a strip above the composer (the `PortalLoops`
+  strip pattern, supplied through the conversation's and the room's
+  `#rail-strip` slot) carrying the same signals as words (`● Work · 1
+  running`); tap → the `PortalFilesPanel` bottom sheet (drag handle, tab
+  strip, X, Esc closes) — the same component in `sheet` mode.
+- **AC-6 — `prefers-reduced-motion`; a live update never resets scroll,
+  selection or the composer**: the only motion is the pulse (`motion-safe:`);
+  the rail body is its own scroll axis and patches in place; the rail is
+  mounted outside the conversation, so opening, collapsing and switching tabs
+  never remount it.
+- **AC-7 — per-door test** (`tests/unit/portalRail.spec.js`): an
+  external-client session gets no platform-only tab (today: no rail chrome at
+  all); the design's four-tab set narrows to Canvas · Files for a client;
+  source guards pin that the shell passes `store.isPlatformSession` (never a
+  literal) and that the rail renders nothing for an empty visible list.
+- **AC-8 — the empty state teaches**: "Nothing running right now" + **See what
+  you can ask** — scrolls to the briefing hints when they are on screen, else
+  opens the agent page's "what it can do".
+- **Not in this slice (recorded on the issue)**: the Work tab's content
+  (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
+  thread tab strip / top band / Agent-details panel / drop target of the
+  approved conversation page (later steps of the same build), and the resize
+  handles (#492 — which lands the grid variables the rail's widths then
+  follow; the shell keeps the flex row and sets its own widths until then).
+- **Flow**: `docs/memory/feature-flows/workspace-rail.md`
 
 ## 6. Activity Monitoring
 

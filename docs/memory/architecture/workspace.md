@@ -285,11 +285,41 @@ that one must stay `ready`). One leg answering is enough — the client renders
 `unavailable` INSTEAD of the fields, so a half-answered briefing must not throw away the
 description it did get. It is a **data-state marker, not a capability** — the #2128 rule
 below is untouched. API
-consumers that want the briefing make the second call. On the client, three
-`ScanlineReveal` zones (stage, conversation body, briefing) each key on their own "no
-data yet", and `ScanlineReveal` gained an additive `content-class` prop because
-`.scan-content` is the primitive's own element and a full-height flex stage had no hook.
+consumers that want the briefing make the second call. On the client, the three loading
+zones (stage, conversation body, briefing) each key on their own "no data yet" and —
+since #2540 — render a **skeleton placeholder** (`components/portal/PortalSkeleton.vue`),
+never the scanline beam, which is the CHART-loading motion (design-system principle 12
+as amended 2026-09-06; `ScanlineReveal` keeps the additive `content-class` prop #2163
+gave it, for its chart consumers). The gates read `stage.state` / `!historyLoaded` /
+`zone.state`, never a bare `<x>.loading` path, because that spelling is what the #1927
+ratchet counts as a bare loading gate.
 See [workspace-roster-briefing.md](../feature-flows/workspace-roster-briefing.md).
+
+**The conversation rail (trinity-enterprise#474, slice 1 of #472).** A collapsible third
+column — a **sibling of `<main>`** in `Portal.vue`, so the conversation and the room
+render into the same rail and its state (a setup ref, persisted under
+`localStorage['trinity-workspace-rail']`) rides no remount: a chat switch remounts the
+conversation, never the rail. 48px collapsed / 384px open, collapsed by default, hidden
+on the agent page and on every stage that holds no conversation — visibility is keyed on
+the route and the stage VERDICT (`railVisibleFor`), never on data still arriving, so a
+room whose participants have not landed keeps its rail. `components/portal/portalRail.js`
+is the **tab contract**: a tab declares `door` (`platform` / `audience` / `agent`), its
+participant `scope`, its `empty` state and its `signal` shape, and `visibleTabs` is the
+ONE gate for render AND mount — `PortalRail` never reads the registry, mounts a body for
+exactly the active tab, and renders no chrome at all for an empty list, so a tab whose
+door the session fails is never asked for its data (an external client sees no rail
+until an audience tab docks). The collapsed strip carries two signal shapes in one hue
+— *live* (ringed, `motion-safe:animate-pulse`) and *updated* (plain) — DERIVED on every
+render from the conversation's in-flight turn or the room's server-reported `working`
+list, and reset on every chat switch, so it structurally cannot stick. A room groups
+every tab by participant over `portalLoopUtils.byAgent`, absence visible. Below `sm` the
+column is a strip above the composer (`PortalRailStrip`, through the two components'
+`#rail-strip` slot) that opens the same component as a bottom sheet. `OverflowTabs`
+gained an optional per-tab `signal` (measured in its mirror row) for the label dot. The
+first docked tab is **Work**, empty by the operator's split — #457's Activity docks into
+its `#tab-work` slot; loops / canvas / files re-home in #472's second child; #492 lands
+the grid variables the rail's widths then follow. See
+[workspace-rail.md](../feature-flows/workspace-rail.md).
 
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal

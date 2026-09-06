@@ -37,13 +37,13 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 ## Data loading & motion
 
-- One loading motion app-wide: scanline beam (gradient halo + ~1.5px glowing core) sweeping a dimmed track at 1.5s ease-in-out alternate; on arrival, one 550ms linear pass wipes the content in behind it via `clip-path`; values flip from `—`. CSS-only. **Use `ScanlineReveal.vue`** (ent#245) — one persistent instance, content swapped in its slot, `:reveal="false"` for error/empty terminals.
+- Two loading treatments, decided by the surface (#2540). **Charts** — the scanline beam (gradient halo + ~1.5px glowing core) sweeping a dimmed track at 1.5s ease-in-out alternate; on arrival, one 550ms linear pass wipes the content in behind it via `clip-path`; values flip from `—`. CSS-only. **Use `ScanlineReveal.vue`** (ent#245) — one persistent instance, content swapped in its slot, `:reveal="false"` for error/empty terminals. **Everything else** — pages, panels, lists, message threads — a skeleton placeholder: pulse blocks in the chrome fills, `animate-pulse motion-reduce:animate-none`, `aria-busy` + one `sr-only` line, the loaded surface's own footprint (`SkeletonLoader.vue`, or content-shaped like `portal/PortalSkeleton.vue`), the first arm of the branch chain.
 - Key the animation off store state (`loading → loaded`), never a timer. Cache hits skip it entirely.
 - Loading means "no data yet", never "fetch in flight".
 - First load animates; **scheduled background refresh is invisible**: stale-while-revalidate, in-place value swap, no skeleton re-flash, no spinner, no layout shift, no scroll reset.
 - A **failed** refresh keeps the data on screen and raises the stale banner (ent#253). Never overwrite the data with a synthetic empty payload in a `catch` — that turns "the request failed" into "this agent has none", which is a different and much worse claim.
 - `prefers-reduced-motion: reduce` → static placeholder, instant reveal.
-- No new spinners or skeletons. The only sanctioned spinner is the 16px in-flight indicator inside BaseButton.
+- No bespoke spinners, and no scanline over a non-chart surface; a skeleton follows the recipe above. The only sanctioned spinner is the 16px in-flight indicator inside BaseButton.
 
 ## Principles — one line each
 
@@ -65,7 +65,7 @@ Density:
 11. One primary action per view; the rest demote to secondary/ghost/overflow.
 
 Data loading:
-12. One loading motion app-wide — the scanline standard; no bespoke spinners.
+12. Scanline on chart surfaces only; a skeleton placeholder keyed on "no data yet" everywhere else; no bespoke spinners (#2540).
 13. First load animates; background refresh is invisible.
 14. Loading = "no data yet"; cache hits skip animation; reduced motion honored.
 
@@ -97,7 +97,7 @@ Before requesting review, verify:
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
 - [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival; the empty branch gates on a succeeded fetch (`hasLoaded`), not on list length
 - [ ] Every action failure has a user-visible home (`InlineError` near the control); no `console.error`-only catch, no `alert()`, and `Promise.allSettled` bulk helpers report their rejected count
-- [ ] Data loading uses the scanline primitive keyed off store state; background refresh is invisible (no re-flash, no scroll reset) — no bare `v-if="loading"` gate on a data surface: gate on "no data yet" (`utils/loadingState.js::viewState`), stale refresh = sibling `InlineError` banner; `tests/unit/loadingGateRatchet.spec.js` fails if a file's bare-gate count grows (#1927)
+- [ ] Data loading uses the scanline primitive on chart surfaces and a skeleton placeholder on every other first load, keyed off store state; background refresh is invisible (no re-flash, no scroll reset) — no bare `v-if="loading"` gate on a data surface: gate on "no data yet" (`utils/loadingState.js::viewState`), stale refresh = sibling `InlineError` banner; `tests/unit/loadingGateRatchet.spec.js` fails if a file's bare-gate count grows (#1927)
 - [ ] `prefers-reduced-motion` handled on any animation touched
 - [ ] Empty states name purpose + one next action; errors name problem + fix + example
 - [ ] Keyboard pass: visible focus, Esc, focus trap, logical tab order

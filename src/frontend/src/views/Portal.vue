@@ -162,25 +162,19 @@
           @open-menu="mobileNav = true"
         />
 
-        <!-- #2163 (AC4): the Workspace stage carries the app's standard
-             first-load motion while the roster AND the deep link's target
-             resolve. ONE persistent instance — the branches swap INSIDE the
-             slot, never as sibling v-ifs around it, or a remount re-inits from
-             loading=false and the reveal never plays.
-
-             No `announce`: the primitive puts role="status" on the zone ROOT,
-             which is an implicit aria-live region — and this zone wraps the
-             whole conversation including the composer, so every appended or
-             streamed message would be re-announced in full. `aria-busy` still
-             rides the root while loading. -->
-        <ScanlineReveal
-          v-else
-          :loading="stage.loading"
-          :reveal="stage.reveal"
-          class="flex-1 min-h-0 flex flex-col rounded-none"
-          content-class="flex-1 min-h-0 flex flex-col"
-        >
-        <template v-if="!stage.loading">
+        <!-- #2540: the stage's first load — while the roster AND the deep
+             link's target resolve — is a SKELETON of the conversation frame
+             (header, thread, composer), so the loaded surface lands on the
+             same footprint. Keyed on the stage VERDICT (`stageZone` over
+             `viewState`), never on `store.loading`, so a background refetch
+             with a roster on screen never re-enters it; and on `stage.state`,
+             not `stage.loading`, because a bare `<x>.loading` gate is what the
+             #1927 ratchet counts. The branch chain is its `v-else`: the
+             placeholder short-circuits the chain, so no terminal arm can render
+             under it (the ent#253 lesson). The scanline beam that was here
+             (#2163) is the CHART motion and is gone from every non-chart zone. -->
+        <PortalSkeleton v-else-if="stage.state === 'loading'" variant="stage" />
+        <template v-else>
         <PortalRoom
           v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
           :key="activeRoomIdFromRoute"
@@ -190,7 +184,13 @@
           @open-menu="mobileNav = true"
           @rooms-changed="refreshThreads"
           @toggle-star="toggleStar"
-        />
+          @participants-changed="onRoomParticipants"
+          @work-state="onWorkState"
+        >
+          <template #rail-strip>
+            <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
+          </template>
+        </PortalRoom>
 
         <!-- #2128: the URL names a room this instance cannot open. This branch
              must catch EVERY remaining room-URL case, and its position between
@@ -253,9 +253,13 @@
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
           @open-thread="openThread"
+          @work-state="onWorkState"
         >
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
+          </template>
+          <template #rail-strip>
+            <PortalRailStrip v-if="railVisible" :tabs="railTabs" :signals="railSignals" @open="railSheetOpen = true" />
           </template>
         </PortalConversation>
 
@@ -308,9 +312,41 @@
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
         </div>
         </template>
-        </ScanlineReveal>
       </main>
+
+      <!-- ent#474: the conversation rail — a SIBLING of <main>, so the
+           conversation and the room render into the same rail, and its state
+           (a setup ref of this view, persisted under one key) rides no remount:
+           a chat switch remounts the conversation, never the rail. Hidden on
+           the agent page and on every stage that holds no conversation
+           (`railVisibleFor`); collapsed by default. Below `sm` the column is
+           replaced by the strip above the composer + the sheet below. -->
+      <PortalRail
+        v-if="railVisible"
+        :tabs="railTabs"
+        :active-tab="railState.tab"
+        :open="railState.open"
+        :signals="railSignals"
+        :participants="railParticipants"
+        @update:open="setRailOpen"
+        @update:active-tab="setRailTab"
+        @see-hints="seeHints"
+      />
     </div>
+
+    <!-- ent#474: the rail's mobile form (the `PortalFilesPanel` sheet). Same
+         component, same tabs, same signals; `sheet` only changes the chrome. -->
+    <PortalRail
+      v-if="railVisible && railSheetOpen"
+      sheet
+      :tabs="railTabs"
+      :active-tab="railState.tab"
+      :signals="railSignals"
+      :participants="railParticipants"
+      @update:active-tab="setRailTab"
+      @close="railSheetOpen = false"
+      @see-hints="seeHints"
+    />
 
     <!-- ent#361: picking who is in a chat is an explicit act now -->
     <PortalAgentPicker
@@ -341,7 +377,18 @@ import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
-import ScanlineReveal from '@/components/ScanlineReveal.vue'
+import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
+import PortalRail from '@/components/portal/PortalRail.vue'
+import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
+import {
+  RAIL_TABS,
+  emptySignal,
+  loadRailState,
+  railParticipantsFor,
+  railVisibleFor,
+  saveRailState,
+  visibleTabs,
+} from '@/components/portal/portalRail'
 import { stageZone } from '@/components/portal/portalBriefingState'
 import { resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
 
@@ -457,16 +504,93 @@ const activeAgent = computed(() => {
 // first turn adopts an id (that just updates the route in place).
 const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.name) || ''}#${convGen.value}`)
 
-// #2163 — the stage's loading verdict (AC4). Keyed on `rosterLoaded` (a
-// VERDICT) and never on `store.loading` (fetch in flight), so a background
-// refetch with a roster on screen is invisible; `viewState` owns that rule.
+// #2163 — the stage's loading verdict. Keyed on `rosterLoaded` (a VERDICT)
+// and never on `store.loading` (fetch in flight), so a background refetch
+// with a roster on screen is invisible; `viewState` owns that rule.
 const stage = computed(() => stageZone({
   rosterLoaded: store.rosterLoaded,
   resolved: bootstrapResolved.value,
   error: store.error,
   agents: store.agents,
+}))
+
+// ---- Conversation rail (ent#474) --------------------------------------------
+// State is a SETUP ref of this view — outside `convKey` and outside every stage
+// branch — so a chat switch (which remounts the conversation) and a live update
+// (which patches the rail body in place) never touch it. Persisted under ONE
+// key (design pass, "State & honesty"), read synchronously here before first
+// paint, written on every change.
+const railState = ref(loadRailState(safeStorage()))
+watch(railState, (s) => saveRailState(safeStorage(), s), { deep: true })
+const railSheetOpen = ref(false)
+const roomParticipants = ref([])
+const workSignal = ref(emptySignal())
+
+const railParticipants = computed(() => railParticipantsFor({
+  agentPage: activeAgentPageName.value,
+  roomId: activeRoomIdFromRoute.value,
+  roomParticipants: roomParticipants.value,
+  activeAgent: activeAgent.value?.name,
+}))
+// THE door gate (the per-door test): the rail column, the mobile strip and the
+// sheet all read this list and never the registry, so a tab whose door this
+// session fails has no icon, no label and no mounted body — and therefore no
+// request for whatever that body would fetch.
+const railTabs = computed(() => visibleTabs(RAIL_TABS, {
+  isPlatform: store.isPlatformSession,
+  participants: railParticipants.value,
+}))
+// Keyed on the route and the stage VERDICT — synchronous facts — never on data
+// still arriving (a room's participants land with its own fetch), so a live
+// update cannot flicker the rail in and out.
+const railVisible = computed(() => railVisibleFor({
+  agentPage: activeAgentPageName.value,
+  stageState: stage.value.state,
+  roomId: activeRoomIdFromRoute.value,
+  roomsAvailable: store.multiAgentChatAvailable,
+  activeAgent: activeAgent.value?.name,
   unreachable: !!unreachableAgent.value,
 }))
+const railSignals = computed(() => ({ work: workSignal.value }))
+
+function setRailOpen(open) { railState.value = { ...railState.value, open } }
+function setRailTab(tab) { railState.value = { ...railState.value, tab } }
+function onWorkState(sig) { workSignal.value = sig || emptySignal() }
+function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list) ? list : [] }
+
+// A signal belongs to the chat that reported it. The conversation is keyed by
+// `convKey` and the room by its id, so a switch unmounts the reporter; reset
+// here as well, so nothing can read as still running across the switch — the
+// "never a stuck indicator" half of #474's AC.
+watch([convKey, activeRoomIdFromRoute], () => {
+  workSignal.value = emptySignal()
+  roomParticipants.value = []
+  railSheetOpen.value = false
+})
+
+// "See what you can ask" — the Work tab's empty-state action. The hints are
+// the briefing on the empty-chat screen: when they are on screen, go to them;
+// otherwise the agent page's "what it can do" is the nearest home.
+function seeHints() {
+  railSheetOpen.value = false
+  const el = typeof document !== 'undefined' ? document.getElementById('portal-briefing') : null
+  if (el) {
+    const reduce = typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
+    return
+  }
+  const first = railParticipants.value[0]
+  if (first) openAgentPage(first)
+}
+
+// localStorage can throw on access (private mode, blocked site data); the rail
+// then runs session-only, which `loadRailState`/`saveRailState` already treat
+// as the default.
+function safeStorage() {
+  try { return typeof localStorage !== 'undefined' ? localStorage : null } catch { return null }
+}
 
 // #2163 — hydrate the ACTIVE agent's briefing, driven from HERE rather than
 // from `PortalBriefing`'s mount. `PortalBriefing` renders only in the
