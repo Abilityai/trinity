@@ -21,14 +21,20 @@ iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
   persists to `localStorage['trinity-dashboard-view']`. **Timeline stays the
   default** for users with no saved preference (and a stale mode — `'graph'`,
   or `'list'` on an older bundle — degrades to it via the
-  `VIEW_MODES.includes()` guard).
+  `VIEW_MODES.includes()` guard). Since #2536 the toggle is the LAST header
+  control (position pinned across modes and the history spinner — in a
+  right-anchored flex row a child's x depends only on the siblings to its
+  right, so with none it cannot move; Tidy up / Reset sit immediately to its
+  left) and `v` cycles Timeline → Grid → List through the `/` hotkey's guard
+  ladder; the mode list is `utils/viewModes.js` (one home).
 - **No Vue Flow dependency** in this mode, and **no new backend endpoints**.
 
 ## Components & Data Flow
 
 ```
 views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pills,
-  │                          "N working now" header stat, empty/error/skeleton states
+  │                          "N working now" header stat, empty/error/skeleton states,
+  │                          `v` hotkey (shares the `/` guard ladder, #2536)
   ├─ components/FleetGrid.vue    pan/zoom viewport, lattice, drag physics, sockets,
   │    │                         cell shading, keyboard reorder, zoom controls + legend,
   │    │                         viewport culling, shared 1s tick for tile timers

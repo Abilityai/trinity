@@ -28,7 +28,7 @@ coerced that to `false`; the payload field is backend truth.
 
 ```
 stores/network.js
- ├─ VIEW_MODES ['grid','timeline','list'] · setViewMode(mode, {persist=true})
+ ├─ VIEW_MODES ['timeline','grid','list'] (from utils/viewModes.js, #2536) · setViewMode(mode, {persist=true})
  │     persist:false skips ONLY the localStorage write (the ?view= deep-link)
  ├─ visibleAgents = computed(agents ∘ owner-filter)   ←— ent#261 seam
  │     `agents` is already server-side tag-filtered by fetchAgents.
@@ -44,7 +44,8 @@ stores/network.js
         stores share rows but never the array)
 
 views/Dashboard.vue (chassis)
- ├─ header: mode toggle ['timeline','grid','list'] (second home of VIEW_MODES)
+ ├─ header: mode toggle (v-for over VIEW_MODES from utils/viewModes.js — one home;
+ │          LAST header control, `v` cycles, #2536)
  │          + Create Agent button + CreateAgentModal (all modes; close →
  │            fetchAgents, since the WS agent_created event can lag; label
  │            icon-only below `md` so the fixed controls cluster leaves the

@@ -30,7 +30,7 @@ The Dashboard gives you a bird's-eye view of your agent fleet in three interchan
 - **Grid** — A draggable tile canvas, optionally overlaid with department zones and reporting lines.
 - **List** — A sortable, filterable row list with inline toggles and bulk tag actions.
 
-Shared controls across all three: press `/` to type-filter the fleet by name, plus tag filter, owner filter, time range, and **Create Agent**.
+Shared controls across all three: press `/` to type-filter the fleet by name, press `v` to cycle the view, plus tag filter, owner filter, time range, and **Create Agent**.
 
 See [Dashboard](../operations/dashboard.md) for the full reference.
 

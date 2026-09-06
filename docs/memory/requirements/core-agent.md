@@ -1471,7 +1471,7 @@ already holds.
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Info tiles)
 
 ### 9.14 Dashboard View-Mode Shortcut + Pinned Switcher (#2536)
-- **Status**: 🚧 In Progress (2026-09-06)
+- **Status**: ✅ Implemented (2026-09-06)
 - **Description**: The Timeline / Grid / List switcher renders at a mode- and fetch-independent position — it is the LAST child of the right-anchored header controls cluster, and nothing conditional may be appended after it — and `v` cycles the modes in the switcher's visual order (Timeline → Grid → List → Timeline). Frontend only; **zero backend changes**.
 - **Activation**: `v` on the same Dashboard-scoped document keydown listener as `/` (`V` without Shift — i.e. Caps Lock — also fires; `Shift+V` is inert by design, reserved). Guards shared, in order: `defaultPrevented`/`repeat` → non-hotkey key (layout-produced via `e.key`; `shiftKey` NOT excluded for `/`, excluded for `v`) → Ctrl/Meta/Alt chords → IME composition → editable targets (INPUT / TEXTAREA / SELECT / `isContentEditable`) → open modals (onboarding wizard, System View editor, Create Agent modal). One document listener for both keys; armed at mount above every `await` (design-system principle 23, `mountListenerOrdering.spec.js`).
 - **Cycle order = visual order = default**: one exported constant `VIEW_MODES = ['timeline','grid','list']` in `utils/viewModes.js` (a zero-import leaf, the #2199 `gridStorageKeys` shape) feeds the store whitelist, the switcher `v-for`, `nextViewMode()`, and the e2e specs; index 0 is the degrade default. An unknown mode wraps to `timeline`.
