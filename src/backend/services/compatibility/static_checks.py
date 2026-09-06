@@ -999,9 +999,34 @@ def c_a004(snap):
 # D — Dashboard & Metrics (static parts)
 # ===========================================================================
 
-_WIDGET_TYPES = {"metric", "status", "progress", "text", "markdown", "table",
-                 "list", "link", "image", "divider", "spacer"}
+# canonical order — mirrors docker/base-image/agent_server/routers/dashboard.py::validate_widget.valid_types
+# (the agent-side gate that strips unknown widgets) and DashboardPanel.vue's render chain; the three are pinned
+# together by tests/unit/test_2110_widget_type_parity.py. A semantic twin, not an Invariant #5 byte mirror.
+_WIDGET_TYPES = ("metric", "status", "progress", "text", "markdown", "table",
+                 "list", "link", "image", "divider", "spacer")
 _WIDGET_COLORS = {"green", "red", "yellow", "gray", "blue", "orange", "purple"}
+
+
+def _clip(s, n=40):
+    """Bound an agent-authored value before it is persisted or rendered.
+
+    `str()` first: the hardened loader hands checks ints, bools, dicts and
+    `datetime.date`s (json.dumps raises on the last). Non-printables dropped —
+    an `\\x1b[…` or a U+202E would reach a terminal MCP consumer intact.
+    Pre-slice bounds the work; the collector already caps files at 256 KiB.
+    """
+    s = str(s)[:512]
+    s = " ".join("".join(ch for ch in s if ch.isprintable()).split())
+    if not s:
+        return "(blank)"
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _named(items, cap=5):
+    """'a, b, c, +N more' — the message names at most `cap`; `detail` keeps up to 25."""
+    items = list(items)
+    more = f", +{len(items) - cap} more" if len(items) > cap else ""
+    return ", ".join(items[:cap]) + more
 
 
 def _dashboard(snap):
@@ -1040,10 +1065,26 @@ def _with_dashboard(snap, fn):
 
 def c_d002(snap):
     def f(widgets):
-        bad = sorted({w.get("type") for w in widgets if w.get("type") not in _WIDGET_TYPES and w.get("type")})
-        if bad:
-            return _fail("unsupported dashboard widget type(s)", {"types": bad})
-        return _ok("all widget types are supported")
+        counts = {}
+        for w in widgets:                   # `_dashboard` already keeps only dict widgets
+            t = w.get("type")
+            if not t:                       # missing/empty type: the agent server strips it with
+                continue                    #   "missing 'type'"; no D check covers it (follow-up) — unchanged
+            if not isinstance(t, str):      # 5 / true / {..}: at HEAD the set-sort raised TypeError →
+                t = str(t)                  #   "check could not be evaluated"
+            if t not in _WIDGET_TYPES:      # membership on the RAW string ("metric\n" is not metric —
+                k = _clip(t)                #   the agent server strips it too); the CLIPPED form is the
+                counts[k] = counts.get(k, 0) + 1   # key, so message and detail carry the same bounded name
+        if not counts:
+            return _ok("all widget types are supported")
+        bad = sorted(counts)                # alphabetical by (clipped) name — identical string every run
+        msg = (f"unsupported dashboard widget type(s): "
+               f"{_named(f'{t!r} ×{counts[t]}' for t in bad)} — not rendered; "
+               f"supported: {', '.join(_WIDGET_TYPES)}")
+        if "chart" in counts:               # the fleet-observed case (#2110): say where trends come from
+            msg += (" (there is no chart widget — trend lines come from metric/progress history: "
+                    "give those widgets a stable id and the platform draws the sparkline)")
+        return _fail(msg, {"types": bad[:25]})
     return _with_dashboard(snap, f)
 
 
@@ -1057,11 +1098,18 @@ def c_d003(snap):
         bad = []
         for w in widgets:
             t = w.get("type")
+            if not isinstance(t, str):      # a non-string type is D-002's finding; `req.get({..})` raised at HEAD
+                continue
             for field in req.get(t, []):
                 if field not in w:
                     bad.append({"type": t, "missing": field})
         if bad:
-            return _fail("dashboard widgets missing required fields (won't render)", {"widgets": bad[:25]})
+            pairs = sorted({(b["type"], b["missing"]) for b in bad})
+            return _fail(
+                "dashboard widgets missing required fields (won't render): "
+                + _named(f"{t!r} needs {m}" for t, m in pairs),
+                {"widgets": bad[:25]},
+            )
         return _ok("widget required fields are present")
     return _with_dashboard(snap, f)
 
@@ -1073,7 +1121,8 @@ def c_d004(snap):
             if w.get("type") == "progress":
                 v = w.get("value")
                 if isinstance(v, (int, float)) and not (0 <= v <= 100):
-                    bad.append(w.get("label") or v)
+                    label = w.get("label")
+                    bad.append(_clip(label) if label else v)   # a YAML `date` label crashed json.dumps at HEAD
         if bad:
             return _fail("progress widget values outside 0–100", {"widgets": bad[:25]})
         return _ok("progress values are in range")
@@ -1086,8 +1135,10 @@ def c_d005(snap):
         for w in widgets:
             if w.get("type") == "status":
                 color = w.get("color")
+                if color and not isinstance(color, str):
+                    color = str(color)      # `color: 5` beside `color: teal` raised in sorted(set(...)) at HEAD
                 if color and color not in _WIDGET_COLORS:
-                    bad.append(color)
+                    bad.append(_clip(color))
         if bad:
             return _fail("status widget colors not in the allowed palette", {"colors": sorted(set(bad))})
         return _ok("status colors are valid")
