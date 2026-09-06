@@ -75,7 +75,104 @@ RUN git config --system gc.auto 0 && \
     git config --system maintenance.auto false && \
     git config --system maintenance.autoDetach false
 
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Claude Code — install it in a way that CANNOT silently ship a dead CLI, and
+# prove it runs before the layer is allowed to succeed (Abilityai/lilu#20).
+#
+# The failure this replaces: on the arm64 DGX this layer exited 0 while leaving
+# `bin/claude.exe` as the 500-byte, shebang-less placeholder the package ships
+# instead of the ~214 MB native binary. The image was tagged `latest`, and the
+# damage only surfaced at an agent's first turn — execve() on a shebang-less
+# text file is ENOEXEC, the agent-server's exec reports "Exec format error", and
+# `chat_with_agent` answers 503. Every agent created against that tag was born
+# unusable.
+#
+# TWO independent exit-0 swallows stack up to produce that:
+#
+#   1. The native CLI ships as a per-platform *optionalDependency*
+#      (`@anthropic-ai/claude-code-linux-{x64,arm64}[-musl]`, ~214 MB, declaring
+#      os/cpu/libc). npm treats ANY failure to fetch or unpack an OPTIONAL
+#      dependency as non-fatal — it warns and exits 0. That tarball is the
+#      largest single download in this build, so it is also the likeliest one to
+#      fail, and the likeliest to hit ENOSPC while unpacking.
+#   2. The package's own postinstall (`install.cjs`) hardlinks that native
+#      binary over `bin/claude.exe`. Read its source: when `require.resolve` of
+#      the native package fails it prints to stderr and `return`s — exit code 0
+#      — leaving the placeholder in place.
+#
+# NOTE on the diagnosis: the placeholder's error text names `--ignore-scripts`
+# and `--omit=optional`, which reads like one of those flags was passed. It was
+# not, and no inherited npm config was involved either — at this point in the
+# build nothing has been COPYed into the image, no `NPM_CONFIG_*` ENV is set,
+# and `docker build` does not inherit host environment. `install.cjs` prints
+# that same text on ANY resolution failure ("This happens with --omit=optional
+# *or when the download failed*"). The suppression is npm's optional-dependency
+# semantics itself, not a flag. Both are closed below regardless.
+#
+# The three defences, in order:
+#
+#   a. Explicit CLI flags. `--include=optional --no-ignore-scripts` override any
+#      npmrc or NPM_CONFIG_* that a future base image or build environment might
+#      introduce (npm config precedence puts CLI flags above every other
+#      source), so cause (1) cannot be re-enabled from outside this file.
+#      `--foreground-scripts` puts the postinstall's stderr in the build log
+#      instead of buffering it away.
+#   b. A deterministic re-install of the platform-native package as a DIRECT,
+#      non-optional install target. This is the actual fix for arm64: as a
+#      direct target its download failure is FATAL to `npm install` rather than
+#      a warning, so the binary either lands or the build stops. The platform
+#      key is computed by the same rule `install.cjs` uses (platform + arch +
+#      musl detection via process.report), so this stays arch-neutral — it works
+#      on arm64 and x64, glibc and musl, with no arch literal in this file.
+#   c. `claude --version` as the layer's last, bare, unconditional command. The
+#      stub exits non-zero (ENOEXEC → 126); the real binary prints a version.
+#      It must stay in THIS RUN — a separate layer would still cache and publish
+#      the broken install. It is unconditional rather than `if arm64` precisely
+#      because npm's silent-optional behaviour is not arch-specific; arm64 is
+#      only where it happened to bite.
+#
+# Verified locally on x86_64 with npm 10.8.2 — the failure and both guards
+# reproduce without arm64 hardware, by starving the unpack of disk instead:
+#
+#   a. the exact DGX artifact, with NO suppressing flag passed (/tmp had 184 MB
+#      free; the native package needs 214 MB):
+#        $ npm install --prefix /tmp/p -g --include=optional
+#              --no-ignore-scripts @anthropic-ai/claude-code@2.1.252
+#        npm warn tar TAR_ENTRY_ERROR ENOSPC: no space left on device, write
+#        $ echo $?                                -> 0      # npm is happy
+#        $ stat -c %s .../bin/claude.exe          -> 500    # the stub, as on the DGX
+#      Note npm's entire report of a fatal-to-the-product failure is a `warn`.
+#   b. defence (c) catches exactly that image:
+#        $ /tmp/p/bin/claude --version; echo $?   -> 126    # set -eu aborts the layer
+#   c. defence (b) converts the same silent failure into a hard one:
+#        $ npm install --prefix /tmp/p -g @anthropic-ai/claude-code-linux-x64@2.1.252
+#        $ echo $?                                -> 1      # direct target => fatal
+#   d. and on a roomy disk that recovery repairs an already-stubbed install:
+#        $ node .../install.cjs && /tmp/p/bin/claude --version
+#        2.1.252 (Claude Code)
+#
+# Also measured, and the reason defence (a) names both flags explicitly rather
+# than trusting either: `--omit=optional` alone does NOT reproduce the stub (npm
+# still installs the optional dep of a directly-installed root), while
+# `--ignore-scripts` does — stub, exit 0.
+#
+# Related, deliberately NOT changed here (out of scope for Abilityai/lilu#20):
+# `@google/gemini-cli` and `@openai/codex` below resolve their binaries through
+# the same optional-dependency mechanism and carry the same silent-failure risk,
+# and the Go tarball above is hardcoded to linux-amd64.
+RUN set -eu; \
+    npm install -g --include=optional --no-ignore-scripts --foreground-scripts \
+        @anthropic-ai/claude-code@latest; \
+    CC_DIR="$(npm root -g)/@anthropic-ai/claude-code"; \
+    if ! claude --version >/dev/null 2>&1; then \
+        echo "[base-image] claude did not run after npm install: the platform-native optionalDependency did not land. Re-installing it as a direct (non-optional) dependency."; \
+        CC_VER="$(node -p "require('$CC_DIR/package.json').version")"; \
+        CC_KEY="$(node -e 'const r=typeof process.report?.getReport==="function"?process.report.getReport():null;const musl=r!=null&&r.header?.glibcVersionRuntime===undefined;process.stdout.write(process.platform+"-"+require("os").arch()+(process.platform==="linux"&&musl?"-musl":""))')"; \
+        echo "[base-image] platform key: $CC_KEY / claude-code version: $CC_VER"; \
+        npm install -g --no-ignore-scripts "@anthropic-ai/claude-code-$CC_KEY@$CC_VER"; \
+        node "$CC_DIR/install.cjs"; \
+        ls -l "$CC_DIR/bin/claude.exe"; \
+    fi; \
+    claude --version
 
 # Install Gemini CLI for multi-runtime support
 RUN npm install -g @google/gemini-cli
