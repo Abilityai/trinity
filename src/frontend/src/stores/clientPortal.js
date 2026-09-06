@@ -991,6 +991,33 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // Open a fresh conversation thread ("New chat"). Returns the empty session.
+    // ent#473 — a person titles their thread. One PATCH per committed rename;
+    // the boundary's named 400 (`invalid_title`) is left on the error for the
+    // editor to render verbatim.
+    async renameThread(agentName, sessionId, title) {
+      const { data } = await portalHttp.patch(
+        `/api/enterprise/client-portal/agents/${agentName}/sessions/${encodeURIComponent(sessionId)}`,
+        { title },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    // ent#473 — the room twin. Membership-scoped server-side; a coded refusal
+    // passes through `_noteRoomsRefusal` untouched (#2128).
+    async renameRoom(roomId, name) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.patch(
+          `/api/rooms/${roomId}`, { name },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
     async createSession(agentName) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
