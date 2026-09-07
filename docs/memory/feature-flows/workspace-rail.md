@@ -316,7 +316,7 @@ key handling of its own — an unguarded Escape there dismissed nothing and
 cancelled the turn instead. The two capture listeners fire in registration
 order (the tab body mounts before the modal it opens), so each returns early on
 `event.defaultPrevented` and one keystroke closes one overlay.
-**Known residual, filed as a follow-up:** `PortalConversation.vue` handles
+**Known residual (#2598):** `PortalConversation.vue` handles
 Escape for an active voice call in a branch *above* that rule, so a preview
 opened during a voice call also ends the call.
 

@@ -278,7 +278,7 @@ it opens), so each must also return early on `event.defaultPrevented` — the
 same protocol these overlays ask the conversation to honour, honoured among
 themselves.
 
-**Known residual (follow-up filed).** `PortalConversation.vue` handles Escape
+**Known residual (follow-up: #2598).** `PortalConversation.vue` handles Escape
 for an ACTIVE VOICE CALL in a branch *above* `shouldCancelOnEscape`, and that
 branch never consults `defaultPrevented` — so a preview opened during a voice
 call closes the preview *and* ends the call. `preventDefault()` cannot help,

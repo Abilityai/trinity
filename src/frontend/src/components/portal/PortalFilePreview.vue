@@ -261,7 +261,7 @@ watch(() => [props.index, file.value?.filename, file.value?.id], load, { immedia
 // already seen `defaultPrevented === false` and cancelled an in-flight turn
 // before this modal ever got to close.
 //
-// Known residual, filed as a follow-up: `PortalConversation.vue` handles Escape
+// Known residual (#2598): `PortalConversation.vue` handles Escape
 // for an ACTIVE VOICE CALL in a branch above that rule and never consults
 // `defaultPrevented`, so a preview opened during a voice call also ends the
 // call. Not fixed here — this merges after the voice track.
