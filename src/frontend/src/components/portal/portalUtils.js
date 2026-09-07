@@ -1632,22 +1632,61 @@ export function landingThread(threads, agentName) {
 // name — with `primaryName` as the seam ent#491 will fill. Alphabetical-by-slug
 // was the alternative and is worse for exactly the reason ent#523 exists: it
 // sorts by a handle nobody thinks in.
-export function orderRosterAgents(agents, threads, primaryName = null) {
+export function orderRosterAgents(agents, threads, primaryName = null, pinned = null) {
   const list = Array.isArray(agents) ? agents.slice() : []
-  const lastSeen = new Map()
-  for (const t of Array.isArray(threads) ? threads : []) {
-    if (!t || t.is_room || !t.agent_name) continue
-    const iso = t.last_message_at || t.created_at
-    const n = iso ? new Date(iso).getTime() : 0
-    if (Number.isNaN(n)) continue
-    if (n > (lastSeen.get(t.agent_name) || 0)) lastSeen.set(t.agent_name, n)
+  const lastSeen = collaborationRecency(threads)
+  // ent#491: a session-stable snapshot may override the derived recency, so a
+  // reply arriving does not re-sort the list under the cursor. Absent (the
+  // default) the derived values are used, which is what every existing caller
+  // and test expects.
+  const at = (name) => {
+    if (!name) return 0
+    const p = pinned && Object.prototype.hasOwnProperty.call(pinned, name)
+      ? Number(pinned[name]) : NaN
+    return Number.isFinite(p) ? p : (lastSeen.get(name) || 0)
   }
   const rank = (a) => (a?.name && a.name === primaryName ? 1 : 0)
   return list.sort((a, b) =>
     rank(b) - rank(a)
-    || (lastSeen.get(b?.name) || 0) - (lastSeen.get(a?.name) || 0)
+    || at(b?.name) - at(a?.name)
     || String(a?.name || '').localeCompare(String(b?.name || ''))
   )
+}
+
+/**
+ * Per-agent "when did I last collaborate with this agent", in ms (ent#491).
+ *
+ * A ROOM counts for every agent in it — the `unreadByAgent` rule, for the same
+ * reason: there is no single agent a multi-agent conversation is "with", so
+ * working in a room with three agents is recent collaboration with all three.
+ * Before this, `orderRosterAgents` skipped rooms outright (`t.is_room`), so an
+ * agent you only ever work with in a room ranked as never-used and sat at the
+ * bottom under the alphabetical tiebreak.
+ *
+ * A room's `last_message_at` is real since ent#491's backend half; for an empty
+ * room it is absent and `created_at` is the honest fallback, which is what
+ * `normalizeRoomRow` already supplies.
+ *
+ * Exported so the store can seed its session snapshot from exactly this rule
+ * rather than a second copy of it.
+ */
+export function collaborationRecency(threads) {
+  const lastSeen = new Map()
+  const bump = (name, n) => {
+    if (!name) return
+    if (n > (lastSeen.get(name) || 0)) lastSeen.set(name, n)
+  }
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t) continue
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    if (!Number.isFinite(n) || n === 0) continue
+    const names = Array.isArray(t.agent_names) && t.agent_names.length
+      ? t.agent_names
+      : (t.agent_name ? [t.agent_name] : [])
+    for (const name of names) bump(name, n)
+  }
+  return lastSeen
 }
 
 // The one-line preview under an agent's name: the last thing said in any of

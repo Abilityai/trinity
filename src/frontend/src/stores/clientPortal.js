@@ -8,7 +8,8 @@
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
-import { normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
+import {
+  collaborationRecency, normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
 import {
   applyBriefings,
   briefingHydrationPlan,
@@ -283,6 +284,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // blip would break Workspace deep-link landing entirely.
     lastSessions: [],
     sessionsFailed: false,
+
+    // ent#491 — the sidebar's agent order, held for the SESSION rather than
+    // recomputed from threads on every refresh.
+    //
+    // The AC has two halves that pull against each other: sending must move an
+    // agent to the top at once, and a reply arriving must NOT re-sort. Derived
+    // order alone cannot do both — a reply moves `last_message_at` exactly like
+    // a send, so a brief landing for another agent would reshuffle the list
+    // under the cursor mid-read.
+    //
+    // So: seeded from thread recency (filling only agents it does not yet know,
+    // so a seed can never undo a bump), and advanced ONLY by the user's own
+    // sends. A reload re-derives from the server and is correct again.
+    agentRecency: {},
 
     // --- Reports tab (#2162) ---
     // Which agent the report state below belongs to, and a monotonic counter
@@ -1268,6 +1283,37 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Merge threads + rooms into the single recency-sorted list the sidebar
     // renders, and remember it (see `lastSessions`).
+    /**
+     * Fill in recency for agents this session has not ranked yet (ent#491).
+     *
+     * Only fills MISSING keys: a later thread refresh must never walk back a
+     * `noteAgentInteraction` bump, which is what would let an incoming reply
+     * re-sort the list.
+     */
+    seedAgentRecency(threads) {
+      const derived = collaborationRecency(threads)
+      const next = { ...this.agentRecency }
+      let changed = false
+      for (const [name, ms] of derived) {
+        if (next[name] === undefined) { next[name] = ms; changed = true }
+      }
+      if (changed) this.agentRecency = next
+    },
+
+    /**
+     * The user just sent to these agents — move them to the top now, without
+     * waiting for a roster or thread refresh (ent#491). A room send passes every
+     * participating agent, the `unreadByAgent` fan-out rule.
+     */
+    noteAgentInteraction(names) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean)
+      if (!list.length) return
+      const now = Date.now()
+      const next = { ...this.agentRecency }
+      for (const n of list) next[n] = now
+      this.agentRecency = next
+    },
+
     _mergeThreadList(lists, rooms) {
       const merged = lists.flat().concat((rooms || []).map(normalizeRoomRow))
       merged.sort((x, y) => {

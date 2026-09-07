@@ -249,7 +249,7 @@
            loadThread with the transcript on screen, and an in-flight key would
            swap the transcript the user just watched arrive for a placeholder.
            The wrapper owns the footprint, so the swap never shifts (principle 4). -->
-      <div class="max-w-4xl mx-auto min-h-[10rem]">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto min-h-[10rem]">
       <PortalSkeleton v-if="!historyLoaded" variant="thread" />
       <div v-else class="space-y-6">
 
@@ -399,7 +399,7 @@
          shows, so answering here clears it in both. Directly above the input
          because it is a turn that is waiting on the person about to type. -->
     <div v-if="agentAsks.length" class="shrink-0 px-3 sm:px-6 pt-2">
-      <div class="max-w-4xl mx-auto">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
         <PortalAsks
           :agent-name="agent.name"
           :current-session-id="currentSessionId"
@@ -416,7 +416,7 @@
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
-      <div class="max-w-4xl mx-auto">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
         <p v-if="offline" class="mb-2 text-xs text-status-warning-600 dark:text-status-warning-400 flex items-center gap-1.5">
           <span class="w-1.5 h-1.5 rounded-full bg-status-warning-500"></span>
           You appear to be offline — messages will send once you're reconnected.
@@ -1747,6 +1747,18 @@ async function send() {
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
 async function submitUserText(text) {
+  // ent#491: the user's own activity is the ordering signal, so the bump happens
+  // HERE — on send — and not when a reply lands. Any agent this message wakes
+  // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
+  // agents, you just collaborated with both.
+  try {
+    const woken = [props.agent?.name, ...(props.agent
+      ? mentionedAgents(text, props.roster, { exclude: [props.agent.name] })
+      : [])].filter(Boolean)
+    store.noteAgentInteraction(woken)
+  } catch {
+    // Ordering is a convenience; it must never be able to block a send.
+  }
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   await scrollDown()
   // A stale "couldn't stop the turn" must not outlive the turn it described.

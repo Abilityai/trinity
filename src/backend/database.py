@@ -1846,6 +1846,10 @@ class DatabaseManager:
     def restamp_execution_dispatch(self, execution_id: str) -> bool:
         return self._schedule_ops.restamp_execution_dispatch(execution_id)
 
+    def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
+        """ent#498 — attach a delivery destination to a pre-created row."""
+        return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:

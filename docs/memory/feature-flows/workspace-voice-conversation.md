@@ -227,7 +227,7 @@ a **platform principal reads every audience in the Workspace**
 | `src/backend/services/voice_prompt_service.py` | the voice prompt resolver, lifted out of the router |
 | `src/backend/services/gemini_voice.py` | `VoiceSession.portal_session_id/client_email/end_reason/end_message`, Redis metadata + reconstruction of every field, `_build_live_config` (compression + resumption), `go_away` reconnect loop, `_record_turn` → `on_turn`, the T-30 s cap notice, `claim_transcript_save` |
 | `src/backend/routers/voice.py` | JWT before session lookup; `on_turn` → portal persistence (function-local import); `finally` → `persist_voice_call_end` or the claimed `_save_transcript`; `saved` frame; `status` frames carry `reason`/`message`; `/stop` never writes for a portal-bound session |
-| `src/backend/db/{schema,tables,migrations}.py`, `migrations/versions/0056_portal_messages_voice_source.py` | `enterprise_portal_messages.source`, `.voice_call_id` (nullable), both tracks |
+| `src/backend/db/{schema,tables,migrations}.py`, `migrations/versions/0057_portal_messages_voice_source.py` | `enterprise_portal_messages.source`, `.voice_call_id` (nullable), both tracks |
 | `src/backend/config.py`, `docker-compose*.yml`, `.env.example` | `WORKSPACE_VOICE_MAX_DURATION` (1800) |
 | `src/frontend/src/components/portal/portalVoiceMode.js` | the pure rules: `voiceEntryState`, `voicePreflight`, `voiceHeaderLine`, `endedNotice`, `startFailureReason`, `groupVoiceBlocks`, `voiceCallLabel*`, `VOICE_SPLIT`, `isPanelTool`, `canvasChanged` |
 | `src/frontend/src/components/portal/PortalConversation.vue` | the Voice control, the modal state, the orb mount, the status line, the collapsed transcript block, Escape, the graceful stops; the ent#440 loop removed |

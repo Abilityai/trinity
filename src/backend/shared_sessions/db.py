@@ -216,6 +216,39 @@ def count_messages_for_rooms(room_ids: list[str]) -> dict[str, int]:
                 for r in conn.execute(stmt, dict(zip(keys, room_ids))).mappings()}
 
 
+
+def last_message_for_rooms(room_ids: list[str]) -> dict[str, str]:
+    """Newest message timestamp per room, batched (trinity-enterprise#491).
+
+    `enterprise_rooms` carries no `last_message_at` column, so before this a room
+    row reached the Workspace with only `created_at` and the sidebar fell back to
+    it (`normalizeRoomRow`). A busy month-old room therefore sorted as month-old
+    and a room created this morning that nobody used sorted above it — the
+    opposite of "most recent collaboration first".
+
+    Derived rather than denormalised: a `last_message_at` column on the room would
+    need a writer on every append and would be one more thing to keep true, for a
+    value this GROUP BY already gets in the same round trip the sibling
+    `count_messages_for_rooms` makes. If the sidebar ever needs it per-keystroke
+    that trade is worth revisiting; it does not.
+
+    A room with no messages is absent from the result — the caller keeps
+    `created_at`, which for an empty room is the honest answer.
+    """
+    if not room_ids:
+        return {}
+    keys = [f"r{i}" for i in range(len(room_ids))]
+    stmt = text(
+        "SELECT room_id, MAX(created_at) AS last_at FROM enterprise_room_messages "
+        "WHERE room_id IN (%s) GROUP BY room_id"
+        % ",".join(f":{k}" for k in keys)
+    )
+    with get_engine().connect() as conn:
+        return {r["room_id"]: r["last_at"]
+                for r in conn.execute(stmt, dict(zip(keys, room_ids))).mappings()
+                if r["last_at"]}
+
+
 def get_participant(room_id: str, kind: str, identity: str) -> Optional[dict]:
     stmt = text(
         "SELECT kind, identity, role, joined_at, left_at, last_read_seq, "

@@ -930,6 +930,25 @@ def portal_submit_rating(agent_name: str, body: PortalRatingRequest,
     # clicking "not what I needed" should not wait on the agent that just
     # disappointed them. `dispatched` therefore means "handed off", which is the
     # honest claim — the turn's own outcome is observable as an execution row.
+    #
+    # ent#499: the OPERATOR's copy, on every thumbs-down — with or without a
+    # comment. Deliberately outside the `comment_recorded` gate below: "this was
+    # not useful" is the report, and the words are the elaboration. Gating on
+    # them would mean the quietest complaints — a bare thumb, which is what most
+    # people leave — never reach anyone.
+    #
+    # Backgrounded because `create_bounded_alert` is async and this route is a
+    # sync `def`; the rating is recorded above either way, so a client's action
+    # never fails because the operator's copy could not be written.
+    if body.rating == "down":
+        background.add_task(
+            service.raise_problem_report,
+            agent_name, email,
+            target_kind=body.target_kind, target_id=body.target_id,
+            comment=body.comment,
+            is_platform=principal.is_platform,
+        )
+
     if result["comment_recorded"] and body.rating == "down":
         if service.agent_has_capture_feedback(agent_name):
             # One turn per person per target (ent#366 review). The row is

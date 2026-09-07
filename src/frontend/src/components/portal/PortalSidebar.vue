@@ -1,5 +1,8 @@
 <template>
-  <aside class="flex flex-col h-full w-72 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
+  <!-- ent#492: the width is the GRID CELL's now (`--ws-sidebar`), not this
+       element's. `w-full` inside the cell, with `w-72` kept as the mobile
+       drawer's width, where there is no grid and no handle. -->
+  <aside class="flex flex-col h-full w-72 sm:w-full min-w-0 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
     <!-- Brand. ent#359: the aggregate "waiting on you" count lives here, because
          the agents block now occupies the top of the scroll region and would
          otherwise scroll a fleet-wide signal out of view. -->
@@ -439,14 +442,17 @@ const emptyLines = computed(() => searchEmptyLines(searchState.value, props.sear
 // copied into it — the only way the two modes cannot drift.
 // ent#523 AC 6 — the agents you worked with most recently first, then by name.
 //
-// This is NOT ent#491, which owns "order by most recent collaboration" and is
-// still incubating; `orderRosterAgents` ships the deterministic order this AC
-// states and leaves `primaryName` as the seam ent#491 fills. Applied BEFORE the
+// ent#491 now fills the recency half: rooms count (crediting every agent in
+// them), and the fourth argument is the session-stable snapshot that keeps an
+// incoming reply from re-sorting the list under the cursor. `primaryName` stays
+// null — ent#500 does not exist, so there is nothing to name a primary with, and
+// guessing one would be worse than the seam. Applied BEFORE the
 // collapse so the rows that survive `visibleAgentRows`' limit are the ones the
 // person actually uses — ordering after it would sort a slice chosen by the old
 // order, which is the same bug one step later. Search results are ordered by
 // relevance and are deliberately left alone.
-const orderedRoster = computed(() => orderRosterAgents(props.roster, props.threads))
+const orderedRoster = computed(() => orderRosterAgents(
+  props.roster, props.threads, null, asksStore.agentRecency))
 
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible

@@ -43,24 +43,38 @@ export function optionsOf(item) {
 }
 
 /**
- * Which controls an item gets — by TYPE (desktop parity), and total:
+ * Which controls an item gets — by TYPE, and total:
  *
  *   approval with usable options → 'approval'    (option buttons → note → Send)
- *   alert                        → 'acknowledge' ("Got it")
- *   everything else              → 'question'    (text answer: question, an
- *                                   approval without options, unknown type)
+ *   approval without options     → 'question'    (the operator still has a
+ *                                   decision to express, so give them a box)
+ *   question                     → 'question'    (text answer)
+ *   everything else              → 'acknowledge' ("Got it") — alert, and any
+ *                                   type this build does not recognise
  *
  * A question that happens to carry options still gets a text answer — an
  * option button is a one-tap decision, and only an approval asks for one.
+ *
+ * **The unknown-type default is `acknowledge`, and that changed (ent#499).** It
+ * was `question`, which is wrong in both directions. `type` is free TEXT with no
+ * CHECK and the platform already emits non-protocol types (`skill_not_found`,
+ * #1410; `workspace_problem_report`, ent#499) — those are INFORMATIONAL, nothing
+ * is waiting on an answer, and offering a freeform box invites an operator to
+ * type a reply that goes nowhere. Under ent#329 an answer can also spend a turn.
+ * Acknowledge is the affordance that always terminates an item, which is what an
+ * unrecognised one needs: a budgeted alert type whose items cannot be closed
+ * jams its own pending cap permanently.
  *
  * @param {{type?: unknown, options?: unknown}|undefined} item
  * @returns {'approval'|'acknowledge'|'question'}
  */
 export function queueResponseKind(item) {
   const type = item?.type
-  if (type === 'approval' && optionsOf(item).length > 0) return 'approval'
-  if (type === 'alert') return 'acknowledge'
-  return 'question'
+  if (type === 'approval') {
+    return optionsOf(item).length > 0 ? 'approval' : 'question'
+  }
+  if (type === 'question') return 'question'
+  return 'acknowledge'
 }
 
 /**

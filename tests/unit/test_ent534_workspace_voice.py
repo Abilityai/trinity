@@ -98,8 +98,8 @@ def test_columns_are_declared_on_every_track():
     names = [name for name, _fn in migrations.MIGRATIONS] if hasattr(migrations, "MIGRATIONS") else []
     src = (_BACKEND / "db" / "migrations.py").read_text()
     assert '("portal_messages_voice_source", _migrate_portal_messages_voice_source)' in src
-    alembic = (_BACKEND / "migrations" / "versions" / "0056_portal_messages_voice_source.py").read_text()
-    assert 'down_revision = "0055_portal_session_main_chat"' in alembic
+    alembic = (_BACKEND / "migrations" / "versions" / "0057_portal_messages_voice_source.py").read_text()
+    assert 'down_revision = "0056_schedule_workspace_delivery"' in alembic
     assert "ADD COLUMN IF NOT EXISTS source TEXT" in alembic
     assert "ADD COLUMN IF NOT EXISTS voice_call_id TEXT" in alembic
     assert names == [] or "portal_messages_voice_source" in names

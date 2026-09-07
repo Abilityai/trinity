@@ -150,6 +150,45 @@ class ScheduleCreate(BaseModel):
     validation_enabled: bool = False  # Enable post-execution validation
     validation_prompt: Optional[str] = None  # Custom auditor instructions (None = default prompt)
     validation_timeout_seconds: int = 120  # Timeout for validation task (30-600 range)
+    # ent#498: deliver this schedule's output into one person's Workspace
+    # conversation with the agent. None = today's behaviour (the run terminates
+    # in an execution row and nothing is delivered).
+    deliver_to_workspace_email: Optional[str] = None
+
+    @field_validator("deliver_to_workspace_email")
+    @classmethod
+    def _normalize_delivery_email(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize the delivery target, and refuse a shape that cannot be one.
+
+        Lower-cased and stripped because that is how the portal roster stores and
+        compares an address — a case difference must not become an
+        "unreachable target" refusal at fire time, hours after the schedule was
+        accepted.
+
+        An empty string becomes None: "" is not a target, and letting it through
+        would arm the delivery path against an address that can never resolve.
+
+        The shape check is deliberately minimal (one `@`, no whitespace, no
+        control characters) — real authorization is `agent_on_roster` at fire
+        time, and a stricter regex here would only reject deliverable addresses.
+        What it does buy is a NAMED 422 at write time instead of a schedule that
+        looks configured and fails on its first run.
+        """
+        if v is None:
+            return None
+        s = str(v).strip().lower()
+        if not s:
+            return None
+        if len(s) > 320:  # RFC 3696 practical ceiling
+            raise ValueError("deliver_to_workspace_email is too long")
+        if s.count("@") != 1 or s.startswith("@") or s.endswith("@"):
+            raise ValueError("deliver_to_workspace_email must be an email address")
+        if any(c.isspace() or ord(c) < 32 for c in s):
+            raise ValueError(
+                "deliver_to_workspace_email must not contain whitespace or "
+                "control characters"
+            )
+        return s
 
 
 class Schedule(BaseModel):
@@ -190,6 +229,8 @@ class Schedule(BaseModel):
     # exactly once, at mint time, and never persisted in the clear).
     webhook_auth_enabled: bool = False
     webhook_secret_encrypted: Optional[str] = None
+    # ent#498: the Workspace delivery target. Nullable on every existing row.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):
