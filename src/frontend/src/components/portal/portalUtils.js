@@ -1678,3 +1678,40 @@ export function composerAvailabilityNotice(agent) {
   if (!chip) return null
   return { state: chip.state, message: chip.title }
 }
+
+// --- Answering an ask (ent#468) ----------------------------------------------
+
+// What the person is told after their answer lands.
+//
+// The decision this issue asked for is RENDER, not drop: on an opt-in agent an
+// answer sets real work in motion and spends the owner's budget, so the person
+// who caused that is told it happened. ent#364's AC — "the answer reaches the
+// agent and it resumes" — was true in the backend and invisible in the product.
+//
+// Consumes BOTH fields the answer response carries, which is the AC's "either
+// both or neither":
+//   * `status` is the gate. Only a row the server calls `answered` earns a
+//     confirmation — anything else means the answer did not land the way this
+//     copy would claim, and saying "Sent" over it would be the over-claim
+//     ent#430 spent a blocker removing from the field below.
+//   * `resume_requested` is the wording, and it is a report of INTENT
+//     (`_resume_requested`'s own contract): the dispatch is backgrounded, so
+//     "is picking this up" is the honest tense — not "has finished", and not a
+//     promise the turn succeeded. A failure after this point surfaces as a
+//     FAILED execution row and an audit entry on the operator's side.
+//
+// Returns null when there is nothing honest to say, so the caller renders
+// nothing rather than an empty line.
+export function answerConfirmation(answered, agentLabel = null) {
+  if (!answered || answered.status !== 'answered') return null
+  const who = (agentLabel || answered.agent_name || 'the agent')
+  return answered.resume_requested === true
+    ? `Sent — ${who} is picking this up.`
+    : 'Sent.'
+}
+
+// How long a confirmation stays before it clears itself. Long enough to read a
+// short sentence you were not waiting for, short enough that it never becomes
+// furniture — and it is a CONSTANT rather than a prop because the answer to
+// "how long should this be up" does not vary by surface.
+export const ANSWER_CONFIRMATION_MS = 6000

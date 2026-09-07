@@ -1908,4 +1908,25 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   and cannot distinguish from a fetch-in-flight gate.
 - **Scoping is unchanged**: roster/inbox rules and the ent#78 auth-path
   invariant hold for both doors.
+**An answered ask says whether work started (ent#468)**
+
+- The decision that issue asked for is **render**, not drop. On a
+  `operator_resume_enabled` agent an answer sets real work in motion and spends
+  the owner's budget; ent#364's AC ("the answer reaches the agent and it
+  resumes") was true in the backend and invisible in the product, and
+  `resume_requested` + the `answered` status were on the wire read by nothing.
+- `portalUtils.js::answerConfirmation` consumes **both** fields — the AC's
+  "either both or neither". `status` is the gate (only a row the server calls
+  `answered` earns a confirmation) and `resume_requested` is the wording. It is
+  a report of INTENT, so the tense is "is picking this up", never a claim the
+  turn finished; a failure after that point is an operator-side FAILED row plus
+  an `operator_resume_dispatch` audit entry (ent#329). An absent or false
+  `resume_requested` says only "Sent." — reading `null` as "started" would be
+  the over-claim ent#430 spent a blocker removing.
+- The confirmation cannot live on the ask row, because answering removes it.
+  `PortalAsks.visible` therefore also stays true while a confirmation is up —
+  gating on `items.length` alone unmounted the surface at the same instant the
+  message was created. It clears itself, and its timers are cleared on unmount
+  (this surface unmounts on every chat switch).
+
 - **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`

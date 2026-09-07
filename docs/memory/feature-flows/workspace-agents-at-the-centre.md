@@ -1,4 +1,4 @@
-# Workspace — agents at the centre (trinity-enterprise#523, trinity-enterprise#524)
+# Workspace — agents at the centre (trinity-enterprise#523, trinity-enterprise#524, trinity-enterprise#468)
 
 **Requirements**: `docs/memory/requirements/core-agent.md` §5.23
 **Design**: board **A3** (A1–A6), artifact `6192c90d-eb4a-49f8-90aa-0ff5e30ba8e5`, approved 2026-09-06
@@ -215,6 +215,29 @@ ships against the existing upload path, and when they land the gesture does not
 change — only the caller's `upload`.
 
 ---
+
+## An answered ask says whether work started (ent#468)
+
+Folded in here because it lands on the same surface: `PortalAsks` renders above
+the composer of the conversation this issue rebuilt.
+
+`WorkspaceAsk.resume_requested` and the `answered` status shipped with ent#430
+and were read by nothing — a client answering on a resume-enabled agent saw
+exactly what they would see with the feature off: the ask disappeared. **Decision:
+render** (ent#468 Option A), recorded on the issue.
+
+- `portalUtils.js::answerConfirmation(answered, agentLabel)` is the rule and
+  consumes **both** fields, which is the AC's "either both or neither":
+  `status === 'answered'` is the GATE, `resume_requested` is the WORDING.
+- The tense is load-bearing. `_resume_requested`'s own contract calls it a report
+  of INTENT — the dispatch is backgrounded — so the copy is "is picking this up",
+  not "has done it". `null`/`false` says only "Sent."; reading an absent value as
+  "started" is the over-claim ent#430 spent a blocker removing from this field.
+- **It cannot live on the ask row**, which answering removes. `visible` gates on
+  `items.length > 0 || confirmations.length > 0`; on `items.length` alone the
+  surface unmounted at the same instant the confirmation was created, so the
+  message would have rendered for zero frames. Timers are cleared on unmount —
+  this surface unmounts on every chat switch.
 
 ## Tests
 

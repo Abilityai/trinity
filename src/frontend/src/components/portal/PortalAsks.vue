@@ -13,6 +13,21 @@
 -->
 <template>
   <div v-if="visible" class="space-y-2" data-testid="portal-asks">
+    <!-- ent#468: what happened to the answer you just gave. It lives HERE and
+         not on the ask row, because answering removes that row — the row is the
+         one place this cannot be. On an opt-in agent the answer sets work in
+         motion and spends the owner's budget, so the person who caused it is
+         told; with the opt-in off it says only that the answer was sent.
+         Clears itself; `aria-live` because it appears without a navigation. -->
+    <p
+      v-for="c in confirmations"
+      :key="c.id"
+      class="rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300"
+      role="status"
+      aria-live="polite"
+      data-testid="portal-ask-confirmation"
+    >{{ c.message }}</p>
+
     <div
       v-for="ask in items"
       :key="ask.id"
@@ -131,9 +146,11 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { expiredLabel, askThreadLink } from './portalUtils'
+import {
+  expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
+} from './portalUtils'
 import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
 
 const props = defineProps({
@@ -168,7 +185,32 @@ const items = computed(() => {
   }
   return store.asks
 })
-const visible = computed(() => store.asksAvailable && items.value.length > 0)
+// ent#468: a confirmation keeps the component mounted after the last ask goes.
+// Gating on `items.length` alone unmounted the whole surface at the instant the
+// row was removed, which is the same instant the confirmation is created — so
+// the message would have been rendered for exactly zero frames.
+const confirmations = ref([])
+const visible = computed(() => (
+  store.asksAvailable && (items.value.length > 0 || confirmations.value.length > 0)
+))
+
+let confirmationTimers = []
+
+function showConfirmation(message) {
+  if (!message) return
+  const id = `ack-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  confirmations.value.push({ id, message })
+  confirmationTimers.push(setTimeout(() => {
+    confirmations.value = confirmations.value.filter((c) => c.id !== id)
+  }, ANSWER_CONFIRMATION_MS))
+}
+
+// A timer that outlives the component would write to a dead ref on a chat
+// switch — the surface unmounts and remounts constantly.
+onBeforeUnmount(() => {
+  confirmationTimers.forEach(clearTimeout)
+  confirmationTimers = []
+})
 
 // #2375: one label set and one controls rule across desktop, /m and the
 // Workspace — both come from utils/operatorQueue, the single home #2370
@@ -191,7 +233,12 @@ async function submit(ask) {
   busyId.value = ask.id
   errors[ask.id] = null
   try {
-    await store.answerAsk(ask.id, { response: body.response, responseText: body.response_text })
+    const answered = await store.answerAsk(ask.id, {
+      response: body.response, responseText: body.response_text,
+    })
+    // ent#468: the response was discarded here, so `resume_requested` and the
+    // `answered` status were on the wire and read by nothing.
+    showConfirmation(answerConfirmation(answered, ask.agent_name))
     delete drafts[ask.id]
     delete picks[ask.id]
     delete notes[ask.id]

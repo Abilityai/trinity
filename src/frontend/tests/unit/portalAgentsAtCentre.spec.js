@@ -21,6 +21,7 @@ import {
   agentPreview,
   composerAvailabilityNotice,
   resolveAgentLanding,
+  answerConfirmation,
   MAIN_TAB_LABEL,
 } from '@/components/portal/portalUtils'
 import {
@@ -377,5 +378,68 @@ describe('ent#523 — the agent page was dismantled, not dropped', () => {
     // caller here.
     expect(CONVERSATION).toMatch(/v-if="isMainChat"[\s\S]{0,600}portal-reset-main/)
     expect(CONVERSATION).not.toContain('ConfirmDialog')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ent#468 — an answered ask says whether work started
+// ---------------------------------------------------------------------------
+
+describe('ent#468 — the answer confirmation', () => {
+  it('says work started on a resume-enabled agent', () => {
+    expect(answerConfirmation({ status: 'answered', resume_requested: true }, 'scribe'))
+      .toBe('Sent — scribe is picking this up.')
+  })
+
+  it('says only that the answer was sent with the opt-in off', () => {
+    expect(answerConfirmation({ status: 'answered', resume_requested: false }, 'scribe'))
+      .toBe('Sent.')
+  })
+
+  it('treats an absent resume_requested as opt-in off, never as on', () => {
+    // `null` is what every pre-ent#430 row and every non-opted-in agent carries.
+    // Reading it as "work started" would be the over-claim ent#430 spent a
+    // blocker removing from this very field.
+    expect(answerConfirmation({ status: 'answered', resume_requested: null }, 'scribe'))
+      .toBe('Sent.')
+    expect(answerConfirmation({ status: 'answered' }, 'scribe')).toBe('Sent.')
+  })
+
+  it('says nothing at all when the row is not `answered`', () => {
+    // `status` is the gate: anything else means the answer did not land the way
+    // this copy would claim, and a confirmation over it would be a false one.
+    expect(answerConfirmation({ status: 'expired', resume_requested: true }, 'scribe')).toBeNull()
+    expect(answerConfirmation({ status: 'pending' }, 'scribe')).toBeNull()
+    expect(answerConfirmation(null)).toBeNull()
+    expect(answerConfirmation(undefined)).toBeNull()
+  })
+
+  it('falls back to the payload agent, then to a neutral noun', () => {
+    expect(answerConfirmation({ status: 'answered', resume_requested: true, agent_name: 'atlas' }))
+      .toBe('Sent — atlas is picking this up.')
+    expect(answerConfirmation({ status: 'answered', resume_requested: true }))
+      .toBe('Sent — the agent is picking this up.')
+  })
+
+  it('consumes BOTH new fields — the AC is either both or neither', () => {
+    const ASKS = read('../../src/components/portal/PortalAsks.vue')
+    const UTILS = read('../../src/components/portal/portalUtils.js')
+    expect(UTILS).toContain('resume_requested')
+    expect(UTILS).toMatch(/status !== 'answered'/)
+    // ...and the component actually reads the response it used to discard.
+    expect(ASKS).toMatch(/const answered = await store\.answerAsk\(/)
+    expect(ASKS).toContain('answerConfirmation(answered')
+  })
+
+  it('survives the ask row it replaces', () => {
+    // Answering removes the row, and `visible` used to gate on `items.length`
+    // alone — so the surface unmounted at the exact instant the confirmation
+    // was created and the message would have rendered for zero frames.
+    const ASKS = read('../../src/components/portal/PortalAsks.vue')
+    expect(ASKS).toMatch(/items\.value\.length > 0 \|\| confirmations\.value\.length > 0/)
+    // And its timer cannot outlive the component — this surface unmounts on
+    // every chat switch.
+    expect(ASKS).toContain('onBeforeUnmount')
+    expect(ASKS).toMatch(/confirmationTimers\.forEach\(clearTimeout\)/)
   })
 })
