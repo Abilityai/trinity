@@ -373,3 +373,56 @@ def test_the_mcp_tools_can_set_and_clear_the_target():
     assert "if (args.deliver_to_workspace_email !== undefined)" in ts
     types = (REPO / "src/mcp-server/src/types.ts").read_text()
     assert "deliver_to_workspace_email?: string | null;" in types
+
+
+# --- the delivered brief is rateable like any agent message (AC 7) -----------
+
+def _delivered_row():
+    """The row shape `channel_completion_report._resolve_portal` writes.
+
+    Mirrors its `add_portal_message(id, session_agent, client_email, "assistant",
+    body, None, now, session_id=chat_id)` call — all three fields the rating
+    predicate checks come from the SESSION row, not from the execution stamp.
+    """
+    return {
+        "id": "m-brief",
+        "agent_name": "analyst",
+        "client_email": "client@example.com",
+        "role": "assistant",
+    }
+
+
+def test_the_delivered_brief_is_rateable(monkeypatch):
+    """AC 7. Claimed "by construction" in the flow doc — construction is exactly
+    what a later edit changes, so it is pinned. `_rating_target_is_visible`
+    demands agent match, client match and `role == 'assistant'`; the delivery leg
+    satisfies all three, which is why a brief can be thumbed down like anything
+    else the agent said."""
+    from client_portal import service
+    monkeypatch.setattr(service.db, "get_portal_message", lambda _id: _delivered_row())
+    assert service._rating_target_is_visible(
+        "analyst", "client@example.com", "message", "m-brief") is True
+
+
+def test_a_brief_written_as_a_system_line_would_not_be_rateable(monkeypatch):
+    """The discriminating half. Reset's notice is written with `role='system'`
+    and is correctly unrateable — so this test proves the one above is asserting
+    the delivery leg's ROLE choice and not merely that the predicate returns
+    True for everything."""
+    from client_portal import service
+    row = _delivered_row() | {"role": "system"}
+    monkeypatch.setattr(service.db, "get_portal_message", lambda _id: row)
+    assert service._rating_target_is_visible(
+        "analyst", "client@example.com", "message", "m-brief") is False
+
+
+def test_the_delivery_leg_writes_an_assistant_row_from_the_session(monkeypatch):
+    """The other end of the same contract: if `_resolve_portal` ever wrote a
+    different role, or addressed the row from the execution stamp rather than
+    the session, the two tests above would still pass while real briefs stopped
+    being rateable."""
+    src = (REPO / "src/backend/services/channel_completion_report.py").read_text()
+    fn = src[src.index("def _resolve_portal"):]
+    write = fn[fn.index("def _write()"):fn.index("try:", fn.index("def _write()"))]
+    assert '"assistant"' in write
+    assert "session_agent" in write and "client_email" in write
