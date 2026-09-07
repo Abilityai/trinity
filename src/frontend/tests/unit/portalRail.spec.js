@@ -430,7 +430,12 @@ describe('ent#474 — the rail component (source guards)', () => {
 
   it('is the approved width in each form, with the sheet on the files-panel pattern', () => {
     expect(rail).toMatch(/collapsed: 'w-12 /)
-    expect(rail).toMatch(/open: 'w-96 /)
+    // ent#492: the OPEN rail's width is the shell's `--ws-rail` variable now,
+    // dragged by the handle and persisted per user. The DEFAULT is still the
+    // approved 24rem / w-96 — that is what the fallback pins — and collapsed is
+    // still a fixed 48px strip, which is why it keeps a literal: it is an
+    // expand control, not a resizable column.
+    expect(rail).toMatch(/open: 'w-\[var\(--ws-rail,24rem\)\] /)
     expect(rail).toContain('inset-x-0 bottom-0 max-h-[85vh] rounded-t-2xl')
     expect(rail).toContain(`:role="mode === 'sheet' ? 'dialog' : undefined"`)
     expect(rail).toContain("e.key === 'Escape'")

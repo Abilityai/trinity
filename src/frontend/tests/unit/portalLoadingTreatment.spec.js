@@ -114,7 +114,12 @@ describe('#2540 — the three Workspace zones load with a skeleton keyed on a ve
 
   it('the thread: a thread skeleton keyed on the history VERDICT, inside the footprint wrapper', () => {
     const src = code('components/portal/PortalConversation.vue')
-    const wrapAt = src.indexOf('<div class="max-w-4xl mx-auto min-h-[10rem]">')
+    // ent#492: the cap follows `--ws-message-max` now, so the messages widen
+    // when the rail or sidebar is narrowed. The rule this pins is unchanged and
+    // is the reason the skeleton shares the SAME cap: the wrapper owns the
+    // footprint for both faces, so a placeholder capped differently from the
+    // thread would shift the layout at the moment it is replaced.
+    const wrapAt = src.indexOf('<div class="max-w-[var(--ws-message-max,64rem)] mx-auto min-h-[10rem]">')
     expect(wrapAt, 'the wrapper must own the footprint for both faces').toBeGreaterThan(-1)
     const zone = src.slice(wrapAt, wrapAt + 200)
     expect(zone).toContain('<PortalSkeleton v-if="!historyLoaded" variant="thread" />')

@@ -1,5 +1,8 @@
 <template>
-  <aside class="flex flex-col h-full w-72 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
+  <!-- ent#492: the width is the GRID CELL's now (`--ws-sidebar`), not this
+       element's. `w-full` inside the cell, with `w-72` kept as the mobile
+       drawer's width, where there is no grid and no handle. -->
+  <aside class="flex flex-col h-full w-72 sm:w-full min-w-0 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
     <!-- Brand. ent#359: the aggregate "waiting on you" count lives here, because
          the agents block now occupies the top of the scroll region and would
          otherwise scroll a fleet-wide signal out of view. -->
