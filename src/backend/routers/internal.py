@@ -32,6 +32,7 @@ from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import heartbeat_service, idempotency_service, schedule_workspace_delivery
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -566,10 +567,22 @@ def _fail_execution_row(execution_id: Optional[str], error: str) -> None:
 
     Never raises: the caller is already refusing, and a failed bookkeeping write
     must not turn a 422 into a 500 that the scheduler reads as retryable.
+
+    **Scrubbed, not allowlisted** (ent#279). Today's only caller passes a
+    platform-composed refusal string built from the schedule's own target address
+    and the agent name — no agent-authored text, and the refusal happens before
+    `execute_task`, so it is the same shape the parity guard allowlists for
+    `_admission_gate`. It scrubs anyway because the signature takes an arbitrary
+    `error: str`: an allowlist entry is pinned to a FUNCTION NAME, so it would
+    silently extend this exemption to a future caller that does pass agent
+    output. The seam fails open with a `[]` fast path, so the cost on a
+    never-staged install is one cheap Redis call on a path that only runs when a
+    dispatch is already being refused.
     """
     if not execution_id:
         return
     try:
+        error = scrub_text(get_staged_values(), error)
         existing = db.get_execution(execution_id)
         if existing and existing.status not in (
             TaskExecutionStatus.SUCCESS,
