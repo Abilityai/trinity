@@ -806,3 +806,66 @@ def test_removed_is_reported_only_after_the_rm_actually_ran():
     # And both probes that describe the POST-sweep world come after it too.
     assert rm_at < script.index(gs._SWEEP_TAG_AFTER)
     assert rm_at < script.index(gs._SWEEP_TAG_SHADOW)
+
+
+# ---------------------------------------------------------------------------
+# Probe bounds — `container_exec_run` reads the whole exec output as one blob
+# ---------------------------------------------------------------------------
+
+def test_probe_lists_are_line_capped_in_container():
+    """Both probed sets are unbounded in exactly the cases this code exists for:
+    the untracked probe runs BEFORE the block is written on a pre-canonical
+    agent (so `$HOME` answers with all of `.local/lib/.../site-packages`), and
+    `$ignored` is five figures on the #1596 population — an agent with a
+    committed `node_modules/`, the 44 GB repos that motivated those patterns."""
+    gs = _gs()
+    cap = gs._SWEEP_PROBE_LINE_CAP
+    merge = shlex.split(gs._build_gitignore_merge_command("/home/developer"))[2]
+    sweep = shlex.split(gs._build_rm_cached_ignored_command("/home/developer"))[2]
+    # cap+1 on the two set-difference operands: a full cap+1 lines is how
+    # truncation announces itself.
+    assert f"head -n {cap + 1}" in merge
+    assert f"head -n {cap + 1}" in sweep
+    # The removed list is capped at the cap itself, and its exact count is
+    # emitted separately so the report is never an undercount.
+    assert f"head -n {cap}" in sweep
+    assert gs._SWEEP_TAG_REMOVED_COUNT in sweep
+
+
+def test_truncated_probe_suppresses_unignored_rather_than_inventing_it():
+    """`unignored` is a SET DIFFERENCE, so a truncated operand manufactures
+    entries that are only "new" because the other side was cut off. Drop the
+    field instead — it is advisory, and a fiction is worse than a gap."""
+    gs = _gs()
+    cap = gs._SWEEP_PROBE_LINE_CAP
+    merge = "".join(f"{gs._SWEEP_TAG_BEFORE}b{i}\n" for i in range(cap + 1))
+    sweep = "".join(f"{gs._SWEEP_TAG_AFTER}a{i}\n" for i in range(10))
+    assert gs._parse_gitignore_sweep(merge, sweep).unignored == ()
+
+    # Just under the cap, it is computed normally.
+    merge = "".join(f"{gs._SWEEP_TAG_BEFORE}b{i}\n" for i in range(cap))
+    assert gs._parse_gitignore_sweep(merge, sweep).unignored == tuple(
+        sorted(f"a{i}" for i in range(10))
+    )
+
+
+def test_removed_count_is_exact_even_when_the_list_is_capped():
+    """A capped list must never become an undercounted claim about how many
+    files a Push untracked — the number is what an operator acts on."""
+    gs = _gs()
+    sweep_out = (
+        f"{gs._SWEEP_TAG_REMOVED_COUNT}41234\n"
+        + "".join(f"{gs._SWEEP_TAG_REMOVED}p{i}\n" for i in range(2000))
+    )
+    sweep = gs._parse_gitignore_sweep("", sweep_out)
+    assert len(sweep.removed) == 2000
+    assert sweep.removed_total == 41234
+    assert "untracked 41234 file(s)" in sweep.summary_line()
+    assert "and 41214 more" in gs._augment_commit_message("m", sweep)
+
+    # A missing or unparseable count falls back to the list length — a wrong
+    # count is worse than a conservative one.
+    fallback = gs._parse_gitignore_sweep(
+        "", f"{gs._SWEEP_TAG_REMOVED_COUNT}not-a-number\n{gs._SWEEP_TAG_REMOVED}p1\n"
+    )
+    assert fallback.removed_total == 1

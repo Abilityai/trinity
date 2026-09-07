@@ -1686,7 +1686,25 @@ _SWEEP_TAG = "TRINITY-2529"
 _SWEEP_TAG_BEFORE = f"{_SWEEP_TAG}-untracked-before: "
 _SWEEP_TAG_AFTER = f"{_SWEEP_TAG}-untracked-after: "
 _SWEEP_TAG_REMOVED = f"{_SWEEP_TAG}-removed: "
+_SWEEP_TAG_REMOVED_COUNT = f"{_SWEEP_TAG}-removed-count: "
 _SWEEP_TAG_SHADOW = f"{_SWEEP_TAG}-shadow: "
+
+# Every probe list is line-capped in-container. `container_exec_run` reads the
+# whole exec output into memory as one blob, and both probed sets are unbounded
+# in exactly the cases this code exists for:
+#
+#   * the untracked probe runs BEFORE the canonical block is written on a
+#     pre-canonical agent, so nothing is ignored yet and `$HOME` answers with
+#     every file under `.local/lib/python3.13/site-packages`, `.npm`, `.cache`;
+#   * `$ignored` is tens of thousands of paths on the #1596 population — an
+#     agent with a committed `node_modules/` (44 GB repos were observed) — which
+#     is precisely the fleet this migration was written for.
+#
+# So the cap is not paranoia. `head -n CAP+1` makes truncation self-announcing
+# (a full CAP+1 lines means "there were more"), and the REMOVED count is emitted
+# separately and exactly, so a capped list never turns into an undercounted
+# claim about how many files a Push untracked.
+_SWEEP_PROBE_LINE_CAP = 2000
 
 # `git check-ignore -v` prints `<source>:<line>:<pattern>\t<pathname>`. The
 # source is a filename and the pattern may itself contain a colon, so the split
@@ -1721,13 +1739,20 @@ class GitignoreSweep:
     removed: Tuple[str, ...] = ()
     unignored: Tuple[str, ...] = ()
     shadowed: Tuple[str, ...] = ()
+    #: How many paths were ACTUALLY untracked. Equals ``len(removed)`` unless
+    #: the in-container list hit ``_SWEEP_PROBE_LINE_CAP``, in which case the
+    #: list is a prefix and this is still exact — an undercounted "untracked N
+    #: file(s)" would be a false claim on the #1596 population, where N is
+    #: routinely five figures.
+    removed_total: int = 0
 
     def summary_line(self) -> str:
         """One line for a commit message / an HTTP error detail, or ``""``."""
         if not self.removed:
             return ""
+        total = max(self.removed_total, len(self.removed))
         return (
-            f"Trinity: untracked {len(self.removed)} file(s) that now match "
+            f"Trinity: untracked {total} file(s) that now match "
             ".gitignore (working tree untouched)"
         )
 
@@ -1803,6 +1828,7 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
     script = (
         f"cd {q(git_dir)} && "
         "{ git ls-files --others --exclude-standard 2>/dev/null | "
+        f"head -n {_SWEEP_PROBE_LINE_CAP + 1} | "
         f"sed 's#^#{_SWEEP_TAG_BEFORE}#'; :; }} && "
         "{ [ -e .gitignore ] || : > .gitignore; } && "
         f"printf '%s\\n' {top_args} > .gitignore.tmp && "
@@ -1882,9 +1908,13 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
         # operator-queue entry — naming files that are in fact still tracked
         # would be a false alarm on the one surface whose whole job is to be
         # trusted.
-        '{ [ -z "$ignored" ] || printf \'%s\\n\' "$ignored" | '
-        f"sed 's#^#{_SWEEP_TAG_REMOVED}#'; }} && "
+        '{ [ -z "$ignored" ] || { printf \'%s\\n\' "$ignored" | wc -l | tr -d " " | '
+        f"sed 's#^#{_SWEEP_TAG_REMOVED_COUNT}#'; "
+        'printf \'%s\\n\' "$ignored" | '
+        f"head -n {_SWEEP_PROBE_LINE_CAP} | "
+        f"sed 's#^#{_SWEEP_TAG_REMOVED}#'; }}; }} && "
         "{ git ls-files --others --exclude-standard | "
+        f"head -n {_SWEEP_PROBE_LINE_CAP + 1} | "
         f"sed 's#^#{_SWEEP_TAG_AFTER}#'; :; }} && "
         # `^!.` (not `^!`) — a bare `!` line would reach check-ignore as an
         # empty pathspec and make it fatal.
@@ -1946,14 +1976,42 @@ def _shadowed_negations(check_ignore_lines: List[str]) -> Tuple[str, ...]:
 
 def _parse_gitignore_sweep(merge_output: Any, sweep_output: Any) -> GitignoreSweep:
     """Assemble a :class:`GitignoreSweep` from the two execs' interleaved blobs."""
-    before = set(_tagged_output_lines(merge_output, _SWEEP_TAG_BEFORE))
-    after = set(_tagged_output_lines(sweep_output, _SWEEP_TAG_AFTER))
+    before = _tagged_output_lines(merge_output, _SWEEP_TAG_BEFORE)
+    after = _tagged_output_lines(sweep_output, _SWEEP_TAG_AFTER)
     removed = tuple(
         dict.fromkeys(_tagged_output_lines(sweep_output, _SWEEP_TAG_REMOVED))
     )
+
+    # The exact count is emitted separately (`wc -l` on the full list), so a
+    # capped list never becomes an undercounted claim about how many files this
+    # Push untracked. Fall back to the list length when the count line is
+    # missing or unparseable — a wrong count is worse than a conservative one.
+    total = len(removed)
+    for raw in _tagged_output_lines(sweep_output, _SWEEP_TAG_REMOVED_COUNT):
+        try:
+            total = max(total, int(raw.strip()))
+        except ValueError:
+            logger.warning("unparseable sweep removed-count %r — using the list length", raw)
+
+    # `unignored` is a SET DIFFERENCE, so a truncated operand would manufacture
+    # entries that are only "new" because the other side was cut off. Both
+    # probes announce truncation by returning the full cap+1 lines; when either
+    # does, drop the field rather than report a fiction. It is advisory anyway.
+    if len(before) > _SWEEP_PROBE_LINE_CAP or len(after) > _SWEEP_PROBE_LINE_CAP:
+        logger.warning(
+            "gitignore sweep: the untracked probe hit its %s-line cap "
+            "(before=%s, after=%s) — unignored_paths suppressed rather than "
+            "computed from a truncated set",
+            _SWEEP_PROBE_LINE_CAP, len(before), len(after),
+        )
+        unignored: Tuple[str, ...] = ()
+    else:
+        unignored = tuple(sorted(set(after) - set(before)))
+
     return GitignoreSweep(
         removed=removed,
-        unignored=tuple(sorted(after - before)),
+        removed_total=total,
+        unignored=unignored,
         shadowed=_shadowed_negations(
             _tagged_output_lines(sweep_output, _SWEEP_TAG_SHADOW)
         ),
@@ -2170,7 +2228,8 @@ async def _emit_gitignore_untracked_alert(
                 "priority": "high",
                 "title": "Push untracked files that now match .gitignore",
                 "question": (
-                    f"{agent_name}: this Push removed {len(sweep.removed)} file(s) "
+                    f"{agent_name}: this Push removed "
+                    f"{max(sweep.removed_total, len(sweep.removed))} file(s) "
                     "from the index because they match an ignore rule. The working "
                     "tree is untouched, but the deletion is committed and pushed. "
                     "If one of these was meant to stay in the repo, negate it in "
@@ -2179,7 +2238,7 @@ async def _emit_gitignore_untracked_alert(
                 ),
                 "context": {
                     "removed_paths": shown,
-                    "removed_count": len(sweep.removed),
+                    "removed_count": max(sweep.removed_total, len(sweep.removed)),
                     "shadowed_negations": list(sweep.shadowed[:20]),
                     "unignored_paths": list(sweep.unignored[:20]),
                 },
@@ -2188,7 +2247,7 @@ async def _emit_gitignore_untracked_alert(
         )
         logger.warning(
             "gitignore_untracked emitted for %s: %s path(s) untracked (%s)",
-            agent_name, len(sweep.removed), ", ".join(shown),
+            agent_name, max(sweep.removed_total, len(sweep.removed)), ", ".join(shown),
         )
     except Exception:
         logger.exception("failed to emit gitignore_untracked alert")
@@ -2212,16 +2271,17 @@ def _augment_commit_message(message: Optional[str], sweep: GitignoreSweep) -> Op
     if not sweep.removed:
         return message
     subject = message or f"Trinity sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    total = max(sweep.removed_total, len(sweep.removed))
     shown = list(sweep.removed[:20])
     body = [
         "",
         "",
-        f"Trinity: untracked {len(sweep.removed)} file(s) that now match "
+        f"Trinity: untracked {total} file(s) that now match "
         ".gitignore (working tree untouched):",
     ]
     body += [f"- {path}" for path in shown]
-    if len(sweep.removed) > len(shown):
-        body.append(f"- ... and {len(sweep.removed) - len(shown)} more")
+    if total > len(shown):
+        body.append(f"- ... and {total - len(shown)} more")
     return subject + "\n".join(body)
 
 
