@@ -43,7 +43,13 @@ UTILS = REPO_ROOT / "src/frontend/src/components/canvas/canvasUtils.js"
 # Context-budget guard, the #1535 discipline: this ships on every turn of every
 # agent. Nine kinds with a payload example each, the fences, and patch-by-id
 # land at ~2.4 KB; raising this ceiling should be a decision, not an accident.
-MAX_BLOCK_CHARS = 2700
+# ent#537 raised it 2700 → 3400 for ONE compact worked example (a
+# `template="dashboard"` write with slotted blocks and a kit card) plus the
+# four layouts and the kit's class list: the platform prompt is the only
+# channel a fresh agent has, and the issue's test of done is a fresh agent
+# producing a designed dashboard without coaching. The full reference lives in
+# the `canvas` library skill, not here.
+MAX_BLOCK_CHARS = 3400
 
 pytestmark = pytest.mark.unit
 

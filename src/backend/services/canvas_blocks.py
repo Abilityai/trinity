@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 from models import (
     CANVAS_BLOCK_ID_RE,
     CANVAS_DIAGRAM_MAX_CHARS,
+    CANVAS_SLOT_RE,
     CANVAS_IMAGE_INLINE_MAX_BYTES,
     CANVAS_IMAGE_SRC_MAX_CHARS,
     CANVAS_MAX_BLOCKS,
@@ -170,6 +171,18 @@ def validate_blocks(blocks: List[Dict]) -> List[Dict]:
             if bid in seen:
                 raise CanvasError(400, f"duplicate block id '{bid}'")
             seen.add(bid)
+        # ent#537 — the slot charset is re-checked here because the voice path
+        # builds its block list without a Pydantic model in front of it. An
+        # unknown slot NAME is deliberately not refused (it renders unslotted,
+        # after the layout); only a malformed one is.
+        slot = b.get("slot")
+        if slot is not None:
+            if not isinstance(slot, str) or not CANVAS_SLOT_RE.match(slot):
+                raise CanvasError(
+                    400,
+                    "block slot must be 1-32 lowercase letters, digits or dashes, "
+                    "starting with a letter",
+                )
         out.append(b)
 
     # Auto-ids second, so a declared `b3` further down the list is never

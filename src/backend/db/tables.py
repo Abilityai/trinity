@@ -604,6 +604,8 @@ agent_canvases = Table(
     Column("created_at", Text),
     Column("updated_at", Text),
     Column("updated_by_execution_id", Text),
+    # ent#537 — starter layout by name; NULL = stacked.
+    Column("template", Text),
 )
 
 user_ui_preferences = Table(

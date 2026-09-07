@@ -668,6 +668,25 @@ CANVAS_DIAGRAM_MAX_CHARS = 20_000           # Mermaid source
 # and lands in a named error, so it carries the same guard.
 CANVAS_BLOCK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
+# ent#537 — starter layouts. A canvas may declare ONE template by name; each
+# names the slots its blocks may fill. A layout never hides a block: an
+# unslotted block, or one naming a slot the layout does not know, renders
+# after the layout — so an unknown SLOT is not refused (losing content to a
+# typo is the worse failure), while an unknown TEMPLATE is (there is nothing
+# to fall back to but stacked, and silently stacking teaches the wrong name).
+# Keep in step with `CANVAS_TEMPLATES` in `canvas.ts` and `LAYOUTS` in the
+# frontend `canvasLayouts.js`; `test_ent537_canvas_design_kit.py` pins them.
+CANVAS_LAYOUT_SLOTS: Dict[str, List[str]] = {
+    "dashboard": ["header", "kpis", "main", "side", "footer"],
+    "report": ["header", "summary", "body", "figures", "appendix"],
+    "brief": ["header", "key-points", "body"],
+    "status-board": ["header", "status", "issues", "next", "log"],
+}
+CANVAS_TEMPLATES = tuple(CANVAS_LAYOUT_SLOTS)
+CanvasTemplate = Literal["dashboard", "report", "brief", "status-board"]
+# A slot name is a short lowercase token: it lands in a CSS grid-area name.
+CANVAS_SLOT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
 # Block kinds. The first five delegate to the shared `components/reports/`
 # dispatch — reused, never forked, because those renderer keys are CI-pinned as
 # the canonical contract (`test_1535_report_prompt_guidance.py`). `chart`,
@@ -691,6 +710,11 @@ class CanvasBlock(BaseModel):
     # blocks so every stored block is addressable by `patch_canvas` (ent#536).
     id: Optional[str] = Field(None, pattern=CANVAS_BLOCK_ID_RE.pattern)
     title: Optional[str] = Field(None, max_length=300)
+    # ent#537 — which slot of the canvas's `template` this block fills. A
+    # rendering hint that travels with the block (so `patch_canvas` keeps it),
+    # never a capability — which is why it may live inside the block while
+    # `audience` may not.
+    slot: Optional[str] = Field(None, pattern=CANVAS_SLOT_RE.pattern)
     # Free-form per kind, byte-capped as a whole at the router. A dict OR a
     # list, because `table` rows and `kpi` tiles are naturally arrays and
     # forcing a wrapper object on the agent buys nothing.
@@ -728,6 +752,8 @@ class CanvasWrite(BaseModel):
     title: Optional[str] = Field(None, max_length=300)
     blocks: List[CanvasBlock] = Field(default_factory=list, max_length=CANVAS_MAX_BLOCKS)
     audience: CanvasAudience = "operator"
+    # ent#537 — a starter layout by name; None keeps the stacked default.
+    template: Optional[CanvasTemplate] = None
     # The turn this write came from. Validated against the agent
     # (`resolve_and_validate_execution`, the MEM-001 rule) — provenance, and
     # what makes the derived staleness claim checkable.
@@ -744,6 +770,8 @@ class CanvasSummary(BaseModel):
     created_at: str
     updated_at: str
     updated_by_execution_id: Optional[str] = None
+    # ent#537 — the starter layout, or None for stacked blocks.
+    template: Optional[str] = None
     # Derived, never stored: the agent has run since this canvas was written.
     stale: bool = False
 

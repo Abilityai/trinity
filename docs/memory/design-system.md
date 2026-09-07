@@ -277,6 +277,38 @@ failure. Inspect the settlement and report the count that did not apply.
 **Alert recipe:** tinted ground per token family (light token-100 bg + token-700 text; dark token-500/16% + token-300), radius 8, padding 12×14, 13.5, 16px stroke icon, bold lead sentence, plain-language body. Errors say what went wrong **and how to fix it** ("Execution failed — exit 137 (out of memory). Raise the agent's memory limit in Settings → Resources."). Warnings carry their action inline.
 **Toast recipe:** surface bg + border-strong + shadow-lg, radius 8, padding 10×16. Toasts confirm **completed verbs** and include the fact you'd check next ("Schedule created — next run Mon 09:00 UTC"); auto-dismiss ~5s; **never used for errors** (principle 18) — errors persist until acknowledged. Enforced in `composables/useNotification.js` (#1926): a `type: 'error'` notification does not start the dismiss timer and stays until the user closes it, so every toast host renders a dismiss control for it. A failure that belongs next to a control should not be a toast at all — use `InlineError`/`LoadFailed` above.
 
+### Canvas design kit — the v-html twin (trinity-enterprise#537)
+
+An agent's canvas renders agent-authored `html` / `markdown` through
+`v-html`, where no component can mount. The **canvas design kit** is the one
+sanctioned exception to primitives-first for that reason, and it is held to the
+same values rather than exempted from them: `ck-card` carries BaseCard's
+surface / 1px border / radius 8 / padding 16 / shadow-sm; `ck-chip` carries
+BaseBadge's pill recipe (11.5/550, token-100 ground + token-700 text light,
+token-500/16% + token-300 dark); `ck-kpi` and `ck-table` carry the report
+tile's and the bounded data table's tokens (sticky mono-caps header on chrome,
+`tabular-nums`, max-height + internal scroll); `ck-callout` is the alert
+recipe; `ck-section` the 18/650 section title. Type stays on the six-size
+scale and spacing on the 4px grid.
+
+- **Home:** `src/frontend/src/components/canvas/CanvasKit.vue` — an UNSCOPED
+  `<style>` whose every selector sits under `.canvas-kit` (Vue scoped CSS
+  cannot reach `v-html` children; the prefix is the scope). An SFC, not a
+  `.css` file, so the raw-colour ratchet walks it: every colour is a `theme()`
+  token with a `.dark .canvas-kit` override and the file ships at zero raw
+  colours. The class allowlist is `utils/canvasKit.js::KIT_CLASSES`; the
+  sanitiser drops anything else on a canvas (`sanitizeCanvasHtml`).
+- **Both themes** through the kit's own custom properties (`--ck-*`), set once
+  light and once under `.dark` — never a per-theme hex in a rule.
+- **Bounded by construction:** collapse is keyed on the kit's inline size
+  (`@container`), never the viewport; inline styles admit only a bounded
+  `width` / `max-width`; the `<style>` element is forbidden on every
+  sanitised surface (design principle 28 applied to agent markup).
+- **Audit:** `/audit-design-system` covers the kit through the scanner (the
+  ratchet) and this section (the principles); a `ck-*` rule that introduces a
+  literal colour, a viewport media query, or a value off the primitive it
+  twins is a regression.
+
 ## 6. Motion — the data-loading standard
 
 The app has **two** data-loading treatments, decided by the surface (design session 2026-07; amended by the operator ruling of 2026-09-06, #2540): the **scanline beam + wipe-in reveal is the chart-loading motion** — `StackedBarChart`, `TrendLineChart`, the grid tile charts, metrics panels — and **every other first load is a skeleton placeholder** keyed on "no data yet": pages, panels, lists, message threads. Bespoke per-component spinners do not survive adoption; a skeleton follows the recipe below, never a hand-rolled one.

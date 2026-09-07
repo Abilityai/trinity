@@ -41,6 +41,13 @@ export const MERMAID_CONFIG = Object.freeze({
   securityLevel: 'strict',
   htmlLabels: false,
   flowchart: Object.freeze({ htmlLabels: false }),
+  // ent#537 /cso: an `%%{init: {themeCSS}}%%` directive in agent source is
+  // honoured under `strict`. Mermaid namespaces every rule under the diagram
+  // id, so it cannot reach the page — but `@keyframes` are deliberately left
+  // global and could redefine an app animation name. Listing the keys here
+  // makes `sanitize()` delete them from any directive, so the SVG's own
+  // <style> (the one `sanitizeSvg` keeps) never carries agent-authored CSS.
+  secure: Object.freeze(['themeCSS', 'fontFamily', 'altFontFamily']),
 })
 
 const LABEL_MAX = 80
@@ -60,6 +67,11 @@ export function blockRenderer(block) {
   return 'json'
 }
 
+// ent#537 — the slot charset the backend enforces (`CANVAS_SLOT_RE`); a
+// stored value is re-checked rather than trusted, and a malformed one reads
+// as "unslotted" so the block still renders.
+const SLOT_RE = /^[a-z][a-z0-9-]{0,31}$/
+
 /** Blocks that survive to the renderer, with their resolved kind attached. */
 export function renderableBlocks(blocks) {
   if (!Array.isArray(blocks)) return []
@@ -70,6 +82,9 @@ export function renderableBlocks(blocks) {
       id: typeof b.id === 'string' ? b.id : null,
       kind: blockRenderer(b),
       title: typeof b.title === 'string' ? b.title : null,
+      // Carried explicitly — this rebuild is a field allowlist, so a key it
+      // does not name never reaches the layout (ent#537).
+      slot: typeof b.slot === 'string' && SLOT_RE.test(b.slot) ? b.slot : null,
       payload: b.payload && typeof b.payload === 'object' ? b.payload : {},
     }))
 }

@@ -23,6 +23,8 @@
  * carry is the viewer's context.
  */
 
+import { filterInlineStyle, filterKitClasses } from './canvasKit'
+
 const URL_IN_STYLE_RE = /url\s*\(|image-set\s*\(|@import/i
 
 /**
@@ -47,6 +49,34 @@ export function hardenMediaAttributes(node) {
   if (typeof style === 'string' && URL_IN_STYLE_RE.test(style)) {
     node.removeAttribute('style')
     changes.push('style')
+  }
+  return changes
+}
+
+/**
+ * Canvas mode (trinity-enterprise#537): keep only the design kit's classes and
+ * a bounded `width` / `max-width` on one element. Applied by `markdown.js`'s
+ * hook when the sanitise call carried `canvasKit: true`; the allowlists live
+ * in `utils/canvasKit.js`. Returns what changed so a test can assert without
+ * a DOM. Runs AFTER `hardenMediaAttributes`, which may already have removed a
+ * `style` carrying a url().
+ */
+export function restrictToCanvasKit(node) {
+  const changes = []
+  if (!node || typeof node.getAttribute !== 'function') return changes
+  const cls = node.getAttribute('class')
+  if (typeof cls === 'string') {
+    const kept = filterKitClasses(cls)
+    if (kept === null) node.removeAttribute('class')
+    else if (kept !== cls) node.setAttribute('class', kept)
+    if (kept !== cls) changes.push('class')
+  }
+  const style = node.getAttribute('style')
+  if (typeof style === 'string') {
+    const kept = filterInlineStyle(style)
+    if (kept === null) node.removeAttribute('style')
+    else if (kept !== style) node.setAttribute('style', kept)
+    if (kept !== style) changes.push('style')
   }
   return changes
 }
