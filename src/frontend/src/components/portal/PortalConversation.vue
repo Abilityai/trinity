@@ -195,14 +195,27 @@
 
     <!-- ent#451: this user's chats with the agent, as tabs (OverflowTabs) —
          Main pinned first (ent#523), then most recent, the rest under
-         "N more". Selecting one is an ordinary thread open through the shell. -->
+         "N more". Selecting one is an ordinary thread open through the shell.
+         #2579: `draft` asks for the provisional "New chat" tab — either this
+         is still an unsaved fresh start, or it was born here a moment ago and
+         the list has not caught up yet. -->
     <PortalChatTabs
       :threads="threads"
       :agent-name="agent.name"
       :active-id="currentSessionId"
       :disabled="voiceCallActive"
+      :draft="newChat || bornHere"
       @select="(t) => emit('open-thread', t)"
     />
+
+    <!-- #2579: the shell's line under the strip (today: the admin-only notice
+         that generated titles are not being generated). A SLOT rather than a
+         prop for the reason the `#band` slot two blocks up is one — the shell
+         owns every fact it carries, and this conversation should not grow a
+         second opinion about them. It also keeps this PR's footprint in the
+         header band to one line, which matters: two sibling PRs restructure
+         exactly this region next. -->
+    <slot name="notice" />
 
     <!-- ent#534: the call's one status line — what the orb is doing, or why
          the call ended when it ended other than by End. `aria-live` because
@@ -717,6 +730,42 @@ const store = useClientPortalStore()
 const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
+
+// #2579 — "this thread was born in THIS mounted conversation, and the list may
+// not know it yet". It bridges a real gap rather than duplicating
+// `props.newChat`: the shell flips `startingNewChat` off the instant it hears
+// `session-adopted`, which is BEFORE the refreshed thread list arrives, so
+// without this the provisional tab vanishes for a round trip — or, when this
+// was the agent's only chat, the whole strip does.
+//
+// It resets by construction on any real thread switch (`convGen` bumps and this
+// instance is replaced) and deliberately survives adoption, because
+// `onSessionAdopted` does NOT bump `convGen`.
+const bornHere = ref(false)
+
+// The ONE adoption seam (#2579). Three call sites emit `session-adopted` —
+// streaming, the synchronous `/chat` fallback, and the voice path's
+// `createSession`. Setting the flag at one of them is how the tab would vanish
+// exactly when streaming is unavailable (the asymmetry ent#451's own spec
+// exists to catch), or for the whole round trip of starting a call.
+function adoptSession(id) {
+  currentSessionId.value = id
+  bornHere.value = true
+  emit('session-adopted', id)
+}
+
+// #2579 — spend the flag the moment the list catches up. Display is identical
+// either way (the real row now carries the active id, so `agentChatTabs`
+// inserts nothing), but a flag that outlives its purpose is one refactor away
+// from labelling a real conversation "New chat".
+watch(() => props.threads, (list) => {
+  if (!bornHere.value || !currentSessionId.value) return
+  const id = currentSessionId.value
+  if ((list || []).some((t) => !t.is_room && (t.id || t.session_id) === id)) bornHere.value = false
+})
+
+function focusComposer() { textarea.value?.focus() }
+
 const loadingHistory = ref(false)
 // #2163 — "a verdict exists for this thread's history" (mirrors `onMounted`'s
 // condition). Never goes false again on this instance, so the adoption-path
@@ -1070,7 +1119,15 @@ onMounted(async () => {
   // fresh conversation rather than updating one, so the watcher above never
   // runs for it.
   if (props.sessionId && !props.newChat) await loadThread(props.sessionId)
-  else messages.value = []
+  else {
+    messages.value = []
+    // #2579 AC 2: New chat has to put the caret in the composer in the SAME
+    // gesture that makes the tab appear. It has to happen here, in the fresh
+    // instance: pressing New chat bumps `convGen`, which remounts this
+    // component, so any focus set before the press is thrown away. A disabled
+    // textarea (a live voice call) makes it a no-op by construction.
+    if (props.newChat) nextTick(focusComposer)
+  }
   autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
 })
 // Review finding: `overflow-y` is now pinned, so the height must be recomputed when
@@ -1390,8 +1447,7 @@ async function deliver(text) {
       if (started.session_id && currentSessionId.value !== started.session_id) {
         // Adopt the thread NOW rather than at the end, so a refresh mid-turn
         // reattaches to it instead of opening a second conversation.
-        currentSessionId.value = started.session_id
-        emit('session-adopted', started.session_id)
+        adoptSession(started.session_id)
       }
       streaming.value = true
       liveActivity.value = []
@@ -1453,8 +1509,7 @@ async function deliver(text) {
     if (voiceMode.value && ttsEnabled.value && data.response
         && !voiceCallActive.value) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
-      currentSessionId.value = data.session_id
-      emit('session-adopted', data.session_id)
+      adoptSession(data.session_id)
     }
     // ent#359: carry WHICH thread finished. The shell marks a completed turn
     // read only when the user is still looking at it — this event fires even
@@ -2086,8 +2141,7 @@ async function startVoiceCall() {
       const created = await store.createSession(props.agent.name)
       sid = created?.id || created?.session_id || null
       if (!sid) { voiceError.value = 'Could not open a chat for the call.'; return }
-      currentSessionId.value = sid
-      emit('session-adopted', sid)
+      adoptSession(sid)
       emit('sessions-changed', sid)
     }
     const ok = await voice.startWith(
@@ -2108,7 +2162,7 @@ async function endVoiceCall() {
 }
 
 
-defineExpose({ focusComposer: () => textarea.value?.focus() })
+defineExpose({ focusComposer })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends
