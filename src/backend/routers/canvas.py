@@ -131,6 +131,7 @@ async def write_canvas(
             title=data.title,
             audience=data.audience,
             execution_id=data.execution_id,
+            template=data.template,
         )
     except CanvasError as e:
         raise _map(e)

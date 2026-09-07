@@ -1,4 +1,4 @@
-# Agent Canvas — a durable surface an agent renders onto (trinity-enterprise#438, widened by #536)
+# Agent Canvas — a durable surface an agent renders onto (trinity-enterprise#438, widened by #536, designed by #537)
 
 > **One idea**: a **report** is a thing published once and accumulated; a
 > **canvas** is one surface the agent keeps *current*. Same output, opposite
@@ -76,6 +76,7 @@ CREATE TABLE agent_canvases (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     updated_by_execution_id TEXT,
+    template   TEXT,              -- ent#537: 'dashboard'|'report'|'brief'|'status-board'; NULL = stacked
     PRIMARY KEY (agent_name, canvas_id)
 );
 CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at DESC);
@@ -94,7 +95,12 @@ CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at D
 - Dual-track migration: `db/migrations.py::agent_canvases_table` +
   Alembic `0050_agent_canvases`. ent#536 changes **no DDL**: block ids and the
   new kinds live inside the `blocks` JSON, so there is no migration and no
-  Alembic revision for it.
+  Alembic revision for it. ent#537 adds the nullable `template` column
+  (`agent_canvases_template` + Alembic `0054_agent_canvases_template`, no
+  backfill); the per-block `slot` lives in `blocks` because it travels with the
+  block through `patch_canvas`. `_SUMMARY_COLUMNS` appends `template` LAST —
+  `_row_to_summary` reads by position, and `_row_to_full` takes the blocks
+  index from the column list rather than a literal.
 
 ## The default canvas (ent#536)
 
@@ -107,7 +113,7 @@ everything else.
 
 ## The block vocabulary (ent#536)
 
-A canvas is an ordered list of `{id, kind, title?, payload}`. **Every stored
+A canvas is an ordered list of `{id, kind, slot?, title?, payload}`. **Every stored
 block carries an id**: `set_canvas` assigns `b1..bN` (by position, never
 shadowing an id the agent declared) to id-less blocks, so anything written is
 addressable by `patch_canvas` and `get_canvas` shows what to address. Ids share
@@ -117,7 +123,7 @@ the canvas-id charset; duplicates within a write are a named 400.
 |---|---|---|
 | `table` `kpi` `markdown` `timeline` `json` | as the report contract (`{columns,rows}`, `{tiles}`, `{markdown}`, `{events}`, raw) | delegated to the shared `components/reports/` dispatch |
 | `chart` | the **metric series shape**, below | `CanvasChart` → `TrendLineChart` (line/area) · `StackedBarChart` (bar/stacked_bar) · `CanvasPieChart` (pie/donut) |
-| `html` | `{html}` | DOMPurify via `utils/markdown.js::sanitizeHtml` (H-005) |
+| `html` | `{html}` | DOMPurify via `utils/markdown.js::sanitizeCanvasHtml` (H-005 + the ent#537 kit allowlist) |
 | `image` | `{src, caption?, alt?}` → stored as `{src, src_kind, …}` | `CanvasImage` |
 | `diagram` | `{mermaid}` (≤ 20,000 chars) | `CanvasDiagram` (lazy mermaid, strict, sanitised) |
 
@@ -233,6 +239,107 @@ leaves** the standalone kinds use (it never imports `CanvasBlock`; fences do not
 nest). A markdown block with no renderable fence takes the ent#438 path
 byte-for-byte. The extracted JSON is handed to components as data — never
 joined back into HTML — so nothing here widens the DOMPurify policy.
+
+## The design kit (ent#537)
+
+An agent's canvas looks designed without the agent touching CSS. Operator
+direction: "learn from how we do the microsite reports and explainers —
+efficient and quick, but good looking." What makes those cheap is ONE
+stylesheet: the author composes against known classes and skeletons, and the
+figures come from data. Here the figures are ent#536's kinds and fences; the
+kit dresses the page around them.
+
+**Home.** `components/canvas/CanvasKit.vue` — the `.canvas-kit` wrapper every
+`CanvasPanel` renders blocks inside, plus an UNSCOPED `<style>` whose every
+selector sits under `.canvas-kit`. Unscoped because Vue's scoped CSS stamps
+data attributes on compiled template nodes only and `v-html` children never get
+them — the prefix IS the scope. An SFC rather than a `.css` file because the
+raw-colour ratchet walks `.vue`/`.js` and counts literals inside `<style>`
+blocks; every colour is a `theme()` token with a `.dark` override (the
+`ScanlineReveal.vue` precedent), so the kit ships at a raw-colour count of
+zero and `/audit-design-system` sees it on every run. Collapse is keyed on the
+kit's own inline size (`@container`), never the viewport — the Portal rail is
+~300px wide on a desktop screen.
+
+**Vocabulary** (`utils/canvasKit.js::KIT_CLASSES`, the one list the prompt is
+pinned against): `ck-card` (+ `-title`, `-meta`, `-body`) · `ck-grid-2/3/4`,
+`ck-span-2`, `ck-span-full`, `ck-stack`, `ck-row` · `ck-section` (+ `-title`,
+`-sub`) · `ck-kpi` (+ `-label`, `-value`, `-unit`, `-delta` with
+`ck-up|ck-down|ck-flat`) · `ck-table` (+ `ck-table-wrap`, `ck-num`) ·
+`ck-callout` and `ck-chip` with the tones `ck-info|ck-success|ck-warning|
+ck-danger|ck-neutral` · `ck-figure` + `ck-caption` · `ck-muted`, `ck-small`,
+`ck-mono`, `ck-right`, `ck-center`. `ck-kpi` and `ck-table` are the v-html
+twins of `ReportKpiTiles.vue` / `ReportTable.vue` (same tokens) — the agent is
+taught to prefer the `kpi` / `table` kinds for data and reach for the classes
+only inside custom `html`. The kit is the one sanctioned exception to
+primitives-first (agent markup cannot mount a component), recorded in
+`design-system.md`.
+
+**The sanitiser admits the kit and nothing else — on the canvas.** `html`
+blocks go through `sanitizeCanvasHtml`, markdown prose through
+`renderCanvasMarkdown` (`CanvasProse.vue`, the report renderer's twin): the
+app's ONE DOMPurify instance with a per-call `canvasKit: true` config flag,
+which the existing `afterSanitizeAttributes` hook reads from its **third
+argument** (DOMPurify hands every hook the whole config), so there is no
+module state to leak on a throw. In canvas mode `restrictToCanvasKit` keeps
+only exact `KIT_CLASSES` members on `class` (the attribute goes when none
+survive), keeps only `width` / `max-width` on `style` with a bounded value
+(`%` ≤ 100, `px` ≤ 9999 — `url(`, `calc(`, `var(`, `!important` are
+unreachable by shape), and `id` is forbidden. Canvas-scoped rather than
+app-wide because chat and report markdown depend on the `code-block*` classes
+the decorator injects before sanitising (#2515).
+
+**`<style>` is forbidden everywhere.** DOMPurify's default tag list admits the
+`<style>` ELEMENT, and a body `<style>` is document-global — so before #537 an
+agent message, a report or a canvas block could ship
+`<style>.x{position:fixed;inset:0}</style>` and restyle the whole page,
+including a customer's Workspace on a `roster` canvas. No attribute allowlist
+closes that; `BASE_CONFIG = { FORBID_TAGS: ['style'] }` on every markdown/html
+path does. The one exception is by name: `sanitizeSvg`, which `CanvasDiagram`
+uses, keeps the default list because mermaid emits the diagram's own id-scoped
+stylesheet inside the `<svg>`.
+
+**Typography.** The wrappers keep `.prose prose-sm` so plain `<h2>` / `<p>` /
+`<ul>` keep their typography; typography's rules are `:where()`-wrapped
+(0,1,0) and lose to `.canvas-kit .ck-*` (0,2,0), and the kit resets the
+properties it owns (margins, table chrome, tile numerals). CommonMark rule for
+kit markup inside a `markdown` block: no blank line inside a kit element, or
+marked ends the HTML block and wraps what follows in `<p>` — use an `html`
+block for anything pretty-printed.
+
+## Starter layouts (ent#537)
+
+A canvas may declare `template` ∈ `dashboard` | `report` | `brief` |
+`status-board` — a nullable column on the row, because a layout is a property
+of the surface like `audience`. Each names the slots a block fills through its
+`slot` key (`CANVAS_LAYOUT_SLOTS` in `models.py`, mirrored in `canvas.ts` and
+`canvasLayouts.js::LAYOUTS`, parity-pinned):
+
+| template | slots (in render order) | side-by-side slot |
+|---|---|---|
+| `dashboard` | header · kpis · main (2/3) + side (1/3) · footer | kpis |
+| `report` | header · summary · body (72ch measure) · figures · appendix | figures |
+| `brief` | header · key-points (1/3) + body (2/3, 72ch) | — |
+| `status-board` | header · status · issues (2/3) + next (1/3) · log | status |
+
+**A layout never hides a block** (`canvasLayouts.js::placeBlocks`, pure): a
+block with no slot, or naming a slot the layout does not know, renders after
+the layout in the stacked list; a layout with nothing slotted degrades to the
+stacked list; empty regions are not rendered. So an unknown SLOT is not
+refused (losing content to a typo is the worse failure) while an unknown
+TEMPLATE is refused by name (`canvas_service.validate_template`; the Pydantic
+`Literal` gives 422 on REST) — silently stacking would teach the agent the
+wrong name. `renderableBlocks` carries `slot` explicitly (that rebuild is a
+field allowlist; a key it does not name never reaches the layout). Every
+writer carries the template: `set_canvas` sets it, `patch_canvas` and the
+voice panel verbs pass the stored value through. The layout CSS
+(`.ck-layout-<template>`, `.ck-slot-<slot>`) is app-emitted and deliberately
+absent from `KIT_CLASSES`, so an agent cannot fake a region; under 640px of
+container width a layout becomes one column in slot order.
+
+Rejected alternative, recorded: a per-block `span: full|half|third` hint with
+no migration. The operator asked for layouts by name; revisit if a fifth
+layout is requested.
 
 ## Audience — how "never widens" is made structural (ent#438 AC 8)
 
@@ -357,7 +464,18 @@ Fail-soft on the store, honest in the result: a write that raises is logged and
 the tool result says the canvas could not be saved, so the model does not
 describe a drawing nobody can see.
 
-## The regular agent is taught (ent#536)
+## The regular agent is taught (ent#536, ent#537)
+
+ent#537 adds ONE compact worked example to `### Your Canvas`
+(`template="dashboard"` with slotted blocks and a kit card), the four layouts
+with their slots, and the kit's class list — the platform prompt is the only
+channel a fresh agent has, and the issue's test of done is a fresh agent
+producing a designed dashboard without coaching. The context cap
+(`test_ent536_canvas_prompt_guidance.py::MAX_BLOCK_CHARS`) is raised
+2,700 → 3,400 deliberately. The full reference and three worked examples live
+in the `canvas` **library skill** (`abilityai/trinity-skills`, category
+`visual-communication`), which opens with the same example the prompt
+teaches; the voice panel's HTML rule names the same classes.
 
 `### Your Canvas` in `PLATFORM_INSTRUCTIONS` (the sibling of `### Publishing
 Reports`): when to use the canvas rather than a report, `set_canvas` /
@@ -394,20 +512,21 @@ thing that would listen for it; until then the panel poll reads the row.
 
 | Layer | File |
 |---|---|
-| DDL | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0050_agent_canvases.py` |
+| DDL | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/{0050_agent_canvases,0054_agent_canvases_template}.py` |
 | DB | `db/canvas.py` (`CanvasOperations`, `normalize_audience`) |
 | Block rules (pure) | `services/canvas_blocks.py` (`classify_image_src`, `validate_blocks`, `patch_blocks`, `map_panel_tool`) |
-| Service | `services/canvas_service.py` (`write_canvas`, `patch_canvas`, `audience_within`, derived staleness) |
+| Service | `services/canvas_service.py` (`write_canvas`, `patch_canvas`, `validate_template`, `audience_within`, derived staleness) |
 | Router | `routers/canvas.py` (`# mcp: canvas.ts …` header; PUT / PATCH / GET / DELETE) |
 | Workspace | `client_portal/agent_page.py::canvases`/`canvas_detail`, `client_portal/router.py` |
 | Voice | `services/gemini_voice.py::_execute_panel_tool`, `routers/voice.py::get_voice_panel` |
 | Prompt | `services/platform_prompt_service.py` (`### Your Canvas`) |
-| Frontend | `components/canvas/{canvasUtils.js, CanvasPanel.vue, CanvasBlock.vue, CanvasChart.vue, CanvasPieChart.vue, CanvasDiagram.vue, CanvasImage.vue, CanvasMarkdown.vue}`, `utils/canvasPalette.js`, `components/{TrendLineChart,StackedBarChart}.vue` (`labelFormat`) |
+| Frontend | `components/canvas/{canvasUtils.js, canvasLayouts.js, CanvasPanel.vue, CanvasKit.vue, CanvasBlock.vue, CanvasProse.vue, CanvasChart.vue, CanvasPieChart.vue, CanvasDiagram.vue, CanvasImage.vue, CanvasMarkdown.vue}`, `utils/{canvasKit.js, canvasPalette.js, sanitizeHooks.js, markdown.js}`, `components/{TrendLineChart,StackedBarChart}.vue` (`labelFormat`) |
 | MCP | `src/mcp-server/src/tools/canvas.ts`, `client.ts` |
-| Tests | `tests/unit/test_ent438_agent_canvas.py`, `test_ent536_canvas_vocabulary.py`, `test_ent536_canvas_prompt_guidance.py`, `test_voice_tools.py`, `src/frontend/tests/unit/canvasUtils.spec.js`, `src/mcp-server/src/tools/canvas.test.ts` |
+| Tests | `tests/unit/test_ent438_agent_canvas.py`, `test_ent536_canvas_vocabulary.py`, `test_ent536_canvas_prompt_guidance.py`, `test_ent537_canvas_design_kit.py`, `test_voice_tools.py`, `src/frontend/tests/unit/{canvasUtils,canvasKit,canvasLayouts,sanitizeHooks}.spec.js`, `src/mcp-server/src/tools/canvas.test.ts` |
 
 ## Change Log
 
+- **2026-09-07 (trinity-enterprise#537)** — the design kit (`CanvasKit.vue`, `utils/canvasKit.js`), the canvas-mode sanitiser (`sanitizeCanvasHtml` / `renderCanvasMarkdown`, per-call config flag, kit-class + bounded width allowlist, `id` dropped), `<style>` forbidden on every markdown/html path with `sanitizeSvg` split out by name, starter layouts (`template` column + Alembic 0054, per-block `slot`, `canvasLayouts.js`), the prompt's worked example and the `canvas` library skill.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-09-02 | claude | Initial — canvas surface, workspace merge, voice-panel bridge (ent#438) |

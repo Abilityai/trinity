@@ -344,10 +344,13 @@ def test_agent_authored_html_is_sanitized():
     """A `roster` canvas reaches a customer's browser, and `html` is exactly
     what the voice panel writes (H-005)."""
     block = (_FRONTEND / "components" / "canvas" / "CanvasBlock.vue").read_text()
-    assert "sanitizeHtml" in block
+    # ent#537: the canvas-mode twin — same DOMPurify instance and hook, plus
+    # the design-kit allowlist on `class` / `style`.
+    assert "sanitizeCanvasHtml" in block
     util = (_FRONTEND / "utils" / "markdown.js").read_text()
-    assert "export function sanitizeHtml" in util
-    assert "DOMPurify.sanitize" in util[util.index("export function sanitizeHtml"):]
+    for fn in ("sanitizeHtml", "sanitizeCanvasHtml"):
+        assert f"export function {fn}" in util
+        assert "DOMPurify.sanitize" in util[util.index(f"export function {fn}"):]
 
 
 # ---------------------------------------------------------------------------

@@ -3957,6 +3957,27 @@ def _migrate_agent_canvases_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_template(cursor, conn):
+    """ent#537 — a canvas may declare a starter layout by name.
+
+    `agent_canvases.template` holds 'dashboard' | 'report' | 'brief' |
+    'status-board', or NULL for the stacked default every pre-#537 row keeps.
+    A property of the SURFACE (like `audience`), so a column rather than a key
+    inside `blocks`; the per-block `slot` that fills a layout lives in the
+    blocks JSON because it travels with the block through `patch_canvas`.
+    No backfill: NULL is the honest reading of a row nobody laid out.
+
+    Mirrored by the Alembic revision 0054_agent_canvases_template.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "template",
+        "ALTER TABLE agent_canvases ADD COLUMN template TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_title_source(cursor, conn):
     """ent#473 — which hand wrote a Workspace thread's title.
 
@@ -4030,7 +4051,7 @@ def _migrate_portal_session_main_chat(cursor, conn):
     for every pair on the instance, and "the chat that happened to be most
     recent when we migrated" is not a fact anyone asked for.
 
-    Mirrored by the Alembic revision 0054_portal_session_main_chat.
+    Mirrored by the Alembic revision 0055_portal_session_main_chat.
     """
     _safe_add_column(
         cursor,
@@ -4062,7 +4083,7 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
     No index deliberately: the column is read only through the schedule row the
     scheduler already loaded by id, never selected on.
 
-    Postgres counterpart: `0055_schedule_workspace_delivery`.
+    Postgres counterpart: `0056_schedule_workspace_delivery`.
     """
     _safe_add_column(
         cursor, "agent_schedules", "deliver_to_workspace_email",
@@ -4196,6 +4217,7 @@ MIGRATIONS = [
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
+    ("agent_canvases_template", _migrate_agent_canvases_template),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
 ]

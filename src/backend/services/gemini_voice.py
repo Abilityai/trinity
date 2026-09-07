@@ -156,7 +156,8 @@ Mermaid rule (for `show_diagram`):
 - Keep diagrams focused; invalid syntax shows a contained error on the canvas.
 
 HTML rule (for `update_panel`):
-- HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, styled `<div>`s, images.
+- HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, `<div>`s, images.
+- Style with the canvas kit classes only: `ck-card` (+ `ck-card-title`), `ck-grid-2/3/4`, `ck-section`, `ck-callout ck-info|ck-success|ck-warning|ck-danger`, `ck-chip`, `ck-kpi`, `ck-table`, `ck-figure` + `ck-caption`, `ck-muted`. Other classes, inline styles and `<style>` are dropped.
 - Do NOT use `<script>`, `<canvas>` + JS charting, or any JS-driven rendering — it will be stripped and show nothing.
 - For data visualisation, put a ```chart fence in `show_markdown` (Trinity draws it from the data), or use `show_diagram` / `show_image`.
 """
@@ -573,6 +574,9 @@ class GeminiVoiceService:
                 title=(current or {}).get("title"),
                 audience=stored_audience,
                 execution_id=None,
+                # ent#537 — a voice edit keeps the board's layout; every writer
+                # of the row carries the same fields (the 2026-08-24 rule).
+                template=(current or {}).get("template"),
             )
             return message
         except Exception as e:  # noqa: BLE001

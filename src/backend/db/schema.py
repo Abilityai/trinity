@@ -524,6 +524,10 @@ TABLES = {
             -- Which execution last wrote it. Provenance, and the thing that
             -- makes the derived staleness claim checkable rather than a guess.
             updated_by_execution_id TEXT,
+            -- ent#537: starter layout by name ('dashboard' | 'report' |
+            -- 'brief' | 'status-board'); NULL = stacked blocks. A property of
+            -- the surface, like `audience`; a block's `slot` lives in `blocks`.
+            template TEXT,
             PRIMARY KEY (agent_name, canvas_id)
         )
     """,
