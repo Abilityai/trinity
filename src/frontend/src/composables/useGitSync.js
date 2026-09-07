@@ -85,14 +85,35 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
     try {
       const result = await agentsStore.syncToGithub(agentRef.value.name, { strategy })
       gitSyncResult.value = result
+      // #2529: every sync also reconciles the agent's `.gitignore` and untracks
+      // files that now match a rule. A toast that says only "Synced 5 file(s)"
+      // reads identically whether or not the same push silently deleted
+      // committed files from the repo — the silence that let two field
+      // incidents run for two months. Name the removals in the same breath.
+      //
+      // The type stays 'success': the sync DID succeed, and the toast host is a
+      // binary success/danger ternary, so anything else would paint a completed
+      // verb in the danger token. The durable surface for a removal an operator
+      // must act on is the `gitignore_untracked` operator-queue entry, not a
+      // 3-second toast.
+      const untracked = result.removed_paths?.length || 0
+      const untrackedNote = untracked > 0
+        ? ` — ${untracked} untracked by .gitignore`
+        : ''
       if (result.success) {
         if (result.files_changed > 0) {
-          showNotification(`Synced ${result.files_changed} file(s) to GitHub`, 'success')
+          showNotification(
+            `Synced ${result.files_changed} file(s) to GitHub${untrackedNote}`,
+            'success'
+          )
         } else {
-          showNotification(result.message || 'Already up to date', 'success')
+          showNotification(
+            `${result.message || 'Already up to date'}${untrackedNote}`,
+            'success'
+          )
         }
       } else {
-        showNotification(result.message || 'Sync failed', 'error')
+        showNotification(`${result.message || 'Sync failed'}${untrackedNote}`, 'error')
       }
       // Refresh status after sync
       await loadGitStatus()
