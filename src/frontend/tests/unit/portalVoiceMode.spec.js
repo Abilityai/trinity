@@ -317,8 +317,13 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(CODE).toMatch(/watch\(\[voiceCallActive, \(\) => voice\.voiceSessionId\.value\]/)
     expect(CANVAS_COLUMN).toContain('if (inFlight || !props.voiceSessionId) return')
     expect(SHELL_CODE).toMatch(/<PortalAgentDetails\s+v-else-if="detailsOpen && activeAgent"/)
-    expect(SHELL_CODE).toMatch(/sm:w-\[60%\]/)
-    expect(SHELL_CODE).toMatch(/voiceCall\.active \? 'flex-1 sm:flex-none sm:w-\[40%\]' : 'flex-1'/)
+    // The 40 / 60 split is two flex SHARES of a zero basis (2 : 3), never
+    // percentages of the row: `w-[40%]` + `w-[60%]` beside the 18rem sidebar
+    // summed to 100% + 18rem and the shell's overflow-hidden clipped the
+    // canvas column off the right edge (#2581, measured by the gallery #2583).
+    expect(SHELL_CODE).toMatch(/<PortalVoiceCanvas[\s\S]*?class="hidden min-w-0 sm:flex sm:flex-\[3_1_0%\]"/)
+    expect(SHELL_CODE).not.toMatch(/sm:w-\[60%\]|sm:w-\[40%\]/)
+    expect(SHELL_CODE).toMatch(/voiceCall\.active \? 'flex-1 sm:flex-\[2_1_0%\]' : 'flex-1'/)
     expect(SHELL_CODE).toContain('@voice-call="onVoiceCall"')
   })
   it('refuses New chat, ⌘J and opening another thread while the call is on', () => {

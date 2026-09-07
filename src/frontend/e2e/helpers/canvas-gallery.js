@@ -5,9 +5,10 @@
 // write route (`PUT /api/agents/{name}/canvas/{id}`) so the spec proves what
 // an agent can actually produce renders, not what a hand-mounted prop would.
 //
-// Pure data + one seeding helper. The assertions live in
-// `canvas-gallery.spec.js`; keep this file free of Playwright imports so the
-// same fixture can be replayed against any instance with a token.
+// Pure data, the seeding helpers, and the three page-side helpers every
+// gallery spec shares (`measureKit`, `settled`, `unclip`). The assertions live
+// in `canvas-gallery*.spec.js`; keep this file free of Playwright imports so
+// the same fixture can be replayed against any instance with a token.
 
 import zlib from 'node:zlib'
 
@@ -345,3 +346,117 @@ export async function clearGallery(request, baseURL, token, { agent = AGENT } = 
 }
 
 export { AGENT as GALLERY_AGENT }
+
+// ---------------------------------------------------------------- page-side helpers
+
+// In-page measurement. Runs after every diagram and image has settled.
+export function measureKit() {
+  const kit = document.querySelector('[data-testid="canvas-panel"] .canvas-kit')
+  if (!kit) return { blocks: 0, issues: [{ msg: 'no canvas kit on the page' }] }
+  const kr = kit.getBoundingClientRect()
+  const doc = document.documentElement
+  const issues = []
+  const px = (n) => Math.round(n)
+  if (doc.scrollWidth > doc.clientWidth + 1) {
+    issues.push({ msg: `page scrolls horizontally: ${doc.scrollWidth} > ${doc.clientWidth}` })
+  }
+  if (kit.scrollWidth > kit.clientWidth + 1) {
+    issues.push({ msg: `kit scrolls horizontally: ${kit.scrollWidth} > ${kit.clientWidth}` })
+  }
+  const scrolls = (el) => {
+    const cs = getComputedStyle(el)
+    return /(auto|scroll|hidden|clip)/.test(cs.overflowX) || /(auto|scroll|hidden|clip)/.test(cs.overflowY)
+  }
+  const blocks = [...kit.querySelectorAll('[data-canvas-block]')]
+  for (const b of blocks) {
+    const r = b.getBoundingClientRect()
+    const id = b.dataset.canvasBlock
+    const kind = b.dataset.canvasKind
+    if (r.height < 4) issues.push({ id, kind, msg: 'block has no height' })
+    // A kind that draws must have drawn SOMETHING — its figure, or its named
+    // fallback. A titled block with nothing under the title has height and
+    // passes every geometric check while being the worst outcome.
+    const drew = {
+      diagram: 'svg, pre',
+      image: 'img, p',
+      chart: 'canvas, svg, .flex.items-end, p, pre',
+    }[kind]
+    if (drew && !b.querySelector(drew)) issues.push({ id, kind, msg: `${kind} block rendered nothing` })
+    if (r.right > kr.right + 1 || r.left < kr.left - 1) {
+      issues.push({ id, kind, msg: `block box outside the kit: ${px(r.left)}..${px(r.right)} vs ${px(kr.left)}..${px(kr.right)}` })
+    }
+    for (const el of b.querySelectorAll('*')) {
+      const er = el.getBoundingClientRect()
+      if (!er.width || !er.height) continue
+      const boxSpill = Math.max(er.right - r.right, r.left - er.left)
+      // Text that runs past its own box has no rect of its own; scrollWidth
+      // sees it. Only for boxes that do not scroll themselves.
+      const textSpill = !scrolls(el) && el.clientWidth ? el.scrollWidth - el.clientWidth : 0
+      if (boxSpill <= 1 && textSpill <= 1) continue
+      let a = el.parentElement
+      let contained = false
+      while (a && a !== b) {
+        if (scrolls(a)) { contained = true; break }
+        a = a.parentElement
+      }
+      if (contained) continue
+      const cls = typeof el.className === 'string' ? el.className.split(/\s+/).slice(0, 3).join(' ') : ''
+      const what = boxSpill > 1 ? `spills ${px(boxSpill)}px past the block` : `has ${px(textSpill)}px of text past its box`
+      issues.push({ id, kind, msg: `<${el.tagName.toLowerCase()} class="${cls}"> ${what}` })
+      break
+    }
+  }
+  // Stacked siblings must not overlap (grid regions lay blocks side by side).
+  const byParent = new Map()
+  for (const b of blocks) {
+    const p = b.parentElement
+    if (p.classList.contains('ck-slot-grid')) continue
+    if (!byParent.has(p)) byParent.set(p, [])
+    byParent.get(p).push(b)
+  }
+  for (const list of byParent.values()) {
+    for (let i = 1; i < list.length; i++) {
+      const a = list[i - 1].getBoundingClientRect()
+      const c = list[i].getBoundingClientRect()
+      if (c.top < a.bottom - 1) {
+        issues.push({ id: list[i].dataset.canvasBlock, kind: list[i].dataset.canvasKind, msg: `overlaps the block above by ${px(a.bottom - c.top)}px` })
+      }
+    }
+  }
+  return { blocks: blocks.length, issues }
+}
+
+// Everything the panel shows asynchronously has arrived: no diagram skeleton,
+// no workspace-image skeleton, every <img> decoded (or failed).
+export async function settled(page) {
+  await page.waitForFunction(() => {
+    const kit = document.querySelector('[data-testid="canvas-panel"] .canvas-kit')
+    if (!kit) return false
+    if (kit.querySelector('[aria-busy="true"]')) return false
+    // A lazy image far down a scroll container never loads on its own, so
+    // the load-or-fail outcome could not be measured; ask for it eagerly.
+    for (const i of kit.querySelectorAll('img[loading="lazy"]')) if (!i.complete) i.loading = 'eager'
+    return [...kit.querySelectorAll('img')].every((i) => i.complete)
+  }, null, { timeout: 45000 })
+}
+
+// For the screenshot only: let the panel's scroll ancestors grow so a full
+// page capture shows the whole canvas rather than one viewport of it.
+export async function unclip(page) {
+  await page.evaluate(() => {
+    let el = document.querySelector('[data-testid="canvas-panel"]')
+    while (el && el !== document.body) {
+      const cs = getComputedStyle(el)
+      if (/(auto|scroll|hidden)/.test(cs.overflowY) || cs.height.endsWith('px') && el.scrollHeight > el.clientHeight + 1) {
+        el.style.overflow = 'visible'
+        el.style.height = 'auto'
+        el.style.maxHeight = 'none'
+        el.style.minHeight = '0'
+      }
+      el = el.parentElement
+    }
+    document.documentElement.style.height = 'auto'
+    document.body.style.height = 'auto'
+  })
+}
+

@@ -178,9 +178,16 @@
            column takes the orb's share of the stage and the canvas column
            (below) takes the rest — orb left / canvas right, the retired page's
            40/60. Below `sm` the orb has the whole stage. -->
+      <!-- During a call (ent#534) the orb and the canvas split the space
+           BESIDE the sidebar 40 / 60 as flex shares (2 : 3 of a zero basis),
+           not as percentages of the whole row: `w-[40%]` + `w-[60%]` next to
+           an 18rem sidebar summed to 100% + 18rem, and the shell's
+           `overflow-hidden` clipped the canvas column off the right edge with
+           no scrollbar — the #2581 report, measured at 296px on a 1280px
+           viewport by the gallery (#2583). -->
       <main
         class="min-w-0 flex flex-col bg-white dark:bg-gray-900"
-        :class="voiceCall.active ? 'flex-1 sm:flex-none sm:w-[40%]' : 'flex-1'"
+        :class="voiceCall.active ? 'flex-1 sm:flex-[2_1_0%]' : 'flex-1'"
       >
         <!-- ent#361: a room takes the stage when the URL names one. The
              single-agent conversation is untouched below — different
@@ -401,7 +408,7 @@
            comes back untouched when the call ends. -->
       <PortalVoiceCanvas
         v-if="voiceCall.active && voiceCall.voiceSessionId && activeAgent"
-        class="hidden sm:flex sm:w-[60%] sm:flex-none"
+        class="hidden min-w-0 sm:flex sm:flex-[3_1_0%]"
         :agent-name="activeAgent.name"
         :voice-session-id="voiceCall.voiceSessionId || ''"
         :panel-version="voicePanelVersion"

@@ -510,8 +510,12 @@ agent will eventually emit (200-row tables, 60-char tokens, twelve series,
 20,000-char Mermaid, a `width: 9999px` card, CJK/RTL, a non-string payload),
 seeded through the **real** `PUT` route so what is asserted is what an agent
 can actually write. `e2e/canvas-gallery.spec.js` renders each on Agent
-Detail (1280 / 1920) and the Workspace rail (a fixed 24rem column), light and
-dark, and asserts per block: the page and the kit never scroll horizontally,
+Detail (1280 / 1920) and the Workspace rail (a fixed 24rem column), and
+`e2e/canvas-gallery-voice.spec.js` on the Workspace **voice column** (the
+60% share during a call, 1280 / 1920 — only the call plumbing is mocked:
+the start request, the audio socket and the panel read; the real column
+mounts on the real page and switches boards the way a call does, on a
+panel-tool `tool_result` frame), light and dark, and asserts per block: the page and the kit never scroll horizontally,
 the block sits inside the kit, a drawing kind (diagram / image / chart) drew
 its figure or its named fallback, nothing spills past the block as a box or
 as text unless a scroll container between them owns it, and stacked siblings
@@ -545,6 +549,16 @@ What it pinned, each now structural rather than per-case:
 - **Switching canvases is guarded.** `CanvasPanel.select` drops a fetch a
   later selection superseded — the header used to name one canvas while the
   slower fetch's blocks belonged to another.
+- **The call columns are flex shares, not row percentages.** `<main>`
+  `sm:flex-[2_1_0%]` and the voice canvas `sm:flex-[3_1_0%]` — the old
+  `w-[40%]` + `w-[60%]` beside the 18rem sidebar summed to 100% + 18rem and
+  the shell's `overflow-hidden` clipped the canvas column off the right edge
+  with no scrollbar (#2581's second bullet; 296px at 1280, measured).
+- **Every block is its own container.** `[data-canvas-block]` is
+  `container-name: block`; the kit grids and the delegated KPI grid collapse
+  on the *block's* width, so a `kpi` block in a layout's 160px grid slot goes
+  to one column instead of four 45px tiles. Layout collapse stays keyed on
+  the kit (`canvas`).
 
 Findings the write route owns (a 422 / 400 by name, so they cannot be
 seeded): an unknown `kind`, a diagram with blank source.
@@ -597,5 +611,5 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 |------|--------|--------|
 | 2026-09-02 | claude | Initial — canvas surface, workspace merge, voice-panel bridge (ent#438) |
 | 2026-09-06 | claude | Conversation-side placement in the Workspace rail; `CanvasPanel` re-reads blocks when the selected canvas's `updated_at` moves (ent#475) |
-| 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, both surfaces, both themes, measured), the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
+| 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, Agent Detail + rail + voice column, both themes, measured), the flex-share call columns, per-block containers, the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |

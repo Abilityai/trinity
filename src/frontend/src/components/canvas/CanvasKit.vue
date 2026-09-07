@@ -126,19 +126,21 @@
 .canvas-kit .ck-grid-4 > *,
 .canvas-kit .ck-stack > * { margin: 0; min-width: 0; }
 
-/* Narrow container (the rail, a phone): everything becomes one column.
-   The delegated `kpi` kind (`ReportKpiTiles`, the kit tile's component twin)
-   follows the same steps HERE, keyed on the column rather than the viewport
-   its own `sm:`/`lg:` classes read — on a 1920px screen the 24rem rail is
-   `lg:`, and four tiles in 340px are 80px each (#2583). */
-@container canvas (max-width: 640px) {
+/* Every block is a container of its own (`CanvasBlock` sets
+   `container-name: block`), and the grids INSIDE a block collapse on the
+   block's width — not the kit's, and never the viewport's: on a 1920px
+   screen the 24rem rail is `lg:` to `ReportKpiTiles`' own classes (four
+   80px tiles), and a `kpi` block in a layout's grid slot is ~160px wide on
+   a kit that is 700px, so a kit-keyed rule left three tiles at 45px with
+   "OPE / N" wrapped inside them (#2583, seen in the voice column). */
+@container block (max-width: 640px) {
   .canvas-kit .ck-grid-2,
   .canvas-kit .ck-grid-3,
   .canvas-kit .ck-grid-4,
   .canvas-kit .report-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .canvas-kit .ck-span-2 { grid-column: 1 / -1; }
 }
-@container canvas (max-width: 400px) {
+@container block (max-width: 400px) {
   .canvas-kit .ck-grid,
   .canvas-kit .ck-grid-2,
   .canvas-kit .ck-grid-3,
@@ -367,6 +369,12 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .canvas-kit .ck-slot { min-width: 0; }
+/* The block container the grid rules above query. `[data-canvas-block]` is
+   the app-emitted attribute on every `CanvasBlock` section. */
+.canvas-kit [data-canvas-block] {
+  container-type: inline-size;
+  container-name: block;
+}
 .canvas-kit .ck-slot > * + * { margin-top: 12px; }
 .canvas-kit .ck-slot-grid {
   display: grid;
