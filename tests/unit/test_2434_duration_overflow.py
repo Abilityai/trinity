@@ -72,8 +72,30 @@ sys.path.insert(0, _BACKEND_STR)
 from db_harness import db_backend, run as _hrun, scalar as _hscalar  # noqa: E402,F401
 
 _DB_MODULES = ("db.connection", "db.schedules", "db.activities", "database")
+# The snapshot/restore pair `tests/lint_sys_modules.py` recognises (precedent:
+# test_1832_duration_clamp.py). The db.* modules must be evicted so each fixture
+# rebinds them to the backend db_backend just activated, and restored afterwards
+# so a later test in the same session does not inherit this file's engine.
+#
+# `models` is deliberately NOT in this list: `ActivityCloseOutcome` is compared
+# by IDENTITY below, and it lives in `models` precisely so that an evicted `db.*`
+# cannot make that comparison silently go False at full-suite scale (#1804).
+_STUBBED_MODULE_NAMES = list(_DB_MODULES)
 
 AGENT = "agent-2434"
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
 
 # The reported reproduction: a real restore whose newest execution was 33 days
 # old (~2.85 bn ms). 24.855 days is the ceiling, so 33 days clears it with room.
