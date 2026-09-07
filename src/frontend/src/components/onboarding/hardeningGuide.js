@@ -117,7 +117,8 @@ export function isHardeningGuideVisible({
  * absence of information, `warning` for the posture whose advertised address
  * carries no encryption, `info` for one with room to improve.
  *
- * There is deliberately no `https-domain` entry — that posture never renders.
+ * `https-domain` is the one posture that speaks only to step two: step one is
+ * already done, so its copy opens on what is left rather than on an exposure.
  */
 export const POSTURE_COPY = {
   unconfigured: {
