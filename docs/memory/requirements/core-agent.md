@@ -1251,6 +1251,77 @@ must work consistently."
   which now returns the canvas row) the voice column.
 - **Flow**: `docs/memory/feature-flows/agent-canvas.md`
 
+**Canvas design kit, starter layouts and the `canvas` library skill
+(trinity-enterprise#537, 2026-09-07)** — operator direction: "a rich interface
+and an easy way for agents to change and update it — learn from how we do the
+microsite reports and explainers." What makes those cheap and good-looking is
+ONE stylesheet: the author composes against known classes and skeletons, and
+the figures come from data. The agent authors content; the platform renders it
+well, and the agent never touches CSS.
+
+- **FR-14 — The kit is platform-owned, token-only, and scoped by prefix**: a
+  class vocabulary (`ck-card`, `ck-grid-2/3/4`, `ck-section`, `ck-callout`,
+  `ck-chip`, `ck-kpi`, `ck-table`, `ck-figure`/`ck-caption`, text utilities)
+  rendered by ONE stylesheet in `components/canvas/CanvasKit.vue` — an unscoped
+  `<style>` block whose every selector sits under `.canvas-kit`, the wrapper
+  every canvas surface renders blocks inside. Colours come from the design
+  tokens via `theme()` with `.dark` overrides, so the raw-colour ratchet covers
+  the kit (the scanner walks `.vue` style blocks; a standalone `.css` would be
+  invisible to it, which is why the kit is not one). Collapse is keyed on the
+  kit's own inline size (`@container`), never the viewport, because the Portal
+  rail is ~300px wide on a desktop screen. The kit is the **v-html twin** of
+  `BaseCard` / `BaseBadge` / the report tile and table — same radius, padding
+  and tint tokens — recorded in `design-system.md` as the one sanctioned
+  exception to primitives-first (agent markup cannot mount a component). The
+  class list is the pure module `utils/canvasKit.js::KIT_CLASSES`.
+- **FR-15 — The sanitiser admits the kit and nothing else, on the canvas**:
+  `html` and `markdown` blocks on a canvas render through `sanitizeCanvasHtml`
+  / `renderCanvasMarkdown`, which run the app's ONE DOMPurify instance with a
+  per-call `canvasKit` config flag (read by the existing
+  `afterSanitizeAttributes` hook from its third argument, so there is no
+  module state to leak): `class` keeps only exact `KIT_CLASSES` members, `style`
+  keeps only `width` / `max-width` with a bounded value (`%` ≤ 100, `px` ≤
+  9999), `id` is dropped. A class outside the kit is dropped, never passed
+  through. The filter is canvas-scoped because chat and report markdown depend
+  on classes the code-block decorator injects before sanitising (#2515).
+  **Every** markdown/html sanitise path additionally forbids the `<style>`
+  ELEMENT (DOMPurify's default admits it): a body `<style>` is document-global,
+  so an agent block could restyle the whole page — a customer's Workspace on a
+  `roster` canvas included. Mermaid SVG keeps its own explicit `sanitizeSvg`
+  path (its scoped `<style>` is the diagram). H-005 unchanged: one instance,
+  one hook.
+- **FR-16 — Starter layouts by name**: a canvas may declare `template` ∈
+  `dashboard` | `report` | `brief` | `status-board` (a nullable column on the
+  row — a layout is a property of the surface, like `audience`; NULL = stacked
+  blocks, the default). Each layout has named slots (`CANVAS_LAYOUT_SLOTS` in
+  `models.py`, mirrored in `canvas.ts` and `canvasLayouts.js`, parity-pinned)
+  and a block fills one with `slot` — a key inside the block, because it
+  travels with the block through `patch_canvas`, and a rendering hint is not a
+  capability (the ent#364 rule binds `audience`, not this). **A layout never
+  hides a block**: a block with no slot, or a slot the layout does not know,
+  renders after the layout; a layout with nothing slotted degrades to the
+  stacked list, and empty regions are not rendered. An unknown template is
+  refused by name; an unknown slot is not (losing content to a typo is the
+  worse failure). Every writer carries the template through: `set_canvas`
+  sets it, `patch_canvas` and the voice panel tools keep the stored one.
+  Dual-track migration `agent_canvases_template` + Alembic
+  `0054_agent_canvases_template`.
+- **FR-17 — Taught twice, at two weights**: `### Your Canvas` gains ONE compact
+  worked example (`template="dashboard"` with slotted blocks and a kit card),
+  the four layouts with their slots, and the class list — because the platform
+  prompt is the only channel a fresh agent has, and AC-4's test of done is a
+  fresh agent producing a designed dashboard without coaching. The context
+  cap is raised 2,700 → 3,400 chars, deliberately. The `canvas` **library
+  skill** (`abilityai/trinity-skills`, category `visual-communication`) carries
+  the full reference and three worked examples (dashboard · report with figures
+  · status board), opening with the same example the prompt teaches. The
+  marketplace wizard scaffolds reference it the way #482 wires
+  `update-dashboard` (abilities repo, separate change).
+- **Deferred, recorded**: a per-block `span` hint (`full|half|third`) was the
+  zero-migration alternative to named layouts — revisit if a fifth layout is
+  requested. Tailwind utilities remain reachable from chat/report markdown
+  (the class allowlist is canvas-only here) — follow-up issue.
+
 ### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
 
 - **Status**: ✅ Implemented (shell) · **ID**: `WORKSPACE_RAIL_SHELL`
@@ -1386,7 +1457,7 @@ must work consistently."
 - **Out of scope**: the State tab (#439), the resize handles (#492), the
   conversation-wide drop target (#524), and a backend broadcast for canvas
   writes / shared files (registered in the debt inbox). The Work tab's
-  content landed as §5.21 (ent#525).
+  content landed as §5.22 (ent#525).
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (slice 2 section),
   `workspace-loops.md`, `agent-canvas.md`
 
@@ -1497,7 +1568,7 @@ must work consistently."
   `src/frontend/tests/unit/portalChatTabsAndTitles.spec.js`.
 - **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
 
-### 5.21 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
+### 5.22 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_TAB`
 - **Description**: When a message starts a long-running job, the Workspace
@@ -1884,3 +1955,115 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
   already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`
+
+### 5.23 Workspace — agents at the centre: the pinned Main chat, Reset, and files onto the conversation (trinity-enterprise#523, trinity-enterprise#524)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_AGENTS_AT_CENTRE`
+- **Description**: Clicking an agent opens the **conversation** you were last
+  in, not a report about it. Every `(user, agent)` pair has one pinned **Main**
+  chat — the place the agent reaches you when no conversation named itself —
+  and **Reset** archives it and starts the agent cold. The agent's numbers sit
+  in an always-visible band above the thread; the rest of its context opens on
+  demand as **Agent details**, in the rail's place. Files can be dropped
+  anywhere on the conversation, several at a time.
+- **Operator rulings**: 2026-09-05 (decision 8, "Version A · Contacts" — agents
+  are the central entity); 2026-09-06 09:27 (Reset has **no** confirmation —
+  nothing is lost); 2026-09-06 11:12 (the stats strip and the Activity chart
+  sit in a band under the header, always visible; the scanline is chart-only,
+  abilityai/trinity#2540); 2026-09-06 13:28 (design approved, board A3);
+  2026-09-06 decision 13 (a file dropped in a room goes to every participating
+  agent's inbox).
+
+**Main and Reset**
+
+- `enterprise_portal_sessions.is_main` marks the pinned chat and `archived_at`
+  the one Reset retired. **One live Main per pair** is enforced by the partial
+  unique index `idx_portal_sessions_main` (`WHERE is_main = 1`), not by a
+  check-then-insert: `ensure_main_session` is reachable from two request paths
+  in every uvicorn worker. The predicate is load-bearing — an archived row
+  keeps its (agent, client) pair forever, so an unconditional unique index
+  would refuse the **second** Reset.
+- **No backfill.** Existing rows read `is_main = 0`; Main is minted lazily by
+  `list_sessions` (opening an agent, which is what renders the pinned tab) and
+  by `_resolve_session_id`. Deliberately **not** by the cross-agent batch
+  (#2198), which would write a row per rostered agent on every sidebar refresh.
+- **Reset needs no second reset primitive.** A fresh row carries no
+  `cached_claude_session_id` and the turn engine resumes only on a cached id,
+  so "starts cold" is a property of the new row rather than an action against
+  the old one. `routers/sessions.py::reset_session_memory` is untouched — that
+  verb clears a cache and keeps the thread; this one retires the thread. The
+  agent's per-user memory (MEM-001) is not touched. Refused with a named 409
+  (`turn_in_flight`) while a turn is running, and `reset_raced` when a
+  concurrent Reset won. Resetting an **untouched** Main is a no-op reported as
+  `archived_session_id: null`.
+- **Landing rule**: `_resolve_session_id(agent, email, None)` resolves to Main.
+  That single edit covers an agent-initiated message, an ask raised outside a
+  chat (ent#364/#429) and a scheduled brief (ent#498), because all three funnel
+  through it; an explicit session id still wins.
+
+**One page**
+
+- `/workspace/a/:agentName` keeps its URL and resolves to a chat.
+  `portalUtils.js::landingThread` is the rule — most recently active, Main as
+  the floor — and the `?agent=` deep link's `resolveAgentLanding` defers to it,
+  so the two entry points cannot land a first-time visitor in different places.
+- `PortalAgentPage.vue` is dismantled: stats + the Activity chart to
+  `PortalAgentBand.vue` (always visible); chats / what it can do / reports to
+  `PortalAgentDetails.vue`; Canvas and Files were already rail tabs (ent#475);
+  recent work was already the rail's Work tab (ent#525); asks keep the
+  conversation's mount, which was the surviving one after #2449.
+- **Agent details is a sibling of the rail, not a rail tab** (ruled
+  2026-09-05): the rail is participant-scoped with a fixed five-tab set, while
+  this is about one agent and is dismissed rather than switched away from.
+  Closing it returns the rail on the tab it was showing.
+- Main is named by its **role** in the tab strip and the header and is not
+  renameable. An archived chat stays a tab — the operator ruled it “becomes the
+  newest tab” — and growth is bounded by `OverflowTabs`' counted “N more” rather
+  than by hiding rows; you simply never LAND in one by default. An unused Main is
+  filtered from the **sidebar** only.
+- The sidebar orders agents by most recent collaboration then name, applied
+  before the collapse. This is **not** ent#491 (incubating): `orderRosterAgents`
+  ships the order this AC states and leaves `primaryName` as its seam.
+- The composer **labels** an unavailable agent (#2196's `availability`), never
+  disables — disabling relocates the dead state rather than removing it.
+
+**Files onto the conversation (ent#524)**
+
+- `composables/usePortalFileDrop.js` is the ONE implementation, used by the
+  conversation, the room and the rail's Files tab. The gesture and the batch
+  live here; the **destination** is the caller's `upload`, so it can move to the
+  ent#484/#486 working folder without the gesture changing.
+- Both `<input type="file">` carry `multiple`; no path reads `[0]`. Every file
+  gets its own chip, progress and outcome; one failure does not fail the batch;
+  a refused file names itself and the limit; a 429 batch says which files landed
+  and when to retry. Uploads run **sequentially** — twenty parallel requests is
+  the surest way to trip the per-email limiter (ent#287).
+- A room's drop fans out to every participating agent's inbox and the chip names
+  the recipients.
+- A chip renders from one derived `attachmentState` ('uploading' | 'failed' |
+  'sent') rather than a bare `v-if="uploading"`, which the #1927 ratchet counts
+  and cannot distinguish from a fetch-in-flight gate.
+- **Scoping is unchanged**: roster/inbox rules and the ent#78 auth-path
+  invariant hold for both doors.
+**An answered ask says whether work started (ent#468)**
+
+- The decision that issue asked for is **render**, not drop. On a
+  `operator_resume_enabled` agent an answer sets real work in motion and spends
+  the owner's budget; ent#364's AC ("the answer reaches the agent and it
+  resumes") was true in the backend and invisible in the product, and
+  `resume_requested` + the `answered` status were on the wire read by nothing.
+- `portalUtils.js::answerConfirmation` consumes **both** fields — the AC's
+  "either both or neither". `status` is the gate (only a row the server calls
+  `answered` earns a confirmation) and `resume_requested` is the wording. It is
+  a report of INTENT, so the tense is "is picking this up", never a claim the
+  turn finished; a failure after that point is an operator-side FAILED row plus
+  an `operator_resume_dispatch` audit entry (ent#329). An absent or false
+  `resume_requested` says only "Sent." — reading `null` as "started" would be
+  the over-claim ent#430 spent a blocker removing.
+- The confirmation cannot live on the ask row, because answering removes it.
+  `PortalAsks.visible` therefore also stays true while a confirmation is up —
+  gating on `items.length` alone unmounted the surface at the same instant the
+  message was created. It clears itself, and its timers are cleared on unmount
+  (this surface unmounts on every chat switch).
+
+- **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`

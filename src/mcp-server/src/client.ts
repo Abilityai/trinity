@@ -1532,8 +1532,9 @@ export class TrinityClient {
     canvasId: string,
     data: {
       title?: string;
-      blocks: Array<{ kind: string; title?: string; payload?: unknown }>;
+      blocks: Array<{ kind: string; title?: string; slot?: string; payload?: unknown }>;
       audience?: "operator" | "roster";
+      template?: string;
       execution_id?: string;
     }
   ): Promise<Record<string, unknown>> {

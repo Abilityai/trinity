@@ -128,7 +128,9 @@ def test_the_leaves_are_shared_and_markdown_never_imports_the_dispatcher():
     for leaf in ("CanvasChart", "CanvasDiagram", "CanvasImage", "CanvasMarkdown", "ReportRenderer"):
         assert leaf in block
     diagram = (_FRONTEND / "components" / "canvas" / "CanvasDiagram.vue").read_text()
-    assert "import('mermaid')" in diagram and "sanitizeHtml(" in diagram
+    # ent#537 split the SVG path out by name: mermaid's own id-scoped <style>
+    # must survive while every html/markdown path forbids the element.
+    assert "import('mermaid')" in diagram and "sanitizeSvg(" in diagram
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +393,7 @@ def test_patch_canvas_keeps_title_and_audience_and_restamps_provenance(monkeypat
     assert out == {"ok": True}
     (agent, canvas_id, merged), kw = writes[0]
     assert [b["id"] for b in merged] == ["b1", "b2"] and merged[1]["kind"] == "markdown"
-    assert kw == {"title": "Board", "audience": "roster", "execution_id": "e2"}
+    assert kw == {"title": "Board", "audience": "roster", "execution_id": "e2", "template": None}
 
 
 def test_patch_canvas_on_a_missing_canvas_is_none(monkeypatch):

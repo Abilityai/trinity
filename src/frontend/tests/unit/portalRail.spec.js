@@ -357,8 +357,30 @@ describe('ent#474 — shell wiring (source guards)', () => {
     expect(railAt).toBeLessThan(portal.indexOf('<PortalAgentPicker'))
     const el = portal.slice(railAt, portal.indexOf('/>', railAt))
     expect(el).not.toContain(':key=')
-    expect(el).toContain('v-if="railVisible"')
+    // ent#523: `v-else-if`, not `v-if` — Agent details takes the rail's PLACE
+    // in the third column (ruled 2026-09-05), so the two are one chain rather
+    // than two independently-mounted columns. Everything this guard is actually
+    // about survives that: the rail is still a sibling of <main>, still outside
+    // every remount, still keyless, and still visibility-gated on `railVisible`
+    // — which is what the assertion below reads, now without pinning which arm
+    // of the chain it sits on.
+    expect(el).toMatch(/v-(else-)?if="railVisible"/)
     expect(el).toContain(':tabs="railTabs"')
+  })
+
+  it('gives Agent details the rail\u2019s place, not a rail tab (ent#523)', () => {
+    // The rail's five-tab set is fixed (ent#472) and scoped to the
+    // conversation's participants; agent details is about ONE agent and is
+    // dismissed rather than switched away from. Mounting it as a sibling in the
+    // same column is what lets the rail keep its own state across the swap.
+    const detailsAt = portal.indexOf('<PortalAgentDetails')
+    const railAt = portal.indexOf('<PortalRail\n')
+    expect(detailsAt, 'the details panel must exist').toBeGreaterThan(-1)
+    expect(detailsAt).toBeLessThan(railAt)
+    expect(portal).toMatch(/<PortalAgentDetails[\s\S]{0,200}v-if="detailsOpen && activeAgent"/)
+    // It must NOT be registered as a rail tab.
+    const railTabs = src('components/portal/portalRail.js')
+    expect(railTabs).not.toContain('details')
   })
 
   it('reads and persists rail state as a setup ref under the one key', () => {

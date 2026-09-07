@@ -1,6 +1,22 @@
 # Feature: the Workspace agent page
 
-> **Status**: ✅ Implemented (2026-08-13)
+> **Status**: 🗂 SUPERSEDED (2026-09-07) by trinity-enterprise#523 — the page was
+> **dismantled**, not deleted, and every section has a named new home. Kept as
+> the record of why the page existed, which is still the reason its content had
+> to go somewhere rather than away. See
+> [workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md) for
+> where each piece went and why clicking an agent now opens a conversation.
+>
+> | This page had | It is now |
+> |---|---|
+> | stats strip, Activity chart | `PortalAgentBand.vue`, always visible above the thread |
+> | Your chats, What it can do, Reports | `PortalAgentDetails.vue`, in the rail's place |
+> | Canvas, Files | rail tabs since ent#475 |
+> | Recent work, Activity | the rail's Work tab since ent#525 |
+> | asks | the conversation's mount, the surviving one after #2449 |
+> | **Start a chat** | gone — the row opens the chat itself |
+>
+> **Status (original)**: ✅ Implemented (2026-08-13)
 > **Issue**: abilityai/trinity-enterprise#360
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.11
 > **Related**: [workspace-sidebar-ia.md](workspace-sidebar-ia.md) (the roster row that opens it), [workspace-absorbs-session.md](workspace-absorbs-session.md)

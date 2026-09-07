@@ -68,13 +68,14 @@ from .models import (
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
+    PortalMainReset,
     PortalTtsRequest,
     PortalTurnStarted,
     PortalUpload,
     PortalUploads,
 )
 from .portal_auth import PortalPrincipal, get_portal_principal
-from .service import ClientPortalError, InvalidChatTitle
+from .service import ClientPortalError, InvalidChatTitle, MainResetRefused
 
 logger = logging.getLogger(__name__)
 _signin_email_tasks: set = set()
@@ -1036,6 +1037,43 @@ def portal_create_session(agent_name: str, principal: PortalPrincipal = Depends(
     include_owned = principal.is_platform
     try:
         return service.create_session(agent_name, email, include_owned=include_owned)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# Invariant #4: declared ABOVE `/agents/{agent_name}/sessions/{session_id}`.
+# `main/reset` is two segments so it cannot be captured by that single-segment
+# parameter today — but the PATCH route is the neighbour a future edit would
+# most plausibly widen, and the ordering costs nothing to state now.
+@router.post("/agents/{agent_name}/sessions/main/reset", response_model=PortalMainReset)
+def portal_reset_main_session(agent_name: str,
+                              principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Reset Main (ent#523): archive the current Main and start the agent cold.
+
+    Nothing is lost — the retired chat stays in the list, readable and
+    renameable — which is why there is no confirmation on this path (operator
+    ruling 2026-09-06). Refused with a NAMED 409 while a turn is in flight
+    (`detail.code == "turn_in_flight"`), or if a concurrent Reset won
+    (`reset_raced`); a miss on the roster is the uniform 404.
+    """
+    email = principal.email
+    # ent#358: what a caller can DO equals what they can SEE.
+    include_owned = principal.is_platform
+
+    from services import rate_limiter
+
+    # A destructive-shaped write (it retires a thread and mints another),
+    # bounded per viewer like every other portal write. Deliberately tighter
+    # than rename's 60/min: resetting twice in a second is a double-click, not
+    # an intent.
+    rate_limiter.enforce(f"portal_reset_main:{email}", 10, 60)
+    try:
+        return service.reset_main_session(agent_name, email, include_owned=include_owned)
+    except MainResetRefused as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.detail},
+        )
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 

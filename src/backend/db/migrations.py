@@ -3957,6 +3957,27 @@ def _migrate_agent_canvases_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_template(cursor, conn):
+    """ent#537 — a canvas may declare a starter layout by name.
+
+    `agent_canvases.template` holds 'dashboard' | 'report' | 'brief' |
+    'status-board', or NULL for the stacked default every pre-#537 row keeps.
+    A property of the SURFACE (like `audience`), so a column rather than a key
+    inside `blocks`; the per-block `slot` that fills a layout lives in the
+    blocks JSON because it travels with the block through `patch_canvas`.
+    No backfill: NULL is the honest reading of a row nobody laid out.
+
+    Mirrored by the Alembic revision 0054_agent_canvases_template.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "template",
+        "ALTER TABLE agent_canvases ADD COLUMN template TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_title_source(cursor, conn):
     """ent#473 — which hand wrote a Workspace thread's title.
 
@@ -4007,6 +4028,47 @@ def _migrate_user_ui_preferences_table(cursor, conn):
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
+
+def _migrate_portal_session_main_chat(cursor, conn):
+    """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
+
+    Every (user, agent) pair has one **Main** chat: the place the agent reaches
+    you when no conversation named itself. `is_main` marks it; `archived_at`
+    marks the one Reset retired, which stays an ordinary past chat — readable,
+    resumable, renameable — and simply stops being that place.
+
+    The partial unique index is the point of the migration, not an
+    afterthought. `ensure_main_session` is reachable from two request paths and
+    runs in every uvicorn worker, so a check-then-insert races two Mains into
+    existence for one pair, after which "the pinned first tab" has no single
+    answer. The predicate `WHERE is_main = 1` is load-bearing: an archived row
+    keeps its (agent, client) pair forever, so an unconditional unique index
+    would refuse the SECOND Reset.
+
+    No backfill, deliberately. Every existing row reads `is_main = 0` and Main
+    is created lazily on the next visit — the same shape as ent#473's
+    `title_source`. Backfilling would have to pick one existing thread as Main
+    for every pair on the instance, and "the chat that happened to be most
+    recent when we migrated" is not a fact anyone asked for.
+
+    Mirrored by the Alembic revision 0055_portal_session_main_chat.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "is_main",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "archived_at",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN archived_at TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_sessions_main "
+        "ON enterprise_portal_sessions(agent_name, client_email) WHERE is_main = 1"
+    )
     conn.commit()
 
 
@@ -4134,4 +4196,6 @@ MIGRATIONS = [
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
+    ("agent_canvases_template", _migrate_agent_canvases_template),
+    ("portal_session_main_chat", _migrate_portal_session_main_chat),
 ]

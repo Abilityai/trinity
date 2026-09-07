@@ -1027,6 +1027,22 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#523 — Reset Main: archive what is there, start the agent cold.
+    //
+    // The error is rethrown UNTOUCHED so the caller can read the server's named
+    // 409 (`detail.code` of `turn_in_flight` / `reset_raced`) and say which one
+    // happened. Swallowing it into a generic failure is what would make Reset
+    // feel broken while a turn runs — the one moment it is most likely to be
+    // pressed.
+    async resetMainChat(agentName) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/sessions/main/reset`,
+        {},
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     // Voice mode (#78): synthesize a reply to speech via the agent's ElevenLabs
     // voice. Returns a playable object URL for an <audio> src, or null when voice
     // is unavailable / synthesis failed / over the cost cap (caller stays text).

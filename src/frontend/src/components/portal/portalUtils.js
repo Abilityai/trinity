@@ -311,10 +311,25 @@ export function renameFailureMessage(err) {
 // so an unsaved new chat renders no active tab rather than a phantom one.
 // #523's pinned Main chat is this list's first slot when it lands; nothing
 // here assumes there is not one.
+// ent#523: the pinned Main chat's tab label. A constant because three places
+// have to agree on it — the strip, the details list, and the test — and a chat
+// whose title is literally "Main" would otherwise be indistinguishable from it.
+export const MAIN_TAB_LABEL = 'Main'
+
 export function agentChatTabs(threads, agentName) {
   if (!agentName) return []
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
+    // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
+    // "one system line in Main names the archived chat, which becomes the
+    // newest tab" (2026-09-06) — and it is right: an archive is an ordinary
+    // past chat, and hiding the thing the system line just pointed at is the
+    // one place the person is most likely to look next.
+    //
+    // An earlier draft filtered these out, reasoning that Reset would grow the
+    // strip by one permanent entry per use. That was solving a problem
+    // `OverflowTabs` already solves: the strip renders what fits and counts the
+    // rest under "N more", so growth costs nothing visually.
   const ts = (t) => {
     const iso = t.last_message_at || t.created_at
     const n = iso ? new Date(iso).getTime() : 0
@@ -322,8 +337,22 @@ export function agentChatTabs(threads, agentName) {
   }
   return mine
     .slice()
-    .sort((a, b) => ts(b) - ts(a))
-    .map((t) => ({ id: t.id || t.session_id, label: threadTitle(t), thread: t }))
+    // Main first, then recency. Sorted rather than spliced so there is one
+    // comparator to reason about, and so a payload that (wrongly) carries two
+    // Mains still produces a stable order instead of a random one.
+    .sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0) || ts(b) - ts(a))
+    .map((t) => ({
+      id: t.id || t.session_id,
+      // Main is named by its ROLE, never by its title: it is the same thread
+      // for the life of the pair, and a derived title from whatever was said
+      // in it first would make the pinned tab wander.
+      label: t.is_main ? MAIN_TAB_LABEL : threadTitle(t),
+      // The bookmark the approved design (board A3) draws on Main. It is the
+      // one tab that is pinned rather than ordered, so it is the one that says
+      // so in the strip rather than only in its position.
+      pinned: !!t.is_main,
+      thread: t,
+    }))
 }
 
 // The overflow trigger's label: counted, as the contract asks ("N more").
@@ -428,7 +457,12 @@ export function resolveAgentLanding({ agent, forceNew = false, agents = [], thre
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
   if (forceNew) return { agentName: agent, sessionId: null }
 
-  const latest = (Array.isArray(threads) ? threads : []).find((t) => t && t.agent_name === agent)
+  // ent#523: the same rule the sidebar's agent row uses (`landingThread`), not
+  // a second one. This used to take the first row of an already-sorted list,
+  // which agreed with "most recent" by accident; once Main exists, an unused
+  // Main sorts last on recency and "first row" would skip it, so a deep link
+  // and a sidebar click could land a first-time visitor in different places.
+  const latest = landingThread(threads, agent)
   return {
     agentName: agent,
     sessionId: latest ? (latest.id || latest.session_id || null) : null,
@@ -1560,4 +1594,192 @@ const FEEDBACK_REACHED_AGENT = new Set(['dispatched', 'already_dispatched'])
 
 export function feedbackAcknowledgement(captureFeedback) {
   return FEEDBACK_REACHED_AGENT.has(captureFeedback) ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
+}
+
+// --- Agents at the centre (ent#523) ------------------------------------------
+
+// Which chat opening an agent lands you in. Most recently ACTIVE wins, and Main
+// is the floor — never a blank stage, and never "the oldest thread happened to
+// sort first". Returns null only when the caller has no chats with this agent at
+// all, which the caller reads as "open Main once the list arrives".
+//
+// Deliberately NOT `agentChatTabs()[0]`: that pins Main to the front, so it
+// would land you in Main every time regardless of where you were last — the
+// exact behaviour AC 1 replaced.
+export function landingThread(threads, agentName) {
+  if (!agentName) return null
+  const mine = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName && !t.archived_at)
+  if (!mine.length) return null
+  const ts = (t) => {
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    return Number.isNaN(n) ? 0 : n
+  }
+  // An unused Main has no `last_message_at` and would sort last on recency
+  // alone, so a first-time visitor would land on nothing. Falling back to it
+  // explicitly is cheaper to read than a comparator that special-cases zero.
+  const used = mine.filter((t) => t.last_message_at)
+  if (used.length) return used.slice().sort((a, b) => ts(b) - ts(a))[0]
+  return mine.find((t) => t.is_main) || mine[0]
+}
+
+// The sidebar's agent order (ent#523 AC 6).
+//
+// ent#491 owns "order by most recent collaboration" and is status-INCUBATING,
+// so this deliberately does NOT implement it. What ships is the deterministic
+// order the AC itself states — the primary companion first, then recency, then
+// name — with `primaryName` as the seam ent#491 will fill. Alphabetical-by-slug
+// was the alternative and is worse for exactly the reason ent#523 exists: it
+// sorts by a handle nobody thinks in.
+export function orderRosterAgents(agents, threads, primaryName = null) {
+  const list = Array.isArray(agents) ? agents.slice() : []
+  const lastSeen = new Map()
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || !t.agent_name) continue
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    if (Number.isNaN(n)) continue
+    if (n > (lastSeen.get(t.agent_name) || 0)) lastSeen.set(t.agent_name, n)
+  }
+  const rank = (a) => (a?.name && a.name === primaryName ? 1 : 0)
+  return list.sort((a, b) =>
+    rank(b) - rank(a)
+    || (lastSeen.get(b?.name) || 0) - (lastSeen.get(a?.name) || 0)
+    || String(a?.name || '').localeCompare(String(b?.name || ''))
+  )
+}
+
+// The one-line preview under an agent's name: the last thing said in any of
+// your chats with it (AC 6). Returns null with nothing to show, so the row
+// keeps its two-line footprint instead of reserving space for an empty string.
+export function agentPreview(threads, agentName) {
+  if (!agentName) return null
+  const mine = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName && t.last_message_at)
+  if (!mine.length) return null
+  const ts = (t) => {
+    const n = new Date(t.last_message_at).getTime()
+    return Number.isNaN(n) ? 0 : n
+  }
+  const newest = mine.slice().sort((a, b) => ts(b) - ts(a))[0]
+  // The thread TITLE, not the message body: the sidebar list is viewer-scoped
+  // metadata (#2198) and carries no message content, so a body preview would
+  // need a second fetch per agent — the N+1 that batch call exists to remove.
+  const label = threadTitle(newest)
+  return label === 'New chat' ? null : label
+}
+
+// What the composer says when the agent cannot take a message (AC 10).
+//
+// A LABEL, never a disabled input: disabling relocates the dead state rather
+// than removing it, and the person can still type, queue their thought and read
+// why it will not go yet. The server's 502 stays the real refusal — this only
+// sets the expectation before they hit Enter. Returns null while the agent can
+// run, including on `unknown`, which is not evidence of anything.
+export function composerAvailabilityNotice(agent) {
+  const chip = availabilityChip(agent, { detailed: true })
+  if (!chip) return null
+  return { state: chip.state, message: chip.title }
+}
+
+// --- Answering an ask (ent#468) ----------------------------------------------
+
+// What the person is told after their answer lands.
+//
+// The decision this issue asked for is RENDER, not drop: on an opt-in agent an
+// answer sets real work in motion and spends the owner's budget, so the person
+// who caused that is told it happened. ent#364's AC — "the answer reaches the
+// agent and it resumes" — was true in the backend and invisible in the product.
+//
+// Consumes BOTH fields the answer response carries, which is the AC's "either
+// both or neither":
+//   * `status` is the gate. Only a row the server calls `answered` earns a
+//     confirmation — anything else means the answer did not land the way this
+//     copy would claim, and saying "Sent" over it would be the over-claim
+//     ent#430 spent a blocker removing from the field below.
+//   * `resume_requested` is the wording, and it is a report of INTENT
+//     (`_resume_requested`'s own contract): the dispatch is backgrounded, so
+//     "is picking this up" is the honest tense — not "has finished", and not a
+//     promise the turn succeeded. A failure after this point surfaces as a
+//     FAILED execution row and an audit entry on the operator's side.
+//
+// Returns null when there is nothing honest to say, so the caller renders
+// nothing rather than an empty line.
+export function answerConfirmation(answered, agentLabel = null) {
+  if (!answered || answered.status !== 'answered') return null
+  const who = (agentLabel || answered.agent_name || 'the agent')
+  return answered.resume_requested === true
+    ? `Sent — ${who} is picking this up.`
+    : 'Sent.'
+}
+
+// How long a confirmation stays before it clears itself. Long enough to read a
+// short sentence you were not waiting for, short enough that it never becomes
+// furniture — and it is a CONSTANT rather than a prop because the answer to
+// "how long should this be up" does not vary by surface.
+export const ANSWER_CONFIRMATION_MS = 6000
+
+// Every agent row's preview + timestamp, in ONE pass over the thread list.
+//
+// The two helpers below each scan the whole list, and the sidebar template
+// called them per row and twice each (a `v-if` and an interpolation) — so a
+// 10-agent roster over 200 threads did ~8k iterations per render, on a surface
+// that re-renders on every store tick. Same rules, same output; the cost is
+// O(threads + agents) instead of O(rows × threads × 4).
+export function agentRowMeta(threads, now = Date.now()) {
+  const newest = new Map()
+  const title = new Map()
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || !t.agent_name || !t.last_message_at) continue
+    const n = new Date(t.last_message_at).getTime()
+    if (!Number.isFinite(n)) continue
+    if (n > (newest.get(t.agent_name) || 0)) {
+      newest.set(t.agent_name, n)
+      title.set(t.agent_name, threadTitle(t))
+    }
+  }
+  const out = {}
+  for (const [name, n] of newest) {
+    const label = title.get(name)
+    out[name] = {
+      // Same rule as `agentPreview`: an untitled chat is no preview, because a
+      // row reading "New chat" under every agent is noise.
+      preview: label === 'New chat' ? null : label,
+      time: compactAge(n, now),
+    }
+  }
+  return out
+}
+
+// The tight form, split out so `agentRowTime` and `agentRowMeta` cannot drift
+// on what "2d" means.
+function compactAge(then, now) {
+  const diff = Math.max(0, now - then)
+  if (diff < 60_000) return 'now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`
+  return new Date(then).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// The agent row's right-hand timestamp (ent#523, board A3): when you last
+// heard from this agent, in the tightest form that is still unambiguous.
+//
+// Deliberately NOT `relativeTime` above, which other surfaces use and which
+// says "just now" / "5m ago" / "2026-09-07". This column is a few characters
+// wide beside a name and a preview, so it drops the "ago" the position already
+// implies and shows a month-day past a week — the shape the design draws
+// (`now` · `12m` · `2d` · `Aug 21`). Two formats because there are two jobs,
+// not because one of them was overlooked.
+export function agentRowTime(threads, agentName, now = Date.now()) {
+  if (!agentName) return ''
+  let newest = 0
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || t.agent_name !== agentName || !t.last_message_at) continue
+    const n = new Date(t.last_message_at).getTime()
+    if (Number.isFinite(n) && n > newest) newest = n
+  }
+  if (!newest) return ''
+  return compactAge(newest, now)
 }

@@ -264,7 +264,11 @@ describe('#2128 structure guards', () => {
     expect(zoneAt, 'the stage no longer has a loading placeholder ahead of the chain').toBeGreaterThan(-1)
     const zone = src.slice(zoneAt, branchAt)
     expect(zone, 'the stage placeholder must be the stage variant').toContain('variant="stage"')
-    expect(zone, 'the stage placeholder must key on the stage verdict').toContain(`v-else-if="stage.state === 'loading'"`)
+    // ent#523: `v-if` or `v-else-if` — the placeholder heads the chain now that
+    // the agent-page branch ahead of it is gone. The verdict it keys on is the
+    // rule; its ordinal in the chain is not.
+    expect(zone, 'the stage placeholder must key on the stage verdict')
+      .toMatch(/v-(else-)?if="stage\.state === 'loading'"/)
     expect(zone, 'the branches must be the placeholder\'s v-else').toContain('<template v-else>')
     expect(zone, 'a bare stage.loading gate would trip the #1927 ratchet').not.toContain('v-if="stage.loading"')
     expect(

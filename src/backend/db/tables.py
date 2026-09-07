@@ -492,6 +492,11 @@ enterprise_portal_sessions = Table(
     Column("consecutive_resume_failures", Integer),
     # ent#473 — NULL (derived fallback / pre-#473) | 'generated' | 'user'.
     Column("title_source", Text),
+    # ent#523 — the pinned Main chat (exactly one live row per pair; the
+    # partial unique index in schema.py is the enforcement) and the Reset
+    # tombstone that retires one. NULL `archived_at` = live.
+    Column("is_main", Integer),
+    Column("archived_at", Text),
 )
 
 enterprise_portal_messages = Table(
@@ -599,6 +604,8 @@ agent_canvases = Table(
     Column("created_at", Text),
     Column("updated_at", Text),
     Column("updated_by_execution_id", Text),
+    # ent#537 — starter layout by name; NULL = stacked.
+    Column("template", Text),
 )
 
 user_ui_preferences = Table(
