@@ -458,7 +458,6 @@ async def test_create_sets_unless_stopped_restart_policy(crud_env):
     assert kw["restart_policy"] == {"Name": "unless-stopped"}
 
 
-
 # ===========================================================================
 # Case 2 — github template happy path (predefined + dynamic), full env key-set
 # ===========================================================================
