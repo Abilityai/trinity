@@ -314,10 +314,12 @@ def agent_container_states() -> Optional[Dict[str, str]]:
     ``list_all_agents_fast`` says "use container name as authoritative source".
 
     The status is classified EXPLICITLY. ``list_all_agents_fast`` falls through
-    with ``else: normalized_status = docker_status``, which passes ``paused``,
-    ``restarting`` and — routinely, during any delete — ``removing`` straight to
-    the caller; consumers of this function map the result onto a closed set, so a
-    raw status escaping here would fail their validation instead of degrading.
+    with ``else: normalized_status = docker_status``, which passes ``paused``
+    and — routinely, during any delete — ``removing`` straight to the caller;
+    consumers of this function map the result onto a closed set, so a raw status
+    escaping here would fail their validation instead of degrading. (``restarting``
+    was in that list until #2541 folded it into the stopped tuple on both
+    normalizers, so all three mappings now agree on it — see RESTART-005.)
     """
     if not docker_client:
         return None
