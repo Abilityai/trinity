@@ -224,6 +224,10 @@ describe('#2579 — the title settle cycle', () => {
     expect((s.match(/refreshTitleHealth\(\)/g) || [])).toHaveLength(2)   // the definition + one caller
     // `@/api` hard-navigates to /login on a 401 under /workspace; a background
     // diagnostic must not bounce an operator out of their conversation.
-    expect(codeOnly(STORE())).toMatch(/async fetchTitleGenerationHealth\(\) \{\s*const \{ data \} = await portalHttp\.get/)
+    const store = codeOnly(STORE())
+    expect(store).toMatch(/async fetchTitleGenerationHealth\(\) \{\s*const \{ data \} = await portalHttp\.get/)
+    expect(store).toMatch(/'\/api\/settings\/portal-session-policy'/)
+    // The same field the settings panel reads — one health path, not two.
+    expect(store).toMatch(/return data\?\.title_generation \|\| null/)
   })
 })

@@ -119,6 +119,13 @@ describe('a draft is a tab (#2579)', () => {
     expect(tabs[0].thread).toBeNull()
   })
 
+  it('goes FIRST when the pair has no Main yet — "after Main" is not "index 1"', () => {
+    // A pair whose chats predate ent#523 has no Main until `ensureMainListed`
+    // mints one. A hardcoded index 1 would bury the new tab behind a chat.
+    const tabs = agentChatTabs([other], 'scribe', { draft: true })
+    expect(tabs.map((t) => t.id)).toEqual([NEW_CHAT_TAB_ID, 'o1'])
+  })
+
   it('takes the adopted id across the gap before the list catches up', () => {
     // The adoption seam: the thread exists, the batch has not listed it yet.
     // Keying the tab to the real id is what stops it jumping on arrival.
@@ -327,6 +334,9 @@ describe('the strip is the primitive, and the editor has one home', () => {
       expect(s2).toMatch(/draft: \{ type: Boolean, default: false \}/)
       expect(s2).toMatch(/activeId: props\.activeId, draft: props\.draft/)
       expect(src('components/portal/PortalConversation.vue')).toMatch(/:draft="newChat \|\| bornHere"/)
+      // ...and the provisional tab renders ACTIVE. Without the fallback the
+      // strip appears with nothing selected, which is its own dead state.
+      expect(s2).toMatch(/:model-value="activeId \|\| \(draft \? NEW_CHAT_TAB_ID : null\)"/)
     })
   })
   it('the three rename homes all mount PortalEditableTitle', () => {
