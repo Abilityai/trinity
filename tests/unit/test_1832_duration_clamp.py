@@ -238,16 +238,47 @@ def _duration_expressions(path: Path):
 
 def _duration_expressions_from_source(source: str):
     """``_duration_expressions`` over a source string — the guard's own unit."""
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
+    yield from _scan_scope(ast.parse(source), None)
+
+
+def _scan_scope(node: ast.AST, func_name: "str | None"):
+    """Walk ``node``, carrying the name of the nearest enclosing function.
+
+    The name is what makes acceptance *per site* rather than per shape: only the
+    six sweeps that FABRICATE an end time may persist ``None`` (see
+    ``_FABRICATION_SITES``). A flat ``ast.walk`` cannot say which function a sink
+    sits in, and ``db/activities.py`` holds a fabricator and the measured
+    ``complete_activity`` in the same file — so file granularity would let a
+    measured writer drop a real datum and still pass.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _scan_scope(child, child.name)
+            continue
+        if isinstance(child, ast.Assign):
+            for target in child.targets:
                 if isinstance(target, ast.Name) and target.id == "duration_ms":
-                    yield node.lineno, node.value
-        elif isinstance(node, ast.keyword) and node.arg == "duration_ms":
-            if _is_pass_through(node.value):
-                continue
-            yield node.value.lineno, node.value
+                    yield child.lineno, child.value, func_name
+        elif isinstance(child, ast.keyword) and child.arg == "duration_ms":
+            if not _is_pass_through(child.value):
+                yield child.value.lineno, child.value, func_name
+        yield from _scan_scope(child, func_name)
+
+
+# The six watchdog sweeps that INVENT a row's end time. They — and only they —
+# may persist ``None``. Everything else that binds duration_ms is a measurement
+# and must route through ``duration_ms_between`` (or write the literal 0 that a
+# skipped row legitimately ran for). Blanket-accepting ``None`` everywhere would
+# let a future edit to ``update_execution_status`` or either scheduler finalizer
+# silently discard a real number and still pass this guard.
+_FABRICATION_SITES = frozenset({
+    "mark_stale_executions_failed",
+    "mark_no_session_executions_failed",
+    "fail_stale_slot_execution",
+    "mark_execution_failed_by_watchdog",
+    "close_open_activities_for_executions",
+    "mark_stale_activities_failed",
+})
 
 
 def _is_pass_through(value: ast.AST) -> bool:
@@ -256,9 +287,14 @@ def _is_pass_through(value: ast.AST) -> bool:
     Exactly two shapes, kept deliberately narrow so the guard stays fail-CLOSED
     (anything it does not recognise must satisfy ``_is_guarded``):
 
-    * ``duration_ms=duration_ms`` — a local already judged at its ``Assign``.
+    * ``duration_ms=duration_ms`` — the local already judged at its ``Assign``.
       Demanding the guard shape here too would flag the sink of a correctly
-      guarded writer.
+      guarded writer. **Only that exact name.** ``_duration_expressions`` judges
+      an ``Assign`` only when its target is literally ``duration_ms``, so
+      skipping any ``ast.Name`` would let ``elapsed = int((c - s)…)`` followed by
+      ``.values(duration_ms=elapsed)`` past the guard entirely — a shape the
+      codebase already writes elsewhere (``fan_out_service`` builds its result
+      that way).
     * ``duration_ms=row["duration_ms"]`` — reading the column straight back out
       of a row mapping to build a model (``_row_to_execution`` and friends).
       That is a READ, not a writer, and it cannot produce a value the column did
@@ -266,7 +302,7 @@ def _is_pass_through(value: ast.AST) -> bool:
       still has to satisfy the guard.
     """
     if isinstance(value, ast.Name):
-        return True
+        return value.id == "duration_ms"
     return (
         isinstance(value, ast.Subscript)
         and isinstance(value.slice, ast.Constant)
@@ -274,14 +310,16 @@ def _is_pass_through(value: ast.AST) -> bool:
     )
 
 
-def _is_guarded(value: ast.AST) -> bool:
+def _is_guarded(value: ast.AST, *, allow_none: bool = True) -> bool:
     """True when the expression is one of the three accepted shapes.
 
-    Acceptance is classified by shape, deliberately NOT a blanket "anything
-    constant is fine" (#2434):
+    Acceptance is classified by shape AND by site, deliberately NOT a blanket
+    "anything constant is fine" (#2434):
 
     * ``None`` — a **fabricated** duration. The sweep invented the end time, so
-      there is nothing to record. Only legitimate at the six sweep sites.
+      there is nothing to record. Legitimate ONLY at the six sweep sites, which
+      is what ``allow_none`` carries: at a measured writer, ``None`` is a
+      discarded measurement, not a guard.
     * literal ``0`` — a **skipped** row: it ran for zero time, which IS a
       measurement.
     * ``duration_ms_between(...)`` — a **measured** writer, guarded at both ends
@@ -291,7 +329,7 @@ def _is_guarded(value: ast.AST) -> bool:
     ``max(0, 2_850_000_000)`` is still 2.85 bn — the #2434 defect itself.
     """
     if isinstance(value, ast.Constant) and value.value is None:
-        return True  # fabricated → NULL (#2434)
+        return allow_none  # fabricated → NULL (#2434); a measurement → not a guard
     if isinstance(value, ast.Constant) and value.value == 0:
         return True  # the `skipped` rows write a literal 0
     return (
@@ -312,8 +350,8 @@ def test_1832_every_duration_writer_is_clamped(path):
     """
     unguarded = [
         lineno
-        for lineno, value in _duration_expressions(path)
-        if not _is_guarded(value)
+        for lineno, value, func_name in _duration_expressions(path)
+        if not _is_guarded(value, allow_none=func_name in _FABRICATION_SITES)
     ]
 
     assert not unguarded, (
@@ -349,7 +387,7 @@ def test_2434_source_guard_catches_an_inlined_keyword_regression():
     found = list(_duration_expressions_from_source(src))
 
     assert found, "the keyword sink was not seen at all"
-    assert not any(_is_guarded(value) for _, value in found)
+    assert not any(_is_guarded(value) for _, value, _fn in found)
 
 
 def test_2434_bare_max_is_no_longer_accepted():
@@ -379,11 +417,17 @@ def test_2434_pass_through_keyword_is_not_double_judged():
     not_skipped = [
         "ScheduleExecution(duration_ms=row['elapsed'])",
         "ScheduleExecution(duration_ms=int((c - s).total_seconds() * 1000))",
+        # A DIFFERENTLY-NAMED local is not a pass-through: nothing judged it,
+        # because `_duration_expressions` only judges an `Assign` whose target
+        # is literally `duration_ms`. Skipping every `ast.Name` would let
+        # `elapsed = int((c - s)...)` + `.values(duration_ms=elapsed)` — the
+        # shape `fan_out_service` already uses — through the guard untouched.
+        "conn.execute(update(t).values(duration_ms=elapsed_ms))",
     ]
     for src in not_skipped:
         found = list(_duration_expressions_from_source(src))
         assert found, src
-        assert not any(_is_guarded(v) for _, v in found), src
+        assert not any(_is_guarded(v) for _, v, _fn in found), src
 
 
 def test_2434_accepted_shapes_are_exactly_three():
@@ -404,3 +448,45 @@ def test_2434_accepted_shapes_are_exactly_three():
     ]
     for src in rejected:
         assert _is_guarded(ast.parse(src).body[0].value) is False, src
+
+
+def test_2434_none_is_only_accepted_at_a_fabrication_site():
+    """`None` is a guard at a sweep and a DISCARDED MEASUREMENT anywhere else.
+
+    Blanket-accepting `None` was the loophole Codex named: it would let a future
+    edit replace `duration_ms_between(...)` with `None` inside
+    `update_execution_status` or either scheduler finalizer — throwing away a
+    real number — and this guard would still pass.
+    """
+    value = ast.parse("duration_ms = None").body[0].value
+
+    assert _is_guarded(value, allow_none=True) is True
+    assert _is_guarded(value, allow_none=False) is False
+
+    # literal 0 and the helper stay accepted on BOTH sides of the split.
+    for src in ("duration_ms = 0", "duration_ms = duration_ms_between(s, c)"):
+        node = ast.parse(src).body[0].value
+        assert _is_guarded(node, allow_none=False) is True, src
+
+
+def test_2434_scanner_reports_the_enclosing_function():
+    """The per-site rule needs the site, so the scanner must carry it.
+
+    Also pins the `db/activities.py` shape specifically: a fabricator and the
+    measured `complete_activity` live in ONE file, so file granularity would be
+    too coarse to catch a measured writer that starts persisting `None`.
+    """
+    src = (
+        "class Ops:\n"
+        "    def mark_stale_activities_failed(self):\n"
+        "        conn.execute(update(t).values(duration_ms=None))\n"
+        "    def complete_activity(self):\n"
+        "        conn.execute(update(t).values(duration_ms=None))\n"
+    )
+    by_func = {fn: value for _, value, fn in _duration_expressions_from_source(src)}
+
+    assert set(by_func) == {"mark_stale_activities_failed", "complete_activity"}
+    assert "mark_stale_activities_failed" in _FABRICATION_SITES
+    assert "complete_activity" not in _FABRICATION_SITES
+    assert _is_guarded(by_func["mark_stale_activities_failed"], allow_none=True) is True
+    assert _is_guarded(by_func["complete_activity"], allow_none=False) is False
