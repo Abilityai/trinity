@@ -265,12 +265,13 @@
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
           @main-reset="onMainReset"
+          @open-details="detailsOpen = true"
         >
           <!-- ent#523: the agent's numbers, always visible under the header.
                Mounted by the shell because the shell owns which agent is on
                screen and which side panel is open. -->
           <template #band>
-            <PortalAgentBand :agent-name="activeAgent.name" @open-details="detailsOpen = true" />
+            <PortalAgentBand :agent-name="activeAgent.name" />
           </template>
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />

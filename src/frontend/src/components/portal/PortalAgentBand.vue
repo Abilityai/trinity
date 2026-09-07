@@ -56,9 +56,23 @@
       <!-- The chart. #2540: the scanline beam is the CHART-loading motion and
            this is the only place on this page entitled to it — every other
            first load here and in the conversation is a skeleton. -->
-      <div class="flex-1 min-w-[12rem] max-w-full">
+      <!-- Bounded, not flexed to fill. Stretched across the whole band a 7-day
+           window gives ~150px-wide columns, so a single execution renders as a
+           slab rather than a bar — board A3's chart is a compact block beside
+           the figures, not a full-width plot. The spacer after it is what keeps
+           the window selector on the right. -->
+      <div class="w-[26rem] max-w-[45%] shrink-0">
+        <!-- Board A3 names the chart rather than leaving a bare plot beside a
+             row of numbers — without it the bars read as another statistic. -->
+        <div class="text-[10px] font-semibold uppercase tracking-wide text-gray-400 leading-none mb-1.5">
+          Activity · last {{ windowLabel }}
+        </div>
         <ScanlineReveal :loading="!loaded">
-          <div class="h-[52px] flex items-center">
+          <!-- No fixed height here. The chart is bars + day labels + legend, so
+               a clipped box put its legend on top of the tab strip; the row
+               sizes to the chart instead. `legend="side"` is what keeps that
+               from doubling the band's height, and is board A3's arrangement. -->
+          <div class="min-h-[52px] flex items-center">
             <p v-if="stats.unavailable" class="text-xs text-gray-400">Stats are unavailable right now.</p>
             <p v-else-if="!hasActivity" class="text-xs text-gray-400">No activity in the last {{ windowLabel }}.</p>
             <StackedBarChart
@@ -68,11 +82,14 @@
               :buckets="chartBuckets"
               :colors="BUCKET_COLORS"
               :labels="PORTAL_BUCKET_LABELS"
-              :height="52"
+              :height="44"
+              legend="side"
             />
           </div>
         </ScanlineReveal>
       </div>
+
+      <div class="flex-1"></div>
 
       <select
         v-model="timeWindow"
@@ -84,12 +101,6 @@
         <option value="30d">30 days</option>
       </select>
 
-      <button
-        type="button"
-        class="shrink-0 text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
-        data-testid="portal-open-agent-details"
-        @click="$emit('open-details')"
-      >Agent details</button>
     </div>
 
     <!-- ent#253: a failed REFRESH keeps the data and says so beside it; it does
@@ -117,7 +128,6 @@ import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
 const props = defineProps({
   agentName: { type: String, required: true },
 })
-defineEmits(['open-details'])
 
 const timeWindow = ref('7d')
 const { stats, ratings, loaded, error, reload } = usePortalAgentPage(

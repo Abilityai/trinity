@@ -151,6 +151,19 @@
              opening it again. Disabled while a turn is in flight because the
              server refuses then anyway; showing it live would offer an action
              that can only fail. -->
+        <!-- ent#523 / board A3: the agent's own context opens from an INFO
+             control in the header, beside the other per-conversation actions —
+             not from a text link in the band. The band is numbers; this is the
+             door to everything else about the agent. -->
+        <button
+          class="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+          title="Agent details"
+          aria-label="Agent details"
+          data-testid="portal-open-agent-details"
+          @click="$emit('open-details')"
+        >
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        </button>
         <button
           v-if="isMainChat"
           class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
@@ -628,7 +641,7 @@ const props = defineProps({
   // ent#473: async (thread, title) => void, or null when renaming is unavailable.
   rename: { type: Function, default: null },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'open-details'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),

@@ -22,6 +22,7 @@ import {
   composerAvailabilityNotice,
   resolveAgentLanding,
   answerConfirmation,
+  agentRowTime,
   MAIN_TAB_LABEL,
 } from '@/components/portal/portalUtils'
 import {
@@ -441,5 +442,68 @@ describe('ent#468 — the answer confirmation', () => {
     // every chat switch.
     expect(ASKS).toContain('onBeforeUnmount')
     expect(ASKS).toMatch(/confirmationTimers\.forEach\(clearTimeout\)/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Board A3 alignment (ent#523)
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — the approved design (board A3)', () => {
+  const T0 = Date.parse('2026-09-07T12:00:00Z')
+  const at = (iso) => ({ agent_name: 'a', last_message_at: iso })
+
+  it('the agent row time is tight — no "ago", a month-day past a week', () => {
+    expect(agentRowTime([at('2026-09-07T11:59:30Z')], 'a', T0)).toBe('now')
+    expect(agentRowTime([at('2026-09-07T11:48:00Z')], 'a', T0)).toBe('12m')
+    expect(agentRowTime([at('2026-09-07T09:00:00Z')], 'a', T0)).toBe('3h')
+    expect(agentRowTime([at('2026-09-05T12:00:00Z')], 'a', T0)).toBe('2d')
+    expect(agentRowTime([at('2026-08-21T12:00:00Z')], 'a', T0)).toMatch(/Aug/)
+  })
+
+  it('takes the NEWEST thread, and says nothing with no history', () => {
+    expect(agentRowTime([
+      at('2026-09-01T12:00:00Z'),
+      at('2026-09-07T11:48:00Z'),
+    ], 'a', T0)).toBe('12m')
+    expect(agentRowTime([{ agent_name: 'a' }], 'a', T0)).toBe('')
+    expect(agentRowTime([], 'a', T0)).toBe('')
+    expect(agentRowTime([at('2026-09-07T11:48:00Z')], '', T0)).toBe('')
+  })
+
+  it('is a SECOND format on purpose, not a replacement for relativeTime', () => {
+    // The row is a few characters wide beside a name and a preview; the other
+    // surfaces want the sentence form. Two jobs, two formats.
+    const UTILS = read('../../src/components/portal/portalUtils.js')
+    expect(UTILS).toContain('export function relativeTime')
+    expect(UTILS).toContain('export function agentRowTime')
+  })
+
+  it('Main carries the pin the design draws', () => {
+    const [tab] = agentChatTabs([main()], 'a')
+    expect(tab.pinned).toBe(true)
+    expect(agentChatTabs([chat('c1')], 'a')[0].pinned).toBe(false)
+  })
+
+  it('the pin is drawn in the MIRROR row too, or the strip mis-measures', () => {
+    // A glyph the visible row renders and the hidden measuring row does not is
+    // a tab measured narrower than it draws — the strip then overflows one tab
+    // too late. Three render sites, one prop.
+    const TABS = read('../../src/components/OverflowTabs.vue')
+    expect((TABS.match(/v-if="tab\.pinned"/g) || []).length).toBe(3)
+    // ...and a pin change must invalidate the measurement cache.
+    expect(TABS).toMatch(/t\.pinned \? 'p' : ''/)
+  })
+
+  it('Agent details opens from the header, not from the band', () => {
+    // Board A3 puts it with the per-conversation actions; the band is numbers.
+    const CONV = read('../../src/components/portal/PortalConversation.vue')
+    const BAND_SRC = read('../../src/components/portal/PortalAgentBand.vue')
+    expect(CONV).toContain('data-testid="portal-open-agent-details"')
+    expect(BAND_SRC).not.toContain('portal-open-agent-details')
+  })
+
+  it('the chart is named rather than left a bare plot beside numbers', () => {
+    expect(read('../../src/components/portal/PortalAgentBand.vue')).toMatch(/Activity · last/)
   })
 })

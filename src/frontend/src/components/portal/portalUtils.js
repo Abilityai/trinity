@@ -347,6 +347,10 @@ export function agentChatTabs(threads, agentName) {
       // for the life of the pair, and a derived title from whatever was said
       // in it first would make the pinned tab wander.
       label: t.is_main ? MAIN_TAB_LABEL : threadTitle(t),
+      // The bookmark the approved design (board A3) draws on Main. It is the
+      // one tab that is pinned rather than ordered, so it is the one that says
+      // so in the strip rather than only in its position.
+      pinned: !!t.is_main,
       thread: t,
     }))
 }
@@ -1715,3 +1719,29 @@ export function answerConfirmation(answered, agentLabel = null) {
 // furniture — and it is a CONSTANT rather than a prop because the answer to
 // "how long should this be up" does not vary by surface.
 export const ANSWER_CONFIRMATION_MS = 6000
+
+// The agent row's right-hand timestamp (ent#523, board A3): when you last
+// heard from this agent, in the tightest form that is still unambiguous.
+//
+// Deliberately NOT `relativeTime` above, which other surfaces use and which
+// says "just now" / "5m ago" / "2026-09-07". This column is a few characters
+// wide beside a name and a preview, so it drops the "ago" the position already
+// implies and shows a month-day past a week — the shape the design draws
+// (`now` · `12m` · `2d` · `Aug 21`). Two formats because there are two jobs,
+// not because one of them was overlooked.
+export function agentRowTime(threads, agentName, now = Date.now()) {
+  if (!agentName) return ''
+  let newest = 0
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || t.agent_name !== agentName || !t.last_message_at) continue
+    const n = new Date(t.last_message_at).getTime()
+    if (Number.isFinite(n) && n > newest) newest = n
+  }
+  if (!newest) return ''
+  const diff = Math.max(0, now - newest)
+  if (diff < 60_000) return 'now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`
+  return new Date(newest).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
