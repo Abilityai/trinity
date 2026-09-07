@@ -510,6 +510,8 @@ enterprise_portal_messages = Table(
     Column("content", Text),
     Column("cost", Float),
     Column("created_at", Text),
+    Column("source", Text),         # ent#534: NULL typed | 'voice'
+    Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind

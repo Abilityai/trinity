@@ -414,43 +414,58 @@ def reports(agent_name: str, client_email: str, *, limit: int = 20, offset: int 
     } for r in rows]
 
 
-def canvases(agent_name: str) -> list[dict]:
-    """The agent's canvases a Workspace client may see (ent#438).
+def canvas_audience_for(is_platform: bool) -> Optional[str]:
+    """Which canvas audiences a Workspace principal reads (ent#534).
 
-    Narrowed **in the query** to `audience='roster'`, not filtered afterwards:
-    a read that loads every canvas and drops some in Python has already put an
-    operator-only surface in this process's memory one edit away from the
-    response, which is the ent#365 FR-2 lesson restated. A canvas is
-    operator-only unless the agent explicitly published it, so the default is
-    an empty Workspace tab rather than an accidental disclosure.
+    A portal-token client sees `roster` only — what the agent meant for them.
+    A PLATFORM principal sees every audience (None = no narrowing): they can
+    already open Agent Detail for any agent on their Workspace roster and read
+    every canvas there, so narrowing here hid nothing from them and only made
+    the canvas the orb drew during a voice call vanish from the rail the moment
+    the call ended (the `main` canvas is `operator` by default). Deliberately
+    asymmetric with Reports on this page, which stay addressed-to-me for
+    everyone: a report is *sent*, a canvas is the agent's *surface*.
+
+    Returned rather than defaulted so every caller states the principal — a
+    default that fails open is the bug class (ent#365).
+    """
+    return None if is_platform else CANVAS_AUDIENCE_ROSTER
+
+
+def canvases(agent_name: str, audience: Optional[str] = CANVAS_AUDIENCE_ROSTER) -> list[dict]:
+    """The agent's canvases a Workspace principal may see (ent#438, ent#534).
+
+    Narrowed **in the query**, not filtered afterwards: a read that loads every
+    canvas and drops some in Python has already put an operator-only surface in
+    this process's memory one edit away from the response, which is the ent#365
+    FR-2 lesson restated. `audience` comes from `canvas_audience_for(principal)`
+    — `roster` for an external client, None (all) for a platform user.
 
     Fail-soft, like every other block on this page: a read error costs the
     canvases, never the page.
     """
     try:
-        rows = db.list_agent_canvases(agent_name, audience=CANVAS_AUDIENCE_ROSTER)
+        rows = db.list_agent_canvases(agent_name, audience=audience)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: canvas read failed for %s: %s", agent_name, e)
         return []
     return canvas_service.decorate(rows, agent_name)
 
 
-def canvas_detail(agent_name: str, canvas_id: str) -> Optional[dict]:
-    """One roster-visible canvas with its blocks, or None (ent#438).
+def canvas_detail(agent_name: str, canvas_id: str,
+                  audience: Optional[str] = CANVAS_AUDIENCE_ROSTER) -> Optional[dict]:
+    """One visible canvas with its blocks, or None (ent#438, ent#534).
 
-    The audience narrowing is a REQUIRED argument on the accessor rather than a
-    check here, for the ent#365 FR-2 reason: a gate applied after the fetch has
-    already loaded what it was meant to withhold, and a default would make it
-    fail open.
+    The audience narrowing is an argument on the accessor rather than a check
+    here, for the ent#365 FR-2 reason: a gate applied after the fetch has
+    already loaded what it was meant to withhold. See `canvas_audience_for`.
     """
     try:
         canvas_service.validate_canvas_id(canvas_id)
     except canvas_service.CanvasError:
         return None
     try:
-        row = db.get_agent_canvas(
-            agent_name, canvas_id, audience=CANVAS_AUDIENCE_ROSTER
-        )
+        row = db.get_agent_canvas(agent_name, canvas_id, audience=audience)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: canvas detail failed for %s: %s", agent_name, e)
         return None

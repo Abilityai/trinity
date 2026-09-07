@@ -109,12 +109,14 @@ describe('what only source can answer', () => {
     // A reply composed locally during a live turn has no row id yet, so a thumb
     // would have nothing to point at.
     expect(conversation).toContain('target-kind="message"')
-    expect(conversation).toMatch(/<PortalRating[\s\S]{0,200}v-if="m\.id"/)
+    // ent#534: the loop variable is `item.message` (the thread folds voice calls
+    // into blocks); the rule — a thumb on a persisted message only — is unchanged.
+    expect(conversation).toMatch(/<PortalRating[\s\S]{0,200}v-if="item\.message\.id"/)
   })
 
   it('carries the caller’s own rating back from history', () => {
     expect(conversation).toContain('myRating: m.my_rating || null')
-    expect(conversation).toContain(':initial-rating="m.myRating"')
+    expect(conversation).toContain(':initial-rating="item.message.myRating"')
   })
 
   it('rates deliverables with the deliverable vocabulary', () => {

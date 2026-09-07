@@ -628,10 +628,15 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     for card in cards:
         card.briefing_state = "pending"
 
+    # ent#534: the Workspace's real-time voice capability — instance-level and
+    # principal-kind-level, resolved once here like `multi_agent_chat`. The
+    # roster is THE capability channel for this surface (#2128).
+    from .voice import realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
+        realtime_voice=realtime_voice_capability(include_owned),
     )
 
 
@@ -1244,6 +1249,8 @@ def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
 
 
 _HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
+# ent#534: how many of one voice call's spoken rows survive into that context.
+_VOICE_CONTEXT_ROWS_PER_CALL = 12
 
 
 _TITLE_MAX_CHARS = 60  # matches the sidebar's truncation width
@@ -1658,11 +1665,34 @@ def _format_history_context(history: list[dict]) -> str:
     first turn after every Reset, and putting words in the agent's mouth is
     worse than omitting chrome it did not write.
     """
+    # ent#534: a voice call's spoken rows are labelled, and budgeted. A 30-minute
+    # call can be ~180 rows, which would otherwise be the WHOLE context window
+    # (`_HISTORY_CONTEXT_MESSAGES`); the last few spoken exchanges are what the
+    # next typed turn is likely about, the rest is summarised as a count.
+    kept_per_call: dict = {}
+    for m in reversed(history):
+        cid = m.get("voice_call_id")
+        if m.get("source") == "voice" and cid and m.get("role") != "system":
+            kept_per_call[cid] = kept_per_call.get(cid, 0) + 1
+    seen_per_call: dict = {}
+    omitted_noted: set = set()
     lines = []
     for m in history:
         if m.get("role") == "system":
             continue
+        spoken = m.get("source") == "voice"
+        if spoken and m.get("voice_call_id"):
+            cid = m["voice_call_id"]
+            seen_per_call[cid] = seen_per_call.get(cid, 0) + 1
+            drop = kept_per_call.get(cid, 0) - _VOICE_CONTEXT_ROWS_PER_CALL
+            if seen_per_call[cid] <= drop:
+                if cid not in omitted_noted:
+                    omitted_noted.add(cid)
+                    lines.append(f"[{drop} earlier spoken turns of a voice call omitted]")
+                continue
         who = "Client" if m.get("role") == "user" else "You"
+        if spoken:
+            who += " (voice)"
         content = (m.get("content") or "").strip()
         if content:
             lines.append(f"{who}: {content}")
@@ -2203,7 +2233,10 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     """
     try:
         recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
-        if recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content:
+        # ent#534: a SPOKEN last line is not a failed typed turn — typing the
+        # same words after saying them is a new message, not a retry.
+        if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
+                and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
             return
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn

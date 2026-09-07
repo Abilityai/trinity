@@ -377,7 +377,11 @@ describe('ent#474 — shell wiring (source guards)', () => {
     const railAt = portal.indexOf('<PortalRail\n')
     expect(detailsAt, 'the details panel must exist').toBeGreaterThan(-1)
     expect(detailsAt).toBeLessThan(railAt)
-    expect(portal).toMatch(/<PortalAgentDetails[\s\S]{0,200}v-if="detailsOpen && activeAgent"/)
+    // ent#534: the voice call's canvas column takes the same place FIRST
+    // (`v-if="voiceCall.active && activeAgent"`), so details is the `v-else-if`
+    // — still a sibling in the rail's column, still not a tab.
+    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,160}v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
+    expect(portal).toMatch(/<PortalAgentDetails[\s\S]{0,200}v-else-if="detailsOpen && activeAgent"/)
     // It must NOT be registered as a rail tab.
     const railTabs = src('components/portal/portalRail.js')
     expect(railTabs).not.toContain('details')

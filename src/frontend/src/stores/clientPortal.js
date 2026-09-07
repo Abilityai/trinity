@@ -257,6 +257,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // actually says otherwise, and the component never sees an undefined
     // tri-state.
     multiAgentChatAvailable: false,
+    // ent#534 — may THIS principal start a real-time voice call from the
+    // Workspace, and if not, why (words for the disabled control). Fail-closed
+    // like the flag above; `reason: null` for a portal-token client means the
+    // control is not rendered at all. Named for the capability, not the
+    // provider (ent#354).
+    realtimeVoice: { available: false, reason: null },
     // Set once a roster attempt REACHED A VERDICT for this session. The room
     // route needs to tell "still loading" from "loaded, and the answer is no" —
     // without it a hard-loaded /workspace/r/:id would flash a refusal it then
@@ -426,6 +432,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // and `rosterLoaded` must go back to "no verdict yet" or the room route
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
+      this.realtimeVoice = { available: false, reason: null }
       this.rosterLoaded = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
@@ -1018,6 +1025,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // ent#534 — start a real-time voice call bound to a Workspace thread. The
+    // platform-principal route (uniform 404 for anyone else); the audio socket
+    // the response names is the OSS one and takes the platform JWT.
+    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/voice/start`,
+        { portal_session_id: portalSessionId, voice_name: voiceName },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     async createSession(agentName) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
@@ -1389,6 +1408,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // every background refetch would unmount a live room and flash a
         // refusal at an entitled client before taking it back.
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        // ent#534: same strictness — an older backend without the field reads
+        // as "not available", never as truthy.
+        this.realtimeVoice = {
+          available: data.realtime_voice?.available === true,
+          reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
+        }
         this.rosterLoaded = true
         // #2163: fired HERE and not from `Portal.vue::bootstrap()`, because
         // both "Try again" buttons call this action directly — a
