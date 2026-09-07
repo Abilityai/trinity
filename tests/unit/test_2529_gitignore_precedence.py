@@ -88,11 +88,38 @@ def _make_repo(tmp_path: Path, files: dict[str, str], gitignore: str) -> Path:
 
 def _push(home: Path) -> set[str]:
     """The two commands a backend Push runs, in order. Returns tracked paths."""
+    _push_sweep(home)
+    return set(_git(home, "ls-files").split())
+
+
+def _push_sweep(home: Path):
+    """The same two commands, returning the parsed `GitignoreSweep`.
+
+    Both probes ride on these two execs, so the report is produced by the exact
+    commands the backend runs — not by a second, test-only code path.
+    """
     gs = _gs()
+    outs = []
     for build in (gs._build_gitignore_merge_command, gs._build_rm_cached_ignored_command):
         out = _run(build(str(home)), home)
         assert out.returncode == 0, f"command failed: {out.stderr[:400]}"
-    return set(_git(home, "ls-files").split())
+        outs.append(out.stdout)
+    return gs._parse_gitignore_sweep(*outs)
+
+
+def _gitignore_lines(home: Path) -> list[str]:
+    return (home / ".gitignore").read_text().splitlines()
+
+
+def _regions(home: Path) -> tuple[list[str], list[str], list[str]]:
+    """(defaults block, user region, protected floor) as line lists."""
+    gs = _gs()
+    lines = _gitignore_lines(home)
+    b1 = lines.index(gs._GITIGNORE_BLOCK_BEGIN)
+    e1 = lines.index(gs._GITIGNORE_BLOCK_END)
+    b2 = lines.index(gs._GITIGNORE_FLOOR_BEGIN)
+    e2 = lines.index(gs._GITIGNORE_FLOOR_END)
+    return lines[b1 + 1:e1], lines[e1 + 1:b2], lines[b2 + 1:e2]
 
 
 # ---------------------------------------------------------------------------
@@ -126,3 +153,501 @@ def test_claude_settings_json_negation_survives_a_push(tmp_path):
     assert ".claude/settings.json" in _push(home), (
         "the #2036 negation hatch did not survive a second Push (#2529)"
     )
+
+
+def test_glob_negation_survives(tmp_path):
+    """corbin's own restore was `!**/.env.example` at nested depth — the exact
+    line hand-added in `ac4ebaa` with the comment "Negation must stay LAST in
+    this file." It must no longer have to be last."""
+    home = _make_repo(
+        tmp_path,
+        {
+            "skills/deploy/.env.example": "TOKEN=\n",
+            "archive/old/.env.example": "TOKEN=\n",
+            "CLAUDE.md": "agent\n",
+        },
+        "!**/.env.example\nmy-scratch/\n",
+    )
+    tracked = _push(home)
+    tracked = _push(home)
+    assert "skills/deploy/.env.example" in tracked
+    assert "archive/old/.env.example" in tracked
+
+
+def test_defaults_block_is_above_user_rules(tmp_path):
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "my-rule/\n!keep.md\n")
+    _push(home)
+    lines = _gitignore_lines(home)
+    gs = _gs()
+    assert lines.index(gs._GITIGNORE_BLOCK_END) < lines.index("my-rule/")
+    assert lines.index("!keep.md") < lines.index(gs._GITIGNORE_FLOOR_BEGIN)
+
+
+def test_user_rules_keep_their_order(tmp_path):
+    """The user region is the original file minus managed lines, in the original
+    order — a re-sort would silently change which of two of the agent's own
+    rules wins."""
+    home = _make_repo(
+        tmp_path,
+        {"CLAUDE.md": "a\n"},
+        "zeta/\n# a comment\nalpha/\n!alpha/keep.md\nmiddle/\n",
+    )
+    _push(home)
+    _, user, _ = _regions(home)
+    assert user == ["zeta/", "# a comment", "alpha/", "!alpha/keep.md", "middle/"]
+
+
+# ---------------------------------------------------------------------------
+# The protected floor (Decisions 5-6)
+# ---------------------------------------------------------------------------
+
+def test_user_negation_cannot_un_ignore_a_credential(tmp_path):
+    """A single hoisted block would turn every currently-INERT `!.env` in the
+    fleet live in one Push, and the unattended 15-minute `git add -A` would then
+    commit the credential to the user's own GitHub repo. The floor makes that
+    structurally impossible."""
+    home = _make_repo(
+        tmp_path,
+        {".env": "SECRET=live\n", "CLAUDE.md": "a\n"},
+        "!.env\n!.env.production\n",
+    )
+    (home / ".env.production").write_text("SECRET=live\n")
+    _push(home)
+    for path in (".env", ".env.production"):
+        out = subprocess.run(
+            ["git", "check-ignore", "-q", path],
+            cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True,
+        )
+        assert out.returncode == 0, f"{path} is NOT ignored — the floor was overridden"
+    assert ".env" not in _push(home)
+
+
+def test_authored_trinity_hook_survives_a_user_wildcard(tmp_path):
+    """The R2 regression, pinned: a user `*.sh` below a hoisted single block
+    would beat `!.trinity/setup.sh` (trinity-enterprise#76 / #1704), and it would
+    fail QUIETLY — the rm-cached pathspec still exempts the path, so nothing is
+    untracked; the hook is simply never `git add`-ed again."""
+    home = _make_repo(
+        tmp_path,
+        {".trinity/setup.sh": "#!/bin/sh\n", "CLAUDE.md": "a\n"},
+        "*.sh\n*.yaml\n*.json\n",
+    )
+    _push(home)
+    out = subprocess.run(
+        ["git", "check-ignore", "-q", ".trinity/setup.sh"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True,
+    )
+    assert out.returncode == 1, (
+        ".trinity/setup.sh is ignored — a user wildcard beat the platform's own "
+        "re-include, so the hook would never be staged again"
+    )
+    assert ".trinity/setup.sh" in _push(home)
+
+
+def test_protected_set_is_a_subset_of_the_pattern_list():
+    """The floor is a PARTITION of the canonical list, not a second list. A
+    pattern in the floor but not in the list would be written to the file and
+    never stripped, so the merge would stop being idempotent."""
+    gs = _gs()
+    assert gs._GITIGNORE_PROTECTED <= set(gs._GITIGNORE_PATTERNS)
+    # And the partition is total: every canonical pattern lands in exactly one
+    # region.
+    top = [p for p in gs._GITIGNORE_PATTERNS if p not in gs._GITIGNORE_PROTECTED]
+    floor = [p for p in gs._GITIGNORE_PATTERNS if p in gs._GITIGNORE_PROTECTED]
+    assert len(top) + len(floor) == len(gs._GITIGNORE_PATTERNS)
+    assert set(floor) == gs._GITIGNORE_PROTECTED
+
+
+def test_every_authored_trinity_path_is_protected():
+    """#2070 derives the `!` re-includes from `_TRINITY_AUTHORED_PATHS`; #2529
+    must derive their PROTECTION from the same tuple. A tenth authored path
+    added tomorrow inherits the floor without anyone remembering to ask."""
+    gs = _gs()
+    for path in gs._TRINITY_AUTHORED_PATHS:
+        assert f"!{path}" in gs._GITIGNORE_PROTECTED, (
+            f"!{path} is not in the protected floor — a user wildcard would beat it"
+        )
+
+
+def test_env_example_negation_follows_the_env_pattern():
+    """Order inside the floor is load-bearing: `!.env.example` must come AFTER
+    `.env.*`, or the broader rule wins on the last-match."""
+    gs = _gs()
+    floor = [p for p in gs._GITIGNORE_PATTERNS if p in gs._GITIGNORE_PROTECTED]
+    assert floor.index("!.env.example") > floor.index(".env.*")
+    assert floor.index("!.mcp.json.template") > floor.index(".mcp.json")
+
+
+# ---------------------------------------------------------------------------
+# Merge mechanics
+# ---------------------------------------------------------------------------
+
+def test_merge_is_idempotent(tmp_path):
+    """Byte-identical second run AND a clean `git status --porcelain`. The
+    mtime is deliberately NOT asserted: `touch`/`: >` on an existing file is not
+    the invariant, content-identity is — and the 15-minute auto-sync loop only
+    cares about the latter."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "my-rule/\n")
+    gs = _gs()
+    _run(gs._build_gitignore_merge_command(str(home)), home)
+    first = (home / ".gitignore").read_text()
+    _git(home, "add", "-A")
+    _git(home, "commit", "-qm", "merged")
+    _run(gs._build_gitignore_merge_command(str(home)), home)
+    assert (home / ".gitignore").read_text() == first
+    assert _git(home, "status", "--porcelain") == "", "the merge manufactured drift"
+
+
+def test_crlf_canonical_line_is_stripped_not_duplicated(tmp_path):
+    """R7. `grep -vxF` with LF patterns does not match a CRLF copy, so a
+    canonical line written by a Windows editor would survive BELOW the block and
+    keep overriding the very negation this fix protects."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "")
+    (home / ".gitignore").write_bytes(b".env.*\r\n!.env.example\r\nmy-rule/\r\n")
+    _run(_gs()._build_gitignore_merge_command(str(home)), home)
+    gs = _gs()
+    # Byte-level, because `str.splitlines()` splits on a bare CR too and would
+    # hide exactly the distinction under test.
+    raw = (home / ".gitignore").read_bytes()
+    body = raw.split(gs._GITIGNORE_BLOCK_END.encode())[1]
+    body = body.split(gs._GITIGNORE_FLOOR_BEGIN.encode())[0]
+    assert b".env.*" not in body, (
+        f"a CRLF canonical line survived in the user region: {body!r}"
+    )
+    # Targeted: the user's OWN line keeps its CRLF. A `tr -d '\r'` fix would
+    # rewrite the whole file's line endings instead.
+    assert b"my-rule/\r\n" in body, f"the user's own CRLF rule was mangled: {body!r}"
+
+
+def test_unreadable_gitignore_aborts_without_writing(tmp_path):
+    """R6, the data-loss path. `cat <(grep ...)` takes only `cat`'s status, so
+    an unreadable `.gitignore` produced a block-only temp file and the `mv` then
+    destroyed the user's rules — `mv` needs DIRECTORY write permission, not
+    file. Reproduced on the shipped base image with a mode-000 file."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "my-precious-rule/\n")
+    target = home / ".gitignore"
+    original = target.read_bytes()
+    target.chmod(0o000)
+    try:
+        out = _run(_gs()._build_gitignore_merge_command(str(home)), home)
+        assert out.returncode != 0, "an unreadable .gitignore must abort the merge"
+    finally:
+        target.chmod(0o644)
+    assert target.read_bytes() == original, "the user's .gitignore was destroyed"
+
+
+def test_nul_byte_gitignore_does_not_lose_user_rules(tmp_path):
+    """R11. Without `-a`, grep prints "binary file matches" and emits ZERO lines
+    while exiting ZERO — so even an explicit status check passes and the whole
+    user region is silently dropped."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "")
+    (home / ".gitignore").write_bytes(b"my-rule/\n\x00binary\nkeep-me/\n")
+    _run(_gs()._build_gitignore_merge_command(str(home)), home)
+    body = (home / ".gitignore").read_bytes()
+    assert b"my-rule/" in body and b"keep-me/" in body, (
+        "the user region was dropped on a NUL-bearing .gitignore"
+    )
+
+
+def test_empty_pattern_is_rejected_at_import():
+    """The `grep -F -f` wipe guard. An empty entry in the strip list matches
+    every blank line with `-x` and every line without it."""
+    gs = _gs()
+    for line in gs._GITIGNORE_MANAGED_LINES:
+        assert line, "an empty managed line would delete the user's blank lines"
+        assert "\n" not in line and "\r" not in line, (
+            f"managed line {line!r} smuggles an extra pattern into the strip list"
+        )
+
+
+def test_file_without_trailing_newline_is_not_glued(tmp_path):
+    """The old `echo p >> .gitignore` glued its first pattern onto the last line
+    of a file with no trailing newline."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "")
+    (home / ".gitignore").write_bytes(b"my-rule/")  # no trailing newline
+    _run(_gs()._build_gitignore_merge_command(str(home)), home)
+    _, user, _ = _regions(home)
+    assert user == ["my-rule/"], f"line-gluing regression: {user}"
+
+
+def test_merge_creates_a_missing_gitignore(tmp_path):
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "")
+    (home / ".gitignore").unlink()
+    _run(_gs()._build_gitignore_merge_command(str(home)), home)
+    top, user, floor = _regions(home)
+    assert user == [] and ".env" in floor and "content/" in top
+
+
+# ---------------------------------------------------------------------------
+# Sweep + reporting (AC-1, AC-4, and Eugene's revised criteria 2 and 3)
+# ---------------------------------------------------------------------------
+
+def test_removed_paths_are_reported(tmp_path):
+    home = _make_repo(
+        tmp_path,
+        {"errors.log": "boom\n", "cache.db": "x\n", "CLAUDE.md": "a\n"},
+        "",
+    )
+    sweep = _push_sweep(home)
+    assert set(sweep.removed) == {"errors.log", "cache.db"}
+    # Idempotent: the second Push has nothing left to report.
+    assert _push_sweep(home).removed == ()
+
+
+def test_unignored_paths_are_reported(tmp_path):
+    """Criterion 3. A user's negation ABOVE their own canonical duplicate is
+    INVERTED by the rebuild: the file becomes tracked and the same Push's
+    `git add -A` commits it. The issue author ruled explicitly against blocking
+    here — "a frozen repo is harder to notice because nothing changes. Proceed
+    and report" — so this field is the whole control."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "!keep.log\n*.log\n")
+    (home / "keep.log").write_text("keep\n")
+    # Before the rebuild the user's own `*.log` sits BELOW the negation and wins.
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", "keep.log"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True,
+    ).returncode == 0
+    sweep = _push_sweep(home)
+    assert "keep.log" in sweep.unignored, (
+        f"the inverted duplicate was not reported: {sweep}"
+    )
+
+
+def test_shadowed_negations_are_reported(tmp_path):
+    """Criterion 2. The two residuals #2529 knowingly leaves — a negation under
+    a dir-form canonical pattern, and a negation the protected floor refuses —
+    are the ONLY thing this field exists to say out loud."""
+    home = _make_repo(
+        tmp_path,
+        {"content/keep.md": "k\n", "CLAUDE.md": "a\n"},
+        "!content/keep.md\n!.env\n!my-own.txt\nmy-own.txt\n",
+    )
+    sweep = _push_sweep(home)
+    assert "!content/keep.md -> content/" in sweep.shadowed
+    assert "!.env -> .env" in sweep.shadowed
+    # The agent's own rule defeating its own negation is the agent's business,
+    # not ours to explain.
+    assert not any("my-own.txt" in entry for entry in sweep.shadowed), sweep.shadowed
+
+
+def test_check_ignore_verdict_comes_from_the_pattern_not_the_exit_code(tmp_path):
+    """THE trap. `git check-ignore -v` exits 0 even when the deciding rule is
+    itself a NEGATION — i.e. even when the path is not ignored. A verdict read
+    off the exit code would report every honoured negation as shadowed."""
+    home = _make_repo(tmp_path, {".env.example": "K=\n", "CLAUDE.md": "a\n"}, "")
+    _push(home)
+    # `--no-index` mirrors the production probe: without it a TRACKED path is
+    # never reported at all, which would make the report blind to exactly the
+    # negations that are currently working.
+    plain = subprocess.run(
+        ["git", "check-ignore", "--no-index", ".env.example"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True, text=True,
+    )
+    verbose = subprocess.run(
+        ["git", "check-ignore", "-v", "--no-index", ".env.example"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True, text=True,
+    )
+    assert plain.returncode == 1, "not ignored — that is the whole point"
+    assert verbose.returncode == 0, (
+        "the trap has changed shape; re-check `_shadowed_negations`"
+    )
+    assert ":!.env.example\t" in verbose.stdout
+    # And the parser gets it right.
+    assert _gs()._shadowed_negations([verbose.stdout.strip()]) == ()
+
+
+@pytest.mark.parametrize(
+    "pattern_form,ignore_rule,path,survives",
+    [
+        # File-form: the negation is effective, so the sweep must not touch it.
+        ("file-form", "*.log", "errors.log", True),
+        # Dir-form: git never descends into an excluded directory, so the
+        # negation is inert AT ANY POSITION and the file IS swept. Pinned as
+        # known-and-surfaced rather than silently absent.
+        ("dir-form", "content/", "content/keep.md", False),
+    ],
+)
+def test_negation_covered_path_is_not_swept(
+    tmp_path, pattern_form, ignore_rule, path, survives
+):
+    """AC-1 rule (b), parametrised over BOTH canonical pattern forms so it
+    cannot pass on a file-form fixture and thereby certify a guarantee that is
+    false for the 23 dir-form patterns."""
+    home = _make_repo(tmp_path, {path: "x\n", "CLAUDE.md": "a\n"}, f"!{path}\n")
+    sweep = _push_sweep(home)
+    tracked = set(_git(home, "ls-files").split())
+    if survives:
+        assert path in tracked, f"an effective negation did not protect {path}"
+        assert path not in sweep.removed
+    else:
+        assert path not in tracked
+        assert path in sweep.removed
+        assert f"!{path} -> {ignore_rule}" in sweep.shadowed, (
+            "a dir-form residual must at least be REPORTED"
+        )
+
+
+def test_no_pre_tracked_path_is_swept_except_declared(tmp_path):
+    """AC-1 is a UNIVERSAL, and a single-fixture test proves a strictly weaker
+    property. Snapshot the whole tracked set before and after, over a repo
+    spanning both regions, a dir-form parent, effective negations and genuine
+    #462/#1596 targets, and assert `before - after == set(removed)` exactly."""
+    files = {
+        "CLAUDE.md": "a\n",
+        "src/app.py": "x\n",
+        ".env.example": "K=\n",              # protected negation
+        ".claude/settings.json": "{}\n",     # user negation
+        ".claude/skills/s/SKILL.md": "s\n",  # untouched by any rule
+        "keep.db": "x\n",                    # user negation over *.db
+        "node_modules/pkg/index.js": "x\n",  # #1596 target — MUST be swept
+        "errors.log": "x\n",                 # #462 target — MUST be swept
+        "content/keep.md": "k\n",            # dir-form residual — swept
+        ".trinity/setup.sh": "#!/bin/sh\n",  # platform-authored — MUST survive
+    }
+    home = _make_repo(
+        tmp_path, files,
+        "!.claude/settings.json\n!keep.db\n!content/keep.md\nmy-scratch/\n",
+    )
+    before = set(_git(home, "ls-files").split())
+    sweep = _push_sweep(home)
+    after = set(_git(home, "ls-files").split())
+
+    assert before - after == set(sweep.removed), (
+        "the sweep untracked paths it did not report (or vice versa): "
+        f"unreported={sorted((before - after) - set(sweep.removed))} "
+        f"overreported={sorted(set(sweep.removed) - (before - after))}"
+    )
+    # #462 / #1596 purpose survives — rule (a) would have deleted it.
+    assert "errors.log" in sweep.removed
+    assert "node_modules/pkg/index.js" in sweep.removed
+    # Effective negations hold.
+    for path in (".env.example", ".claude/settings.json", "keep.db",
+                 ".trinity/setup.sh", ".claude/skills/s/SKILL.md", "src/app.py"):
+        assert path in after, f"{path} was untracked despite an effective negation"
+
+
+def test_462_purpose_survives(tmp_path):
+    """A NEWLY added runtime file must still be untracked — that is #462's
+    entire reason to exist, and rule (a) as literally worded would delete it."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "")
+    _push(home)
+    for rel in (".cache/foo", "errors.log"):
+        target = home / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n")
+    _git(home, "add", "-A")
+    assert ".cache/foo" not in _git(home, "ls-files").split()
+    assert "errors.log" not in _git(home, "ls-files").split()
+
+
+def test_marker_parse_survives_interleaved_stderr():
+    """`container_exec_run` does NOT pass `demux=True`, so stdout and stderr
+    arrive as ONE blob. A begin/end region parser would swallow a stray
+    `grep: ...` line as a payload path; a per-line tag cannot."""
+    gs = _gs()
+    merge = (
+        "TRINITY-2529-untracked-before: draft.md\n"
+        "grep: .gitignore: Permission denied\n"
+    )
+    sweep_out = (
+        "grep: warning: stray stderr line\n"
+        "TRINITY-2529-removed: errors.log\n"
+        "fatal: something unrelated\n"
+        "TRINITY-2529-untracked-after: draft.md\n"
+        "TRINITY-2529-untracked-after: new-thing.txt\n"
+        "TRINITY-2529-shadow: .gitignore:13:content/\tcontent/keep.md\n"
+        "warning: yet more noise\n"
+    )
+    sweep = gs._parse_gitignore_sweep(merge, sweep_out)
+    assert sweep.removed == ("errors.log",)
+    assert sweep.unignored == ("new-thing.txt",)
+    assert sweep.shadowed == ("!content/keep.md -> content/",)
+
+
+def test_coerce_sweep_accepts_a_magicmock():
+    """`test_ent123_tokenless_clone.py` patches `_migrate_workspace_gitignore`
+    with a bare `AsyncMock()`, and a `MagicMock` landing in a `List[str]`
+    response field fails Pydantic validation at the very return that test
+    asserts on. This is required, not defensive noise."""
+    from unittest.mock import MagicMock
+
+    gs = _gs()
+    assert gs._coerce_sweep(MagicMock()) == gs.GitignoreSweep()
+    assert gs._coerce_sweep(None) == gs.GitignoreSweep()
+    real = gs.GitignoreSweep(removed=("a",))
+    assert gs._coerce_sweep(real) is real
+
+
+def test_summary_line_and_commit_message():
+    """AC-4's commit-message half. Best-effort by construction — `git rm
+    --cached` only STAGES — so the shape is asserted, not the delivery."""
+    gs = _gs()
+    empty = gs.GitignoreSweep()
+    assert empty.summary_line() == ""
+    assert gs._augment_commit_message("my message", empty) == "my message"
+
+    sweep = gs.GitignoreSweep(removed=tuple(f"f{i}" for i in range(25)))
+    augmented = gs._augment_commit_message("my message", sweep)
+    assert augmented.startswith("my message\n\n")
+    assert "untracked 25 file(s)" in augmented
+    assert "- f0" in augmented and "- f19" in augmented
+    assert "- f20" not in augmented
+    assert "and 5 more" in augmented
+
+    # No caller message: the agent server's own `Trinity sync: <ts>` default is
+    # reproduced, because supplying a message at all suppresses it.
+    assert gs._augment_commit_message(None, sweep).startswith("Trinity sync: ")
+
+
+def test_with_sweep_makes_the_failure_path_honest():
+    """R5. The router raises `HTTPException(detail=result.message)` on 409/400
+    and keeps NOTHING else, so a structured field alone is dead on exactly the
+    paths where the index mutation already happened."""
+    gs = _gs()
+    from database import GitSyncResult
+
+    sweep = gs.GitignoreSweep(removed=("a", "b"), unignored=("c",), shadowed=("d",))
+    out = gs._with_sweep(GitSyncResult(success=False, message="Sync conflict"), sweep)
+    assert out.removed_paths == ["a", "b"]
+    assert out.unignored_paths == ["c"]
+    assert out.shadowed_negations == ["d"]
+    assert "untracked 2 file(s)" in out.message
+    assert out.message.startswith("Sync conflict")
+
+    # An empty sweep leaves the message exactly as it was.
+    clean = gs._with_sweep(GitSyncResult(success=True, message="Synced"), gs.GitignoreSweep())
+    assert clean.message == "Synced"
+    assert clean.removed_paths == []
+
+
+def test_creation_merge_on_a_pristine_bundled_template_shows_no_drift(tmp_path):
+    """R12 / #953, where it actually bites. #1908 ships the 14 bundled templates
+    with a `.gitignore` byte-identical to what the platform writes, which is the
+    zero-drift property that let #953 stop `startup.sh` producing `M .gitignore`
+    against `origin/main`.
+
+    A two-region merge over a template that merely CONTAINED the canonical
+    patterns yields `M .gitignore` (39+/37-) on every template-derived agent and
+    tears the template's `# GENERATED, do not hand-edit` header off its content.
+    The templates are therefore regenerated as the merge's own fixed point —
+    proven here against the real shipped bytes, not a synthetic seed.
+    """
+    template = _REPO / "config" / "agent-templates" / "dd-lead" / ".gitignore"
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, template.read_text())
+    _run(_gs()._build_gitignore_merge_command(str(home)), home)
+    porcelain = _git(home, "status", "--porcelain")
+    assert porcelain.strip() == "", (
+        f"the merge manufactured drift on a pristine bundled template:\n{porcelain}"
+    )
+
+
+def test_managed_lines_are_all_stripped_by_the_builder():
+    """The strip list and the shadow oracle are the SAME set. If the builder
+    ever stopped stripping a line the oracle still calls "managed", that line
+    would accumulate in the user region on every Push."""
+    gs = _gs()
+    command = gs._build_gitignore_merge_command("/home/developer")
+    for line in gs._GITIGNORE_MANAGED_LINES:
+        assert shlex.quote(line) in command or line in command, (
+            f"managed line {line!r} is not in the merge command's strip list"
+        )
