@@ -22,7 +22,12 @@ import {
   LAYOUT_KEY_V1,
   LAYOUT_KEY,
   WIDGET_PREFS_KEY,
+  ORG_KEY,
+  LEGACY_ADOPTED_KEY,
+  PREF_KEYS,
+  userScopedKey,
 } from '@/utils/gridStorageKeys'
+import { useUserPreferencesStore } from './userPreferences'
 
 /**
  * Fleet Grid store (trinity-enterprise#47) — owns the Dashboard Grid view's
@@ -49,61 +54,123 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   const authStore = useAuthStore()
   const executionsStore = useExecutionsStore()
 
+  // --- persistence (trinity-enterprise#413): the user's record, not the browser's ---
+  // The SERVER holds the three blobs (`grid_layout` / `grid_widgets` /
+  // `grid_org`) per user; `stores/userPreferences.js` is the sync engine. This
+  // store keeps a per-USER localStorage cache so the first paint has a layout
+  // before the GET answers (the #47 performance contract) and the grid stays
+  // editable when the server cannot be reached. Load order per blob:
+  //   server record → per-user cache → legacy browser-global blob (adopted
+  //   ONCE, by the first identity to sign in after the upgrade; the legacy key
+  //   is left in place so a downgrade is not data loss) → default.
+  const prefs = useUserPreferencesStore()
+  const principalId = computed(() => authStore.principalId || null)
+
+  // 'pending' until the initial load settles, then where the layout came from.
+  const layoutSource = ref('pending') // 'pending' | 'server' | 'local' | 'default'
+  // Bumped whenever the server record replaced the in-memory layout;
+  // `FleetGrid.vue` watches it and re-runs the reconcile.
+  const layoutGeneration = ref(0)
+  // Keys the user EDITED in this tab since the load began. A server record
+  // that lands afterwards must not overwrite a gesture the user just made;
+  // the pending write pushes the local state instead (and wins, once).
+  const _editedSinceLoad = new Set()
+
+  function _readJson(key) {
+    try {
+      const raw = localStorage.getItem(key)
+      const parsed = raw ? JSON.parse(raw) : null
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+    } catch {
+      return null
+    }
+  }
+  function _writeScoped(baseKey, value) {
+    const pid = principalId.value
+    if (!pid) return
+    try {
+      localStorage.setItem(userScopedKey(baseKey, pid), JSON.stringify(value))
+    } catch {
+      /* private mode — session-local */
+    }
+  }
+  function _removeScoped(baseKey) {
+    const pid = principalId.value
+    if (!pid) return
+    try {
+      localStorage.removeItem(userScopedKey(baseKey, pid))
+    } catch {
+      /* ignore */
+    }
+  }
+  /** May THIS identity adopt the legacy browser-global blobs? */
+  function _legacyClaimable() {
+    try {
+      const by = localStorage.getItem(LEGACY_ADOPTED_KEY)
+      return !by || by === principalId.value
+    } catch {
+      return false
+    }
+  }
+  function _claimLegacy() {
+    try {
+      if (!localStorage.getItem(LEGACY_ADOPTED_KEY)) {
+        localStorage.setItem(LEGACY_ADOPTED_KEY, principalId.value)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  /** Per-user cache first, then the legacy blob(s) if still claimable. */
+  function _readLocal(baseKey, legacyKeys = [baseKey]) {
+    const pid = principalId.value
+    if (pid) {
+      const scoped = _readJson(userScopedKey(baseKey, pid))
+      if (scoped) return { value: scoped, legacy: false }
+    }
+    if (!_legacyClaimable()) return null
+    for (const k of legacyKeys) {
+      const v = _readJson(k)
+      if (v) return { value: v, legacy: true }
+    }
+    return null
+  }
+
   // --- layout: agent → {c, r} on the unbounded lattice ---
   // `layout` holds ONLY the agents currently shown. `_savedRaw` is the full
   // persisted map, including agents hidden by an owner/tag filter — persisting
   // merges over it so toggling a filter never erases the positions of the
   // tiles it hides (filtering is indistinguishable from deletion here, so we
   // never treat absence as deletion; a truly deleted agent's entry just
-  // lingers harmlessly in localStorage until Reset).
+  // lingers harmlessly in the record until Reset — accepted, the value is
+  // size-capped server-side).
   const layout = ref({})
   let _savedRaw = null // lazily loaded full persisted map
+  let _savedRawFromLegacy = false
 
   function _loadSavedRaw() {
     if (_savedRaw) return _savedRaw
-    try {
-      const raw = localStorage.getItem(LAYOUT_KEY)
-      const parsed = raw ? JSON.parse(raw) : null
-      if (parsed && typeof parsed === 'object') {
-        _savedRaw = parsed
-        return _savedRaw
-      }
-      // One-time v1 -> v2 migration. v1 holds agent keys only, so the copy is
-      // straight; widgets are seeded afterwards by `syncLayout` into the band
-      // above the fleet, which is why an existing constellation does not move.
-      const legacy = localStorage.getItem(LAYOUT_KEY_V1)
-      const legacyParsed = legacy ? JSON.parse(legacy) : null
-      _savedRaw =
-        legacyParsed && typeof legacyParsed === 'object' ? { ...legacyParsed } : {}
-      if (Object.keys(_savedRaw).length) {
-        try {
-          localStorage.setItem(LAYOUT_KEY, JSON.stringify(_savedRaw))
-        } catch {
-          /* private mode */
-        }
-      }
-    } catch {
-      _savedRaw = {}
-    }
+    // Legacy generations newest first (v2 then v1): v1 holds agent keys only,
+    // so the copy is straight; widgets are seeded afterwards by `syncLayout`
+    // into the band above the fleet, which is why an existing constellation
+    // does not move.
+    const found = _readLocal(LAYOUT_KEY, [LAYOUT_KEY, LAYOUT_KEY_V1])
+    _savedRaw = found ? { ...found.value } : {}
+    _savedRawFromLegacy = !!found?.legacy
     return _savedRaw
   }
 
   // --- info-tile show/hide preferences (ent#325) ---
   const widgetPrefs = ref({})
-  try {
-    const raw = localStorage.getItem(WIDGET_PREFS_KEY)
-    const parsed = raw ? JSON.parse(raw) : null
-    if (parsed && typeof parsed === 'object') widgetPrefs.value = parsed
-  } catch {
-    /* defaults */
+  {
+    const found = _readLocal(WIDGET_PREFS_KEY)
+    if (found) widgetPrefs.value = found.value
   }
 
-  function _persistWidgetPrefs() {
-    try {
-      localStorage.setItem(WIDGET_PREFS_KEY, JSON.stringify(widgetPrefs.value))
-    } catch {
-      /* private mode — session-local */
-    }
+  function _persistWidgetPrefs(origin = 'gesture') {
+    _writeScoped(WIDGET_PREFS_KEY, widgetPrefs.value)
+    if (origin === 'gesture') _editedSinceLoad.add(PREF_KEYS.widgets)
+    prefs.save(PREF_KEYS.widgets, widgetPrefs.value, { origin })
   }
 
   function setWidgetEnabled(id, enabled) {
@@ -121,7 +188,28 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   /** Back to catalog defaults (an empty override map IS "defaults"). */
   function resetWidgets() {
     widgetPrefs.value = {}
-    _persistWidgetPrefs()
+    // An explicit empty cache, not a removed one: with the key absent the next
+    // load would fall through to the legacy blob and "Reset tiles" would
+    // appear not to have worked (the ent#325 class).
+    _writeScoped(WIDGET_PREFS_KEY, {})
+    _editedSinceLoad.add(PREF_KEYS.widgets)
+    prefs.remove(PREF_KEYS.widgets)
+  }
+
+  // --- org overlay toggles (#305) — owned here since ent#413 ---
+  const orgPrefs = ref({ zones: true, lines: true })
+  {
+    const found = _readLocal(ORG_KEY)
+    if (found) {
+      orgPrefs.value = { zones: found.value.zones !== false, lines: found.value.lines !== false }
+    }
+  }
+
+  function setOrgPref(name, on) {
+    orgPrefs.value = { ...orgPrefs.value, [name]: !!on }
+    _writeScoped(ORG_KEY, orgPrefs.value)
+    _editedSinceLoad.add(PREF_KEYS.org)
+    prefs.save(PREF_KEYS.org, orgPrefs.value, { origin: 'gesture' })
   }
 
   const isAdmin = computed(() => authStore.user?.role === 'admin')
@@ -131,13 +219,142 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     enabledWidgetKeys(isAdmin.value, widgetPrefs.value)
   )
 
-  function _persist() {
+  function _persist(origin = 'gesture') {
     _savedRaw = { ..._loadSavedRaw(), ...layout.value }
-    try {
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(_savedRaw))
-    } catch {
-      /* private mode — layout stays session-local */
+    _savedRawFromLegacy = false
+    _writeScoped(LAYOUT_KEY, _savedRaw)
+    if (origin === 'gesture') _editedSinceLoad.add(PREF_KEYS.layout)
+    prefs.save(PREF_KEYS.layout, _savedRaw, { origin })
+  }
+
+  /**
+   * Fetch the user's server record and reconcile it with what the first paint
+   * used. Called by `FleetGrid` at setup; idempotent per identity.
+   */
+  async function loadPreferences() {
+    if (!principalId.value) return
+    _editedSinceLoad.clear()
+    await prefs.load()
+    if (prefs.loadState === 'failed') {
+      // Honest fallback: whatever the first paint used stays, session-local.
+      if (layoutSource.value === 'pending') {
+        layoutSource.value = Object.keys(_loadSavedRaw()).length ? 'local' : 'default'
+      }
     }
+    // The 'loaded' case is handled by the serverGeneration watcher below, so
+    // a 409 adoption later takes exactly the same path as the initial load.
+  }
+
+  /**
+   * Apply the server-known records (initial load or a 409 adoption). Order is
+   * widgets → org → layout, then ONE generation bump: the `activeWidgetKeys`
+   * watcher in FleetGrid re-syncs + persists on a widget change, and that
+   * persist must see the adopted layout, not the pre-load one.
+   */
+  function _applyServerRecords() {
+    const recs = prefs.records
+    let importedLegacy = false
+
+    const w = recs[PREF_KEYS.widgets]
+    if (w && !_editedSinceLoad.has(PREF_KEYS.widgets)) {
+      widgetPrefs.value = { ...w.value }
+      _writeScoped(WIDGET_PREFS_KEY, widgetPrefs.value)
+    } else if (!w && !prefs.hasPending(PREF_KEYS.widgets)) {
+      const found = _readLocal(WIDGET_PREFS_KEY)
+      if (found && Object.keys(found.value).length) {
+        widgetPrefs.value = found.value
+        _persistWidgetPrefs('reconcile')
+        importedLegacy = importedLegacy || found.legacy
+      }
+    }
+
+    const o = recs[PREF_KEYS.org]
+    if (o && !_editedSinceLoad.has(PREF_KEYS.org)) {
+      orgPrefs.value = { zones: o.value.zones !== false, lines: o.value.lines !== false }
+      _writeScoped(ORG_KEY, orgPrefs.value)
+    } else if (!o && !prefs.hasPending(PREF_KEYS.org)) {
+      const found = _readLocal(ORG_KEY)
+      if (found) {
+        orgPrefs.value = { zones: found.value.zones !== false, lines: found.value.lines !== false }
+        _writeScoped(ORG_KEY, orgPrefs.value)
+        prefs.save(PREF_KEYS.org, orgPrefs.value, { origin: 'reconcile' })
+        importedLegacy = importedLegacy || found.legacy
+      }
+    }
+
+    const l = recs[PREF_KEYS.layout]
+    if (l && !_editedSinceLoad.has(PREF_KEYS.layout)) {
+      // `syncLayout` overlays the in-memory `layout` over `_savedRaw`, so
+      // replacing `_savedRaw` alone would re-normalise the OLD positions —
+      // the board must start empty for the server record to win.
+      _savedRaw = { ...l.value }
+      _savedRawFromLegacy = false
+      layout.value = {}
+      _writeScoped(LAYOUT_KEY, _savedRaw)
+      layoutSource.value = 'server'
+      layoutGeneration.value++
+    } else if (l) {
+      layoutSource.value = 'server'
+    } else {
+      const raw = _loadSavedRaw()
+      const hadLocal = Object.keys(raw).length > 0
+      layoutSource.value = hadLocal ? 'local' : 'default'
+      if (hadLocal && !prefs.hasPending(PREF_KEYS.layout)) {
+        // One-time ADOPT of a hand-arranged constellation into the record.
+        _writeScoped(LAYOUT_KEY, raw)
+        prefs.save(PREF_KEYS.layout, raw, { origin: 'reconcile' })
+        importedLegacy = importedLegacy || _savedRawFromLegacy
+      }
+    }
+    if (importedLegacy) _claimLegacy()
+    // Gestures made before THIS apply have either been kept (and their write
+    // is pending) or superseded; a later adoption (a 409 on a reconcile-born
+    // write) applies in full.
+    _editedSinceLoad.clear()
+  }
+
+  watch(
+    () => prefs.serverGeneration,
+    (gen, was) => {
+      if (gen !== was && prefs.loadState === 'loaded') _applyServerRecords()
+    }
+  )
+
+  // Identity change (logout → another login without a reload): drop every
+  // in-memory blob so the next user never sees this one's board. The engine
+  // drops its queue on the same watcher (sync), so nothing fires under the new
+  // token. `flush: 'sync'` for the same reason.
+  watch(
+    principalId,
+    () => {
+      _savedRaw = null
+      _savedRawFromLegacy = false
+      layout.value = {}
+      widgetPrefs.value = {}
+      orgPrefs.value = { zones: true, lines: true }
+      _editedSinceLoad.clear()
+      layoutSource.value = 'pending'
+    },
+    { flush: 'sync' }
+  )
+
+  /** Honest status for the canvas: null, or a sentence naming the failure. */
+  const persistNotice = computed(() => {
+    if (prefs.saveError) {
+      return `Couldn’t save your layout to the server (${prefs.saveError}). Changes are kept in this browser and will retry on your next change.`
+    }
+    if (prefs.loadError) {
+      return `Couldn’t load your saved layout from the server (${prefs.loadError}). Showing this browser’s copy; changes stay here until the server is reachable.`
+    }
+    return null
+  })
+  function dismissPersistNotice() {
+    prefs.dismissErrors()
+  }
+  /** Send whatever is still debounced: `pagehide` (keepalive fetch — the
+   *  page is going away) or unmount (normal client — the page stays). */
+  function flushPending({ keepalive = true } = {}) {
+    prefs.flushNow({ keepalive })
   }
 
   /**
@@ -174,7 +391,9 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
       widgetKeys
     )
     layout.value = healed
-    if (changed || unplaced.length) _persist()
+    // A reconcile-born write: if it 409s against a newer save from another
+    // tab, the engine adopts the server record rather than clobbering it.
+    if (changed || unplaced.length) _persist('reconcile')
   }
 
   /** Drop a tile on `(c, r)`; an occupied target swaps with the dragged tile. */
@@ -194,15 +413,22 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   }
 
   function resetLayout(agentNames, systemNames = new Set()) {
+    _removeScoped(LAYOUT_KEY)
     try {
+      // The legacy generations too, or the next `_loadSavedRaw` adopts the
+      // stale blob straight back in and "Reset layout" appears not to have
+      // worked (ent#325).
       localStorage.removeItem(LAYOUT_KEY)
-      // v1 too, or the next _loadSavedRaw migrates the stale blob straight
-      // back in and "Reset layout" appears not to have worked (ent#325).
       localStorage.removeItem(LAYOUT_KEY_V1)
     } catch {
       /* ignore */
     }
     _savedRaw = {} // reset drops hidden/stale entries too
+    _savedRawFromLegacy = false
+    _editedSinceLoad.add(PREF_KEYS.layout)
+    // The CALLER's server record only; the reconcile that follows re-persists
+    // the default under an insert-only base.
+    prefs.remove(PREF_KEYS.layout)
     layout.value = defaultLayout(agentNames, systemNames)
     _persist()
   }
@@ -602,11 +828,19 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
 
   return {
     layout,
+    layoutSource,
+    layoutGeneration,
+    loadPreferences,
+    persistNotice,
+    dismissPersistNotice,
+    flushPending,
     widgetPrefs,
     activeWidgetKeys,
     isAdmin,
     setWidgetEnabled,
     resetWidgets,
+    orgPrefs,
+    setOrgPref,
     syncLayout,
     moveTile,
     tidy,
