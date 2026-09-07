@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test'
-import { ALL_LAYOUT_KEYS, LAYOUT_KEY, WIDGET_PREFS_KEY } from '../src/utils/gridStorageKeys.js'
+import { LAYOUT_KEY, userScopedKey } from '../src/utils/gridStorageKeys.js'
+import {
+  E2E_PRINCIPAL,
+  clearBrowserGridState,
+  resetServerGridPrefs,
+  readServerPref,
+} from './helpers/grid-prefs.js'
 import { isWidgetKey } from '../src/utils/gridWidgets.js'
 
 /**
@@ -19,32 +25,28 @@ import { isWidgetKey } from '../src/utils/gridWidgets.js'
  * localStorage.
  */
 
-// LAYOUT_KEY / ALL_LAYOUT_KEYS / WIDGET_PREFS_KEY are imported from the store's
-// own module (#2199) — a hand-copied literal here silently desynced on the
-// #2042 v1->v2 bump and both read-back assertions below resolved `null`.
+// LAYOUT_KEY is imported from the store's own module (#2199) — a hand-copied
+// literal here silently desynced on the #2042 v1->v2 bump and both read-back
+// assertions below resolved `null`. Since ent#413 the browser copy is a
+// PER-USER cache, so the read-backs address the e2e identity's key.
 const MODE_KEY = 'trinity-dashboard-view'
+const CACHE_KEY = userScopedKey(LAYOUT_KEY, E2E_PRINCIPAL)
 
 async function gotoGrid(page) {
   await page.goto('/')
+  // Server record too (ent#413), BEFORE Grid mode mounts the store.
+  await resetServerGridPrefs(page)
   await page.getByRole('button', { name: 'grid', exact: true }).click()
   await expect(page.locator('.fleet-canvas')).toBeVisible()
 }
 
 test.describe('dashboard grid view (trinity-enterprise#47)', () => {
   test.beforeEach(async ({ page }) => {
-    // Fresh layout + default mode for deterministic assertions.
-    // ALL generations, not just the current one: `_loadSavedRaw` migrates a v1
-    // blob into v2 when v2 is absent, so clearing only LAYOUT_KEY lets a stale
-    // layout be migrated straight back in and the board is not clean (#2199).
-    // The argument is SPREAD into one flat array and the callback iterates it —
-    // nesting it would call removeItem() with an Array and silently clear
-    // nothing, which looks identical to a working cleanup.
-    await page.addInitScript(
-      (keys) => {
-        keys.forEach((k) => localStorage.removeItem(k))
-      },
-      [...ALL_LAYOUT_KEYS, WIDGET_PREFS_KEY]
-    )
+    // Fresh layout + default mode for deterministic assertions: the per-user
+    // cache AND every legacy generation (the adopt path reads those — a stale
+    // v1 blob would be adopted straight back in, #2199). The server record is
+    // cleared in `gotoGrid`, once the page has its token (ent#413).
+    await clearBrowserGridState(page)
   })
 
   test('@smoke mode toggle shows Grid and renders agent tiles', async ({ page }) => {
@@ -127,7 +129,7 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     const tile = page.locator('.gv-tile[data-agent="trinity-system"]')
     await expect(tile).toBeVisible({ timeout: 15000 })
 
-    const before = await page.evaluate((k) => localStorage.getItem(k), LAYOUT_KEY)
+    const before = await page.evaluate((k) => localStorage.getItem(k), CACHE_KEY)
 
     // Drag by two cell-heights straight down (mouse-level, exercises the
     // pointer capture + socket path).
@@ -146,7 +148,7 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await page.mouse.up()
 
     await expect
-      .poll(async () => page.evaluate((k) => localStorage.getItem(k), LAYOUT_KEY))
+      .poll(async () => page.evaluate((k) => localStorage.getItem(k), CACHE_KEY))
       .not.toBe(before)
   })
 
@@ -155,11 +157,11 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await expect(page.locator('.gv-tile').first()).toBeVisible({ timeout: 15000 })
 
     await page.getByRole('button', { name: 'Tidy up' }).click()
-    const tidied = await page.evaluate((k) => localStorage.getItem(k), LAYOUT_KEY)
+    const tidied = await page.evaluate((k) => localStorage.getItem(k), CACHE_KEY)
     expect(tidied).toBeTruthy()
 
     await page.getByRole('button', { name: 'Reset', exact: true }).click()
-    const reset = await page.evaluate((k) => localStorage.getItem(k), LAYOUT_KEY)
+    const reset = await page.evaluate((k) => localStorage.getItem(k), CACHE_KEY)
     expect(reset).toBeTruthy()
     // Reset yields the deterministic default. Layout v2 holds TWO occupant
     // kinds (#2042 / ent#325), so the shape differs by kind and asserting
@@ -181,6 +183,53 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
         expect(p.r).toBeGreaterThanOrEqual(0)
       }
     }
+  })
+
+  test('a dragged layout is the user\'s server record and survives a wiped browser (ent#413)', async ({
+    page,
+  }) => {
+    await gotoGrid(page)
+    const tile = page.locator('.gv-tile[data-agent="trinity-system"]')
+    await expect(tile).toBeVisible({ timeout: 15000 })
+    const before = await page.evaluate((k) => localStorage.getItem(k), CACHE_KEY)
+
+    const box = await tile.boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    for (let i = 1; i <= 10; i++) {
+      await page.mouse.move(
+        box.x + box.width / 2,
+        box.y + box.height / 2 + (i / 10) * box.height * 2.2,
+        { steps: 2 }
+      )
+    }
+    await page.mouse.up()
+    await expect
+      .poll(async () => page.evaluate((k) => localStorage.getItem(k), CACHE_KEY))
+      .not.toBe(before)
+    const dragged = JSON.parse(await page.evaluate((k) => localStorage.getItem(k), CACHE_KEY))
+    const cell = dragged['trinity-system']
+
+    // The write is debounced (800 ms) and then conditional — poll the SERVER
+    // for the same cell rather than asserting on the first paint.
+    await expect
+      .poll(async () => (await readServerPref(page, 'grid_layout'))?.value?.['trinity-system'], {
+        timeout: 10000,
+      })
+      .toEqual(cell)
+
+    // Wipe this browser's copy (every key, as a new device would have) and
+    // come back: the record is the user's, not the browser's. The first paint
+    // is the default; the server record re-syncs asynchronously, so poll.
+    await page.evaluate((keys) => keys.forEach((k) => localStorage.removeItem(k)), [CACHE_KEY])
+    await page.reload()
+    await expect(page.locator('.fleet-canvas')).toBeVisible({ timeout: 15000 })
+    await expect
+      .poll(async () => {
+        const raw = await page.evaluate((k) => localStorage.getItem(k), CACHE_KEY)
+        return raw ? JSON.parse(raw)['trinity-system'] : null
+      }, { timeout: 10000 })
+      .toEqual(cell)
   })
 
   test('@smoke timeline mode still works alongside grid', async ({ page }) => {

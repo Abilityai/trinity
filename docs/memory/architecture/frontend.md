@@ -16,7 +16,8 @@
 
 **Stores (domain-scoped, Invariant #6):**
 - `stores/agents.js` - Agent CRUD, chat, activity
-- `stores/auth.js` - Email/admin authentication + JWT
+- `stores/auth.js` - Email/admin authentication + JWT; `principalId` getter = the JWT `sub` (the username on every login path, available synchronously from the stored token — `user.username` is NOT, it lands with `/api/users/me`), the identity every per-user browser cache is namespaced by (trinity-enterprise#413)
+- `stores/userPreferences.js` - Per-user UI preference sync engine over `GET|PUT|DELETE /api/users/me/preferences` (trinity-enterprise#413): one load, trailing-debounced conditional PUT per key (`base_updated_at`: `null` insert-only / string compare-and-set — never unconditional, nothing sent before the load settles), origin-aware 409 (gesture retries once, reconcile adopts), identity-tagged queue dropped synchronously on identity change, `keepalive` flush on `pagehide`. `stores/fleetGrid.js` is the first consumer; every other per-user localStorage key migrates by consuming it, never by re-implementing it — see [dashboard-grid-view.md](../feature-flows/dashboard-grid-view.md#layout-model)
 - `stores/collaborations.js` - Collaboration graph state, WebSocket integration
 - `stores/loops.js` - Sequential agent loops UI state, agent-scoped, WebSocket-driven (#1106)
 - `stores/executions.js` - Fleet execution list/stats + agent Overview analytics (`fetchAgentAnalytics`, cached per `${name}:${window}`, never polled) (#1107) + per-schedule performance rollups (`fetchSchedulesSummary`, same `${name}:${window}` cache; one fetch shared by the Overview "Schedules performance" section and the Schedules-tab inline stats) (#1115)

@@ -521,6 +521,25 @@ TABLES = {
         )
     """,
 
+    # ent#413 — per-user UI preferences (OSS-core by explicit decision). A
+    # generic (user_id, key) → JSON-object record, NOT a grid-only table: the
+    # Dashboard Grid's three blobs (`grid_layout` / `grid_widgets` / `grid_org`)
+    # are the first keys, and the next per-user UI state (view mode, list
+    # filters) is a new allowlisted key in services/user_preferences_service.py,
+    # never a new table. `updated_at` is per KEY on purpose — it is the
+    # compare-and-set base the PUT contract needs, which one JSON column on
+    # `users` could not express. Values are size-capped at the service (413).
+    "user_ui_preferences": """
+        CREATE TABLE IF NOT EXISTS user_ui_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """,
+
     "agent_reports": """
         CREATE TABLE IF NOT EXISTS agent_reports (
             id TEXT PRIMARY KEY,

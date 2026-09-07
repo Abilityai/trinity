@@ -17,7 +17,7 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import Column, Float, Index, MetaData, Table, Text, text
+from sqlalchemy import Column, Float, ForeignKey, Index, MetaData, Table, Text, text
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -599,6 +599,17 @@ agent_canvases = Table(
     Column("created_at", Text),
     Column("updated_at", Text),
     Column("updated_by_execution_id", Text),
+)
+
+user_ui_preferences = Table(
+    # ent#413 — generic per-user UI preference record; (user_id, key) → JSON
+    # object. Per-key `updated_at` is the compare-and-set base for PUT.
+    "user_ui_preferences",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("key", Text, primary_key=True),
+    Column("value_json", Text),
+    Column("updated_at", Text),
 )
 
 agent_reports = Table(

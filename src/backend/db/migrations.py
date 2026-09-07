@@ -3983,6 +3983,33 @@ def _migrate_portal_session_title_source(cursor, conn):
     conn.commit()
 
 
+def _migrate_user_ui_preferences_table(cursor, conn):
+    """Create user_ui_preferences (trinity-enterprise#413, OSS-core).
+
+    Per-user UI state that used to live in browser-global localStorage — the
+    Dashboard Grid layout, tile prefs and org toggles first. One row per
+    (user_id, key); the value is an opaque JSON object, size-capped at the
+    service. Schema is also in db/schema.py for fresh installs; this handles
+    existing ones. Idempotent. Mirrored by Alembic revision
+    0053_user_ui_preferences for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(user_ui_preferences)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_ui_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4106,4 +4133,5 @@ MIGRATIONS = [
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
+    ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
 ]

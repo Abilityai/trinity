@@ -64,6 +64,28 @@ describe('#2199 grid layout storage key has one source of truth', () => {
     expect(mod.ALL_LAYOUT_KEYS).toContain(mod.LAYOUT_KEY_V1)
   })
 
+  it('ent#413: the per-user cache keys and the org key live here too', async () => {
+    const mod = await import('../../src/utils/gridStorageKeys.js')
+    expect(mod.ORG_KEY).toBe('trinity-grid-org-v1')
+    expect(mod.userScopedKey(mod.LAYOUT_KEY, 'admin')).toBe('trinity-grid-layout-v2:admin')
+    // A spec's cleanup must clear the identity's cache AND every legacy key
+    // (the adopt path reads those) — one helper, or the #2199 class returns.
+    const all = mod.allGridKeysFor('admin')
+    for (const k of mod.ALL_LAYOUT_KEYS) expect(all).toContain(k)
+    expect(all).toContain(mod.WIDGET_PREFS_KEY)
+    expect(all).toContain(mod.ORG_KEY)
+    expect(all).toContain(mod.LEGACY_ADOPTED_KEY)
+    for (const k of mod.userScopedKeys('admin')) expect(all).toContain(k)
+    expect(Object.values(mod.PREF_KEYS)).toEqual(['grid_layout', 'grid_widgets', 'grid_org'])
+  })
+
+  it('no e2e spec or composable hand-copies the org key literal (ent#413)', () => {
+    const org = /['"`]trinity-grid-org-[^'"`]*['"`]/
+    const files = [...jsFilesUnder(E2E_DIR), fileURLToPath(new URL('../../src/composables/useOrgOverlay.js', import.meta.url))]
+    const offenders = files.filter((f) => org.test(stripComments(readFileSync(f, 'utf8'))))
+    expect(offenders).toEqual([])
+  })
+
   it('the constants module imports nothing (Playwright must resolve it)', () => {
     // Playwright reads neither the Vite `@` alias nor a tsconfig `paths` map,
     // so one aliased import here would break every grid spec at once.
