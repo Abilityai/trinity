@@ -1,0 +1,481 @@
+name: Alembic head watch
+
+# Pre-merge Alembic head check against the LIVE `dev` tip (#2533).
+#
+# THE DEFECT THIS EXISTS FOR — and it is not a checkout bug, so do not
+# "fix" it by changing how `schema-parity` checks out. That job runs
+# `scripts/ci/check_alembic_heads.py` unconditionally, and `actions/checkout`
+# on a `pull_request` event already resolves `refs/pull/N/merge`, so the guard
+# WAS testing the merge result and WAS correct. It was STALE. GitHub recomputes
+# `refs/pull/N/merge` when the base advances but does NOT re-trigger workflows,
+# so the last green run can describe a base that no longer exists while the PR
+# reads "mergeable, all checks green". #2526 merged 75 minutes after its last
+# green run, in which time `dev` gained a revision with the same parent.
+#
+# WHY ALEMBIC AND NOT EVERY CHECK: staleness is true of every check. Alembic is
+# where it is silent and expensive — the two revision files never conflict
+# textually (different filenames, each individually valid; the defect exists
+# only in the RELATIONSHIP), and `alembic upgrade head` is singular and
+# resolves its target BEFORE applying anything, so a two-head graph applies
+# ZERO revisions on PostgreSQL. Every revision merged since the fork stops
+# arriving, not only the one that forked.
+#
+# WHAT THIS DOES NOT COVER, said out loud rather than left to imply coverage:
+# the Alembic single-head class ONLY. Every other check on a PR is equally
+# stale and nothing here helps them. The complete fixes for the whole class are
+# a GitHub merge queue, or "require branches to be up to date before merging" —
+# both repository settings rather than code, both priced out on this repo's
+# merge rate (#2533). Post-merge nets already exist and are unchanged:
+# `schema-parity` also runs on push to `dev`, and `deploy` runs migrations at
+# boot. This closes a window; it is not the last line of defence.
+#
+# ADVISORY BY DESIGN. The `alembic-head-watch` commit status must never be made
+# a required context — the `pg-migrations.yml` precedent: "keep it advisory so
+# an infra hiccup can't brick the merge queue the way a stuck required context
+# would." A run that dies leaves a PR mergeable, which is the correct failure
+# direction for a watcher whose whole premise is that the blocking gate already
+# ran and passed.
+#
+# TRIGGERS — the cron is the BACKSTOP, not the mechanism. The staleness window
+# opens at exactly one moment: `dev` gains a revision. A PR opened or pushed
+# after that gets a fresh `pull_request` run of its own; only a PR that was
+# already green when `dev` moved is invalidated. So `push` on `dev`, path-
+# filtered, is the precise trigger and fires within a minute of the event.
+# Note `schedule:` fires ONLY from the default branch (`main`), so the cron arm
+# is dormant until this file reaches `main` at a release cut — the push arm is
+# live the moment it merges to `dev`.
+#
+# THE `pull_request` ARM IS A SELF-TEST, and it is why this workflow is
+# verifiable at all. `workflow_dispatch` cannot reach a workflow that exists
+# only on a feature branch (GitHub resolves dispatchable workflows from the
+# default branch), so without this a change here could not be exercised until
+# after it merged. Path-filtered to this workflow's own files, it runs the
+# WHOLE path — discover, fetch, merge-tree, archive, guard, verdict, summary —
+# with DRY_RUN on, publishing nothing. Fork-safe by construction: a fork PR's
+# read-only GITHUB_TOKEN is never asked to write.
+#
+# ONE JOB, AND WHY THAT IS NOT A WEAKENED COPY OF backend-unit-nightly.yml.
+# That workflow splits discover → test → comment because it runs PYTEST ON PR
+# CODE, which must never share a job with a write-capable token. That
+# constraint does not exist here:
+#   * the workspace is `dev` only — the PR is NEVER checked out;
+#   * `git merge-tree --write-tree` "does not make any new commits and does not
+#     read from or write to either the working tree or index" (git's own docs),
+#     so this workflow structurally cannot push;
+#   * the only PR bytes that touch the disk are Alembic revision files
+#     extracted into a temp dir, read by `ast.parse` — which the guard's
+#     docstring pins as never imported and never executed.
+# No PR-authored code runs, so `pull-requests: write` is safe in this job.
+# `persist-credentials: false` is the belt. Copying the three-job shape without
+# its reason would add artifact plumbing and lose nothing but clarity.
+#
+# THE CHECKOUT PINS `ref: dev`, NOT `github.sha`, and that is deliberate. The
+# guard applied must be the one `dev` enforces, not the one a PR proposes, and
+# script + merge base then come from one commit by construction. (This is the
+# same question #2462 answered the other way for a different reason: there the
+# trusted module had to match the WORKFLOW; here it has to match the BASE.)
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'src/backend/migrations/versions/**'
+  pull_request:
+    paths:
+      - '.github/workflows/alembic-head-watch.yml'
+      - 'scripts/ci/alembic-head-verdict.js'
+  schedule:
+    - cron: '17 */6 * * *'   # backstop for a dropped run; `main` only (see header)
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Evaluate only this PR (blank = every open PR touching versions/**)'
+        required: false
+        type: string
+
+# No top-level permissions — the one job declares its own narrow scope.
+permissions: {}
+
+concurrency:
+  group: alembic-head-watch
+  # NOT cancel-in-progress: a cancelled run publishes nothing, and the verdicts
+  # it would have refreshed then stay stale until the next trigger. The run is
+  # short enough that overlap is cheaper than silence.
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: head check against the live dev tip
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write   # the sticky comment
+      issues: write          # PR conversation comments are issue comments
+      statuses: write        # the alarm at the merge click
+    env:
+      # The `pull_request` arm is this workflow's self-test: evaluate
+      # everything, publish nothing. Read by the report step.
+      DRY_RUN: ${{ github.event_name == 'pull_request' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout dev (the PR is never checked out)
+        uses: actions/checkout@v7
+        with:
+          ref: dev
+          # MUST be full history (#1941, third workflow to need this). With a
+          # depth, the PR head and this base share no ancestor and merge-tree
+          # cannot find a merge base — which would report every PR as broken,
+          # the exact class where a detector's output stops depending on its
+          # input.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Baseline — dev itself resolves to one head
+        id: base
+        run: |
+          set -euo pipefail
+          for f in scripts/ci/check_alembic_heads.py scripts/ci/alembic-head-verdict.js; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f is missing from dev — the watcher cannot run without it."
+              exit 1
+            fi
+          done
+
+          # The SAME invocation schema-parity makes, including the enterprise
+          # arm, which is inert on public CI (the private submodule is never
+          # checked out) and skips loudly rather than failing.
+          set +e
+          out=$(python3 scripts/ci/check_alembic_heads.py \
+                  src/backend/migrations/versions \
+                  src/backend/enterprise/backend/migrations/versions 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+
+          if [ "$rc" -ne 0 ]; then
+            # A forked `dev` would make EVERY PR verdict meaningless, and
+            # flagging all of them would reproduce #1941's defect in a second
+            # workflow: a detector whose output is independent of its input.
+            # schema-parity's own push-on-dev run is already red in this state,
+            # so say it once here and touch no PR.
+            {
+              echo "### Alembic head watch"
+              echo
+              echo ":rotating_light: \`dev\` itself does not resolve to one head. No PR was evaluated —"
+              echo "every verdict would be meaningless until \`dev\` is fixed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::dev itself resolves to more than one head; no PR evaluated (#2533)."
+            exit 1
+          fi
+
+          # Parsed without matching the em-dash in the guard's own PASS line.
+          # First match is the OSS line, which is the first positional arg.
+          dev_head=$(printf '%s\n' "$out" | grep -o '1 head ([^)]*)' | head -1 \
+                     | sed 's/^1 head (//; s/)$//')
+          echo "dev_head=$dev_head" >> "$GITHUB_OUTPUT"
+          echo "dev head: ${dev_head:-<unparsed>}"
+
+      - name: Discover open PRs touching the Alembic version line
+        id: discover
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through `env:` rather than interpolated into the shell, so a
+          # dispatch input cannot break out of a quoted string. Validated below.
+          ONLY_PR: ${{ inputs.pr_number }}
+          SELF_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Self-test: exercise the whole path on THIS PR, deliberately
+            # bypassing the versions/** filter — a change to this workflow will
+            # almost never touch a revision, and a rehearsal that discovers
+            # nothing rehearses nothing. DRY_RUN is on, so nothing is published.
+            echo "numbers=$SELF_PR" >> "$GITHUB_OUTPUT"
+            echo "has_prs=true" >> "$GITHUB_OUTPUT"
+            echo "Self-test (dry run): evaluating only PR #$SELF_PR."
+            exit 0
+          fi
+
+          if [ -n "${ONLY_PR:-}" ] && ! printf '%s' "$ONLY_PR" | grep -qE '^[0-9]+$'; then
+            echo "::error::pr_number must be digits, got: $ONLY_PR"
+            exit 1
+          fi
+
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --base dev --state open \
+                  --limit 100 --json number --jq '.[].number')
+
+          # The filter is guarded on a NON-EMPTY input. An always-on filter with
+          # an empty value would silently reduce every scheduled run to nothing
+          # — the same silence this issue is about, arriving by another door.
+          if [ -n "${ONLY_PR:-}" ]; then
+            prs=$(printf '%s\n' "$prs" | grep -x "$ONLY_PR" || true)
+            echo "Scoped to PR #$ONLY_PR."
+          fi
+
+          selected=""
+          for n in $prs; do
+            set +e
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$n/files" \
+                      --jq '.[].filename' 2>/dev/null)
+            api_rc=$?
+            set -e
+            if [ "$api_rc" -ne 0 ]; then
+              # FAIL OPEN TOWARD EVALUATING. An extra sub-second check costs
+              # nothing; a skipped one is the entire bug this workflow exists
+              # for. Same for a listing GitHub truncated.
+              echo "::warning::PR #$n — could not list files; evaluating it anyway."
+              selected="$selected $n"
+              continue
+            fi
+            if printf '%s\n' "$files" | grep -q '^src/backend/migrations/versions/'; then
+              selected="$selected $n"
+            fi
+          done
+
+          selected=$(printf '%s' "$selected" | xargs || true)
+          if [ -z "$selected" ]; then
+            echo "has_prs=false" >> "$GITHUB_OUTPUT"
+            echo "numbers=" >> "$GITHUB_OUTPUT"
+            echo "No open PR touches src/backend/migrations/versions/** — nothing to check."
+            {
+              echo "### Alembic head watch"
+              echo
+              echo ":white_check_mark: No open PR touches \`src/backend/migrations/versions/**\` — nothing to check."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "has_prs=true" >> "$GITHUB_OUTPUT"
+          echo "numbers=$selected" >> "$GITHUB_OUTPUT"
+          echo "Evaluating: $selected"
+
+      - name: Merge each PR in memory and run the guard
+        id: evaluate
+        if: steps.discover.outputs.has_prs == 'true'
+        env:
+          DEV_HEAD: ${{ steps.base.outputs.dev_head }}
+          PR_NUMBERS: ${{ steps.discover.outputs.numbers }}
+        run: |
+          set -euo pipefail
+          mkdir -p verdicts
+
+          write_verdict() {
+            jq -n --argjson pr "$1" --arg head_sha "$2" --arg outcome "$3" \
+                  --arg detail "$4" --arg dev_head "${DEV_HEAD:-}" --arg run_url "$RUN_URL" \
+              '{prNumber: $pr, headSha: $head_sha, outcome: $outcome,
+                detail: $detail, devHead: $dev_head, runUrl: $run_url}' \
+              > "verdicts/pr-$1.json"
+          }
+
+          for n in $PR_NUMBERS; do
+            echo "::group::PR #$n"
+
+            # `pull/N/head` is the fork-safe ref: it works for same-repo and
+            # fork PRs alike, where `origin/<branch>` works only for the former
+            # and can collide with a base-repo branch name. Objects only — no
+            # checkout, no working-tree change.
+            if ! git fetch --no-tags --quiet origin "pull/$n/head:refs/watch/pr-$n"; then
+              echo "::warning::PR #$n — could not fetch pull/$n/head; no verdict written."
+              write_verdict "$n" "" unknown ""
+              echo "::endgroup::"; continue
+            fi
+            head_sha=$(git rev-parse "refs/watch/pr-$n")
+
+            # git's documented exit contract: 0 = clean, 1 = conflicts, anything
+            # else = could not complete. That distinguishes "this PR conflicts"
+            # from "the infrastructure failed" NATIVELY — no `--diff-filter=U`
+            # heuristic, which is what backend-unit-nightly.yml got wrong in
+            # #1941 and reported as a conflict for 9 of 9 open PRs.
+            set +e
+            tree=$(git merge-tree --write-tree HEAD "refs/watch/pr-$n" 2>/dev/null | head -1)
+            rc=$?
+            set -e
+
+            if [ "$rc" -eq 1 ]; then
+              # A conflicting PR shows ZERO checks anyway — GitHub cannot
+              # compute refs/pull/N/merge either. Report "cannot evaluate",
+              # never a verdict.
+              echo "PR #$n conflicts with dev — head check not evaluated."
+              write_verdict "$n" "$head_sha" conflict ""
+              echo "::endgroup::"; continue
+            fi
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::PR #$n — git merge-tree exited $rc (neither clean nor conflicted); no verdict written."
+              write_verdict "$n" "$head_sha" unknown ""
+              echo "::endgroup::"; continue
+            fi
+
+            # Mirror the real repo layout inside the temp dir so the guard's own
+            # labels read exactly as they do in schema-parity, with no temp path
+            # leaking into the PR comment.
+            work=$(mktemp -d)
+            oss="$work/src/backend/migrations/versions"
+            ent="$work/src/backend/enterprise/backend/migrations/versions"
+            mkdir -p "$oss"
+
+            if ! git archive "$tree:src/backend/migrations/versions" | tar -x -C "$oss"; then
+              echo "::warning::PR #$n — could not extract the OSS version line; no verdict written."
+              write_verdict "$n" "$head_sha" unknown ""
+              rm -rf "$work"; echo "::endgroup::"; continue
+            fi
+
+            # `src/backend/enterprise` is a GITLINK, so this path cannot resolve
+            # on public CI. Absence is EXPECTED, never an error: leave the
+            # directory uncreated and let the guard print its own
+            # "version directory absent … skipped" line — byte-for-byte what
+            # schema-parity does today. Deliberately NOT `mkdir -p "$ent"` up
+            # front: an existing-but-empty directory takes the guard's other
+            # (also skipping) branch, and the two logs should not diverge for
+            # no reason.
+            if git rev-parse -q --verify "$tree:src/backend/enterprise/backend/migrations/versions" >/dev/null 2>&1; then
+              mkdir -p "$ent"
+              git archive "$tree:src/backend/enterprise/backend/migrations/versions" | tar -x -C "$ent" || true
+            fi
+
+            # Bounds PARSING, not extraction (the tree is already on disk by
+            # here, and bounded by the repo itself). A version line this large
+            # is a mistake or an attack, and either way the honest answer is
+            # "no verdict" rather than a ten-minute timeout.
+            count=$(find "$work" -type f -name '*.py' | wc -l | tr -d ' ')
+            if [ "$count" -gt 500 ]; then
+              echo "::warning::PR #$n — $count revision files exceeds the 500 cap; refusing to parse."
+              write_verdict "$n" "$head_sha" unknown ""
+              rm -rf "$work"; echo "::endgroup::"; continue
+            fi
+
+            # The guard comes from the DEV checkout, never from the merged tree:
+            # the assertion applied must be the one dev enforces, not the one
+            # this PR proposes.
+            set +e
+            out=$(cd "$work" && python3 "$GITHUB_WORKSPACE/scripts/ci/check_alembic_heads.py" \
+                    src/backend/migrations/versions \
+                    src/backend/enterprise/backend/migrations/versions 2>&1)
+            grc=$?
+            set -e
+            printf '%s\n' "$out"
+
+            case "$grc" in
+              0) write_verdict "$n" "$head_sha" clean "" ;;
+              1) write_verdict "$n" "$head_sha" fork "$out" ;;
+              *) echo "::warning::PR #$n — the guard exited $grc; no verdict written."
+                 write_verdict "$n" "$head_sha" unknown "" ;;
+            esac
+
+            rm -rf "$work"
+            echo "::endgroup::"
+          done
+
+      - name: Publish status + sticky comment
+        # `always()` so a hard failure mid-sweep still publishes the verdicts
+        # that WERE written. Gated on has_prs rather than on a count string,
+        # because an empty output compares unequal to '0' and would run this
+        # step after the baseline step failed.
+        if: always() && steps.discover.outputs.has_prs == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { verdictFor, MARKER } = require(
+              `${process.env.GITHUB_WORKSPACE}/scripts/ci/alembic-head-verdict.js`
+            );
+            const dryRun = process.env.DRY_RUN === 'true';
+            const dir = `${process.env.GITHUB_WORKSPACE}/verdicts`;
+
+            let files = [];
+            try {
+              files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+            } catch (err) {
+              core.warning(`no verdicts directory: ${err.message}`);
+            }
+
+            // Migration-touching PRs were found but nothing produced a verdict:
+            // every leg died before the guard ran. That must not exit 0 — a
+            // watcher is allowed to say nothing ABOUT A PR, never to say
+            // nothing at all and pass (#2462).
+            if (files.length === 0) {
+              core.setFailed(
+                'PRs touching src/backend/migrations/versions/** were discovered but no verdict ' +
+                'was written — every leg failed before the guard could run (#2533).'
+              );
+              return;
+            }
+
+            const lines = [];
+            for (const file of files.sort()) {
+              let result;
+              try {
+                result = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+              } catch (err) {
+                core.warning(`unreadable verdict ${file}: ${err.message}`);
+                continue;
+              }
+              try {
+                const v = verdictFor({ ...result, dryRun });
+                lines.push(`- ${v.summary}`);
+
+                if (v.status) {
+                  await github.rest.repos.createCommitStatus({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    sha: result.headSha,
+                    ...v.status,
+                  });
+                }
+
+                if (!v.comment) continue;
+
+                // Bot-author filter is REQUIRED: without it a user comment that
+                // quotes the marker matches, and updateComment then 403s
+                // (a bot may only edit its own comments) so the real sticky is
+                // never created. backend-unit-nightly.yml already paid for this.
+                const existing = await github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: result.prNumber,
+                  per_page: 100,
+                });
+                const sticky = existing.find(
+                  (c) =>
+                    (c.body || '').includes(MARKER) &&
+                    c.user &&
+                    (c.user.type === 'Bot' || c.user.login === 'github-actions[bot]')
+                );
+
+                if (sticky) {
+                  if (sticky.body === v.comment.body) {
+                    core.info(`PR #${result.prNumber}: comment unchanged, skipping.`);
+                  } else {
+                    await github.rest.issues.updateComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      comment_id: sticky.id,
+                      body: v.comment.body,
+                    });
+                  }
+                } else if (v.createIfMissing) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: result.prNumber,
+                    body: v.comment.body,
+                  });
+                }
+                // else: clean and never flagged — deliberately no comment.
+              } catch (err) {
+                // One PR's failure must not take out the rest of the sweep.
+                core.warning(`PR #${result.prNumber}: ${err.message}`);
+              }
+            }
+
+            await core.summary
+              .addHeading('Alembic head watch', 3)
+              .addRaw(
+                dryRun
+                  ? '_Dry run (`pull_request` self-test) — evaluated, published nothing._\n\n'
+                  : ''
+              )
+              .addRaw(lines.join('\n'))
+              .write();
