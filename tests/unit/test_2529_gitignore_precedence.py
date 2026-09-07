@@ -839,6 +839,176 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
 
 
 # ---------------------------------------------------------------------------
+# The HTTP surface (AC-4's "API" half). `_with_sweep` populating the model is
+# only half the delivery: `routers/git.py::sync_to_github` hand-builds its
+# response dict and drops anything not named in it, so a field can be correct
+# on the model and invisible on the wire. The MCP tool is a passthrough over
+# THIS dict, so a drop here silently empties the MCP surface too (Invariant #13).
+# ---------------------------------------------------------------------------
+
+
+def _git_router():
+    """Import the backend router in the unit island.
+
+    `routers.git` pulls `config.py`, which raises at import if `REDIS_URL`
+    carries no credentials, and `database`, which wants a path. Same preamble
+    as `test_ent109_bind_endpoint.py`, which imports this very module. Deliberately
+    NOT wrapped in a skip: a guard that evaporates when its import breaks is the
+    stale-guard shape this file exists to prevent.
+    """
+    import os
+    import tempfile
+
+    os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
+    os.environ.setdefault("REDIS_PASSWORD", "test")
+    os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+    os.environ.setdefault("AGENT_AUTH_SECRET", "0" * 64)
+    os.environ.setdefault(
+        "TRINITY_DB_PATH",
+        str(Path(tempfile.gettempdir()) / "trinity_test_2529_router.db"),
+    )
+    import routers.git as git_router
+
+    return git_router
+
+
+def _fake_request():
+    """The handler only hands `request` to `_audit_git`, which is patched."""
+    import types
+
+    return types.SimpleNamespace(
+        client=types.SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        url=types.SimpleNamespace(path="/api/agents/alpha/git/sync"),
+    )
+
+
+def _fake_user():
+    import types
+
+    return types.SimpleNamespace(
+        id=1, username="alice", email="alice@example.com", role="admin", agent_name=None
+    )
+
+
+def _sweep_written_fields(gs, GitSyncResult):
+    """The `GitSyncResult` fields `_with_sweep` actually writes, derived by
+    BEHAVIOUR (baseline vs populated), never by a hardcoded list — a hardcoded
+    list is the same "someone must remember" mechanism that lost the field in
+    the first place. `message` is excluded because it is a pre-#2529 field the
+    sweep only augments; it was already in the response dict."""
+    base = GitSyncResult(success=True, message="Synced")
+    full = gs.GitignoreSweep(
+        removed=("r.txt",), unignored=("u.txt",), shadowed=("!s -> s/",)
+    )
+    populated = gs._with_sweep(GitSyncResult(success=True, message="Synced"), full)
+    return {
+        name
+        for name in type(base).model_fields
+        if getattr(populated, name) != getattr(base, name)
+    } - {"message"}
+
+
+@pytest.mark.asyncio
+async def test_the_sync_response_dict_carries_every_field_the_sweep_writes():
+    """AC-4, at the boundary the UI and the MCP tool actually read.
+
+    The assertion is COMPLETENESS, not the presence of three names: whatever
+    `_with_sweep` writes onto the result must appear on the wire. A fourth sweep
+    field added to the model and to `_with_sweep` — the natural next change here,
+    since this round already added two — but forgotten in the hand-built dict
+    fails this test instead of shipping a field that exists everywhere except
+    where a caller can see it.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    gs = _gs()
+    from database import GitSyncResult
+
+    git_router = _git_router()
+
+    sweep = gs.GitignoreSweep(
+        removed=("data/report.csv",),
+        unignored=(".ssh/id_rsa",),
+        shadowed=("!content/keep.md -> content/",),
+    )
+    result = gs._with_sweep(GitSyncResult(success=True, message="Synced"), sweep)
+
+    with patch.object(
+        git_router.git_service, "sync_to_github", new=AsyncMock(return_value=result)
+    ), patch.object(git_router, "_audit_git", new=AsyncMock()), patch(
+        "services.docker_service.get_agent_container", return_value=object()
+    ):
+        response = await git_router.sync_to_github(
+            agent_name="alpha",
+            request=_fake_request(),
+            body=git_router.GitSyncRequest(),
+            current_user=_fake_user(),
+        )
+
+    written = _sweep_written_fields(gs, GitSyncResult)
+    assert written, "derivation broke — `_with_sweep` appears to write nothing"
+    missing = {f for f in written if f not in response}
+    assert not missing, (
+        f"`sync_to_github`'s response dict drops {sorted(missing)}; the field is "
+        "populated on the model and invisible to every HTTP and MCP caller"
+    )
+    for field in written:
+        assert response[field] == getattr(result, field)
+
+    # And the summary rides along on `message`, which is the ONLY sweep surface
+    # the failure path below can carry.
+    assert "untracked 1 file(s)" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_push_still_reports_the_sweep_it_already_performed():
+    """The sweep mutates the index BEFORE the push, so a 409 has untracked the
+    files just as surely as a 200 did. `HTTPException` keeps only `detail`, so
+    the structured fields cannot survive that return at all — the summary folded
+    into `message` is the whole surface, and #905's audit row is the durable half.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    gs = _gs()
+    from fastapi import HTTPException
+
+    from database import GitSyncResult
+
+    git_router = _git_router()
+
+    sweep = gs.GitignoreSweep(removed=("a.txt", "b.txt"))
+    result = gs._with_sweep(
+        GitSyncResult(
+            success=False, message="Sync conflict", conflict_type="push_rejected"
+        ),
+        sweep,
+    )
+
+    audit = AsyncMock()
+    with patch.object(
+        git_router.git_service, "sync_to_github", new=AsyncMock(return_value=result)
+    ), patch.object(git_router, "_audit_git", new=audit), patch(
+        "services.docker_service.get_agent_container", return_value=object()
+    ):
+        with pytest.raises(HTTPException) as raised:
+            await git_router.sync_to_github(
+                agent_name="alpha",
+                request=_fake_request(),
+                body=git_router.GitSyncRequest(),
+                current_user=_fake_user(),
+            )
+
+    assert raised.value.status_code == 409
+    assert "untracked 2 file(s)" in raised.value.detail
+
+    assert audit.await_count == 1
+    details = audit.await_args.kwargs["details"]
+    assert details["removed_paths"] == ["a.txt", "b.txt"]
+    assert audit.await_args.kwargs["success"] is False
+
+
+# ---------------------------------------------------------------------------
 # The other writers of an agent's `.gitignore` (Decision 8: the coverage frame
 # is the FILE, not the three merge call sites)
 # ---------------------------------------------------------------------------
