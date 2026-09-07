@@ -23,6 +23,7 @@ import {
   resolveAgentLanding,
   answerConfirmation,
   agentRowTime,
+  agentRowMeta,
   MAIN_TAB_LABEL,
 } from '@/components/portal/portalUtils'
 import {
@@ -505,5 +506,45 @@ describe('ent#523 — the approved design (board A3)', () => {
 
   it('the chart is named rather than left a bare plot beside numbers', () => {
     expect(read('../../src/components/portal/PortalAgentBand.vue')).toMatch(/Activity · last/)
+  })
+})
+
+describe('ent#523 — the sidebar row meta is one pass, not four per row', () => {
+  const T0 = Date.parse('2026-09-07T12:00:00Z')
+
+  it('agrees with the per-agent helpers it replaced', () => {
+    const threads = [
+      { agent_name: 'a', title: 'Older', last_message_at: '2026-09-01T12:00:00Z' },
+      { agent_name: 'a', title: 'Newest', last_message_at: '2026-09-07T11:48:00Z' },
+      { agent_name: 'b', title: 'Solo', last_message_at: '2026-09-05T12:00:00Z' },
+    ]
+    const meta = agentRowMeta(threads, T0)
+    expect(meta.a).toEqual({ preview: 'Newest', time: '12m' })
+    expect(meta.b).toEqual({ preview: 'Solo', time: '2d' })
+    // The rule it must not drift from.
+    expect(meta.a.time).toBe(agentRowTime(threads, 'a', T0))
+    expect(meta.a.preview).toBe(agentPreview(threads, 'a'))
+  })
+
+  it('keeps the untitled-chat rule — no "New chat" under every agent', () => {
+    const meta = agentRowMeta([{ agent_name: 'a', last_message_at: '2026-09-07T11:48:00Z' }], T0)
+    expect(meta.a.preview).toBeNull()
+    expect(meta.a.time).toBe('12m')
+  })
+
+  it('ignores rooms and threads with no history', () => {
+    expect(agentRowMeta([
+      { agent_name: 'a', is_room: true, last_message_at: '2026-09-07T11:00:00Z' },
+      { agent_name: 'b' },
+    ], T0)).toEqual({})
+  })
+
+  it('the sidebar reads the memoized map, not a per-row function', () => {
+    // The template called two whole-list scans twice each, per row, on a
+    // surface that re-renders on every store tick.
+    const SB = read('../../src/components/portal/PortalSidebar.vue')
+    expect(SB).toMatch(/const rowMeta = computed\(\(\) => agentRowMeta\(/)
+    expect(SB).not.toMatch(/previewFor\(a\.name\)/)
+    expect(SB).not.toMatch(/rowTime\(a\.name\)/)
   })
 })

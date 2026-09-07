@@ -1720,6 +1720,49 @@ export function answerConfirmation(answered, agentLabel = null) {
 // "how long should this be up" does not vary by surface.
 export const ANSWER_CONFIRMATION_MS = 6000
 
+// Every agent row's preview + timestamp, in ONE pass over the thread list.
+//
+// The two helpers below each scan the whole list, and the sidebar template
+// called them per row and twice each (a `v-if` and an interpolation) — so a
+// 10-agent roster over 200 threads did ~8k iterations per render, on a surface
+// that re-renders on every store tick. Same rules, same output; the cost is
+// O(threads + agents) instead of O(rows × threads × 4).
+export function agentRowMeta(threads, now = Date.now()) {
+  const newest = new Map()
+  const title = new Map()
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || t.is_room || !t.agent_name || !t.last_message_at) continue
+    const n = new Date(t.last_message_at).getTime()
+    if (!Number.isFinite(n)) continue
+    if (n > (newest.get(t.agent_name) || 0)) {
+      newest.set(t.agent_name, n)
+      title.set(t.agent_name, threadTitle(t))
+    }
+  }
+  const out = {}
+  for (const [name, n] of newest) {
+    const label = title.get(name)
+    out[name] = {
+      // Same rule as `agentPreview`: an untitled chat is no preview, because a
+      // row reading "New chat" under every agent is noise.
+      preview: label === 'New chat' ? null : label,
+      time: compactAge(n, now),
+    }
+  }
+  return out
+}
+
+// The tight form, split out so `agentRowTime` and `agentRowMeta` cannot drift
+// on what "2d" means.
+function compactAge(then, now) {
+  const diff = Math.max(0, now - then)
+  if (diff < 60_000) return 'now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`
+  return new Date(then).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 // The agent row's right-hand timestamp (ent#523, board A3): when you last
 // heard from this agent, in the tightest form that is still unambiguous.
 //
@@ -1738,10 +1781,5 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
     if (Number.isFinite(n) && n > newest) newest = n
   }
   if (!newest) return ''
-  const diff = Math.max(0, now - newest)
-  if (diff < 60_000) return 'now'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
-  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`
-  return new Date(newest).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return compactAge(newest, now)
 }

@@ -200,9 +200,14 @@ function showConfirmation(message) {
   if (!message) return
   const id = `ack-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   confirmations.value.push({ id, message })
-  confirmationTimers.push(setTimeout(() => {
+  const timer = setTimeout(() => {
     confirmations.value = confirmations.value.filter((c) => c.id !== id)
-  }, ANSWER_CONFIRMATION_MS))
+    // Drop the handle too: a fired timer left in the list is dead weight that
+    // grows for the life of the mount, and `onBeforeUnmount` would then clear
+    // a pile of expired ids.
+    confirmationTimers = confirmationTimers.filter((t) => t !== timer)
+  }, ANSWER_CONFIRMATION_MS)
+  confirmationTimers.push(timer)
 }
 
 // A timer that outlives the component would write to a dead ref on a chat
