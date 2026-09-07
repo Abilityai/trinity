@@ -1020,14 +1020,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // #2579 — the operator-only title-generation health, for the notice under
     // the Workspace tab strip. Same payload the settings panel reads.
     //
-    // `portalHttp`, deliberately, not `@/api`. This store owns its own axios
-    // instance whose request interceptor rebuilds `Authorization` from
-    // `authHeader` — which for a platform session IS the platform JWT — and
-    // whose 401 handler routes an operator through `_onPlatformSessionLost`.
-    // `@/api` would add a second, harsher path into this same file: it hard-
-    // navigates to `/login` on a 401 under `/workspace`, so a stale token on a
-    // BACKGROUND diagnostic probe would bounce an operator out of the
-    // conversation they are reading, through a route the Workspace never uses.
+    // `portalHttp`, deliberately, not `@/api` — for the credential, not for the
+    // bounce. This store's request interceptor is the ONE place that decides a
+    // workspace `Authorization` (portal token, else the platform JWT, else
+    // nothing), and every other workspace read already goes through it; adding
+    // `@/api` here would put a second credential decision in this file for a
+    // single diagnostic.
+    //
+    // /review correction: an earlier version of this note claimed `@/api` would
+    // bounce an operator on a 401 where `portalHttp` would not. It would not —
+    // `portalHttp`'s own 401 handler calls `_onPlatformSessionLost` for exactly
+    // a platform session, which logs out and pushes `/login`. The difference is
+    // a router push versus `@/api`'s hard `window.location.href`, so the choice
+    // stands but the reason recorded for it did not.
     //
     // Fail-soft on purpose: the caller treats any refusal as "no notice". The
     // endpoint is `assert_admin`-gated, which is the authority; the client-side

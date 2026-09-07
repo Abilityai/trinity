@@ -225,6 +225,27 @@ describe('#2579 — the title settle cycle', () => {
     expect(s).toMatch(/onBeforeUnmount\(\(\) => \{[\s\S]*?clearTitleSettle\(\)/)
   })
 
+  it('re-asks the same question INSIDE the arm, because the caller decided it two awaits ago', () => {
+    // /review. `stillHere` is computed synchronously at the event; the arm runs
+    // after `markRead` and `refreshThreads`. A thread switch inside that window
+    // passes the caller's check AND fires `watch(convKey)` while nothing is
+    // armed yet — so without this second check the cycle is armed on a
+    // conversation the person has already left, which is precisely what the
+    // caller's own comment claims is prevented.
+    const s = src()
+    expect(s).toMatch(
+      /function armTitleSettle\(sessionId\) \{\s*clearTitleSettle\(\)\s*if \(!shouldMarkTurnRead\(sessionId, activeSessionId\.value \|\| pendingSession\.value\)\) return/
+    )
+  })
+
+  it('a list-only re-read still owes the ent#491 seeding it replaces', () => {
+    // /review. `settleTick` assigns `threads.value` exactly as `refreshThreads`
+    // does, so it must seed agent recency the same way or an unranked agent
+    // stays unranked for as long as the cycle keeps overwriting the list.
+    const s = src()
+    expect(s).toMatch(/threads\.value = decorate\(list\)\s*store\.seedAgentRecency\(threads\.value\)/)
+  })
+
   it('a vanished row stops the cycle WITHOUT a verdict', () => {
     // A deleted row (Reset, delete) is not evidence the generator works.
     expect(src()).toMatch(/if \(!row\) \{ clearTitleSettle\(\); return \}/)

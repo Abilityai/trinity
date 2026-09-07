@@ -1339,6 +1339,14 @@ function armTitleSettle(sessionId) {
   // leave the first cycle's timers running beside the second's, against a
   // baseline the second overwrote.
   clearTitleSettle()
+  // /review: the "still in this thread" question has to be asked HERE too, not
+  // only at the event. `onConversationTurnDone` decides it synchronously and
+  // then arms after two awaits (`markRead` + `refreshThreads`), so a thread
+  // switch inside that window passes the caller's check, fires `watch(convKey)`
+  // while nothing is armed yet, and lands here anyway — arming a cycle on a
+  // conversation the person has already left, which is the exact thing the
+  // caller's comment says is prevented.
+  if (!shouldMarkTurnRead(sessionId, activeSessionId.value || pendingSession.value)) return
   const row = threadRow(sessionId)
   if (!row || !titleSettling(row)) return
   titleAtTurnDone = row.title || ''
@@ -1354,6 +1362,11 @@ async function settleTick(sessionId, last) {
   const list = await store.fetchAllSessions().catch(() => null)
   if (list === null || store.sessionsFailed) { clearTitleSettle(); return }
   threads.value = decorate(list)
+  // /review: this replaces `threads` exactly as `refreshThreads` does, so it
+  // owes the same ent#491 seeding — otherwise an agent this session has not
+  // ranked stays unranked for as long as the cycle keeps overwriting the list.
+  // Fills only MISSING keys, so it cannot walk back a send's bump.
+  store.seedAgentRecency(threads.value)
   const row = threadRow(sessionId)
   // Gone (Reset, delete): stop, and leave the health verdict alone. A deleted
   // row is not evidence that generation works.
