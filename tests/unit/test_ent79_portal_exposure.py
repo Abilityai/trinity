@@ -1048,22 +1048,49 @@ def test_title_generation_failure_keeps_the_fallback(history_db):
     assert pdb.get_portal_session(sid, "atlas", "bob@example.com")["title"] == before
 
 
-def test_title_generated_once_and_only_from_the_visible_exchange(history_db):
+def test_title_generated_from_the_visible_exchange_and_retried_once(history_db):
+    """ent#186 titled a thread exactly once, from its opening exchange. ent#473
+    keeps the opening attempt and adds ONE more when that attempt never landed
+    — here the spawn is stubbed, so the thread's title stays the derived
+    fallback (`title_source` NULL) and the second turn earns the retry. A
+    third turn is past the window and earns nothing."""
     from unittest.mock import AsyncMock, patch
     from client_portal import service
     calls = []
     cm, _svc = _mock_execute(response="the visible reply")
     with cm, \
             patch.object(service, "_collect_inbox_for_turn", new=AsyncMock(return_value=([], [], []))), \
-            patch.object(service, "_spawn_title_generation", side_effect=lambda *a: calls.append(a)):
+            patch.object(service, "_spawn_title_generation",
+                         side_effect=lambda *a, **kw: calls.append((a, kw))):
         sid = _run(service.portal_chat("atlas", "opening message", "bob@example.com"))["session_id"]
-        # Second turn on the SAME (now titled) thread must not regenerate.
         _run(service.portal_chat("atlas", "follow-up message", "bob@example.com", session_id=sid))
-    assert len(calls) == 1
+        _run(service.portal_chat("atlas", "third message", "bob@example.com", session_id=sid))
+    assert [kw.get("attempt") for _, kw in calls] == ["first", "retry"]
     # Only the client's message + the agent's visible reply — never the composed
     # execution message (history context / file manifest / platform prompt).
-    # Spawn now carries the agent name first (subscription-token resolution, ent#186 follow-up).
-    assert calls[0] == ("atlas", sid, "opening message", "the visible reply")
+    # Spawn carries the agent name first (subscription-token resolution, ent#186 follow-up).
+    assert calls[0][0] == ("atlas", sid, "opening message", "the visible reply")
+    # The retry feeds THIS exchange — the first one with a topic in it.
+    assert calls[1][0] == ("atlas", sid, "follow-up message", "the visible reply")
+
+
+def test_a_landed_title_is_not_regenerated_on_the_second_turn(history_db):
+    """The ent#186 rule, restated under ent#473: once the generated title has
+    LANDED (`title_source = 'generated'`) and the opener was not a greeting,
+    a later turn on the thread never regenerates."""
+    from unittest.mock import AsyncMock, patch
+    from client_portal import db as pdb
+    from client_portal import service
+    calls = []
+    cm, _svc = _mock_execute(response="the visible reply")
+    with cm, \
+            patch.object(service, "_collect_inbox_for_turn", new=AsyncMock(return_value=([], [], []))), \
+            patch.object(service, "_spawn_title_generation",
+                         side_effect=lambda *a, **kw: calls.append(kw.get("attempt"))):
+        sid = _run(service.portal_chat("atlas", "Where is the Q3 invoice for Acme?", "bob@example.com"))["session_id"]
+        assert pdb.set_portal_session_title(sid, "Q3 invoice for Acme")   # the first attempt landed
+        _run(service.portal_chat("atlas", "follow-up message", "bob@example.com", session_id=sid))
+    assert calls == ["first"]
 
 
 def test_title_prompt_carries_only_the_two_blocks():

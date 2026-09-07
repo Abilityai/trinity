@@ -122,6 +122,14 @@ def list_all_rooms() -> list[dict]:
         return [dict(r) for r in conn.execute(stmt).mappings()]
 
 
+def rename_room(room_id: str, name: str) -> bool:
+    """A person renames a room (ent#473). Plain UPDATE, open or closed — a
+    closed room is a past chat, and naming a past chat is the point."""
+    stmt = text("UPDATE enterprise_rooms SET name = :name WHERE id = :id")
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {"id": room_id, "name": name}).rowcount or 0) > 0
+
+
 def close_room(room_id: str, stop_reason: str, now: str) -> bool:
     """CAS close — only an OPEN room transitions, so a concurrent close (user vs
     budget sweep) produces one winner and the reason can't be overwritten."""

@@ -479,27 +479,40 @@ if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ]; t
 fi
 
 # The reverse switch, and the likelier mistake of the two: an operator who
-# installed with --hosted and later runs this script WITHOUT the flag — having
-# forgotten it, or followed an older doc — gets docker-compose.yml, an empty
-# `trinity-data` named volume, and the same shared `redis-data`. That is the
-# identical half-migrated state as above, with no warning at all, so it earns
-# the same refusal rather than a one-directional one.
+# installed on the bind mount and later runs this script WITHOUT --hosted —
+# having forgotten it, or followed an older doc — gets docker-compose.yml, an
+# empty `trinity-data` named volume, and the same shared `redis-data`. That is
+# the identical half-migrated state as above, with no warning at all, so it
+# earns the same refusal rather than a one-directional one.
+#
+# #2528: the bind mount is what BOTH docker-compose.prod.yml and
+# docker-compose.hosted.yml write, so this state is reached from a source-built
+# production host just as readily as from a hosted one (the restart that filed
+# the issue was a source-built production host). The message used to assert "installed with
+# --hosted" and offer only `--hosted` as the remedy — which on a prod box would
+# have pulled GHCR images onto a host that builds its own. It now names both
+# installs and prints the invocation each one actually uses.
 if [ "$HOSTED" != "1" ] && [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "0" ]; then
-    echo "❌ Refusing to start: this checkout was installed with --hosted, and the dev stack cannot see its database." >&2
+    echo "❌ Refusing to start: this checkout has a bind-mounted database that the dev stack cannot see." >&2
     echo "" >&2
-    echo "   Found: ${_data_abs}/trinity.db (the bind mount docker-compose.hosted.yml uses)" >&2
+    echo "   Found: ${_data_abs}/trinity.db (the TRINITY_DATA_PATH bind mount that" >&2
+    echo "          docker-compose.prod.yml and docker-compose.hosted.yml use)" >&2
     echo "   Wanted: docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)" >&2
     echo "" >&2
     echo "   Starting anyway would migrate a NEW empty database from zero while the real" >&2
     echo "   one stays in ${_data_abs} — and Redis is shared between the two stacks, so you" >&2
     echo "   would get a half-migrated install rather than a clean one." >&2
     echo "" >&2
-    echo "   If you meant to stay on the prebuilt images, re-run with the flag:" >&2
-    echo "       ./scripts/deploy/start.sh --hosted" >&2
+    echo "   This is a production or hosted install. Bring it up with the file set it" >&2
+    echo "   was installed with:" >&2
+    echo "       docker compose -f docker-compose.prod.yml up -d    # source-built production" >&2
+    echo "       ./scripts/deploy/start.sh --hosted                  # prebuilt GHCR images" >&2
+    echo "   (docker-compose.prod.yml is a complete standalone file — never stack it on" >&2
+    echo "    docker-compose.yml with two -f flags; the merge does not validate.)" >&2
     echo "" >&2
-    echo "   To move BACK to a source build, copy the data into the dev volume first" >&2
+    echo "   To move BACK to the dev stack, copy the data into the dev volume first" >&2
     echo "   (with the stack stopped):" >&2
-    echo "       docker compose -f docker-compose.hosted.yml stop" >&2
+    echo "       docker compose -f docker-compose.prod.yml stop      # or docker-compose.hosted.yml" >&2
     echo "       docker volume create ${_project}_trinity-data" >&2
     echo "       docker run --rm -v \"${_data_abs}\":/from -v ${_project}_trinity-data:/to \\" >&2
     echo "           alpine sh -c 'cp -a /from/. /to/'" >&2
@@ -507,6 +520,30 @@ if [ "$HOSTED" != "1" ] && [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "0" ]; 
     echo "" >&2
     echo "   Or, to deliberately start fresh, move ${_data_abs} aside." >&2
     exit 1
+fi
+
+# Both stores present (#2528). This is the state a wrong-file start LEAVES
+# BEHIND: the real database in the bind mount and a freshly migrated (and, via
+# the ent#124 first-run seed, freshly populated) one in the named volume.
+# Neither refusal above fires — each is written for a clean crossing — so a
+# repeat of the very mistake that created this state was silent. It cannot be
+# a refusal: the copy-across remedy both refusals print leaves both stores in
+# place, so refusing here would block the operator who did exactly what they
+# were told. It can, and must, say which store the stack is about to use.
+if [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "1" ]; then
+    if [ "$HOSTED" = "1" ]; then
+        _db_in_use="${_data_abs}/trinity.db (the bind mount docker-compose.hosted.yml uses)"
+        _db_ignored="docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)"
+    else
+        _db_in_use="docker volume '${_project}_trinity-data' (what docker-compose.yml mounts)"
+        _db_ignored="${_data_abs}/trinity.db (the bind mount docker-compose.prod.yml / docker-compose.hosted.yml use)"
+    fi
+    echo "⚠️  Two databases found for this checkout — the stack will use ${_db_in_use}."
+    echo "    Ignored: ${_db_ignored}."
+    echo "    If the ignored one holds your real data, stop now (Ctrl-C) and bring the"
+    echo "    stack up with the file set that mounts it; once you are sure which store"
+    echo "    is live, remove the other so this warning stops."
+    echo ""
 fi
 
 # Check base image before starting — without it, agent creation will silently fail.

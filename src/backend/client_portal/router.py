@@ -39,6 +39,7 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 
 from . import agent_page, service
 from .models import (
+    PortalSessionRename,
     PortalRatingRequest,
     PortalRatingResult,
     PortalAuthRequest,
@@ -73,7 +74,7 @@ from .models import (
     PortalUploads,
 )
 from .portal_auth import PortalPrincipal, get_portal_principal
-from .service import ClientPortalError
+from .service import ClientPortalError, InvalidChatTitle
 
 logger = logging.getLogger(__name__)
 _signin_email_tasks: set = set()
@@ -494,7 +495,8 @@ def portal_search(q: str = "", limit: int = 30, principal: PortalPrincipal = Dep
     Roster-scoped; a short/empty query returns no results (never an error)."""
     # No agent gate here: search is scoped to the caller's own portal rows by
     # email, so there is no roster decision to mirror.
-    return service.search_chats(principal.email, q, limit=min(max(limit, 1), 50))
+    return service.search_chats(principal.email, q, limit=min(max(limit, 1), 50),
+                                include_owned=principal.is_platform)
 
 
 @router.get("/sessions", response_model=PortalAllSessions)
@@ -1034,6 +1036,34 @@ def portal_create_session(agent_name: str, principal: PortalPrincipal = Depends(
     include_owned = principal.is_platform
     try:
         return service.create_session(agent_name, email, include_owned=include_owned)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.patch("/agents/{agent_name}/sessions/{session_id}", response_model=PortalSessionSummary)
+def portal_rename_session(agent_name: str, session_id: str, body: PortalSessionRename,
+                          principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Title a thread (ent#473). Roster-scoped, then session-scoped to the
+    caller — both misses are the uniform 404. A refused title is a NAMED 400
+    (`detail.code == "invalid_title"`, `detail.reason` the rule it broke,
+    `detail.message` what to change), never a 422 about a schema."""
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can SEE.
+    include_owned = principal.is_platform
+
+    from services import rate_limiter
+
+    # A write, bounded per viewer like every other portal write surface; the
+    # keystroke-level edits happen client-side, one PATCH per committed rename.
+    rate_limiter.enforce(f"portal_rename:{email}", 60, 60)
+    try:
+        return service.rename_session(agent_name, email, session_id, body.title,
+                                      include_owned=include_owned)
+    except InvalidChatTitle as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_title", "reason": e.reason, "message": e.detail},
+        )
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 

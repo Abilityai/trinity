@@ -398,7 +398,10 @@ class ScheduleStatsMixin:
                     source_mcp_key_id, source_mcp_key_name,
                     model_used, fan_out_id, business_status, validation_execution_id,
                     turn_integrity,
-                    queued_at
+                    queued_at,
+                    -- ent#525: read by the Workspace Work projection; the
+                    -- fleet dashboard's model drops them (see FleetExecutionSummary).
+                    source_channel, source_channel_chat_id, loop_id
                 FROM schedule_executions
                 {where}
                 ORDER BY started_at DESC

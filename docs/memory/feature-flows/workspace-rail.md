@@ -199,8 +199,8 @@ is gone with the drawer.
 
 ## Residuals (stated)
 
-- The Work signal rides component emits until #457 gives executions a store;
-  Loops / Canvas / Files are store-derived through `usePortalRailFeeds` (ent#475).
+- The Work signal is store-derived since ent#525 (`workspace-work.md`): the owner merges
+  the conversation's emit into the feed's live rows BY EXECUTION ID;
 - On a phone the hidden column (`hidden sm:flex`) and the open sheet both mount
   the active tab's body; bodies never fetch, so the cost is a second form
   instance, not a second request.

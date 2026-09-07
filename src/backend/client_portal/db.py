@@ -311,7 +311,7 @@ def get_portal_session(session_id: str, agent_name: str, client_email: str) -> O
     """One session row, scoped to (agent, client) so a client can't read another's
     thread by id. Returns None on miss."""
     stmt = text(
-        "SELECT id, title, created_at, last_message_at, message_count "
+        "SELECT id, title, title_source, created_at, last_message_at, message_count "
         "FROM enterprise_portal_sessions "
         "WHERE id = :id AND agent_name = :agent AND client_email = :email"
     )
@@ -390,14 +390,46 @@ def search_portal_sessions(client_email: str, like_pattern: str,
         }).mappings()]
 
 
-def set_portal_session_title(session_id: str, title: str) -> None:
-    """Overwrite a thread's title (ent#186 — the generated title replacing the
-    derived fallback ``touch_portal_session`` already stored). Unconditional by
-    design: the caller decides *whether* to generate (first exchange only), this
-    just lands the result."""
-    stmt = text("UPDATE enterprise_portal_sessions SET title = :title WHERE id = :id")
+def set_portal_session_title(session_id: str, title: str) -> bool:
+    """Land a GENERATED title (ent#186) over the derived fallback
+    ``touch_portal_session`` already stored — unless a person got there first.
+
+    ent#473: this used to be unconditional ("the caller decides whether to
+    generate, this just lands the result"), and that was right while only two
+    hands wrote the column. A third hand — a person renaming the chat — races
+    the generator by construction: generation runs off the reply path, so a
+    rename typed during the first turn's 15 s window would be overwritten by a
+    model's guess seconds later. The guard is in the UPDATE itself (not a
+    read-then-write in the caller) so there is no window between the check and
+    the write. Returns whether the title landed; ``False`` means a person's
+    title stood and the caller should say so in the log, not retry.
+    """
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET title = :title, title_source = 'generated' "
+        "WHERE id = :id AND (title_source IS NULL OR title_source != 'user')"
+    )
     with get_engine().begin() as conn:
-        conn.execute(stmt, {"title": title, "id": session_id})
+        return (conn.execute(stmt, {"title": title, "id": session_id}).rowcount or 0) > 0
+
+
+def rename_portal_session(session_id: str, agent_name: str, client_email: str,
+                          title: str) -> bool:
+    """A person renames their thread (ent#473). Scoped to (agent, client) in
+    the UPDATE itself — the same shape as `get_portal_session` — so a caller
+    can never rename another client's thread by id; a miss is ``False`` and
+    the router turns it into the uniform 404 (Invariant #8). Marks the hand as
+    ``'user'``, which is what makes `set_portal_session_title` stand down."""
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET title = :title, title_source = 'user' "
+        "WHERE id = :id AND agent_name = :agent AND client_email = :email"
+    )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {
+            "title": title, "id": session_id, "agent": agent_name,
+            "email": (client_email or "").lower(),
+        }).rowcount or 0) > 0
 
 
 def touch_portal_session(session_id: str, now: str, added: int = 2,

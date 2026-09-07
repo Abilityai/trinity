@@ -128,6 +128,7 @@ from services.ws_identity_service import accessible_agents_for, resolve_ws_ident
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
 from client_portal.asks.router import router as portal_asks_router
+from client_portal.work.router import router as portal_work_router
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -1353,6 +1354,10 @@ app.include_router(room_budget_router)
 # on an install whose submodule still registers the old gated module, the
 # ungated OSS routes win the match order (the ent#443 transition rule).
 app.include_router(portal_asks_router)
+# Workspace work — the live execution card + the rail's Work tab
+# (trinity-enterprise#525, the visual half of ent#457). Same prefix, same
+# transition rule as the asks router above; platform-door only inside.
+app.include_router(portal_work_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule

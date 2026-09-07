@@ -7,6 +7,7 @@ import { useExecutionsStore } from '../stores/executions'
 import { useLoopsStore } from '../stores/loops'
 import { usePortalLoopsStore } from '../stores/portalLoops'
 import { usePortalRailFeedsStore } from '../stores/portalRailFeeds'
+import { usePortalWorkStore } from '../stores/portalWork'
 import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 import { useRoomsStore } from '../stores/rooms'
 
@@ -32,6 +33,7 @@ export function useWebSocket() {
   const loopsStore = useLoopsStore()
   const portalLoopsStore = usePortalLoopsStore()
   const portalRailFeedsStore = usePortalRailFeedsStore()
+  const portalWorkStore = usePortalWorkStore()
   const reportsStore = useReportsStore()
   const fleetReportsStore = useFleetReportsStore()
 
@@ -175,6 +177,10 @@ export function useWebSocket() {
           // store re-reads (debounced) through the access-controlled routes.
           // No-op unless the rail is scoped to that agent.
           portalRailFeedsStore.handleWebSocketEvent(data)
+          // ent#525: the Work feed re-reads on a participant's activity —
+          // started AND terminal, so *Now* cold-starts when a schedule or a
+          // loop begins in an idle chat. Debounced in the store.
+          portalWorkStore.handleWebSocketEvent(data)
         }
         // #1106: loop progress events (broadcast fleet-wide, keyed by type).
         // The store filters by the agent currently shown in LoopsPanel.
@@ -189,6 +195,7 @@ export function useWebSocket() {
           // ent#475: a loop run on a participant is the other moment a canvas
           // or file may have changed — same thin trigger, third consumer.
           portalRailFeedsStore.handleWebSocketEvent(data)
+          portalWorkStore.handleWebSocketEvent(data)   // ent#525: loop runs are one execution kind
         }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
         // The agent store filters by the agent on screen; the fleet store does a

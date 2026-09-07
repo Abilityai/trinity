@@ -490,6 +490,8 @@ enterprise_portal_sessions = Table(
     Column("cached_claude_session_id", Text),
     Column("last_resume_at", Text),
     Column("consecutive_resume_failures", Integer),
+    # ent#473 — NULL (derived fallback / pre-#473) | 'generated' | 'user'.
+    Column("title_source", Text),
 )
 
 enterprise_portal_messages = Table(

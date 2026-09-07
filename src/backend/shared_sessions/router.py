@@ -39,6 +39,7 @@ from .models import (
     RoomCreate,
     RoomMessageCreate,
     RoomParticipantAdd,
+    RoomRename,
 )
 from .service import RoomError
 
@@ -230,6 +231,18 @@ async def post_message(room_id: str, body: RoomMessageCreate,
         raise
     idempotency_service.complete(decision, None, result)
     return result
+
+
+@router.patch("/{room_id}")
+async def rename_room(room_id: str, body: RoomRename,
+                      current_user=Depends(get_room_principal)):
+    """Title the room (ent#473). Any human member; uniform 404 for a
+    non-member; a named 400 (`invalid_title`) for a title the boundary
+    refuses, with the sentence that says what to change."""
+    try:
+        return service.rename_room(current_user, room_id, body.name)
+    except RoomError as e:
+        _raise(e)
 
 
 @router.post("/{room_id}/close")

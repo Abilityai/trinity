@@ -6,8 +6,15 @@
         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
       </button>
 
-      <div class="min-w-0">
-        <div class="font-semibold truncate text-sm">{{ room?.name || 'Chat' }}</div>
+      <div class="min-w-0 flex-1">
+        <!-- ent#473: the room's name, renameable in place by any human member. -->
+        <PortalEditableTitle
+          :value="room?.name || ''"
+          placeholder="Chat"
+          :rename="rename ? saveName : null"
+          label="Rename this chat"
+          text-class="font-semibold text-sm"
+        />
         <div class="flex items-center gap-1 mt-0.5">
           <PortalAvatar
             v-for="a in agentParticipants"
@@ -31,7 +38,7 @@
         {{ budgetWarning }}
       </div>
 
-      <div class="flex items-center gap-1" :class="{ 'ml-auto': !budgetWarning }">
+      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !budgetWarning }">
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -101,7 +108,17 @@
              the local send, so a client that reloaded mid-turn still sees it —
              a reload used to make the dots vanish while two agents were still
              working, which reads as the room having given up. -->
-        <div v-if="workingAgents.length" class="flex items-start gap-2.5">
+        <!-- ent#525: the live card per working agent, from the Work feed the
+             shell owns — status, elapsed, steps where the agent publishes
+             them. Falls back to the server-derived line below until the feed
+             has the rows, so a reload never shows a room that gave up. -->
+        <div v-if="roomLiveItems.length" class="space-y-2" data-testid="portal-room-work">
+          <div v-for="it in roomLiveItems" :key="it.id" class="flex items-start gap-2.5">
+            <PortalAvatar :name="it.agent_name" :size="28" class="mt-0.5" />
+            <PortalWorkCard :item="it" show-agent :elapsed-seconds="elapsedOf(it)" show-open-in-work @open-work="emit('open-work')" />
+          </div>
+        </div>
+        <div v-else-if="workingAgents.length" class="flex items-start gap-2.5">
           <PortalAvatar :name="workingAgents[0]" :size="28" class="mt-0.5" />
           <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex items-center gap-2">
             <span class="inline-flex gap-1">
@@ -209,8 +226,12 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import PortalWorkCard from './PortalWorkCard.vue'
+import { usePortalWorkStore } from '@/stores/portalWork'
+import { liveElapsedSeconds } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
+import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import { workSignalFromRoom } from './portalRail'
 import {
@@ -232,6 +253,9 @@ import {
 import { agentDisplayName } from '@/utils/agentName'
 
 const props = defineProps({
+  // ent#473: async (roomId, title) => void — the shell owns the request and
+  // the sidebar list; null when renaming is unavailable.
+  rename: { type: Function, default: null },
   roomId: { type: String, required: true },
   roster: { type: Array, default: () => [] },
   // ent#359: star state is per-viewer and owned by the shell, not by the room —
@@ -241,11 +265,18 @@ const props = defineProps({
   // pre-fills, never sends. Same contract as `PortalConversation`'s.
   prefill: { type: String, default: '' },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work'])
 
 const store = useClientPortalStore()
 
 const room = ref(null)
+// ent#473: the header's rename. The shell renames and re-reads the list; the
+// room keeps its own header in step without a refetch, then tells the shell.
+async function saveName(title) {
+  await props.rename(props.roomId, title)
+  if (room.value) room.value = { ...room.value, name: title }
+  emit('rooms-changed')
+}
 const messages = ref([])
 const loading = ref(true)
 const sending = ref(false)
@@ -282,6 +313,20 @@ const isClosed = computed(() => room.value?.status === 'closed')
 // covers the gap between posting and the first poll, when nobody has been
 // marked working yet.
 const workingAgents = computed(() => room.value?.working || [])
+
+// ent#525: the feed's live rows for the agents the SERVER says are working —
+// the card needs both facts, so a stale feed row on an idle agent never
+// draws a card the room's own poll contradicts.
+const workStore = usePortalWorkStore()
+const roomLiveItems = computed(() => workStore.live.filter((it) => it.agent_name && workingAgents.value.includes(it.agent_name)))
+const clockMs = ref(Date.now())
+let clockTimer = null
+watch(() => roomLiveItems.value.length > 0, (on) => {
+  if (on && !clockTimer) clockTimer = setInterval(() => { clockMs.value = Date.now() }, 1000)
+  if (!on && clockTimer) { clearInterval(clockTimer); clockTimer = null }
+}, { immediate: true })
+onBeforeUnmount(() => { if (clockTimer) clearInterval(clockTimer) })
+function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value }) }
 
 // ent#474 — the shell scopes the rail to the room's participants and derives
 // its Work signal from the SERVER's `working` list (never a local flag), so

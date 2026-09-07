@@ -429,7 +429,9 @@ describe('ent#474 — the rail component (source guards)', () => {
 describe('ent#474 — the two conversations feed the rail (source guards)', () => {
   it('the conversation emits the Work signal from its in-flight flag, and clears it on unmount', () => {
     const conv = src('components/portal/PortalConversation.vue')
-    expect(conv).toMatch(/watch\(\n\s+sending,\n\s+\(on\) => emit\('work-state', workSignalFrom\(\{ sending: on, agent: props\.agent\?\.name \}\)\)/)
+    // ent#525: the emit also carries the execution id, so the owner can merge
+    // it with the feed's rows BY ID — still derived from the in-flight flag.
+    expect(conv).toMatch(/watch\(\n\s+\[sending, activeExecutionId\],\n\s+\(\[on, id\]\) => emit\('work-state', workSignalFrom\(\{ sending: on, agent: props\.agent\?\.name, executionId: id \}\)\)/)
     expect(conv).toContain("onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))")
     expect(conv).toContain('<slot name="rail-strip" />')
     expect(conv.indexOf('<slot name="rail-strip" />')).toBeLessThan(conv.indexOf('v-if="offline"'))
@@ -461,11 +463,12 @@ describe('ent#474 — the two conversations feed the rail (source guards)', () =
 
 describe('ent#475 — the door decides what is FETCHED, not only what renders', () => {
   it('reads the feed set off the visible list, never the registry', () => {
-    expect(feedsFor(visibleTabs(RAIL_TABS, PLATFORM))).toEqual({ loops: true, canvas: true, files: true })
-    expect(feedsFor(visibleTabs(RAIL_TABS, CLIENT))).toEqual({ loops: false, canvas: true, files: true })
-    expect(feedsFor(visibleTabs(RAIL_TABS, { isPlatform: false, participants: [] }))).toEqual({ loops: false, canvas: true, files: false })
-    expect(feedsFor([])).toEqual({ loops: false, canvas: false, files: false })
-    expect(feedsFor(null)).toEqual({ loops: false, canvas: false, files: false })
+    // ent#525: `work` joins the set — platform-only, like loops.
+    expect(feedsFor(visibleTabs(RAIL_TABS, PLATFORM))).toEqual({ work: true, loops: true, canvas: true, files: true })
+    expect(feedsFor(visibleTabs(RAIL_TABS, CLIENT))).toEqual({ work: false, loops: false, canvas: true, files: true })
+    expect(feedsFor(visibleTabs(RAIL_TABS, { isPlatform: false, participants: [] }))).toEqual({ work: false, loops: false, canvas: true, files: false })
+    expect(feedsFor([])).toEqual({ work: false, loops: false, canvas: false, files: false })
+    expect(feedsFor(null)).toEqual({ work: false, loops: false, canvas: false, files: false })
   })
 })
 
@@ -670,7 +673,10 @@ describe('ent#475 — the shell owns the feeds (source guards)', () => {
     for (const line of ['visible: railVisible', 'tabs: railTabs', 'participants: railParticipants', 'sheetOpen: railSheetOpen', 'storage: safeStorage']) {
       expect(call).toContain(line)
     }
-    expect(portal).toContain('const railSignals = computed(() => ({ work: workSignal.value, ...rail.signals.value }))')
+    // ent#525: the Work signal is store-derived through the owner now (the
+    // emit is merged in by execution id), so the shell no longer spreads it.
+    expect(call).toContain('workEmit: workSignal')
+    expect(portal).toContain('const railSignals = computed(() => ({ ...rail.signals.value }))')
   })
 
   it('feeds nothing behind a door, nothing before the stage verdict, and does not blank a room\'s first beat', () => {

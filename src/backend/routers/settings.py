@@ -637,6 +637,7 @@ async def get_portal_session_policy_status(current_user: User = Depends(get_curr
         PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
         PORTAL_SESSION_MIN_IDLE_MINUTES,
     )
+    from client_portal.service import title_generation_health
     from services.entitlement_service import entitlement_service
     from services.settings_service import settings_service
 
@@ -655,6 +656,10 @@ async def get_portal_session_policy_status(current_user: User = Depends(get_curr
         "min_idle_minutes": PORTAL_SESSION_MIN_IDLE_MINUTES,
         "max_absolute_days": PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
         "editable": "portal_session_policy" in entitlement_service.list_entitled_features(),
+        # ent#473: whether the Workspace's generated thread titles are landing.
+        # Rides this OSS read because it is the one Workspace settings payload
+        # every edition renders; the state is in-process and credential-free.
+        "title_generation": title_generation_health(),
     }
 
 

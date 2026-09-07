@@ -41,7 +41,37 @@
         </div>
       </div>
 
-      <div class="ml-auto flex items-center gap-1">
+      <!-- ent#473: the thread's title, renameable in place. Below `sm` the
+           picker and the controls already fill the bar; the tab strip under
+           it still names the active chat. -->
+      <PortalEditableTitle
+        v-if="currentThread"
+        class="hidden sm:flex"
+        :value="currentTitle"
+        placeholder="New chat"
+        :rename="rename ? saveTitle : null"
+        label="Rename this chat"
+        text-class="text-sm font-medium"
+      />
+      <span v-else-if="!currentSessionId" class="hidden sm:inline min-w-0 flex-1 truncate text-sm text-gray-500 dark:text-gray-400">New chat</span>
+
+      <div class="ml-auto flex items-center gap-1 shrink-0">
+        <!-- ent#451: New chat lives in the header, with its hotkey (⌘J /
+             Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
+             the sidebar's button is the cross-agent one (the picker). -->
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition"
+          :title="`New chat (${newChatHotkey})`"
+          :aria-label="`New chat (${newChatHotkey})`"
+          :aria-keyshortcuts="newChatHotkey === '⌘J' ? 'Meta+J' : 'Control+J'"
+          data-testid="new-chat-header"
+          @click="emit('new-chat')"
+        >
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+          <span class="hidden md:inline">New chat</span>
+          <kbd class="hidden lg:inline text-[11px] font-mono text-gray-400 dark:text-gray-500">{{ newChatHotkey }}</kbd>
+        </button>
         <!-- ent#359 AC #4: star from the header too. Hidden until the thread
              exists — a chat with no id yet cannot be pinned, and rendering a
              control that silently does nothing is the dead end this family of
@@ -90,6 +120,16 @@
         </button>
       </div>
     </header>
+
+    <!-- ent#451: this user's chats with the agent, as tabs (OverflowTabs) —
+         most recent first, the rest under "N more". Selecting one is an
+         ordinary thread open through the shell. -->
+    <PortalChatTabs
+      :threads="threads"
+      :agent-name="agent.name"
+      :active-id="currentSessionId"
+      @select="(t) => emit('open-thread', t)"
+    />
 
     <!-- Messages -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
@@ -147,24 +187,39 @@
           </div>
         </div>
 
-        <!-- Long-turn status: elapsed-aware, not just bouncing dots -->
+        <!-- ent#525: the live execution card under the message that started
+             the job (ent#457's card, as ruled). Status, elapsed, the stream's
+             last line as the current step (ent#286), the steps of a pipeline
+             with its holder, delegated children found by THIS chat, Stop
+             (ent#155) and Open in Work. The feed's row wins once it has the
+             turn — matched by execution id, never "latest running". -->
         <div v-if="sending" class="flex items-start gap-2.5">
           <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
-          <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex flex-col gap-1.5">
-            <div class="flex items-center gap-2">
-              <span class="inline-flex gap-1">
-                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
-                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
-                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
-              </span>
-              <span v-if="elapsed >= 4" class="text-xs text-gray-400">{{ statusLabel }}</span>
-            </div>
-            <!-- ent#286: what the agent is doing right now. Only while streaming;
-                 a non-streaming turn keeps exactly the old indicator. -->
-            <ul v-if="streaming && liveActivity.length" class="text-xs text-gray-500 dark:text-gray-400 space-y-0.5">
-              <li v-for="(step, si) in liveActivity" :key="si" class="truncate max-w-[36ch]">{{ step }}</li>
-            </ul>
-          </div>
+          <PortalWorkCard
+            :item="liveCardItem"
+            :live-step="liveStepLine"
+            :elapsed-seconds="elapsed"
+            :children="liveChildren"
+            :can-stop="canCancelTurn"
+            :stopping="cancelling"
+            show-open-in-work
+            @stop="cancelTurn"
+            @open-work="emit('open-work')"
+          />
+        </div>
+        <!-- A turn that failed, timed out, was stopped or was lost sight of
+             keeps its card (AC 3): rendered FROM the durable verdict the
+             thread carries (#2320's outcome record), so it survives a reload
+             exactly as the red message does. Success collapses into the
+             reply — the reply IS the outcome. "Ask about it" is a prefill. -->
+        <div v-else-if="terminalCardItem" class="flex items-start gap-2.5" data-testid="portal-work-terminal">
+          <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
+          <PortalWorkCard
+            :item="terminalCardItem"
+            show-open-in-work
+            @ask-about-it="askAboutIt"
+            @open-work="emit('open-work')"
+          />
         </div>
 
         <!-- ent#365: what this conversation actually produced, at the end of
@@ -385,8 +440,14 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import PortalWorkCard from './PortalWorkCard.vue'
+import { usePortalWorkStore } from '@/stores/portalWork'
+import { askAboutItPrefill, childrenForChat, itemById } from './portalWork'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
+import PortalEditableTitle from './PortalEditableTitle.vue'
+import PortalChatTabs from './PortalChatTabs.vue'
+import { newChatHotkeyLabel } from './portalUtils'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
@@ -471,8 +532,26 @@ const props = defineProps({
   // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
+  // ent#451: the shell's thread list — the tab strip above the thread is this
+  // agent's slice of it, and the header's title is the active thread's.
+  threads: { type: Array, default: () => [] },
+  // ent#473: async (thread, title) => void, or null when renaming is unavailable.
+  rename: { type: Function, default: null },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat'])
+
+// ent#451/#473: the active thread as the shell's list knows it. Null until the
+// list carries the thread (a just-adopted session lands on the next refresh),
+// and the header shows no title rather than a guessed one meanwhile.
+const currentThread = computed(() => (props.threads || []).find(
+  (t) => t && !t.is_room && (t.id || t.session_id) === currentSessionId.value,
+) || null)
+const currentTitle = computed(() => (currentThread.value?.title || '').trim())
+const newChatHotkey = newChatHotkeyLabel(typeof navigator !== 'undefined' ? navigator.platform : '')
+async function saveTitle(title) {
+  if (!props.rename || !currentThread.value) return
+  await props.rename(currentThread.value, title)
+}
 
 const store = useClientPortalStore()
 // ent#364: one list, filtered — never a second fetch for this surface.
@@ -518,6 +597,89 @@ const cancelledExecutionIds = ref(new Set())
 // know which execution the turn it is about to judge actually ran under.
 const lastDeliveredExecutionId = ref(null)
 const canCancelTurn = computed(() => sending.value && !!activeExecutionId.value)
+
+// ---- ent#525: the live card and the terminal card ---------------------------
+const workStore = usePortalWorkStore()
+function lastUserText() {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') return messages.value[i].content
+  }
+  return ''
+}
+// The feed's row for THIS turn, by id; until the feed has read it, a
+// synthetic item that says what is known (steps `undefined` = not read yet,
+// which the card renders as nothing — never as "could not be read").
+const liveCardItem = computed(() => {
+  const fromFeed = itemById(workStore.now, activeExecutionId.value)
+  if (fromFeed) return fromFeed
+  return {
+    id: activeExecutionId.value || 'pending',
+    agent_name: props.agent.name,
+    status: 'running',
+    outcome: 'running',
+    kind: 'turn',
+    title: pendingUserText.value || lastUserText(),
+    chat_id: currentSessionId.value,
+    steps: undefined,
+    can_stop: false,
+  }
+})
+// Two clocks, one rule: while the stream is live its last line is the step.
+const liveStepLine = computed(() => (
+  streaming.value && liveActivity.value.length ? liveActivity.value[liveActivity.value.length - 1] : null
+))
+// Delegated work this turn handed on — found by the CHAT, not the agent.
+const liveChildren = computed(() => childrenForChat(workStore.now, currentSessionId.value, activeExecutionId.value))
+// The durable verdict the terminal card renders from (#2320's record, or this
+// tab's own settle). Cleared by the next send and by a thread switch.
+const terminalOutcome = ref(null)
+const terminalCardItem = computed(() => {
+  const o = terminalOutcome.value
+  if (!o) return null
+  // A RETRYABLE verdict means nothing reached the agent (#2320's "never
+  // started"): no work ran, the red message with its Retry is the honest UI,
+  // and a "Failed" card beside it would describe a job that never existed.
+  // The card stands for work that ran or may have run.
+  if (o.retryable === true) return null
+  const msg = String(o.message || '')
+  let outcome = 'failed'
+  if (o.category === 'cancelled') outcome = 'cancelled'
+  else if (o.category === 'lost' || /lost track|did not reply/i.test(msg)) outcome = 'lost'
+  else if (/timed?\s*-?\s*out|timeout/i.test(msg)) outcome = 'timeout'
+  return {
+    id: o.execution_id || lastDeliveredExecutionId.value || 'last',
+    agent_name: props.agent.name,
+    status: outcome === 'cancelled' ? 'cancelled' : 'failed',
+    outcome,
+    kind: 'turn',
+    title: lastUserText(),
+    chat_id: currentSessionId.value,
+    error: outcome === 'cancelled' || outcome === 'lost' ? null : (msg || null),
+    steps: null,
+    can_stop: false,
+  }
+})
+// The card keeps every honest terminal — a cancel included, which the
+// red-message path (`markLastUserTurnFailed`) deliberately does NOT mark.
+// Kept beside that function rather than inside it: #2320's spec evaluates
+// that function in isolation, and this state is the card's, not the row's.
+function rememberVerdict(outcome) {
+  if (!outcome || !outcome.message) { terminalOutcome.value = null; return }
+  // The same tail rule as `markLastUserTurnFailed`: a verdict is shown only
+  // under a user message still waiting for its reply. A verdict recorded by a
+  // raise site that persisted no user row (the roster / availability refusals)
+  // must not pin a card onto an EARLIER, answered turn.
+  const last = messages.value[messages.value.length - 1]
+  if (!last || last.role !== 'user') { terminalOutcome.value = null; return }
+  terminalOutcome.value = outcome
+}
+
+// "Ask about it": the ruled lesser control — a prefill, never a send.
+function askAboutIt(item) {
+  input.value = askAboutItPrefill(item)
+  autoGrowAfterUpdate()
+  nextTick(() => textarea.value?.focus())
+}
 const attachments = ref([])
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
@@ -540,6 +702,7 @@ const dismissed = ref(null)
 async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
+  terminalOutcome.value = null
   let inFlight = null
   let inFlightBudget = null
   let budgetReadAt = null
@@ -578,6 +741,7 @@ async function loadThread(sessionId) {
   // outlives the tab that sent it, so it is applied on load too, not only to
   // the client that happened to be watching.
   if (outcome) markLastUserTurnFailed(outcome)
+  if (outcome) rememberVerdict(outcome)
 }
 
 // Apply a server verdict to the most recent user message. Used by the two
@@ -617,6 +781,9 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   if (sending.value) return
   sending.value = true
   streaming.value = true
+  // ent#525 (review E3): a reattached turn is still a turn the person may
+  // stop — without the id, `canCancelTurn` stayed false after every reload.
+  activeExecutionId.value = executionId || null
   liveActivity.value = []
   elapsed.value = 0
   clearInterval(elapsedTimer)
@@ -636,13 +803,18 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     // less than one that stayed, which is backwards.
     if (data?.failed) {
       markLastUserTurnFailed(data.outcome)
+      rememberVerdict(data.outcome)
     } else if (data?.lost) {
-      markLastUserTurnFailed({
+      const verdict = {
+        category: 'lost',
         message: data.idle
           ? 'The agent did not reply. Check the conversation in a moment.'
           : "Still no reply — we've lost track of this turn. It may still finish; check the conversation shortly.",
         retryable: false,
-      })
+        execution_id: executionId,
+      }
+      markLastUserTurnFailed(verdict)
+      rememberVerdict(verdict)
     }
     if (data?.response) {
       messages.value.push({ role: 'assistant', content: data.response })
@@ -657,6 +829,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     sending.value = false
     streaming.value = false
     liveActivity.value = []
+    activeExecutionId.value = null
     clearInterval(elapsedTimer)
     await scrollDown()
   }
@@ -955,15 +1128,13 @@ async function onPickFile(e) {
 
 // ---- Send + resilient retry ---------------------------------------------------
 let elapsedTimer = null
+// ent#525: the card renders the clock (`formatElapsed`); the three-tier
+// "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
-const statusLabel = computed(() => {
-  if (elapsed.value >= 30) return `Still working… ${elapsed.value}s`
-  if (elapsed.value >= 12) return `Working on it… ${elapsed.value}s`
-  return `Thinking… ${elapsed.value}s`
-})
 
 async function deliver(text) {
   voiceLoopEndedDuringTurn = false
+  terminalOutcome.value = null
   sending.value = true
   elapsed.value = 0
   clearInterval(elapsedTimer)
@@ -1072,6 +1243,7 @@ async function deliver(text) {
     }
 
     messages.value.push({ role: 'assistant', content: data.response || '(no response)' })
+    terminalOutcome.value = null   // ent#525: the reply IS the outcome
     // ent#440: the spoken half of a voice turn is driven by the loop's state
     // machine, not by this branch — narrating here as well would speak every
     // reply twice, once raw and once cleaned for the ear.
@@ -1164,6 +1336,10 @@ async function cancelTurn() {
       cancelledExecutionIds.value.add(executionId)
       input.value = restoreDraft(restoreText, input.value)
       autoGrowAfterUpdate()
+      // ent#525: a stop the person asked for is an honest terminal the card
+      // keeps ("Stopped by you") — recorded at the act, shown once the turn
+      // settles. The red-message path deliberately never marks it.
+      rememberVerdict({ category: 'cancelled', message: 'Stopped by you.', execution_id: executionId })
     }
   } catch (err) {
     // A 404 is the lost race (the row went terminal, or the agent no longer
@@ -1409,6 +1585,8 @@ function settleDelivery(index, text, res) {
     return { ok: false, cancelled: true }
   }
   markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
+  terminalOutcome.value = { category: res?.lost ? 'lost' : 'failed', message: res?.error || 'Something went wrong.',
+                            retryable: res?.retryable ?? !res?.lost, execution_id: lastDeliveredExecutionId.value }
   return { ok: false, error: res?.error, lost: res?.lost }
 }
 
@@ -1977,8 +2155,8 @@ defineExpose({ focusComposer: () => textarea.value?.focus() })
 // the shell resets on every switch as well, so neither side can leave the
 // rail reading "running" for a conversation that is no longer on screen.
 watch(
-  sending,
-  (on) => emit('work-state', workSignalFrom({ sending: on, agent: props.agent?.name })),
+  [sending, activeExecutionId],
+  ([on, id]) => emit('work-state', workSignalFrom({ sending: on, agent: props.agent?.name, executionId: id })),
   { immediate: true }
 )
 onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))

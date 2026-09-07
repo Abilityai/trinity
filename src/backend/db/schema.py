@@ -580,7 +580,12 @@ TABLES = {
             message_count INTEGER NOT NULL DEFAULT 0,
             cached_claude_session_id TEXT,
             last_resume_at TEXT,
-            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0
+            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            -- ent#473: which hand wrote `title`. NULL = the derived fallback
+            -- (or a pre-#473 row), 'generated' = the ent#186 model title,
+            -- 'user' = a person renamed it — and a person's title is never
+            -- overwritten by generation.
+            title_source TEXT
         )
     """,
 
