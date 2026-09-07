@@ -10,6 +10,7 @@
 // `addHook`), which would otherwise put the parser's behaviour out of reach.
 import { marked } from './markedConfig'
 import { decorateCodeBlocks, stripCodeBlockMarkers } from './codeBlocks'
+import { hardenMediaAttributes } from './sanitizeHooks'
 import DOMPurify from 'dompurify'
 
 // Allow target and rel attributes for links (DOMPurify strips them by default)
@@ -18,6 +19,11 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
     node.setAttribute('target', '_blank')
     node.setAttribute('rel', 'noopener noreferrer')
   }
+  // ent#536 — the CSP admits https images page-wide, so every sanitised
+  // <img> drops the referrer and no inline style may load a url(). The rule
+  // is a pure module (`sanitizeHooks.js`) because this file cannot be imported
+  // without a DOM.
+  hardenMediaAttributes(node)
 })
 
 /**

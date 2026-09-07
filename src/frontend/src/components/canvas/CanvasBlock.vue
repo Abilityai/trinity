@@ -5,17 +5,25 @@
       class="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400"
     >{{ block.title }}</h4>
 
-    <!-- chart — the canvas's own kind. TrendLineChart is reused as-is; a
-         payload that cannot make a chart falls through to the JSON renderer
-         below rather than mounting an empty chart, which would read as
-         "no data" — a claim we have not earned. -->
-    <TrendLineChart
-      v-if="block.kind === 'chart' && chart"
-      :dates="chart.labels"
-      :series="chart.series"
+    <!-- The canvas's own kinds (ent#438 / ent#536). Each leaf is the SAME
+         component the rich fences inside a markdown block use, so a figure
+         renders identically whether it stands alone or sits in prose. A payload
+         that cannot make its kind falls through to the JSON renderer below
+         rather than mounting an empty chart or a broken image — "no data" is a
+         claim we have not earned. -->
+    <CanvasChart v-if="block.kind === 'chart' && chart" :model="chart" />
+
+    <CanvasDiagram v-else-if="block.kind === 'diagram' && diagramSource" :source="diagramSource" />
+
+    <CanvasImage
+      v-else-if="block.kind === 'image' && image"
+      :image="image"
+      :agent-name="agentName"
     />
 
-    <!-- html — the kind the voice panel writes (ent#438 FR-7). Sanitised
+    <CanvasMarkdown v-else-if="block.kind === 'markdown' && richSegments" :segments="richSegments" />
+
+    <!-- html — the kind the voice panel's update_panel writes. Sanitised
          through the shared DOMPurify path, never raw: this is agent-authored
          markup and, on a `roster` canvas, it reaches a customer's browser. -->
     <div
@@ -38,20 +46,48 @@
 <script setup>
 import { computed } from 'vue'
 import ReportRenderer from '../reports/ReportRenderer.vue'
-import TrendLineChart from '../TrendLineChart.vue'
+import CanvasChart from './CanvasChart.vue'
+import CanvasDiagram from './CanvasDiagram.vue'
+import CanvasImage from './CanvasImage.vue'
+import CanvasMarkdown from './CanvasMarkdown.vue'
 import { sanitizeHtml } from '../../utils/markdown'
-import { chartSeries, REPORT_DELEGATED_KINDS } from './canvasUtils'
+import {
+  chartModel,
+  imageSource,
+  REPORT_DELEGATED_KINDS,
+  splitRichFences,
+} from './canvasUtils'
 
 const props = defineProps({
   block: { type: Object, required: true },
+  // The agent whose canvas this is — needed only to fetch a workspace-file
+  // image through the authenticated preview route. Null on a surface that
+  // cannot reach it, and the image block then says so instead of 401-ing.
+  agentName: { type: String, default: null },
 })
 
-const chart = computed(() => chartSeries(props.block?.payload))
+const chart = computed(() => (props.block?.kind === 'chart' ? chartModel(props.block?.payload) : null))
+
+const diagramSource = computed(() => {
+  if (props.block?.kind !== 'diagram') return ''
+  const src = props.block?.payload?.mermaid
+  return typeof src === 'string' && src.trim() ? src : ''
+})
+
+const image = computed(() => (props.block?.kind === 'image' ? imageSource(props.block?.payload) : null))
+
+// A markdown block with at least one renderable fence splits into prose and
+// figures; one without takes the report path byte-for-byte, as before.
+const richSegments = computed(() => {
+  if (props.block?.kind !== 'markdown') return null
+  const segments = splitRichFences(props.block?.payload?.markdown)
+  return segments.some((s) => s.type !== 'markdown') ? segments : null
+})
 
 const safeHtml = computed(() => sanitizeHtml(props.block?.payload?.html || ''))
 
-// A `chart` whose payload could not make one, and any kind the report dispatch
-// does not know, both land on `json` — the reader still sees the data.
+// A canvas kind whose payload could not make one, and any kind the report
+// dispatch does not know, both land on `json` — the reader still sees the data.
 const delegatedHint = computed(() =>
   REPORT_DELEGATED_KINDS.includes(props.block?.kind) ? props.block.kind : 'json',
 )

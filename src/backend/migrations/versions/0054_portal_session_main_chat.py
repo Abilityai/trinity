@@ -21,14 +21,27 @@ was most recent when we migrated" is not a fact anyone asked for.
 
 Mirrors the SQLite ``portal_session_main_chat`` migration.
 
-Revision ID: 0053_portal_session_main_chat
-Revises: 0052_portal_session_title_source
+Revision ID: 0054_portal_session_main_chat
+Revises: 0053_user_ui_preferences
+
+Chained off `0053_user_ui_preferences`, not off `0052`, and renumbered from
+0053 to match. Both were written against 0052 in parallel; dev's landed first,
+so two revisions shared a `down_revision` — two heads. `alembic upgrade head`
+is SINGULAR and resolves its target BEFORE applying anything, so a forked graph
+applies **zero** revisions: not just the newer one, both. Nothing conflicts in
+git, because each file is individually valid and the defect exists only in the
+relationship (`scripts/ci/check_alembic_heads.py` is the gate that catches it).
+
+Rebasing this one is the correct resolution rather than a merge revision:
+dev's is already applied wherever dev is deployed, this one is not applied
+anywhere yet. The numeric prefix moves with it so the directory keeps its one
+human ordering cue.
 """
 from alembic import op
 
 
-revision = "0053_portal_session_main_chat"
-down_revision = "0052_portal_session_title_source"
+revision = "0054_portal_session_main_chat"
+down_revision = "0053_user_ui_preferences"
 branch_labels = None
 depends_on = None
 

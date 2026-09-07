@@ -51,6 +51,23 @@ export const useAuthStore = defineStore('auth', {
       return this.user?.picture || null
     },
 
+    // trinity-enterprise#413: the identity that is available SYNCHRONOUSLY
+    // from the stored token on every login path. The JWT `sub` IS the
+    // username (routers/auth.py mints `{"sub": user["username"]}` for admin,
+    // email and post-2FA logins, and dependencies.get_current_user resolves
+    // the principal from it). `user.username` is NOT safe for this: the admin
+    // seed has no `username` until `/api/users/me` lands, SSO/MFA seeds `null`,
+    // and that fetch is swallowed on failure. Used to namespace per-user
+    // browser caches so two users of one browser never read each other's.
+    principalId() {
+      if (!this.token) return null
+      try {
+        return this.parseJwtPayload(this.token)?.sub || null
+      } catch {
+        return null
+      }
+    },
+
     // ROLE-001: 4-tier hierarchy user < operator < creator < admin.
     // Returns 'user' as the conservative fallback for callers that read
     // role before the /api/users/me response has landed.

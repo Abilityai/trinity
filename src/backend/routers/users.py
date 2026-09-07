@@ -8,9 +8,22 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from models import User, UserRoleUpdate, UpdateMyEmailRequest, GitHubPATRequest
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
+
+from models import (
+    User,
+    UserRoleUpdate,
+    UpdateMyEmailRequest,
+    GitHubPATRequest,
+    UserPreferenceWrite,
+    UserPreferenceRecord,
+    UserPreferencesResponse,
+)
 from database import db
-from dependencies import require_admin, get_current_user
+from dependencies import require_admin, get_current_user, reject_non_interactive_principal
+from services import user_preferences_service
+from services.user_preferences_service import PreferenceConflict, PreferenceError
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -126,6 +139,75 @@ async def clear_my_github_pat(current_user: User = Depends(get_current_user)):
     """
     db.clear_user_github_pat(current_user.id)
     return {"configured": False, "message": "Personal GitHub token cleared."}
+
+
+# ---------------------------------------------------------------------------
+# Per-user UI preferences (trinity-enterprise#413, OSS-core) — the caller's OWN
+# record, always. The Dashboard Grid's layout / tile prefs / org toggles are
+# the first keys; the allowlist lives in services/user_preferences_service.py.
+#
+# Gated `reject_non_interactive_principal` on all three routes, the GET
+# included, which deviates from that helper's "never for read surfaces an MCP
+# key legitimately drives" note on purpose: a dashboard arrangement has no
+# machine consumer. An agent-scoped key resolves to its OWNER on REST, so
+# without the gate any agent could read and rewrite the operator's board.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/me/preferences", response_model=UserPreferencesResponse)
+async def get_my_preferences(current_user: User = Depends(get_current_user)):
+    """Every stored UI preference of the caller, in one round trip."""
+    reject_non_interactive_principal(current_user)
+    return {"preferences": user_preferences_service.get_all(current_user.id)}
+
+
+@router.put("/me/preferences/{key}", response_model=UserPreferenceRecord)
+async def put_my_preference(
+    key: str,
+    body: UserPreferenceWrite,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Conditionally store one preference (insert-only or compare-and-set).
+
+    409 carries the live record in `detail.current` (or `null` when the row
+    is gone) so the client can adopt or retry without another GET.
+    """
+    reject_non_interactive_principal(current_user)
+    # Cheap header check before the parsed payload is re-serialized. A HINT,
+    # not the enforcement — the exact byte check lives in the service (the
+    # routers/canvas.py two-stage shape).
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > user_preferences_service.MAX_VALUE_BYTES * 2:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"Preference value exceeds {user_preferences_service.MAX_VALUE_BYTES} bytes",
+                )
+        except ValueError:
+            pass
+    try:
+        return user_preferences_service.put(
+            current_user.id, key, body.value, body.base_updated_at
+        )
+    except PreferenceConflict as e:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": {"message": e.detail, "current": e.current}},
+        )
+    except PreferenceError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.delete("/me/preferences/{key}")
+async def delete_my_preference(key: str, current_user: User = Depends(get_current_user)):
+    """Remove one of the caller's preferences (the Grid's "Reset")."""
+    reject_non_interactive_principal(current_user)
+    try:
+        return {"deleted": user_preferences_service.delete(current_user.id, key)}
+    except PreferenceError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 @router.get("")

@@ -195,6 +195,9 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |
 | GET | `/api/users/me` | Current user |
 | PUT | `/api/users/me/email` | Bind a sign-in email to the caller's own account (#82 transition; 409 if taken). No verification email sent |
+| GET | `/api/users/me/preferences` | Every stored per-user UI preference of the caller — `{preferences: {key: {value, updated_at}}}` (trinity-enterprise#413). Interactive JWT only (`reject_non_interactive_principal`) |
+| PUT | `/api/users/me/preferences/{key}` | Conditionally store one preference. Body `{value: object, base_updated_at: null \| string}` — `null` = insert-only, string = compare-and-set; 404 unknown key (allowlist: `grid_layout`, `grid_widgets`, `grid_org`), 422 non-object, 413 over 256 KiB, 409 stale base with `detail.current` = the live record (or `null`). Interactive JWT only |
+| DELETE | `/api/users/me/preferences/{key}` | Remove one of the caller's preferences (the Grid's "Reset") → `{deleted}`. Interactive JWT only |
 | GET | `/api/users` | List users with roles (admin-only; exposes `suspended_at` read-only) (ROLE-001) |
 | PUT | `/api/users/{username}/role` | Update user role (admin-only) |
 | GET | `/api/mcp/info` | MCP server info |

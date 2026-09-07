@@ -1148,11 +1148,11 @@ already holds.
   delegate to the shared `components/reports/` dispatch — *reused, not forked*,
   because those renderer keys are CI-pinned as the canonical contract
   (`test_1535_report_prompt_guidance.py`), and forking them is what §5.11 and
-  §5.14 both refused. The canvas adds two kinds that dispatch cannot serve:
-  `chart` (over the existing `TrendLineChart`) and `html` (DOMPurify-sanitised
-  at render, H-005). The report `display_hint` enum is deliberately **not**
-  widened: a canvas is a superset of a report's rendering, not a change to what
-  a report is.
+  §5.14 both refused. The canvas adds the kinds that dispatch cannot serve —
+  `chart`, `html` (DOMPurify-sanitised at render, H-005) and, since
+  trinity-enterprise#536, `image` and `diagram` (FR-9). The report
+  `display_hint` enum is deliberately **not** widened: a canvas is a superset
+  of a report's rendering, not a change to what a report is.
 - **FR-4 — Visibility is an explicit agent act, defaulting to operator-only**
   (AC 8): each canvas carries `audience` ∈ `operator` (default) | `roster`.
   `operator` is visible only on Agent Detail; `roster` additionally appears on
@@ -1179,11 +1179,12 @@ already holds.
   primitives. `execution_id` is validated through `resolve_and_validate_execution`
   (the MEM-001 rule) rather than trusted.
 - **FR-7 — The voice panel becomes the canvas**: `gemini_voice`'s
-  `show_markdown` / `update_panel` / `append_to_panel` / `clear_panel` now write
-  the durable canvas (`canvas_id="voice"`) instead of session memory, so AC 2 is
-  met by the capability *moving* rather than by being dropped with a stated
-  reason. They inherit `audience="operator"`, which is what a voice session on an
-  operator-authenticated page always was.
+  `show_markdown` / `update_panel` / `append_to_panel` / `clear_panel` write
+  the durable canvas instead of session memory, so AC 2 is met by the
+  capability *moving* rather than by being dropped with a stated reason.
+  Superseded in detail by FR-12 (trinity-enterprise#536): the voice tools are
+  block edits on the agent's **default** canvas through the one write path,
+  and the audience is a property of the write.
 - **FR-8 — Empty state offers the next action** (AC 6): a canvas-less agent
   renders what a canvas is and the one-line tool call that creates one on the
   operator surface; on the Workspace it says the agent has not published one and
@@ -1195,7 +1196,59 @@ already holds.
   bounded by construction (one row per `(agent, canvas_id)`, replaced on write),
   unlike the append-only tables `RETENTION_OPS_KEYS` governs.
 - **Migrations**: dual-track — `db/migrations.py::agent_canvases_table` + Alembic
-  `0050_agent_canvases`.
+  `0050_agent_canvases`. The #536 widening changes no DDL (ids and kinds live
+  in the `blocks` JSON), so it carries no migration.
+
+**One rich block vocabulary (trinity-enterprise#536, 2026-09-07)** — operator
+ruling: "the canvas should be richer — charts, images, actually useful
+information — usable by the regular agent, not just the voice mode, and the two
+must work consistently."
+
+- **FR-9 — Kinds**: `image` (an https URL, an inline `data:image/(png|jpeg|
+  gif|webp);base64` under a stated cap, or a workspace-confined file path
+  served through the authenticated preview route — never a bare `<img src>`
+  that 401s), `diagram` (Mermaid rendered in-parent, `securityLevel: 'strict'`
+  with HTML labels off, SVG sanitised before insertion), and `chart` widened to
+  bar · stacked bar · line · area · pie · donut over time **or** category
+  axes, reusing the existing uPlot components plus one pure-SVG pie. A payload
+  that cannot make its kind still falls to `json`, never an empty chart. The
+  frontend CSP `img-src` gains `https:` (both mirrors) so a web-URL image can
+  load at all — a stated posture change, mitigated by `no-referrer` and bounded
+  to `https:`; the flow doc records the trade.
+- **FR-10 — Payload alignment with declared metrics** (ruled 2026-09-07,
+  reviewed against #478's store): the `chart` payload is the metric series
+  shape — `series[{label, unit?, color?, stale?, last_point_at?,
+  points[{ts, value}]}]`, one series per line/segment/slice, categories as
+  series (dims in the store) — so a metric later becomes a payload *source*
+  (#538), not a new kind. `kpi` keeps the CI-pinned `{tiles}` key; a tile is a
+  metric's latest point. The ent#438 `{labels, series[{data}]}` shape stays
+  accepted.
+- **FR-11 — Rich fences and patch**: a `markdown` block may carry ```chart /
+  ```kpi / ```table (JSON) and ```mermaid fences that render through the same
+  components as the standalone kinds — one write gives a narrative page with
+  figures; only an exact column-0 three-backtick fence with a usable body is
+  extracted, everything else stays prose. Every stored block carries an `id`
+  (`b1..bN` assigned when absent); `patch_canvas(canvas_id?, blocks[])` and
+  `PATCH …/canvas/{id}` replace only the named blocks in place, keeping order,
+  refusing unknown ids and id-less canvases by name. `set_canvas` stays the
+  full-state write; there is still no append.
+- **FR-12 — One default canvas, one write path, write-side audience**:
+  `DEFAULT_CANVAS_ID = "main"` is what the MCP tools default to and what the
+  voice panel tools draw on (no `voice` silo). Both writers go through
+  `canvas_service.write_canvas` (one validation, one cap, one image gate). The
+  voice verbs map 1:1 onto kinds as edits of the `voice*` block ids — the
+  agent's own blocks survive a call — and `VoiceSession.canvas_audience`
+  (default `operator`; ent#534 sets `roster` for a Workspace call) bounds the
+  write: a canvas stored wider is refused with a spoken reason, one stored
+  narrower keeps its audience. Never widens, never silently narrows.
+- **FR-13 — The regular agent is taught**: a `### Your Canvas` platform-prompt
+  section (when to use it vs a report, the tools, every kind with a payload
+  example, the fences, the ceilings interpolated from `models.py`, the
+  no-JavaScript rule), CI-pinned against the MCP enum and the frontend rules
+  exactly as the report block is. MINIMAL-droppable tool guidance.
+- **Rendering parity**: one `CanvasPanel` → `CanvasBlock` → shared leaves on
+  Agent Detail, the Workspace agent page, the rail and (via the panel poll,
+  which now returns the canvas row) the voice column.
 - **Flow**: `docs/memory/feature-flows/agent-canvas.md`
 
 ### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
@@ -1579,9 +1632,10 @@ already holds.
 ### 9.8 Dashboard Grid View (trinity-enterprise#47)
 - **Status**: ✅ Implemented (2026-07-06)
 - **Description**: One of three dashboard modes (Timeline / Grid / List; Timeline default — the legacy Graph mode was decommissioned in #1689, and the List mode landed in trinity-enterprise#260, §9.9) — a magnetic tile canvas: rich 384×216 landscape agent tiles snapping to a sparse, unbounded lattice the operator arranges freely, on the same pan/zoom dotted-canvas language as the graph view. Not the default (Timeline remains default for new users); selection persists to localStorage.
-- **Key Features**: iPhone-style drag with live socket preview + swap-with-preview; Tidy up / Reset; keyboard arrow reorder; per-user layout (`agent → {col,row}`, localStorage v1, self-healing); five-zone tile (identity with half-out avatar, adaptive chip strip with live working timer, Activity·14d stacked-by-trigger + Context·7d trend charts, success micro-meter + stats, Run/Auto toggles); system agent keeps its purple treatment; `prefers-reduced-motion` honored.
-- **Performance (first-class)**: skeleton-first render from `/api/agents`; per-tile analytics hydrate lazily (viewport-gated, concurrency-capped) into the existing `(agent, window)` cache with stale-while-revalidate; batch endpoints for chip data (sync-health, operator-queue) on a visibility-aware poll that tears down when the mode is inactive; viewport culling for 50+ fleets. **No new backend endpoints** — reads `/api/agents/{name}/analytics` (#1107), fleet context/execution/slot stats, `/api/agents/sync-health` (#389), operator-queue pending.
-- **Out of scope (follow-ups)**: fleet KPI strip; "Needs your attention" + live-activity right rail.
+- **Key Features**: iPhone-style drag with live socket preview + swap-with-preview; Tidy up / Reset; keyboard arrow reorder; per-user layout (`agent → {col,row}` + `widget:*` keys; **server-persisted per user** since trinity-enterprise#413, with a user-scoped localStorage cache for first paint — see the Persistence bullet; self-healing); five-zone tile (identity with half-out avatar, adaptive chip strip with live working timer, Activity·14d stacked-by-trigger + Context·7d trend charts, success micro-meter + stats, Run/Auto toggles); system agent keeps its purple treatment; `prefers-reduced-motion` honored.
+- **Performance (first-class)**: skeleton-first render from `/api/agents`; per-tile analytics hydrate lazily (viewport-gated, concurrency-capped) into the existing `(agent, window)` cache with stale-while-revalidate; batch endpoints for chip data (sync-health, operator-queue) on a visibility-aware poll that tears down when the mode is inactive; viewport culling for 50+ fleets. **No new backend endpoints for grid data** (the only backend surface is the per-user preferences record, trinity-enterprise#413 — see Persistence) — reads `/api/agents/{name}/analytics` (#1107), fleet context/execution/slot stats, `/api/agents/sync-health` (#389), operator-queue pending.
+- **Persistence — per user, server-side (trinity-enterprise#413, OSS-core by explicit decision)**: the Grid's three blobs — tile layout, the Tiles ▾ enable/disable override map, and the org-overlay Zones/Lines toggles — are stored **per user on the backend** in the generic `user_ui_preferences (user_id, key, value_json, updated_at)` record (keys `grid_layout` / `grid_widgets` / `grid_org`), exposed as `GET /api/users/me/preferences`, `PUT|DELETE /api/users/me/preferences/{key}` (JWT humans only — `reject_non_interactive_principal`; key allowlisted → 404, value must be a JSON object → 422, ≤ 256 KiB → 413). The same user gets their board on any browser; two users on one browser never see each other's (the localStorage cache is namespaced by username, and the store wipes in-memory state on identity change). **Load order**: server record → user-scoped local cache → legacy un-namespaced blob (one-time ADOPT into the server record; the legacy key is left in place so a downgrade is not data loss) → `defaultLayout`. **Writes** are local-first (instant) then a debounced PUT carrying `base_updated_at`; a stale base → 409 and the tab adopts the server record, so an older tab never clobbers a newer save. **Fallback** is honest: a failed load/save keeps the grid working session-locally, sets `layoutSource` (`server|local|default`) + `persistError` on the store, and the canvas shows a status notice. Reset clears the **caller's** server record and local copy only. First paint is unchanged (sync from cache/default; the server record re-syncs when it lands).
+- **Out of scope (follow-ups)**: fleet KPI strip; "Needs your attention" + live-activity right rail; `trinity-dashboard-view` / `trinity-dashboard-filter-owner` as further `user_ui_preferences` keys.
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md`
 
 ### 9.9 Dashboard List View — Agents-page consolidation (trinity-enterprise#260)
@@ -1616,7 +1670,7 @@ already holds.
 ### 9.11 Grid Org Overlay — Department Zones + Reporting Lines (trinity-enterprise#305)
 - **Status**: ✅ Implemented (2026-07-31) · OSS-core (explicit decision — no entitlement gate)
 - **Description**: Organizational layer over the Grid view. **Departments** are `dept-<name>` tags rendered as derived hull frames ("zones") around member tiles wherever they sit — membership is the tag, geometry is computed, nothing is persisted per zone. **Reporting lines** are `reports-to-<agent>` tags stored on the REPORT agent (direction = which row carries the tag), rendered as manager→report arrows. Storage is namespaced tags — no schema change; a dedicated field can supersede losslessly.
-- **Key Features**: zones with live rollups (count/running, viewer-scoped) + per-tile dept ribbons (stable hash → 8 themed palette slots); bottom connect port (drag from manager onto report; live "X will report to Y" pill; undo toast); click-line removal with undo; hover chain/line highlighting; drop-into-zone reassigns dept (re-validated at drop, undo toast); zone-header block move with per-tile target sockets and invalid-spring-back; "Group by dept" dense arrange + zone-aware Tidy (`tidyByDept`); zone-aware newcomer placement; "New department" affordance (named validation + click-to-assign mode); Zones/Lines toggles persisted per user.
+- **Key Features**: zones with live rollups (count/running, viewer-scoped) + per-tile dept ribbons (stable hash → 8 themed palette slots); bottom connect port (drag from manager onto report; live "X will report to Y" pill; undo toast); click-line removal with undo; hover chain/line highlighting; drop-into-zone reassigns dept (re-validated at drop, undo toast); zone-header block move with per-tile target sockets and invalid-spring-back; "Group by dept" dense arrange + zone-aware Tidy (`tidyByDept`); zone-aware newcomer placement; "New department" affordance (named validation + click-to-assign mode); Zones/Lines toggles persisted per user (server-side via `user_ui_preferences` key `grid_org` since trinity-enterprise#413 — §9.8 Persistence).
 - **Bootstrap fallback**: while NO agent carries a `dept-*` tag, an agent's first plain tag counts as its department (day-one zones on tag-organized fleets) — those zones are READ-ONLY (never drop-assigned) and the fallback switches off fleet-wide at the first explicit `dept-*`.
 - **Guardrails / integrity**: org namespaces are **human-only at both writers** — the tags router rejects agent-principal writes to `dept-*`/`reports-to-*` (mirrors the #1578 reserved event namespace) and the system-manifest validator rejects org-prefixed manifest tags; tag edits broadcast a **thin** `agent_tags_changed` trigger (`{type, agent_name}` only — `/ws` is SCOPE_ALL/unfiltered, so tag values on the wire would leak the org chart cross-tenant; listeners refetch per-agent) so all browsers converge; `GET /api/tags` hides org prefixes from non-admins; dept assignment is an atomic set-list PUT; agent **rename** rewrites `reports-to-<old>` values fleet-wide inside the rename transaction (PK-collision-safe); hard **purge** deletes dangling `reports-to-<name>` values (soft-delete keeps them; render skips missing agents). Generic tag surfaces (Dashboard quick-tags, List-view chips (`AgentListPanel`), SystemViewEditor, network-store grouping) hide org namespaces via `isOrgTag`; the AgentDetail tag editor shows all.
 - **Spacing contract**: lattice gaps (GAP_X 40 / GAP_Y 50) absorb the zone frame chrome (22/10/34/10), so adjacent-row/column departments never collide and the arrange needs no spacer cells — pinned by a unit test.

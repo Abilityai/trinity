@@ -1544,6 +1544,25 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Replace only the named blocks of an existing canvas (ent#536). PATCH:
+   * order is kept, unknown ids are refused by name, title/audience untouched.
+   */
+  async patchCanvas(
+    agentName: string,
+    canvasId: string,
+    data: {
+      blocks: Array<{ id: string; kind: string; title?: string; payload?: unknown }>;
+      execution_id?: string;
+    }
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "PATCH",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`,
+      data
+    );
+  }
+
   /** One canvas with its blocks. */
   async getCanvas(agentName: string, canvasId: string): Promise<Record<string, unknown>> {
     return this.request(

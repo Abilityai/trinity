@@ -1,11 +1,15 @@
-"""Agent canvas service (ent#438).
+"""Agent canvas service (ent#438, widened by ent#536).
 
 The decidable half of the canvas: what a canvas id may look like, how big a
-block list may be, and — the part worth reading — how "this may be out of
-date" is derived rather than guessed.
+block list may be, how a write and a partial write are validated and stored,
+and — the part worth reading — how "this may be out of date" is derived rather
+than guessed.
 
 HTTP-free by design (Invariant #1): every failure is a ``CanvasError`` the thin
 router maps 1:1, the shape ``chat_execution_service`` established in #1483.
+The pure block rules (image confinement, ids, merges, the voice verbs) live in
+``services/canvas_blocks.py`` and are re-exported here; this module is the
+half that touches the database.
 """
 from __future__ import annotations
 
@@ -14,23 +18,23 @@ import logging
 from typing import Dict, List, Optional
 
 from database import db
+from db.canvas import AUDIENCE_OPERATOR, AUDIENCE_ROSTER, normalize_audience
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     CANVAS_ID_RE,
     CANVAS_MAX_BLOCKS,
+    DEFAULT_CANVAS_ID,
+)
+from services.canvas_blocks import (  # noqa: F401 — re-exported for callers
+    CanvasError,
+    classify_image_src,
+    map_panel_tool,
+    patch_blocks,
+    validate_blocks,
 )
 from services.idempotency_service import resolve_and_validate_execution
 
 logger = logging.getLogger(__name__)
-
-
-class CanvasError(Exception):
-    """A refusal the router turns into an HTTP status, 1:1 (Invariant #1)."""
-
-    def __init__(self, status_code: int, detail: str):
-        super().__init__(detail)
-        self.status_code = status_code
-        self.detail = detail
 
 
 def validate_canvas_id(canvas_id: str) -> str:
@@ -80,6 +84,117 @@ def resolve_execution_id(execution_id: Optional[str], agent_name: str) -> Option
     execution = resolve_and_validate_execution(execution_id, agent_name)
     return execution_id if execution else None
 
+
+# ---------------------------------------------------------------------------
+# Audience width (ent#536)
+# ---------------------------------------------------------------------------
+
+# `operator` ⊂ `roster`. A writer may land on a canvas that is at most as wide
+# as the writer's own audience — never wider, because that would publish the
+# writer's content to readers it never chose.
+_AUDIENCE_WIDTH = {AUDIENCE_OPERATOR: 0, AUDIENCE_ROSTER: 1}
+
+
+def audience_within(stored: Optional[str], writer: Optional[str]) -> bool:
+    """May a writer with audience ``writer`` write onto a canvas stored at ``stored``?"""
+    return _AUDIENCE_WIDTH[normalize_audience(stored)] <= _AUDIENCE_WIDTH[normalize_audience(writer)]
+
+
+# ---------------------------------------------------------------------------
+# The one write path (ent#536)
+# ---------------------------------------------------------------------------
+
+def write_canvas(
+    agent_name: str,
+    canvas_id: str,
+    blocks: List[Dict],
+    *,
+    title: Optional[str],
+    audience: str,
+    execution_id: Optional[str],
+) -> Dict:
+    """Validate and store a canvas — the ONLY path that writes ``agent_canvases``.
+
+    Both writers come through here: the REST/MCP `set_canvas` and the Gemini
+    voice panel tools. One validation (ids, per-kind rules, the byte cap), one
+    execution resolution, one upsert — so a block renders identically whoever
+    wrote it, and a cap the router enforces cannot be bypassed by the voice
+    path. ``audience`` is REQUIRED: the caller decides who may read, never a
+    default hidden in here.
+    """
+    validate_canvas_id(canvas_id)
+    validated = validate_blocks(blocks)
+    # Serialize once HERE purely to enforce the byte cap before anything
+    # touches the DB; db/canvas.py serializes again for storage. The double
+    # encode is deliberate — the alternative is a service that returns a
+    # string and a db layer that trusts it, and the db layer is the one every
+    # future caller reaches through.
+    serialize_blocks(validated)
+    resolved = resolve_execution_id(execution_id, agent_name)
+    return db.upsert_agent_canvas(
+        agent_name,
+        canvas_id,
+        blocks=validated,
+        title=title,
+        audience=normalize_audience(audience),
+        execution_id=resolved,
+    )
+
+
+def patch_canvas(
+    agent_name: str,
+    canvas_id: str,
+    patch: List[Dict],
+    *,
+    execution_id: Optional[str],
+) -> Optional[Dict]:
+    """Replace only the named blocks of an existing canvas, or None if absent.
+
+    Read-modify-write under the same last-writer-wins contract the db layer
+    documents for the full write (one writer per canvas — the agent itself).
+    Title and audience are kept; the provenance stamp becomes this write's.
+    The merged list goes back through `write_canvas`, so a patch can no more
+    exceed a cap or smuggle a bad image source than a full write can.
+    """
+    validate_canvas_id(canvas_id)
+    current = db.get_agent_canvas(agent_name, canvas_id)
+    if not current:
+        return None
+    merged = patch_blocks(current.get("blocks") or [], patch)
+    return write_canvas(
+        agent_name,
+        canvas_id,
+        merged,
+        title=current.get("title"),
+        audience=current.get("audience") or AUDIENCE_OPERATOR,
+        execution_id=execution_id,
+    )
+
+
+def empty_canvas(agent_name: str, canvas_id: str = DEFAULT_CANVAS_ID) -> Dict:
+    """The shape a reader sees for a canvas that does not exist yet.
+
+    Used by the voice panel poll, which must answer 200 during the teardown
+    window and before the first tool call rather than 404 into the client's
+    poll loop.
+    """
+    return {
+        "agent_name": agent_name,
+        "canvas_id": canvas_id,
+        "title": None,
+        "audience": AUDIENCE_OPERATOR,
+        "schema_version": 1,
+        "created_at": None,
+        "updated_at": None,
+        "updated_by_execution_id": None,
+        "stale": False,
+        "blocks": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Staleness (ent#438)
+# ---------------------------------------------------------------------------
 
 def is_stale(canvas: Dict, last_completed_at: Optional[str]) -> bool:
     """Has the agent finished a run since this canvas was last written?

@@ -61,7 +61,12 @@
             v-else-if="!blocks.length"
             class="text-xs text-gray-500 dark:text-gray-400"
           >This canvas is empty.</p>
-          <CanvasBlock v-for="b in blocks" :key="b.key" :block="b" />
+          <CanvasBlock
+            v-for="b in blocks"
+            :key="b.key"
+            :block="b"
+            :agent-name="detail?.agent_name || null"
+          />
         </div>
       </div>
     </template>

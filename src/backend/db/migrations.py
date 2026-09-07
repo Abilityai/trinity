@@ -3983,6 +3983,31 @@ def _migrate_portal_session_title_source(cursor, conn):
     conn.commit()
 
 
+def _migrate_user_ui_preferences_table(cursor, conn):
+    """Create user_ui_preferences (trinity-enterprise#413, OSS-core).
+
+    Per-user UI state that used to live in browser-global localStorage — the
+    Dashboard Grid layout, tile prefs and org toggles first. One row per
+    (user_id, key); the value is an opaque JSON object, size-capped at the
+    service. Schema is also in db/schema.py for fresh installs; this handles
+    existing ones. Idempotent. Mirrored by Alembic revision
+    0053_user_ui_preferences for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(user_ui_preferences)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_ui_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -4005,7 +4030,7 @@ def _migrate_portal_session_main_chat(cursor, conn):
     for every pair on the instance, and "the chat that happened to be most
     recent when we migrated" is not a fact anyone asked for.
 
-    Mirrored by the Alembic revision 0053_portal_session_main_chat.
+    Mirrored by the Alembic revision 0054_portal_session_main_chat.
     """
     _safe_add_column(
         cursor,
@@ -4149,5 +4174,6 @@ MIGRATIONS = [
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
+    ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
 ]

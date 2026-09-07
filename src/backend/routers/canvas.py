@@ -1,13 +1,14 @@
-"""Agent canvas API (ent#438).
+# mcp: canvas.ts (set_canvas / patch_canvas / get_canvas / list_canvases / clear_canvas → /api/agents/{name}/canvas)
+"""Agent canvas API (ent#438, widened by ent#536).
 
 A **canvas** is a durable surface an agent renders onto and keeps current —
 addressed by ``(agent, canvas_id)``, updated in place, and rendered by the
 Workspace and Agent Detail through the shared ``components/reports/`` dispatch.
 Reports (#918) stay the immutable half: a thing published once and accumulated.
 
-Thin by contract (Invariant #1): validation and the derived staleness live in
-``services/canvas_service.py``; this module is auth, the HTTP error map, and
-the audience projection.
+Thin by contract (Invariant #1): validation, the derived staleness, and the
+one write path live in ``services/canvas_service.py``; this module is auth,
+the HTTP error map, and the audience projection.
 
 **Write is self-gated**, exactly as reports are: ``AuthorizedAgent`` proves the
 key's owner can access the path agent, but does NOT stop an agent-scoped key
@@ -28,6 +29,7 @@ from models import (
     CANVAS_RATE_LIMIT,
     CANVAS_RATE_WINDOW,
     Canvas,
+    CanvasPatch,
     CanvasSummary,
     CanvasWrite,
     User,
@@ -51,6 +53,31 @@ def _require_self(current_user: User, name: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Agent-scoped key may only write its own canvas",
         )
+
+
+def _gate_write(current_user: User, name: str, request: Request) -> None:
+    """The three checks every canvas write shares: self-gate, rate, size hint."""
+    _require_self(current_user, name)
+    rate_limiter.enforce(
+        f"agent_canvas:{name}",
+        CANVAS_RATE_LIMIT,
+        CANVAS_RATE_WINDOW,
+        detail="Canvas write rate limit exceeded for this agent.",
+    )
+    # Cheap header check before the parsed payload is re-serialized. A HINT,
+    # not the enforcement — a missing or lying Content-Length falls through to
+    # the exact byte check in the service, which is what actually bounds what
+    # reaches the DB and every later read (the #1537 two-stage shape).
+    declared = request.headers.get("content-length") if request else None
+    if declared:
+        try:
+            if int(declared) > CANVAS_BLOCKS_MAX_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"canvas blocks exceed {CANVAS_BLOCKS_MAX_BYTES} bytes",
+                )
+        except ValueError:
+            pass  # unparseable header — the exact check below still applies
 
 
 @router.get("/{name}/canvas", response_model=List[CanvasSummary])
@@ -95,49 +122,49 @@ async def write_canvas(
     ``(agent, canvas_id)`` — writing the same blocks twice leaves one canvas in
     one state, which is the whole point of the surface.
     """
-    _require_self(current_user, name)
-    rate_limiter.enforce(
-        f"agent_canvas:{name}",
-        CANVAS_RATE_LIMIT,
-        CANVAS_RATE_WINDOW,
-        detail="Canvas write rate limit exceeded for this agent.",
-    )
-    # Cheap header check before the parsed payload is re-serialized. A HINT,
-    # not the enforcement — a missing or lying Content-Length falls through to
-    # the exact byte check below, which is what actually bounds what reaches
-    # the DB and every later read (the #1537 two-stage shape).
-    declared = request.headers.get("content-length") if request else None
-    if declared:
-        try:
-            if int(declared) > CANVAS_BLOCKS_MAX_BYTES:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"canvas blocks exceed {CANVAS_BLOCKS_MAX_BYTES} bytes",
-                )
-        except ValueError:
-            pass  # unparseable header — the exact check below still applies
-
+    _gate_write(current_user, name, request)
     try:
-        canvas_service.validate_canvas_id(canvas_id)
-        blocks = [b.model_dump() for b in data.blocks]
-        # Serialize once HERE purely to enforce the byte cap before anything
-        # touches the DB; db/canvas.py serializes again for storage. The double
-        # encode is deliberate — the alternative is a service that returns a
-        # string and a db layer that trusts it, and the db layer is the one
-        # every future caller reaches through.
-        canvas_service.serialize_blocks(blocks)
-        execution_id = canvas_service.resolve_execution_id(data.execution_id, name)
+        canvas = canvas_service.write_canvas(
+            name,
+            canvas_id,
+            [b.model_dump() for b in data.blocks],
+            title=data.title,
+            audience=data.audience,
+            execution_id=data.execution_id,
+        )
     except CanvasError as e:
         raise _map(e)
+    return canvas_service.decorate([canvas], name)[0]
 
-    canvas = db.upsert_agent_canvas(
-        name,
-        canvas_id,
-        blocks=blocks,
-        title=data.title,
-        audience=data.audience,
-        execution_id=execution_id,
-    )
+
+@router.patch("/{name}/canvas/{canvas_id}", response_model=Canvas)
+async def patch_canvas(
+    name: AuthorizedAgent,
+    canvas_id: str,
+    data: CanvasPatch,
+    request: Request = None,
+    current_user: User = Depends(get_current_user),
+):
+    """Replace only the named blocks of an existing canvas (ent#536).
+
+    The agent names what changes; order is kept; an id the canvas does not
+    hold is refused by name rather than appended, because a partial write that
+    could append would be the append tool the surface deliberately lacks.
+    Title and audience are untouched — this is a content edit, not a
+    republish.
+    """
+    _gate_write(current_user, name, request)
+    try:
+        canvas = canvas_service.patch_canvas(
+            name,
+            canvas_id,
+            [b.model_dump() for b in data.blocks],
+            execution_id=data.execution_id,
+        )
+    except CanvasError as e:
+        raise _map(e)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="Canvas not found")
     return canvas_service.decorate([canvas], name)[0]
 
 

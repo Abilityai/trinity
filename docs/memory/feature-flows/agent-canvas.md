@@ -1,9 +1,15 @@
-# Agent Canvas — a durable surface an agent renders onto (trinity-enterprise#438)
+# Agent Canvas — a durable surface an agent renders onto (trinity-enterprise#438, widened by #536)
 
 > **One idea**: a **report** is a thing published once and accumulated; a
 > **canvas** is one surface the agent keeps *current*. Same output, opposite
 > lifetime. The composite primary key `(agent_name, canvas_id)` is what makes
 > that difference structural rather than a convention someone has to remember.
+>
+> **ent#536 adds the second idea**: one block vocabulary, written the same way
+> by the agent (`set_canvas` / `patch_canvas`) and by its voice mode (the panel
+> tools), onto one default canvas, rendered by one component wherever a canvas
+> is shown. The agent provides data; the platform draws it. No JavaScript from
+> the agent, ever.
 
 ## Why
 
@@ -21,6 +27,13 @@ find. The only canvas that existed was `VoiceSession.panel_state`: in memory,
 writable only by the Gemini Live voice tools, on one page, and gone when the
 session ended.
 
+After ent#438 the canvas existed but was thin (ent#536's context, verified on
+`origin/dev@1fd289cf`): `chart` drew only a trend line over a UTC-day axis, there
+was no `image` or `diagram` kind, the voice path had lost diagram rendering
+when the old page went (a ```mermaid fence rendered as a code block), the voice
+tools and the MCP tools spoke different vocabularies into different canvases,
+and nothing taught the text agent the canvas existed.
+
 **OSS-core by decision.** Deliberately ungated — no `requires_entitlement`,
 logic in the OSS tree. Recorded because the default for an enterprise-tracker
 feature is *gated unless ruled otherwise*, so the ruling must never be inferred
@@ -28,7 +41,7 @@ later from the mere fact that it merged (the ent#326 / ent#384 / ent#392
 discipline). Rationale, on operator instruction: the Workspace and everything
 around it is OSS.
 
-## The merge (AC 1)
+## The merge (ent#438 AC 1)
 
 `/agents/:name/workspace` is **deleted** and its route is a query-preserving
 redirect to `/workspace?agent=<name>`.
@@ -44,8 +57,7 @@ Two knock-on edits, both of which would otherwise leave dead behaviour:
 - `AgentHeader`'s Workspace button now opens `/workspace?agent=`, is no longer
   gated on `workspaceAvailable`, and is no longer disabled while the agent is
   stopped. The Workspace reports availability itself (#2196), and a dead button
-  is a worse answer than a page that says why. The now-unused
-  `workspaceAvailable` prop is removed rather than left as a lie.
+  is a worse answer than a page that says why.
 - `ChatPanel`'s voice overlay starts its session with `workspaceMode: true`.
   **This is load-bearing, not a bonus**: the retired page was the only caller
   that passed it, so bridging the voice panel to the canvas while leaving it
@@ -58,7 +70,7 @@ CREATE TABLE agent_canvases (
     agent_name TEXT NOT NULL,
     canvas_id  TEXT NOT NULL,
     title      TEXT,
-    blocks     TEXT NOT NULL,     -- JSON [{kind, title?, payload}]
+    blocks     TEXT NOT NULL,     -- JSON [{id, kind, title?, payload}]
     audience   TEXT NOT NULL DEFAULT 'operator',   -- 'operator' | 'roster'
     schema_version INTEGER DEFAULT 1,
     created_at TEXT NOT NULL,
@@ -80,9 +92,149 @@ CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at D
   per surface, replaced on write — unlike the append-only tables
   `RETENTION_OPS_KEYS` governs. It is deliberately absent from that set.
 - Dual-track migration: `db/migrations.py::agent_canvases_table` +
-  Alembic `0050_agent_canvases`.
+  Alembic `0050_agent_canvases`. ent#536 changes **no DDL**: block ids and the
+  new kinds live inside the `blocks` JSON, so there is no migration and no
+  Alembic revision for it.
 
-## Audience — how "never widens" is made structural (AC 8)
+## The default canvas (ent#536)
+
+`DEFAULT_CANVAS_ID = "main"` (`models.py`; mirrored in `canvas.ts` and
+`canvasUtils.js`, parity-pinned). It is the canvas the MCP tools write and
+read when no `canvas_id` is given, **and** the canvas the voice panel tools
+draw on — one surface for the agent and its voice mode, which is what makes
+"rendered the same everywhere" more than a slogan. Named canvases remain for
+everything else.
+
+## The block vocabulary (ent#536)
+
+A canvas is an ordered list of `{id, kind, title?, payload}`. **Every stored
+block carries an id**: `set_canvas` assigns `b1..bN` (by position, never
+shadowing an id the agent declared) to id-less blocks, so anything written is
+addressable by `patch_canvas` and `get_canvas` shows what to address. Ids share
+the canvas-id charset; duplicates within a write are a named 400.
+
+| kind | payload | renderer |
+|---|---|---|
+| `table` `kpi` `markdown` `timeline` `json` | as the report contract (`{columns,rows}`, `{tiles}`, `{markdown}`, `{events}`, raw) | delegated to the shared `components/reports/` dispatch |
+| `chart` | the **metric series shape**, below | `CanvasChart` → `TrendLineChart` (line/area) · `StackedBarChart` (bar/stacked_bar) · `CanvasPieChart` (pie/donut) |
+| `html` | `{html}` | DOMPurify via `utils/markdown.js::sanitizeHtml` (H-005) |
+| `image` | `{src, caption?, alt?}` → stored as `{src, src_kind, …}` | `CanvasImage` |
+| `diagram` | `{mermaid}` (≤ 20,000 chars) | `CanvasDiagram` (lazy mermaid, strict, sanitised) |
+
+The five shared kinds **delegate, never fork** — those renderer keys are
+CI-pinned as the canonical contract (`test_1535_report_prompt_guidance.py`).
+The report `display_hint` enum is deliberately **not** widened: a canvas is a
+superset of a report's rendering, not a change to what a report is. An unknown
+kind resolves to `json`, never to nothing — a silently dropped block would leave
+the surface looking complete while missing content. Every canvas kind whose
+payload cannot make its kind (a chart with no points, an image with a refused
+source) also lands on `json`: the reader still sees the data.
+
+### `chart` — the metric series shape (ruled 2026-09-07, aligned with #478/#479)
+
+```json
+{ "type": "bar | stacked_bar | line | area | pie | donut",
+  "series": [ { "label": "Leads", "unit": "new", "color": "#6366f1",
+                "stale": false, "last_point_at": "2026-09-02T09:00:00Z",
+                "points": [ { "ts": "2026-09-01", "value": 14 } ] } ] }
+```
+
+One series per line, stack segment or slice; a point is `{ts, value}` and
+nothing else — a literal projection of a `metric_points(metric, ts, value)` row
+with the registry's `label`/`unit`, so a declared metric later becomes a payload
+*source* (#538 resolves `{metric, window, agg}` into exactly this) rather than a
+new kind. Categories are **series**, as they are dims in the store: a "leads by
+region" bar is four series with one point each. The axis kind is derived —
+every `ts` parses as a date → a time axis (day, or day + time when labels are
+closer than a day); otherwise `ts` is a category name shown verbatim. Pie and
+donut take each series' last non-null point; bar/stacked_bar render one bar per
+series when every series holds one point, else one column per label with the
+series stacked. Per-series `stale`/`last_point_at` mirror #479's read; the
+chart shows "as of" and a stale mark as additions. The pre-ent#536
+`{labels, series[{label,data}]}` shape is still accepted and normalised, so
+canvases written since ent#438 keep rendering.
+
+Everything an agent authors on a chart is normalised in `canvasUtils.js`
+before a component sees it: a `color` must be a hex triplet or it becomes the
+palette entry for its position (`utils/canvasPalette.js` — hex in JS by the
+`executionBuckets.js` precedent; a uPlot stroke of `undefined` draws nothing,
+which reads as "no data"), a `label` is plain text capped at 80 characters.
+The trend tooltip that used to concatenate label and colour into `innerHTML`
+now builds with DOM APIs — on a `roster` canvas those strings reach a customer's
+browser.
+
+### `image`
+
+`src` is an `https?://` URL (≤ 2 KiB, no whitespace or control characters), an
+inline `data:image/(png|jpeg|gif|webp);base64,…` under
+`CANVAS_IMAGE_INLINE_MAX_BYTES` (64 KiB), or a path to a file in the agent's
+workspace — relative, `~/`, or absolute under `/home/developer`, `..`-free,
+sibling-prefix (`/home/developer-evil`) refused (the #979 gate, now
+`services/canvas_blocks.py::classify_image_src` and shared by both writers).
+Every other scheme (`file:`, `ftp:`, `javascript:`, protocol-relative `//`)
+and `svg+xml` (a document, not a raster) is a named 400 at write. The write
+normalises the payload to `{src, src_kind}`; `CanvasImage` trusts the kind and
+rechecks the prefix, because a stored block outlives the validator. A web URL
+or data URI binds directly; a workspace path is fetched through the
+authenticated `/files/preview` route (`agentsStore.getFilePreviewBlob` — a bare
+`<img src>` there would 401) into an object URL that is revoked on change and
+unmount. **CSP note (a stated posture change):** the frontend CSP had
+`img-src 'self' data: blob:` since #190, so a web-URL image was blocked at the
+browser on every deployment — #979's "web URLs render directly" never held in
+production. ent#536 widens `img-src` to include `https:` in BOTH mirrored
+definitions (`vite.config.js`, `security-headers.conf`); the cost is the
+tracking-pixel class (an agent-chosen host learns a viewer's IP, user agent
+and time of viewing). The directive is page-global, so the mitigation is too
+(the `/cso --diff` verifier caught that an `image`-block-only mitigation left
+`html`/`markdown` blocks and every other `renderMarkdown` surface open):
+`utils/sanitizeHooks.js::hardenMediaAttributes` runs inside the app's one
+DOMPurify `afterSanitizeAttributes` hook and gives **every** sanitised `<img>`
+`referrerpolicy="no-referrer"` (the deployment origin never travels) and
+removes any inline `style` that references `url(`/`image-set(`/`@import` (a
+CSS background is the same pixel through another attribute). The canvas
+`<img>` carries `no-referrer` explicitly as well. The write gate admits
+`https:` only — `http://` is refused at write rather than left to the browser,
+so the refusal text and the validator say the same thing. Where that route is unreachable (an external Workspace client, a
+stopped agent) the block says so instead of rendering a broken image.
+
+### `diagram`
+
+Mermaid, rendered in-parent — the production CSP (`script-src 'self'`) blocks
+inline scripts in a srcdoc iframe and CORP blocks the bundle from its opaque
+origin. `import('mermaid')` is lazy (its own chunk; only a canvas with a diagram
+pays ~1.5 MB). `MERMAID_CONFIG` (`canvasUtils.js`, spec-pinned) is
+`securityLevel: 'strict'` **with `htmlLabels: false`** — load-bearing, not
+style: mermaid 11 keeps HTML labels on under `strict` and DOMPurify forbids the
+`<foreignObject>` they live in, so without it every flowchart node renders as an
+empty box after sanitisation. The SVG goes through the app's one DOMPurify
+instance (`sanitizeHtml`) before `v-html`. Initialisation is global to mermaid,
+so it is done once per theme at module level; render ids come from a module
+counter (per-instance counters collide on `<marker id>` and arrowheads vanish);
+renders are **serialised** through a module-level promise chain, because
+`mermaid.render` shares parser/layout state and two diagrams mounting at once
+bleed nodes into each other's SVG (seen live on the seed canvas, not
+hypothesised); a parse error shows a contained error with the source, and the
+scratch node mermaid leaves behind is removed.
+
+### Rich fences in `markdown`
+
+A `markdown` block may carry ```chart / ```kpi / ```table fences (JSON inside)
+and ```mermaid fences. `canvasUtils.splitRichFences` (pure, spec-pinned)
+extracts **only** a column-0 opener of exactly three backticks plus one of
+those languages, closed by a column-0 ``` line, and only when the body is
+usable (JSON in the shape the renderer reads, or non-empty Mermaid source).
+Everything else — `~~~`, four-backtick, indented, blockquoted or unterminated
+fences, an info string with extras, JSON that will not parse or will not make a
+chart — stays in the prose byte-for-byte and renders as the code block it is;
+any other fence is copied through to its own close untouched, so a ```chart
+shown inside a ````markdown example is never extracted. `CanvasMarkdown` renders
+prose through the report markdown renderer and figures through the **same
+leaves** the standalone kinds use (it never imports `CanvasBlock`; fences do not
+nest). A markdown block with no renderable fence takes the ent#438 path
+byte-for-byte. The extracted JSON is handed to components as data — never
+joined back into HTML — so nothing here widens the DOMPurify policy.
+
+## Audience — how "never widens" is made structural (ent#438 AC 8)
 
 `audience` defaults to `operator` and is a **validated column, never a key
 inside `blocks`** (the ent#364 rule): `blocks` is agent-authored, so an audience
@@ -93,18 +245,19 @@ buried there would let a prompt-injected agent choose its own readers.
   rostered on that agent.
 
 `normalize_audience` is an **allowlist**: an unrecognised stored value reads as
-`operator`. The column is plain TEXT with no CHECK constraint, so the next value
-someone writes by hand — or a future value this build has not heard of — must
-fail closed (#2396's rule).
+`operator`. The Workspace read narrows **in the query**
+(`db.list_agent_canvases(agent, audience='roster')`), not afterwards. Both gates
+are needed and neither is redundant: the roster gate answers *may this person
+reach this agent*, the audience narrowing answers *did the agent mean this for
+them*.
 
-The Workspace read narrows **in the query** (`db.list_agent_canvases(agent,
-audience='roster')`), not afterwards. A read that loads everything and filters
-in Python has already put an operator-only surface in the process one edit away
-from the response — the ent#365 FR-2 lesson restated. Both gates are needed and
-neither is redundant: the roster gate answers *may this person reach this
-agent*, the audience narrowing answers *did the agent mean this for them*.
+**Audience is a property of the write, not only the canvas (ent#536).** A
+writer carries the widest audience it may publish at; `write_canvas` takes
+`audience` as a REQUIRED parameter and `canvas_service.audience_within(stored,
+writer)` answers whether a writer may land on a stored canvas: `operator` ⊂
+`roster`, never the other way. See the voice section for where that bites.
 
-## Staleness — derived, not a clock (AC 7)
+## Staleness — derived, not a clock (ent#438 AC 7)
 
 `stale` is `last_completed_execution_at(agent) > canvas.updated_at` — the agent
 finished a run and did not refresh this surface.
@@ -124,64 +277,97 @@ stale", because the mark is an *addition* to an always-rendered `updated_at`,
 never a replacement for it. Marking on no evidence would train the reader to
 ignore the mark. It is derived once per agent, not once per canvas.
 
-## Rendering — one layer (AC 4)
+## Write path — one, for both writers (ent#536)
 
-A canvas is an ordered list of `{kind, title?, payload}`:
-
-| kind | renderer |
-|---|---|
-| `table` `kpi` `markdown` `timeline` `json` | delegated to the shared `components/reports/` dispatch |
-| `chart` | `TrendLineChart`, reused as-is |
-| `html` | DOMPurify via `utils/markdown.js::sanitizeHtml` (H-005) |
-
-The five shared kinds **delegate, never fork** — those renderer keys are
-CI-pinned as the canonical contract (`test_1535_report_prompt_guidance.py`), and
-forking them is what §5.11 and §5.14 both refused. The report `display_hint`
-enum is deliberately **not** widened to add `chart`/`html`: a canvas is a
-superset of a report's rendering, not a change to what a report is.
-
-`sanitizeHtml` is added to the *existing* markdown util rather than a new
-module, so it shares the DOMPurify instance and its configured link hardening —
-a second sanitizer is a second policy to keep in step, which is H-005 one level
-up.
-
-An unknown kind resolves to `json`, never to nothing: a silently dropped block
-is the one failure a canvas must not have, because the surface would look
-complete while missing content.
-
-## Write path
+`canvas_service.write_canvas(agent, canvas_id, blocks, *, title, audience,
+execution_id)` is the ONLY path that writes `agent_canvases`: id validation,
+block validation (ids, per-kind rules, image normalisation, the diagram cap),
+the byte cap, execution resolution, upsert. The REST/MCP write and the voice
+panel tools both call it, so a block renders identically whoever wrote it and a
+cap the router enforces cannot be bypassed by the voice path. The pure block
+rules live in `services/canvas_blocks.py` (importing nothing that touches the
+DB — so `gemini_voice`, whose unit suite stubs `config` down to a handful of
+names, can import them at module level).
 
 `PUT /api/agents/{name}/canvas/{canvas_id}` — PUT because the operation is
 idempotent on the key, which is the surface's whole contract.
 
-- **Self-gated**: `AuthorizedAgent` proves the key's *owner* can reach the path
-  agent; it does not stop an agent-scoped key writing as a *sibling* the same
-  owner shares. That is a disclosure surface as well as a correctness one,
-  because a `roster` canvas is client-visible (the #918 rule).
-- Per-agent rate limit; `canvas_id` charset-validated with a **named** 400;
-  blocks capped at 50 and 512 KiB with a 413. The byte cap is what the count
-  cap cannot express.
-- `execution_id` is resolved through `resolve_and_validate_execution` (MEM-001).
-  A foreign id **degrades to None rather than refusing the write** — it is
-  provenance, not authorization, and losing a stamp is a smaller harm than
-  losing the canvas the agent just rendered.
-- Reads are **not** self-gated: an operator reads as a user-scoped principal
-  with no `agent_name`, and the `{self} ∪ permitted` narrowing for agent keys
-  lives at the MCP layer.
+`PATCH /api/agents/{name}/canvas/{canvas_id}` (ent#536) — body
+`{blocks:[{id, kind, title?, payload}], execution_id?}`; every block must carry
+an id; each replaces the stored block with that id **in place**, order kept; an
+unknown id is refused **by name** (`unknown block id(s): b9 — set_canvas writes
+the full state`), a canvas written before ids existed is refused with the fix
+spelled out, and a stored duplicate id is replaced wherever it occurs. Title and
+audience are untouched — a content edit, not a republish; the provenance stamp
+becomes this write's. The merged list goes back through `write_canvas`, so a
+patch can no more exceed a cap or smuggle a bad image source than a full write
+can. Read-modify-write under the last-writer-wins contract the db layer already
+documents (one writer per canvas — the agent itself); the tool description says
+so. There is still **no append** (the #438 rule): the agent names what changes.
 
-## The voice panel moved (AC 2 / FR-7)
+Both writes are **self-gated** (`AuthorizedAgent` proves the key's *owner* can
+reach the path agent; it does not stop an agent-scoped key writing as a
+*sibling* the same owner shares — the #918 rule, and a disclosure surface too
+because a `roster` canvas is client-visible), share one per-agent rate bucket,
+carry the Content-Length hint before the exact byte check, and cap at 50 blocks
+/ 512 KiB (plus the per-kind caps above). `execution_id` is resolved through
+`resolve_and_validate_execution` (MEM-001); a foreign id **degrades to None
+rather than refusing the write** — provenance, not authorization. Reads are
+**not** self-gated: an operator reads as a user-scoped principal with no
+`agent_name`, and the `{self} ∪ permitted` narrowing for agent keys lives at the
+MCP layer.
 
-`gemini_voice._execute_panel_tool` still updates the in-session `panel_state`
-the live overlay reads, and now additionally persists it to canvas
-`voice` via `_persist_panel_to_canvas`. Mermaid and image panels map onto
-markdown blocks — a fenced ```mermaid block and an image link — so no new block
-kind was needed.
+## The voice panel IS the default canvas (ent#438 FR-7 → ent#536)
 
-Fixed `audience="operator"`: a voice session always ran on an
-operator-authenticated surface, and a voice panel that silently became
-client-visible is exactly the widening the audience default exists to prevent.
-Fail-soft: a canvas write that fails must not break the panel in front of the
-operator or the tool result the model is waiting on.
+There is no in-session `panel_state` any more — the canvas row is the state,
+the live poll (`GET /api/agents/{name}/voice/{session_id}/panel`) returns the
+agent's `main` canvas (or an empty canvas shape, 200, during teardown), and the
+Canvas tab shows the same blocks after the call.
+
+Each panel verb is a block edit, mapped by the pure
+`canvas_blocks.map_panel_tool` and written through `write_canvas`. The voice
+panel owns the `voice*` block ids on `main` and nothing else:
+
+| voice tool | block edit |
+|---|---|
+| `show_markdown(content, title?)` | replace every `voice*` block with one `voice` **markdown** block where the first stood |
+| `show_diagram(diagram, title?)` | … one `voice` **diagram** block (`{mermaid}`, capped) |
+| `show_image(src, title?, caption?)` | … one `voice` **image** block, through the shared confinement gate |
+| `update_panel(html, title?)` | … one `voice` **html** block |
+| `append_to_panel(html)` | grow the trailing `voice*` html block, else start `voice-N` |
+| `clear_panel()` | remove the `voice*` blocks only |
+
+`title` is the **block** title, never the canvas title. Blocks the agent wrote
+with `set_canvas` survive a call untouched — that is what makes one shared
+default canvas safe (both independent reviewers hit the alternative, "replace
+the whole canvas", as the 6-month regret). A refused verb (a bad image source,
+empty or over-cap diagram source) writes nothing and returns the reason for
+the model to voice.
+
+**Audience.** `VoiceSession.canvas_audience` (default `operator`) is the widest
+audience the session may write at; a Workspace call (ent#534) sets `roster` so
+the person in the call can see what was drawn. A canvas stored WIDER than the
+session's audience is **refused** with a tool result the model can speak — an
+operator's Agent Detail call must never land on a customer's Workspace because
+the agent had published its board there — and a canvas stored narrower keeps
+its stored audience, so a call never widens either. A new `main` takes the
+session's audience.
+
+Fail-soft on the store, honest in the result: a write that raises is logged and
+the tool result says the canvas could not be saved, so the model does not
+describe a drawing nobody can see.
+
+## The regular agent is taught (ent#536)
+
+`### Your Canvas` in `PLATFORM_INSTRUCTIONS` (the sibling of `### Publishing
+Reports`): when to use the canvas rather than a report, `set_canvas` /
+`patch_canvas` / `get_canvas`, every kind with a one-line payload example, the
+fences, the default canvas, the ceilings (interpolated from `models.py`, never
+typed twice), and the no-JavaScript rule. Registered in `_KNOWN_SECTION_HEADINGS`
+and `_MINIMAL_DROP_SECTIONS` — tool guidance, dropped at the MINIMAL tier like
+the report block. CI-pinned by `test_ent536_canvas_prompt_guidance.py` against
+the MCP `BLOCK_KINDS` enum and the frontend rules, exactly as `test_1535` pins
+the report block. The Codex orientation lists the canvas tools by bare name.
 
 ## Surfaces
 
@@ -189,16 +375,20 @@ operator or the tool result the model is waiting on.
 |---|---|---|
 | Agent Detail → **Canvas** tab | `GET /api/agents/{name}/canvas[/{id}]` | every canvas |
 | Workspace agent page → **Canvas** tab | `GET /api/enterprise/client-portal/agents/{name}/canvas[/{id}]` | `audience='roster'` only |
-| Workspace conversation rail → **Canvas** tab (ent#475) | the same routes, the same `CanvasPanel` per participating agent | `audience='roster'` only; "updated since last view" dot on the collapsed rail |
-| MCP | `set_canvas` · `get_canvas` · `list_canvases` · `clear_canvas` | its own |
+| Workspace conversation rail → **Canvas** tab (ent#475) | the same routes, the same `CanvasPanel` per participating agent | `audience='roster'` only |
+| Voice panel poll | `GET /api/agents/{name}/voice/{session_id}/panel` | the agent's `main` canvas (ent#534 renders it in the call's right column) |
+| MCP | `set_canvas` · `patch_canvas` · `get_canvas` · `list_canvases` · `clear_canvas` | its own |
 
-There is **no `append_to_canvas` tool, by design**: `set_canvas` replaces, so
-read-change-write is the only sequence that leaves the surface in a state the
-agent chose. `get_canvas`'s description says so.
+**Rendering parity** is one component: `CanvasPanel` → `CanvasBlock` →
+{`CanvasChart`, `CanvasDiagram`, `CanvasImage`, `CanvasMarkdown`,
+`ReportRenderer`, sanitised html}. No surface renders a canvas any other way,
+and `CanvasPanel` passes the canvas's `agent_name` down only so an image block
+can fetch a workspace file. Empty states differ by viewer (AC 6) because the
+next action does: an operator can make an agent write a canvas, a client cannot.
 
-Empty states differ by viewer (AC 6) because the next action does: an operator
-can make an agent write a canvas, a client cannot — offering them a tool call
-would be an instruction they cannot follow, so they get the chat instead.
+Deferred, with its consumer: a thin `canvas_updated` WebSocket trigger (ids
+only, the #918 rule) lands with ent#534's canvas column, which is the first
+thing that would listen for it; until then the panel poll reads the row.
 
 ## Key files
 
@@ -206,13 +396,15 @@ would be an instruction they cannot follow, so they get the chat instead.
 |---|---|
 | DDL | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0050_agent_canvases.py` |
 | DB | `db/canvas.py` (`CanvasOperations`, `normalize_audience`) |
-| Service | `services/canvas_service.py` (validation, bounds, derived staleness) |
-| Router | `routers/canvas.py` |
+| Block rules (pure) | `services/canvas_blocks.py` (`classify_image_src`, `validate_blocks`, `patch_blocks`, `map_panel_tool`) |
+| Service | `services/canvas_service.py` (`write_canvas`, `patch_canvas`, `audience_within`, derived staleness) |
+| Router | `routers/canvas.py` (`# mcp: canvas.ts …` header; PUT / PATCH / GET / DELETE) |
 | Workspace | `client_portal/agent_page.py::canvases`/`canvas_detail`, `client_portal/router.py` |
-| Voice bridge | `services/gemini_voice.py::_persist_panel_to_canvas` |
-| Frontend | `components/canvas/{canvasUtils.js,CanvasBlock.vue,CanvasPanel.vue,AgentCanvasTab.vue}` |
+| Voice | `services/gemini_voice.py::_execute_panel_tool`, `routers/voice.py::get_voice_panel` |
+| Prompt | `services/platform_prompt_service.py` (`### Your Canvas`) |
+| Frontend | `components/canvas/{canvasUtils.js, CanvasPanel.vue, CanvasBlock.vue, CanvasChart.vue, CanvasPieChart.vue, CanvasDiagram.vue, CanvasImage.vue, CanvasMarkdown.vue}`, `utils/canvasPalette.js`, `components/{TrendLineChart,StackedBarChart}.vue` (`labelFormat`) |
 | MCP | `src/mcp-server/src/tools/canvas.ts`, `client.ts` |
-| Tests | `tests/unit/test_ent438_agent_canvas.py` |
+| Tests | `tests/unit/test_ent438_agent_canvas.py`, `test_ent536_canvas_vocabulary.py`, `test_ent536_canvas_prompt_guidance.py`, `test_voice_tools.py`, `src/frontend/tests/unit/canvasUtils.spec.js`, `src/mcp-server/src/tools/canvas.test.ts` |
 
 ## Change Log
 
@@ -220,3 +412,4 @@ would be an instruction they cannot follow, so they get the chat instead.
 |------|--------|--------|
 | 2026-09-02 | claude | Initial — canvas surface, workspace merge, voice-panel bridge (ent#438) |
 | 2026-09-06 | claude | Conversation-side placement in the Workspace rail; `CanvasPanel` re-reads blocks when the selected canvas's `updated_at` moves (ent#475) |
+| 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |

@@ -387,31 +387,63 @@ class TestVoiceStopAuth:
 # ── GET /panel ownership tests ───────────────────────────────────────────────
 
 class TestVoicePanelAuth:
-    """Tests for GET /api/agents/{name}/voice/{session_id}/panel ownership gate."""
+    """Tests for GET /api/agents/{name}/voice/{session_id}/panel ownership gate.
+
+    ent#536: the panel IS the agent's default canvas, so the body is the canvas
+    row (or an empty canvas shape) rather than an in-memory panel_state.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _canvas_row(self, monkeypatch):
+        """Fake the canvas read so the ownership gate is what is under test."""
+        self.rows = {}
+
+        def _empty(name, canvas_id="main"):
+            return {"agent_name": name, "canvas_id": canvas_id, "blocks": [],
+                    "updated_at": None, "stale": False}
+
+        fake_service = types.SimpleNamespace(
+            empty_canvas=_empty,
+            decorate=lambda rows, name: rows,
+        )
+        fake_db = types.SimpleNamespace(
+            get_agent_canvas=lambda name, canvas_id, audience=None: self.rows.get((name, canvas_id)),
+        )
+        monkeypatch.setattr(voice_router, "canvas_service", fake_service, raising=False)
+        monkeypatch.setattr(voice_router, "db", fake_db, raising=False)
+        monkeypatch.setattr(voice_router, "DEFAULT_CANVAS_ID", "main", raising=False)
 
     def test_missing_session_returns_empty_state(self, monkeypatch):
-        """Non-existent session_id returns empty state (200), not 404."""
+        """Non-existent session_id returns an empty canvas (200), not 404."""
         result = _run(voice_router.get_voice_panel(
             session_id="vs_does_not_exist",
             name="alice-agent",
             current_user=_FakeUser(1),
         ))
-        assert result["type"] == "empty"
-        assert result["content"] == ""
+        assert result["canvas_id"] == "main"
+        assert result["blocks"] == []
 
-    def test_owner_gets_panel_state(self, alice_session, monkeypatch):
-        """Session owner gets the panel state back."""
-        # Inject some panel state on the fake session
-        alice_session.panel_state = {
-            "type": "markdown", "content": "# Hello", "title": None, "updated_at": "ts"
+    def test_owner_gets_the_canvas(self, alice_session, monkeypatch):
+        """Session owner gets the agent's default canvas back."""
+        self.rows[("alice-agent", "main")] = {
+            "agent_name": "alice-agent", "canvas_id": "main", "updated_at": "ts",
+            "blocks": [{"id": "voice", "kind": "markdown", "payload": {"markdown": "# Hello"}}],
         }
         result = _run(voice_router.get_voice_panel(
             session_id="vs_alice",
             name="alice-agent",
             current_user=_FakeUser(1),
         ))
-        assert result["type"] == "markdown"
-        assert result["content"] == "# Hello"
+        assert result["canvas_id"] == "main"
+        assert result["blocks"][0]["payload"]["markdown"] == "# Hello"
+
+    def test_no_canvas_yet_is_an_empty_canvas_not_404(self, alice_session, monkeypatch):
+        result = _run(voice_router.get_voice_panel(
+            session_id="vs_alice",
+            name="alice-agent",
+            current_user=_FakeUser(1),
+        ))
+        assert result["blocks"] == []
 
     def test_wrong_agent_name_403(self, alice_session, monkeypatch):
         """Session belongs to alice-agent but path says bob-agent — reject."""
@@ -424,7 +456,7 @@ class TestVoicePanelAuth:
         assert exc.value.status_code == 403
 
     def test_other_user_403(self, alice_session, monkeypatch):
-        """Bob cannot read Alice's panel state."""
+        """Bob cannot read Alice's panel."""
         with pytest.raises(HTTPException) as exc:
             _run(voice_router.get_voice_panel(
                 session_id="vs_alice",
@@ -434,16 +466,17 @@ class TestVoicePanelAuth:
         assert exc.value.status_code == 403
 
     def test_admin_reads_any_panel(self, alice_session, monkeypatch):
-        """Admin can read any user's panel state."""
-        alice_session.panel_state = {
-            "type": "html", "content": "<b>data</b>", "title": "T", "updated_at": "ts"
+        """Admin can read any user's panel."""
+        self.rows[("alice-agent", "main")] = {
+            "agent_name": "alice-agent", "canvas_id": "main", "updated_at": "ts",
+            "blocks": [{"id": "voice", "kind": "html", "payload": {"html": "<b>data</b>"}}],
         }
         result = _run(voice_router.get_voice_panel(
             session_id="vs_alice",
             name="alice-agent",
             current_user=_FakeUser(99, role="admin"),
         ))
-        assert result["type"] == "html"
+        assert result["blocks"][0]["kind"] == "html"
 
 
 # ── Audit attribution tests (#705) ──────────────────────────────────────────

@@ -764,6 +764,27 @@ CREATE TABLE agent_compatibility_results (
 );
 ```
 
+**user_ui_preferences** (trinity-enterprise#413, OSS-core — see [Dashboard Grid View](../feature-flows/dashboard-grid-view.md#layout-model)).
+Dual-track migration (SQLite `user_ui_preferences_table` + Alembic `0053_user_ui_preferences`).
+A GENERIC per-user UI-preference record: `(user_id, key)` → an opaque JSON object, size-capped
+at the service (256 KiB → 413). The Dashboard Grid's three blobs (`grid_layout` / `grid_widgets` /
+`grid_org`) are the first keys; the next per-user UI state that used to be browser-global
+localStorage is one more entry in `services/user_preferences_service.py::PREFERENCE_KEYS`,
+never a new table. `updated_at` is per KEY on purpose — it is the compare-and-set base the
+PUT contract carries, which one JSON column on `users` could not express. `ON DELETE CASCADE`
+for the dialect that enforces FKs; `db.delete_user_preferences(user_id)` is the explicit hook
+for a deleter running with SQLite's default `foreign_keys=OFF` (OSS has no user-delete path today):
+```sql
+CREATE TABLE user_ui_preferences (
+    user_id     INTEGER NOT NULL,
+    key         TEXT NOT NULL,
+    value_json  TEXT NOT NULL,             -- compact JSON object
+    updated_at  TEXT NOT NULL,             -- per key: the CAS base
+    PRIMARY KEY (user_id, key),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
 **agent_reports** (#918 — see [Agent Reports](observability.md#agent-reports-918)). Dual-track migration
 (SQLite `agent_reports_table` + Alembic `0006_agent_reports`). `user_id` = the MCP-key/JWT
 owner who authored the report (not necessarily the agent owner):
