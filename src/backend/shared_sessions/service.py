@@ -111,19 +111,31 @@ def _user_identity(current_user) -> str:
 # `kind` is free TEXT with no CHECK, so this needs no migration.
 WORKSPACE_KIND = "workspace_user"
 
-# Participant kinds that are NOT a person outside the agent fleet. Written as the
-# complement of "human" rather than as a list of human kinds, because the failure
-# directions are not symmetrical: a kind added later (ent#171's external A2A
-# sender was the one anticipated in `db.count_budget_messages`) is far more
-# likely to be another PERSON than another machine, and an allow-list of humans
-# would silently classify it as fleet-internal — the exact disclosure
-# trinity-enterprise#363 exists to prevent. `system` is the platform's own
-# narration, not a reader.
-NON_HUMAN_PARTICIPANT_KINDS = frozenset({"agent", "system"})
+# Participant kinds that do NOT make a room client-facing.
+#
+# trinity-enterprise#363 says "a room containing a **workspace user**", and the
+# fleet-internal kinds are the complement of that. `user` is a PLATFORM account —
+# the operator and their team — and is deliberately here: an operator's own ops
+# room is not a customer-facing room, and telling its agents to keep costs,
+# infrastructure and queue plumbing out of it muzzles them on exactly the subject
+# the room was opened for.
+#
+# That matters more than it looks, because `create_room` always seats its creator
+# and the only removal path is `kind="agent"` — so a human participant can never
+# leave, and treating `user` as client-facing would make every room client-facing
+# and the else-branch below unreachable. An earlier revision of this did exactly
+# that: it generalised the ticket's "workspace user" to "any non-agent kind" and
+# shipped a test pinning the generalisation.
+#
+# An UNRECOGNISED kind still counts as a reader. That half of the complement is
+# right: ent#171's external A2A sender is the one already anticipated in
+# `db.count_budget_messages`, and a new kind is far likelier to be an outside
+# person than a machine.
+FLEET_INTERNAL_PARTICIPANT_KINDS = frozenset({"agent", "system", "user"})
 
 
 def room_is_user_facing(participants: list[dict]) -> bool:
-    """Is a person from outside the agent fleet present in this room?
+    """Is a CLIENT — someone outside the operator's own organisation — in this room?
 
     Pure, so the rule is testable without a DB, and the ONE place the question is
     answered (trinity-enterprise#363 AC 2: the signal is set by the platform from
@@ -137,7 +149,7 @@ def room_is_user_facing(participants: list[dict]) -> bool:
     for p in participants or []:
         if p.get("left_at"):
             continue
-        if str(p.get("kind") or "").strip() not in NON_HUMAN_PARTICIPANT_KINDS:
+        if str(p.get("kind") or "").strip() not in FLEET_INTERNAL_PARTICIPANT_KINDS:
             return True
     return False
 

@@ -620,11 +620,14 @@ report is never dropped, only deferred, and the narrowing applies to every porta
 rather than only scheduled ones. See
 [schedule-workspace-delivery.md](../feature-flows/schedule-workspace-delivery.md).
 
-**A room tells its agents when a person is reading.** Full transcript visibility is the
+**A room tells its agents when a CLIENT is reading.** Full transcript visibility is the
 deliberate choice for Workspace rooms, and it is only safe while the agents know they are
 watched. `shared_sessions.service.room_is_user_facing` is the pure rule, derived from
-MEMBERSHIP — nothing a participant writes reaches it — and `NON_HUMAN_PARTICIPANT_KINDS` is
-written as the complement of "human" because a kind added later (ent#171's external A2A
+MEMBERSHIP — nothing a participant writes reaches it. `FLEET_INTERNAL_PARTICIPANT_KINDS`
+holds `agent`, `system` AND `user`: the platform `user` is the operator, and an ops room
+is not client-facing. Getting that wrong is not cosmetic — `create_room` always seats its
+creator and the only removal path is `kind="agent"`, so counting `user` makes every room
+client-facing and the quiet branch unreachable. The set is otherwise the complement of "reader" because a kind added later (ent#171's external A2A
 sender) is likelier to be a person than a machine, and an allow-list of human kinds would
 silently classify it as fleet-internal. `platform_prompt_service.build_user_facing_room_prompt`
 takes no arguments and names no participant: it is composed into a prompt handed to EVERY

@@ -10,10 +10,13 @@ the text, that the operator's copy is not gated on the client having bothered to
 type anything, and that the agent-facing redaction is untouched.
 """
 import asyncio
+from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.unit
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 # --- the id ------------------------------------------------------------------
@@ -198,3 +201,60 @@ def test_the_agent_facing_redaction_is_untouched():
     from pathlib import Path
     src = Path(__file__).resolve().parents[2] / "src/backend/routers/evaluations.py"
     assert "comment_withheld" in src.read_text()
+
+
+# --- the complaint must not travel back to the agent it is about -------------
+#
+# Found by an adversarial review pass, and it falsified this feature's own
+# docstring ("the operator sees the comment; the agent still does not"). Two
+# pre-existing return paths carry a RESPONDED item back to its agent, and both
+# keyed on agent_name alone:
+#
+#   * operator_queue_service._write_responses_to_agent → the agent's own
+#     ~/.trinity/operator-queue.json, `question` and `context` verbatim;
+#   * routers/operator_queue respond → ent#329 spawn_resume_dispatch, whose
+#     prompt embeds item["question"].
+#
+# Both exist to close a loop the AGENT opened. A platform alarm opened none —
+# and for a problem report the agent is the SUBJECT, so returning it hands the
+# rated agent the client's address and words, plus (under
+# operator_resume_enabled) one of its own turns to read them with.
+
+def test_a_platform_alarm_is_recognised_as_platform_minted():
+    from services.operator_queue_service import is_platform_minted
+    assert is_platform_minted({"request_id": "workspace-problem-abc123"}) is True
+    assert is_platform_minted({"id": "skill-not-found-agent-2026"}) is True
+    assert is_platform_minted("db-backup-20260907") is True
+
+
+def test_an_agent_authored_item_is_not_platform_minted():
+    """The predicate has to DISCRIMINATE: if it swallowed agent items too, the
+    respond→resume loop and the answer write-back would both go dead and every
+    parked agent question would stop being answerable."""
+    from services.operator_queue_service import is_platform_minted
+    assert is_platform_minted({"request_id": "deploy-approval-42"}) is False
+    assert is_platform_minted({"request_id": ""}) is False
+    assert is_platform_minted({}) is False
+
+
+def test_the_agent_file_write_back_skips_platform_alarms():
+    src = (REPO / "src/backend/services/operator_queue_service.py").read_text()
+    fn = src[src.index("def _write_responses_to_agent"):]
+    loop = fn[fn.index("for resp in responded_items:"):]
+    assert "is_platform_minted(resp)" in loop[:400], (
+        "a responded platform alarm is written into the agent's own queue file"
+    )
+
+
+def test_acknowledging_a_platform_alarm_does_not_spend_the_agents_turn():
+    """'Got it' posts to /respond like any other answer, so without this gate an
+    acknowledge dispatches a full execute_task on the rated agent."""
+    src = (REPO / "src/backend/routers/operator_queue.py").read_text()
+    assert "if item and not operator_queue_service.is_platform_minted(item):" in src
+
+
+def test_the_context_blob_carries_no_client_words_or_address(monkeypatch):
+    _, seen = _run(monkeypatch, comment="my card number is 4111 1111 1111 1111")
+    ctx = str(seen["item"]["context"])
+    assert "4111" not in ctx
+    assert "client@example.com" not in ctx

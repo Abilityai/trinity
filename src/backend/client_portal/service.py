@@ -4204,10 +4204,13 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
             "priority": "medium",
             "title": "A Workspace client rated a response as not useful",
             "question": question,
+            # Identifiers only — no comment text, and no address. The operator
+            # reads who is unhappy from `question`; `context` is the
+            # machine-readable half and is the field most likely to be forwarded
+            # or logged, so it carries the least it can (the G-04 rule).
             "context": {
                 "target_kind": target_kind,
                 "target_id": target_id,
-                "client_email": email,
                 "has_comment": bool(text),
             },
             "created_at": utc_now_iso(),

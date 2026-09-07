@@ -31,14 +31,41 @@ def test_a_workspace_client_makes_the_room_user_facing():
     ]) is True
 
 
-def test_a_platform_user_makes_the_room_user_facing():
-    """A `user` participant is an operator — still a person outside the agent
-    fleet, still reading every line."""
+def test_an_operators_own_room_is_not_client_facing():
+    """A `user` participant is a PLATFORM account — the operator and their team.
+
+    This assertion was originally the exact opposite, and pinned a bug. The
+    ticket says "a room containing a **workspace user**"; generalising that to
+    "any non-agent kind" swept in the operator, and since `create_room` always
+    seats its creator and the only removal path is `kind='agent'`, EVERY room
+    became client-facing and the else-branch became unreachable. The visible cost
+    was an ops room whose agents were told to keep infrastructure, costs and
+    queue plumbing out of it — the subject the room exists for.
+    """
     from shared_sessions import service
     assert service.room_is_user_facing([
         {"kind": "agent", "identity": "researcher"},
         {"kind": "user", "identity": "admin"},
-    ]) is True
+    ]) is False
+
+
+def test_the_quiet_branch_is_reachable_from_a_real_room_shape():
+    """The generalisation above was invisible to every test because they all fed
+    synthetic participant lists. This one uses the shape `create_room` actually
+    produces — creator seated, agents added — so a change that makes the signal
+    unconditional fails here rather than passing everywhere."""
+    from shared_sessions import service
+    operator_room = [
+        {"kind": "user", "identity": "admin", "role": "moderator"},
+        {"kind": "agent", "identity": "infra-bot", "role": "member"},
+    ]
+    client_room = [
+        {"kind": service.WORKSPACE_KIND, "identity": "client@example.com",
+         "role": "moderator"},
+        {"kind": "agent", "identity": "analyst", "role": "member"},
+    ]
+    assert service.room_is_user_facing(operator_room) is False
+    assert service.room_is_user_facing(client_room) is True
 
 
 def test_an_agent_only_room_is_not_user_facing():

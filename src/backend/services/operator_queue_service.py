@@ -198,6 +198,36 @@ def _valid_execution_id(value) -> Optional[str]:
     return None
 
 
+def is_platform_minted(item) -> bool:
+    """Was this queue item raised by the PLATFORM rather than by the agent?
+
+    ent#499. The two agent-facing return paths — the responded write-back into
+    ``~/.trinity/operator-queue.json`` and the ent#329 respond→resume dispatch —
+    both exist to close a loop the AGENT opened: it parked a question, a human
+    answered, the answer goes back. A platform alarm opened no such loop. The
+    agent never asked, is not waiting, and in ent#499's case is the SUBJECT of
+    the complaint rather than its author.
+
+    Feeding those back is not merely useless, it is a disclosure: ent#499's body
+    carries a client's email and their verbatim words, which ent#366 deliberately
+    withholds from the rated agent (``comment_withheld``). Without this predicate
+    an operator clicking "Got it" hands both to that agent within one 5s sync
+    cycle, and — with ``operator_resume_enabled`` — spends one of its turns doing
+    it.
+
+    Keyed on the reserved id prefixes, which are already the platform's marker
+    for "an agent may not mint this id" (#1632). One predicate, both sinks, so
+    they cannot drift.
+    """
+    if isinstance(item, str):
+        candidate = item
+    elif isinstance(item, dict):
+        candidate = item.get("request_id") or item.get("id") or ""
+    else:
+        candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
+    return str(candidate).strip().lower().startswith(_RESERVED_ID_PREFIXES)
+
+
 def _truncate_with_marker(text: str, max_len: int) -> str:
     """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
     if len(text) <= max_len:
@@ -1041,6 +1071,10 @@ class OperatorQueueSyncService:
         # sync cycle's exists() check — keyed on request_id — matches instead of
         # creating a duplicate.
         for resp in responded_items:
+            # ent#499: a platform alarm was never in this agent's file and must
+            # not be written into it — see `is_platform_minted`.
+            if is_platform_minted(resp):
+                continue
             if resp["request_id"] not in seen_ids:
                 requests.append({
                     "id": resp["request_id"],

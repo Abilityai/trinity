@@ -1997,14 +1997,26 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 - **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
 
-### 5.24 A room tells its agents when a person is reading (trinity-enterprise#363)
+### 5.24 A room tells its agents when a CLIENT is reading (trinity-enterprise#363)
 - **Status**: ✅ Implemented (2026-09-07)
 - **Requirement ID**: WORKSPACE_ROOM_USER_FACING_SIGNAL
 - **GitHub Issue**: abilityai/trinity-enterprise#363
-- **Description**: An agent woken in a room that contains a **human** participant
+- **Description**: An agent woken in a room that contains a **workspace client**
   receives an explicit signal in its injected context saying the transcript is
-  being read by a person outside the fleet, and guidance on what that should
-  change about its output. A room with only agents in it is unchanged.
+  being read by someone outside the operator's organisation, and guidance on what
+  that should change about its output. A room with no client in it — including an
+  operator's own ops room — is unchanged.
+- **`user` is fleet-internal, and that is the whole subtlety.** The ticket says
+  "a room containing a **workspace user**". An earlier revision generalised that
+  to "any non-agent kind", which swept in the platform `user` — the operator and
+  their team. Because `create_room` always seats its creator and the only removal
+  path is `kind="agent"`, a human participant can never leave, so EVERY room
+  became client-facing and the quiet branch became unreachable. The visible cost
+  was an operator's ops room whose agents were told to keep infrastructure, costs
+  and queue plumbing out of it — the subject the room exists for. The
+  generalisation shipped with a test asserting it, which is why no test caught
+  it: `FLEET_INTERNAL_PARTICIPANT_KINDS` now names all three, and a test drives
+  the participant shape `create_room` actually produces.
 - **Why this is a security requirement, not a politeness one.** Full transcript
   visibility is the deliberate choice for Workspace rooms — watching the team
   work is the differentiator over a summary — and that choice is only safe if
@@ -2022,8 +2034,8 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   a user-facing one: it is scene-setting, not a disclosure.
 - **Set by the platform from membership, never asserted by a participant** (AC 2).
   `_wake_agent` derives the fact from `db.list_participants(room_id)` — a
-  participant `kind` outside the agent/system set, still present (`left_at IS
-  NULL`) — and passes it as `system_prompt`. Nothing a participant can write
+  participant `kind` outside `FLEET_INTERNAL_PARTICIPANT_KINDS` (`agent`,
+  `system`, and `user`, the platform operator), still present (`left_at IS NULL`) — and passes it as `system_prompt`. Nothing a participant can write
   reaches the decision, and no participant identity reaches the block: the
   signal states **that** a person is reading, never who, because the block is
   composed into a prompt and a client's address is neither needed for the
