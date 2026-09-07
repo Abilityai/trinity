@@ -29,6 +29,7 @@ OSS table would pass on the pre-fix code and prove nothing.
 """
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -50,8 +51,20 @@ PROBE_TABLE = "probe_module_agent_owned"
 @pytest.fixture
 def registry_isolated():
     """`EXTRA_AGENT_REFS` is process-global; a registration left behind would
-    leak into whichever test runs next under pytest-randomly."""
-    from db import agent_cleanup
+    leak into whichever test runs next under pytest-randomly.
+
+    Resolved through `importlib.import_module`, deliberately, rather than
+    `from db import agent_cleanup`. The two are NOT equivalent under a suite
+    that reloads modules: the `from`-form reads the `db` package attribute,
+    which keeps pointing at a stale module object when something drops
+    `db.agent_cleanup` from `sys.modules`, while the production call site
+    (`rename_agent` does `from db.agent_cleanup import cascade_rename` at call
+    time) goes through `sys.modules` and re-imports. Registering into the stale
+    object then leaves the live registry empty, the sweep silently no-ops, and
+    the failure reads as "the consolidation dropped the behaviour" — a green
+    production path failing a test that is looking at the wrong module.
+    """
+    agent_cleanup = importlib.import_module("db.agent_cleanup")
 
     saved = list(agent_cleanup.EXTRA_AGENT_REFS)
     yield agent_cleanup
@@ -259,6 +272,28 @@ def test_the_production_rename_path_still_rekeys_a_registered_table(
                 f"INSERT INTO {PROBE_TABLE} (agent_name, payload) "
                 "VALUES ('scout', 'mine')"
             )
+        )
+
+    # Precondition, asserted rather than assumed: the registry the PRODUCTION
+    # call site will read must be the one just written to, and the probe table
+    # must be visible to the same connection `cascade_rename` gets. Both are
+    # process-global state this test does not own, and when either is wrong the
+    # row simply does not move — which is indistinguishable, at the final
+    # assert, from the regression this test exists to catch. Checking them here
+    # means an isolation failure says so instead of impersonating a real one.
+    from sqlalchemy import inspect as sa_inspect
+
+    from db.agent_cleanup import EXTRA_AGENT_REFS as live_registry
+
+    assert (PROBE_TABLE, "agent_name") in live_registry, (
+        "the probe table is not in the registry the production path reads — "
+        "test isolation, not a rename regression. "
+        f"live={list(live_registry)} fixture_module={registry_isolated!r}"
+    )
+    with full_schema_db.begin() as conn:
+        assert sa_inspect(conn).has_table(PROBE_TABLE), (
+            "the probe table is not visible on the engine the rename will use "
+            "— test isolation, not a rename regression"
         )
 
     assert MetadataMixin().rename_agent("scout", "ranger") is True
