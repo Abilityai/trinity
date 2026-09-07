@@ -753,3 +753,36 @@ def test_a_user_line_matching_a_canonical_pattern_is_deduped_not_doubled(tmp_pat
     top, user, _ = _regions(home)
     assert top.count("*.log") == 1
     assert user == ["!important.log", "mine/"]
+
+
+def test_a_previously_swept_file_comes_back_and_is_reported(tmp_path):
+    """Revised criterion 3, in the shape the field incident actually had.
+
+    An earlier Push swept four `.env.example` files: still on disk, gone from the
+    index, and IGNORED — so nothing re-added them, and the issue's own follow-up
+    names the second-order property, *"un-ignoring a file does not re-track it."*
+    Three of four were restored by hand; one sat untracked for two days.
+
+    After this fix the agent's negation is effective again, so on the next Push
+    the file is newly un-ignored and still untracked — which is exactly what
+    `unignored_paths` reports, and exactly what would have made that sweep a
+    same-day finding instead of a two-month-old one. The same Push's own
+    `git add -A` then re-tracks it.
+    """
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "!.env.example\nmy-scratch/\n")
+    # The state a previous Push left behind: on disk, untracked, and ignored
+    # because the canonical block was appended BELOW the negation.
+    (home / ".env.example").write_text("API_KEY=\n")
+    (home / ".gitignore").write_text("!.env.example\nmy-scratch/\n.env\n.env.*\n")
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", ".env.example"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True,
+    ).returncode == 0, "fixture is wrong — the file must start out ignored"
+
+    sweep = _push_sweep(home)
+    assert ".env.example" in sweep.unignored, (
+        f"the swept file's return was not reported: {sweep}"
+    )
+    # And the agent's own `git add -A` now picks it up.
+    _git(home, "add", "-A")
+    assert ".env.example" in _git(home, "ls-files").split()
