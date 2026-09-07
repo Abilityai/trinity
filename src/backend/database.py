@@ -118,6 +118,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.canvas import CanvasOperations
+from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
@@ -966,6 +967,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
         self._canvas_ops = CanvasOperations()
+        self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
@@ -2208,6 +2210,27 @@ class DatabaseManager:
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
+
+    # =========================================================================
+    # Per-user UI preferences (trinity-enterprise#413, delegated to db/user_preferences.py)
+    # =========================================================================
+
+    def get_user_preferences(self, user_id: int):
+        return self._user_preference_ops.get_user_preferences(user_id)
+
+    def get_user_preference(self, user_id: int, key: str):
+        return self._user_preference_ops.get_user_preference(user_id, key)
+
+    def set_user_preference(self, user_id: int, key: str, value_json: str, *, base_updated_at):
+        return self._user_preference_ops.set_user_preference(
+            user_id, key, value_json, base_updated_at=base_updated_at
+        )
+
+    def delete_user_preference(self, user_id: int, key: str) -> bool:
+        return self._user_preference_ops.delete_user_preference(user_id, key)
+
+    def delete_user_preferences(self, user_id: int) -> int:
+        return self._user_preference_ops.delete_user_preferences(user_id)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
                               hours: int = None, search: str = None,
