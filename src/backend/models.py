@@ -2093,7 +2093,12 @@ class ExecutionResultEnvelope(BaseModel):
     metadata: Optional[Dict] = None
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
-    execution_time_ms: Optional[int] = None
+    # #2434: agent-supplied and previously unbounded. This lands in two
+    # `Integer` columns (schedule_executions / chat message rows), so a
+    # misbehaving or compromised agent posting 3_000_000_000 on the #1083 async
+    # result callback reproduces the int4-overflow class on a hostile input
+    # path. Bounded at the contract, where a bad value is a clean 422.
+    execution_time_ms: Optional[int] = Field(None, ge=0, le=2**31 - 1)
 
 
 # =============================================================================
