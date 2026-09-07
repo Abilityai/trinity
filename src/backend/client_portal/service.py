@@ -4112,3 +4112,108 @@ async def dispatch_capture_feedback(agent_name: str, email: str, *, target_kind:
         _settle_capture_feedback_claim(claim, delivered=False)
     else:
         _settle_capture_feedback_claim(claim, delivered=True)
+
+
+# --------------------------------------------------------------------------
+# Report-a-problem (ent#499)
+# --------------------------------------------------------------------------
+
+#: How much of the client's comment reaches the operator's queue item. Well
+#: under the #1677 db-sink belt (16 KiB on `question`) and under the 2000 chars
+#: the rating itself stores — the full text is always on the evaluation row; the
+#: queue item is a summons, not the record.
+PROBLEM_REPORT_COMMENT_CHARS = 600
+
+
+def _problem_report_id(evaluator: str, target_kind: str, target_id: str) -> str:
+    """One item per person per target.
+
+    Derived from the resolved identity — never the comment — for the same reason
+    `claim_capture_feedback_dispatch` excludes it: a key that moves with the text
+    is not a dedup, it is a rename of the attack. `create_item` is an
+    ``INSERT ... ON CONFLICT DO NOTHING`` keyed on ``(agent_name, request_id)``,
+    so a re-rate is a no-op.
+
+    Hashed rather than interpolated: the id is matched against
+    ``_RESERVED_ID_PREFIXES`` and validated by ``_ID_RE``
+    (``^[A-Za-z0-9._:-]+$``), and an email is neither bounded nor confined to
+    that alphabet — a raw one would be silently rejected at the sink for some
+    addresses and not others. It also keeps the address out of a column the
+    operator queue renders and the agent's own queue file can be synced with.
+
+    **Stated residual**: `create_item` has no UPDATE path, so an edited comment
+    does not reach an item already raised. That is the same residual ent#434's
+    alert carries and it is a shared fix at the sink, not a per-emitter one —
+    working around it here (a comment-dependent id) would trade one bounded item
+    per person for one per keystroke-set, which is the flood the budget exists
+    to stop.
+    """
+    digest = hashlib.sha256(
+        "\x00".join((evaluator, target_kind, target_id)).encode("utf-8")
+    ).hexdigest()[:32]
+    return f"workspace-problem-{digest}"
+
+
+async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
+                               target_id: str, comment: str | None,
+                               is_platform: bool = False) -> bool:
+    """A thumbs-down reaches the instance's operator (ent#499).
+
+    The rated agent is deliberately not in this loop. ent#366's rule — a readable
+    score is a loop an agent may optimise for, and a stranger's verbatim words
+    handed to the thing being criticised is a prompt-injection path into it — is
+    why the operator's copy goes straight to the queue and the agent-facing
+    redaction (`comment_withheld`) is untouched. The operator sees the comment;
+    the agent still does not.
+
+    **Routed through the #1677 budget, never a direct create.** The volume is
+    driven by a client clicking, so by the classification rule this is an
+    agent-influenceable emitter: a direct `create_operator_queue_item` would fail
+    the CI emitter guard, and reusing the generic `alert` type would have let five
+    unrelated alerts on that agent silence every problem report (the budget counts
+    pending rows OF THAT TYPE, including ones other emitters wrote).
+
+    Never raises, and returns whether an item was raised. The client's rating is
+    already recorded by the time this runs: their action must never fail because
+    the operator's copy could not be written.
+    """
+    try:
+        from services.operator_queue_service import (
+            _truncate_with_marker,
+            create_bounded_alert,
+        )
+
+        evaluator = workspace_evaluator(email, is_platform=is_platform)
+        text = (comment or "").strip()
+        excerpt = _truncate_with_marker(text, PROBLEM_REPORT_COMMENT_CHARS) if text else ""
+
+        what = "a message" if target_kind == "message" else "a deliverable"
+        question = (
+            f"{email} rated {what} from {agent_name} as not useful."
+            + (f"\n\nWhat they said:\n\n> {excerpt}" if excerpt
+               else "\n\nThey left no comment.")
+            + "\n\nThis is a heads-up for you, not for the agent — the agent can "
+              "read that it was rated down but never these words. Nothing is "
+              "waiting on a reply; acknowledge it once you have looked."
+        )
+        item = {
+            "id": _problem_report_id(evaluator, target_kind, target_id),
+            "agent_name": agent_name,
+            "type": "workspace_problem_report",
+            "status": "pending",
+            "priority": "medium",
+            "title": "A Workspace client rated a response as not useful",
+            "question": question,
+            "context": {
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "client_email": email,
+                "has_comment": bool(text),
+            },
+            "created_at": utc_now_iso(),
+        }
+        return await create_bounded_alert(agent_name, item)
+    except Exception as e:  # noqa: BLE001 — the rating is already recorded
+        logger.warning("[ent#499] problem report failed for %s/%s: %s",
+                       agent_name, target_kind, e)
+        return False

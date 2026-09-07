@@ -124,7 +124,13 @@ OPERATOR_ALERT_MAX_PENDING_PER_TYPE = int(
 # unregistered `item["type"]` is refused fail-closed: a caller-trusted string
 # would mint a fresh budget per distinct value (unbounded cap keyspace), so
 # registration is a one-line reviewed act here, never a call-site decision.
-_BUDGETED_ALERT_TYPES = frozenset({"skill_not_found"})
+_BUDGETED_ALERT_TYPES = frozenset({
+    "skill_not_found",
+    # ent#499: a Workspace client's thumbs-down. No agent authors it, but the
+    # volume is driven by a person clicking, which is the same
+    # not-bound-by-platform-cadence side of the #1677 classification.
+    "workspace_problem_report",
+})
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
 # platform trigger enum only — NEVER agent-controlled free text (G-04: the
@@ -156,6 +162,9 @@ _RESERVED_ID_PREFIXES = (
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
+    "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
+                           # so an agent cannot pre-create the id of a complaint
+                           # ABOUT ITSELF and silence it through ON CONFLICT
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
