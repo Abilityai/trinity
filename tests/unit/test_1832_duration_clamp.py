@@ -27,6 +27,25 @@ change well beyond a p2 reliability fix.
 
 Companion coverage lives in ``test_1771c_schedules_cas_edges.py`` (A6), where the
 original ``strict=True`` xfail was retired by this fix.
+
+#2434 extends this guard to the OTHER end of the same range, and to the sites it
+could not see:
+
+* ``max(0, …)`` is no longer an accepted shape. It guards only the low end —
+  ``max(0, 2_850_000_000)`` is still 2.85 bn, which the PostgreSQL ``INTEGER``
+  column cannot hold — so every measured writer must call
+  ``utils.helpers.duration_ms_between`` (mirrored in ``src/scheduler/utils.py``),
+  which guards BOTH ends.
+* The scanner now sees ``ast.keyword`` sinks (``.values(duration_ms=…)``), not
+  only ``ast.Assign``. That is the actual sink at all six watchdog-sweep sites in
+  ``db/schedules/cleanup.py`` and ``db/activities.py``, which are therefore added
+  to ``_WRITERS``.
+* Acceptance is classified per site rather than blanket-accepting ``None``:
+  fabricated → ``None``, skipped → literal ``0``, measured → the helper. A
+  blanket rule would let a measured writer silently discard a real datum.
+
+The behavioural half of #2434 lives in ``test_2434_duration_overflow.py``, which
+needs real PostgreSQL — SQLite stores an 8-byte int and cannot fail.
 """
 
 from __future__ import annotations
@@ -190,50 +209,119 @@ def test_1832_analytics_never_reports_a_negative_duration(ops):
 _WRITERS = (
     _ROOT / "src" / "backend" / "db" / "schedules" / "executions.py",
     _ROOT / "src" / "scheduler" / "database.py",
+    # #2434: the six fabrication sites. Their sink is an ``ast.keyword`` —
+    # ``.values(duration_ms=...)`` — not an ``ast.Assign``, which is exactly the
+    # blind spot ``_duration_expressions`` below now closes.
+    _ROOT / "src" / "backend" / "db" / "schedules" / "cleanup.py",
+    _ROOT / "src" / "backend" / "db" / "activities.py",
 )
 
 
-def _duration_assignments(path: Path):
-    """Yield (lineno, node) for every ``duration_ms = <expr>`` assignment."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _duration_expressions(path: Path):
+    """Yield ``(lineno, value_node)`` for every expression bound to duration_ms.
+
+    Two sinks, not one (#2434):
+
+    * ``ast.Assign`` — ``duration_ms = <expr>``, the local the writers compute.
+    * ``ast.keyword`` — ``.values(duration_ms=<expr>)`` / ``foo(duration_ms=…)``,
+      which is where the value actually reaches the column at every site in
+      ``cleanup.py`` and ``activities.py``.
+
+    Scanning only ``Assign`` made the guard satisfiable by a redundant
+    ``duration_ms = None`` local whose sole purpose is to feed a scanner — a line
+    the next reviewer or formatter inlines, silently neutering the guard on all
+    six sites at once. Pass-through keyword values are skipped — see
+    ``_is_pass_through`` for the two shapes and why the skip is kept narrow.
+    """
+    yield from _duration_expressions_from_source(path.read_text(encoding="utf-8"))
+
+
+def _duration_expressions_from_source(source: str):
+    """``_duration_expressions`` over a source string — the guard's own unit."""
+    tree = ast.parse(source)
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "duration_ms":
-                yield node.lineno, node.value
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "duration_ms":
+                    yield node.lineno, node.value
+        elif isinstance(node, ast.keyword) and node.arg == "duration_ms":
+            if _is_pass_through(node.value):
+                continue
+            yield node.value.lineno, node.value
 
 
-def _is_clamped(value: ast.AST) -> bool:
-    """True when the assigned expression is a literal 0 or wrapped in max()."""
+def _is_pass_through(value: ast.AST) -> bool:
+    """True for a keyword value that moves an existing duration, never computes one.
+
+    Exactly two shapes, kept deliberately narrow so the guard stays fail-CLOSED
+    (anything it does not recognise must satisfy ``_is_guarded``):
+
+    * ``duration_ms=duration_ms`` — a local already judged at its ``Assign``.
+      Demanding the guard shape here too would flag the sink of a correctly
+      guarded writer.
+    * ``duration_ms=row["duration_ms"]`` — reading the column straight back out
+      of a row mapping to build a model (``_row_to_execution`` and friends).
+      That is a READ, not a writer, and it cannot produce a value the column did
+      not already hold. Only the identical key is skipped: ``row["anything_else"]``
+      still has to satisfy the guard.
+    """
+    if isinstance(value, ast.Name):
+        return True
+    return (
+        isinstance(value, ast.Subscript)
+        and isinstance(value.slice, ast.Constant)
+        and value.slice.value == "duration_ms"
+    )
+
+
+def _is_guarded(value: ast.AST) -> bool:
+    """True when the expression is one of the three accepted shapes.
+
+    Acceptance is classified by shape, deliberately NOT a blanket "anything
+    constant is fine" (#2434):
+
+    * ``None`` — a **fabricated** duration. The sweep invented the end time, so
+      there is nothing to record. Only legitimate at the six sweep sites.
+    * literal ``0`` — a **skipped** row: it ran for zero time, which IS a
+      measurement.
+    * ``duration_ms_between(...)`` — a **measured** writer, guarded at both ends
+      (``max(0, …)`` low per #1832, ``None`` above the int4 ceiling per #2434).
+
+    A bare ``max(...)`` is NO LONGER accepted: it guards only the low end, and
+    ``max(0, 2_850_000_000)`` is still 2.85 bn — the #2434 defect itself.
+    """
+    if isinstance(value, ast.Constant) and value.value is None:
+        return True  # fabricated → NULL (#2434)
     if isinstance(value, ast.Constant) and value.value == 0:
         return True  # the `skipped` rows write a literal 0
     return (
         isinstance(value, ast.Call)
         and isinstance(value.func, ast.Name)
-        and value.func.id == "max"
+        and value.func.id == "duration_ms_between"
     )
 
 
 @pytest.mark.parametrize("path", _WRITERS, ids=lambda p: p.name)
 def test_1832_every_duration_writer_is_clamped(path):
-    """No writer may assign an unguarded ``completed_at - started_at``.
+    """No writer may bind duration_ms to an unguarded ``completed_at - started_at``.
 
     The two ``src/scheduler`` writers ship in a separate image that these unit
     tests cannot import, so the invariant is enforced against the source. This
-    also catches a fourth call-site added later, which is how the reported bug
-    survived being fixed in one place.
+    also catches a call-site added later, which is how the reported bug survived
+    being fixed in one place — twice (#1832 low end, #2434 high end).
     """
-    unclamped = [
+    unguarded = [
         lineno
-        for lineno, value in _duration_assignments(path)
-        if not _is_clamped(value)
+        for lineno, value in _duration_expressions(path)
+        if not _is_guarded(value)
     ]
 
-    assert not unclamped, (
-        f"{path.relative_to(_ROOT)} assigns duration_ms unguarded at "
-        f"line(s) {unclamped} — wrap in max(0, ...) so clock skew cannot "
-        f"persist a negative duration (#1832)"
+    assert not unguarded, (
+        f"{path.relative_to(_ROOT)} binds duration_ms unguarded at "
+        f"line(s) {unguarded} — a measured writer must call "
+        f"duration_ms_between(started_at, completed_at) (clamps negative skew "
+        f"per #1832 AND returns None above the PostgreSQL int4 ceiling per "
+        f"#2434); a sweep that FABRICATES the end time must write None."
     )
 
 
@@ -242,4 +330,77 @@ def test_1832_source_guard_would_catch_a_regression():
     tree = ast.parse("duration_ms = int((completed_at - started_at).seconds)")
     value = tree.body[0].value
 
-    assert _is_clamped(value) is False
+    assert _is_guarded(value) is False
+
+
+def test_2434_source_guard_catches_an_inlined_keyword_regression():
+    """The keyword extension must fire on the shape it exists to catch.
+
+    Without this, adding the two sweep files to ``_WRITERS`` would be an
+    unverified change: the guard would pass because every site writes
+    ``duration_ms=None``, and nothing would prove it can still fail when someone
+    inlines the subtraction straight into ``.values(...)`` — the regression the
+    #2434 fix is protecting against.
+    """
+    src = (
+        "conn.execute(update(t).values("
+        "duration_ms=int((completed_at - started_at).total_seconds() * 1000)))"
+    )
+    found = list(_duration_expressions_from_source(src))
+
+    assert found, "the keyword sink was not seen at all"
+    assert not any(_is_guarded(value) for _, value in found)
+
+
+def test_2434_bare_max_is_no_longer_accepted():
+    """``max(0, …)`` guards only the LOW end — accepting it re-opens #2434."""
+    tree = ast.parse(
+        "duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))"
+    )
+
+    assert _is_guarded(tree.body[0].value) is False
+
+
+def test_2434_pass_through_keyword_is_not_double_judged():
+    """A pass-through moves an existing duration; it never computes one.
+
+    ``duration_ms=duration_ms`` is judged at the local's ``Assign``, and
+    ``duration_ms=row["duration_ms"]`` is a row->model READ that cannot produce a
+    value the column did not already hold. Both are skipped — but narrowly: a
+    different key, or any computation, still has to satisfy the guard.
+    """
+    skipped = [
+        "conn.execute(update(t).values(duration_ms=duration_ms))",
+        "ScheduleExecution(duration_ms=row['duration_ms'])",
+    ]
+    for src in skipped:
+        assert list(_duration_expressions_from_source(src)) == [], src
+
+    not_skipped = [
+        "ScheduleExecution(duration_ms=row['elapsed'])",
+        "ScheduleExecution(duration_ms=int((c - s).total_seconds() * 1000))",
+    ]
+    for src in not_skipped:
+        found = list(_duration_expressions_from_source(src))
+        assert found, src
+        assert not any(_is_guarded(v) for _, v in found), src
+
+
+def test_2434_accepted_shapes_are_exactly_three():
+    """None (fabricated), literal 0 (skipped), duration_ms_between (measured)."""
+    accepted = [
+        "duration_ms = None",
+        "duration_ms = 0",
+        "duration_ms = duration_ms_between(started_at, completed_at)",
+    ]
+    for src in accepted:
+        assert _is_guarded(ast.parse(src).body[0].value) is True, src
+
+    rejected = [
+        "duration_ms = int((c - s).total_seconds() * 1000)",
+        "duration_ms = max(0, int((c - s).total_seconds() * 1000))",
+        "duration_ms = min(2**31 - 1, ms)",
+        "duration_ms = 1",
+    ]
+    for src in rejected:
+        assert _is_guarded(ast.parse(src).body[0].value) is False, src
