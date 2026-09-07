@@ -1,0 +1,82 @@
+{
+  "version": "1.1",
+  "date": "2026-09-06",
+  "mode": "diff",
+  "scope": "abilityai/trinity#2110 — branch vybe/issue-2110 vs merge-base a5ac3cf3 on dev (13 files, +688/-30 at b02e3c39)",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_routes": 0,
+    "changed_routes": 0,
+    "new_ws_consumers": 0,
+    "new_local_storage_keys": [],
+    "file_upload_points": "none",
+    "external_integrations": 0,
+    "changed_data_flows": [
+      "agent-authored dashboard.yaml -> c_d002/c_d003/c_d004/c_d005 -> message/detail -> CompatibilityPanel.vue:196 text interpolation | CompatibilityReport JSON (MCP proxied whole) | db/compatibility.py:57 json.dumps(checks, default=str) -> SQLAlchemy Core bound insert/update"
+    ]
+  },
+  "findings": [],
+  "observations": [
+    {
+      "id": "O1",
+      "severity": "INFO",
+      "confidence": 4,
+      "text": "default=str at the persistence sink can mask a future producer that puts a non-JSON-native object into detail (persists as str() instead of failing). Accepted (plan TASTE T3): producers bounded at origin; belt exists so one check cannot drop the whole report's persistence, which is what a YAML date label did at HEAD (silently — build_report's best-effort except swallowed it)."
+    },
+    {
+      "id": "O2",
+      "severity": "INFO",
+      "confidence": 3,
+      "text": "Agent-authored widget-type names now appear in message, read by MCP clients (operator LLMs) as a tool result. Bounded to <=5 names x 40 printable chars via _clip/_named; previously the same names travelled unbounded in detail.types — net reduction of the surface."
+    },
+    {
+      "id": "O3",
+      "severity": "INFO",
+      "confidence": 3,
+      "text": "_clip collapses whitespace, so a quoted type \"metric \" (correctly unsupported — the agent server strips it too) renders as 'metric' x1 while metric is in the supported list. Confusing corner case, not exploitable; clipped-form-as-key is a deliberate plan decision."
+    },
+    {
+      "id": "O4",
+      "severity": "INFO",
+      "confidence": 2,
+      "text": "Parity guard _literal_assign does not reject subscript assignment (valid_types[:] = ..., valid_types[0] = ...) or mutation through an aliased parameter; a starred element raises a bare ValueError (still a loud red). Test hygiene, not a security property."
+    }
+  ],
+  "verification": {
+    "secrets_scan": "0 matches (known-prefix scan over git log -p a5ac3cf3..HEAD: AWS, OpenAI/Anthropic, GitHub token/PAT, Slack, PEM); 0 PII/internal-URL hits in added lines",
+    "enterprise_docs_guard": "0 hits — workflow PCRE run over changed docs and over the full CI scope",
+    "private_consumers": "enterprise submodule @90f2f2c grepped read-only: 0 consumers of D-002/D-003 ids, message prefixes, checks_json, or services.compatibility imports; both message prefixes byte-identical to origin/dev",
+    "xss_sinks": "message rendered via {{ c.message }} (CompatibilityPanel.vue:196); the file's only v-html is renderMarkdown(c.explanation) at :204 — unchanged",
+    "sql": "db/compatibility.py:57 json.dumps(checks, default=str) feeds insert(t).values(**payload)/update(...).values(**payload) — bound parameters; default=str is the only change in the file and the only writer of agent_compatibility_results.checks_json",
+    "format_string": "f-strings over data values only; no str.format/% applied to attacker-controlled templates; D-003 interpolates only req-map keys and constant field names",
+    "tests": "test_compatibility_checks.py 111 passed (+13); test_2110_widget_type_parity.py 16 passed; 3 pytest-randomly seeds 127 passed; mutation: 'chart' appended to _WIDGET_TYPES -> 8 failed / 8 passed"
+  },
+  "supply_chain_summary": {
+    "python": "no changes",
+    "node": "no changes",
+    "lockfiles": "unchanged",
+    "docker_compose_ci": "unchanged",
+    "frontend_source": "unchanged (git diff --quiet origin/dev...HEAD -- src/frontend clean)"
+  },
+  "filter_stats": {
+    "raw_candidates": 4,
+    "hard_excluded": 0,
+    "below_gate": 4,
+    "fixed_during_audit": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "info": 4
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-09-06-ent475-rail-rehome",
+    "comparable": false,
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0
+  }
+}
