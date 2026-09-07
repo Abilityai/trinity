@@ -133,8 +133,22 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
   non-source `github:`+PAT ghosts included** (the DB-flag block excludes them, but they
   still bake `GIT_SYNC_AUTO` and are never Pushed). Source-mode excluded (the uncommitted
   `.gitignore` would block a pull-only agent's next `git pull`).
-- **Idempotent (#953)**: `grep -qxF` gate → no `M .gitignore` drift for an already-compliant
-  template; a stale wholesale `.trinity/` line gets a legitimate supersede→append (#2070).
+- **Two managed regions, not one block (#2529)**: the merge is a normalize-and-rebuild —
+  `[defaults block][the agent's own rules, original order][protected floor]`. The defaults
+  block sits ABOVE the agent's rules so an agent negation (`!.env.example`,
+  `!.claude/settings.json`) wins without having to be the file's last line; the floor —
+  the six credential patterns with `!.env.example`/`!.mcp.json.template`, plus `.trinity/*`
+  and its 8 derived `!` re-includes — sits BELOW them and cannot be overridden. One block
+  provably cannot carry both: hoisting would turn every currently-inert `!.env` in the fleet
+  live in one unattended Push, and would let a user `*.sh` beat `!.trinity/setup.sh`
+  (ent#76 / #1704, failing quietly). `_GITIGNORE_PROTECTED` is a filter over
+  `_GITIGNORE_PATTERNS`, so the floor cannot drift from the list.
+- **Idempotent (#953, #2529)**: idempotent by CONTENT — a second run computes byte-identical
+  output and `cmp` leaves the file (and its mtime) untouched, so an already-compliant
+  template shows no `M .gitignore` drift and the 15-min auto-sync loop has nothing to
+  re-commit. The 14 bundled templates are regenerated as this merge's own **fixed point**
+  (#1908 byte-identity), because a flat canonical list is no longer one. A stale wholesale
+  `.trinity/` line gets a legitimate supersede (#2070).
 - **Fleet remediation (T1)**: `start_agent_internal` fires the same spawn (gated on the DB
   `auto_sync_enabled` flag — ghosts never recreate), so existing leakers converge on their
   next base-image-drift recreate/restart. No behaviour change on Push (`sync_to_github`).
@@ -353,6 +367,8 @@ the data-loss setup.
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents; `_apply_github_env` gates on `git_service._git_auto_sync_baked` (#2069, single owner of the bake predicate); `_materialize_agent_files` fires `spawn_gitignore_merge_after_clone` on the same predicate (#2069 creation seed) |
 | `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env — derive-only, never writing the column back (ent#109); `start_agent_internal` fires `spawn_gitignore_merge_after_clone` on the DB `auto_sync_enabled` flag (#2069 T1 fleet remediation) |
 | `services/git_service.py` | `merge_gitignore_after_clone` (readiness-gated poll-then-merge, reusing `_build_gitignore_merge_command`), `spawn_gitignore_merge_after_clone` (fire-and-forget, Semaphore-capped), `_git_auto_sync_baked` (the `GIT_SYNC_AUTO`-bake predicate) — #2069 creation-time seed |
+| `services/git_service.py` | `_GITIGNORE_PROTECTED` + the four `_GITIGNORE_BLOCK_*`/`_GITIGNORE_FLOOR_*` markers, the rebuilt `_build_gitignore_merge_command`, the reporting probes on `_build_rm_cached_ignored_command`, `GitignoreSweep`/`_parse_gitignore_sweep`/`_shadowed_negations`/`_coerce_sweep`/`_with_sweep`, `_emit_gitignore_untracked_alert`, `_augment_commit_message` — #2529 precedence + honest sweep reporting |
+| `db_models.py`, `routers/git.py`, `src/mcp-server/src/tools/git.ts`, `src/frontend/src/composables/useGitSync.js` | the three sweep fields on `GitSyncResult` and their five surfaces (#2529) |
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
@@ -393,6 +409,28 @@ backend):
   (clean agent, duplicate flagged, ahead_working, filter).
 
 Baseline: 75 passing tests added across the two PRs.
+
+The `.gitignore` half of §0 has its own real-git suites (no Docker either — they
+run the SHIPPED builder commands against throwaway repositories, because the
+defects live in git's own last-match-wins and dir-descent semantics):
+
+- `tests/unit/test_2069_gitignore_at_creation.py` — the creation-time seed:
+  readiness gate, merge-only (no rm-cached), the ENV predicate, and the #953
+  no-drift contract (now: *already in block shape ⇒ no drift*).
+- `tests/unit/test_2069_gitignore_merge_caller_guard.py` — the AST writer-SET
+  guard: exactly three callers of `_build_gitignore_merge_command`, and
+  `_GITIGNORE_PATTERNS` read by that builder alone.
+- `tests/unit/test_2070_trinity_authored_paths.py` — the authored-vs-runtime
+  `.trinity/` split survives a Push sweep.
+- `tests/unit/test_2529_gitignore_precedence.py` — precedence over two
+  consecutive Pushes, the protected floor, merge-command hardening (CRLF, NUL
+  byte, unreadable file, no line-gluing), and the three report fields, including
+  AC-1 as the universal `before − after == set(removed_paths)`.
+- `tests/unit/test_1908_bundled_template_gitignore.py` — the 14 bundled
+  templates are byte-identical to the merge's fixed point.
+- `src/frontend/tests/unit/gitSyncSweepToast.spec.js` and
+  `src/mcp-server/src/tools/git.test.ts` — the sweep report on the UI and MCP
+  surfaces (Invariant #13).
 
 ## Operator Controls
 
