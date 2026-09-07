@@ -94,6 +94,12 @@ class ScheduleCrudMixin:
             # ent#77: signature-auth fields (graceful default for pre-migration rows)
             webhook_auth_enabled=bool(row["webhook_auth_enabled"]) if "webhook_auth_enabled" in row_keys and row["webhook_auth_enabled"] is not None else False,
             webhook_secret_encrypted=row["webhook_secret_encrypted"] if "webhook_secret_encrypted" in row_keys else None,
+            # ent#498: NULL (and a pre-migration row, which has no key at all) is
+            # "deliver nowhere" — the resolver fails closed on it.
+            deliver_to_workspace_email=(
+                row["deliver_to_workspace_email"]
+                if "deliver_to_workspace_email" in row_keys else None
+            ),
         )
 
     # =========================================================================
@@ -174,6 +180,7 @@ class ScheduleCrudMixin:
                         validation_enabled=1 if schedule_data.validation_enabled else 0,
                         validation_prompt=schedule_data.validation_prompt,
                         validation_timeout_seconds=validation_timeout_seconds,
+                        deliver_to_workspace_email=schedule_data.deliver_to_workspace_email,
                     )
                 )
 
@@ -197,7 +204,8 @@ class ScheduleCrudMixin:
                 retry_delay_seconds=retry_delay_seconds,
                 validation_enabled=schedule_data.validation_enabled,
                 validation_prompt=schedule_data.validation_prompt,
-                validation_timeout_seconds=validation_timeout_seconds
+                validation_timeout_seconds=validation_timeout_seconds,
+                deliver_to_workspace_email=schedule_data.deliver_to_workspace_email,
             )
         except IntegrityError:
             return None
@@ -368,7 +376,8 @@ class ScheduleCrudMixin:
             "name", "cron_expression", "message", "enabled", "timezone",
             "description", "timeout_seconds", "allowed_tools", "model",
             "max_retries", "retry_delay_seconds",  # RETRY-001
-            "validation_enabled", "validation_prompt", "validation_timeout_seconds"  # VALIDATE-001
+            "validation_enabled", "validation_prompt", "validation_timeout_seconds",  # VALIDATE-001
+            "deliver_to_workspace_email",  # ent#498
         ]
 
         for key, value in updates.items():

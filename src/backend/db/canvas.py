@@ -43,6 +43,9 @@ _SUMMARY_COLUMNS = (
     agent_canvases.c.created_at,
     agent_canvases.c.updated_at,
     agent_canvases.c.updated_by_execution_id,
+    # ent#537 — appended LAST on purpose: `_row_to_summary` reads by position,
+    # so inserting in DDL order would shift every index after it.
+    agent_canvases.c.template,
 )
 
 
@@ -66,6 +69,7 @@ class CanvasOperations:
             "created_at": row[5],
             "updated_at": row[6],
             "updated_by_execution_id": row[7],
+            "template": row[8] or None,
         }
 
     @classmethod
@@ -79,7 +83,7 @@ class CanvasOperations:
         `updated_at` that proves something was written.
         """
         summary = cls._row_to_summary(row)
-        raw = row[8]
+        raw = row[len(_SUMMARY_COLUMNS)]
         try:
             blocks = json.loads(raw) if raw else []
         except (TypeError, ValueError):
@@ -165,6 +169,7 @@ class CanvasOperations:
         title: Optional[str] = None,
         audience: str = AUDIENCE_OPERATOR,
         execution_id: Optional[str] = None,
+        template: Optional[str] = None,
     ) -> Dict:
         """Replace a canvas's blocks, creating it if absent.
 
@@ -202,6 +207,7 @@ class CanvasOperations:
                         audience=normalize_audience(audience),
                         updated_at=now,
                         updated_by_execution_id=execution_id,
+                        template=template,
                     )
                 )
                 created_at = existing[0]
@@ -218,6 +224,7 @@ class CanvasOperations:
                         created_at=created_at,
                         updated_at=now,
                         updated_by_execution_id=execution_id,
+                        template=template,
                     )
                 )
         return {
@@ -229,6 +236,7 @@ class CanvasOperations:
             "created_at": created_at,
             "updated_at": now,
             "updated_by_execution_id": execution_id,
+            "template": template,
             "blocks": blocks,
         }
 

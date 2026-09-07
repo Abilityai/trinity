@@ -25,6 +25,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - BaseTextarea: min-height 84px, `resize: vertical` only, mono variant for prompts/config, same focus/error as inputs.
 - BaseBadge: pill, 11.5/550; light token-100 bg + token-700 text; dark token-500/16% + token-300; one fact per badge.
 - BaseCard: surface bg, 1px border, radius 8px, padding 16, shadow-sm — the only surface recipe.
+- Agent-authored `v-html` on a canvas cannot mount a primitive: it uses the **canvas design kit** (`components/canvas/CanvasKit.vue`, classes in `utils/canvasKit.js`) — the v-html twin held to the same token values, unscoped under `.canvas-kit`, `theme()` colours only, `@container` collapse, never a viewport query (ent#537).
 - Modal: overlay gray-950/55%, 400px card radius 10 shadow-lg; Esc + click-outside close; focus trapped, **initial focus on the safe action**; destructive confirms restate the consequence.
 - Tabs: `OverflowTabs` everywhere — counted "+N more" overflow, re-measured on resize; never wrap or truncate.
 - Tables: sticky mono-caps header on chrome, bounded viewport (max-height + internal scroll), tabular-nums right-aligned numbers, stated total ("412 · latest 50 shown"); virtualize/paginate past ~200 rows.

@@ -35,6 +35,7 @@
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
 - [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
 - [Agent Chat](agents/agent-chat.md) — Chat interface, voice, streaming, history
+- [Agent Canvas](agents/agent-canvas.md) — A surface the agent keeps current: blocks, the design kit, starter layouts
 - [Continuous Conversations](agents/agent-session.md) — What resuming preserves, auto-compact, per-turn limits
 - [Agent Terminal](agents/agent-terminal.md) — Web terminal, SSH access, mode switching
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders

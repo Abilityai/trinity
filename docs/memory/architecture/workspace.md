@@ -529,7 +529,7 @@ something — it is simply no longer a STOP on the way to the conversation.
 **Main.** Every `(user, agent)` pair has one pinned Main chat: the place the agent
 reaches you when no conversation named itself. `enterprise_portal_sessions.is_main`
 marks it and `archived_at` marks the one Reset retired (both tracks: SQLite
-`portal_session_main_chat` + Alembic `0053`, no backfill). Uniqueness is the **partial
+`portal_session_main_chat` + Alembic `0055`, no backfill). Uniqueness is the **partial
 unique index** `idx_portal_sessions_main` (`WHERE is_main = 1`), not a check-then-insert:
 `ensure_main_session` is reachable from two request paths and runs in every uvicorn
 worker, and the loser of the race catches `IntegrityError` and adopts the winner's row.
@@ -590,3 +590,61 @@ without the gesture changing.
 
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
 **Requirements**: `requirements/core-agent.md` §5.23
+
+## The Tandem layer — a brief lands in Main, a room says who is reading, a complaint reaches the operator (ent#498, ent#363, ent#499)
+
+Three small features that only make sense once Main exists (ent#523).
+
+**A schedule can name one Workspace user** (`agent_schedules.deliver_to_workspace_email`,
+nullable, both tracks, Alembic `0056`). Almost all of the delivery already existed:
+`report_completion` is trigger-agnostic and `schedule` is deliberately NOT in
+`INLINE_CHANNEL_TRIGGERS`, so the only missing fact was that a scheduled execution row never
+carried `source_channel='portal'`. This is therefore **a stamp and nothing else** — no new
+delivery path, no second applier, no terminal writer changed. The scheduler carries the
+ADDRESS only: it is a separate process that cannot import the portal package, and it always
+sends `execution_id`, so `execute_task`'s channel-persisting branch can never run for a cron
+fire and channel columns passed as kwargs would be silently inert (#2426).
+`execute_task_internal` resolves Main via `ensure_main_session` and stamps the pre-created row
+BEFORE dispatch, through `db.stamp_execution_channel_context` — the first UPDATE of those
+columns (every other writer sets them at INSERT), guarded on `source_channel IS NULL` so it
+only ever ADDS a destination and can never repoint an inbound channel turn whose adapter is
+waiting on that reply. Access is checked with `agent_on_roster(..., include_owned=True)`, the
+Workspace's own roster, NOT `email_has_agent_access`: that admits any admin, and an admin who
+neither owns the agent nor is shared it cannot open the thread, so a brief delivered there
+would be invisible. Every refusal — blocked client, unreachable address, unreadable roster
+(fail closed), unavailable session, already-stamped row — fails the pre-created row with a
+named reason and releases the idempotency claim, because running the turn anyway spends the
+tokens and puts the answer where nobody can read it. **C9** is honoured by a bounded wait on
+the ent#286 in-flight marker inside the portal delivery leg, which then writes regardless: the
+report is never dropped, only deferred, and the narrowing applies to every portal report
+rather than only scheduled ones. See
+[schedule-workspace-delivery.md](../feature-flows/schedule-workspace-delivery.md).
+
+**A room tells its agents when a CLIENT is reading.** Full transcript visibility is the
+deliberate choice for Workspace rooms, and it is only safe while the agents know they are
+watched. `shared_sessions.service.room_is_user_facing` is the pure rule, derived from
+MEMBERSHIP — nothing a participant writes reaches it. `FLEET_INTERNAL_PARTICIPANT_KINDS`
+holds `agent`, `system` AND `user`: the platform `user` is the operator, and an ops room
+is not client-facing. Getting that wrong is not cosmetic — `create_room` always seats its
+creator and the only removal path is `kind="agent"`, so counting `user` makes every room
+client-facing and the quiet branch unreachable. The set is otherwise the complement of "reader" because a kind added later (ent#171's external A2A
+sender) is likelier to be a person than a machine, and an allow-list of human kinds would
+silently classify it as fleet-internal. `platform_prompt_service.build_user_facing_room_prompt`
+takes no arguments and names no participant: it is composed into a prompt handed to EVERY
+woken agent, so an address would be disclosed sideways to agents that person never addressed.
+Derived per wake rather than threaded from `post_message` (which does hold the list), because
+`_wake_agent` calls `post_message` back and a threaded value could go stale when a reply
+recruits a human. An unreadable roster assumes a person IS reading — the inverse of the usual
+capability default, because the mistakes are not symmetrical.
+
+**A negative rating reaches the operator.** ent#366's redaction stands — the rated agent reads
+the score and never the words — so the operator's copy goes straight to `operator_queue`,
+routed through `create_bounded_alert` (the volume is driven by a client clicking, which is the
+agent-influenceable side of the #1677 classification) with its own registered type and a
+reserved id prefix, one item per person per target. It fires on EVERY thumbs-down, not only
+commented ones: "this was not useful" is the report and the words are the elaboration.
+Prerequisite, and a live bug: `operator_queue.type` is free TEXT and both queue cards
+hardcoded an `approval → question → alert` chain that rendered no control for anything else,
+so `skill_not_found` items have never been closeable and five of them would jam a budgeted
+type's pending cap forever. Both cards now consume `utils/operatorQueue.js::queueResponseKind`
+and its unknown-type default moves from `question` to `acknowledge`.

@@ -225,6 +225,13 @@ TABLES = {
             -- default off — a plain token-in-URL webhook is unchanged.
             webhook_secret_encrypted TEXT,
             webhook_auth_enabled INTEGER DEFAULT 0,
+            -- ent#498: deliver this schedule's output into one person's
+            -- Workspace conversation with the agent. NULL — every existing row,
+            -- no backfill — is today's behaviour: the run terminates in an
+            -- execution row and nothing is delivered. The resolver fails CLOSED
+            -- on NULL, and an address that can no longer reach the agent is a
+            -- refused dispatch rather than a silent drop.
+            deliver_to_workspace_email TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
@@ -517,6 +524,10 @@ TABLES = {
             -- Which execution last wrote it. Provenance, and the thing that
             -- makes the derived staleness claim checkable rather than a guess.
             updated_by_execution_id TEXT,
+            -- ent#537: starter layout by name ('dashboard' | 'report' |
+            -- 'brief' | 'status-board'); NULL = stacked blocks. A property of
+            -- the surface, like `audience`; a block's `slot` lives in `blocks`.
+            template TEXT,
             PRIMARY KEY (agent_name, canvas_id)
         )
     """,

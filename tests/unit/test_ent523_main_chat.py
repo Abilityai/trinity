@@ -110,16 +110,16 @@ def test_both_migration_tracks_carry_the_change():
 
     from pathlib import Path
     rev = Path(__file__).resolve().parents[2] / (
-        "src/backend/migrations/versions/0054_portal_session_main_chat.py"
+        "src/backend/migrations/versions/0055_portal_session_main_chat.py"
     )
     body = rev.read_text()
-    # Chained off `0053_user_ui_preferences`, not `0052`: both were written
-    # against 0052 in parallel and dev's landed first, so sharing a
-    # `down_revision` would have been TWO HEADS — and `upgrade head` is
-    # singular, so a forked graph applies zero revisions, not just the newer
-    # one. Pinned by id rather than by "some parent" so a future rebase of this
-    # revision is a deliberate edit here too.
-    assert 'down_revision = "0053_user_ui_preferences"' in body
+    # Chained off `0054_agent_canvases_template`: this revision was written
+    # against 0052, and dev landed 0053 and then 0054 before it merged, so
+    # sharing a `down_revision` with either would have been TWO HEADS — and
+    # `upgrade head` is singular, so a forked graph applies zero revisions, not
+    # just the newer one. Pinned by id rather than by "some parent" so a future
+    # rebase of this revision is a deliberate edit here too.
+    assert 'down_revision = "0054_agent_canvases_template"' in body
     # `IF NOT EXISTS` throughout: a fresh PostgreSQL database is built from
     # schema.py first and only then runs the revisions.
     assert body.count("IF NOT EXISTS") >= 3

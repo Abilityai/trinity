@@ -110,6 +110,8 @@ A block is `{"id"?, "kind", "title"?, "payload"}`. Kinds and their payloads:
 - `html` — `{"html": "..."}` static markup, sanitised; scripts never run
 - `json` — anything else
 
+Layouts: `template` ∈ dashboard(header, kpis, main, side, footer) · report(header, summary, body, figures, appendix) · brief(header, key-points, body) · status-board(header, status, issues, next, log); each block names its `"slot"`. Unslotted blocks render after the layout; no template = stacked. Example: `set_canvas(template="dashboard", blocks=[{"slot":"header","kind":"markdown","payload":{"markdown":"## Pipeline · W36"}},{"slot":"kpis","kind":"kpi","payload":{"tiles":[{"label":"Open","value":42},{"label":"Won","value":7}]}},{"slot":"side","kind":"html","payload":{"html":"<div class=\"ck-card\"><div class=\"ck-card-title\">Next</div><span class=\"ck-chip ck-warning\">2 stalled</span></div>"}}])`
+Kit classes for `html`/`markdown` (only these survive): ck-card / ck-card-title / ck-card-meta · ck-grid-2 / ck-grid-3 / ck-grid-4 + ck-span-2 · ck-section / ck-section-title / ck-section-sub · ck-callout + ck-info | ck-success | ck-warning | ck-danger · ck-chip (same tones, ck-neutral) · ck-kpi / ck-kpi-label / ck-kpi-value / ck-kpi-unit / ck-kpi-delta ck-up | ck-down · ck-table + ck-num · ck-figure / ck-caption · ck-muted · ck-mono. Other classes, `<style>` and inline styles (except width/max-width) are dropped. Prefer the kpi/table/chart kinds for data; the kit dresses the page around them. The `canvas` skill has full worked examples.
 Limits: __CANVAS_MAX_BLOCKS__ blocks, __CANVAS_BLOCKS_MAX__ serialized — aggregate first. Never put JavaScript in a block: you provide the data, Trinity draws it.
 
 ### Operator Communication
@@ -289,7 +291,7 @@ _MINIMAL_DROP_SECTIONS = frozenset({
     "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
-    "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads)
+    "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
 })
 
 # Every top-level section, CI-pinned (tests/unit/test_ent243_prompt_tier.py).
@@ -985,6 +987,56 @@ def build_narrated_surface_prompt(agent_name: str) -> Optional[str]:
         "- If a client asks to be spoken to, point them at the speaker control in this "
         "conversation. Never tell them this surface is text-only, and never send them "
         "to another channel to be heard."
+    )
+
+
+def build_user_facing_room_prompt() -> str:
+    """Tell an agent that a PERSON outside the fleet is reading this room
+    (trinity-enterprise#363).
+
+    Full transcript visibility is the deliberate choice for Workspace rooms —
+    watching the team work is the differentiator over a summary — and that choice
+    is only safe while the agents know they are being watched. Without this an
+    agent-to-agent exchange in front of a customer discusses internals, other
+    customers, costs and platform mechanics, because nothing in its context says
+    anyone is there.
+
+    Takes NO arguments, and that is deliberate twice over:
+
+    * it states **that** a person is reading, never **who**. The block is
+      composed into a prompt handed to every woken agent in the room, so a
+      participant's address would be disclosed sideways to agents the person
+      never addressed, and it buys nothing — the behaviour change is the same
+      whoever is reading. ent#362's per-line ``(human)`` label already answers
+      "who said this"; this answers "who is in the room".
+    * the fact is derived by the caller from room MEMBERSHIP
+      (``shared_sessions.service._wake_agent``), never asserted by a participant.
+      Keeping the derivation out of here is what makes that guarantee checkable
+      in one place.
+
+    Pure and constant — no DB read, so nothing to fail and no ``Optional``. The
+    caller decides whether to include it at all; see the sibling
+    ``build_narrated_surface_prompt`` for the shape.
+    """
+    return (
+        "## A person is reading this room\n"
+        "This room includes at least one human participant from outside the agent "
+        "fleet — a client or an operator — and they can read **every** message in "
+        "it, including the ones you address to other agents. There is no private "
+        "side channel here.\n\n"
+        "So, for this turn:\n"
+        "- Write every message as if it will be read by that person, because it "
+        "will be. Address other agents normally; just do not say anything to them "
+        "you would not say in front of the reader.\n"
+        "- Keep platform mechanics out of it — infrastructure, container and model "
+        "internals, costs and token spend, queue and scheduling plumbing — unless "
+        "the person asked about them.\n"
+        "- Never mention another client, another customer's data, or work done for "
+        "anyone who is not in this room.\n"
+        "- Say what you are doing and what you need in plain language. Half a "
+        "sentence of shorthand to a peer reads as evasion to someone watching.\n"
+        "- If you need to raise something the reader should not see, do it outside "
+        "this room."
     )
 
 

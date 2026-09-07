@@ -23,9 +23,16 @@
 
     <CanvasMarkdown v-else-if="block.kind === 'markdown' && richSegments" :segments="richSegments" />
 
+    <!-- markdown without figures — canvas prose (ent#537): the report
+         markdown renderer's twin under the canvas-mode sanitiser, so raw kit
+         markup inside the markdown keeps its `ck-*` classes and nothing else. -->
+    <CanvasProse v-else-if="block.kind === 'markdown'" :markdown="block.payload?.markdown || ''" />
+
     <!-- html — the kind the voice panel's update_panel writes. Sanitised
          through the shared DOMPurify path, never raw: this is agent-authored
-         markup and, on a `roster` canvas, it reaches a customer's browser. -->
+         markup and, on a `roster` canvas, it reaches a customer's browser.
+         Canvas mode (ent#537): only the design kit's classes and a bounded
+         width survive; `<style>` and `id` are dropped. -->
     <div
       v-else-if="block.kind === 'html'"
       class="prose prose-sm dark:prose-invert max-w-none"
@@ -50,7 +57,8 @@ import CanvasChart from './CanvasChart.vue'
 import CanvasDiagram from './CanvasDiagram.vue'
 import CanvasImage from './CanvasImage.vue'
 import CanvasMarkdown from './CanvasMarkdown.vue'
-import { sanitizeHtml } from '../../utils/markdown'
+import CanvasProse from './CanvasProse.vue'
+import { sanitizeCanvasHtml } from '../../utils/markdown'
 import {
   chartModel,
   imageSource,
@@ -84,7 +92,7 @@ const richSegments = computed(() => {
   return segments.some((s) => s.type !== 'markdown') ? segments : null
 })
 
-const safeHtml = computed(() => sanitizeHtml(props.block?.payload?.html || ''))
+const safeHtml = computed(() => sanitizeCanvasHtml(props.block?.payload?.html || ''))
 
 // A canvas kind whose payload could not make one, and any kind the report
 // dispatch does not know, both land on `json` — the reader still sees the data.

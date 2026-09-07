@@ -1146,6 +1146,10 @@ async function refreshThreads() {
   ])
   chatState.value = state || {}
   threads.value = decorate(list || [])
+  // ent#491: rank any agent this session has not ranked yet. Fills only missing
+  // keys, so a refresh triggered by an incoming reply cannot walk back a send's
+  // bump and re-sort the sidebar under the cursor.
+  store.seedAgentRecency(threads.value)
 }
 
 // A turn finishing in the conversation the user is LOOKING AT is read by

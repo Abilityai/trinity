@@ -97,7 +97,7 @@
       <!-- Response area -->
       <div class="px-4 pb-4">
         <!-- Approval: option buttons -->
-        <div v-if="item.type === 'approval' && item.options" class="space-y-3">
+        <div v-if="responseKind === 'approval'" class="space-y-3">
           <div class="flex flex-wrap gap-2">
             <button
               v-for="(option, idx) in item.options"
@@ -134,7 +134,7 @@
         </div>
 
         <!-- Question: freeform answer -->
-        <div v-else-if="item.type === 'question'" class="space-y-2">
+        <div v-else-if="responseKind === 'question'" class="space-y-2">
           <textarea
             v-model="responseText"
             rows="3"
@@ -157,7 +157,7 @@
         </div>
 
         <!-- Alert: acknowledge -->
-        <div v-else-if="item.type === 'alert'" class="flex justify-end">
+        <div v-else class="flex justify-end">
           <button
             @click.stop="store.acknowledgeItem(item.id)"
             class="px-5 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
@@ -176,7 +176,7 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
-import { queueTypeLabel } from '../../utils/operatorQueue'
+import { queueTypeLabel, queueResponseKind } from '../../utils/operatorQueue'
 import AgentAvatar from '../AgentAvatar.vue'
 
 const props = defineProps({
@@ -185,6 +185,14 @@ const props = defineProps({
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
+
+// ent#499: the controls come from the ONE shared rule, never a local v-if
+// chain. `type` is free TEXT and the platform emits non-protocol types
+// (skill_not_found #1410, workspace_problem_report ent#499); the hardcoded
+// chain rendered NO control for those, so they could not be closed from the
+// queue at all — and a budgeted alert type whose items cannot be closed jams
+// its own pending cap permanently.
+const responseKind = computed(() => queueResponseKind(props.item))
 
 const isExpanded = computed(() => store.expandedItemId === props.item.id)
 const agentAvatarUrl = computed(() => {

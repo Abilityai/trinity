@@ -125,10 +125,20 @@ def test_no_status_field_is_committed(catalog):
     )
 
 
-def test_all_ten_journeys_are_declared(catalog):
+# The catalog GROWS — a new promise is a real event, not drift. What must not
+# happen is a gap or a reordering, so the assertion is "a dense J01..JNN run in
+# order", and the count moves in the same commit that adds the record.
+# ent#498 added J11 (a companion's brief reaches you where you work).
+DECLARED_JOURNEY_COUNT = 11
+
+
+def test_every_journey_is_declared_densely_and_in_order(catalog):
     ids = [j["id"] for j in catalog["journeys"]]
-    assert ids == [f"J{n:02d}" for n in range(1, 11)], (
-        f"expected J01..J10 in order, got {ids}"
+    expected = [f"J{n:02d}" for n in range(1, DECLARED_JOURNEY_COUNT + 1)]
+    assert ids == expected, (
+        f"expected {expected[0]}..{expected[-1]} in order, got {ids}. Adding a "
+        f"promise means bumping DECLARED_JOURNEY_COUNT in the same commit — "
+        f"the number is the deliberate act, not a formality."
     )
 
 

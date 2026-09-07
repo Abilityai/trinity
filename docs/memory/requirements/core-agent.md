@@ -1251,6 +1251,77 @@ must work consistently."
   which now returns the canvas row) the voice column.
 - **Flow**: `docs/memory/feature-flows/agent-canvas.md`
 
+**Canvas design kit, starter layouts and the `canvas` library skill
+(trinity-enterprise#537, 2026-09-07)** — operator direction: "a rich interface
+and an easy way for agents to change and update it — learn from how we do the
+microsite reports and explainers." What makes those cheap and good-looking is
+ONE stylesheet: the author composes against known classes and skeletons, and
+the figures come from data. The agent authors content; the platform renders it
+well, and the agent never touches CSS.
+
+- **FR-14 — The kit is platform-owned, token-only, and scoped by prefix**: a
+  class vocabulary (`ck-card`, `ck-grid-2/3/4`, `ck-section`, `ck-callout`,
+  `ck-chip`, `ck-kpi`, `ck-table`, `ck-figure`/`ck-caption`, text utilities)
+  rendered by ONE stylesheet in `components/canvas/CanvasKit.vue` — an unscoped
+  `<style>` block whose every selector sits under `.canvas-kit`, the wrapper
+  every canvas surface renders blocks inside. Colours come from the design
+  tokens via `theme()` with `.dark` overrides, so the raw-colour ratchet covers
+  the kit (the scanner walks `.vue` style blocks; a standalone `.css` would be
+  invisible to it, which is why the kit is not one). Collapse is keyed on the
+  kit's own inline size (`@container`), never the viewport, because the Portal
+  rail is ~300px wide on a desktop screen. The kit is the **v-html twin** of
+  `BaseCard` / `BaseBadge` / the report tile and table — same radius, padding
+  and tint tokens — recorded in `design-system.md` as the one sanctioned
+  exception to primitives-first (agent markup cannot mount a component). The
+  class list is the pure module `utils/canvasKit.js::KIT_CLASSES`.
+- **FR-15 — The sanitiser admits the kit and nothing else, on the canvas**:
+  `html` and `markdown` blocks on a canvas render through `sanitizeCanvasHtml`
+  / `renderCanvasMarkdown`, which run the app's ONE DOMPurify instance with a
+  per-call `canvasKit` config flag (read by the existing
+  `afterSanitizeAttributes` hook from its third argument, so there is no
+  module state to leak): `class` keeps only exact `KIT_CLASSES` members, `style`
+  keeps only `width` / `max-width` with a bounded value (`%` ≤ 100, `px` ≤
+  9999), `id` is dropped. A class outside the kit is dropped, never passed
+  through. The filter is canvas-scoped because chat and report markdown depend
+  on classes the code-block decorator injects before sanitising (#2515).
+  **Every** markdown/html sanitise path additionally forbids the `<style>`
+  ELEMENT (DOMPurify's default admits it): a body `<style>` is document-global,
+  so an agent block could restyle the whole page — a customer's Workspace on a
+  `roster` canvas included. Mermaid SVG keeps its own explicit `sanitizeSvg`
+  path (its scoped `<style>` is the diagram). H-005 unchanged: one instance,
+  one hook.
+- **FR-16 — Starter layouts by name**: a canvas may declare `template` ∈
+  `dashboard` | `report` | `brief` | `status-board` (a nullable column on the
+  row — a layout is a property of the surface, like `audience`; NULL = stacked
+  blocks, the default). Each layout has named slots (`CANVAS_LAYOUT_SLOTS` in
+  `models.py`, mirrored in `canvas.ts` and `canvasLayouts.js`, parity-pinned)
+  and a block fills one with `slot` — a key inside the block, because it
+  travels with the block through `patch_canvas`, and a rendering hint is not a
+  capability (the ent#364 rule binds `audience`, not this). **A layout never
+  hides a block**: a block with no slot, or a slot the layout does not know,
+  renders after the layout; a layout with nothing slotted degrades to the
+  stacked list, and empty regions are not rendered. An unknown template is
+  refused by name; an unknown slot is not (losing content to a typo is the
+  worse failure). Every writer carries the template through: `set_canvas`
+  sets it, `patch_canvas` and the voice panel tools keep the stored one.
+  Dual-track migration `agent_canvases_template` + Alembic
+  `0054_agent_canvases_template`.
+- **FR-17 — Taught twice, at two weights**: `### Your Canvas` gains ONE compact
+  worked example (`template="dashboard"` with slotted blocks and a kit card),
+  the four layouts with their slots, and the class list — because the platform
+  prompt is the only channel a fresh agent has, and AC-4's test of done is a
+  fresh agent producing a designed dashboard without coaching. The context
+  cap is raised 2,700 → 3,400 chars, deliberately. The `canvas` **library
+  skill** (`abilityai/trinity-skills`, category `visual-communication`) carries
+  the full reference and three worked examples (dashboard · report with figures
+  · status board), opening with the same example the prompt teaches. The
+  marketplace wizard scaffolds reference it the way #482 wires
+  `update-dashboard` (abilities repo, separate change).
+- **Deferred, recorded**: a per-block `span` hint (`full|half|third`) was the
+  zero-migration alternative to named layouts — revisit if a fifth layout is
+  requested. Tailwind utilities remain reachable from chat/report markdown
+  (the class allowlist is canvas-only here) — follow-up issue.
+
 ### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
 
 - **Status**: ✅ Implemented (shell) · **ID**: `WORKSPACE_RAIL_SHELL`
@@ -1997,7 +2068,218 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 
 - **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
 
-### 5.24 Workspace — resizable columns (trinity-enterprise#492)
+### 5.24 A room tells its agents when a CLIENT is reading (trinity-enterprise#363)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_ROOM_USER_FACING_SIGNAL
+- **GitHub Issue**: abilityai/trinity-enterprise#363
+- **Description**: An agent woken in a room that contains a **workspace client**
+  receives an explicit signal in its injected context saying the transcript is
+  being read by someone outside the operator's organisation, and guidance on what
+  that should change about its output. A room with no client in it — including an
+  operator's own ops room — is unchanged.
+- **`user` is fleet-internal, and that is the whole subtlety.** The ticket says
+  "a room containing a **workspace user**". An earlier revision generalised that
+  to "any non-agent kind", which swept in the platform `user` — the operator and
+  their team. Because `create_room` always seats its creator and the only removal
+  path is `kind="agent"`, a human participant can never leave, so EVERY room
+  became client-facing and the quiet branch became unreachable. The visible cost
+  was an operator's ops room whose agents were told to keep infrastructure, costs
+  and queue plumbing out of it — the subject the room exists for. The
+  generalisation shipped with a test asserting it, which is why no test caught
+  it: `FLEET_INTERNAL_PARTICIPANT_KINDS` now names all three, and a test drives
+  the participant shape `create_room` actually produces.
+- **Why this is a security requirement, not a politeness one.** Full transcript
+  visibility is the deliberate choice for Workspace rooms — watching the team
+  work is the differentiator over a summary — and that choice is only safe if
+  the agents know they are being watched. Without the signal, agent-to-agent
+  messages in a user-facing room discuss internals, other customers, costs and
+  platform mechanics **in front of the customer**. The issue is filed
+  `theme-security` for that reason.
+- **What existed and why it was not enough.** ent#362 labels each transcript
+  line whose `sender_kind` is `user`/`workspace_user` with a `(human)` suffix.
+  That is per-MESSAGE and only appears if that person happened to speak inside
+  the delta window — so an agent woken into a room where the human is reading
+  silently sees a transcript of agents talking to agents and nothing else. The
+  room header additionally said "Other agents and people are in this room"
+  **unconditionally**, which is false in an agent-only room and far too weak in
+  a user-facing one: it is scene-setting, not a disclosure.
+- **Set by the platform from membership, never asserted by a participant** (AC 2).
+  `_wake_agent` derives the fact from `db.list_participants(room_id)` — a
+  participant `kind` outside `FLEET_INTERNAL_PARTICIPANT_KINDS` (`agent`,
+  `system`, and `user`, the platform operator), still present (`left_at IS NULL`) — and passes it as `system_prompt`. Nothing a participant can write
+  reaches the decision, and no participant identity reaches the block: the
+  signal states **that** a person is reading, never who, because the block is
+  composed into a prompt and a client's address is neither needed for the
+  behaviour change nor safe to hand every agent in the room.
+- **Derived per wake, not threaded.** `post_message` already holds the
+  participant list, but `_wake_agent` calls `post_message` back with the agent's
+  reply, which wakes further agents — so a value threaded down the first call
+  would have to survive a round trip through a public function. Re-deriving is
+  one indexed read per wake against a turn that costs an LLM call, and it cannot
+  go stale mid-chain when a human is recruited by the reply.
+- **Fail direction is stated: unreadable membership reads as USER-FACING.** The
+  inverse of the usual capability default (#2128 fails closed to "absent"),
+  because the two mistakes are not symmetrical — a needless caution in an
+  agent-only room costs a slightly more careful answer, while a missed signal in
+  front of a customer is the disclosure this requirement exists to prevent.
+- **The header stops lying.** `_build_turn_prompt` now says who is actually in
+  the room, so the unconditional sentence is replaced by a true one in both
+  cases; the `(human)` per-line label is kept, because per-line attribution and
+  a room-level disclosure answer different questions.
+- **Verified by test** (AC 5): a room with a workspace user injects the block, an
+  agent-only room passes `system_prompt=None`, a participant who has left does
+  not count, and no participant identity appears in the composed prompt.
+
+### 5.25 Report-a-problem — a negative Workspace rating reaches the operator (trinity-enterprise#499)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_PROBLEM_REPORT
+- **GitHub Issue**: abilityai/trinity-enterprise#499
+- **Description**: A thumbs-down on a message or deliverable (§5.15) raises a
+  **rate-bounded** `operator_queue` item naming the agent, the person, what was
+  rated and their comment, so the instance's operator learns a client is unhappy
+  without the rated agent being in the loop.
+- **The agent is not the reporting channel.** ent#366's rule — a readable score
+  is a loop an agent may optimise for, and a stranger's verbatim words handed to
+  the thing being criticised is a prompt-injection path into it — is why the
+  operator's copy goes to the queue directly and the agent-facing redaction
+  (`comment_withheld`) is untouched. The operator sees the comment; the agent
+  still does not.
+- **Routed through the budget, never allowlisted** (#1677). The volume here is
+  driven by a *client* clicking, so this is an agent-influenceable emitter by
+  the classification rule and goes through
+  `operator_queue_service.create_bounded_alert` with its own registered type
+  `workspace_problem_report` and reserved id prefix `workspace-problem-`. A
+  direct `create_operator_queue_item` would fail the CI emitter guard, and
+  reusing the generic `alert` type would have made five unrelated alerts on that
+  agent silence every problem report.
+- **One item per person per target, by construction.** The id is derived from
+  the evaluator and the target, so a re-rate hits `create_item`'s
+  `ON CONFLICT DO NOTHING`. **Stated residual**: `create_item` has no UPDATE
+  path, so an edited comment does not reach an item already raised — the same
+  residual ent#434's alert carries, and it is a shared fix, not a per-emitter
+  one.
+- **Emitted off the response path.** `create_bounded_alert` is async and the
+  rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
+  existing `capture-feedback` dispatch. A rating is recorded whether or not the
+  alert is raised: the client's action must never fail because the operator's
+  copy could not be written.
+- **An unknown queue type is acknowledgeable** — see the prerequisite below.
+  Without it this item would render with no action at all, five would accumulate
+  and the budget would jam permanently.
+- **With no operator configured** (OSS single-user) the item still records: it is
+  a durable row, and the queue is read by whoever runs the instance.
+- **ent#329 has shipped**, so the AC's "acted on at the next wake-up" caveat (C15)
+  is spent. It is deliberately NOT replaced with a claim about resume: this item
+  is an **alert**, nothing is waiting on an answer, and `operator_resume_enabled`
+  is per-agent and off by default — so a sentence promising a re-trigger would be
+  wrong on most installs.
+
+### 5.26 An operator-queue item of an unrecognised type can still be closed (trinity-enterprise#499 prerequisite)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: OPERATOR_QUEUE_UNKNOWN_TYPE_ACK
+- **Description**: The desktop queue card and detail panel choose their controls
+  through the shared `queueResponseKind` rule rather than a hardcoded `v-if`
+  chain, and an item whose `type` is none of `approval`/`question`/`alert` offers
+  **acknowledge**.
+- **This is a live bug, found while building §5.25.** `skill_not_found` (#1410)
+  has shipped a non-protocol `type` since it landed; `QueueCard.vue` and
+  `QueueItemDetail.vue` branch `approval → question → alert` and render **no
+  control** for anything else, so those items cannot be closed from the queue at
+  all. `utils/operatorQueue.js::queueResponseKind` — the module whose docstring
+  says it is "the ONE home of … the controls-kind switch" — already existed and
+  the two cards were the second producer it exists to prevent.
+- **The default moves from `question` to `acknowledge`.** An unknown type is
+  *informational*: `question` is the type that asks for an answer, and offering a
+  freeform box invites an operator to type a reply nothing is waiting for — which
+  under ent#329 can spend a turn. `approval` with no options keeps falling to
+  `question`, because there the operator genuinely has a decision to express.
+- **Verified by test**: the pure rule's table including the changed default, and
+  a source guard that neither card re-implements the switch.
+
+### 5.27 Workspace sidebar — agents ordered by most recent collaboration (trinity-enterprise#491)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_SIDEBAR_RECENCY
+- **GitHub Issue**: abilityai/trinity-enterprise#491
+- **Description**: The agent you last worked with sits on top, then the next, and
+  agents you have never talked to follow alphabetically. Per user, not per agent.
+- **A room counts for every agent in it.** There is no single agent a multi-agent
+  conversation is "with", so working in a room with three agents is recent
+  collaboration with all three — the same fan-out `unreadByAgent` already applies.
+  `orderRosterAgents` previously skipped `is_room` rows outright, so an agent you
+  only ever meet in a room read as never-used and sat at the bottom under the
+  alphabetical tiebreak.
+- **Rooms needed a real timestamp first.** `enterprise_rooms` has no
+  `last_message_at` column and `list_rooms` returned only `created_at`, so a room's
+  recency was its CREATION time — a busy month-old room ranked below one opened
+  this morning and never used. `shared_sessions.db.last_message_for_rooms` is a
+  batched `MAX(created_at) GROUP BY room_id`, the sibling of the existing
+  `count_messages_for_rooms`. **Derived, not denormalised**: a column on the room
+  would need a writer on every append for a value one GROUP BY already returns in
+  the same round trip. An empty room is absent from the result and keeps
+  `created_at`, which is the honest answer for a room nobody has spoken in.
+- **Sends re-sort; replies do not.** The two clauses pull against each other —
+  `last_message_at` moves identically for both, so a derived order would reshuffle
+  the list under the reader's cursor every time a brief landed for another agent.
+  The order therefore reads a **session-held snapshot** (`clientPortal.agentRecency`)
+  seeded from thread recency and advanced only by the user's own sends. The seed
+  fills **only missing keys**, so a refresh triggered by an incoming reply can
+  never walk back a send's bump; a reload re-derives from the server and is
+  correct again. `noteAgentInteraction` fires in `submitUserText` — the user's own
+  action — and credits every agent the message wakes, mirroring the room fan-out.
+- **Applied before the collapse**, so the rows surviving `visibleAgentRows`' limit
+  are the ones the person actually uses; ordering after it would sort a slice
+  chosen by the old order. The #2424 rule still holds — an agent with an open ask
+  is never collapsed out — and search results stay ordered by relevance.
+- **The primary-companion tier stays a seam.** ent#500 does not exist: there is no
+  `agent_assignments` table, no column, nothing server-side that can say who a
+  person's primary is. `orderRosterAgents` keeps its tested `primaryName`
+  parameter and the sidebar passes `null`, because a guessed primary would be a
+  confident wrong answer where an empty seam is merely incomplete.
+
+### 5.28 One non-chart loading treatment — the skeleton sweep (#1921)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: UI_SKELETON_SWEEP
+- **GitHub Issue**: abilityai/trinity#1921
+- **Description**: Bespoke spinners, `animate-spin` rings and bare "Loading…" text
+  on **non-chart** data surfaces become skeleton placeholders keyed on "no data
+  yet". The scanline beam stays only where a chart loads (principle 12 as amended
+  by #2540).
+- **The primitive was the first fix.** `SkeletonLoader.vue` — the component the
+  sweep exists to spread — used a bare `animate-pulse` with no
+  `motion-reduce:animate-none`, so it failed the issue's own reduced-motion
+  criterion and every surface converted to it would have inherited the violation.
+- **`HOLDOVERS` is now empty.** Both non-chart `ScanlineReveal` consumers (a skills
+  list, a JSON `<pre>`) are converted, so the beam is chart-only **in fact**, not
+  only by rule. The allowlist stays as an explicit empty constant: a new non-chart
+  importer must still fail loudly rather than quietly join a list that no longer
+  exists.
+- **Footprint, not decoration.** Each placeholder mirrors the loaded surface —
+  list rows for a list, table-cell bars for a table row, form fields for a form —
+  because a centred ring in a differently-sized box is itself the layout shift
+  principle 4 forbids.
+- **Two real bugs fell out of it**: `TemplateSelector` gated on a bare
+  `v-if="loading"`, so re-opening the picker with templates already fetched swapped
+  the loaded grid back to a placeholder; and `GitPanel` did the same with git
+  status. Both now key on a `firstLoad` verdict. The #1927 ratchet fell 72 → 69.
+- **One spinner was deleted and then restored, and the reason is worth keeping.**
+  The Dashboard's history spinner *looks* like a background-refresh indicator, and
+  the sweep removed it as one. It is not: `fetchHistoricalCommunications` has
+  exactly three callers — mount, the Refresh button, and a time-range change — and
+  no interval anywhere, so all three are first-load or explicit user actions,
+  which is when in-flight feedback is sanctioned. The deletion rested on "it fires
+  on every poll" without checking that a poll existed. #2536's e2e caught it,
+  because that test measures the view-switcher's bounding box *with and without
+  this element* — the deletion removed its instrument. **The rule "background
+  refresh is invisible" only applies once you have shown there is a background
+  refresh.**
+- **Sanctioned spinners are untouched** (AC 6): the 16px in-flight indicator inside
+  a pressed control, on every Save/Trigger/Toggle button, and the refresh-icon spin
+  that pairs with a disabled refresh control.
+- **`/m` (MobileAdmin) is plain CSS, not Tailwind**, so it gets the same recipe
+  spelled out locally — pulse in the chrome fill, `prefers-reduced-motion` static,
+  an `sr-only` line — rather than a Tailwind class that would not apply there.
+
+### 5.29 Workspace — resizable columns (trinity-enterprise#492)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_COLUMN_RESIZE`
 - **Description**: All three Workspace columns are resizable. Two handles —

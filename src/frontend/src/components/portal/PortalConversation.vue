@@ -1697,6 +1697,18 @@ async function send() {
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
 async function submitUserText(text) {
+  // ent#491: the user's own activity is the ordering signal, so the bump happens
+  // HERE — on send — and not when a reply lands. Any agent this message wakes
+  // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
+  // agents, you just collaborated with both.
+  try {
+    const woken = [props.agent?.name, ...(props.agent
+      ? mentionedAgents(text, props.roster, { exclude: [props.agent.name] })
+      : [])].filter(Boolean)
+    store.noteAgentInteraction(woken)
+  } catch {
+    // Ordering is a convenience; it must never be able to block a send.
+  }
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   await scrollDown()
   // A stale "couldn't stop the turn" must not outlive the turn it described.

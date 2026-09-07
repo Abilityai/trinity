@@ -122,6 +122,20 @@ the primary key*, so an unregistered table would leave a renamed agent's canvas
 addressed to a name nothing resolves and its next write would mint a SECOND
 canvas under the new name while the old one stayed visible.
 
+- **The design kit and starter layouts (ent#537).** `html`/`markdown` blocks
+  render inside `components/canvas/CanvasKit.vue` — an unscoped, `.canvas-kit`-
+  prefixed, token-only stylesheet (an SFC so the raw-colour ratchet sees it)
+  — through the canvas-mode sanitiser (`utils/markdown.js::sanitizeCanvasHtml`
+  / `renderCanvasMarkdown`: the one DOMPurify instance with a per-call
+  `canvasKit` config flag the hook reads from its third argument; only
+  `utils/canvasKit.js::KIT_CLASSES` and a bounded `width`/`max-width` survive).
+  `BASE_CONFIG` forbids the `<style>` ELEMENT on every markdown/html path
+  (DOMPurify's default admits it and a body `<style>` is document-global);
+  `sanitizeSvg` is the named exception for mermaid. A canvas's `template`
+  column (`dashboard|report|brief|status-board`, Alembic `0054`) plus a
+  per-block `slot` drive `canvasLayouts.js::placeBlocks`; a layout never hides
+  a block. Flow: `feature-flows/agent-canvas.md` → "The design kit".
+
 - **The workspace merge.** `/agents/:name/workspace` — a Gemini voice orb beside
   an in-memory panel, gated on `VOICE_ENABLED && GEMINI_API_KEY &&
   WORKSPACE_ENABLED` — is **deleted**, its route a query-preserving redirect to

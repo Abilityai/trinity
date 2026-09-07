@@ -151,14 +151,23 @@
              know the queue is empty; claiming "All caught up" is optimistic
              success (principle 15). -->
         <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
-          <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
-            <svg class="w-8 h-8 animate-spin text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-            </svg>
+          <!-- #1921: card-shaped placeholders in the list's own footprint. The
+               centred 16-unit circle was a different shape and size from the
+               queue cards it became, so the page jumped when items landed. The
+               #1926 point this block exists for is unchanged: before the first
+               poll returns we do NOT claim "All caught up". -->
+          <div class="space-y-3 text-left">
+            <div
+              v-for="n in 3"
+              :key="n"
+              class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-3 animate-pulse motion-reduce:animate-none"
+            >
+              <div class="h-4 w-1/3 rounded bg-gray-200 dark:bg-gray-800"></div>
+              <div class="h-3 w-5/6 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+              <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+            </div>
           </div>
-          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Checking the queue…</h3>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Loading items that need your response.</p>
+          <span class="sr-only">Checking the queue…</span>
         </div>
 
         <!-- Failed state (#1926) -->
