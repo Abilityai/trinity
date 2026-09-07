@@ -452,8 +452,12 @@ empty or over-cap diagram source) writes nothing and returns the reason for
 the model to voice.
 
 **Audience.** `VoiceSession.canvas_audience` (default `operator`) is the widest
-audience the session may write at; a Workspace call (ent#534) sets `roster` so
-the person in the call can see what was drawn. A canvas stored WIDER than the
+audience the session may write at. A Workspace call (ent#534) writes at
+`operator` too — an internal user's call is an operator surface; the person in
+the call sees what was drawn because a **platform principal reads every
+audience in the Workspace** (below), not because the call published wider. The
+plan review found the alternative (`roster`) would let a call that CREATES
+`main` publish its drawings to every external client on the roster. A canvas stored WIDER than the
 session's audience is **refused** with a tool result the model can speak — an
 operator's Agent Detail call must never land on a customer's Workspace because
 the agent had published its board there — and a canvas stored narrower keeps
@@ -492,9 +496,11 @@ the report block. The Codex orientation lists the canvas tools by bare name.
 | Surface | Route | Sees |
 |---|---|---|
 | Agent Detail → **Canvas** tab | `GET /api/agents/{name}/canvas[/{id}]` | every canvas |
-| Workspace agent page → **Canvas** tab | `GET /api/enterprise/client-portal/agents/{name}/canvas[/{id}]` | `audience='roster'` only |
-| Workspace conversation rail → **Canvas** tab (ent#475) | the same routes, the same `CanvasPanel` per participating agent | `audience='roster'` only |
-| Voice panel poll | `GET /api/agents/{name}/voice/{session_id}/panel` | the agent's `main` canvas (ent#534 renders it in the call's right column) |
+| Workspace agent page → **Canvas** tab | `GET /api/enterprise/client-portal/agents/{name}/canvas[/{id}]` | portal-token client: `audience='roster'` only · platform principal: every audience (ent#534, `agent_page.canvas_audience_for`) |
+| Workspace conversation rail → **Canvas** tab (ent#475) | the same routes, the same `CanvasPanel` per participating agent | the same rule as the row above |
+| Workspace voice call → right column (ent#534) | `GET /api/agents/{name}/voice/{session_id}/panel`, refetched on each panel `tool_result` frame + a 3 s safety poll (`PortalVoiceCanvas.vue`) | the agent's `main` canvas, whatever its audience — the person in the call sees what the call draws |
+
+**Why a platform principal reads every audience here (ent#534).** They can already open Agent Detail for any agent on their Workspace roster and read every canvas there, so the `roster` narrowing hid nothing from them — it only made the board the orb drew during a call (`main`, `operator` by default) vanish from the rail the moment the call ended. The narrowing stays for portal-token clients, keyed on `principal.is_platform` and passed as an explicit argument (the fail-closed default is `roster`). **Deliberately asymmetric with Reports** on the same page, which stay addressed-to-me for everyone: a report is *sent*, a canvas is the agent's *surface*.
 | MCP | `set_canvas` · `patch_canvas` · `get_canvas` · `list_canvases` · `clear_canvas` | its own |
 
 **Rendering parity** is one component: `CanvasPanel` → `CanvasBlock` →
@@ -504,9 +510,11 @@ and `CanvasPanel` passes the canvas's `agent_name` down only so an image block
 can fetch a workspace file. Empty states differ by viewer (AC 6) because the
 next action does: an operator can make an agent write a canvas, a client cannot.
 
-Deferred, with its consumer: a thin `canvas_updated` WebSocket trigger (ids
-only, the #918 rule) lands with ent#534's canvas column, which is the first
-thing that would listen for it; until then the panel poll reads the row.
+Deferred still: a platform-wide `canvas_updated` WebSocket trigger (ids only,
+the #918 rule). ent#534's canvas column did not need it — the voice call IS a
+WebSocket, and the bridge already emits a `tool_result` frame for every panel
+verb, so the column refetches on those and keeps only a slow safety poll. The
+rail's Canvas tab outside a call still refreshes on its own triggers.
 
 ## Key files
 

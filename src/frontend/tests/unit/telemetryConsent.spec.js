@@ -108,8 +108,10 @@ describe('CONSENT_COPY promises only what the payload earns', () => {
 })
 
 describe('receiverCopy', () => {
-  it('states a default-URL 404 as a receiver that is not live yet', () => {
-    expect(receiverCopy('receiver_not_live')).toMatch(/not live yet/)
+  it('states a default-URL 404 as a 404, never as "not live yet" (the receiver has been live since 2026-09-04)', () => {
+    expect(receiverCopy('receiver_not_live')).toMatch(/answered 404/)
+    expect(receiverCopy('receiver_not_live')).toMatch(/retried daily/)
+    expect(receiverCopy('receiver_not_live')).not.toMatch(/not live/i)
     expect(receiverCopy('receiver_not_live')).not.toMatch(/your/i)
   })
   it('states an override 404 as that receiver, naming the env var', () => {

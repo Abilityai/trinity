@@ -10,7 +10,7 @@
        ent#475, and duplicating them here would give the same capability two
        homes that can disagree. -->
   <aside
-    class="hidden sm:flex shrink-0 w-96 flex-col border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
+    class="hidden sm:flex shrink-0 w-[var(--ws-rail,24rem)] flex-col border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
     data-testid="portal-agent-details"
     aria-label="Agent details"
   >

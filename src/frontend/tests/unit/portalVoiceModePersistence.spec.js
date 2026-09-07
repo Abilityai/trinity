@@ -37,8 +37,8 @@ describe('#2157 portal voice-mode persistence', () => {
 
   it('writes on change and re-reads when the agent switches', () => {
     expect(CODE).toMatch(/watch\(voiceMode,[\s\S]{0,200}setItem\(voiceModeKey\.value/)
-    // Window widened for ent#440, which added an "end any live voice
-    // conversation" line to the same watcher. The rule being guarded is
+    // Window widened for ent#440 (and kept for ent#534, whose "end any live
+    // voice call" line sits in the same watcher). The rule being guarded is
     // unchanged: switching agents RE-READS that agent's stored choice.
     expect(CODE).toMatch(/watch\(\(\)\s*=>\s*props\.agent\?\.name[\s\S]{0,600}loadVoiceMode\(\)/)
   })
@@ -50,18 +50,15 @@ describe('#2157 portal voice-mode persistence', () => {
   })
 
   it('still speaks only when the client has narration on AND the agent can be narrated', () => {
-    // ent#440 added one more condition — a live voice conversation narrates
-    // through its own state machine, so this branch must NOT also speak (it
-    // would say every reply twice, once raw and once cleaned for the ear).
-    // The #2157 rule is asserted term by term so it survives that addition
-    // without the guard degrading into "some line mentions voiceMode".
+    // The #2157 rule is asserted term by term so it survives additions to the
+    // guard without degrading into "some line mentions voiceMode".
     expect(CODE).toContain('if (voiceMode.value && ttsEnabled.value && data.response')
-    // ent#440 review: the guard gained a second term — a Stop pressed while the
-    // agent was thinking left `voiceConvLive` false by the time this branch ran
-    // (it is evaluated after the turn's await), so the raw reply was spoken for
-    // a loop the user had already ended. Pinned as a RULE, not a literal.
-    expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceConvLive\.value[\s\S]{0,80}speak\(data\.response\)/)
-    expect(CODE).toMatch(/!voiceLoopEndedDuringTurn\) speak\(data\.response\)/)
+    // ent#534: the third term moved from the retired ent#440 loop's `voiceConvLive`
+    // to the voice CALL — the orb owns playback while a call is on, so this
+    // branch must not narrate over it. Pinned as a RULE, not a literal.
+    expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceCallActive\.value\) speak\(data\.response\)/)
+    expect(CODE).not.toContain('voiceConvLive')
+    expect(CODE).not.toContain('voiceLoopEndedDuringTurn')
     expect(CODE).toContain('const ttsEnabled = computed(() => !!props.agent.voice_available)')
   })
 })

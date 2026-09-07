@@ -537,9 +537,13 @@ transport); only the **reciprocity benchmark view** is entitlement-gated
 - **FR-1 — Two-gate egress, never without consent**: egress fires only when BOTH
   the stored `telemetry_sharing_enabled` consent (system_settings, default-off)
   AND the config switch `TELEMETRY_SHARING_ENABLED` (honors `DO_NOT_TRACK`) are
-  on. Either off ⇒ nothing leaves the box. Both re-checked in `share_now`.
+  on. Either off ⇒ nothing leaves the box. Both re-checked in `share_now`. The
+  same two gates front the **benchmark read** (FR-6, ent#190): the gated view
+  asks the hosted service on the operator's behalf, carrying only the share id,
+  and that request leaves the box exactly when a heartbeat would.
 - **FR-2 — Anonymized aggregates only**: `services/telemetry_sharing_service.py`
-  `build_aggregate_payload` — `installation_id` (anonymous), version/edition/
+  `build_aggregate_payload` — `sharing_id` (the anonymous share identity, §45.2
+  FR-2), version/edition/
   platform/python, coarse `enterprise_features`, agent + execution **counts**, and
   the Tier-1 activation-funnel counts. **No PII, no content, no prompts, no
   emails, no agent names.** The exact payload is **inspectable before send** via
@@ -558,16 +562,23 @@ transport); only the **reciprocity benchmark view** is entitlement-gated
   reversible default-off toggle in Settings → General
   (`components/settings/TelemetrySharingPanel.vue`), each stating exactly what is
   shared. `PUT /api/settings/telemetry-sharing` is admin + human-only, audit-logged.
-- **FR-6 — Reciprocity carrot (gated, v1 status surface)**: `GET
-  /api/enterprise/telemetry/benchmark` (entitlement-gated) reports whether the
-  operator is sharing and that benchmarks are `pending_hosted_service` until the
-  hosted service lands; the OSS `ActivationFunnelPanel` renders it. Percentiles
-  are computable only for participants, so sharing is structurally the price of
-  the comparison.
+- **FR-6 — Reciprocity carrot (gated; wired to the hosted service, ent#190)**:
+  `GET /api/enterprise/telemetry/benchmark` (entitlement-gated, admin-only) asks
+  the hosted benchmark service for this instance's standing — keyed on the share
+  id, never the install id — and answers one of five honest statuses:
+  `not_sharing`, `pending`, `not_enough_data`, `ready` (per-metric value,
+  percentile and fleet quartiles), `unavailable`, each with a `reason` naming the
+  class. The read never mints identity, fails open (a slow or absent receiver is
+  a status, never a 500), is bounded, and is memoised briefly. The OSS
+  `ActivationFunnelPanel` renders what it is given (`FleetBenchmarkCard`, fetched
+  once per view and independently of the funnel). Percentiles exist only for
+  participants — the receiver serves them once five instances have shared in its
+  45-day window — so sharing is structurally the price of the comparison.
 
-**Deferred**: the hosted aggregation/benchmark service (separate issue); v2/v3
-carrots (targeted alerts, live in-app benchmark panel, roadmap influence).
-The warm-ask-after-value prompt shipped with §45.2.
+**Deferred**: v2/v3 carrots (targeted alerts, roadmap influence); the
+fleet-composition tallies in the benchmark card, once a `ready` answer is
+observable in the wild. The hosted service went live on 2026-09-04 (ent#190) and
+the warm-ask-after-value prompt shipped with §45.2.
 
 ### 45.2 Opt-in Instance Telemetry — prominent ask, share id, outcome mix (trinity-enterprise#437)
 
@@ -608,8 +619,10 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   carries **`sharing_id`** (UUID4) instead — minted on the off→on consent
   transition with `insert_setting_if_absent` (atomic across workers), unchanged
   while consent stays on, **deleted on revoke**, re-minted on re-consent (revoke
-  = forget locally; anything already sent stays with the receiver until a
-  deletion signal exists — an ent#190 contract item). `installation_id` is banned
+  = forget locally; anything already sent stays with the receiver — by design
+  the client sends no deletion on revoke, and the receiver offers an
+  operator-initiated forget-me deletion keyed on the share id, ent#190).
+  `installation_id` is banned
   from the payload by the validator, the id is logged only as an 8-char prefix,
   and `instance.trinity_version` is the release version (never a commit SHA) so
   adoption timing cannot re-join this stream to the presence/intake streams.
@@ -635,9 +648,9 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
 - **FR-5 — Inspect afterwards**: the last 5 send attempts (success and failure,
   with HTTP status or error class, never `str(e)`) are kept in
   `telemetry_sharing_recent_sends` and rendered in Settings → Usage sharing. A
-  404 from the default URL is worded as "the hosted service is not live yet"
-  unless `TELEMETRY_SHARING_URL` was overridden — the receiver (ent#190) does
-  not exist at the time of writing, so every send fails and the UI says so.
+  404 from the default URL is worded as a 404 at the default address (the
+  receiver has been live since 2026-09-04, ent#190, so that is an anomaly to look
+  at); from an overridden `TELEMETRY_SHARING_URL` as that receiver answering 404.
 - **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
   is retried by the 24h heartbeat until the first 2xx
   (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
@@ -651,9 +664,10 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   source degrades a field, never the payload.
 
 **Deferred**: feature-usage / click-through coverage (PR2, child issue); an
-edition-differentiated ask (when ent#190 exists); the taxonomy field (ent#418);
-a deletion signal on revoke (ent#190); `main.py` adopting
-`utils/app_version.py` (debt inbox `2026-09-03-main-version-resolver-adopt-util`).
+edition-differentiated ask (ent#496, unblocked by ent#190); the taxonomy field
+(ent#418); the send log recording its destination host (#2571); `main.py`
+adopting `utils/app_version.py` (debt inbox
+`2026-09-03-main-version-resolver-adopt-util`).
 
 ---
 

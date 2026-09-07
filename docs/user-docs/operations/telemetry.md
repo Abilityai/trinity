@@ -7,7 +7,7 @@ Trinity has a two-tier telemetry model. Tier 1 records anonymous product events 
 | Tier | What it is | Default | Egress |
 |------|-----------|---------|--------|
 | **Tier 1 — Local product events** | A small fixed allow-list of onboarding/setup step events, recorded in Trinity's own database | On (no toggle) | None — stays on your server |
-| **Tier 2 — Fleet sharing** | A periodic share of coarse anonymized aggregates to a hosted benchmark service, for reciprocal fleet benchmarks | Off (admin opt-in) | Only when consented **and** enabled |
+| **Tier 2 — Fleet sharing** | A periodic share of coarse anonymized aggregates to a hosted benchmark service, for reciprocal fleet benchmarks (the enterprise Activation view also reads that service, with the same anonymous share id, to show your benchmarks) | Off (admin opt-in) | Only when consented **and** enabled |
 
 The two tiers are independent: Tier 1 never sends anything, and turning Tier 2 off (or leaving it off) leaves Tier 1 exactly as it was.
 

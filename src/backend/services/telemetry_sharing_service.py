@@ -6,8 +6,8 @@ records anonymous product events **locally, default-on, zero egress**. This laye
 adds — on **explicit, default-off, reversible operator consent** — a periodic
 share of **anonymized aggregates only** to the Ability-operated hosted intake, in
 exchange for reciprocal value (fleet benchmarks; the hosted aggregation/benchmark
-service is ent#190 and did not exist when this shipped — every send 404s until it
-does, and the send log below says so).
+service is ent#190, live since 2026-09-04 — the entitlement-gated benchmark view
+reads it, keyed on the same share id, under the same two gates as the sends).
 
 Guarantees:
 - **Never egresses without consent.** Two independent gates: the stored
@@ -378,9 +378,10 @@ def _record_send(entry: Dict) -> None:
 
 def receiver_hint(recent: List[Dict]) -> Optional[str]:
     """What the newest attempt says about the receiver — a hint for the panel,
-    never a verdict: ``receiver_not_live`` (404 from the DEFAULT url — ent#190 is
-    not deployed), ``receiver_404`` (404 from an overridden url), ``ok``,
-    ``failed``, or None when nothing has been attempted."""
+    never a verdict: ``receiver_not_live`` (404 from the DEFAULT url — the ent#190
+    receiver has been live since 2026-09-04, so this is an anomaly, not the
+    expected state; the hint keeps its name), ``receiver_404`` (404 from an
+    overridden url), ``ok``, ``failed``, or None when nothing has been attempted."""
     if not recent:
         return None
     newest = recent[0]

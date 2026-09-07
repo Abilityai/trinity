@@ -58,6 +58,17 @@ def _stub_genai():
     class _FunctionResponse:
         def __init__(self, **kw): self.__dict__.update(kw)
 
+    # ent#534 — session-lifetime config the real SDK carries; the service reads
+    # them through getattr so their absence is also a supported shape.
+    class _ContextWindowCompressionConfig:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    class _SlidingWindow:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    class _SessionResumptionConfig:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
     gtypes.FunctionDeclaration = _FunctionDeclaration
     gtypes.Schema = _Schema
     gtypes.Type = _Type
@@ -67,6 +78,9 @@ def _stub_genai():
     gtypes.PrebuiltVoiceConfig = _PrebuiltVoiceConfig
     gtypes.LiveConnectConfig = _LiveConnectConfig
     gtypes.FunctionResponse = _FunctionResponse
+    gtypes.ContextWindowCompressionConfig = _ContextWindowCompressionConfig
+    gtypes.SlidingWindow = _SlidingWindow
+    gtypes.SessionResumptionConfig = _SessionResumptionConfig
 
     class _Client:
         def __init__(self, api_key=None): pass
@@ -86,6 +100,7 @@ def _stub_config():
     config_mod.GEMINI_API_KEY = "test-key"
     config_mod.VOICE_MODEL = "test-model"
     config_mod.VOICE_MAX_DURATION = 300
+    config_mod.WORKSPACE_VOICE_MAX_DURATION = 1800  # ent#534
     config_mod.REDIS_URL = "redis://user:pass@localhost:6379"
     config_mod.DEFAULT_GITHUB_TEMPLATE_REPOS = []
     config_mod.GITHUB_PAT_CREDENTIAL_ID = "github-pat-templates"

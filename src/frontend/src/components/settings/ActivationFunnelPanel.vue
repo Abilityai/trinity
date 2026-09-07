@@ -5,8 +5,9 @@
         <h2 class="text-lg font-medium text-gray-900 dark:text-white">Activation funnel</h2>
         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
           First-run activation and first-value events, recorded
-          <span class="font-medium">locally on this instance only</span> — nothing
-          leaves the box. (ent#184)
+          <span class="font-medium">locally on this instance</span>. The funnel never
+          leaves the box; the fleet-benchmarks card asks the hosted benchmark service
+          with your anonymous share id only while usage sharing is on.
         </p>
       </div>
       <select
@@ -22,18 +23,18 @@
       </select>
     </div>
 
-    <!-- ent#12 Tier-2 — fleet benchmark reciprocity carrot (gated view). v1 is a
-         status surface until the hosted benchmark service lands. -->
-    <div
-      v-if="benchmark"
-      class="mx-6 mt-4 rounded-md border px-4 py-3 text-sm"
-      :class="benchmark.sharing_enabled
-        ? 'border-action-primary-200 dark:border-action-primary-800 bg-action-primary-50 dark:bg-action-primary-900/20'
-        : 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40'"
-    >
-      <p class="font-medium text-gray-900 dark:text-gray-100">Fleet benchmarks</p>
-      <p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">{{ benchmark.message }}</p>
-    </div>
+    <!-- ent#12 → ent#190 — fleet benchmarks from the hosted service. Its own
+         fetch, once per mount, independent of the funnel (a stalled receiver must
+         never hide the funnel); the card renders exactly what the backend answers
+         and owns its loading / failed / ready footprint. -->
+    <FleetBenchmarkCard
+      class="mx-6 mt-4"
+      :benchmark="benchmark"
+      :loaded="benchmarkLoaded"
+      :error="benchmarkError"
+      :retrying="benchmarkRetrying"
+      @retry="loadBenchmark"
+    />
 
     <div class="p-6">
       <div v-if="loading" class="text-sm text-gray-500 dark:text-gray-400">Loading…</div>
@@ -93,7 +94,8 @@
         </template>
 
         <p class="mt-6 text-xs text-gray-400 dark:text-gray-500">
-          Install {{ installationId }} · local-only, zero network egress.
+          Install {{ installationId }} · the funnel is local-only; fleet benchmarks are
+          read from the hosted service only while usage sharing is on.
         </p>
       </template>
     </div>
@@ -103,6 +105,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import api from '../../api'
+import FleetBenchmarkCard from './FleetBenchmarkCard.vue'
 
 // Labels for the setup-funnel steps (order = funnel order). Mirrors the
 // backend allow-list; the enterprise endpoint returns counts keyed by these.
@@ -126,7 +129,11 @@ const error = ref('')
 const funnelCounts = ref({})
 const firstValueCounts = ref({})
 const installationId = ref('')
-const benchmark = ref(null)  // ent#12 Tier-2 carrot status
+// ent#12 → ent#190: the fleet-benchmark document and its own fetch state.
+const benchmark = ref(null)
+const benchmarkLoaded = ref(false)
+const benchmarkError = ref('')
+const benchmarkRetrying = ref(false)
 
 const funnel = computed(() =>
   FUNNEL_STEPS.map((s) => ({ ...s, count: funnelCounts.value[s.key] || 0 }))
@@ -166,13 +173,6 @@ async function load() {
     funnelCounts.value = r.data?.funnel || {}
     firstValueCounts.value = r.data?.first_value || {}
     installationId.value = r.data?.installation_id || ''
-    // ent#12: fetch the Tier-2 benchmark status (best-effort, non-blocking).
-    try {
-      const b = await api.get('/api/enterprise/telemetry/benchmark')
-      benchmark.value = b.data || null
-    } catch {
-      benchmark.value = null
-    }
   } catch (e) {
     error.value =
       e?.response?.data?.detail ||
@@ -182,5 +182,28 @@ async function load() {
   }
 }
 
-onMounted(load)
+// ent#12 → ent#190: the benchmark read is its own fetch — once per mount, never
+// re-fired by the window selector (each call is an outbound request that carries
+// the share id to the hosted service), and never inside the funnel's try/finally
+// (a slow receiver must not hide the funnel behind its loading state).
+async function loadBenchmark() {
+  benchmarkRetrying.value = Boolean(benchmarkError.value)
+  try {
+    const b = await api.get('/api/enterprise/telemetry/benchmark')
+    benchmark.value = b.data && typeof b.data === 'object' && !Array.isArray(b.data) ? b.data : null
+    benchmarkLoaded.value = true
+    benchmarkError.value = ''
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    benchmarkError.value =
+      typeof detail === 'string' ? detail : e?.message || 'The benchmark request failed.'
+  } finally {
+    benchmarkRetrying.value = false
+  }
+}
+
+onMounted(() => {
+  load()
+  loadBenchmark()
+})
 </script>

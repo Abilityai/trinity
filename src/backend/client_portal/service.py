@@ -628,10 +628,15 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     for card in cards:
         card.briefing_state = "pending"
 
+    # ent#534: the Workspace's real-time voice capability — instance-level and
+    # principal-kind-level, resolved once here like `multi_agent_chat`. The
+    # roster is THE capability channel for this surface (#2128).
+    from .voice import realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
+        realtime_voice=realtime_voice_capability(include_owned),
     )
 
 
@@ -1244,6 +1249,8 @@ def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
 
 
 _HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
+# ent#534: how many of one voice call's spoken rows survive into that context.
+_VOICE_CONTEXT_ROWS_PER_CALL = 12
 
 
 _TITLE_MAX_CHARS = 60  # matches the sidebar's truncation width
@@ -1658,11 +1665,34 @@ def _format_history_context(history: list[dict]) -> str:
     first turn after every Reset, and putting words in the agent's mouth is
     worse than omitting chrome it did not write.
     """
+    # ent#534: a voice call's spoken rows are labelled, and budgeted. A 30-minute
+    # call can be ~180 rows, which would otherwise be the WHOLE context window
+    # (`_HISTORY_CONTEXT_MESSAGES`); the last few spoken exchanges are what the
+    # next typed turn is likely about, the rest is summarised as a count.
+    kept_per_call: dict = {}
+    for m in reversed(history):
+        cid = m.get("voice_call_id")
+        if m.get("source") == "voice" and cid and m.get("role") != "system":
+            kept_per_call[cid] = kept_per_call.get(cid, 0) + 1
+    seen_per_call: dict = {}
+    omitted_noted: set = set()
     lines = []
     for m in history:
         if m.get("role") == "system":
             continue
+        spoken = m.get("source") == "voice"
+        if spoken and m.get("voice_call_id"):
+            cid = m["voice_call_id"]
+            seen_per_call[cid] = seen_per_call.get(cid, 0) + 1
+            drop = kept_per_call.get(cid, 0) - _VOICE_CONTEXT_ROWS_PER_CALL
+            if seen_per_call[cid] <= drop:
+                if cid not in omitted_noted:
+                    omitted_noted.add(cid)
+                    lines.append(f"[{drop} earlier spoken turns of a voice call omitted]")
+                continue
         who = "Client" if m.get("role") == "user" else "You"
+        if spoken:
+            who += " (voice)"
         content = (m.get("content") or "").strip()
         if content:
             lines.append(f"{who}: {content}")
@@ -2203,7 +2233,10 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     """
     try:
         recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
-        if recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content:
+        # ent#534: a SPOKEN last line is not a failed typed turn — typing the
+        # same words after saying them is a new message, not a retry.
+        if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
+                and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
             return
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
@@ -4112,3 +4145,121 @@ async def dispatch_capture_feedback(agent_name: str, email: str, *, target_kind:
         _settle_capture_feedback_claim(claim, delivered=False)
     else:
         _settle_capture_feedback_claim(claim, delivered=True)
+
+
+# --------------------------------------------------------------------------
+# Report-a-problem (ent#499)
+# --------------------------------------------------------------------------
+
+#: How much of the client's comment reaches the operator's queue item. Well
+#: under the #1677 db-sink belt (16 KiB on `question`) and under the 2000 chars
+#: the rating itself stores — the full text is always on the evaluation row; the
+#: queue item is a summons, not the record.
+PROBLEM_REPORT_COMMENT_CHARS = 600
+
+
+def _problem_report_id(evaluator: str, target_kind: str, target_id: str,
+                       *, day: str | None = None) -> str:
+    """One item per person per target.
+
+    Derived from the resolved identity — never the comment — for the same reason
+    `claim_capture_feedback_dispatch` excludes it: a key that moves with the text
+    is not a dedup, it is a rename of the attack. `create_item` is an
+    ``INSERT ... ON CONFLICT DO NOTHING`` keyed on ``(agent_name, request_id)``,
+    so a re-rate is a no-op.
+
+    Hashed rather than interpolated: the id is matched against
+    ``_RESERVED_ID_PREFIXES`` and validated by ``_ID_RE``
+    (``^[A-Za-z0-9._:-]+$``), and an email is neither bounded nor confined to
+    that alphabet — a raw one would be silently rejected at the sink for some
+    addresses and not others. It also keeps the address out of a column the
+    operator queue renders and the agent's own queue file can be synced with.
+
+    **Quantised to the UTC day**, which is the review fix for a sharper problem
+    than the one below: `create_item`'s ON CONFLICT ignores the existing row's
+    STATUS, so once an operator had acknowledged a report that person could never
+    raise another about that target — a second complaint was silently dropped,
+    forever, which is worse than a duplicate. A day bucket keeps "never
+    duplicates" true in the sense that matters (one item per person per target per
+    day, whatever they click) while letting tomorrow's complaint through. It is
+    the same bucketing ent#434's alert id uses, for the same reason.
+
+    **Stated residual**: `create_item` still has no UPDATE path, so an edited
+    comment does not reach an item already raised *that day*. That is the shared
+    ent#434 residual and belongs at the sink — working around it here with a
+    comment-dependent id would trade one bounded item per person for one per
+    keystroke-set, which is the flood the budget exists to stop.
+    """
+    bucket = day or utc_now_iso()[:10]
+    digest = hashlib.sha256(
+        "\x00".join((evaluator, target_kind, target_id, bucket)).encode("utf-8")
+    ).hexdigest()[:32]
+    return f"workspace-problem-{digest}"
+
+
+async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
+                               target_id: str, comment: str | None,
+                               is_platform: bool = False) -> bool:
+    """A thumbs-down reaches the instance's operator (ent#499).
+
+    The rated agent is deliberately not in this loop. ent#366's rule — a readable
+    score is a loop an agent may optimise for, and a stranger's verbatim words
+    handed to the thing being criticised is a prompt-injection path into it — is
+    why the operator's copy goes straight to the queue and the agent-facing
+    redaction (`comment_withheld`) is untouched. The operator sees the comment;
+    the agent still does not.
+
+    **Routed through the #1677 budget, never a direct create.** The volume is
+    driven by a client clicking, so by the classification rule this is an
+    agent-influenceable emitter: a direct `create_operator_queue_item` would fail
+    the CI emitter guard, and reusing the generic `alert` type would have let five
+    unrelated alerts on that agent silence every problem report (the budget counts
+    pending rows OF THAT TYPE, including ones other emitters wrote).
+
+    Never raises, and returns whether an item was raised. The client's rating is
+    already recorded by the time this runs: their action must never fail because
+    the operator's copy could not be written.
+    """
+    try:
+        from services.operator_queue_service import (
+            _truncate_with_marker,
+            create_bounded_alert,
+        )
+
+        evaluator = workspace_evaluator(email, is_platform=is_platform)
+        text = (comment or "").strip()
+        excerpt = _truncate_with_marker(text, PROBLEM_REPORT_COMMENT_CHARS) if text else ""
+
+        what = "a message" if target_kind == "message" else "a deliverable"
+        question = (
+            f"{email} rated {what} from {agent_name} as not useful."
+            + (f"\n\nWhat they said:\n\n> {excerpt}" if excerpt
+               else "\n\nThey left no comment.")
+            + "\n\nThis is a heads-up for you, not for the agent — the agent can "
+              "read that it was rated down but never these words. Nothing is "
+              "waiting on a reply; acknowledge it once you have looked."
+        )
+        item = {
+            "id": _problem_report_id(evaluator, target_kind, target_id),
+            "agent_name": agent_name,
+            "type": "workspace_problem_report",
+            "status": "pending",
+            "priority": "medium",
+            "title": "A Workspace client rated a response as not useful",
+            "question": question,
+            # Identifiers only — no comment text, and no address. The operator
+            # reads who is unhappy from `question`; `context` is the
+            # machine-readable half and is the field most likely to be forwarded
+            # or logged, so it carries the least it can (the G-04 rule).
+            "context": {
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "has_comment": bool(text),
+            },
+            "created_at": utc_now_iso(),
+        }
+        return await create_bounded_alert(agent_name, item)
+    except Exception as e:  # noqa: BLE001 — the rating is already recorded
+        logger.warning("[ent#499] problem report failed for %s/%s: %s",
+                       agent_name, target_kind, e)
+        return False

@@ -18,7 +18,6 @@
     "src/frontend/src/components/CredentialsPanel.vue": 2,
     "src/frontend/src/components/FilesPanel.vue": 1,
     "src/frontend/src/components/FoldersPanel.vue": 1,
-    "src/frontend/src/components/GitPanel.vue": 1,
     "src/frontend/src/components/GuardrailsPanel.vue": 1,
     "src/frontend/src/components/HelpChatWidget.vue": 1,
     "src/frontend/src/components/McpExposedPanel.vue": 1,
@@ -43,7 +42,6 @@
     "src/frontend/src/components/chat/ChatMessages.vue": 1,
     "src/frontend/src/components/file-manager/FilePreview.vue": 1,
     "src/frontend/src/components/portal/PortalRoom.vue": 1,
-    "src/frontend/src/components/process/TemplateSelector.vue": 1,
     "src/frontend/src/components/settings/ActivationFunnelPanel.vue": 1,
     "src/frontend/src/components/settings/McpKeysTab.vue": 1,
     "src/frontend/src/components/settings/PortalSessionPolicyPanel.vue": 1,
@@ -61,7 +59,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 72,
-    "files_with_gates": 56
+    "bare_loading_gates": 70,
+    "files_with_gates": 54
   }
 }
