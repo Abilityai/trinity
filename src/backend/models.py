@@ -3763,6 +3763,34 @@ class UpdateMyEmailRequest(BaseModel):
     email: str
 
 
+class UserPreferenceWrite(BaseModel):
+    """Request body for `PUT /api/users/me/preferences/{key}` (trinity-enterprise#413).
+
+    `base_updated_at` is REQUIRED and tri-state by omission being an error:
+    `null` = "insert only — I believe no row exists" (409 if one does), a
+    string = "replace only if the row still carries this `updated_at`" (409
+    otherwise). There is no unconditional client write: every save states what
+    it believes the server holds, so an older tab cannot silently overwrite a
+    newer save. The 409 detail carries the live record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    value: Dict[str, Any]
+    base_updated_at: Optional[str] = Field(..., max_length=64)
+
+
+class UserPreferenceRecord(BaseModel):
+    """One stored preference (trinity-enterprise#413)."""
+    key: str
+    value: Dict[str, Any]
+    updated_at: str
+
+
+class UserPreferencesResponse(BaseModel):
+    """`GET /api/users/me/preferences` — every stored key of the caller."""
+    preferences: Dict[str, UserPreferenceRecord]
+
+
 # =============================================================================
 # Voice Models (routers/voice.py)
 # =============================================================================

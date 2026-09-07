@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { ALL_LAYOUT_KEYS, WIDGET_PREFS_KEY } from '../src/utils/gridStorageKeys.js'
+import { clearBrowserGridState } from './helpers/grid-prefs.js'
 import { widgetKey } from '../src/utils/gridWidgets.js'
 
 /**
@@ -61,12 +61,7 @@ test.describe('grid info-tile loading motion (trinity-enterprise#449)', () => {
     // Every layout generation, not just the current one: `_loadSavedRaw`
     // migrates a v1 blob into v2 when v2 is absent, so clearing only the
     // current key lets a stale layout be migrated straight back in (#2199).
-    await page.addInitScript(
-      (keys) => {
-        keys.forEach((k) => localStorage.removeItem(k))
-      },
-      [...ALL_LAYOUT_KEYS, WIDGET_PREFS_KEY]
-    )
+    await clearBrowserGridState(page)
   })
 
   test('Executions info tile loads with the scanline, never the chassis skeleton (ent#449)', async ({

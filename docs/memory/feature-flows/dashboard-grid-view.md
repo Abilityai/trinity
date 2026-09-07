@@ -1,6 +1,6 @@
 # Feature Flow: Dashboard Grid View (magnetic tile canvas)
 
-> **Last Updated**: 2026-09-03 (#2358: the tile's identity zone shows the slug)
+> **Last Updated**: 2026-09-07 (trinity-enterprise#413: layout / tile prefs / org toggles are the user's server record)
 > **Status**: Implemented — third dashboard mode, not default
 > **Issue**: trinity-enterprise#47 (design of record embedded in the issue)
 > **Requirements**: `docs/memory/requirements/core-agent.md` §9.8, §9.12 (info tiles)
@@ -27,7 +27,7 @@ iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
   right, so with none it cannot move; Tidy up / Reset sit immediately to its
   left) and `v` cycles Timeline → Grid → List through the `/` hotkey's guard
   ladder; the mode list is `utils/viewModes.js` (one home).
-- **No Vue Flow dependency** in this mode, and **no new backend endpoints**.
+- **No Vue Flow dependency** in this mode. The only backend surface is the per-user preferences record (ent#413, below).
 
 ## Components & Data Flow
 
@@ -40,7 +40,9 @@ views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pill
   │    │                         viewport culling, shared 1s tick for tile timers
   │    └─ components/AgentTile.vue   five-zone tile (see below); composes
   │           AgentAvatar / RuntimeBadge / RunningStateToggle / AutonomyToggle
-  ├─ stores/fleetGrid.js     per-user layout (localStorage v1, self-healing),
+  ├─ stores/userPreferences.js  per-user UI preference sync engine (ent#413):
+  │                          one GET, debounced conditional PUT per key, DELETE
+  ├─ stores/fleetGrid.js     per-user layout (server record + per-user cache, self-healing),
   │                          lazy analytics hydration queue (concurrency 4,
   │                          stale-while-revalidate over executions-store cache),
   │                          batch chip data (sync-health + operator-queue pending)
@@ -99,8 +101,76 @@ explains the colors once — never repeated per tile.
 
 ## Layout model
 
-- Layout = per-user map `agent → {c, r}`; localStorage key
-  `trinity-grid-layout-v1`; server-side per-user storage is a follow-up.
+- Layout = per-user map `agent|widget:* → {c, r}`. **Since trinity-enterprise#413
+  the record of truth is the SERVER** — `user_ui_preferences` key `grid_layout`
+  (the Tiles ▾ override map is `grid_widgets`, the org Zones/Lines toggles
+  `grid_org`), read in one `GET /api/users/me/preferences`, written by a
+  trailing-debounced (800 ms) conditional `PUT /api/users/me/preferences/{key}`,
+  cleared by `DELETE`. The same user gets their board on any browser; two users
+  on one browser never see each other's. OSS-core by explicit decision.
+- **Persistence layering** (`stores/userPreferences.js` is the sync engine —
+  one home for "this UI state belongs to the user, not the browser"; the grid
+  store is its first consumer and every other per-user localStorage key
+  migrates by consuming it, never by re-implementing it):
+  - **Browser cache, per user**: `localStorage[<key>:<principalId>]`
+    (`utils/gridStorageKeys.js::userScopedKey`). `principalId` is the JWT
+    `sub` (`stores/auth.js` getter) — the username on every login path and
+    available synchronously from the stored token, unlike `user.username`,
+    which is absent until `/api/users/me` lands. It gives the first paint a
+    layout before the GET answers (the #47 performance contract is unchanged)
+    and keeps the grid editable when the server cannot be reached.
+  - **Load order per blob**: server record → per-user cache → legacy
+    browser-global blob (`trinity-grid-layout-v2`, then `-v1`; `-widgets-v1`;
+    `-org-v1`) → default. A legacy blob is ADOPTED once into the server record
+    by the **first** identity to sign in after the upgrade
+    (`trinity-grid-legacy-adopted-by` marker) — everyone after starts from the
+    default rather than inheriting someone else's board — and the legacy key
+    is left in place so a downgrade is not a data-loss event.
+  - **Adoption wins**: `syncLayout` overlays the in-memory `layout` over
+    `_savedRaw`, so when the server record lands the store sets
+    `layout = {}` before replacing `_savedRaw` and bumping `layoutGeneration`,
+    which `FleetGrid.vue` watches to re-run the reconcile. Order is widgets →
+    org → layout, then one bump, so the `activeWidgetKeys` re-sync sees the
+    adopted map. A gesture the user made in this tab before the GET landed is
+    NOT overwritten — its pending write pushes the local state instead.
+  - **No write is unconditional**: nothing leaves before the initial GET
+    settles, and every PUT carries `base_updated_at` — `null` = insert-only
+    (409 if a row exists), a string = compare-and-set. A **409 is
+    origin-aware**: a write born from a user gesture re-PUTs once with the new
+    base (this tab's edit wins — last-write-wins per user), a write born from
+    a reconcile (`syncLayout` on a roster change) adopts the server record and
+    does not retry — that is exactly the stale tab the base exists to stop.
+    One retry per write; no loop.
+  - **Identity change** (logout → another login without a reload —
+    `auth.logout()` does not reset Pinia): both stores watch `principalId`
+    with `flush: 'sync'`; the engine cancels timers and drops its queue,
+    every queued write is tagged with the identity it was made under and
+    discarded on mismatch, and the grid store wipes its in-memory blobs. Never
+    flushed on identity change.
+  - **Tab going away**: `FleetGrid.vue` listens to `pagehide` (its own
+    listener — `stopPolling` tears down the store's visibility hook) and
+    `flushPending()` sends the debounced writes via `fetch(..., { keepalive })`
+    with the bearer header — the same documented raw-`fetch` exception
+    `streamPortalExecution` makes; an XHR is killed on tab discard and
+    `sendBeacon` cannot carry the header.
+  - **Honest fallback**: a failed load or save keeps the grid working from
+    the cache; the store exposes `layoutSource` (`pending|server|local|default`)
+    and `persistNotice` (a sentence naming the HTTP status or "network error"),
+    rendered as a dismissable `role="status"` notice on the canvas
+    (`.gv-orgtoast.gv-persist`). A 401 is a logout, never "unreachable".
+  - **Reset** clears the caller's per-user cache + the legacy generations
+    (or the next load adopts the stale blob straight back in, ent#325),
+    `DELETE`s the caller's server key, and the reconcile that follows
+    re-persists the default insert-only. "Reset tiles" writes an explicit
+    `{}` cache rather than removing the key, for the same reason.
+  - Stale agent names are NOT pruned client-side (filtered ≠ deleted from
+    the client's view); the value is size-capped server-side (256 KiB).
+  - Pinned by `tests/unit/fleetGridServerPersist.spec.js` (store contract),
+    `tests/unit/test_ent413_user_ui_preferences.py` (backend), and the e2e
+    grid specs, which clear the per-user cache + legacy keys and DELETE the
+    three server keys through `e2e/helpers/grid-prefs.js`; the new
+    server-restore case drags, wipes the browser copy, reloads and polls for
+    the re-sync.
 - **Self-healing** (`normalizeLayout`): new agents take the first free cell
   near the origin (spiral search); deleted agents leave their gap; an invalid
   or colliding saved position resolves to the nearest free cell.
@@ -529,7 +599,9 @@ dashboard-breaking when forgotten:
 
 ## Failure modes & edge cases
 
-- Corrupt/unavailable localStorage → default layout, session-local.
+- Corrupt/unavailable localStorage → server record if any, else default; edits still reach the server (the cache is a convenience, not the record).
+- Server unreachable (load or save) → cached/default layout, session-local edits, honest notice; retried on the next change / next mount.
+- Stale tab (older `base_updated_at`) → 409: gesture retries once and wins, reconcile adopts the server record.
 - Agent deleted/renamed mid-session → self-healing pass; a mid-drag removal
   cancels the drag cleanly.
 - Stopped agent → Offline state, context chart flattens to a dash.
@@ -588,7 +660,8 @@ data-less terminal never plays a late reveal.
 ## Out of scope (tracked follow-ups)
 
 Fleet KPI strip; "Needs your attention" + live-activity right rail;
-server-side per-user layout storage; the widget-chassis documentation itself
+`trinity-dashboard-view` / `trinity-dashboard-filter-owner` as further
+`user_ui_preferences` keys; the widget-chassis documentation itself
 (#2126 — the `widget:*` occupant type, what `InfoTile` deliberately lacks, the
 org-overlay interlock, the layout v1→v2 copy-migration, prefs-as-override-map);
 persisting `error_code` so the failure chip carries the platform taxonomy;
