@@ -1484,6 +1484,19 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Local overrides
     "*.local.md",
     "*.local.json",
+    # #2529: the two negations the agent guide's canonical fence has carried for
+    # months while this constant did not — the direction
+    # `test_doc_and_constant_in_sync` could not catch, because it asserted
+    # `constant ⊆ doc` only. Both live in the PROTECTED floor below, so an agent
+    # cannot lose `.env.example` (compat check F-004 requires it, and
+    # `credential_requirements_service` reads it to tell users which credentials
+    # to supply) to its own `.env.*`-shaped rule. Appended at the TAIL so this
+    # constant's order is now EXACTLY the guide fence's order.
+    "!.env.example",
+    # Belt-and-braces: `.mcp.json` is an exact-name pattern, so this negation is
+    # a no-op today. It is here because the guide promises it and because a
+    # future `.mcp.json*` would silently take the template with it.
+    "!.mcp.json.template",
 )
 
 
@@ -1522,41 +1535,278 @@ _GITIGNORE_SUPERSEDED_LINES: Tuple[str, ...] = (
 )
 
 
-def _build_gitignore_merge_command(git_dir: str) -> str:
-    """Build a bash command that reconciles ``{git_dir}/.gitignore`` with
-    ``_GITIGNORE_PATTERNS``: drop superseded exact lines, then append whatever
-    is missing — without clobbering user-supplied rules. Idempotent: the
-    removal is a no-op once the line is gone, and each append is gated by an
-    exact-line ``grep -qxF`` check.
-    """
-    parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
-    for stale in _GITIGNORE_SUPERSEDED_LINES:
-        # `grep -vxF` into a temp file, not `sed -i`: `-x -F` is a whole-line
-        # literal match, so no pattern metacharacter in a user's rule can be
-        # caught by accident. Guarded on the line existing, so the common path
-        # leaves the file (and its mtime) untouched.
-        q = shlex.quote(stale)
-        # `|| true` on the filter: `grep -v` exits 1 when it selects NO lines,
-        # which is the legitimate case of a `.gitignore` that contained only
-        # the superseded line. Without it the whole `&&` chain aborts and the
-        # merge never runs — and the guard above has already proved the file is
-        # readable, so the only status being swallowed is "empty result".
-        parts.append(
-            f"(! grep -qxF -- {q} .gitignore || "
-            f"{{ grep -vxF -- {q} .gitignore > .gitignore.tmp || true; "
-            f"mv .gitignore.tmp .gitignore; }})"
+# ---------------------------------------------------------------------------
+# #2529: TWO managed regions, not one.
+# ---------------------------------------------------------------------------
+#
+# Both writers of an agent's `.gitignore` used to APPEND, and git is
+# last-match-wins, so the canonical block landed BELOW every `!negation` the
+# agent had written and silently reversed it — after which
+# `_build_rm_cached_ignored_command` untracked the files those negations were
+# protecting, inside an unrelated sync commit that named none of them (the
+# 2026-07-30 `47efd80` incident; corbin repeated it on 2026-09-02 and left the
+# comment "Negation must stay LAST in this file.").
+#
+# The merge is therefore a NORMALIZE-AND-REBUILD, not an append: every managed
+# line is stripped wherever it appears, then the file is rewritten as
+#
+#     [DEFAULTS block]  <- markers below; the agent may override these
+#     [user region]     <- the agent's own rules, ORIGINAL ORDER
+#     [PROTECTED floor] <- markers below; the agent may NOT override these
+#
+# Idempotent by construction: a second run computes byte-identical output, and
+# the file is written only when the computed content differs — so the 15-minute
+# auto-sync loop has nothing to re-commit.
+#
+# WHY TWO REGIONS AND NOT ONE. A single hoisted block cannot carry both
+# "defaults the agent may override" and "guarantees the agent may not", and both
+# halves of that were measured, not assumed:
+#
+#   1. CREDENTIALS. Today a user's `!.env` with no `.env` line of its own is
+#      INERT — the old merge appended `.env` BELOW the negation, so `.env` was
+#      ignored. Hoisting a single block reverses that for every such agent in the
+#      fleet at once, and the unattended `git add -A` commits the newly-tracked
+#      credential file to the user's own GitHub repo. That is the #458 class on
+#      the path nobody watches, so the six credential patterns and their two
+#      canonical negations sit BELOW the user region.
+#   2. PLATFORM-AUTHORED `.trinity/` PATHS. `_GITIGNORE_PATTERNS` derives eight
+#      `!.trinity/...` re-includes from `_TRINITY_AUTHORED_PATHS` (#2070). Under a
+#      single hoisted block a user `*.sh` below it beats `!.trinity/setup.sh` —
+#      trinity-enterprise#76 / #1704 reintroduced, and QUIETLY: the rm-cached
+#      pathspec still exempts the path, so nothing is untracked; the hook is
+#      simply never `git add`-ed again and the absence surfaces one
+#      reconstitution later.
+#
+# `_GITIGNORE_PROTECTED` is a MEMBERSHIP SET, and the region split is derived
+# from it inside `_build_gitignore_merge_command` — not a second hand-written
+# copy of the list — so adding an authored path stays one edit and the two
+# cannot drift (#2070's principle).
+#
+# CHANGING A MARKER STRING is a fleet migration: the old text must be added to
+# `_GITIGNORE_SUPERSEDED_LINES` first, or every existing agent keeps an orphaned
+# marker line in its user region forever. Same discipline as the wholesale
+# `.trinity/` line above.
+_GITIGNORE_BLOCK_BEGIN = (
+    "# >>> Trinity default ignore rules — managed; "
+    "your own rules go BELOW and win (#2529) >>>"
+)
+_GITIGNORE_BLOCK_END = "# <<< Trinity default ignore rules <<<"
+_GITIGNORE_FLOOR_BEGIN = (
+    "# >>> Trinity protected rules — managed; NOT overridable "
+    "(credentials + platform-authored paths, #2529) >>>"
+)
+_GITIGNORE_FLOOR_END = "# <<< Trinity protected rules <<<"
+
+_GITIGNORE_MARKERS: Tuple[str, ...] = (
+    _GITIGNORE_BLOCK_BEGIN,
+    _GITIGNORE_BLOCK_END,
+    _GITIGNORE_FLOOR_BEGIN,
+    _GITIGNORE_FLOOR_END,
+)
+
+# Invariant #12 — credentials are never committed. These keep their canonical
+# negations with them: `!.env.example` is REQUIRED by compat check F-004 and read
+# by `credential_requirements_service`, so it must be un-ignorable by the agent
+# AND un-ignorable by the platform's own `.env.*`.
+_GITIGNORE_CREDENTIAL_PATTERNS: Tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    ".mcp.json",
+    "credentials.json",
+    "*.pem",
+    "*.key",
+    "!.env.example",
+    "!.mcp.json.template",
+)
+
+# NOTE `.trinity/operator-queue.json` is deliberately NOT here and deliberately
+# NOT in `_TRINITY_AUTHORED_PATHS`: it is a live approval queue rewritten
+# continuously, so committing it would put a diff in every 15-minute auto-sync
+# cycle and push approval payloads into the user's repo. Same call #919 /
+# Invariant #8 made for `.trinity/pipelines/` (definitions committed) vs
+# `pipeline-state/` (state not). Reviewed in #2529, not forgotten.
+_GITIGNORE_PROTECTED: frozenset = frozenset(
+    (
+        *_GITIGNORE_CREDENTIAL_PATTERNS,
+        ".trinity/*",
+        *(f"!{path}" for path in _TRINITY_AUTHORED_PATHS),
+    )
+)
+
+# Every line this platform owns: stripped from the user region by the merge, and
+# the oracle for "was this negation shadowed by US or by the agent's own rule?".
+_GITIGNORE_MANAGED_LINES: Tuple[str, ...] = (
+    *_GITIGNORE_PATTERNS,
+    *_GITIGNORE_SUPERSEDED_LINES,
+    *_GITIGNORE_MARKERS,
+)
+
+if not _GITIGNORE_PROTECTED <= set(_GITIGNORE_PATTERNS):
+    raise RuntimeError(
+        "_GITIGNORE_PROTECTED is not a subset of _GITIGNORE_PATTERNS: "
+        f"{sorted(_GITIGNORE_PROTECTED - set(_GITIGNORE_PATTERNS))}. The floor is "
+        "a PARTITION of the canonical list, not a second list — a pattern here "
+        "that is not there would be written to the floor and never stripped."
+    )
+
+for _managed_line in _GITIGNORE_MANAGED_LINES:
+    # `grep -vxF -f` is the strip mechanism. An EMPTY entry in that pattern file
+    # matches every blank line with `-x` (silently deleting the user's spacing)
+    # and every line without it (wiping the file); a newline-bearing entry
+    # smuggles an extra pattern in. Fail at import, not in a container.
+    if not _managed_line or "\n" in _managed_line or "\r" in _managed_line:
+        raise RuntimeError(
+            "managed .gitignore line is empty or carries a newline: "
+            f"{_managed_line!r}"
         )
-    for pattern in _GITIGNORE_PATTERNS:
-        q = shlex.quote(pattern)
-        parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
-    script = " && ".join(parts)
+del _managed_line
+
+
+# Per-line output tags for the sweep probes (#2529). `container_exec_run` does
+# NOT pass `demux=True` (docker_utils.py), so stdout and stderr arrive
+# interleaved in ONE blob — a begin/end region parser would happily swallow a
+# stray `grep: ...` line as a payload path. A per-line prefix cannot: anything
+# without the tag is not ours, wherever it lands.
+_SWEEP_TAG = "TRINITY-2529"
+_SWEEP_TAG_BEFORE = f"{_SWEEP_TAG}-untracked-before: "
+_SWEEP_TAG_AFTER = f"{_SWEEP_TAG}-untracked-after: "
+_SWEEP_TAG_REMOVED = f"{_SWEEP_TAG}-removed: "
+_SWEEP_TAG_SHADOW = f"{_SWEEP_TAG}-shadow: "
+
+# `git check-ignore -v` prints `<source>:<line>:<pattern>\t<pathname>`. The
+# source is a filename and the pattern may itself contain a colon, so the split
+# is anchored on the LAST `:<digits>:` rather than on the first colon.
+_CHECK_IGNORE_RE = re.compile(r"^(?P<source>.*):(?P<line>\d+):(?P<pattern>.*)\t(?P<path>.*)$")
+
+
+@dataclass(frozen=True)
+class GitignoreSweep:
+    """What a Push's `.gitignore` migration actually did (#2529).
+
+    Every field is ADVISORY reporting — a failure to compute any of them returns
+    the empty sweep and never breaks the Push.
+
+    removed:   paths this Push untracked (`git rm --cached`). The honest answer
+               to "5 files pushed" vs "5 files pushed, 4 deletions".
+    unignored: paths that became newly un-ignored and are still untracked — the
+               inverted-duplicate case (a user's `!.env.production` above their
+               own `.env.*`), which the SAME Push then stages via `git add -A`.
+               KNOWN CONTAMINATION: this is `after - before` across two execs
+               against a LIVE container, so a file the agent's own session
+               creates in that window is reported here too. Folding both probes
+               into the two execs the Push already ran narrows the window; it
+               does not close it.
+    shadowed:  `"!rule -> deciding managed pattern"` for every agent negation a
+               managed line defeats. Two residuals live here: a negation under a
+               dir-form canonical pattern (git does not descend into an excluded
+               directory, so it is inert at ANY position) and a negation the
+               protected floor deliberately refuses.
+    """
+
+    removed: Tuple[str, ...] = ()
+    unignored: Tuple[str, ...] = ()
+    shadowed: Tuple[str, ...] = ()
+
+    def summary_line(self) -> str:
+        """One line for a commit message / an HTTP error detail, or ``""``."""
+        if not self.removed:
+            return ""
+        return (
+            f"Trinity: untracked {len(self.removed)} file(s) that now match "
+            ".gitignore (working tree untouched)"
+        )
+
+
+def _build_gitignore_merge_command(git_dir: str) -> str:
+    """Build a bash command that REBUILDS ``{git_dir}/.gitignore`` as
+
+        [defaults block][user region, original order][protected floor]
+
+    stripping every managed line wherever it currently appears (#2529). The two
+    regions and the reason there are two of them are documented at
+    ``_GITIGNORE_PROTECTED`` above; this is the only function that partitions
+    ``_GITIGNORE_PATTERNS`` into them, and the only reader of that constant
+    (pinned by ``test_2069_gitignore_merge_caller_guard.py``).
+
+    Idempotent by CONTENT, not by absence of work: a second run computes
+    byte-identical output and the ``cmp`` gate then leaves the file — and its
+    mtime — untouched, so the 15-minute auto-sync loop has nothing to re-commit.
+
+    Four shell details are load-bearing, each reproduced before it was fixed:
+
+    * **The strip ``grep`` is a real command in the ``&&`` chain**, with its
+      status inspected (``0`` = lines kept, ``1`` = the legitimate "file held
+      only managed lines", ``>=2`` = a real error that aborts the chain and
+      leaves the original file alone). The obvious spelling —
+      ``cat <(grep ...) > tmp`` — takes only ``cat``'s status, so an unreadable
+      ``.gitignore`` produced a block-only temp file and the ``mv`` then
+      DESTROYED the user's rules. Reproduced on the shipped base image with a
+      mode-000 ``.gitignore``: ``grep`` says "Permission denied", the chain
+      exits 0, and ``mv`` succeeds because it needs DIRECTORY write permission,
+      not file. ``|| true`` is exactly the wrong tool here — it masks the one
+      status that matters.
+    * **``LC_ALL=C grep -a``**. Without ``-a``, a ``.gitignore`` carrying a NUL
+      byte (a crash-truncated file) makes grep print ``binary file matches`` and
+      emit ZERO lines while exiting ZERO — so even the status check above passes
+      and the whole user region is dropped.
+    * **The strip list carries every line twice, bare and CR-suffixed**, so a
+      CRLF copy of a canonical line is stripped instead of surviving below the
+      block and still overriding it. Targeted, unlike ``tr -d '\r'``, which
+      would rewrite the user's line endings wholesale.
+    * **``[ -e .gitignore ] || : > .gitignore``**, not ``touch`` — ``touch``
+      bumps mtime on every Push even when nothing changes.
+
+    ``grep -vxF`` is whole-line and fixed-string, so no metacharacter in a user
+    rule can be caught by accident — the same guarantee the #2070
+    superseded-line removal already relied on. Empty and newline-bearing entries
+    are rejected at import (see ``_GITIGNORE_MANAGED_LINES``), because an empty
+    entry in a ``-f`` pattern file matches every blank line.
+
+    ``.gitignore.tmp`` is written on every Push now rather than only when a
+    superseded line exists. Benign: canonical ``*.tmp`` already matches it. The
+    one residual is the very first merge on a pre-canonical repo, where ``*.tmp``
+    is not yet in the file — one-time and milliseconds wide.
+
+    The leading probe records the untracked-and-not-ignored set BEFORE the
+    rebuild, so ``GitignoreSweep.unignored`` can be computed without a fifth
+    ``docker exec``. It is wrapped in a group ending in ``:`` so a repo-less
+    directory (the init path calls this builder too) reports nothing instead of
+    aborting the merge.
+    """
+    q = shlex.quote
+    top = tuple(p for p in _GITIGNORE_PATTERNS if p not in _GITIGNORE_PROTECTED)
+    floor = tuple(p for p in _GITIGNORE_PATTERNS if p in _GITIGNORE_PROTECTED)
+
+    top_args = " ".join(
+        q(line) for line in (_GITIGNORE_BLOCK_BEGIN, *top, _GITIGNORE_BLOCK_END)
+    )
+    floor_args = " ".join(
+        q(line) for line in (_GITIGNORE_FLOOR_BEGIN, *floor, _GITIGNORE_FLOOR_END)
+    )
+    strip_args = " ".join(q(line) for line in _GITIGNORE_MANAGED_LINES)
+
+    script = (
+        f"cd {q(git_dir)} && "
+        "{ git ls-files --others --exclude-standard 2>/dev/null | "
+        f"sed 's#^#{_SWEEP_TAG_BEFORE}#'; :; }} && "
+        "{ [ -e .gitignore ] || : > .gitignore; } && "
+        f"printf '%s\\n' {top_args} > .gitignore.tmp && "
+        "{ LC_ALL=C grep -a -vxF -f "
+        f"<(printf '%s\\n' {strip_args}; printf '%s\\r\\n' {strip_args}) "
+        ".gitignore >> .gitignore.tmp || [ $? -eq 1 ]; } && "
+        f"printf '%s\\n' {floor_args} >> .gitignore.tmp && "
+        "if cmp -s .gitignore.tmp .gitignore; then rm -f .gitignore.tmp; "
+        "else mv .gitignore.tmp .gitignore; fi"
+    )
     return f"bash -c {shlex.quote(script)}"
 
 
 def _build_rm_cached_ignored_command(git_dir: str) -> str:
     """Build a bash command that ``git rm --cached``s any tracked files that
-    NOW match an ignore rule. Idempotent — `git ls-files -ci` returns the
-    empty set after the first successful run.
+    NOW match an ignore rule, and REPORTS what it did (#2529).
+
+    Idempotent — `git ls-files -ci` returns the empty set after the first
+    successful run.
 
     Two-pass: a non-NUL `git ls-files` to check emptiness via shell variable
     (bash can't hold NUL bytes), then a NUL-delimited pipe to xargs so paths
@@ -1577,19 +1827,127 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     pathspec stays for the agent whose ``.gitignore`` still carries the
     superseded wholesale ``.trinity/`` line — otherwise its hooks would be
     swept by the very push that repairs the file.
+
+    THE THREE REPORT PROBES (#2529) ride on this same exec rather than costing
+    two more `docker exec`s on the hot path of every Push:
+
+    * ``removed`` — the sweep's own ``$ignored``, echoed before the ``xargs``.
+      Nothing downstream could previously tell "5 files pushed" from "5 files
+      pushed, 4 silent deletions", which is why two field incidents surfaced two
+      months late.
+    * ``untracked-after`` — differenced against the merge command's
+      ``untracked-before`` to find paths this Push newly UN-ignored (an inverted
+      user duplicate) and that the same Push's ``git add -A`` will now commit.
+    * ``shadow`` — for every ``!`` line in the file, ask GIT which rule actually
+      decides, via ``git check-ignore -v --no-index --stdin``. Never reimplement
+      gitignore matching; a hand-rolled matcher would diverge from git and be a
+      bug farm. The pipeline is assembled IN-CONTAINER by the shell (``grep |
+      sed | git check-ignore``) and never interpolated from Python, so
+      agent-controlled ``.gitignore`` content never reaches a ``bash -c`` payload
+      backend-side — keep it that way if this is ever refactored.
+
+    The three probe groups end in ``:`` so a report failure can never fail a
+    Push; the SWEEP itself stays in the ``&&`` chain, so a real ``git rm``
+    failure still aborts before the probes run.
     """
+    q = shlex.quote
     exempt = " ".join(
-        shlex.quote(f":!{path.rstrip('/')}") for path in _TRINITY_AUTHORED_PATHS
+        q(f":!{path.rstrip('/')}") for path in _TRINITY_AUTHORED_PATHS
     )
     script = (
-        f"cd {shlex.quote(git_dir)} && "
+        f"cd {q(git_dir)} && "
         f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
+        '{ [ -z "$ignored" ] || printf \'%s\\n\' "$ignored" | '
+        f"sed 's#^#{_SWEEP_TAG_REMOVED}#'; }} && "
         'if [ -n "$ignored" ]; then '
         f"git ls-files -ci -z --exclude-standard -- . {exempt} | "
         "xargs -0 git rm --cached --quiet -r --; "
-        "fi"
+        "fi && "
+        "{ git ls-files --others --exclude-standard | "
+        f"sed 's#^#{_SWEEP_TAG_AFTER}#'; :; }} && "
+        # `^!.` (not `^!`) — a bare `!` line would reach check-ignore as an
+        # empty pathspec and make it fatal.
+        "{ LC_ALL=C grep -a -h '^!.' .gitignore | sed 's/^!//' | "
+        "git check-ignore -v --no-index --stdin | "
+        f"sed 's#^#{_SWEEP_TAG_SHADOW}#'; :; }}"
     )
     return f"bash -c {shlex.quote(script)}"
+
+
+def _tagged_output_lines(output: Any, tag: str) -> List[str]:
+    """Every line of a probe blob carrying ``tag``, with the tag stripped.
+
+    Anything without the tag — an interleaved stderr line, git's own chatter —
+    is simply not ours. `container_exec_run` does not demux, so this is the
+    whole defence against a stray `grep: ...` being read as a path.
+    """
+    if not isinstance(output, str):
+        return []
+    return [
+        line[len(tag):].rstrip("\r")
+        for line in output.splitlines()
+        if line.startswith(tag)
+    ]
+
+
+def _shadowed_negations(check_ignore_lines: List[str]) -> Tuple[str, ...]:
+    """Turn ``git check-ignore -v`` output into ``"!rule -> deciding pattern"``.
+
+    THE TRAP: ``git check-ignore -v`` exits **0 even when the deciding rule is
+    itself a negation** — i.e. even when the path is NOT ignored. (Verified:
+    `.env.example` gives plain_rc=1 but verbose_rc=0.) So the verdict must come
+    from the deciding PATTERN TEXT — a leading ``!`` means the negation won —
+    never from the exit code.
+
+    Only rules THIS PLATFORM wrote are reported. An agent whose own broad rule
+    defeats its own negation is its own business; a managed line defeating it is
+    ours to explain, and covers both residuals #2529 knowingly leaves: a
+    negation under a dir-form canonical pattern (inert at any position, because
+    git does not descend into an excluded directory) and a negation the
+    protected floor deliberately refuses.
+    """
+    managed = set(_GITIGNORE_MANAGED_LINES)
+    out: List[str] = []
+    for line in check_ignore_lines:
+        match = _CHECK_IGNORE_RE.match(line)
+        if not match:
+            continue
+        pattern = match.group("pattern")
+        if pattern.startswith("!"):
+            continue  # the negation WON — nothing to report
+        if pattern not in managed:
+            continue  # the agent's own rule, not ours
+        entry = f"!{match.group('path')} -> {pattern}"
+        if entry not in out:
+            out.append(entry)
+    return tuple(out)
+
+
+def _parse_gitignore_sweep(merge_output: Any, sweep_output: Any) -> GitignoreSweep:
+    """Assemble a :class:`GitignoreSweep` from the two execs' interleaved blobs."""
+    before = set(_tagged_output_lines(merge_output, _SWEEP_TAG_BEFORE))
+    after = set(_tagged_output_lines(sweep_output, _SWEEP_TAG_AFTER))
+    removed = tuple(
+        dict.fromkeys(_tagged_output_lines(sweep_output, _SWEEP_TAG_REMOVED))
+    )
+    return GitignoreSweep(
+        removed=removed,
+        unignored=tuple(sorted(after - before)),
+        shadowed=_shadowed_negations(
+            _tagged_output_lines(sweep_output, _SWEEP_TAG_SHADOW)
+        ),
+    )
+
+
+def _coerce_sweep(value: Any) -> GitignoreSweep:
+    """Anything that is not a real :class:`GitignoreSweep` becomes the empty one.
+
+    Required, not defensive noise: `tests/unit/test_ent123_tokenless_clone.py`
+    patches `_migrate_workspace_gitignore` with a bare `AsyncMock()`, and a
+    `MagicMock` landing in a `List[str]` response field fails Pydantic
+    validation at the very return the test is asserting on.
+    """
+    return value if isinstance(value, GitignoreSweep) else GitignoreSweep()
 
 
 AGENT_HOME_DIR = "/home/developer"
