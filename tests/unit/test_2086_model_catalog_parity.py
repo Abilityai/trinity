@@ -72,6 +72,12 @@ def _expected_records(model_catalog) -> list[dict]:
             "publicChannel": m.public_channel,
             "adminDefaultSelectable": m.admin_default_selectable,
             "recommended": m.recommended,
+            # ent#403 — appended last, like the dataclass fields and the
+            # `_JS_KEY_MAP` rows. This dict IS the key-set assertion: the
+            # structural compare below is an equality, so a new emitted key that
+            # is not listed here turns this file red.
+            "workspace": m.workspace,
+            "workspaceTier": m.workspace_tier,
         }
         for m in model_catalog.MODEL_CATALOG
     ]
@@ -225,3 +231,42 @@ def test_backend_public_channel_set_derives_from_catalog():
     assert set(backend_set) == {
         m.id for m in model_catalog.MODEL_CATALOG if m.public_channel
     }, "settings_service.PUBLIC_CHANNEL_MODELS drifted from the catalog re-export"
+
+
+# --- the Workspace subset (ent#403) -----------------------------------------
+
+
+def test_workspace_models_are_a_subset_of_the_public_channel_allow_list():
+    """The Workspace composer must never offer a model the #894 route would 422.
+
+    The Workspace validates its own field against `WORKSPACE_MODELS`, but the
+    value it accepts is resolved through the SAME ladder the operator route
+    writes (`is_valid_public_channel_model`). A workspace-only id would be taken
+    at the composer and refused wherever the two meet — the "two sources
+    silently disagree" ent#403's AC 5 exists to kill.
+
+    `model_catalog.py` asserts this at import; asserting it here too is what
+    makes the failure legible in CI rather than a collection error somewhere
+    unrelated (every module that imports `settings_service` imports this).
+    """
+    model_catalog = _catalog()
+
+    assert model_catalog.WORKSPACE_MODELS, "the curated Workspace set must not be empty"
+    assert model_catalog.WORKSPACE_MODELS <= model_catalog.PUBLIC_CHANNEL_MODELS
+    assert model_catalog.WORKSPACE_MODELS == {
+        m.id for m in model_catalog.MODEL_CATALOG if m.workspace
+    }, "WORKSPACE_MODELS drifted from the `workspace` flag it is derived from"
+
+
+def test_every_workspace_model_carries_a_plain_language_tier():
+    """The option's PRIMARY text is the tier, not the label — a workspace entry
+    with an empty tier renders a blank option. Import-time-asserted; pinned here
+    so the reason survives."""
+    model_catalog = _catalog()
+
+    tiers = [m.workspace_tier for m in model_catalog.MODEL_CATALOG if m.workspace]
+    assert all(t.strip() for t in tiers), "a workspace model with no tier renders blank"
+    assert len(set(tiers)) == len(tiers), (
+        "two options leading with the same words are not a choice — the reason "
+        "`workspace_tier` exists instead of reusing `note`"
+    )
