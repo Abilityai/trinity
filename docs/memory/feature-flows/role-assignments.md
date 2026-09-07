@@ -241,6 +241,13 @@ mattered.
 
 ## Testing
 
+**Status**: ✅ Verified 2026-09-07 — 71 assertions across the five suites below,
+green under pytest-randomly seeds 12345 / 67890 / 106; `npm test` in
+`src/mcp-server` 326 passed; the full unit island 14456 passed. The
+`cascade_rename` suite was additionally verified **RED against the pre-fix
+code** — "there is a test" and "the test would have caught it" are different
+claims, and only the second one is worth writing down.
+
 - `tests/unit/test_ent500_assignment_provider.py` — the three degrade paths,
   last-wins registration, `clear_provider`, unknown-key dropping, and a static
   assert that the seam file is in `enterprise-docs-guard.yml`'s hardcoded
