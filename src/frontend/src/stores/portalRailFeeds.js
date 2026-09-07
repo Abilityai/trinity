@@ -16,9 +16,12 @@ import { useClientPortalStore } from './clientPortal'
  *     `visibleTabs` through `feedsFor`) — the door gate extends from "mount"
  *     to "fetch", so a session that fails a tab's door never requests its data;
  *   * `uploads` (the viewer's own inbox) is read from the CONTAINER by the
- *     backend (`_read_inbox`, a docker exec), never signals, and is fetched
- *     only on request — while Files is the open active tab, and after an
- *     upload;
+ *     backend (`_read_inbox`, a docker exec) and is fetched only on request —
+ *     while Files is the open active tab, after an upload from ANY surface
+ *     (#2582, via `noteUpload`), and after a delete. It DOES signal since
+ *     #2582: `portalRail.js::filesSignalItems` projects it onto the same
+ *     `created_at` key the Files dot already reads, so the two collections stay
+ *     separate and only the SIGNAL merges them;
  *   * push-driven refreshes are DEBOUNCED (trailing 2s): a 100-run loop emits
  *     100 `loop_run_completed` events, and each would otherwise cost every
  *     participant a canvas + documents round trip.
@@ -44,6 +47,12 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
 
   let _fetchToken = 0
   let _debounceTimer = null
+  // #2582 — `noteUpload`'s coalescing state. Leading AND trailing: a second
+  // note that arrives while a read is in flight must NOT join that read (its
+  // listing was snapshotted before the second file landed), it must queue one
+  // more read after it. `_notePending` is the per-agent trailing set.
+  const _noteInFlight = new Set()
+  const _notePending = new Set()
 
   const canvasCount = computed(() => Object.values(canvases.value).reduce((n, l) => n + l.length, 0))
   const documentCount = computed(() => Object.values(documents.value).reduce((n, l) => n + l.length, 0))
@@ -63,6 +72,8 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     hasLoaded.value = false
     error.value = null
     _fetchToken++
+    _noteInFlight.clear()
+    _notePending.clear()
   }
 
   function setFeeds({ canvas = false, files = false } = {}) {
@@ -137,23 +148,54 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
   }
 
   /**
+   * Re-read ONE participant's inbox after a file landed in it (#2582).
+   *
+   * Three properties, each of which a simpler shape gets wrong:
+   *
+   *   * it SHARES `_fetchToken` with `refresh()`. Without that, a
+   *     `refresh({uploads: true})` issued before the upload but resolving after
+   *     this read would clobber the fresh listing with the pre-upload one — and
+   *     it rebuilds `nextUploads` from a snapshot taken after its own awaits,
+   *     so the clobber is silent.
+   *   * it coalesces LEADING and TRAILING. A note arriving while a read is in
+   *     flight cannot join that read: the listing was taken before the newer
+   *     file existed, which is defect 1 reproduced exactly. It queues one more
+   *     read instead.
+   *   * it is a no-op for an agent that is not a participant, and it re-checks
+   *     that AFTER the await, because the chat can switch mid-read.
+   */
+  async function noteUpload(agentName) {
+    if (!agentName || !participants.value.includes(agentName)) return
+    if (_noteInFlight.has(agentName)) { _notePending.add(agentName); return }
+    _noteInFlight.add(agentName)
+    const portal = useClientPortalStore()
+    const token = ++_fetchToken
+    try {
+      const rows = await portal.fetchUploads(agentName)
+      if (token !== _fetchToken) return          // a newer read (or a chat switch) already won
+      if (!participants.value.includes(agentName)) return
+      uploads.value = { ...uploads.value, [agentName]: Array.isArray(rows) ? rows : [] }
+      uploadsLoaded.value = { ...uploadsLoaded.value, [agentName]: true }
+      version.value++
+    } catch { /* the upload succeeded; the list catches up on the next read */
+    } finally {
+      _noteInFlight.delete(agentName)
+      if (_notePending.delete(agentName)) void noteUpload(agentName)
+    }
+  }
+
+  /**
    * Send a file to a participant, then re-read that agent's inbox. Rethrows so
-   * the body can show the server's named reason next to the control (#1926);
-   * the inbox re-read is skipped if the chat moved on while the upload ran.
+   * the body can show the server's named reason next to the control (#1926).
+   *
+   * The re-read is `noteUpload`'s, not its own: `uploadDocument` already queues
+   * the agent for the rail owner (#2582), so a second implementation here would
+   * be a second listing racing the first.
    */
   async function upload(agentName, file) {
     const portal = useClientPortalStore()
     const res = await portal.uploadDocument(agentName, file)
-    if (participants.value.includes(agentName)) {
-      try {
-        const rows = await portal.fetchUploads(agentName)
-        if (participants.value.includes(agentName)) {
-          uploads.value = { ...uploads.value, [agentName]: Array.isArray(rows) ? rows : [] }
-          uploadsLoaded.value = { ...uploadsLoaded.value, [agentName]: true }
-          version.value++
-        }
-      } catch { /* the upload succeeded; the list catches up on the next read */ }
-    }
+    await noteUpload(agentName)
     return res
   }
 
@@ -178,6 +220,8 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
 
   function clear() {
     if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null }
+    _noteInFlight.clear()
+    _notePending.clear()
     participants.value = []
     feeds.value = { canvas: false, files: false }
     canvases.value = {}
@@ -193,7 +237,7 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
   return {
     participants, feeds, canvases, documents, uploads, uploadsLoaded,
     hasLoaded, loading, error, version, canvasCount, documentCount,
-    setParticipants, setFeeds, refresh, scheduleRefresh, upload,
+    setParticipants, setFeeds, refresh, scheduleRefresh, upload, noteUpload,
     handleWebSocketEvent, clear,
   }
 })
