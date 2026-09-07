@@ -343,17 +343,86 @@ def test_the_portal_leg_waits_for_an_in_flight_turn_before_writing():
     assert "get_turn_inflight" in fn
 
 
+def _deliver_fn():
+    """The `deliver` coroutine inside `_resolve_portal`, as an AST node.
+
+    Parsed, not sliced. Two earlier revisions of these tests cut the source on a
+    neighbouring token — `def _write()` (which then moved) and `except Exception`
+    (which appears inside the cancel handler's own COMMENT explaining why it does
+    not catch) — and both failed for reasons unrelated to what they assert. The
+    same trap the ent#499 emitter guard hit. A structure question deserves a
+    structural read.
+    """
+    src = (REPO / "src/backend/services/channel_completion_report.py").read_text()
+    tree = ast.parse(src)
+    resolve = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "_resolve_portal")
+    return next(n for n in ast.walk(resolve)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "deliver")
+
+
+def _cancel_handler(fn):
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Try):
+            continue
+        for h in node.handlers:
+            name = ast.dump(h.type or ast.Constant(None))
+            if "CancelledError" in name:
+                return h
+    return None
+
+
 def test_the_wait_is_bounded_and_never_drops_the_report():
-    """A wait that could refuse would trade a cosmetic misread for a lost brief,
-    which is much worse."""
+    """A wait that could refuse would trade a cosmetic misread for a lost brief."""
     src = (REPO / "src/backend/services/channel_completion_report.py").read_text()
     assert re.search(r"_INFLIGHT_WAIT_SECONDS\s*=\s*\d", src)
-    fn = src[src.index("async def deliver() -> bool:"):]
-    body = fn[:fn.index("def _write()")]
-    # The loop must have a `while ... < budget` bound and no early `return False`
-    # on the timeout path.
-    assert "while waited < _INFLIGHT_WAIT_SECONDS" in body
-    assert "return False" not in body
+
+    fn = _deliver_fn()
+    whiles = [n for n in ast.walk(fn) if isinstance(n, ast.While)]
+    assert whiles, "the in-flight wait loop is gone"
+    bounded = any("_INFLIGHT_WAIT_SECONDS" in ast.dump(w.test) for w in whiles)
+    assert bounded, "the wait loop lost its budget and can spin forever"
+
+    # No early exit that would drop the report on the timeout path. `deliver`
+    # legitimately returns False on a FAILED WRITE further down; what must not
+    # exist is a `return` inside the wait loop itself.
+    for w in whiles:
+        assert not [n for n in ast.walk(w) if isinstance(n, ast.Return)], (
+            "the wait loop returns early — a deferred report became a dropped one"
+        )
+
+
+def test_a_cancellation_writes_inline_rather_than_planning_on_another_await():
+    """The cancel path cannot rely on falling through to `await to_thread(_write)`:
+    the task is being cancelled because the loop is going away, so planning to
+    reach another await point is planning on the thing that just stopped being
+    available. It writes synchronously, then re-raises — swallowing a
+    cancellation would leave the task running against a closing loop."""
+    fn = _deliver_fn()
+    handler = _cancel_handler(fn)
+    assert handler is not None, (
+        "no CancelledError handler — it is a BaseException, so `except Exception` "
+        "does not catch it and a restart mid-wait loses the report"
+    )
+
+    calls = {n.func.id for n in ast.walk(handler)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_write" in calls, "the cancel path does not write the report"
+
+    assert [n for n in ast.walk(handler) if isinstance(n, ast.Raise)], (
+        "a swallowed cancellation leaves the task running against a closing loop"
+    )
+    # And the write must not be awaited here — an await is the one thing a
+    # cancelled task cannot count on reaching.
+    assert not [n for n in ast.walk(handler) if isinstance(n, ast.Await)], (
+        "the cancel path awaits; it must write synchronously"
+    )
+
+    # `_write` has to be DEFINED before the handler, or the call is a NameError
+    # at exactly the moment it matters.
+    write_def = next(n for n in ast.walk(fn)
+                     if isinstance(n, ast.FunctionDef) and n.name == "_write")
+    assert write_def.lineno < handler.lineno
 
 
 def test_schedule_is_still_not_an_inline_trigger():

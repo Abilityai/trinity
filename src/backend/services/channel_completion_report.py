@@ -414,6 +414,21 @@ def _resolve_portal(
         import uuid as _uuid
         from utils.helpers import utc_now_iso
 
+        def _write() -> None:
+            now = utc_now_iso()
+            portal_db.add_portal_message(
+                _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
+                None, now, session_id=chat_id,
+            )
+            # Every other writer of a portal message touches its session, and
+            # this one has to for the same reason: `last_message_at` is what
+            # orders the sidebar. The unread badge is safe either way — ent#359
+            # counts message ROWS against a read cursor — but a badge on a
+            # thread that has not moved is a notification pointing at the middle
+            # of a list. A report nobody notices is the same silence this
+            # contract exists to end.
+            portal_db.touch_portal_session(chat_id, now, added=1)
+
         # ent#498 C9: never interleave with an in-flight turn on this thread.
         #
         # `PortalConversation` detects a reply by an assistant-row count delta
@@ -454,33 +469,33 @@ def _resolve_portal(
         except asyncio.CancelledError:
             # `CancelledError` is a BaseException, so `except Exception` below
             # does NOT catch it — and a backend restart landing inside the wait
-            # would have unwound the effect guard with the terminal already
-            # applied and nothing to re-apply it. The report would be silently
-            # lost, which is exactly what the "never dropped, only deferred"
-            # claim above promises cannot happen. Fall through and WRITE: a
-            # report that lands beside an in-flight turn is a cosmetic misread,
-            # a report that never lands is the failure this contract exists to
-            # prevent.
+            # unwinds the effect guard with the terminal already applied and
+            # nothing to re-apply it. The report is silently lost, which is
+            # exactly what the "never dropped, only deferred" claim above
+            # promises cannot happen.
+            #
+            # Written SYNCHRONOUSLY here, not by falling through to the
+            # `to_thread` below: this task is being cancelled because the loop is
+            # going away, so planning to reach another await point is planning on
+            # the thing that just stopped being available. One blocking write on a
+            # dying loop is the right trade against losing the brief.
+            #
+            # Then re-raise. Swallowing a cancellation leaves the task running
+            # against a closing loop, and the caller's shutdown path is entitled
+            # to its exception.
             logger.info("[ent#498] in-flight wait cancelled for session %s — "
-                        "delivering now rather than losing the report", chat_id)
+                        "writing the report inline before unwinding", chat_id)
+            try:
+                _write()
+            except Exception:  # noqa: BLE001 — nothing left to salvage it with
+                logger.exception(
+                    "[ent#498] inline delivery on cancel failed for session %s "
+                    "(execution %s)", chat_id, execution_id)
+            raise
         except Exception as e:  # noqa: BLE001 — a wait must never lose a report
             logger.warning("[ent#498] in-flight wait failed for session %s: %s",
                            chat_id, e)
 
-        def _write() -> None:
-            now = utc_now_iso()
-            portal_db.add_portal_message(
-                _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
-                None, now, session_id=chat_id,
-            )
-            # Every other writer of a portal message touches its session, and
-            # this one has to for the same reason: `last_message_at` is what
-            # orders the sidebar. The unread badge is safe either way — ent#359
-            # counts message ROWS against a read cursor — but a badge on a
-            # thread that has not moved is a notification pointing at the middle
-            # of a list. A report nobody notices is the same silence this
-            # contract exists to end.
-            portal_db.touch_portal_session(chat_id, now, added=1)
 
         try:
             # Review finding: these are synchronous SQLAlchemy writes, and they
