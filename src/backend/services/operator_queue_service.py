@@ -141,6 +141,16 @@ _TRIGGERED_BY_RE = re.compile(r"[a-z0-9_]{1,32}")
 # Valid priority values — an agent-supplied unknown collapses to "medium".
 _VALID_PRIORITIES = {"critical", "high", "medium", "low"}
 
+# Reserved id prefix for role-assignment drift alerts (trinity-enterprise#500).
+# A NAMED public constant rather than a bare literal in the emitter, because the
+# emitter is CROSS-REPO: the registered module that raises these items imports
+# this name, so the reservation below and the id it produces cannot drift apart
+# across two repositories. (The house convention puts the constant in the
+# emitter's own module — `BASE_IMAGE_STALE_ALERT_PREFIX` in
+# `system_agent_service.py`. This is the deliberate deviation, and the reason is
+# exactly that the emitter is not in this repo.)
+ROLE_DRIFT_ALERT_PREFIX = "role-drift-"
+
 # Platform-reserved id prefixes an agent must NOT author. If it could, it would
 # pre-create — and via create_item's on_conflict_do_nothing, silently suppress —
 # its own flood alarm or the #1402 poison alert (C2). Verified against source
@@ -165,6 +175,10 @@ _RESERVED_ID_PREFIXES = (
     "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
                            # so an agent cannot pre-create the id of a complaint
                            # ABOUT ITSELF and silence it through ON CONFLICT
+    ROLE_DRIFT_ALERT_PREFIX,  # role-assignment drift (trinity-enterprise#500) —
+                           # the role file lives in the AGENT'S OWN workspace, so
+                           # an unreserved prefix would let it pre-create the id
+                           # of the alert about its own configuration
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
