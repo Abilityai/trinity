@@ -54,11 +54,27 @@ name: Alembic head watch
 # with DRY_RUN on, publishing nothing. Fork-safe by construction: a fork PR's
 # read-only GITHUB_TOKEN is never asked to write.
 #
+# AND IT HAS TO TEST *THIS PR'S* VERDICT MODULE, NOT DEV'S. The module is
+# `require()`d from the workspace and the workspace is `dev`, so a self-test
+# that only ever loads dev's copy never exercises the change it exists to
+# rehearse — and on the PR that ADDS the file it cannot run at all. A second,
+# SPARSE checkout of `scripts/ci` into a side path supplies the PR's copy, and
+# only when BOTH hold: the event is `pull_request`, and the head repo is this
+# repo. A fork keeps dev's copy, so the "no PR-authored code runs" claim below
+# holds verbatim for exactly the case it was written for — and two independent
+# belts make it moot anyway (a fork's GITHUB_TOKEN is read-only, and DRY_RUN is
+# forced on for this event, so `verdictFor` returns {status: null, comment:
+# null} on every branch). The PYTHON GUARD is never sourced this way: it is the
+# assertion `dev` enforces and always comes from the dev workspace.
+#
 # ONE JOB, AND WHY THAT IS NOT A WEAKENED COPY OF backend-unit-nightly.yml.
 # That workflow splits discover → test → comment because it runs PYTEST ON PR
 # CODE, which must never share a job with a write-capable token. That
 # constraint does not exist here:
-#   * the workspace is `dev` only — the PR is NEVER checked out;
+#   * the workspace the guard runs in is `dev` only — a PR's revision files
+#     are never checked out into it (the same-repo self-test's sparse
+#     `scripts/ci` checkout lands in a side path, is `pull_request`-only, and
+#     publishes nothing);
 #   * `git merge-tree --write-tree` "does not make any new commits and does not
 #     read from or write to either the working tree or index" (git's own docs),
 #     so this workflow structurally cannot push;
@@ -97,10 +113,14 @@ on:
 permissions: {}
 
 concurrency:
-  group: alembic-head-watch
-  # NOT cancel-in-progress: a cancelled run publishes nothing, and the verdicts
-  # it would have refreshed then stay stale until the next trigger. The run is
-  # short enough that overlap is cheaper than silence.
+  # KEYED ON THE EVENT (#2533 M4). `cancel-in-progress: false` does not queue:
+  # GitHub cancels any *pending* run in the group and puts the new one in its
+  # place. Between two `push` runs that is harmless — each sweep re-evaluates
+  # every open PR against the current tip, so a later run subsumes an earlier
+  # one. ACROSS events it is not: a `pull_request` self-test, which publishes
+  # nothing, would evict a pending `push` run, which does. Separate groups, so
+  # a dry run can never silence a real one.
+  group: alembic-head-watch-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -120,7 +140,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - name: Checkout dev (the PR is never checked out)
+      - name: Checkout dev (the PR's revision files are never checked out)
         uses: actions/checkout@v7
         with:
           ref: dev
@@ -132,16 +152,46 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The self-test's own module, from the PR head — see the header. Sparse
+      # and into a side path so it cannot clobber the dev workspace the guard
+      # and the merge base both come from. Same-repo only; a fork gets dev's.
+      - name: Checkout this PR's scripts/ci (same-repo self-test only)
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .pr-scripts
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+
       - name: Baseline — dev itself resolves to one head
         id: base
         run: |
           set -euo pipefail
-          for f in scripts/ci/check_alembic_heads.py scripts/ci/alembic-head-verdict.js; do
-            if [ ! -f "$f" ]; then
-              echo "::error::$f is missing from dev — the watcher cannot run without it."
-              exit 1
-            fi
-          done
+          if [ ! -f scripts/ci/check_alembic_heads.py ]; then
+            echo "::error::scripts/ci/check_alembic_heads.py is missing from dev — the watcher cannot run without it."
+            exit 1
+          fi
+
+          # Which verdict module publishes. Dev's, always — EXCEPT on the
+          # `pull_request` self-test, which is dry-run and whose whole purpose
+          # is to execute the copy this PR proposes (including the PR that adds
+          # the file, which dev by definition does not have yet).
+          verdict="$GITHUB_WORKSPACE/scripts/ci/alembic-head-verdict.js"
+          pr_verdict="$GITHUB_WORKSPACE/.pr-scripts/scripts/ci/alembic-head-verdict.js"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -f "$pr_verdict" ]; then
+            verdict="$pr_verdict"
+            echo "Self-test: verdict module sourced from this PR's head."
+          fi
+          if [ ! -f "$verdict" ]; then
+            echo "::error::scripts/ci/alembic-head-verdict.js is missing from dev — the watcher cannot publish without it."
+            exit 1
+          fi
+          echo "verdict_module=$verdict" >> "$GITHUB_OUTPUT"
 
           # The SAME invocation schema-parity makes, including the enterprise
           # arm, which is inert on public CI (the private submodule is never
@@ -172,8 +222,13 @@ jobs:
 
           # Parsed without matching the em-dash in the guard's own PASS line.
           # First match is the OSS line, which is the first positional arg.
+          # `|| true` is load-bearing: this runs under `set -euo pipefail`, so
+          # if the guard's wording ever changes (or the OSS line skips) grep
+          # exits 1, pipefail propagates, and the step dies with no diagnostic
+          # on a perfectly healthy `dev` — while the `<unparsed>` fallback two
+          # lines down, which exists for exactly that case, never prints.
           dev_head=$(printf '%s\n' "$out" | grep -o '1 head ([^)]*)' | head -1 \
-                     | sed 's/^1 head (//; s/)$//')
+                     | sed 's/^1 head (//; s/)$//' || true)
           echo "dev_head=$dev_head" >> "$GITHUB_OUTPUT"
           echo "dev head: ${dev_head:-<unparsed>}"
 
@@ -261,6 +316,12 @@ jobs:
           set -euo pipefail
           mkdir -p verdicts
 
+          # merge-tree's streams go to FILES, never through a pipe — see the
+          # exit-contract comment in the loop.
+          mt=$(mktemp -d)
+          mt_out="$mt/merge-tree.out"
+          mt_err="$mt/merge-tree.err"
+
           write_verdict() {
             jq -n --argjson pr "$1" --arg head_sha "$2" --arg outcome "$3" \
                   --arg detail "$4" --arg dev_head "${DEV_HEAD:-}" --arg run_url "$RUN_URL" \
@@ -283,17 +344,32 @@ jobs:
             fi
             head_sha=$(git rev-parse "refs/watch/pr-$n")
 
-            # git's documented exit contract: 0 = clean, 1 = conflicts, anything
-            # else = could not complete. That distinguishes "this PR conflicts"
-            # from "the infrastructure failed" NATIVELY — no `--diff-filter=U`
+            # git's exit contract: 0 = clean, 1 = conflicts, anything else =
+            # could not complete. That distinguishes "this PR conflicts" from
+            # "the infrastructure failed" NATIVELY — no `--diff-filter=U`
             # heuristic, which is what backend-unit-nightly.yml got wrong in
             # #1941 and reported as a conflict for 9 of 9 open PRs.
+            #
+            # BUT 1 IS OVERLOADED, and the documented contract alone is not
+            # enough (measured on git 2.50.1): an unresolvable ref ALSO exits 1
+            # — with EMPTY stdout — while a real conflict exits 1 with the
+            # merged tree's OID on line 1. Taking exit 1 as "conflict" answers
+            # an infrastructure fault with a sticky comment telling an innocent
+            # author their PR conflicts. The tree OID is the discriminator.
+            #
+            # NO PIPELINE, deliberately. `tree=$(git … | head -1); rc=$?` reads
+            # merge-tree's exit only because `pipefail` survives `set +e`; drop
+            # pipefail and a CONFLICTING PR is classified clean and published as
+            # a green status for a check that never ran. `head -1` can also
+            # SIGPIPE (rc=141) into the error arm. Redirecting to files removes
+            # both, and keeps stderr for the warning instead of /dev/null-ing it.
             set +e
-            tree=$(git merge-tree --write-tree HEAD "refs/watch/pr-$n" 2>/dev/null | head -1)
+            git merge-tree --write-tree HEAD "refs/watch/pr-$n" >"$mt_out" 2>"$mt_err"
             rc=$?
             set -e
+            tree=$(head -1 "$mt_out")
 
-            if [ "$rc" -eq 1 ]; then
+            if [ "$rc" -eq 1 ] && [ -n "$tree" ]; then
               # A conflicting PR shows ZERO checks anyway — GitHub cannot
               # compute refs/pull/N/merge either. Report "cannot evaluate",
               # never a verdict.
@@ -302,7 +378,10 @@ jobs:
               echo "::endgroup::"; continue
             fi
             if [ "$rc" -ne 0 ]; then
-              echo "::warning::PR #$n — git merge-tree exited $rc (neither clean nor conflicted); no verdict written."
+              # Exit 1 with no tree lands here too — an unresolvable ref, not a
+              # conflict. "Cannot evaluate" is the honest answer for both.
+              echo "::warning::PR #$n — git merge-tree exited $rc without a merged tree; no verdict written."
+              sed 's/^/  merge-tree: /' "$mt_err" || true
               write_verdict "$n" "$head_sha" unknown ""
               echo "::endgroup::"; continue
             fi
@@ -333,6 +412,15 @@ jobs:
               mkdir -p "$ent"
               git archive "$tree:src/backend/enterprise/backend/migrations/versions" | tar -x -C "$ent" || true
             fi
+
+            # `git archive` can emit symlinks, and the guard globs `*.py` and
+            # `read_text()`s whatever it finds — so a link at an unbounded
+            # source can hang or OOM a job that holds write scopes. Disclosure
+            # is already closed (the guard prints revision ids and filenames,
+            # never file content); this closes the RESOURCE path. Nothing in a
+            # version line needs a symlink, and dropping them here keeps
+            # `check_alembic_heads.py` unmodified, which #2533 requires.
+            find "$work" -type l -delete
 
             # Bounds PARSING, not extraction (the tree is already on disk by
             # here, and bounded by the repo itself). A version line this large
@@ -374,12 +462,17 @@ jobs:
         # step after the baseline step failed.
         if: always() && steps.discover.outputs.has_prs == 'true'
         uses: actions/github-script@v9
+        env:
+          # Dev's copy, except on the same-repo `pull_request` self-test — see
+          # the header. Resolved once, by the baseline step.
+          VERDICT_MODULE: ${{ steps.base.outputs.verdict_module }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const { verdictFor, MARKER } = require(
-              `${process.env.GITHUB_WORKSPACE}/scripts/ci/alembic-head-verdict.js`
+            const { verdictFor, stickyBodiesMatch, MARKER } = require(
+              process.env.VERDICT_MODULE ||
+                `${process.env.GITHUB_WORKSPACE}/scripts/ci/alembic-head-verdict.js`
             );
             const dryRun = process.env.DRY_RUN === 'true';
             const dir = `${process.env.GITHUB_WORKSPACE}/verdicts`;
@@ -404,6 +497,7 @@ jobs:
             }
 
             const lines = [];
+            const mute = [];
             for (const file of files.sort()) {
               let result;
               try {
@@ -412,61 +506,99 @@ jobs:
                 core.warning(`unreadable verdict ${file}: ${err.message}`);
                 continue;
               }
-              try {
-                const v = verdictFor({ ...result, dryRun });
-                lines.push(`- ${v.summary}`);
 
-                if (v.status) {
+              let v;
+              try {
+                v = verdictFor({ ...result, dryRun });
+              } catch (err) {
+                // One PR's failure must not take out the rest of the sweep.
+                core.warning(`PR #${result.prNumber}: verdict failed: ${err.message}`);
+                continue;
+              }
+              lines.push(`- ${v.summary}`);
+
+              // THE STATUS AND THE COMMENT ARE SEPARATE SIGNALS WITH SEPARATE
+              // FAILURE DOMAINS, so they get separate try/catch (#2533 M7).
+              // Sharing one meant a throwing status call skipped the comment
+              // entirely — on `fork`, the one outcome this whole workflow
+              // exists to be seen on, the human would then see NOTHING while
+              // the run still passed.
+              let published = 0;
+
+              if (v.status) {
+                try {
                   await github.rest.repos.createCommitStatus({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     sha: result.headSha,
                     ...v.status,
                   });
+                  published += 1;
+                } catch (err) {
+                  core.warning(`PR #${result.prNumber}: commit status failed: ${err.message}`);
                 }
+              }
 
-                if (!v.comment) continue;
-
-                // Bot-author filter is REQUIRED: without it a user comment that
-                // quotes the marker matches, and updateComment then 403s
-                // (a bot may only edit its own comments) so the real sticky is
-                // never created. backend-unit-nightly.yml already paid for this.
-                const existing = await github.paginate(github.rest.issues.listComments, {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: result.prNumber,
-                  per_page: 100,
-                });
-                const sticky = existing.find(
-                  (c) =>
-                    (c.body || '').includes(MARKER) &&
-                    c.user &&
-                    (c.user.type === 'Bot' || c.user.login === 'github-actions[bot]')
-                );
-
-                if (sticky) {
-                  if (sticky.body === v.comment.body) {
-                    core.info(`PR #${result.prNumber}: comment unchanged, skipping.`);
-                  } else {
-                    await github.rest.issues.updateComment({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      comment_id: sticky.id,
-                      body: v.comment.body,
-                    });
-                  }
-                } else if (v.createIfMissing) {
-                  await github.rest.issues.createComment({
+              if (v.comment) {
+                try {
+                  // Bot-author filter is REQUIRED: without it a user comment
+                  // that quotes the marker matches, and updateComment then 403s
+                  // (a bot may only edit its own comments) so the real sticky is
+                  // never created. backend-unit-nightly.yml already paid for this.
+                  const existing = await github.paginate(github.rest.issues.listComments, {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     issue_number: result.prNumber,
-                    body: v.comment.body,
+                    per_page: 100,
                   });
+                  const sticky = existing.find(
+                    (c) =>
+                      (c.body || '').includes(MARKER) &&
+                      c.user &&
+                      (c.user.type === 'Bot' || c.user.login === 'github-actions[bot]')
+                  );
+
+                  if (sticky) {
+                    // `stickyBodiesMatch`, not `===`: the footer carries this
+                    // run's URL, which is unique per run, so literal equality
+                    // is unreachable and the "skip if unchanged" branch would
+                    // be dead code (#2533 M8).
+                    if (stickyBodiesMatch(sticky.body, v.comment.body)) {
+                      core.info(`PR #${result.prNumber}: comment unchanged, skipping.`);
+                    } else {
+                      await github.rest.issues.updateComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        comment_id: sticky.id,
+                        body: v.comment.body,
+                      });
+                    }
+                    published += 1;
+                  } else if (v.createIfMissing) {
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: result.prNumber,
+                      body: v.comment.body,
+                    });
+                    published += 1;
+                  }
+                  // else: clean and never flagged — deliberately no comment.
+                } catch (err) {
+                  core.warning(`PR #${result.prNumber}: sticky comment failed: ${err.message}`);
                 }
-                // else: clean and never flagged — deliberately no comment.
-              } catch (err) {
-                // One PR's failure must not take out the rest of the sweep.
-                core.warning(`PR #${result.prNumber}: ${err.message}`);
+              }
+
+              // Bad news that reached nobody is the same as no run at all, and
+              // the run must say so rather than passing (#2462). `clean` and
+              // `unknown` are excluded on purpose: one has nothing urgent to
+              // say, the other deliberately says nothing.
+              if (
+                !dryRun &&
+                (result.outcome === 'fork' || result.outcome === 'conflict') &&
+                published === 0
+              ) {
+                mute.push(result.prNumber);
               }
             }
 
@@ -479,3 +611,10 @@ jobs:
               )
               .addRaw(lines.join('\n'))
               .write();
+
+            if (mute.length) {
+              core.setFailed(
+                `Neither the commit status nor the sticky comment could be published for ` +
+                `PR(s) ${mute.map((n) => `#${n}`).join(', ')} — the finding reached nobody (#2533).`
+              );
+            }

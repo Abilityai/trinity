@@ -143,6 +143,30 @@ function footer({ headSha, runUrl }) {
   return parts.join(' · ');
 }
 
+/** Matches the run id inside an Actions run URL — the only per-run token in a body. */
+const RUN_ID_IN_URL = /(\/actions\/runs\/)\d+/g;
+
+/**
+ * Is an existing sticky already saying the same thing as the new body?
+ *
+ * Load-bearing, and not `===` (#2533 M8). `footer()` embeds this run's URL,
+ * whose id is unique to every run, so literal equality is UNREACHABLE — the
+ * caller's "skip if unchanged" branch would be dead code and a flagged PR's
+ * sticky would be rewritten on every sweep (~5/day), re-rendering a comment
+ * that has not changed. Normalising the run id away makes the documented
+ * behaviour real while keeping the link in the body, where a `conflict` — which
+ * deliberately posts no status, so no `target_url` — has no other way to point
+ * at the run that produced it.
+ *
+ * @param {string} existingBody body currently on the PR
+ * @param {string} nextBody     body this run would write
+ * @returns {boolean} true when the only difference is which run wrote it
+ */
+function stickyBodiesMatch(existingBody, nextBody) {
+  const normalise = (body) => String(body || '').replace(RUN_ID_IN_URL, '$1<run>');
+  return normalise(existingBody) === normalise(nextBody);
+}
+
 /**
  * Decide what to publish for one evaluated PR.
  *
@@ -231,4 +255,11 @@ function verdictFor(result) {
   return nothing(`PR #${prNumber}: unrecognised outcome ${JSON.stringify(outcome)} — published nothing`);
 }
 
-module.exports = { verdictFor, parseGuardOutput, MARKER, CONTEXT, MAX_DESCRIPTION };
+module.exports = {
+  verdictFor,
+  parseGuardOutput,
+  stickyBodiesMatch,
+  MARKER,
+  CONTEXT,
+  MAX_DESCRIPTION,
+};
