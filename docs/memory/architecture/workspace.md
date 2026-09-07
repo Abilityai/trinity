@@ -206,8 +206,9 @@ the ruling must never be inferred later from the mere fact that it merged.** See
 
 **Voice mode — the orb takes the conversation (ent#534; supersedes ent#440).** The
 Workspace's voice is the platform's **real-time voice session** (`routers/voice.py` +
-`services/gemini_voice.py`, the Agent Detail orb `VoiceOverlay` + `useVoiceSession`,
-reused not forked), run as a **modal call** inside the conversation: the orb covers the
+`services/gemini_voice.py`, the platform orb `VoiceOverlay` + `useVoiceSession`,
+reused not forked — and **since #2559 the Workspace is its only consumer**), run as a
+**modal call** inside the conversation: the orb covers the
 thread, the header controls / tabs / composer are visible but inert, the shell swaps the
 rail for the agent's canvas (`PortalVoiceCanvas`, 40/60), and End / Escape returns to the
 chat. It is bound to the **Workspace thread**: `POST

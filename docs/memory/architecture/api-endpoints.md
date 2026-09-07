@@ -87,12 +87,15 @@
 **Note**: Route ordering is critical — static routes (`/context-stats`, `/autonomy-status`) must be defined BEFORE the `/{name}` catch-all (Invariant #4).
 
 ### Voice (9 endpoints)
+
+**No first-party frontend caller since #2559** for `POST …/voice/start`, `POST …/voice/stop` and `GET …/voice/status`: the retired Agent Detail chat-panel overlay was the only one, and the Workspace starts through `POST /api/enterprise/client-portal/agents/{name}/voice/start` instead. The routes are **kept** (test-pinned by `test_voice_auth.py` and `test_ent279_scrub_parity.py`; retiring them is a follow-up after a release), and `/ws/voice/{id}`, `/voice/prompt`, `/voice/name` and `/voice/{session_id}/panel` are shared by both start paths and stay live.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/agents/{name}/voice/start` | Start Gemini Live voice session; `workspace_mode` enables panel tools. Resolves voice as request override → persisted `voice_name` → `Kore` (#28) |
-| POST | `/api/agents/{name}/voice/stop` | Stop active voice session |
+| POST | `/api/agents/{name}/voice/start` | Start Gemini Live voice session; `workspace_mode` enables panel tools. Resolves voice as request override → persisted `voice_name` → `Kore` (#28). Caller-less since #2559 |
+| POST | `/api/agents/{name}/voice/stop` | Stop active voice session. Caller-less since #2559 (the Workspace passes `restStop: false` — its bridge closes the call on the socket) |
 | GET/PUT | `/api/agents/{name}/voice/prompt` | Get/set per-agent voice system prompt |
-| GET/PUT | `/api/agents/{name}/voice/name` | Get (any accessor; returns `available_voices`/`default_voice`) / set (owner-only; 400 on a voice outside `GEMINI_VOICE_NAMES`) the persisted per-agent Gemini voice. Applies to both the voice overlay/workspace and outbound VoIP calls (#28) |
+| GET/PUT | `/api/agents/{name}/voice/name` | Get (any accessor; returns `available_voices`/`default_voice`) / set (owner-only; 400 on a voice outside `GEMINI_VOICE_NAMES`) the persisted per-agent Gemini voice. Applies to both the Workspace voice call and outbound VoIP calls (#28) |
 | GET | `/api/agents/{name}/voice/{session_id}/panel` | Canvas panel state for workspace mode (ownership-gated; empty state when session gone, #699) |
 
 ### VoIP Telephony (VOIP-001, #1056 — flag-gated, default OFF)
