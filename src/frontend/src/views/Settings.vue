@@ -39,9 +39,14 @@
         </div>
 
         <!-- Loading State -->
-        <div v-if="loading" class="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900 p-8 text-center">
-          <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-600 mx-auto"></div>
-          <p class="mt-4 text-gray-500 dark:text-gray-400">Loading settings...</p>
+        <!-- #1921: card-shaped, so the page keeps its footprint while settings
+             load rather than collapsing to a centred ring and jumping. -->
+        <div v-if="loading" class="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900 p-8 space-y-4" aria-busy="true">
+          <div class="h-5 w-1/4 rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-10 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-10 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <div class="h-10 w-3/4 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+          <span class="sr-only">Loading settings…</span>
         </div>
 
         <!-- Settings Content -->
@@ -1373,7 +1378,7 @@ Example:
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingWhitelist">
                         <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                          <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                         </td>
                       </tr>
                       <tr v-else-if="emailWhitelist.length === 0">
@@ -1487,7 +1492,7 @@ Example:
                   <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     <tr v-if="loadingUsers">
                       <td :colspan="umEntitled ? 5 : 4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                        <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                        <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                       </td>
                     </tr>
                     <tr v-else-if="usersList.length === 0">
@@ -1552,7 +1557,7 @@ Example:
 
               <div class="p-5">
                 <div v-if="activityLoading" class="text-center py-8">
-                  <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                  <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                 </div>
                 <div v-else-if="activityError" class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ activityError }}</div>
                 <template v-else-if="activityData">
@@ -1711,7 +1716,7 @@ Example:
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingGithubTemplates">
                         <td colspan="3" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
+                          <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                         </td>
                       </tr>
                       <!-- #1931: dropped "or reset to defaults" — the Reset

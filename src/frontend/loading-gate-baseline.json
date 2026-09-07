@@ -18,7 +18,6 @@
     "src/frontend/src/components/CredentialsPanel.vue": 2,
     "src/frontend/src/components/FilesPanel.vue": 1,
     "src/frontend/src/components/FoldersPanel.vue": 1,
-    "src/frontend/src/components/GitPanel.vue": 1,
     "src/frontend/src/components/GuardrailsPanel.vue": 1,
     "src/frontend/src/components/HelpChatWidget.vue": 1,
     "src/frontend/src/components/McpExposedPanel.vue": 1,
@@ -51,7 +50,6 @@
     "src/frontend/src/components/settings/TwoFactorPanel.vue": 1,
     "src/frontend/src/components/systems/SystemInstallPanel.vue": 1,
     "src/frontend/src/views/AgentDetail.vue": 1,
-    "src/frontend/src/views/Dashboard.vue": 1,
     "src/frontend/src/views/ExecutionDetail.vue": 1,
     "src/frontend/src/views/Login.vue": 1,
     "src/frontend/src/views/PublicChat.vue": 4,
@@ -60,7 +58,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 71,
-    "files_with_gates": 55
+    "bare_loading_gates": 69,
+    "files_with_gates": 53
   }
 }

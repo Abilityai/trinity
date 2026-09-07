@@ -301,9 +301,11 @@
          spinner height and the browser clamped window.scrollY to 0, so toggling
          a row threw the page back to the top. Matches ExecutionsPanel /
          LoopsPanel / TasksPanel / ReportsPanel / RoomsRail / CompatibilityPanel. -->
-    <div v-if="loading && schedules.length === 0" class="text-center py-8">
-      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading schedules...</p>
+    <!-- #1921: row-shaped, in the list's own footprint. The gate is already
+         "no data yet" and is unchanged. -->
+    <div v-if="loading && schedules.length === 0" class="p-4" aria-busy="true">
+      <SkeletonLoader variant="rows" :count="4" height="3.5rem" gap="0.5rem" />
+      <span class="sr-only">Loading schedules…</span>
     </div>
 
     <!-- Failed list fetch (#1926) — "No schedules configured" on a failed fetch
@@ -594,8 +596,10 @@
 
         <!-- ent#77: Webhook configuration panel -->
         <div v-if="webhookOpen === schedule.id" class="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3 space-y-3 text-sm">
-          <div v-if="wh(schedule).loading" class="text-center py-3">
-            <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-action-primary-500 mx-auto"></div>
+          <div v-if="wh(schedule).loading" class="py-3 space-y-2" aria-busy="true">
+            <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+            <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+            <span class="sr-only">Loading…</span>
           </div>
 
           <template v-else>
@@ -914,6 +918,7 @@
 </template>
 
 <script setup>
+import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { formatCost } from '../composables/useFormatters'
 import axios from 'axios'

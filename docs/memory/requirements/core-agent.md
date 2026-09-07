@@ -2164,3 +2164,40 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   person's primary is. `orderRosterAgents` keeps its tested `primaryName`
   parameter and the sidebar passes `null`, because a guessed primary would be a
   confident wrong answer where an empty seam is merely incomplete.
+
+### 5.28 One non-chart loading treatment — the skeleton sweep (#1921)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: UI_SKELETON_SWEEP
+- **GitHub Issue**: abilityai/trinity#1921
+- **Description**: Bespoke spinners, `animate-spin` rings and bare "Loading…" text
+  on **non-chart** data surfaces become skeleton placeholders keyed on "no data
+  yet". The scanline beam stays only where a chart loads (principle 12 as amended
+  by #2540).
+- **The primitive was the first fix.** `SkeletonLoader.vue` — the component the
+  sweep exists to spread — used a bare `animate-pulse` with no
+  `motion-reduce:animate-none`, so it failed the issue's own reduced-motion
+  criterion and every surface converted to it would have inherited the violation.
+- **`HOLDOVERS` is now empty.** Both non-chart `ScanlineReveal` consumers (a skills
+  list, a JSON `<pre>`) are converted, so the beam is chart-only **in fact**, not
+  only by rule. The allowlist stays as an explicit empty constant: a new non-chart
+  importer must still fail loudly rather than quietly join a list that no longer
+  exists.
+- **Footprint, not decoration.** Each placeholder mirrors the loaded surface —
+  list rows for a list, table-cell bars for a table row, form fields for a form —
+  because a centred ring in a differently-sized box is itself the layout shift
+  principle 4 forbids.
+- **Two real bugs fell out of it**: `TemplateSelector` gated on a bare
+  `v-if="loading"`, so re-opening the picker with templates already fetched swapped
+  the loaded grid back to a placeholder; and `GitPanel` did the same with git
+  status. Both now key on a `firstLoad` verdict. The #1927 ratchet fell 72 → 69.
+- **One spinner was removed rather than converted.** The Dashboard's history
+  spinner fired on every background poll, beside a Refresh button that already
+  signals in-flight by disabling itself. "First load animates; scheduled
+  background refresh is invisible" — so the honest treatment was deletion, not a
+  nicer animation.
+- **Sanctioned spinners are untouched** (AC 6): the 16px in-flight indicator inside
+  a pressed control, on every Save/Trigger/Toggle button, and the refresh-icon spin
+  that pairs with a disabled refresh control.
+- **`/m` (MobileAdmin) is plain CSS, not Tailwind**, so it gets the same recipe
+  spelled out locally — pulse in the chrome fill, `prefers-reduced-motion` static,
+  an `sr-only` line — rather than a Tailwind class that would not apply there.
