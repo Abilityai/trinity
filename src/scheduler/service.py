@@ -1149,6 +1149,7 @@ class SchedulerService:
                 timeout_seconds=schedule.timeout_seconds,
                 allowed_tools=schedule.allowed_tools,
                 execution_id=execution.id,
+                deliver_to_workspace_email=schedule.deliver_to_workspace_email,
             )
 
             status = result.get("status", ExecutionStatus.FAILED)
@@ -1326,6 +1327,7 @@ class SchedulerService:
         timeout_seconds: Optional[int] = None,
         allowed_tools: Optional[list] = None,
         execution_id: Optional[str] = None,
+        deliver_to_workspace_email: Optional[str] = None,
     ) -> dict:
         """
         Execute a task via the backend's internal TaskExecutionService endpoint.
@@ -1368,6 +1370,14 @@ class SchedulerService:
             payload["allowed_tools"] = allowed_tools
         if execution_id:
             payload["execution_id"] = execution_id
+        if deliver_to_workspace_email:
+            # ent#498. The scheduler carries the ADDRESS only: it creates the
+            # execution row itself and always sends `execution_id`, so the
+            # backend's channel-persisting branch (`if not execution_id:`) can
+            # never run for a cron fire — channel columns passed as kwargs would
+            # be silently inert (#2426). The backend resolves the session and
+            # stamps the pre-created row before dispatch.
+            payload["deliver_to_workspace_email"] = deliver_to_workspace_email
 
         # Step 1: Dispatch with the configured deadline (#1022 — was a 30s
         # literal). The async endpoint normally returns ~instantly; reaching
