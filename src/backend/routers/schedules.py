@@ -162,7 +162,12 @@ def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
     if target == (getattr(current_user, "email", "") or "").strip().lower():
         return
     try:
-        can_own = db.can_user_share_agent(str(current_user.id), name)
+        # USERNAME, not id: `can_user_share_agent` resolves via
+        # `get_user_by_username`, so an id silently finds no user and returns
+        # False — which would have refused the OWNER too, turning this gate from
+        # a narrowing into a functional break. Every other call site in the
+        # codebase passes `current_user.username`.
+        can_own = db.can_user_share_agent(current_user.username, name)
     except Exception:  # noqa: BLE001 — an unreadable ownership check refuses
         can_own = False
     if not can_own:

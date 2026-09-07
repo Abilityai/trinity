@@ -497,6 +497,32 @@ def test_the_gate_is_on_both_the_create_and_the_update_path():
     assert src.count("_enforce_delivery_target_authority(") >= 3  # def + 2 call sites
 
 
+def test_the_ownership_check_is_called_with_a_USERNAME(monkeypatch):
+    """`can_user_share_agent` resolves via `get_user_by_username`, so an id finds
+    no user and returns False — which refuses the OWNER too, turning this gate
+    from a narrowing into a functional break.
+
+    Every other test here stubs that function and so proves nothing about what is
+    passed to it; this one inspects the argument. The first cut of this gate
+    passed `str(current_user.id)` and every test still went green.
+    """
+    from routers import schedules
+
+    seen = {}
+
+    def _spy(user, agent):
+        seen["user"], seen["agent"] = user, agent
+        return True
+
+    monkeypatch.setattr(schedules.db, "can_user_share_agent", _spy)
+    schedules._enforce_delivery_target_authority(
+        _User(uid="7", email="me@example.com"), "analyst", "colleague@example.com")
+    assert seen["user"] == "me", (
+        f"passed {seen['user']!r}; can_user_share_agent takes a username"
+    )
+    assert seen["agent"] == "analyst"
+
+
 def test_the_case_comparison_is_normalised(monkeypatch):
     """`current_user.email` and the schedule field are both free text; a case
     difference must not turn 'myself' into 'a colleague'."""
