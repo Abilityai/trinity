@@ -54,7 +54,11 @@ def test_precreated_row_carries_the_session_and_the_client(portal_service, monke
     monkeypatch.setattr(database, "db", _FakeDb(), raising=False)
 
     out = portal_service._precreate_sync_execution(
-        "agent-a", "hello", "x@example.com", "ps_session_1",
+        # ent#403 added `resolved_model` as a REQUIRED positional, for the same
+        # reason `session_id` is one: `model_used` is written only at row
+        # creation, so a default here would let a caller reintroduce the silent
+        # NULL this file exists to prevent — one column over.
+        "agent-a", "hello", "x@example.com", "ps_session_1", "claude-opus-5",
     )
 
     assert out == "exec_abc"
@@ -89,7 +93,7 @@ def test_still_fails_soft_when_the_row_cannot_be_written(portal_service, monkeyp
     monkeypatch.setattr(database, "db", _BoomDb(), raising=False)
 
     assert portal_service._precreate_sync_execution(
-        "agent-a", "hello", "x@example.com", "ps_1",
+        "agent-a", "hello", "x@example.com", "ps_1", None,
     ) is None
 
 
@@ -108,7 +112,7 @@ def test_subscription_lookup_failure_does_not_lose_the_binding(portal_service, m
     import database
     monkeypatch.setattr(database, "db", _PartialDb(), raising=False)
 
-    portal_service._precreate_sync_execution("a", "m", "x@example.com", "ps_2")
+    portal_service._precreate_sync_execution("a", "m", "x@example.com", "ps_2", None)
     assert captured["subscription_id"] is None
     assert captured["source_channel_chat_id"] == "ps_2"
     assert captured["source_channel_client"] == "x@example.com"

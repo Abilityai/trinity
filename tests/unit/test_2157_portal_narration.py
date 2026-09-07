@@ -382,7 +382,12 @@ def _card(*, tts_ready=True, enabled=True, voice_id="own", default_voice="plat")
     svc = _portal_service()
     row = {"agent_name": "agent-x", "tts_voice_id": voice_id,
            "tts_voice_replies_enabled": 1 if enabled else 0}
-    return svc._row_to_card(row, tts_ready, default_voice)
+    # ent#403 made `is_platform` / `runtime` / `model_context` keyword-only with
+    # NO default — a default would let a call site silently serve the wrong
+    # card. This file is about the voice bits, so it passes the neutral values.
+    return svc._row_to_card(row, tts_ready, default_voice,
+                            is_platform=False, runtime="claude-code",
+                            model_context=svc._model_context())
 
 
 def test_card_voice_available_falls_back_to_platform_default():

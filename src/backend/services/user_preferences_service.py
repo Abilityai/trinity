@@ -26,6 +26,15 @@ PREFERENCE_KEYS = frozenset({
     "grid_layout",   # Dashboard Grid tile positions: {agent|widget:* → {c, r}}
     "grid_widgets",  # Tiles ▾ override map: {widgetId → bool}
     "grid_org",      # Org overlay toggles: {zones: bool, lines: bool}
+    # ent#403 — the Workspace composer's model choice, {agent_name → model-id}.
+    # A SERVER record and not browser storage, deliberately: the Workspace's own
+    # identity term (`clientPortal.clientEmail`) starts null and is filled from a
+    # network response, so a browser key built on it reads `anon` on every reload
+    # and writes under the email a moment later (`composables/useColumnResize.js`
+    # — caught live). Here the scope is per (user, agent) BY CONSTRUCTION: the
+    # server knows who is asking, so "never leaks between agents or between
+    # clients" is a property of the storage rather than of a key.
+    "workspace_model",
 })
 
 # A DoS bound, not a feature limit: a 500-agent layout serializes to ~15 KB.

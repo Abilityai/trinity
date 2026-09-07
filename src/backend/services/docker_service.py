@@ -349,6 +349,57 @@ def agent_container_states() -> Optional[Dict[str, str]]:
         return None
 
 
+def agent_container_runtimes() -> Optional[Dict[str, str]]:
+    """Every Trinity agent container's execution RUNTIME, in ONE Docker round trip.
+
+    Returns ``{agent_name: "claude-code" | "codex" | "gemini" | …}``, or ``None``
+    when Docker could not be asked. Same tri-state discipline, same keying and
+    the same ``sparse=True`` cost bound as :func:`agent_container_states` — this
+    is the batch form of :func:`get_agent_runtime`, added for the Workspace
+    roster (ent#403), which needs the runtime for EVERY rostered agent and must
+    not pay ``get_agent_runtime``'s inspect-per-agent (the #2160 cost).
+
+    The sparse constraint is the same trap with a different exit. Under
+    ``sparse=True`` docker-py's ``container.labels`` **raises** — it reads
+    ``attrs["Config"]["Labels"]``, which only a full inspect populates — so the
+    label is taken from ``attrs["Labels"]``, the key the ``/containers/json``
+    SUMMARY actually carries. Reading ``.labels`` here would raise on every
+    container, be swallowed by the ``except`` below, and return ``None``
+    forever: safe, silent, and permanently wrong.
+
+    Fails OPEN at the call site, not here: a name absent from a valid map, or an
+    unreadable Docker, leaves the caller with no runtime, and ent#403 resolves
+    that to ``"claude-code"`` — the same fallback ``get_agent_runtime``
+    documents. Denying a working affordance on every Claude agent because one
+    Docker read hiccuped is the #2196 inversion.
+    """
+    if not docker_client:
+        return None
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
+            sparse=True,
+        )
+        runtimes: Dict[str, str] = {}
+        for container in containers:
+            raw = (container.attrs.get("Names") or [""])[0] or ""
+            name = raw.lstrip("/").removeprefix("agent-")
+            if not name:
+                continue
+            labels = container.attrs.get("Labels") or {}
+            if not isinstance(labels, dict):
+                labels = {}
+            runtimes[name] = labels.get("trinity.agent-runtime") or "claude-code"
+        return runtimes
+    except Exception as e:  # noqa: BLE001 — unreadable Docker is a valid answer here
+        _warn_throttled(
+            "agent_container_runtimes",
+            "Failed to read agent container runtimes from Docker: %s", e,
+        )
+        return None
+
+
 def agent_container_state(name: str) -> Optional[str]:
     """One agent's coarse state: ``"running"``/``"stopped"``/``"missing"``, or
     ``None`` when Docker could not be asked.
