@@ -213,14 +213,24 @@ pays ~1.5 MB). `MERMAID_CONFIG` (`canvasUtils.js`, spec-pinned) is
 style: mermaid 11 keeps HTML labels on under `strict` and DOMPurify forbids the
 `<foreignObject>` they live in, so without it every flowchart node renders as an
 empty box after sanitisation. The SVG goes through the app's one DOMPurify
-instance (`sanitizeHtml`) before `v-html`. Initialisation is global to mermaid,
-so it is done once per theme at module level; render ids come from a module
+instance (`sanitizeSvg` — the one entry point that keeps the diagram's own
+id-scoped `<style>`) before `v-html`. Initialisation is global to mermaid, so
+it is done once per theme at module level; render ids come from a module
 counter (per-instance counters collide on `<marker id>` and arrowheads vanish);
 renders are **serialised** through a module-level promise chain, because
 `mermaid.render` shares parser/layout state and two diagrams mounting at once
 bleed nodes into each other's SVG (seen live on the seed canvas, not
-hypothesised); a parse error shows a contained error with the source, and the
-scratch node mermaid leaves behind is removed.
+hypothesised); a parse error shows a contained, **height-bounded** error box
+with the source, and the scratch node mermaid leaves behind is removed.
+**"Module level" means a plain `<script>` block, not `<script setup>`
+(#2583):** the SFC compiler moves every top-level binding of a setup block
+into `setup()`, which silently made the counter and the chain per-instance —
+and because mermaid begins every `render(id)` by deleting any element already
+carrying that id from the live document, three diagrams sharing
+`canvas-mmd-1` meant each render removed the previous diagram's SVG from the
+page: a canvas of eleven diagrams showed eight empty blocks. A diagram wider
+than its column keeps its natural width and scrolls inside its wrapper rather
+than scaling down to a strip (`keepLegibleWidth`).
 
 ### Rich fences in `markdown`
 
@@ -491,6 +501,54 @@ the report block. CI-pinned by `test_ent536_canvas_prompt_guidance.py` against
 the MCP `BLOCK_KINDS` enum and the frontend rules, exactly as `test_1535` pins
 the report block. The Codex orientation lists the canvas tools by bare name.
 
+## The render bar — the gallery (#2583)
+
+The canvas is measured, not eyeballed. `e2e/helpers/canvas-gallery.js` is
+seventeen canvases / ~180 blocks covering every kind, every chart type, the
+rich fences, the kit classes, the four layouts and the adversarial shapes an
+agent will eventually emit (200-row tables, 60-char tokens, twelve series,
+20,000-char Mermaid, a `width: 9999px` card, CJK/RTL, a non-string payload),
+seeded through the **real** `PUT` route so what is asserted is what an agent
+can actually write. `e2e/canvas-gallery.spec.js` renders each on Agent
+Detail (1280 / 1920) and the Workspace rail (a fixed 24rem column), light and
+dark, and asserts per block: the page and the kit never scroll horizontally,
+the block sits inside the kit, a drawing kind (diagram / image / chart) drew
+its figure or its named fallback, nothing spills past the block as a box or
+as text unless a scroll container between them owns it, and stacked siblings
+do not overlap. Screenshots land in `e2e/canvas-gallery-shots/`.
+
+What it pinned, each now structural rather than per-case:
+
+- **A block never vanishes.** `CanvasBlock` is an error boundary
+  (`onErrorCaptured`): a leaf that throws — `marked()` on a non-string
+  `markdown`, a timeline with a `null` event — shows the payload as JSON in
+  place instead of unmounting the section. `markdown` reaches `CanvasProse`
+  only as a string.
+- **Bounded viewports (principle 28).** `table` and `timeline` get a 420px
+  scroll box on the canvas (the kit's `ck-table-wrap` bound); a Mermaid error
+  box is bounded too. The delegated KPI grid re-flows by the **kit's**
+  container width (`.report-kpi-grid` in `CanvasKit.vue`), not the viewport's
+  `sm:`/`lg:` — the 24rem rail is `lg:` on a desktop screen.
+- **Long tokens wrap, tables scroll.** Canvas prose / html wrappers and KPI
+  tiles use `overflow-wrap: anywhere`; table cells inside prose reset it and
+  the table becomes its own horizontal viewport, so a wide markdown table or
+  a bare `<table>` from the voice panel never pushes the column.
+- **An admitted pixel width is bounded.** `filterInlineStyle` emits
+  `min(<px>, 100%)` — `width: 9999px` on a card used to scroll the whole
+  canvas 10,000px sideways.
+- **Charts say what they show.** Line/area charts carry a legend when they
+  have more than one series; a flat series (all zero, one point) gets a
+  padded y range instead of a degenerate one; isolated points (a sparse
+  series, a single point) are drawn as markers (`points.filter`); long
+  category labels space the axis (`axisLabelSpace`) instead of overprinting;
+  a pie legend wraps under the pie in a narrow figure cell.
+- **Switching canvases is guarded.** `CanvasPanel.select` drops a fetch a
+  later selection superseded — the header used to name one canvas while the
+  slower fetch's blocks belonged to another.
+
+Findings the write route owns (a 422 / 400 by name, so they cannot be
+seeded): an unknown `kind`, a diagram with blank source.
+
 ## Surfaces
 
 | Surface | Route | Sees |
@@ -539,4 +597,5 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 |------|--------|--------|
 | 2026-09-02 | claude | Initial — canvas surface, workspace merge, voice-panel bridge (ent#438) |
 | 2026-09-06 | claude | Conversation-side placement in the Workspace rail; `CanvasPanel` re-reads blocks when the selected canvas's `updated_at` moves (ent#475) |
+| 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, both surfaces, both themes, measured), the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |
