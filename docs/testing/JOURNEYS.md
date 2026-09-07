@@ -21,5 +21,6 @@ coverage debt is queryable rather than rediscovered.
 | **J08** | I can install a marketplace plugin and the agent can use it. | user | local | live-stack | **no** | — | — | #2347 |
 | **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | — | #2348 |
 | **J10** | My agents can call each other, and I can see what they said. | user | local | live-stack | **no** | — | L-03 | #2349 |
+| **J11** | A companion's brief reaches me where I already work, without me asking. | user | local | live-stack | **no** | — | E-01, E-05, L-03 | #2565 |
 
-**0 of 10 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**0 of 11 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.

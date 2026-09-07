@@ -156,10 +156,42 @@ class PortalTtsRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+class PortalRealtimeVoice(BaseModel):
+    """Whether THIS principal may start a real-time voice call from the
+    Workspace (ent#534), and — for a platform user on an instance that cannot —
+    why, in words. Named for the capability, not the provider (ent#354 may add
+    a second one behind the same field). Distinct from the per-agent
+    `voice_available`, which means "this agent has a TTS voice to narrate with".
+
+    Fail-closed like `voice_available`: the bug this guards is promising an
+    affordance that cannot work. `reason` is None for a portal-token client —
+    the WebSocket needs a platform JWT they do not hold, so the control is not
+    rendered at all rather than rendered disabled with an explanation that is
+    not theirs to act on.
+    """
+    available: bool = False
+    reason: Optional[str] = None
+
+
+class PortalVoiceStartRequest(BaseModel):
+    """Start a voice call bound to a Workspace thread (ent#534)."""
+    portal_session_id: str = Field(..., min_length=1, max_length=64)
+    voice_name: Optional[str] = None
+
+
+class PortalVoiceStartResponse(BaseModel):
+    voice_session_id: str
+    websocket_url: str
+    portal_session_id: str
+    max_duration_seconds: int
+
+
 class PortalRoster(BaseModel):
     """The client-facing roster: every agent the signed-in email may reach."""
     client_email: Optional[str] = None
     agents: list[PortalAgentCard]
+    # ent#534 — see PortalRealtimeVoice. Resolved once per roster load.
+    realtime_voice: PortalRealtimeVoice = Field(default_factory=PortalRealtimeVoice)
     # #2128 — whether a chat may include MORE THAN ONE agent on this instance.
     # Named for the capability, never the module or the edition: this payload
     # goes to an operator's customer, who can neither buy a missing module nor
@@ -508,6 +540,11 @@ class PortalHistoryMessage(BaseModel):
     # The caller's OWN rating of this message, if any — never anyone else's.
     # Present so a reload shows the thumb the person already gave.
     my_rating: Optional[str] = None  # 'up' | 'down' | None
+    # ent#534: `'voice'` for a turn spoken in a Workspace voice call (NULL/None
+    # for a typed one), and the call it belongs to — the chat folds one call's
+    # rows into a single collapsed block keyed on this id.
+    source: Optional[str] = None
+    voice_call_id: Optional[str] = None
 
 
 class PortalTurnOutcome(BaseModel):

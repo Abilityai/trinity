@@ -19,7 +19,7 @@ from services.operator_queue_choices import (
     ResponseNotOfferedError,
     validate_response_choice,
 )
-from services import operator_resume_service
+from services import operator_queue_service, operator_resume_service
 
 
 router = APIRouter(prefix="/api/operator-queue", tags=["operator-queue"])
@@ -258,7 +258,12 @@ async def respond_to_queue_item(
     # caller's answer is the one that landed. Backgrounded so respond stays fast;
     # a no-opt-in agent costs one flag read. The answer is already committed, so
     # this can never roll it back.
-    if item:
+    # ent#499: a PLATFORM-minted item opened no loop for the agent to resume —
+    # it never asked, is not waiting, and for a problem report is the subject of
+    # the complaint. Dispatching would spend one of its turns on a prompt
+    # carrying the client's email and verbatim words, which ent#366 withholds
+    # from that agent by design. Same predicate the responded write-back uses.
+    if item and not operator_queue_service.is_platform_minted(item):
         operator_resume_service.spawn_resume_dispatch(
             item,
             response=body.response,

@@ -190,6 +190,16 @@ export function createScheduleTools(
           .optional()
           .default(60)
           .describe("Seconds between retry attempts (30-600). Default: 60. Rate-limited failures use 2x delay."),
+        deliver_to_workspace_email: z
+          .string()
+          .optional()
+          .describe(
+            "Optional. Deliver this schedule's output into that person's Workspace " +
+            "conversation with the agent (their pinned Main chat), as well as recording " +
+            "the run. Must be someone the agent is already shared with or owned by — " +
+            "an address that cannot reach the agent makes the run FAIL rather than " +
+            "silently deliver nowhere. Omit for today's behaviour (no delivery)."
+          ),
       }),
       execute: async (
         args: {
@@ -205,6 +215,7 @@ export function createScheduleTools(
           model?: string;
           max_retries?: number;
           retry_delay_seconds?: number;
+          deliver_to_workspace_email?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -234,6 +245,7 @@ export function createScheduleTools(
           model: args.model,
           max_retries: args.max_retries,
           retry_delay_seconds: args.retry_delay_seconds,
+          deliver_to_workspace_email: args.deliver_to_workspace_email,
         });
 
         console.log(`[create_agent_schedule] Created schedule '${schedule.name}' (${schedule.id}) for agent '${args.agent_name}'`);
@@ -248,6 +260,7 @@ export function createScheduleTools(
             enabled: schedule.enabled,
             timezone: schedule.timezone,
             next_run_at: schedule.next_run_at,
+            deliver_to_workspace_email: schedule.deliver_to_workspace_email,
           },
         }, null, 2);
       },
@@ -340,6 +353,14 @@ export function createScheduleTools(
           .max(600)
           .optional()
           .describe("New retry delay in seconds (30-600). If omitted, keeps current value."),
+        deliver_to_workspace_email: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Deliver this schedule's output into that person's Workspace conversation " +
+            "with the agent. Pass null to stop delivering. If omitted, keeps current value."
+          ),
       }),
       execute: async (
         args: {
@@ -356,6 +377,7 @@ export function createScheduleTools(
           model?: string;
           max_retries?: number;
           retry_delay_seconds?: number;
+          deliver_to_workspace_email?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -386,6 +408,10 @@ export function createScheduleTools(
         if (args.model !== undefined) updates.model = args.model;
         if (args.max_retries !== undefined) updates.max_retries = args.max_retries;
         if (args.retry_delay_seconds !== undefined) updates.retry_delay_seconds = args.retry_delay_seconds;
+        // `null` is meaningful here and `undefined` is not: the backend handler
+        // uses exclude_unset, so omitting keeps the target and an explicit null
+        // clears it. A truthiness check would make it unsettable.
+        if (args.deliver_to_workspace_email !== undefined) updates.deliver_to_workspace_email = args.deliver_to_workspace_email;
 
         const schedule = await apiClient.updateAgentSchedule(
           args.agent_name,

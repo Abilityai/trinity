@@ -97,7 +97,7 @@
             @retry="fetchAgents"
             @dismiss="fetchError.agents = ''"
           />
-          <div v-if="agentsView.state === 'loading'" class="loading-state">Loading agents...</div>
+          <div v-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
           <LoadFailed
             v-else-if="agentsView.state === 'failed'"
             dense
@@ -216,7 +216,7 @@
               @retry="fetchQueue"
               @dismiss="fetchError.queue = ''"
             />
-            <div v-if="queueView.state === 'loading'" class="loading-state">Loading queue...</div>
+            <div v-if="queueView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading queue...</span></div>
             <LoadFailed
               v-else-if="queueView.state === 'failed'"
               dense
@@ -346,7 +346,7 @@
               @retry="fetchNotifications"
               @dismiss="fetchError.notifications = ''"
             />
-            <div v-if="notificationsView.state === 'loading'" class="loading-state">Loading...</div>
+            <div v-if="notificationsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
             <LoadFailed
               v-else-if="notificationsView.state === 'failed'"
               dense
@@ -394,7 +394,7 @@
               @retry="fetchFleetHealth"
               @dismiss="fetchError.fleet = ''"
             />
-            <div v-if="fleetView.state === 'loading'" class="loading-state">Loading...</div>
+            <div v-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
             <LoadFailed
               v-else-if="fleetView.state === 'failed'"
               dense
@@ -2309,6 +2309,29 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 }
 
 /* ─── States ────────────────────────────────────────────────────────────── */
+
+/* #1921: row-shaped placeholders instead of bare "Loading…" text. `/m` is plain
+   CSS, not Tailwind, so the recipe is spelled out here: pulse in the chrome fill,
+   static under reduced motion, and a footprint close to the rows it becomes. */
+.skeleton-rows { padding: 8px 0; }
+.skeleton-row {
+  height: 44px;
+  margin: 8px 0;
+  border-radius: 8px;
+  background: #f3f4f6;
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-color-scheme: dark) {
+  .skeleton-row { background: #1f2937; }
+}
+@keyframes skeleton-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .55 } }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-row { animation: none; }
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 .loading-state, .empty-state {
   text-align: center;

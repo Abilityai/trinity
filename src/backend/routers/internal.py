@@ -31,7 +31,8 @@ from models import (
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import heartbeat_service, idempotency_service
+from services import heartbeat_service, idempotency_service, schedule_workspace_delivery
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +478,43 @@ async def execute_task_internal(
             },
         )
 
+    # ent#498: attach the Workspace destination BEFORE dispatch, so the terminal
+    # appliers find it already on the row and no writer downstream changes.
+    #
+    # It runs ahead of BOTH branches deliberately. A refusal must not depend on
+    # whether the caller asked for async — and the async branch returns an
+    # `accepted` ack the scheduler then polls, so refusing after it would leave a
+    # row nobody ever fails.
+    if request.deliver_to_workspace_email:
+        try:
+            # Off the event loop: `resolve_and_stamp` makes 4–6 synchronous
+            # SQLAlchemy calls, two of them writes. This handler is `async def`,
+            # and the canonical use case fires at ~03:30 UTC — inside the window
+            # where `db_backup_service` holds SQLite's lock, so the worst case is
+            # the 30s busy timeout per call, on the one loop serving every
+            # request. Same finding `channel_completion_report` records for its
+            # own portal write.
+            await asyncio.to_thread(
+                schedule_workspace_delivery.resolve_and_stamp,
+                request.execution_id, request.agent_name,
+                request.deliver_to_workspace_email,
+            )
+        except schedule_workspace_delivery.WorkspaceDeliveryRefused as refusal:
+            # A visible failure on the execution row, never a silent no-op
+            # (AC 5). Running the turn anyway would spend the tokens and put the
+            # answer where nobody can read it.
+            logger.warning(
+                "[ent#498] refusing %s for %s: %s",
+                request.execution_id, request.agent_name, refusal.detail,
+            )
+            _fail_execution_row(request.execution_id, refusal.detail)
+            idempotency_service.fail(idem)
+            raise HTTPException(status_code=422, detail={
+                "error": refusal.reason,
+                "message": refusal.detail,
+                "execution_id": request.execution_id,
+            })
+
     if request.async_mode:
         # Fire-and-forget: spawn background task, return immediately
         asyncio.create_task(_execute_task_internal_background(
@@ -523,6 +561,49 @@ async def execute_task_internal(
         logger.error(f"Internal task execution failed for {request.agent_name}: {e}")
         idempotency_service.fail(idem)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+def _fail_execution_row(execution_id: Optional[str], error: str) -> None:
+    """Write a FAILED terminal on a row the caller pre-created (ent#498).
+
+    An admission-path terminal: the refusal happens BEFORE `execute_task`, so no
+    dispatch activity exists yet and none is closed — the same reason
+    `test_1804_terminal_activity_parity` allowlists the other admission
+    terminals. It is also guarded on a non-terminal status so a late refusal can
+    never overwrite a finished run.
+
+    Never raises: the caller is already refusing, and a failed bookkeeping write
+    must not turn a 422 into a 500 that the scheduler reads as retryable.
+
+    **Scrubbed, not allowlisted** (ent#279). Today's only caller passes a
+    platform-composed refusal string built from the schedule's own target address
+    and the agent name — no agent-authored text, and the refusal happens before
+    `execute_task`, so it is the same shape the parity guard allowlists for
+    `_admission_gate`. It scrubs anyway because the signature takes an arbitrary
+    `error: str`: an allowlist entry is pinned to a FUNCTION NAME, so it would
+    silently extend this exemption to a future caller that does pass agent
+    output. The seam fails open with a `[]` fast path, so the cost on a
+    never-staged install is one cheap Redis call on a path that only runs when a
+    dispatch is already being refused.
+    """
+    if not execution_id:
+        return
+    try:
+        error = scrub_text(get_staged_values(), error)
+        existing = db.get_execution(execution_id)
+        if existing and existing.status not in (
+            TaskExecutionStatus.SUCCESS,
+            TaskExecutionStatus.FAILED,
+            TaskExecutionStatus.CANCELLED,
+        ):
+            db.update_execution_status(
+                execution_id=execution_id,
+                status=TaskExecutionStatus.FAILED,
+                error=error,
+            )
+    except Exception as db_err:  # noqa: BLE001
+        logger.error("Failed to mark execution %s failed: %s", execution_id, db_err)
 
 
 async def _execute_task_internal_background(task_service, request: InternalTaskExecutionRequest):

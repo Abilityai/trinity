@@ -244,7 +244,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 // shell's grid variables.
 const ASIDE = {
   collapsed: 'w-12 flex flex-col border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900',
-  open: 'w-96 flex flex-col min-h-0 border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900',
+  // ent#492: the OPEN rail's width is `--ws-rail`, set by the shell's grid and
+  // dragged by the handle. Collapsed stays a fixed 48px strip — it is an
+  // expand control, not a column, which is why the handle disappears with it.
+  open: 'w-[var(--ws-rail,24rem)] flex flex-col min-h-0 border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900',
   sheet: 'absolute inset-x-0 bottom-0 max-h-[85vh] rounded-t-2xl bg-white dark:bg-gray-900 shadow-xl flex flex-col',
 }
 const ICON_BTN = 'w-9 h-9 rounded-lg flex items-center justify-center hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition'

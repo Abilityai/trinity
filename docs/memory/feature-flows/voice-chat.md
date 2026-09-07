@@ -1,8 +1,10 @@
 # Voice Chat — Gemini 2.5 Flash Native Audio
 
-**Status**: ✅ Phase 1 + Tool Calling + Workspace Mode (BETA) Complete
-**Date**: 2026-05-30 (workspace canvas rendering moved in-parent — #979 prod-CSP fix)
+**Status**: ✅ Phase 1 + Tool Calling + Workspace Mode Complete · **the Workspace is the front door (ent#534, 2026-09-07)**
+**Date**: 2026-09-07 (ent#534: Workspace voice mode — session lifetime, cap notice, `saved` frame; earlier: 2026-05-30 #979 prod-CSP fix)
 **Priority**: P1
+
+> **Front doors.** Two surfaces start this session: the **Workspace conversation** (ent#534 — the modal call with the orb and the canvas column; the transcript lands in the Workspace thread; see [workspace-voice-conversation.md](workspace-voice-conversation.md)) and the Agent Detail chat panel (`VoiceOverlay` over the chat; transcript → `chat_messages`; retires with trinity#2559). The session, the tools, the canvas verbs and the WebSocket bridge below are shared; only the start route and the transcript's home differ.
 
 ---
 
@@ -146,6 +148,26 @@ and a `prefers-reduced-motion`-aware cross-fade on canvas updates.
 6. WebSocket established; panel poll starts at 300ms interval
 7. Agent may call panel tools during conversation — panel content updated in-memory
 8. Frontend polls `GET /api/agents/{name}/voice/{session_id}/panel` and re-renders canvas
+
+### Session lifetime — the session outlives the provider connection (ent#534)
+
+Gemini Live ends an uncompressed audio-only session at ~15 min and recycles the
+connection at ~10 min, announcing it with `go_away`. The 300 s Agent Detail cap
+hid both; the Workspace's 30-minute cap does not. Every session therefore asks
+for `context_window_compression` (sliding window) and `session_resumption`
+(`_build_live_config`, types read through `getattr` so a stubbed/older SDK still
+connects); `_receive_audio_loop` stores each `session_resumption_update.new_handle`
+and returns on `go_away`; `connect_and_stream` reconnects with the latest handle
+(≤ `MAX_RECONNECTS_PER_SESSION` = 8) while the watchdog, the browser socket and the
+transcript stay session-scoped. **Cap with words**: `_timeout_watchdog` asks the
+model out loud to wrap up at T-`CAP_WARNING_LEAD_SECONDS` (30 s) via
+`send_realtime_input(text=…)`, then sets `end_reason="cap"` BEFORE `end_session`
+(which cancels the watchdog's own task). `end_reason ∈ {None, cap, error,
+provider_closed}` + `end_message` ride the `status: ended` frame; the bridge
+sends a final `saved` frame after the transcript is persisted and before the
+close, which is what a client reloads on. Per-session caps: `VOICE_MAX_DURATION`
+(Agent Detail, 300), `WORKSPACE_VOICE_MAX_DURATION` (Workspace, 1800),
+`VOIP_MAX_CALL_DURATION` (phone, 600).
 
 ### Feature Flag: voice_available
 
@@ -301,10 +323,16 @@ Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/
 ```json
 { "type": "audio", "data": "<base64 PCM audio>" }
 { "type": "transcript", "role": "user|assistant", "text": "..." }
-{ "type": "status", "state": "listening|speaking|processing" }
-{ "type": "tool_call", "tool_name": "run_task|show_markdown|..." }
-{ "type": "tool_result", "tool_name": "run_task", "result": "..." }
+{ "type": "status", "state": "connecting|listening|speaking|ended", "reason": "cap|error|provider_closed|null", "message": "..." }
+{ "type": "tool_call", "tool": "run_task|show_markdown|...", "args": {} }
+{ "type": "tool_result", "tool": "run_task", "result_preview": "..." }
+{ "type": "saved", "messages_saved": 12, "duration_seconds": 245.0, "reason": null, "message": null }
 ```
+
+`reason`/`message` are present on the `ended` status only (ent#534). `saved` is
+sent once, after the transcript is persisted and before the close — a client
+that reloads its thread on `ended` races the write. Panel-tool `tool_result`
+frames are how a canvas column learns the board changed.
 
 Panel tool calls (`show_markdown`, `update_panel`, etc.) appear as `tool_call` WS frames but do NOT send `tool_result` frames to the browser — they're resolved in-process on the backend and Gemini is notified internally. The frontend polls the panel state separately via REST.
 
@@ -370,7 +398,8 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 | `VOICE_ENABLED` | Global voice toggle (default `true`; effective only when `GEMINI_API_KEY` is set). Wired into backend compose `environment:` (#979) |
 | `WORKSPACE_ENABLED` | Workspace canvas toggle — opt-in BETA, default `false` (#860). `workspace_available = voice_available && WORKSPACE_ENABLED`. Wired into backend compose `environment:` (#979 — previously never passed through, so the canvas couldn't be enabled via `.env`) |
 | `VOICE_MODEL` | Model ID (default: `models/gemini-3.1-flash-live-preview`, set in `src/backend/config.py`). #1076: leave unset/commented — a set-but-empty value is coalesced to the default by `os.getenv("VOICE_MODEL") or …`. |
-| `VOICE_MAX_DURATION` | Max **browser** voice session duration in seconds (default: 300 / 5 min). Phone calls use `VOIP_MAX_CALL_DURATION` instead (default 600 / 10 min) — both flow through the same per-session `_timeout_watchdog`, which now sleeps on `session.max_duration` rather than a global. See [voip-telephony.md](voip-telephony.md). |
+| `VOICE_MAX_DURATION` | Max **Agent Detail** voice session duration in seconds (default: 300 / 5 min). Phone calls use `VOIP_MAX_CALL_DURATION` instead (default 600 / 10 min) — both flow through the same per-session `_timeout_watchdog`, which sleeps on `session.max_duration` rather than a global. See [voip-telephony.md](voip-telephony.md). |
+| `WORKSPACE_VOICE_MAX_DURATION` | Max **Workspace** voice call duration in seconds (default: 1800 / 30 min, ent#534); wired through both compose files and `.env.example`. Spoken wrap-up at T-30 s, written reason at the cap. |
 
 ### Per-Agent
 
@@ -386,7 +415,9 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler, `/panel` endpoint, `_get_voice_system_prompt()`, `on_tool_call`/`on_tool_result` callbacks |
+| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler (JWT decoded before the session lookup), `/panel` endpoint, `on_tool_call`/`on_tool_result`/`on_turn` callbacks, the `saved` frame, the idempotent Agent Detail `_save_transcript` |
+| **Backend** | `src/backend/services/voice_prompt_service.py` | `get_voice_system_prompt` — the 3-level resolver, lifted out of the router (ent#534) so `client_portal` can share it |
+| **Backend** | `src/backend/client_portal/voice.py` + `client_portal/router.py` | The Workspace front door: `POST /api/enterprise/client-portal/agents/{name}/voice/start`, turn-by-turn persistence into the thread (ent#534) |
 | **Backend** | `src/backend/services/gemini_voice.py` | `VoiceSession` (+ `workspace_mode`, `panel_state`), `_RUN_TASK_TOOL`, `_PANEL_TOOLS`, `_execute_panel_tool()`, `WORKSPACE_PANEL_INSTRUCTIONS` |
 | **Backend** | `src/backend/routers/settings.py` | `voice_available` feature flag in `GET /api/settings/feature-flags` |
 | **Frontend** | `src/frontend/src/views/AgentWorkspace.vue` | Full workspace page (orb + canvas panel, particle system inlined, panel polling) |

@@ -223,6 +223,8 @@ agent_schedules = Table(
     Column("webhook_enabled", Integer),
     Column("webhook_secret_encrypted", Text),  # ent#77: AES-256-GCM HMAC secret
     Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
+    # ent#498 — nullable, no backfill; see db/schema.py for the contract.
+    Column("deliver_to_workspace_email", Text),
     Column("deleted_at", Text),
 )
 
@@ -510,6 +512,8 @@ enterprise_portal_messages = Table(
     Column("content", Text),
     Column("cost", Float),
     Column("created_at", Text),
+    Column("source", Text),         # ent#534: NULL typed | 'voice'
+    Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind

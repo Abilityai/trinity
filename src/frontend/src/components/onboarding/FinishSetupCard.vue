@@ -91,9 +91,23 @@
               retryable
               @retry="loadPreview"
             />
-            <ScanlineReveal v-else :loading="previewView.state === 'loading'" :reveal="previewView.state === 'ready'">
-              <pre class="max-h-64 overflow-auto rounded bg-gray-50 dark:bg-gray-900 p-2 text-xs text-gray-700 dark:text-gray-300"><code>{{ prettyPreview }}</code></pre>
-            </ScanlineReveal>
+            <!-- #1921: a JSON preview is a `<pre>`, not a chart — skeleton, not
+                 the beam (principle 12 as amended by #2540). Same verdict drives
+                 both faces, and the placeholder mirrors the block's own height
+                 so opening the details pane does not resize when data lands. -->
+            <div v-else>
+              <div
+                v-if="previewView.state === 'loading'"
+                class="animate-pulse motion-reduce:animate-none space-y-2 rounded bg-gray-50 dark:bg-gray-900 p-2"
+                aria-busy="true"
+              >
+                <div class="h-3 w-3/4 rounded bg-gray-200 dark:bg-gray-800"></div>
+                <div class="h-3 w-5/6 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+                <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+                <span class="sr-only">Loading…</span>
+              </div>
+              <pre v-else class="max-h-64 overflow-auto rounded bg-gray-50 dark:bg-gray-900 p-2 text-xs text-gray-700 dark:text-gray-300"><code>{{ prettyPreview }}</code></pre>
+            </div>
           </div>
         </details>
 
@@ -164,7 +178,6 @@ import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import InlineError from '../InlineError.vue'
 import LoadFailed from '../LoadFailed.vue'
-import ScanlineReveal from '../ScanlineReveal.vue'
 import {
   CONSENT_COPY,
   consentVariant,

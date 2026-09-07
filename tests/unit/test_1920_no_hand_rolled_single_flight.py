@@ -69,6 +69,10 @@ _ALLOWED = {
     "caller decides. SingleFlightLock would be actively wrong here — its internal fail-open returns True on a Redis "
     "error, which for a port reservation reads as 'reserved' and hands two agents the same SSH port, the exact "
     "collision #2215 fixed",
+    "services/gemini_voice.py": "voice_session:{id}:saved transcript-save CLAIM (ent#534) — a one-shot 'who writes' "
+    "decision between the WebSocket `finally` and `/stop` on two workers: no release, no token, TTL-expiry only, over "
+    "redis.asyncio (the sync primitive cannot be awaited from the bridge). Fails OPEN by design — losing a transcript "
+    "is worse than a duplicate, and the in-process `_transcript_saved` flag covers the same-worker case",
     # --- genuine non-lock nx=True uses ---
     "adapters/transports/twilio_media_stream.py": "voip_saved:{call_id} single-fire transcript guard — a once-guard, not a mutex",
     "services/agent_service/ephemeral.py": "ephemeral:quota:{owner_id} counter seed — the discard LOCK now uses "

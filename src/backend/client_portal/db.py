@@ -158,16 +158,22 @@ def get_owned_roster(email: str) -> list[dict]:
 
 def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        role: str, content: str, cost, now: str,
-                       session_id: Optional[str] = None) -> None:
+                       session_id: Optional[str] = None,
+                       source: Optional[str] = None,
+                       voice_call_id: Optional[str] = None) -> None:
+    # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
+    # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
-        "(id, agent_name, client_email, session_id, role, content, cost, created_at) "
-        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now)"
+        "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
+        " source, voice_call_id) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
+            "source": source, "call": voice_call_id,
         })
 
 
@@ -186,7 +192,10 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
         # had nothing to point at.
-        f"SELECT id, role, content, cost, created_at FROM enterprise_portal_messages "
+        # ent#534: `source` / `voice_call_id` ride along so the chat can fold a
+        # voice call's rows into one block and the context formatter can label them.
+        f"SELECT id, role, content, cost, created_at, source, voice_call_id "
+        f"FROM enterprise_portal_messages "
         f"WHERE {where} ORDER BY created_at DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:

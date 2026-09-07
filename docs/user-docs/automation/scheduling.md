@@ -75,6 +75,51 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 
 Enabling, disabling, and manually triggering a schedule are **owner or admin** actions — someone the agent is merely shared with can read its schedules and their history but cannot start or stop them. The same applies to the `toggle_agent_schedule` and `trigger_agent_schedule` MCP tools.
 
+## Delivering a Run's Output to Someone's Workspace
+
+By default a scheduled run ends in the executions list — an operator's view. If the
+run exists for one particular person (a morning brief, a weekly summary), you can
+name them and have the output arrive as a message in **their Workspace conversation
+with that agent** instead of only in the log.
+
+Set `deliver_to_workspace_email` on the schedule:
+
+```bash
+curl -X POST http://localhost:8000/api/agents/my-agent/schedules \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+        "name": "morning-brief",
+        "cron_expression": "0 7 * * 1-5",
+        "message": "Write my morning brief.",
+        "timezone": "Europe/Kyiv",
+        "deliver_to_workspace_email": "person@example.com"
+      }'
+```
+
+The same field is available on `create_agent_schedule` and `update_agent_schedule`;
+passing `null` on an update stops delivering. Leave it unset and nothing changes.
+
+**Where it lands.** In that person's **Main** chat with the agent — the one constant
+conversation per person per agent, which is where the agent reaches you when no
+particular chat is the right home for a message. It reads like any other message
+from the agent, and it can be rated like one.
+
+**Who you can name.** Someone the agent is already shared with, or its owner. If the
+address cannot reach the agent — never shared, share revoked, or simply unknown —
+**the run fails and says so** on the execution row rather than running and quietly
+delivering nowhere. A malformed address is rejected when you save the schedule, not
+hours later on the first fire.
+
+**When it shows up.** The message is saved as soon as the run finishes, but the
+Workspace does not poll a conversation you already have open. So it appears the
+next time that person loads the Workspace or switches to the chat — fine at daily
+cadence, and worth knowing if you were expecting it to pop up mid-conversation. It
+will also never cut into a turn already in progress in that chat: it waits for the
+reply to finish first.
+
+**Delivered once.** Each fire delivers at most one message, even if the platform
+has to retry internally.
+
 ## Per-Schedule Analytics
 
 Each schedule has an analytics view summarizing how it has been performing over a selectable time window.

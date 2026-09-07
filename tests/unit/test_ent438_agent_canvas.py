@@ -95,14 +95,37 @@ def test_the_audience_is_a_column_not_a_block():
 def test_the_portal_read_narrows_in_the_query():
     """ent#365 FR-2's lesson: a gate applied after the fetch has already loaded
     what it was meant to withhold. Pinned on the source because the defect is
-    the SHAPE of the call, not its result."""
+    the SHAPE of the call, not its result.
+
+    ent#534 made the audience a parameter of the read (a platform principal
+    sees every audience, an external client `roster` only), so the guard moved
+    with it: the narrowing still happens IN the query, and the parameter's
+    default is the fail-closed one, so a caller that forgets to state the
+    principal gets the client's view, never the operator's.
+    """
     source = (_BACKEND / "client_portal" / "agent_page.py").read_text()
     body = source[source.index("def canvases("):source.index("def _rating_tally(")]
-    assert "audience=CANVAS_AUDIENCE_ROSTER" in body, (
+    assert "db.list_agent_canvases(agent_name, audience=audience)" in body, (
         "the Workspace canvas read no longer narrows by audience in the query — "
         "an operator-only canvas would reach a client"
     )
+    assert "audience: Optional[str] = CANVAS_AUDIENCE_ROSTER" in body, (
+        "the read's default audience must be the client's (fail-closed)"
+    )
+    assert "db.get_agent_canvas(agent_name, canvas_id, audience=audience)" in body
     assert "AUDIENCE_ROSTER" in (_BACKEND / "db" / "canvas.py").read_text()
+
+
+def test_the_workspace_audience_is_decided_by_principal_kind():
+    """ent#534: a platform user reads every audience (they already can on Agent
+    Detail for any agent on their roster); an external client stays roster-only.
+    The two callers in the router pass this function's answer, never a literal."""
+    from client_portal import agent_page
+    from db.canvas import AUDIENCE_ROSTER
+    assert agent_page.canvas_audience_for(False) == AUDIENCE_ROSTER
+    assert agent_page.canvas_audience_for(True) is None
+    router = (_BACKEND / "client_portal" / "router.py").read_text()
+    assert router.count("agent_page.canvas_audience_for(principal.is_platform)") == 2
 
 
 # ---------------------------------------------------------------------------
