@@ -29,6 +29,7 @@ from dependencies import (
     OwnedAgentByName,
     assert_admin,
     get_current_user,
+    oauth2_scheme,
     reject_agent_principal,
     require_admin,
 )
@@ -71,6 +72,8 @@ from .models import (
     PortalMainReset,
     PortalTtsRequest,
     PortalTurnStarted,
+    PortalVoiceStartRequest,
+    PortalVoiceStartResponse,
     PortalUpload,
     PortalUploads,
 )
@@ -720,7 +723,10 @@ def portal_agent_canvases(
     operator-only canvas stays invisible to a rostered client.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
-    return {"agent_name": agent_name, "canvases": agent_page.canvases(agent_name)}
+    # ent#534: a platform principal reads every audience (they already can on
+    # Agent Detail); an external client stays `roster`-only.
+    return {"agent_name": agent_name, "canvases": agent_page.canvases(
+        agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
 
 @router.get("/agents/{agent_name}/canvas/{canvas_id}")
@@ -743,7 +749,8 @@ def portal_agent_canvas_detail(
     # for the same reason the report detail route is, and keyed after the
     # roster gate so an unreachable agent cannot mint limiter keys.
     rate_limiter.enforce(f"portal_canvas_detail:{principal.email}:{agent_name}", 60, 60)
-    canvas = agent_page.canvas_detail(agent_name, canvas_id)
+    canvas = agent_page.canvas_detail(
+        agent_name, canvas_id, audience=agent_page.canvas_audience_for(principal.is_platform))
     if canvas is None:
         raise HTTPException(status_code=404, detail="Canvas not found")
     return canvas
@@ -1002,6 +1009,59 @@ async def portal_tts(agent_name: str, body: PortalTtsRequest,
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(content=audio, media_type="audio/mpeg")
+
+
+@router.post("/agents/{agent_name}/voice/start", response_model=PortalVoiceStartResponse)
+async def portal_voice_start(
+    agent_name: str,
+    body: PortalVoiceStartRequest,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+    token: str = Depends(oauth2_scheme),
+):
+    """Start a real-time voice call bound to a Workspace thread (ent#534).
+
+    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS)
+    authenticates with the platform JWT, which a portal-token client does not
+    hold, so for them this is a uniform 404 like any agent off their roster.
+    Under the portal principal rather than the OSS `voice/start` deliberately:
+    every Workspace gate (agent-key rejection, the blocked-client check, the
+    roster union for owners) is inherited here instead of re-spelled.
+
+    Order: roster/thread → one uniform 404 → rate limit → 503 when voice is
+    off (the roster already told the UI why, so this is the belt) → the
+    provider session. `/stop`, the WebSocket and `/panel` are the OSS ones.
+    """
+    if not principal.is_platform:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _require_roster(agent_name, principal.email, include_owned=True)
+    from services import rate_limiter
+    # A realtime session is a paid provider connection; ten starts a minute per
+    # (user, agent) is generous for a human and a wall for a loop.
+    rate_limiter.enforce(f"portal_voice_start:{principal.email}:{agent_name}", 10, 60)
+    # The WebSocket's ownership gate (#600) is by platform user id, so the
+    # session must carry it — resolved from the same token the principal came
+    # from, the way `get_portal_principal` itself does.
+    user = await get_current_user(request, token)
+    from . import voice as workspace_voice
+    try:
+        result = await workspace_voice.start_workspace_voice(
+            agent_name=agent_name,
+            email=principal.email,
+            is_platform=principal.is_platform,
+            portal_session_id=body.portal_session_id,
+            user_id=user.id,
+            user_label=user.email or user.username,
+            voice_name=body.voice_name,
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except RuntimeError as e:
+        # The voice service could not persist the session (Redis down) — say
+        # so rather than hand out an id the WebSocket will refuse.
+        logger.error("workspace voice start failed for %s: %s", agent_name, e)
+        raise HTTPException(status_code=503, detail="Voice is unavailable right now. Try again shortly.")
+    return PortalVoiceStartResponse(**result)
 
 
 @router.post("/agents/{agent_name}/stt")

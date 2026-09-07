@@ -174,8 +174,14 @@
         </div>
       </div>
 
-      <!-- Main stage -->
-      <main class="flex-1 min-w-0 flex flex-col bg-white dark:bg-gray-900">
+      <!-- Main stage. ent#534: while a voice call is on, the conversation
+           column takes the orb's share of the stage and the canvas column
+           (below) takes the rest — orb left / canvas right, the retired page's
+           40/60. Below `sm` the orb has the whole stage. -->
+      <main
+        class="min-w-0 flex flex-col bg-white dark:bg-gray-900"
+        :class="voiceCall.active ? 'flex-1 sm:flex-none sm:w-[40%]' : 'flex-1'"
+      >
         <!-- ent#361: a room takes the stage when the URL names one. The
              single-agent conversation is untouched below — different
              substrate, different component, no shared state. -->
@@ -293,6 +299,8 @@
           @open-work="openRailOn('work')"
           @main-reset="onMainReset"
           @open-details="detailsOpen = true"
+          @voice-call="onVoiceCall"
+          @voice-panel="(v) => { voicePanelVersion = v }"
         >
           <!-- ent#523: the agent's numbers, always visible under the header.
                Mounted by the shell because the shell owns which agent is on
@@ -387,8 +395,19 @@
            2026-09-05) — a sibling of the rail, not a tab. The rail's own state
            is a setup ref of this view, so it is untouched by this swap and
            closing returns it on the tab it was showing. -->
+      <!-- ent#534: the agent's canvas takes the right column for the duration
+           of a voice call — in the rail's (and the details panel's) place, the
+           way Agent details takes it. The rail's own state is a setup ref and
+           comes back untouched when the call ends. -->
+      <PortalVoiceCanvas
+        v-if="voiceCall.active && voiceCall.voiceSessionId && activeAgent"
+        class="hidden sm:flex sm:w-[60%] sm:flex-none"
+        :agent-name="activeAgent.name"
+        :voice-session-id="voiceCall.voiceSessionId || ''"
+        :panel-version="voicePanelVersion"
+      />
       <PortalAgentDetails
-        v-if="detailsOpen && activeAgent"
+        v-else-if="detailsOpen && activeAgent"
         :agent-name="activeAgent.name"
         :agent="activeAgent"
         :threads="threads"
@@ -491,6 +510,7 @@ import { useColumnResize } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
+import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
 import {
   RAIL_TABS,
@@ -646,6 +666,20 @@ const railSheetOpen = ref(false)
 // a panel about the previous agent is worse than no panel.
 const detailsOpen = ref(false)
 
+// ent#534 — the voice call the conversation reports. Owned here because the
+// shell decides what the right column shows and whether a chat may be left:
+// while a call is on, sidebar clicks, the tabs, New chat and ⌘J are refused
+// (a switch remounts the conversation and would drop the call); route-driven
+// changes end the call gracefully inside the conversation instead.
+const voiceCall = ref({ active: false, agentName: null, voiceSessionId: null })
+const voicePanelVersion = ref(0)
+function onVoiceCall(sig) {
+  voiceCall.value = sig?.active
+    ? { active: true, agentName: sig.agentName || null, voiceSessionId: sig.voiceSessionId || null }
+    : { active: false, agentName: null, voiceSessionId: null }
+  if (!sig?.active) voicePanelVersion.value = 0
+}
+
 // ent#492 — the three resizable columns. Widths are per user and read
 // synchronously here, before first paint, so a reload does not flash the
 // default layout. The rail's own open/collapsed state stays `railState`'s: this
@@ -658,9 +692,12 @@ const columns = useColumnResize({
 })
 
 // The third column is resizable only when it is a real column: the rail when
-// open, or Agent details, which takes its place at the same width.
+// open, or Agent details, which takes its place at the same width. Not during
+// a voice call (ent#534): the canvas takes that column at a fixed share and
+// would ignore the width the handle drags.
 const thirdColumnResizable = computed(() => (
-  (detailsOpen.value && !!activeAgent.value) || (railVisible.value && railState.value.open)
+  !voiceCall.value.active
+  && ((detailsOpen.value && !!activeAgent.value) || (railVisible.value && railState.value.open))
 ))
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
@@ -761,6 +798,9 @@ function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list)
 // reset (`setParticipants` clears each store); the owner clears on its own
 // when the rail leaves the screen.
 watch([convKey, activeRoomIdFromRoute], () => {
+  // ent#534: the reporter unmounted (its own teardown ended the call on the
+  // server); the shell must not keep showing a canvas column for it.
+  onVoiceCall(null)
   workSignal.value = emptySignal()
   roomParticipants.value = []
   railSheetOpen.value = false
@@ -1051,6 +1091,7 @@ async function onMainReset(result) {
 }
 
 function newChatWithAgent(name) {
+  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
   unreachableAgent.value = null
   activeAgentName.value = name
   // ent#451: this function has always MEANT a fresh chat — it clears
@@ -1072,6 +1113,7 @@ function newChatWithAgent(name) {
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
+  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
   unreachableAgent.value = null
   // Opening an existing thread is the opposite intent; clear it so a later
   // send does not still ask for a fresh one.
@@ -1224,6 +1266,7 @@ function renameRoom(roomId, title) {
 function onGlobalKeydown(e) {
   if (!isNewChatHotkey(e)) return
   if (!store.isClientSignedIn) return
+  if (voiceCall.value.active) return   // ent#534: the call owns the stage
   e.preventDefault()
   const name = activeAgentPageName.value
     || (!activeRoomIdFromRoute.value && !unreachableAgent.value ? activeAgent.value?.name : null)

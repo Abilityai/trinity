@@ -7,7 +7,15 @@
        inherited rather than re-implemented. Renders no chrome at all with
        nothing to list: an unsaved new chat is not a tab yet, and a strip with
        one phantom tab would claim a chat that does not exist. -->
-  <div v-if="tabs.length" class="shrink-0 px-3 sm:px-4 bg-white dark:bg-gray-900" data-testid="portal-chat-tabs">
+  <!-- ent#534: while a voice call is on, the strip is visible but inert —
+       switching chats would remount the conversation and drop the call. -->
+  <div
+    v-if="tabs.length"
+    class="shrink-0 px-3 sm:px-4 bg-white dark:bg-gray-900"
+    :class="disabled ? 'opacity-60 pointer-events-none' : ''"
+    :aria-disabled="disabled ? 'true' : undefined"
+    data-testid="portal-chat-tabs"
+  >
     <OverflowTabs
       dense
       :tabs="tabs"
@@ -27,12 +35,15 @@ const props = defineProps({
   threads: { type: Array, default: () => [] },
   agentName: { type: String, default: '' },
   activeId: { type: String, default: null },
+  // ent#534: inert while a voice call is on.
+  disabled: { type: Boolean, default: false },
 })
 const emit = defineEmits(['select'])
 
 const tabs = computed(() => agentChatTabs(props.threads, props.agentName))
 
 function onSelect(id) {
+  if (props.disabled) return
   if (!id || id === props.activeId) return
   const tab = tabs.value.find((t) => t.id === id)
   if (tab) emit('select', tab.thread)

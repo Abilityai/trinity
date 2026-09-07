@@ -4029,6 +4029,36 @@ def _migrate_user_ui_preferences_table(cursor, conn):
         )
     """)
 
+def _migrate_portal_messages_voice_source(cursor, conn):
+    """ent#534 — a Workspace voice call's turns land in the chat, marked spoken.
+
+    Two nullable columns on `enterprise_portal_messages`: `source` (NULL for a
+    typed turn, 'voice' for one spoken in a call) and `voice_call_id` (the voice
+    session id, so one call's rows group into a single collapsed block). Both
+    are written by the platform only — no client request carries them.
+
+    A per-row call id rather than a header row, deliberately: `get_portal_messages`
+    reads the newest 100 rows, and a 30-minute call is ~180, so anything keyed on
+    an opener row falls apart exactly when the call was long enough to matter.
+
+    Additive, no backfill: every existing row is a typed turn (`source IS NULL`).
+    Mirrored by the Alembic revision 0057_portal_messages_voice_source.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "source",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN source TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "voice_call_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN voice_call_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -4220,4 +4250,5 @@ MIGRATIONS = [
     ("agent_canvases_template", _migrate_agent_canvases_template),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
+    ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
 ]

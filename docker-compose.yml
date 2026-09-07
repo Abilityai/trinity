@@ -47,6 +47,7 @@ services:
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
       # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
       # Both default OFF; must reach the container or the flags stay false (config.py).
