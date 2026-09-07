@@ -87,6 +87,7 @@ Some specs need a real agent on the stack. Each reads an env var with a
 | `portal-agent-page-overview` | `PORTAL_TEST_AGENT` | exists, visible to admin |
 | `timeline-cancelled-bar`, `honest-failed-states` | `TEST_AGENT` | exists |
 | `circuit-breaker-badge` | `TEST_AGENT` | exists |
+| `agent-detail-talk-door` | `TALK_AGENT` | exists, **and on the signed-in operator's Workspace roster** (shared ∪ owned — an admin's reach on Agent Detail is wider than the roster's) |
 
 **The contract (#2199): a missing fixture reads as SKIPPED, never broken —
 and the probe must be authenticated.** `GET /api/agents/{name}` is behind
