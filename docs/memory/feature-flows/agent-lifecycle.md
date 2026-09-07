@@ -524,12 +524,18 @@ failure that flipped this answer would either recreate the orchestrator or leak 
 `is_system`-flagged row). So
 writer and checker cannot disagree. `None` (every existing caller) = today's fleet-derived behaviour.
 
-**Restart-policy carry-forward (#1816):** `_provision_folders_and_run_agent_container` takes a keyword-only
-`restart_policy: Optional[dict]` and forwards it to `containers_run` only when `Name` is non-empty.
-`recreate_container_with_updated_config` reads it from the old container's `HostConfig` — previously an
-extracted-but-never-read variable, which is precisely why `unless-stopped` silently vanished on every
-recreate. Read null-safely as `(old_host_config.get("RestartPolicy") or {}).get("Name")`: the key can exist
-with a `null` value, and `.get` on `None` would abort the recreate.
+**Restart policy — unconditional, #2541** *(retired #1816's carry-forward)*:
+`_provision_folders_and_run_agent_container` bakes `restart_policy=AGENT_RESTART_POLICY`
+(`{"Name": "unless-stopped"}`, from `capabilities.py`) on **every** call, like every other property at that
+call site. #1816 had it as a keyword-only `restart_policy: Optional[dict]` read from the old container's
+`HostConfig` and forwarded only when `Name` was non-empty — faithful, and therefore sticky: it carried
+Docker's default `no` forward forever, which is why the 2026-09-04 power-off left 8 of 19 agents Exited for
+~42 hours. The tail's *other* caller, `recreate_missing_container` (#1559 recovery), passed nothing at all,
+so a recovered agent was rebuilt on `no` even when it had `unless-stopped`. The keyword and the
+`old_host_config` extraction are both **deleted** — keeping the latter would recreate the dead-variable
+shape #1816 was filed to fix. #1816's intent (`trinity-system` never loses `unless-stopped` across a
+recreate) now holds fleet-wide by construction. See [container-capabilities.md](container-capabilities.md)
+→ Container Restart Policy.
 
 **Canonical cold restart — `restart_agent_internal` (#1860)** (`src/backend/services/agent_service/lifecycle.py:469-488`, directly after `start_agent_internal` :257):
 
