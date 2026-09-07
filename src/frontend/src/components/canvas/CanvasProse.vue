@@ -1,6 +1,6 @@
 <template>
   <!-- eslint-disable-next-line vue/no-v-html -- sanitized by renderCanvasMarkdown (DOMPurify, H-005, canvas kit allowlist) -->
-  <div class="prose prose-sm dark:prose-invert max-w-none" v-html="html"></div>
+  <div class="prose prose-sm dark:prose-invert max-w-none min-w-0 [overflow-wrap:anywhere]" v-html="html"></div>
 </template>
 
 <script setup>
