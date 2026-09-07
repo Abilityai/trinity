@@ -268,12 +268,19 @@ def register_agent_owned_table(table: str, column: str = "agent_name") -> None:
     """Idempotently register an entitled-module agent-scoped table so the OSS
     delete + rename paths sweep/re-key it with its agent.
 
-    Both paths, and that is load-bearing rather than tidy: until this was fixed
-    the docstring promised both while ``cascade_rename`` iterated ``AGENT_REFS``
-    only, so a registered private table kept the OLD agent name after a rename.
-    The agent silently lost its rows, and a later agent taking the freed name
-    INHERITED them — the same recycled-name cross-wire ``delete_reports_to_refs``
-    exists to prevent one function below.
+    Both paths, and that is the contract rather than an implementation detail:
+    this docstring promised both while ``cascade_rename`` iterated
+    ``AGENT_REFS`` only (fixed in trinity-enterprise#500). It was survivable
+    because the one production caller — ``db/agent_settings/metadata.py::
+    rename_agent`` — carried its own copy of the sweep, which is what made it
+    long-lived AND what made it dangerous: the behaviour lived in a caller, so a
+    cross-repo module author reading this contract would have believed the
+    shared function, and any second caller would have silently dropped it. A
+    registered table left on the OLD name is not merely orphaned — the freed
+    name can be taken by a new agent, which then INHERITS those rows, the
+    recycled-name cross-wire ``delete_reports_to_refs`` exists to prevent one
+    function below. The caller's duplicate loop was deleted when this one
+    landed: one question, one place (the #1819 lesson).
     """
     if (table, column) not in EXTRA_AGENT_REFS:
         EXTRA_AGENT_REFS.append((table, column))

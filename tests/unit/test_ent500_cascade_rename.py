@@ -1,23 +1,31 @@
-"""B3 — `cascade_rename` must sweep the tables it says it sweeps.
+"""`cascade_rename` must sweep the tables it says it sweeps (ent#500).
 
-`register_agent_owned_table` is how an entitled module joins the OSS agent
-cascade, and its docstring said the "delete + rename paths sweep/re-key" the
-registered table. Only the delete path did: `cascade_delete` iterated
-`EXTRA_AGENT_REFS`, `cascade_rename` iterated `AGENT_REFS` alone.
+⚠️ **Scope, stated accurately.** The plan that led here claimed a live
+disclosure: that after `PUT /api/agents/{name}/rename` a registered private
+table kept the OLD agent name, so the renamed agent lost its rows and a new
+agent taking the freed name inherited them. **That was overstated.**
+`db/agent_settings/metadata.py::rename_agent` — the only production caller —
+carried its own `EXTRA_AGENT_REFS` loop (ent#46), so the production rename path
+was already correct. Verified by reading every caller, not assumed.
 
-The consequence is not a stale row, it is a cross-wire. After
-`PUT /api/agents/{name}/rename` the registered rows still carry the OLD name, so
-the renamed agent silently loses them — and a NEW agent created later under that
-freed name INHERITS them. For a table that records which human an agent serves,
-that means one agent inheriting another's people. The codebase names this exact
-class one function away, in `delete_reports_to_refs`: *"a dangling ref would
-silently re-attach to an unrelated agent that reuses the name."*
+What WAS wrong is narrower and still worth fixing: the behaviour lived in the
+CALLER while `cascade_rename` — the shared function whose docstring
+(`register_agent_owned_table`: *"the OSS delete + rename paths sweep/re-key
+it"*) promised it — did not do it. That is the #1819 lesson one level down. Two
+places answering one question, and a cross-repo module author reading the
+contract would have believed the shared function. Any second caller of
+`cascade_rename` would have silently dropped the sweep, and the recycled-name
+cross-wire `delete_reports_to_refs` exists to prevent — one function below — is
+what that would have produced.
 
-The behavioural test uses a table that is deliberately NOT in the OSS
-`db/tables.py` MetaData, because that is the whole reason the extra registry
-exists — `_table()` cannot build a statement for a private table, so a rename
-sweep has to go through raw `text()` the way the delete sweep does. A test
-against an OSS table would pass on the pre-fix code.
+So the fix is a CONSOLIDATION: the loop moved into `cascade_rename`, the
+duplicate in `rename_agent` was deleted, and the docstring is now true.
+
+The behavioural tests use a table deliberately NOT in the OSS `db/tables.py`
+MetaData, because that absence is the whole reason the second registry exists —
+`_table()` cannot build a statement for a private table, so the sweep has to go
+through raw `text()` the way the delete sweep does. A test written against an
+OSS table would pass on the pre-fix code and prove nothing.
 """
 from __future__ import annotations
 
@@ -113,8 +121,9 @@ def test_rename_rekeys_a_registered_module_table(probe_db, registry_isolated):
 
     rows = _rows(probe_db)
     assert rows["mine"] == "ranger", (
-        "the registered table kept the OLD name — the renamed agent has lost "
-        "its rows, and the next agent to take the freed name will inherit them"
+        "cascade_rename left the registered table on the OLD name — a second "
+        "caller would silently strand a private module's rows, and the next "
+        "agent to take the freed name would inherit them"
     )
     assert rows["theirs"] == "other-agent", "an unrelated agent's row was rewritten"
     assert updated.get(PROBE_TABLE) == 1
@@ -175,12 +184,110 @@ def test_delete_and_rename_consume_the_SAME_registry(probe_db, registry_isolated
 
 
 def test_the_docstring_no_longer_promises_what_the_code_did_not_do():
-    """The docstring is the only place the contract is written down for a
-    cross-repo module author, so a lie there is the defect's real cause."""
+    """The docstring is the only place this contract is written down for a
+    cross-repo module author, so a lie there IS the defect — the code it
+    described happened to be correct at one caller, which is precisely what made
+    the lie survivable and therefore long-lived."""
     from db.agent_cleanup import register_agent_owned_table
 
     doc = register_agent_owned_table.__doc__ or ""
     assert "rename" in doc
     assert "recycled-name" in doc or "reuses the name" in doc, (
         "the docstring should say WHY both paths matter, not just that they do"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The caller level — the property the consolidation could break
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def full_schema_db(tmp_path, monkeypatch):
+    """The real production schema, because `rename_agent` needs `agent_ownership`
+    and the tag-ref sweep, not just the probe table."""
+    monkeypatch.setenv("TRINITY_DB_PATH", str(tmp_path / "rename-full.db"))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    import db.connection as conn_mod
+
+    monkeypatch.setattr(conn_mod, "DB_PATH", str(tmp_path / "rename-full.db"))
+
+    from sqlalchemy import text
+
+    from db.engine import dispose_engines, get_engine
+    from db_harness import bootstrap_schema
+
+    dispose_engines()
+    bootstrap_schema()
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"CREATE TABLE {PROBE_TABLE} ("
+                " id INTEGER PRIMARY KEY, agent_name TEXT NOT NULL, payload TEXT)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
+                "VALUES ('scout', 1, '2026-09-07T10:00:00Z')"
+            )
+        )
+    yield engine
+    dispose_engines()
+
+
+def test_the_production_rename_path_still_rekeys_a_registered_table(
+    full_schema_db, registry_isolated
+):
+    """`rename_agent` used to carry its OWN `EXTRA_AGENT_REFS` loop, which is why
+    the production path was correct while `cascade_rename` was not. The loop was
+    deleted when `cascade_rename` grew the sweep — so this asserts the caller did
+    not LOSE the behaviour in the consolidation.
+
+    Without it, moving the loop is an unverified refactor of the one path that
+    actually mattered.
+    """
+    from sqlalchemy import text
+
+    from db.agent_settings.metadata import MetadataMixin
+
+    registry_isolated.register_agent_owned_table(PROBE_TABLE, "agent_name")
+    with full_schema_db.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO {PROBE_TABLE} (agent_name, payload) "
+                "VALUES ('scout', 'mine')"
+            )
+        )
+
+    assert MetadataMixin().rename_agent("scout", "ranger") is True
+
+    with full_schema_db.begin() as conn:
+        left = conn.execute(
+            text(f"SELECT COUNT(*) FROM {PROBE_TABLE} WHERE agent_name = 'scout'")
+        ).scalar()
+        moved = conn.execute(
+            text(f"SELECT COUNT(*) FROM {PROBE_TABLE} WHERE agent_name = 'ranger'")
+        ).scalar()
+    assert (left, moved) == (0, 1), (
+        "the production rename path stopped re-keying an entitled module's "
+        "table — the consolidation dropped the behaviour instead of moving it"
+    )
+
+
+def test_rename_agent_carries_no_table_loop_of_its_own():
+    """Structural, and the point of the whole exercise: one question, one place.
+    `rename_agent` regrowing a private sweep is how the two lists diverged in
+    #1819, and how `cascade_rename`'s docstring came to disagree with the code.
+    """
+    import inspect
+
+    from db.agent_settings.metadata import MetadataMixin
+
+    body = inspect.getsource(MetadataMixin.rename_agent)
+    assert "cascade_rename(" in body, "rename must derive its tables from the registry"
+    assert "for table, column in EXTRA_AGENT_REFS" not in body, (
+        "rename_agent has regrown its own EXTRA_AGENT_REFS loop — the sweep "
+        "belongs in cascade_rename so every caller inherits it"
     )

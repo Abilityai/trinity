@@ -187,18 +187,32 @@ cascade, and its docstring promised the "delete + rename paths sweep/re-key" the
 table. Only delete did: `cascade_delete` iterated `EXTRA_AGENT_REFS`,
 `cascade_rename` iterated `AGENT_REFS` alone.
 
-The consequence is not a stale row, it is a **cross-wire**. After a rename the
-registered rows keep the OLD name, so the renamed agent silently loses them — and
-a new agent later taking the freed name inherits them. For a table recording
-which human an agent serves, that is one agent inheriting another agent's people,
-and those people then flow into its system prompt and its roster read. The
-codebase names this exact class one function away (`delete_reports_to_refs`:
+⚠️ **Stated accurately, because the plan that led here overstated it.** This was
+NOT a live disclosure. `db/agent_settings/metadata.py::rename_agent` — the only
+production caller of `cascade_rename` — carried its own `EXTRA_AGENT_REFS` loop
+(ent#46), so the rename endpoint was already correct. Verified by reading every
+caller rather than assumed.
+
+What was actually wrong is narrower and still worth fixing: the behaviour lived
+in the **caller**, while the shared function whose contract advertised it did
+not do it. That is the #1819 lesson one level down — two places answering one
+question. A cross-repo module author reads the contract, not the caller; and a
+second caller of `cascade_rename` would have silently dropped the sweep. What
+that would then produce is the **cross-wire**: registered rows keep the OLD name,
+the renamed agent loses them, and a new agent taking the freed name inherits
+them — for a table recording which human an agent serves, one agent inheriting
+another agent's people, who then flow into its system prompt and its roster read.
+The codebase names this exact class one function away (`delete_reports_to_refs`:
 *"a dangling ref would silently re-attach to an unrelated agent that reuses the
 name"*).
 
-Fixed here, in the public repo, as an edition-agnostic OSS fix: `cascade_rename`
-sweeps `EXTRA_AGENT_REFS` with the same bound-parameter `text()` UPDATE the
-delete path uses, and the docstring now says why both halves matter.
+So the fix is a **consolidation**, shipped in the public repo as an
+edition-agnostic change: `cascade_rename` sweeps `EXTRA_AGENT_REFS` with the same
+bound-parameter `text()` UPDATE the delete path uses, the duplicate loop in
+`rename_agent` is deleted, and the docstring is now true. `test_ent500_cascade_rename.py`
+covers both levels — the shared function AND the production caller, the latter
+because moving a loop is otherwise an unverified refactor of the one path that
+mattered.
 
 ## Failure Semantics
 
