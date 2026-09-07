@@ -577,11 +577,18 @@
   - **Defaults region (top) — agent negations win.** Anything the agent writes below
     the block beats a canonical default, so `!.env.example`, `!.claude/settings.json`
     and `!**/.env.example` hold **without having to be the file's last line**.
-  - **Protected floor (bottom) — NOT overridable.** The six credential patterns
-    (`.env`, `.env.*`, `.mcp.json`, `credentials.json`, `*.pem`, `*.key`) plus their
-    two canonical negations (`!.env.example`, `!.mcp.json.template`), and `.trinity/*`
-    with the 8 `!` re-includes derived from `_TRINITY_AUTHORED_PATHS`, sit **below** the
-    user region. Two reasons, both measured: (1) hoisting a single block would flip
+  - **Protected floor (bottom) — NOT overridable.** The seven credential patterns
+    (`.env`, `.env.*`, `.mcp.json`, `credentials.json`, `*.pem`, `*.key`, `.ssh/`) plus
+    their two canonical negations (`!.env.example`, `!.mcp.json.template`), and
+    `.trinity/*` with the 8 `!` re-includes derived from `_TRINITY_AUTHORED_PATHS`, sit
+    **below** the user region. Floor membership is decided against
+    `services/credential_paths.py` — the platform's own answer to *"is this secret
+    material"* — **not** against the source file's comment headings: `.ssh/` sits under
+    "Instance-specific directories" and was consequently missed on the first pass, which
+    left a fleet agent carrying `!.ssh` (with no `.ssh/` line of its own) newly committing
+    `.ssh/id_rsa` on its migration Push. Pinned by
+    `test_2529_gitignore_precedence.py::test_credential_bearing_defaults_are_all_in_the_floor`
+    and `::test_a_user_negation_cannot_un_ignore_ssh_key_material`. Two reasons, both measured: (1) hoisting a single block would flip
     every currently-**inert** credential negation in the fleet live in one Push — today
     a user's `!.env` with no `.env` line gets `.env` appended *below* it, so `.env` **is**
     ignored; hoisting reverses that, and the unattended 15-minute `git add -A` commits
@@ -618,7 +625,18 @@
   - **Five surfaces, one of which outlives the session.** API response, `git_sync` MCP
     tool result, UI toast, the commit message, and — because both field incidents were
     unattended and surfaced two months late — an **operator-queue entry**
-    (`gitignore_untracked`, the #1595 `git_bloat` precedent). That entry is **budgeted**
+    (`gitignore_untracked`, the #1595 `git_bloat` precedent). **Every one of the five
+    gates on `GitignoreSweep.changed_tracking` — `removed` OR `unignored` — never on
+    `removed` alone.** The rebuild can change what is in the repo in *both* directions,
+    and the addition is the worse half: a removal is recoverable from the working tree,
+    whereas a newly un-ignored path is already in the remote's history and may need a
+    credential rotated. `shadowed` is deliberately **not** in the gate — it is standing
+    advice about the file, not a change this Push made, so including it would file an
+    alert on every single Push of every agent with a dir-form negation. An
+    unignored-ONLY entry files at `medium`, not `high`: `unignored` is
+    `after − before` across two execs against a live container, so a file the agent's
+    own session creates in that window lands there too, whereas a removal is a
+    confirmed destructive act. That entry is **budgeted**
     (#1677 `create_bounded_alert`), not a direct create like its `git_bloat`/`sync_failing`
     siblings: their cadence is the 60-second platform poller's, while this one fires from
     `sync_to_github`, which the `git_sync` MCP tool lets an agent-scoped key drive on itself

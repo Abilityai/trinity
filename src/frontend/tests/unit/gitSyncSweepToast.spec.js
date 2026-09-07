@@ -88,6 +88,42 @@ describe('#2529 git sync toast — untracked paths are named', () => {
     )
   })
 
+  it('names newly un-ignored paths too — the addition half of the sweep', async () => {
+    // Found in review: the rebuild that stops a managed default reversing an
+    // agent negation can also newly UN-ignore a path, and the same sync then
+    // COMMITS it. Reporting only removals left that addition exactly as silent
+    // as the deletions this all exists to end.
+    const { notify, sync } = setup({
+      success: true,
+      files_changed: 3,
+      removed_paths: [],
+      unignored_paths: ['.ssh/id_rsa'],
+    })
+
+    await sync.syncToGithub()
+
+    expect(notify).toHaveBeenCalledWith(
+      'Synced 3 file(s) to GitHub — 1 newly un-ignored and committed',
+      'success',
+    )
+  })
+
+  it('names both directions when the sweep did both', async () => {
+    const { notify, sync } = setup({
+      success: true,
+      files_changed: 4,
+      removed_paths: ['errors.log', 'a.db'],
+      unignored_paths: ['keep.db'],
+    })
+
+    await sync.syncToGithub()
+
+    expect(notify).toHaveBeenCalledWith(
+      'Synced 4 file(s) to GitHub — 2 untracked by .gitignore, 1 newly un-ignored and committed',
+      'success',
+    )
+  })
+
   it('survives an older backend that sends no removed_paths at all', async () => {
     const { notify, sync } = setup({ success: true, files_changed: 2 })
 

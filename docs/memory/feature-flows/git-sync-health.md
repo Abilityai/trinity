@@ -137,7 +137,7 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
   `[defaults block][the agent's own rules, original order][protected floor]`. The defaults
   block sits ABOVE the agent's rules so an agent negation (`!.env.example`,
   `!.claude/settings.json`) wins without having to be the file's last line; the floor —
-  the six credential patterns with `!.env.example`/`!.mcp.json.template`, plus `.trinity/*`
+  the seven credential patterns (incl. `.ssh/`) with `!.env.example`/`!.mcp.json.template`, plus `.trinity/*`
   and its 8 derived `!` re-includes — sits BELOW them and cannot be overridden. One block
   provably cannot carry both: hoisting would turn every currently-inert `!.env` in the fleet
   live in one unattended Push, and would let a user `*.sh` beat `!.trinity/setup.sh`

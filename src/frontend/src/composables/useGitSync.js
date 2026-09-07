@@ -96,10 +96,17 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
       // verb in the danger token. The durable surface for a removal an operator
       // must act on is the `gitignore_untracked` operator-queue entry, not a
       // 3-second toast.
+      //
+      // BOTH directions. The same rebuild that stops a managed default from
+      // reversing an agent negation can also newly UN-ignore a path, which
+      // this same sync then commits — reporting only removals would leave the
+      // addition exactly as silent as the deletions this all exists to end.
       const untracked = result.removed_paths?.length || 0
-      const untrackedNote = untracked > 0
-        ? ` — ${untracked} untracked by .gitignore`
-        : ''
+      const unignored = result.unignored_paths?.length || 0
+      const sweepNotes = []
+      if (untracked > 0) sweepNotes.push(`${untracked} untracked by .gitignore`)
+      if (unignored > 0) sweepNotes.push(`${unignored} newly un-ignored and committed`)
+      const untrackedNote = sweepNotes.length ? ` — ${sweepNotes.join(', ')}` : ''
       if (result.success) {
         if (result.files_changed > 0) {
           showNotification(

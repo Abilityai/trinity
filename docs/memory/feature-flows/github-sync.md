@@ -259,7 +259,7 @@ sequenceDiagram
     Backend->>Container: docker exec — rebuild .gitignore: [defaults][user rules][protected floor] (#462, #2529)
     Backend->>Container: docker exec — git rm --cached newly-ignored tracked files + report probes (#2529)
     Backend->>Backend: parse GitignoreSweep (removed / unignored / shadowed)
-    Backend->>Backend: file gitignore_untracked operator-queue entry if anything was removed
+    Backend->>Backend: file gitignore_untracked operator-queue entry if anything was removed OR newly un-ignored
     Backend->>Container: POST /api/git/sync (commit message names the removals)
     Container->>Container: git add -A
     Container->>Container: git commit -m "Trinity sync: {timestamp}"
@@ -332,8 +332,14 @@ into a `GitignoreSweep`:
 
 The sweep reaches five surfaces: the API response, the `git_sync` MCP result,
 the UI toast, the commit message, and a `gitignore_untracked` **operator-queue**
-entry — filed through the #1677 **budget seam** (`create_bounded_alert`), not as
-a direct create like its `git_bloat`/`sync_failing` siblings, because those fire
+entry. All five gate on `GitignoreSweep.changed_tracking` — `removed` **or**
+`unignored`, never `removed` alone: the rebuild changes what is in the repo in
+both directions, and the addition is the worse half (a removal is recoverable
+from the working tree; a newly un-ignored path is already in the remote's
+history and may need a credential rotated). `shadowed` is not in the gate — it
+is standing advice about the file, not a change this Push made. The entry is
+filed through the #1677 **budget seam** (`create_bounded_alert`), not as a
+direct create like its `git_bloat`/`sync_failing` siblings, because those fire
 on the 60-second platform poller's cadence while this one fires from
 `sync_to_github`, which the `git_sync` MCP tool lets an agent drive on itself.
 The last surface is the point: both field incidents were unattended

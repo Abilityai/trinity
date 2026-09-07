@@ -298,9 +298,9 @@ Write, for example:
 these win no matter what you write:
 
 - the credential patterns (`.env`, `.env.*`, `.mcp.json`, `credentials.json`,
-  `*.pem`, `*.key`) — an inert `!.env` that suddenly went live on an unattended
-  15-minute auto-sync would push a live secret into your own repo, so the
-  platform refuses;
+  `*.pem`, `*.key`, `.ssh/`) — an inert `!.env` or `!.ssh` that suddenly went live
+  on an unattended 15-minute auto-sync would push a live secret (or an SSH private
+  key) into your own repo, so the platform refuses;
 - `.trinity/*` and the `!` re-includes for the paths the platform itself authors
   and reads back (`pre-check`, `post-check`, `pre-snapshot`, `setup.sh`,
   `persistent-processes.allow`, `brain-orb/`, `pipelines/`, `plugins.yaml`) — a
@@ -344,8 +344,12 @@ above.
 **Knowing it happened at all.** A sync's result names what it removed
 (`removed_paths`), what it newly un-ignored and is about to commit
 (`unignored_paths`), and which of your negations a managed rule defeated
-(`shadowed_negations`). A sync that untracks anything also files an operator-queue
-entry, so an unattended 15-minute cycle is not silent.
+(`shadowed_negations`). A sync that changes what is tracked — in **either**
+direction, untracked *or* newly committed — also files an operator-queue entry,
+so an unattended 15-minute cycle is not silent. Watch `unignored_paths` in
+particular: those files were ignored before this sync and are now in your
+repository's history, so if one turns out to be a secret, rotate it rather than
+just deleting the file.
 
 **Note on Skills**: Skills in templates are seeded to the **Platform Skills Library** on first deployment, then managed centrally. See [Platform Skills](#platform-skills).
 
