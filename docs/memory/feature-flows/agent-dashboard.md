@@ -117,17 +117,19 @@ import DashboardPanel from '../components/DashboardPanel.vue'
 
 | Widget Type | Lines | Description |
 |-------------|-------|-------------|
-| metric | 100-122 | Numeric value with trend indicator (up/down arrows) |
-| status | 125-138 | Colored badge with label |
-| progress | 141-159 | Progress bar (0-100%) with color |
-| text | 162-173 | Simple text with size/color/align options |
-| markdown | 176-182 | Rendered markdown content (uses marked.js) |
-| table | 185-219 | Tabular data with columns and rows |
-| list | 222-239 | Bullet or numbered list |
-| link | 242-257 | Clickable link or button style |
-| divider | 260-265 | Horizontal separator (spans full width) |
-| spacer | 268-274 | Vertical space (sm/md/lg sizes) |
-| image | 277-290 | Image display with optional caption |
+| metric | 195-229 | Numeric value with trend indicator (up/down arrows) |
+| status | 232-245 | Colored badge with label |
+| progress | 248-285 | Progress bar (0-100%) with color |
+| text | 288-299 | Simple text with size/color/align options |
+| markdown | 302-308 | Rendered markdown content (uses marked.js) |
+| table | 311-345 | Tabular data with columns and rows |
+| list | 348-365 | Bullet or numbered list |
+| link | 368-383 | Clickable link or button style |
+| divider | 386-391 | Horizontal separator (spans full width) |
+| spacer | 394-400 | Vertical space (sm/md/lg sizes) |
+| image | 403-416 | Image display with optional caption |
+
+The 11 types above are the closed set. The backend D-002 allowlist (`static_checks._WIDGET_TYPES`, a tuple in this same order), the agent-server gate `validate_widget.valid_types` (which strips any other widget before the frontend sees it and lists it in the Dashboard tab's warning banner) and this render chain are kept in lockstep by `tests/unit/test_2110_widget_type_parity.py`, together with the validation spec, the agent guide and the two user-docs pages. There has never been a chart, badge or countdown widget type — trend lines come from the platform's history enrichment (DASH-001) on `metric`/`progress` widgets keyed by a stable `id` (#2110).
 
 ### Helper Functions (DashboardPanel.vue)
 
@@ -546,6 +548,7 @@ const startRefresh = () => {
 
 | Date | Change |
 |------|--------|
+| 2026-09-06 | **Widget-type closed set** pinned by a parity test (backend ≡ agent server ≡ renderer ≡ docs); D-002 now names the offending type (#2110). Refreshed stale Widget Renderers line numbers. |
 | 2026-03-15 | **Dashboard Resilience**: Added stale cache fallback - when YAML breaks, last valid dashboard shown with warning banner. Added "Update Dashboard" button that triggers `/update-dashboard` playbook if available. Tab visibility now considers stale responses. |
 | 2026-02-12 | **Conditional Tab Visibility**: Dashboard tab now hidden when agent doesn't have `dashboard.yaml`. |
 | 2026-02-11 | Fixed workspace path references - dashboard.yaml only at `/home/developer/dashboard.yaml` (no workspace fallback) |
