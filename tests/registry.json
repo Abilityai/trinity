@@ -2681,6 +2681,30 @@
       "description": "ent#438 agent canvas + workspace merge: audience defaults to operator and an unrecognised stored value reads as operator (allowlist, so a canvas never widens who sees agent output); the Workspace read narrows IN THE QUERY; staleness is derived (agent finished a run after the write) not a clock, never claims more than it observed, and is computed once per agent; canvas ids are charset-validated with a named 400 and the pattern is anchored; blocks are count- AND byte-capped; writes are self-gated while reads are not; a foreign execution_id degrades rather than refusing (provenance, not authorization); the retired /agents/:name/workspace route still resolves and carries its agent, the page is gone and nothing references it; every advertised block kind has a renderer and the five shared ones delegate to the CI-pinned components/reports/ dispatch without widening the report display_hint enum; agent-authored html is DOMPurify-sanitised; the voice panel writes the durable canvas at operator audience and still has a caller; dual-track migration present and the table is AGENT_REFS-registered."
     },
     {
+      "file": "unit/test_ent536_canvas_vocabulary.py",
+      "feature": "ent#536",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "frontend",
+        "workspace",
+        "security",
+        "regression"
+      ],
+      "description": "ent#536 one rich canvas block vocabulary: the backend enum, MCP BLOCK_KINDS and frontend CANVAS_BLOCK_KINDS are one set (image + diagram added, report display_hint untouched) and DEFAULT_CANVAS_ID is one string across models.py, canvas.ts, canvasUtils.js and the voice service (no 'voice' silo); id-less blocks are assigned b1..bN without shadowing declared ids, duplicate or malformed ids are refused by name, CanvasPatch requires ids; classify_image_src is one gate for both writers (https, data:image/(png|jpeg|gif|webp);base64 under the inline cap, workspace paths normalised under /home/developer; svg, other schemes, protocol-relative, control chars, traversal and sibling-prefix refused) and image payloads are normalised to {src, src_kind} at write; diagram source is required and capped; patch_blocks replaces in place keeping order, refuses unknown ids and id-less canvases with the fix spelled out, replaces stored duplicates everywhere; map_panel_tool maps each voice verb onto one block kind on the voice* ids (show_* replaces where the first voice block stood, append coalesces into the trailing voice html block, clear removes voice blocks only, refusals return no blocks); audience_within never widens; write_canvas assigns ids, normalises audience closed, resolves provenance, enforces the byte cap and REQUIRES audience; patch_canvas keeps title/audience and restamps provenance; the router declares its # mcp: header and a self-gated PATCH route with no router-side upsert; the panel endpoint serves the canvas row; CanvasMarkdown never imports the dispatcher and mermaid is lazy + sanitised."
+    },
+    {
+      "file": "unit/test_ent536_canvas_prompt_guidance.py",
+      "feature": "ent#536",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "prompt",
+        "regression"
+      ],
+      "description": "ent#536 '### Your Canvas' platform-prompt guidance, the sibling of test_1535: documents set_canvas / patch_canvas / get_canvas and the default canvas 'main'; Codex build uses bare names and its orientation lists the canvas tools; every kind in the MCP BLOCK_KINDS enum is documented with a payload; the chart keys (series/points/ts/value/type/label/unit), the diagram key (mermaid), the image keys (src/caption) and the report-shared keys match the frontend rules; every CHART_TYPES entry and the four rich fences are taught; the four ceilings are interpolated from models.py with no marker leaked; the block stays within its context budget; the trigger phrase, the report hand-off and the no-JavaScript rule are stated; the section is registered as MINIMAL-droppable tool guidance; the Publishing Reports block is not swallowed by its new neighbour."
+    },
+    {
       "file": "unit/test_2523_loops_terminal_driven.py",
       "feature": "#2523",
       "added": "2026-09-04",

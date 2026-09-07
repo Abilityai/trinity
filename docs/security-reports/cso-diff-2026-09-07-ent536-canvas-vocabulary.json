@@ -1,0 +1,127 @@
+{
+  "version": "1.1",
+  "date": "2026-09-07",
+  "mode": "diff",
+  "scope": "abilityai/trinity-enterprise#536 \u2014 branch feature/536-rich-canvas-vocabulary vs merge-base 88056c3d (dev tip); 25 feature files changed/added (working tree, pre-commit)",
+  "phases_run": [
+    "P0 architecture",
+    "P1 attack surface (diff)",
+    "P2 secrets (diff + enterprise-docs guard)",
+    "P3 supply chain (no dependency changes; mermaid now lazy)",
+    "P4 CI/CD (no workflow changes)",
+    "P5 infra (no Docker/compose changes; CSP img-src widened)",
+    "P6 integrations (voice write path, PATCH route, MCP patch_canvas)",
+    "P7 LLM/AI (agent-authored chart/diagram/image/html rendering)",
+    "P8 skills (no skill changes)",
+    "P9 OWASP (diff)",
+    "P10 STRIDE (diff)",
+    "P11 data classification",
+    "P12 FP filter + independent verifier",
+    "P13 report",
+    "P14 save"
+  ],
+  "attack_surface": {
+    "new_routes": [
+      "PATCH /api/agents/{name}/canvas/{canvas_id} (AuthorizedAgent + self-gate + rate + byte cap)"
+    ],
+    "changed_routes": [
+      "GET /api/agents/{name}/voice/{session_id}/panel (returns the canvas row; gates unchanged)",
+      "PUT /api/agents/{name}/canvas/{canvas_id} (via canvas_service.write_canvas)"
+    ],
+    "new_mcp_tools": [
+      "patch_canvas (agent-scoped only)"
+    ],
+    "renderer_sinks": [
+      "CanvasDiagram.vue v-html (mermaid strict + htmlLabels:false, DOMPurify)",
+      "CanvasBlock.vue v-html html block (DOMPurify, unchanged)",
+      "CanvasImage.vue <img> (https | data:image raster \u226464KiB | blob from authenticated preview)"
+    ],
+    "csp_change": "img-src 'self' data: blob: -> 'self' data: blob: https: (both mirrors)"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "resolution": "mitigated_in_diff",
+      "category": "information-disclosure/tracking-pixel",
+      "phase": "P7/P9-A05",
+      "title": "img-src https: is page-global; first mitigation covered only the canvas <img>; classifier accepted http://",
+      "files": [
+        "src/frontend/vite.config.js:38",
+        "src/frontend/security-headers.conf:31",
+        "src/frontend/src/utils/markdown.js:55",
+        "src/backend/services/canvas_blocks.py:61"
+      ],
+      "exploit": "agent-authored html/markdown carrying <img src=https://attacker> or style=url(...) reports viewer IP/UA/timing + deployment origin on every render, including roster canvases on the Workspace",
+      "fix": "utils/sanitizeHooks.js hardenMediaAttributes inside the one DOMPurify hook: no-referrer + lazy on every sanitised <img>, url()/image-set/@import inline styles removed; classify_image_src and imageSource https-only; documented residual (viewer IP to an https host of the agent's choosing)"
+    },
+    {
+      "id": "F2",
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "resolution": "resolved_in_diff",
+      "category": "xss/html-injection",
+      "phase": "P7/P9-A03",
+      "title": "Pre-existing (ent#438): TrendLineChart tooltip concatenated agent-authored label/color into innerHTML",
+      "files": [
+        "origin/dev:src/frontend/src/components/TrendLineChart.vue:67-76",
+        "origin/dev:src/frontend/src/components/canvas/canvasUtils.js:126-128"
+      ],
+      "exploit": "set_canvas chart series label '<img src=x onerror=...>' -> tooltip innerHTML on hover; script blocked by prod CSP (script-src 'self'), executes under the Vite dev CSP; HTML/CSS injection in prod",
+      "fix": "tooltip rebuilt with replaceChildren/createElement/textContent; CSSOM background from safeColor (hex-only); safeLabel plain text; pinned by canvasUtils.spec.js"
+    }
+  ],
+  "observations": [
+    {
+      "id": "O1",
+      "severity": "INFO",
+      "confidence": 4,
+      "text": "patch_canvas read-modify-write across two transactions; LWW documented in db layer and tool description (hard exclusion #6)"
+    },
+    {
+      "id": "O2",
+      "severity": "INFO",
+      "confidence": 3,
+      "text": "workspace-path images need a running agent and a platform JWT; external portal clients get an honest placeholder"
+    },
+    {
+      "id": "O3",
+      "severity": "INFO",
+      "confidence": 3,
+      "text": "voice panel tool now performs one read + one write per call on the event loop; bounded by the model's tool-call rate"
+    }
+  ],
+  "verification": {
+    "secrets_scan": "0 matches over the merge-base diff and every new file",
+    "enterprise_docs_guard": "0 hits on changed public docs",
+    "independent_verifier": "one fresh-context Agent, refute-first: F1 mitigation partly refuted (http accepted; page-global gap) and widened; F2 verified pre-existing and verified closed",
+    "tests": "backend suites touching the changed modules green (713 passed before the https-only tightening, re-run green after); frontend vitest green incl. canvasUtils.spec.js + sanitizeHooks.spec.js; MCP node:test green + tsc clean; live seed on the rebuilt backend with Playwright console check"
+  },
+  "supply_chain_summary": "no dependency changes; mermaid (existing dep) loaded lazily in its own chunk",
+  "filter_stats": {
+    "raw_candidates": 5,
+    "hard_excluded": 1,
+    "below_gate": 2,
+    "fixed_during_audit": 2,
+    "reported": 2
+  },
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 0,
+    "info": 3,
+    "open": 0
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-09-06-ent475-rail-rehome",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 2,
+    "new_closed_in_diff": 2,
+    "direction": "n/a (different surfaces)"
+  }
+}

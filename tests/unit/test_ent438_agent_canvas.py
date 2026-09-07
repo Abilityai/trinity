@@ -254,10 +254,15 @@ def test_the_write_routes_are_self_gated():
     assert "_require_self" in source
     guard = source[source.index("def _require_self"):source.index("@router.get")]
     assert "current_user.agent_name" in guard and "403" in guard
-    for handler in ("def write_canvas", "def clear_canvas"):
+    # ent#536: the two content writes share `_gate_write` (self-gate + rate +
+    # size hint); the delete keeps the bare self-gate. Either spelling proves
+    # the gate is applied — what must never appear is a write with neither.
+    gate = source[source.index("def _gate_write"):source.index("@router.get")]
+    assert "_require_self(current_user, name)" in gate
+    for handler in ("def write_canvas", "def patch_canvas", "def clear_canvas"):
         body = source[source.index(handler):]
         body = body[:body.index("@router.") if "@router." in body[10:] else len(body)]
-        assert "_require_self(" in body, f"{handler} is not self-gated"
+        assert "_require_self(" in body or "_gate_write(" in body, f"{handler} is not self-gated"
 
 
 def test_reads_are_not_self_gated():
@@ -350,14 +355,30 @@ def test_agent_authored_html_is_sanitized():
 # ---------------------------------------------------------------------------
 
 def test_the_voice_panel_writes_the_durable_canvas():
+    """ent#536: the panel IS the agent's default canvas — every verb goes
+    through the one service write path, and there is no in-memory copy."""
     source = (_BACKEND / "services" / "gemini_voice.py").read_text()
-    assert "_persist_panel_to_canvas" in source
-    body = source[source.index("def _persist_panel_to_canvas"):]
-    assert "upsert_agent_canvas" in body
-    assert 'audience="operator"' in body, (
-        "a voice panel that silently became client-visible is the widening "
-        "FR-4 exists to prevent"
-    )
+    assert "panel_state" not in source, "the voice panel must not keep a second copy of the canvas"
+    body = source[source.index("def _execute_panel_tool"):]
+    body = body[:body.index("\n    async def ")]
+    assert "canvas_service.write_canvas" in body
+    assert "map_panel_tool" in body
+    assert "_CANVAS_ID = DEFAULT_CANVAS_ID" in source, "voice writes the shared default canvas, not a silo"
+
+
+def test_the_voice_panel_never_widens_who_can_see_a_canvas():
+    """Behavioural pin (ent#536, replacing the old literal `audience="operator"`
+    pin): the write carries the SESSION audience, defaulting to operator, and a
+    canvas stored wider than that is refused rather than written."""
+    from services.canvas_service import audience_within
+
+    assert audience_within("operator", "operator")
+    assert audience_within("operator", "roster")
+    assert audience_within("roster", "roster")
+    assert not audience_within("roster", "operator"), "an operator call must not land on a roster canvas"
+    assert not audience_within("roster", "garbage"), "an unknown writer audience reads as operator"
+    source = (_BACKEND / "services" / "gemini_voice.py").read_text()
+    assert 'canvas_audience: str = "operator"' in source
 
 
 def test_the_voice_panel_capability_still_has_a_caller():
@@ -371,9 +392,10 @@ def test_the_voice_panel_capability_still_has_a_caller():
 
 def test_a_canvas_write_failure_never_breaks_the_voice_turn():
     source = (_BACKEND / "services" / "gemini_voice.py").read_text()
-    body = source[source.index("def _persist_panel_to_canvas"):]
+    body = source[source.index("def _execute_panel_tool"):]
     body = body[:body.index("\n    async def ") if "\n    async def " in body else len(body)]
     assert "except Exception" in body and "logger.warning" in body
+    assert "could not be saved" in body, "a failed write must be reported, not claimed as success"
 
 
 # ---------------------------------------------------------------------------

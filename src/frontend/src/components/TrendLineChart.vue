@@ -24,7 +24,15 @@ const props = defineProps({
   valueFormat: { type: Function, default: (v) => (v == null ? '—' : String(v)) },
   // formats a y-axis tick
   axisFormat: { type: Function, default: (v) => String(v) },
+  // formats an x label (ent#536). Null = the UTC-day formatter every existing
+  // caller relies on; the canvas passes its own so a category axis is not
+  // forced through a date parser.
+  labelFormat: { type: Function, default: null },
 })
+
+function fmtLabel(v) {
+  return props.labelFormat ? props.labelFormat(v) : fmtDay(v)
+}
 
 const themeStore = useThemeStore()
 const wrapEl = ref(null)
@@ -63,17 +71,30 @@ function moveTooltip(u) {
     tip.style.display = 'none'
     return
   }
-  const dateStr = props.dates[idx] ? fmtDay(props.dates[idx]) : ''
-  let html = `<div style="font-weight:600;margin-bottom:3px">${dateStr}</div>`
+  // Built with DOM APIs, never string-concatenated markup: series labels and
+  // colours are caller data — on the agent canvas they are AGENT-authored and
+  // reach a customer's browser — so they must only ever land in textContent
+  // and CSSOM properties, where no string can become an element (ent#536).
+  tip.replaceChildren()
+  const head = document.createElement('div')
+  head.style.cssText = 'font-weight:600;margin-bottom:3px'
+  head.textContent = props.dates[idx] ? fmtLabel(props.dates[idx]) : ''
+  tip.appendChild(head)
   props.series.forEach((s, si) => {
     const v = u.data[si + 1] ? u.data[si + 1][idx] : null
-    html += `<div style="display:flex;align-items:center;gap:8px">`
-      + `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color}"></span>`
-      + `<span>${s.label}</span>`
-      + `<span style="margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600">${props.valueFormat(v)}</span>`
-      + `</div>`
+    const row = document.createElement('div')
+    row.style.cssText = 'display:flex;align-items:center;gap:8px'
+    const swatch = document.createElement('span')
+    swatch.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:2px'
+    swatch.style.background = s.color
+    const name = document.createElement('span')
+    name.textContent = s.label
+    const val = document.createElement('span')
+    val.style.cssText = 'margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600'
+    val.textContent = props.valueFormat(v)
+    row.append(swatch, name, val)
+    tip.appendChild(row)
   })
-  tip.innerHTML = html
   tip.style.display = 'block'
   // Follow the cursor horizontally; pin just above the plot top so the
   // tooltip itself never jumps vertically.
@@ -119,7 +140,7 @@ function buildOpts(width) {
         grid: { show: false },
         ticks: { show: false },
         font: '10px sans-serif',
-        values: (u, splits) => splits.map((i) => (dates[i] ? fmtDay(dates[i]) : '')),
+        values: (u, splits) => splits.map((i) => (dates[i] ? fmtLabel(dates[i]) : '')),
       },
       {
         stroke: axisStroke,
@@ -131,7 +152,7 @@ function buildOpts(width) {
       },
     ],
     series: [
-      { label: '', value: (u, i) => (dates[i] ? fmtDay(dates[i]) : '') },
+      { label: '', value: (u, i) => (dates[i] ? fmtLabel(dates[i]) : '') },
       ...props.series.map((s) => ({
         label: s.label,
         stroke: s.color,
