@@ -216,9 +216,22 @@ const availabilityDot = computed(() => (
     : 'bg-status-warning-500'
 ))
 
-const chats = computed(() => props.threads.filter(
-  (t) => !t.is_room && t.agent_name === props.agentName,
-))
+// Main first, then recency — the same order the tab strip uses, because the
+// two are the same list at different lengths and a person reading both should
+// not have to re-find Main. Unlike the strip, ARCHIVED chats are included:
+// this panel is where the full history lives, and a retired Main is still a
+// chat you can open.
+const chats = computed(() => {
+  const ts = (t) => {
+    const iso = t.last_message_at || t.created_at
+    const n = iso ? new Date(iso).getTime() : 0
+    return Number.isNaN(n) ? 0 : n
+  }
+  return props.threads
+    .filter((t) => !t.is_room && t.agent_name === props.agentName)
+    .slice()
+    .sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0) || ts(b) - ts(a))
+})
 const chatTitle = threadTitle
 
 // The store is a singleton and outlives this component, so every read is gated
