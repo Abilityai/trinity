@@ -3983,6 +3983,49 @@ def _migrate_portal_session_title_source(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_session_main_chat(cursor, conn):
+    """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
+
+    Every (user, agent) pair has one **Main** chat: the place the agent reaches
+    you when no conversation named itself. `is_main` marks it; `archived_at`
+    marks the one Reset retired, which stays an ordinary past chat — readable,
+    resumable, renameable — and simply stops being that place.
+
+    The partial unique index is the point of the migration, not an
+    afterthought. `ensure_main_session` is reachable from two request paths and
+    runs in every uvicorn worker, so a check-then-insert races two Mains into
+    existence for one pair, after which "the pinned first tab" has no single
+    answer. The predicate `WHERE is_main = 1` is load-bearing: an archived row
+    keeps its (agent, client) pair forever, so an unconditional unique index
+    would refuse the SECOND Reset.
+
+    No backfill, deliberately. Every existing row reads `is_main = 0` and Main
+    is created lazily on the next visit — the same shape as ent#473's
+    `title_source`. Backfilling would have to pick one existing thread as Main
+    for every pair on the instance, and "the chat that happened to be most
+    recent when we migrated" is not a fact anyone asked for.
+
+    Mirrored by the Alembic revision 0053_portal_session_main_chat.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "is_main",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "archived_at",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN archived_at TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_sessions_main "
+        "ON enterprise_portal_sessions(agent_name, client_email) WHERE is_main = 1"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4106,4 +4149,5 @@ MIGRATIONS = [
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
+    ("portal_session_main_chat", _migrate_portal_session_main_chat),
 ]

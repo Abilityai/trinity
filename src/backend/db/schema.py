@@ -585,7 +585,20 @@ TABLES = {
             -- (or a pre-#473 row), 'generated' = the ent#186 model title,
             -- 'user' = a person renamed it — and a person's title is never
             -- overwritten by generation.
-            title_source TEXT
+            title_source TEXT,
+            -- ent#523: the pinned Main chat. Exactly one LIVE row per
+            -- (agent_name, client_email) carries is_main = 1 — enforced by the
+            -- partial unique index below, which is also what makes
+            -- `ensure_main_session` safe to race. Main is the place the agent
+            -- reaches you: an agent-initiated message, an ask raised outside a
+            -- chat (ent#364/#429) and a scheduled brief (ent#498) land here
+            -- unless the row names another session.
+            is_main INTEGER NOT NULL DEFAULT 0,
+            -- ent#523: set by Reset, which retires the current Main and mints a
+            -- fresh one. An archived row is an ordinary past chat — still
+            -- readable, still resumable, still renameable — it has simply
+            -- stopped being the one the agent reaches you in. NULL = live.
+            archived_at TEXT
         )
     """,
 
@@ -1942,6 +1955,16 @@ INDEXES = [
     # migration to a pre-existing table and this index had to wait for it.
     "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
     "ON enterprise_portal_messages(session_id, created_at)",
+    # ent#523 — ONE live Main per (agent, client). This is not a performance
+    # index: it is the invariant. `ensure_main_session` is reachable from two
+    # request paths and runs in every uvicorn worker, so a check-then-insert
+    # would race two Mains into existence for the same pair — after which
+    # "the pinned first tab" has no single answer. The partial predicate is
+    # what makes it work: an ARCHIVED row keeps its (agent, client) pair
+    # forever (is_main flips to 0), so an unconditional unique index would
+    # refuse the second Reset. Supported by both backends.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_sessions_main "
+    "ON enterprise_portal_sessions(agent_name, client_email) WHERE is_main = 1",
     # Multi-agent rooms (ent#169, OSS since ent#443). Same rule as the portal
     # indexes above: names unchanged from the enterprise runner that created
     # them, so an install that already has rooms re-runs these as no-ops.
