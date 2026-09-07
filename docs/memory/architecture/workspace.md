@@ -529,7 +529,7 @@ something — it is simply no longer a STOP on the way to the conversation.
 **Main.** Every `(user, agent)` pair has one pinned Main chat: the place the agent
 reaches you when no conversation named itself. `enterprise_portal_sessions.is_main`
 marks it and `archived_at` marks the one Reset retired (both tracks: SQLite
-`portal_session_main_chat` + Alembic `0054`, no backfill). Uniqueness is the **partial
+`portal_session_main_chat` + Alembic `0055`, no backfill). Uniqueness is the **partial
 unique index** `idx_portal_sessions_main` (`WHERE is_main = 1`), not a check-then-insert:
 `ensure_main_session` is reachable from two request paths and runs in every uvicorn
 worker, and the loser of the race catches `IntegrityError` and adopts the winner's row.
@@ -596,7 +596,7 @@ without the gesture changing.
 Three small features that only make sense once Main exists (ent#523).
 
 **A schedule can name one Workspace user** (`agent_schedules.deliver_to_workspace_email`,
-nullable, both tracks, Alembic `0055`). Almost all of the delivery already existed:
+nullable, both tracks, Alembic `0056`). Almost all of the delivery already existed:
 `report_completion` is trigger-agnostic and `schedule` is deliberately NOT in
 `INLINE_CHANNEL_TRIGGERS`, so the only missing fact was that a scheduled execution row never
 carried `source_channel='portal'`. This is therefore **a stamp and nothing else** — no new

@@ -10,13 +10,13 @@ column that already exists (the rule 0052 states in full).
 No index: the column is read only through the schedule row the scheduler has
 already loaded by id, never selected on.
 
-Revision ID: 0055_schedule_workspace_delivery
-Revises: 0054_portal_session_main_chat
+Revision ID: 0056_schedule_workspace_delivery
+Revises: 0055_portal_session_main_chat
 """
 from alembic import op
 
-revision = "0055_schedule_workspace_delivery"
-down_revision = "0054_portal_session_main_chat"
+revision = "0056_schedule_workspace_delivery"
+down_revision = "0055_portal_session_main_chat"
 branch_labels = None
 depends_on = None
 

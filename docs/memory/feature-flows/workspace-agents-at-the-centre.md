@@ -40,7 +40,7 @@ surface people actually work in.
 ### Schema
 
 `enterprise_portal_sessions` gains two columns and one index (both migration
-tracks, Invariant #3 — SQLite `portal_session_main_chat`, Alembic `0054`):
+tracks, Invariant #3 — SQLite `portal_session_main_chat`, Alembic `0055`):
 
 ```sql
 is_main     INTEGER NOT NULL DEFAULT 0   -- the pinned chat

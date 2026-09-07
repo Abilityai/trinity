@@ -1251,6 +1251,77 @@ must work consistently."
   which now returns the canvas row) the voice column.
 - **Flow**: `docs/memory/feature-flows/agent-canvas.md`
 
+**Canvas design kit, starter layouts and the `canvas` library skill
+(trinity-enterprise#537, 2026-09-07)** — operator direction: "a rich interface
+and an easy way for agents to change and update it — learn from how we do the
+microsite reports and explainers." What makes those cheap and good-looking is
+ONE stylesheet: the author composes against known classes and skeletons, and
+the figures come from data. The agent authors content; the platform renders it
+well, and the agent never touches CSS.
+
+- **FR-14 — The kit is platform-owned, token-only, and scoped by prefix**: a
+  class vocabulary (`ck-card`, `ck-grid-2/3/4`, `ck-section`, `ck-callout`,
+  `ck-chip`, `ck-kpi`, `ck-table`, `ck-figure`/`ck-caption`, text utilities)
+  rendered by ONE stylesheet in `components/canvas/CanvasKit.vue` — an unscoped
+  `<style>` block whose every selector sits under `.canvas-kit`, the wrapper
+  every canvas surface renders blocks inside. Colours come from the design
+  tokens via `theme()` with `.dark` overrides, so the raw-colour ratchet covers
+  the kit (the scanner walks `.vue` style blocks; a standalone `.css` would be
+  invisible to it, which is why the kit is not one). Collapse is keyed on the
+  kit's own inline size (`@container`), never the viewport, because the Portal
+  rail is ~300px wide on a desktop screen. The kit is the **v-html twin** of
+  `BaseCard` / `BaseBadge` / the report tile and table — same radius, padding
+  and tint tokens — recorded in `design-system.md` as the one sanctioned
+  exception to primitives-first (agent markup cannot mount a component). The
+  class list is the pure module `utils/canvasKit.js::KIT_CLASSES`.
+- **FR-15 — The sanitiser admits the kit and nothing else, on the canvas**:
+  `html` and `markdown` blocks on a canvas render through `sanitizeCanvasHtml`
+  / `renderCanvasMarkdown`, which run the app's ONE DOMPurify instance with a
+  per-call `canvasKit` config flag (read by the existing
+  `afterSanitizeAttributes` hook from its third argument, so there is no
+  module state to leak): `class` keeps only exact `KIT_CLASSES` members, `style`
+  keeps only `width` / `max-width` with a bounded value (`%` ≤ 100, `px` ≤
+  9999), `id` is dropped. A class outside the kit is dropped, never passed
+  through. The filter is canvas-scoped because chat and report markdown depend
+  on classes the code-block decorator injects before sanitising (#2515).
+  **Every** markdown/html sanitise path additionally forbids the `<style>`
+  ELEMENT (DOMPurify's default admits it): a body `<style>` is document-global,
+  so an agent block could restyle the whole page — a customer's Workspace on a
+  `roster` canvas included. Mermaid SVG keeps its own explicit `sanitizeSvg`
+  path (its scoped `<style>` is the diagram). H-005 unchanged: one instance,
+  one hook.
+- **FR-16 — Starter layouts by name**: a canvas may declare `template` ∈
+  `dashboard` | `report` | `brief` | `status-board` (a nullable column on the
+  row — a layout is a property of the surface, like `audience`; NULL = stacked
+  blocks, the default). Each layout has named slots (`CANVAS_LAYOUT_SLOTS` in
+  `models.py`, mirrored in `canvas.ts` and `canvasLayouts.js`, parity-pinned)
+  and a block fills one with `slot` — a key inside the block, because it
+  travels with the block through `patch_canvas`, and a rendering hint is not a
+  capability (the ent#364 rule binds `audience`, not this). **A layout never
+  hides a block**: a block with no slot, or a slot the layout does not know,
+  renders after the layout; a layout with nothing slotted degrades to the
+  stacked list, and empty regions are not rendered. An unknown template is
+  refused by name; an unknown slot is not (losing content to a typo is the
+  worse failure). Every writer carries the template through: `set_canvas`
+  sets it, `patch_canvas` and the voice panel tools keep the stored one.
+  Dual-track migration `agent_canvases_template` + Alembic
+  `0054_agent_canvases_template`.
+- **FR-17 — Taught twice, at two weights**: `### Your Canvas` gains ONE compact
+  worked example (`template="dashboard"` with slotted blocks and a kit card),
+  the four layouts with their slots, and the class list — because the platform
+  prompt is the only channel a fresh agent has, and AC-4's test of done is a
+  fresh agent producing a designed dashboard without coaching. The context
+  cap is raised 2,700 → 3,400 chars, deliberately. The `canvas` **library
+  skill** (`abilityai/trinity-skills`, category `visual-communication`) carries
+  the full reference and three worked examples (dashboard · report with figures
+  · status board), opening with the same example the prompt teaches. The
+  marketplace wizard scaffolds reference it the way #482 wires
+  `update-dashboard` (abilities repo, separate change).
+- **Deferred, recorded**: a per-block `span` hint (`full|half|third`) was the
+  zero-migration alternative to named layouts — revisit if a fifth layout is
+  requested. Tailwind utilities remain reachable from chat/report markdown
+  (the class allowlist is canvas-only here) — follow-up issue.
+
 ### 5.19 Workspace conversation rail — the shell (trinity-enterprise#474, slice 1 of #472)
 
 - **Status**: ✅ Implemented (shell) · **ID**: `WORKSPACE_RAIL_SHELL`

@@ -46,10 +46,10 @@ def test_the_alembic_revision_exists_and_chains_off_the_head():
     two heads, and `alembic upgrade head` is singular — it resolves its target
     BEFORE applying anything, so a forked graph applies ZERO revisions and every
     revision since the fork silently stops arriving."""
-    rev = REPO / "src/backend/migrations/versions/0055_schedule_workspace_delivery.py"
+    rev = REPO / "src/backend/migrations/versions/0056_schedule_workspace_delivery.py"
     body = rev.read_text()
-    assert 'revision = "0055_schedule_workspace_delivery"' in body
-    assert 'down_revision = "0054_portal_session_main_chat"' in body
+    assert 'revision = "0056_schedule_workspace_delivery"' in body
+    assert 'down_revision = "0055_portal_session_main_chat"' in body
     # Mandatory, not defensive: a fresh PostgreSQL build runs init_schema_postgres
     # from db/schema.py FIRST and is then stamped through the chain, so this
     # revision routinely meets a column that already exists.

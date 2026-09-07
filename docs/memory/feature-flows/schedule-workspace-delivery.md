@@ -162,8 +162,8 @@ needs a per-row discriminator `enterprise_portal_messages` does not carry.
 
 `agent_schedules.deliver_to_workspace_email TEXT` — nullable, no backfill, no index (it is
 read only through a row already loaded by id). Both tracks per Invariant #3: SQLite
-`schedule_workspace_delivery`, Alembic `0055_schedule_workspace_delivery` off
-`0054_portal_session_main_chat`.
+`schedule_workspace_delivery`, Alembic `0056_schedule_workspace_delivery` off
+`0055_portal_session_main_chat`.
 
 ## Testing
 

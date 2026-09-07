@@ -41,7 +41,7 @@
  * `<marker id>` (which makes arrowheads vanish).
  */
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { sanitizeHtml } from '../../utils/markdown'
+import { sanitizeSvg } from '../../utils/markdown'
 import { useThemeStore } from '../../stores/theme'
 import { MERMAID_CONFIG } from './canvasUtils'
 
@@ -93,7 +93,9 @@ async function render() {
   try {
     const out = await renderSerially(themeStore.isDark, id, String(props.source))
     if (unmounted || seq !== mySeq) return // superseded or gone
-    svg.value = sanitizeHtml(out.svg)
+    // `sanitizeSvg`, not `sanitizeHtml`: the diagram's own id-scoped <style>
+    // must survive, and every other path now forbids the element (ent#537).
+    svg.value = sanitizeSvg(out.svg)
   } catch (e) {
     // mermaid can leave its scratch node behind on a parse error.
     if (typeof document !== 'undefined') document.getElementById(`d${id}`)?.remove()

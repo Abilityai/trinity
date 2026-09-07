@@ -53,7 +53,12 @@
           class="border-b border-gray-200 dark:border-gray-800 px-4 py-2 text-xs text-gray-600 dark:text-gray-400"
         >{{ fresh.note }}</p>
 
-        <div class="px-4 py-4">
+        <!-- ent#537 — every block renders inside the design kit, so an agent's
+             `ck-*` markup looks the same on Agent Detail, the Workspace page
+             and the rail. A declared `template` lays slotted blocks into named
+             regions; whatever is not slotted follows in the stacked list, so a
+             layout never hides a block. -->
+        <CanvasKit class="px-4 py-4">
           <p v-if="detailError" class="text-xs text-status-danger-600 dark:text-status-danger-400">
             {{ detailError }}
           </p>
@@ -61,13 +66,34 @@
             v-else-if="!blocks.length"
             class="text-xs text-gray-500 dark:text-gray-400"
           >This canvas is empty.</p>
-          <CanvasBlock
-            v-for="b in blocks"
-            :key="b.key"
-            :block="b"
-            :agent-name="detail?.agent_name || null"
-          />
-        </div>
+          <template v-else>
+            <div
+              v-if="placement"
+              :class="['ck-layout', `ck-layout-${placement.template}`]"
+              :data-canvas-template="placement.template"
+            >
+              <section
+                v-for="region in placement.regions"
+                :key="region.slot"
+                :class="['ck-slot', `ck-slot-${region.slot}`, region.grid ? 'ck-slot-grid' : null]"
+                :data-canvas-slot="region.slot"
+              >
+                <CanvasBlock
+                  v-for="b in region.blocks"
+                  :key="b.key"
+                  :block="b"
+                  :agent-name="detail?.agent_name || null"
+                />
+              </section>
+            </div>
+            <CanvasBlock
+              v-for="b in (placement ? placement.unslotted : blocks)"
+              :key="b.key"
+              :block="b"
+              :agent-name="detail?.agent_name || null"
+            />
+          </template>
+        </CanvasKit>
       </div>
     </template>
   </div>
@@ -76,6 +102,8 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import CanvasBlock from './CanvasBlock.vue'
+import CanvasKit from './CanvasKit.vue'
+import { placeBlocks } from './canvasLayouts'
 import { emptyState, freshness, renderableBlocks } from './canvasUtils'
 
 const props = defineProps({
@@ -99,6 +127,8 @@ const selected = computed(
 )
 const fresh = computed(() => freshness(selected.value || {}))
 const blocks = computed(() => renderableBlocks(detail.value?.blocks))
+// null → stacked (no template, an unknown one, or nothing slotted).
+const placement = computed(() => placeBlocks(detail.value?.template, blocks.value))
 
 async function select(id) {
   if (!id) return

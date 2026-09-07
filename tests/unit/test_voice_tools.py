@@ -411,10 +411,10 @@ class _CanvasHarness:
         monkeypatch.setattr(db, "get_agent_canvas",
                             lambda agent, canvas_id, audience=None: self.current)
 
-        def _write(agent, canvas_id, blocks, *, title, audience, execution_id):
+        def _write(agent, canvas_id, blocks, *, title, audience, execution_id, template=None):
             self.writes.append({"agent": agent, "canvas_id": canvas_id, "blocks": blocks,
                                 "title": title, "audience": audience,
-                                "execution_id": execution_id})
+                                "execution_id": execution_id, "template": template})
             return {"blocks": blocks}
 
         monkeypatch.setattr(canvas_service, "write_canvas", _write)

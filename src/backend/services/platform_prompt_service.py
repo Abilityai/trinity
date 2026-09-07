@@ -110,6 +110,8 @@ A block is `{"id"?, "kind", "title"?, "payload"}`. Kinds and their payloads:
 - `html` — `{"html": "..."}` static markup, sanitised; scripts never run
 - `json` — anything else
 
+Layouts: `template` ∈ dashboard(header, kpis, main, side, footer) · report(header, summary, body, figures, appendix) · brief(header, key-points, body) · status-board(header, status, issues, next, log); each block names its `"slot"`. Unslotted blocks render after the layout; no template = stacked. Example: `set_canvas(template="dashboard", blocks=[{"slot":"header","kind":"markdown","payload":{"markdown":"## Pipeline · W36"}},{"slot":"kpis","kind":"kpi","payload":{"tiles":[{"label":"Open","value":42},{"label":"Won","value":7}]}},{"slot":"side","kind":"html","payload":{"html":"<div class=\"ck-card\"><div class=\"ck-card-title\">Next</div><span class=\"ck-chip ck-warning\">2 stalled</span></div>"}}])`
+Kit classes for `html`/`markdown` (only these survive): ck-card / ck-card-title / ck-card-meta · ck-grid-2 / ck-grid-3 / ck-grid-4 + ck-span-2 · ck-section / ck-section-title / ck-section-sub · ck-callout + ck-info | ck-success | ck-warning | ck-danger · ck-chip (same tones, ck-neutral) · ck-kpi / ck-kpi-label / ck-kpi-value / ck-kpi-unit / ck-kpi-delta ck-up | ck-down · ck-table + ck-num · ck-figure / ck-caption · ck-muted · ck-mono. Other classes, `<style>` and inline styles (except width/max-width) are dropped. Prefer the kpi/table/chart kinds for data; the kit dresses the page around them. The `canvas` skill has full worked examples.
 Limits: __CANVAS_MAX_BLOCKS__ blocks, __CANVAS_BLOCKS_MAX__ serialized — aggregate first. Never put JavaScript in a block: you provide the data, Trinity draws it.
 
 ### Operator Communication
@@ -289,7 +291,7 @@ _MINIMAL_DROP_SECTIONS = frozenset({
     "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
-    "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads)
+    "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
 })
 
 # Every top-level section, CI-pinned (tests/unit/test_ent243_prompt_tier.py).
