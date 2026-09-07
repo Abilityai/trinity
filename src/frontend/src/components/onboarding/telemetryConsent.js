@@ -86,15 +86,17 @@ export const CONSENT_COPY = {
 
 /**
  * The receiver line. A 404 is stated for what it is, never dressed up as an
- * install fault: from the default URL it means the hosted service is not live
- * yet; from an override it means only that the receiver answered 404.
+ * install fault. The hosted receiver has been live since 2026-09-04
+ * (trinity-enterprise#190), so a 404 from the default address is an anomaly
+ * to look at, not the expected state; from an override it means only that the
+ * receiver answered 404.
  */
 export function receiverCopy(hint, shareUrl = '') {
   switch (hint) {
     case 'ok':
       return 'The receiving service acknowledged the last send.'
     case 'receiver_not_live':
-      return 'The receiving service answered 404 — the hosted service is not live yet, so sends are recorded here and retried daily.'
+      return 'The receiving service answered 404 at the default address. The send is recorded here and retried daily.'
     case 'receiver_404':
       return `The receiver at ${shareUrl} answered 404. Check TELEMETRY_SHARING_URL.`
     case 'failed':

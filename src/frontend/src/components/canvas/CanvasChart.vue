@@ -2,13 +2,29 @@
   <div>
     <!-- line / area: the shared trend chart, with a label formatter so a
          category axis is not forced through the UTC-day formatter. -->
-    <TrendLineChart
-      v-if="model.type === 'line' || model.type === 'area'"
-      :dates="trend.dates"
-      :series="trend.series"
-      :label-format="trend.labelFormat"
-      :value-format="valueFormat"
-    />
+    <template v-if="model.type === 'line' || model.type === 'area'">
+      <TrendLineChart
+        :dates="trend.dates"
+        :series="trend.series"
+        :label-format="trend.labelFormat"
+        :label-space="trend.labelSpace"
+        :value-format="valueFormat"
+      />
+      <!-- The trend chart's legend is its hover tooltip, which a canvas
+           reader on a phone, in a screenshot or with twelve lines does not
+           have. Name the series below the plot, the way the bar chart does;
+           one series is named by the block title. -->
+      <div v-if="model.series.length > 1" class="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+        <span
+          v-for="(s, i) in model.series"
+          :key="i"
+          class="inline-flex min-w-0 items-center text-xs text-gray-600 dark:text-gray-300"
+        >
+          <span class="mr-1 h-2.5 w-2.5 shrink-0 rounded-sm" :style="{ backgroundColor: s.color }"></span>
+          <span class="truncate">{{ s.label }}</span>
+        </span>
+      </div>
+    </template>
 
     <!-- bar / stacked bar: the shared execution chart. A single-point-per-series
          payload renders one bar per series (categories are series, as they are

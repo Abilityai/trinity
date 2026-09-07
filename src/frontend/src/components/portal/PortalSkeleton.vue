@@ -46,12 +46,12 @@
       <div :class="[BLOCK_STRONG, 'h-3 w-28 rounded']"></div>
     </div>
     <div class="flex-1 min-h-0 overflow-hidden px-3 sm:px-6 py-5">
-      <div class="max-w-4xl mx-auto">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
         <PortalSkeleton variant="thread" :announce="false" />
       </div>
     </div>
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 px-3 sm:px-6 py-3">
-      <div :class="[BLOCK, 'max-w-4xl mx-auto h-11 rounded-2xl']"></div>
+      <div :class="[BLOCK, 'max-w-[var(--ws-message-max,64rem)] mx-auto h-11 rounded-2xl']"></div>
     </div>
     <span class="sr-only">Loading your workspace…</span>
   </div>

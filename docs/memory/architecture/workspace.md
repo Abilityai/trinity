@@ -204,36 +204,41 @@ CLAUDE.md's default for an enterprise-tracker feature is gated unless ruled othe
 the ruling must never be inferred later from the mere fact that it merged.** See
 [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md).
 
-**Voice conversation — one conversation, two modalities (ent#440).** The Workspace's
-two manual voice controls — hold-to-dictate (#2212) and the speaker toggle (#2157)
-— become one hands-free loop: the mic listens, the utterance is submitted as an
-**ordinary Workspace turn**, the reply is spoken, the mic reopens. The load-bearing
-property is that a spoken turn takes the SAME path a typed one does
-(`submitUserText` → `deliver` → `POST .../chat/stream`), so shared context, history
-parity and permission parity are true by construction rather than by
-synchronisation — same portal session, same resumed Claude session, same
-`enterprise_portal_messages` row, no new route and therefore no new gate. Bridging
-the platform's Gemini Live session (VOICE-001, `routers/voice.py`) was **rejected**:
-it answers with a different model holding a *summarised copy* of the thread and
-writes its transcript back afterwards (a parallel conversation wearing the same
-page), it cannot reach the agent's own tools/canvas, and its JWT-only WebSocket
-cannot authenticate a portal client, which holds no `users` row. All decidable
-rules are pure in `components/portal/voiceConversation.js` — transition table
-(`start` idempotent; every event inert in `off`, so a `/stt` answer arriving after
-teardown cannot restart a loop the user ended; `transcript` sends from exactly one
-state; every exit releases the microphone), an RMS level meter for utterance
-boundaries (1.2 s silence hold, 30 s cap, 15 s no-speech → stop **with a
-sentence**; room tone re-listens rather than spending a transcription), barge-in at
-a **higher** threshold than listening plus `echoCancellation` on capture (without
-both, the mic hears the agent's narration through the speakers and it interrupts
-itself), and `spokenReply()`, which cleans a reply for the ear (code fences → one
-spoken sentence, links read as text, sentence-boundary cap) while the rendered
-message is untouched. The control renders only where the loop can run; an agent
-with no configured voice still converses, in text, and says so. **OSS-core by
-decision (ent#440): deliberately ungated** — recorded explicitly because the
-default for an enterprise-tracker feature is gated-unless-ruled-otherwise (the
-ent#326/ent#384/ent#392 discipline). **No backend change, no new endpoint, no
-migration.** See [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
+**Voice mode — the orb takes the conversation (ent#534; supersedes ent#440).** The
+Workspace's voice is the platform's **real-time voice session** (`routers/voice.py` +
+`services/gemini_voice.py`, the Agent Detail orb `VoiceOverlay` + `useVoiceSession`,
+reused not forked), run as a **modal call** inside the conversation: the orb covers the
+thread, the header controls / tabs / composer are visible but inert, the shell swaps the
+rail for the agent's canvas (`PortalVoiceCanvas`, 40/60), and End / Escape returns to the
+chat. It is bound to the **Workspace thread**: `POST
+/api/enterprise/client-portal/agents/{name}/voice/start` under `get_portal_principal`
+(platform principals only; off-roster, a foreign thread and a portal token are ONE uniform
+404; `_require_roster` → rate limit → 503-with-reason) calls
+`client_portal/voice.py::start_workspace_voice`, which builds the context from the thread's
+recent rows and creates the session with `portal_session_id` + `client_email`,
+`canvas_audience="operator"` and `max_duration=WORKSPACE_VOICE_MAX_DURATION` (1800 s).
+The transcript is **written turn by turn on the worker holding the live socket**
+(`persist_voice_turn`, called from the bridge's `on_turn`) as `enterprise_portal_messages`
+rows carrying `source='voice'` + `voice_call_id`; the call closes with one `system` label
+row and `touch_portal_session`; a call with no turns writes nothing; `/stop` never writes
+for this surface. Save-at-end was rejected by both independent plan reviews: under two
+uvicorn workers a `/stop` landing off-worker reconstructs an EMPTY session from Redis and
+would write a phantom call, and a restart mid-call would lose it all. The chat folds one
+call's rows into a collapsed "Voice call · N min" block **keyed on the call id, never an
+opener row** (`portalVoiceMode.js::groupVoiceBlocks`) — the history window is 100 rows
+and a long call is more. The session must outlive the provider connection: every
+session asks for context-window compression + session resumption and `connect_and_stream`
+reconnects on `go_away`; the cap speaks a wrap-up at T-30 s and ends with a reason the
+`status` and `saved` frames carry, so the surface reloads the thread only after the rows
+exist. The roster carries `realtime_voice {available, reason}` (platform principals only,
+fail-closed, named for the capability — ent#354 may add a second provider behind the same
+field; the per-agent `voice_available` still means "has a TTS voice"). A platform
+principal reads **every** canvas audience in the Workspace (`agent_page.canvas_audience_for`;
+they already can on Agent Detail), a portal-token client stays `roster`. The ent#440
+hands-free STT→turn→TTS loop is **retired** by the same ruling (one voice entry point);
+hold-to-dictate (#2212) and spoken replies (#2157) stay as composer affordances. **OSS-core
+by the standing ruling, deliberately ungated.** See
+[workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
 
 **Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
 `components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
@@ -590,3 +595,61 @@ without the gesture changing.
 
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
 **Requirements**: `requirements/core-agent.md` §5.23
+
+## The Tandem layer — a brief lands in Main, a room says who is reading, a complaint reaches the operator (ent#498, ent#363, ent#499)
+
+Three small features that only make sense once Main exists (ent#523).
+
+**A schedule can name one Workspace user** (`agent_schedules.deliver_to_workspace_email`,
+nullable, both tracks, Alembic `0056`). Almost all of the delivery already existed:
+`report_completion` is trigger-agnostic and `schedule` is deliberately NOT in
+`INLINE_CHANNEL_TRIGGERS`, so the only missing fact was that a scheduled execution row never
+carried `source_channel='portal'`. This is therefore **a stamp and nothing else** — no new
+delivery path, no second applier, no terminal writer changed. The scheduler carries the
+ADDRESS only: it is a separate process that cannot import the portal package, and it always
+sends `execution_id`, so `execute_task`'s channel-persisting branch can never run for a cron
+fire and channel columns passed as kwargs would be silently inert (#2426).
+`execute_task_internal` resolves Main via `ensure_main_session` and stamps the pre-created row
+BEFORE dispatch, through `db.stamp_execution_channel_context` — the first UPDATE of those
+columns (every other writer sets them at INSERT), guarded on `source_channel IS NULL` so it
+only ever ADDS a destination and can never repoint an inbound channel turn whose adapter is
+waiting on that reply. Access is checked with `agent_on_roster(..., include_owned=True)`, the
+Workspace's own roster, NOT `email_has_agent_access`: that admits any admin, and an admin who
+neither owns the agent nor is shared it cannot open the thread, so a brief delivered there
+would be invisible. Every refusal — blocked client, unreachable address, unreadable roster
+(fail closed), unavailable session, already-stamped row — fails the pre-created row with a
+named reason and releases the idempotency claim, because running the turn anyway spends the
+tokens and puts the answer where nobody can read it. **C9** is honoured by a bounded wait on
+the ent#286 in-flight marker inside the portal delivery leg, which then writes regardless: the
+report is never dropped, only deferred, and the narrowing applies to every portal report
+rather than only scheduled ones. See
+[schedule-workspace-delivery.md](../feature-flows/schedule-workspace-delivery.md).
+
+**A room tells its agents when a CLIENT is reading.** Full transcript visibility is the
+deliberate choice for Workspace rooms, and it is only safe while the agents know they are
+watched. `shared_sessions.service.room_is_user_facing` is the pure rule, derived from
+MEMBERSHIP — nothing a participant writes reaches it. `FLEET_INTERNAL_PARTICIPANT_KINDS`
+holds `agent`, `system` AND `user`: the platform `user` is the operator, and an ops room
+is not client-facing. Getting that wrong is not cosmetic — `create_room` always seats its
+creator and the only removal path is `kind="agent"`, so counting `user` makes every room
+client-facing and the quiet branch unreachable. The set is otherwise the complement of "reader" because a kind added later (ent#171's external A2A
+sender) is likelier to be a person than a machine, and an allow-list of human kinds would
+silently classify it as fleet-internal. `platform_prompt_service.build_user_facing_room_prompt`
+takes no arguments and names no participant: it is composed into a prompt handed to EVERY
+woken agent, so an address would be disclosed sideways to agents that person never addressed.
+Derived per wake rather than threaded from `post_message` (which does hold the list), because
+`_wake_agent` calls `post_message` back and a threaded value could go stale when a reply
+recruits a human. An unreadable roster assumes a person IS reading — the inverse of the usual
+capability default, because the mistakes are not symmetrical.
+
+**A negative rating reaches the operator.** ent#366's redaction stands — the rated agent reads
+the score and never the words — so the operator's copy goes straight to `operator_queue`,
+routed through `create_bounded_alert` (the volume is driven by a client clicking, which is the
+agent-influenceable side of the #1677 classification) with its own registered type and a
+reserved id prefix, one item per person per target. It fires on EVERY thumbs-down, not only
+commented ones: "this was not useful" is the report and the words are the elaboration.
+Prerequisite, and a live bug: `operator_queue.type` is free TEXT and both queue cards
+hardcoded an `approval → question → alert` chain that rendered no control for anything else,
+so `skill_not_found` items have never been closeable and five of them would jam a budgeted
+type's pending cap forever. Both cards now consume `utils/operatorQueue.js::queueResponseKind`
+and its unknown-type default moves from `question` to `acknowledge`.

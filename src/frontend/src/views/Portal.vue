@@ -99,9 +99,25 @@
     </div>
 
     <!-- ============================ APP SHELL ============================ -->
-    <div v-else class="flex-1 flex min-h-0">
+    <!-- ent#492: a flex row whose fixed columns take their width from the
+         resize variables, and the conversation is `flex-1 min-w-0` — the
+         flexible middle BY CONSTRUCTION, so it never carries a width of its own
+         and cannot be dragged directly. Widening the messages is done by
+         narrowing a neighbour, which is what the AC asks for.
+
+         The issue's technical notes suggested `grid-template-columns`, and the
+         first cut did that. It is wrong here: the rail handle is conditional
+         (AC 1 — present only while there is a column to drag), so the number of
+         grid children CHANGES, and with the handle absent the rail fell into
+         the handle's track and the track meant for it stayed empty. A grid
+         places children by count; flex does not care. Caught live — the rail's
+         expand button was in the DOM and never became clickable.
+
+         Below `sm` the columns collapse to the single stage the drawer and the
+         bottom sheet already assume, so the variables are simply unused. -->
+    <div v-else class="flex-1 flex min-h-0" :style="columns.gridStyle.value">
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
-      <div class="hidden sm:flex shrink-0">
+      <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
         <PortalSidebar
           :roster="store.agents"
           :threads="sidebarThreads"
@@ -122,6 +138,17 @@
           @sign-out="onSignOut"
         />
       </div>
+      <ColumnResizeHandle
+        :value="columns.sidebar.value"
+        :min="columns.limits.sidebar.min"
+        :max="columns.limits.sidebar.max"
+        label="Resize the sidebar"
+        side="left"
+        testid="ws-handle-sidebar"
+        @resize="columns.resizeSidebar"
+        @reset="columns.resetSidebar"
+      />
+
       <div v-if="mobileNav" class="sm:hidden fixed inset-0 z-40">
         <div class="absolute inset-0 bg-black/40" @click="mobileNav = false"></div>
         <div class="absolute inset-y-0 left-0">
@@ -147,8 +174,21 @@
         </div>
       </div>
 
-      <!-- Main stage -->
-      <main class="flex-1 min-w-0 flex flex-col bg-white dark:bg-gray-900">
+      <!-- Main stage. ent#534: while a voice call is on, the conversation
+           column takes the orb's share of the stage and the canvas column
+           (below) takes the rest — orb left / canvas right, the retired page's
+           40/60. Below `sm` the orb has the whole stage. -->
+      <!-- During a call (ent#534) the orb and the canvas split the space
+           BESIDE the sidebar 40 / 60 as flex shares (2 : 3 of a zero basis),
+           not as percentages of the whole row: `w-[40%]` + `w-[60%]` next to
+           an 18rem sidebar summed to 100% + 18rem, and the shell's
+           `overflow-hidden` clipped the canvas column off the right edge with
+           no scrollbar — the #2581 report, measured at 296px on a 1280px
+           viewport by the gallery (#2583). -->
+      <main
+        class="min-w-0 flex flex-col bg-white dark:bg-gray-900"
+        :class="voiceCall.active ? 'flex-1 sm:flex-[2_1_0%]' : 'flex-1'"
+      >
         <!-- ent#361: a room takes the stage when the URL names one. The
              single-agent conversation is untouched below — different
              substrate, different component, no shared state. -->
@@ -266,6 +306,8 @@
           @open-work="openRailOn('work')"
           @main-reset="onMainReset"
           @open-details="detailsOpen = true"
+          @voice-call="onVoiceCall"
+          @voice-panel="(v) => { voicePanelVersion = v }"
         >
           <!-- ent#523: the agent's numbers, always visible under the header.
                Mounted by the shell because the shell owns which agent is on
@@ -339,12 +381,40 @@
            the agent page and on every stage that holds no conversation
            (`railVisibleFor`); collapsed by default. Below `sm` the column is
            replaced by the strip above the composer + the sheet below. -->
+      <!-- AC 1: present only while there is a column to its right to resize.
+           A collapsed rail is a fixed 48px strip, not a resizable column, so
+           the handle goes with the width it would drag. Agent details takes the
+           rail's place (ent#523) and is the same column, so it gets the same
+           handle rather than a second one. -->
+      <ColumnResizeHandle
+        v-if="thirdColumnResizable"
+        :value="columns.railOpenWidth.value"
+        :min="columns.limits.rail.min"
+        :max="columns.limits.rail.max"
+        label="Resize the side panel"
+        side="right"
+        testid="ws-handle-rail"
+        @resize="columns.resizeRail"
+        @reset="columns.resetRail"
+      />
+
       <!-- ent#523: Agent details opens INTO THE RAIL'S PLACE (ruled
            2026-09-05) — a sibling of the rail, not a tab. The rail's own state
            is a setup ref of this view, so it is untouched by this swap and
            closing returns it on the tab it was showing. -->
+      <!-- ent#534: the agent's canvas takes the right column for the duration
+           of a voice call — in the rail's (and the details panel's) place, the
+           way Agent details takes it. The rail's own state is a setup ref and
+           comes back untouched when the call ends. -->
+      <PortalVoiceCanvas
+        v-if="voiceCall.active && voiceCall.voiceSessionId && activeAgent"
+        class="hidden min-w-0 sm:flex sm:flex-[3_1_0%]"
+        :agent-name="activeAgent.name"
+        :voice-session-id="voiceCall.voiceSessionId || ''"
+        :panel-version="voicePanelVersion"
+      />
       <PortalAgentDetails
-        v-if="detailsOpen && activeAgent"
+        v-else-if="detailsOpen && activeAgent"
         :agent-name="activeAgent.name"
         :agent="activeAgent"
         :threads="threads"
@@ -442,9 +512,12 @@ import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
 import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
+import ColumnResizeHandle from '@/components/ColumnResizeHandle.vue'
+import { useColumnResize } from '@/composables/useColumnResize'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
+import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
 import {
   RAIL_TABS,
@@ -599,6 +672,40 @@ const railSheetOpen = ref(false)
 // conversation remounting on a chat switch. Closed on every agent change, since
 // a panel about the previous agent is worse than no panel.
 const detailsOpen = ref(false)
+
+// ent#534 — the voice call the conversation reports. Owned here because the
+// shell decides what the right column shows and whether a chat may be left:
+// while a call is on, sidebar clicks, the tabs, New chat and ⌘J are refused
+// (a switch remounts the conversation and would drop the call); route-driven
+// changes end the call gracefully inside the conversation instead.
+const voiceCall = ref({ active: false, agentName: null, voiceSessionId: null })
+const voicePanelVersion = ref(0)
+function onVoiceCall(sig) {
+  voiceCall.value = sig?.active
+    ? { active: true, agentName: sig.agentName || null, voiceSessionId: sig.voiceSessionId || null }
+    : { active: false, agentName: null, voiceSessionId: null }
+  if (!sig?.active) voicePanelVersion.value = 0
+}
+
+// ent#492 — the three resizable columns. Widths are per user and read
+// synchronously here, before first paint, so a reload does not flash the
+// default layout. The rail's own open/collapsed state stays `railState`'s: this
+// owns how WIDE the column is, never whether it is there — except for the
+// auto-collapse below, which is the AC's tie-breaker when the viewport cannot
+// fit all three.
+const columns = useColumnResize({
+  railOpen: computed(() => railState.value.open && railVisible.value),
+  setRailOpen: (open) => { if (!open) setRailOpen(false) },
+})
+
+// The third column is resizable only when it is a real column: the rail when
+// open, or Agent details, which takes its place at the same width. Not during
+// a voice call (ent#534): the canvas takes that column at a fixed share and
+// would ignore the width the handle drags.
+const thirdColumnResizable = computed(() => (
+  !voiceCall.value.active
+  && ((detailsOpen.value && !!activeAgent.value) || (railVisible.value && railState.value.open))
+))
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
@@ -698,6 +805,9 @@ function onRoomParticipants(list) { roomParticipants.value = Array.isArray(list)
 // reset (`setParticipants` clears each store); the owner clears on its own
 // when the rail leaves the screen.
 watch([convKey, activeRoomIdFromRoute], () => {
+  // ent#534: the reporter unmounted (its own teardown ended the call on the
+  // server); the shell must not keep showing a canvas column for it.
+  onVoiceCall(null)
   workSignal.value = emptySignal()
   roomParticipants.value = []
   railSheetOpen.value = false
@@ -988,6 +1098,7 @@ async function onMainReset(result) {
 }
 
 function newChatWithAgent(name) {
+  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
   unreachableAgent.value = null
   activeAgentName.value = name
   // ent#451: this function has always MEANT a fresh chat — it clears
@@ -1009,6 +1120,7 @@ function newChatWithAgent(name) {
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
+  if (voiceCall.value.active) return   // ent#534: end the call to switch chats
   unreachableAgent.value = null
   // Opening an existing thread is the opposite intent; clear it so a later
   // send does not still ask for a fresh one.
@@ -1083,6 +1195,10 @@ async function refreshThreads() {
   ])
   chatState.value = state || {}
   threads.value = decorate(list || [])
+  // ent#491: rank any agent this session has not ranked yet. Fills only missing
+  // keys, so a refresh triggered by an incoming reply cannot walk back a send's
+  // bump and re-sort the sidebar under the cursor.
+  store.seedAgentRecency(threads.value)
 }
 
 // A turn finishing in the conversation the user is LOOKING AT is read by
@@ -1157,6 +1273,7 @@ function renameRoom(roomId, title) {
 function onGlobalKeydown(e) {
   if (!isNewChatHotkey(e)) return
   if (!store.isClientSignedIn) return
+  if (voiceCall.value.active) return   // ent#534: the call owns the stage
   e.preventDefault()
   const name = activeAgentPageName.value
     || (!activeRoomIdFromRoute.value && !unreachableAgent.value ? activeAgent.value?.name : null)
@@ -1240,6 +1357,11 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
 watch(() => activeAgent.value?.name, (next, prev) => {
   if (next !== prev) detailsOpen.value = false
 })
+
+// ent#492: a sign-in inside this tab changes whose layout this is, and the
+// identity is read from storage at setup — so it has to be re-read once the
+// session lands, or this session keeps writing into the anonymous bucket.
+watch(() => store.isClientSignedIn, () => columns.refreshIdentity())
 
 // ent#358: `/workspace?agent=<name>` opens that agent's conversation directly —
 // the landing spot for anything that used to point at the Agent Detail Session

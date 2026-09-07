@@ -330,6 +330,14 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
 VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
+# Workspace voice mode (ent#534): the cap for a call started from the Workspace
+# conversation — 30 min, ruled 2026-09-07 — kept apart from the Agent Detail
+# overlay's VOICE_MAX_DURATION because the two are different surfaces with
+# different expectations, not different providers. The Gemini session itself is
+# made to survive this long by context-window compression + resumption in
+# services/gemini_voice.py; the knob is surface-scoped so a second realtime
+# provider (ent#354) inherits it unchanged.
+WORKSPACE_VOICE_MAX_DURATION = int(os.getenv("WORKSPACE_VOICE_MAX_DURATION", "1800"))  # seconds
 
 # Per-agent voice selection (#28). Canonical set of Gemini Live prebuilt voices
 # offered by Trinity; the single source of truth shared by the persisted-voice

@@ -179,7 +179,10 @@ describe('both transcripts delegate to it', () => {
 
   it('the rating stays a child of the bubble, on a persisted message only', () => {
     expect(code(CONVERSATION)).toMatch(/<PortalAgentBubble[\s\S]{0,200}<PortalRating/)
-    expect(CONVERSATION).toMatch(/<PortalRating[\s\S]{0,200}v-if="m\.id"/)
+    // ent#534: the thread loop iterates `threadItems` (voice calls fold into one
+    // block), so the message is `item.message` — the rule is unchanged: a thumb
+    // only on a PERSISTED message.
+    expect(CONVERSATION).toMatch(/<PortalRating[\s\S]{0,200}v-if="item\.message\.id"/)
   })
 
   it('neither new component introduces a bare loading gate', () => {

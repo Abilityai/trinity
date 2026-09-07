@@ -144,9 +144,10 @@
          and hands short-viewport overflow to the root scroller) -->
     <div data-testid="task-history-card" class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden flex-1 min-h-96 flex flex-col">
       <!-- Loading State -->
-      <div v-if="loading && allTasks.length === 0" class="text-center py-8 flex-1 flex flex-col justify-center">
-        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
-        <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading tasks...</p>
+      <!-- #1921: row-shaped placeholders in the list's footprint. -->
+      <div v-if="loading && allTasks.length === 0" class="p-4 flex-1" aria-busy="true">
+        <SkeletonLoader variant="rows" :count="5" height="3rem" gap="0.5rem" />
+        <span class="sr-only">Loading tasks…</span>
       </div>
 
       <!-- Failed State (#1926) — "No tasks yet" on a failed fetch is a lie that
@@ -428,8 +429,15 @@
             </div>
             <!-- Modal Body -->
             <div class="flex-1 overflow-y-auto overflow-x-hidden p-4">
-              <div v-if="logLoading" class="flex items-center justify-center py-12">
-                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
+              <!-- #1921: the log modal loads a block of text, so the
+                   placeholder is text-shaped rather than a centred ring. -->
+              <div v-if="logLoading" class="space-y-2 py-2" aria-busy="true">
+                <div class="h-3 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+                <div class="h-3 w-11/12 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+                <div class="h-3 w-4/5 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+                <div class="h-3 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+                <div class="h-3 w-3/4 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+                <span class="sr-only">Loading…</span>
               </div>
               <div v-else-if="logError" class="text-center py-8">
                 <p class="text-status-danger-500 dark:text-status-danger-400">{{ logError }}</p>
@@ -540,6 +548,7 @@
 </template>
 
 <script setup>
+import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'

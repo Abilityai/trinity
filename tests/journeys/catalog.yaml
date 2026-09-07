@@ -156,6 +156,20 @@ journeys:
     owner: trinity
     invariants: [L-03]
 
+  - id: J11
+    issue: 2565
+    promise: "A companion's brief reaches me where I already work, without me asking."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: null
+    built: false
+    owner: trinity
+    # E-01/E-05 are the terminal-closure and dispatched-rows-have-a-session
+    # invariants the delivering execution rides on; L-03 covers the cascade that
+    # must not strand a delivered thread when the agent goes away.
+    invariants: [E-01, E-05, L-03]
+
 # The agent-lifecycle journey #2336 shipped is NOT a journey of its own — it is
 # J03's first half. Recording it here rather than minting a J11 keeps the
 # catalog a list of PROMISES; "an agent can be restarted" is a step inside

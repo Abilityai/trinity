@@ -990,6 +990,56 @@ def build_narrated_surface_prompt(agent_name: str) -> Optional[str]:
     )
 
 
+def build_user_facing_room_prompt() -> str:
+    """Tell an agent that a PERSON outside the fleet is reading this room
+    (trinity-enterprise#363).
+
+    Full transcript visibility is the deliberate choice for Workspace rooms —
+    watching the team work is the differentiator over a summary — and that choice
+    is only safe while the agents know they are being watched. Without this an
+    agent-to-agent exchange in front of a customer discusses internals, other
+    customers, costs and platform mechanics, because nothing in its context says
+    anyone is there.
+
+    Takes NO arguments, and that is deliberate twice over:
+
+    * it states **that** a person is reading, never **who**. The block is
+      composed into a prompt handed to every woken agent in the room, so a
+      participant's address would be disclosed sideways to agents the person
+      never addressed, and it buys nothing — the behaviour change is the same
+      whoever is reading. ent#362's per-line ``(human)`` label already answers
+      "who said this"; this answers "who is in the room".
+    * the fact is derived by the caller from room MEMBERSHIP
+      (``shared_sessions.service._wake_agent``), never asserted by a participant.
+      Keeping the derivation out of here is what makes that guarantee checkable
+      in one place.
+
+    Pure and constant — no DB read, so nothing to fail and no ``Optional``. The
+    caller decides whether to include it at all; see the sibling
+    ``build_narrated_surface_prompt`` for the shape.
+    """
+    return (
+        "## A person is reading this room\n"
+        "This room includes at least one human participant from outside the agent "
+        "fleet — a client or an operator — and they can read **every** message in "
+        "it, including the ones you address to other agents. There is no private "
+        "side channel here.\n\n"
+        "So, for this turn:\n"
+        "- Write every message as if it will be read by that person, because it "
+        "will be. Address other agents normally; just do not say anything to them "
+        "you would not say in front of the reader.\n"
+        "- Keep platform mechanics out of it — infrastructure, container and model "
+        "internals, costs and token spend, queue and scheduling plumbing — unless "
+        "the person asked about them.\n"
+        "- Never mention another client, another customer's data, or work done for "
+        "anyone who is not in this room.\n"
+        "- Say what you are doing and what you need in plain language. Half a "
+        "sentence of shorthand to a peer reads as evasion to someone watching.\n"
+        "- If you need to raise something the reader should not see, do it outside "
+        "this room."
+    )
+
+
 def is_execution_context_enabled() -> bool:
     """Operator kill-switch for the execution context block. Default: enabled."""
     try:

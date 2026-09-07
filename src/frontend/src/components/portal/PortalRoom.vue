@@ -97,7 +97,7 @@
 
     <!-- Transcript -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <div class="max-w-4xl mx-auto space-y-6">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
 
         <div v-for="m in messages" :key="m.seq">
@@ -169,7 +169,7 @@
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
-      <div class="max-w-4xl mx-auto">
+      <div class="max-w-[var(--ws-message-max,64rem)] mx-auto">
         <!-- A closed room is a dead end unless it SAYS so. Rooms end on their
              own (message budget, cost cap, TTL) — silence would read as the
              agents having stopped answering. -->

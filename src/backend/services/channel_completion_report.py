@@ -62,6 +62,14 @@ logger = logging.getLogger(__name__)
 # `source_channel_chat_id`, so they never reach this check.
 INLINE_CHANNEL_TRIGGERS = frozenset({"slack", "telegram", "whatsapp", "public"})
 
+# ent#498 C9. How long a portal report waits for an in-flight turn on the same
+# thread before writing anyway. Comfortably longer than a typical turn and far
+# shorter than the terminal writer's own patience — this runs inside a
+# fire-and-forget `spawn_completion_report` task, so the wait blocks nothing a
+# user is watching.
+_INFLIGHT_WAIT_SECONDS = 120.0
+_INFLIGHT_POLL_SECONDS = 2.0
+
 _MAX_REPORT_CHARS = 2800
 
 # Telegram sendMessage hard cap. Applied AFTER markdown→HTML conversion +
@@ -420,6 +428,74 @@ def _resolve_portal(
             # of a list. A report nobody notices is the same silence this
             # contract exists to end.
             portal_db.touch_portal_session(chat_id, now, added=1)
+
+        # ent#498 C9: never interleave with an in-flight turn on this thread.
+        #
+        # `PortalConversation` detects a reply by an assistant-row count delta
+        # and renders the LAST assistant row, so a report landing mid-turn can be
+        # read as that turn's answer — the ambiguity documented above. Waiting for
+        # the marker to clear removes it for the overwhelmingly common case at
+        # the cost of, at most, `_INFLIGHT_WAIT_SECONDS`.
+        #
+        # BOUNDED, and it writes anyway when the budget runs out: the report is
+        # never dropped, only deferred. A wait that could refuse would trade a
+        # cosmetic misread for a lost brief, which is much worse. It also cannot
+        # hang on a dead marker — `mark_turn_inflight` sets a TTL, and
+        # `get_turn_inflight` returns None when Redis is unreachable.
+        #
+        # Applies to every portal report, not only scheduled ones: the misread is
+        # identical for the ent#457 delegation case and deferring is strictly
+        # better there too. The complete fix needs a per-row discriminator
+        # `enterprise_portal_messages` does not carry.
+        try:
+            from client_portal.service import get_turn_inflight
+
+            waited = 0.0
+            while waited < _INFLIGHT_WAIT_SECONDS:
+                # `get_turn_inflight` is a SYNCHRONOUS Redis GET. Left on the
+                # loop it is up to 60 blocking calls per report, each up to the
+                # 1s socket timeout — so a degraded-but-not-down Redis stalls
+                # the single backend loop for a minute.
+                if await asyncio.to_thread(get_turn_inflight, chat_id) is None:
+                    break
+                await asyncio.sleep(_INFLIGHT_POLL_SECONDS)
+                waited += _INFLIGHT_POLL_SECONDS
+            else:
+                logger.info(
+                    "[ent#498] session %s still has a turn in flight after %ss — "
+                    "delivering anyway rather than dropping the report (execution %s)",
+                    chat_id, _INFLIGHT_WAIT_SECONDS, execution_id,
+                )
+        except asyncio.CancelledError:
+            # `CancelledError` is a BaseException, so `except Exception` below
+            # does NOT catch it — and a backend restart landing inside the wait
+            # unwinds the effect guard with the terminal already applied and
+            # nothing to re-apply it. The report is silently lost, which is
+            # exactly what the "never dropped, only deferred" claim above
+            # promises cannot happen.
+            #
+            # Written SYNCHRONOUSLY here, not by falling through to the
+            # `to_thread` below: this task is being cancelled because the loop is
+            # going away, so planning to reach another await point is planning on
+            # the thing that just stopped being available. One blocking write on a
+            # dying loop is the right trade against losing the brief.
+            #
+            # Then re-raise. Swallowing a cancellation leaves the task running
+            # against a closing loop, and the caller's shutdown path is entitled
+            # to its exception.
+            logger.info("[ent#498] in-flight wait cancelled for session %s — "
+                        "writing the report inline before unwinding", chat_id)
+            try:
+                _write()
+            except Exception:  # noqa: BLE001 — nothing left to salvage it with
+                logger.exception(
+                    "[ent#498] inline delivery on cancel failed for session %s "
+                    "(execution %s)", chat_id, execution_id)
+            raise
+        except Exception as e:  # noqa: BLE001 — a wait must never lose a report
+            logger.warning("[ent#498] in-flight wait failed for session %s: %s",
+                           chat_id, e)
+
 
         try:
             # Review finding: these are synchronous SQLAlchemy writes, and they

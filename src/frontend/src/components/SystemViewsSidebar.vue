@@ -46,8 +46,21 @@
       <div v-if="!isCollapsed && views.length > 0" class="my-2 border-t border-gray-200 dark:border-gray-700"></div>
 
       <!-- System Views -->
-      <div v-if="isLoading && views.length === 0" class="px-3 py-2 text-xs text-gray-400">
-        Loading...
+      <!-- #1921: bare "Loading..." text replaced by a placeholder shaped like the
+           view rows it becomes, so the sidebar keeps one footprint through
+           loading -> loaded (principle 4). The gate is already compound
+           ("no data yet"), so only the treatment changes. -->
+      <div
+        v-if="isLoading && views.length === 0"
+        class="px-3 py-2 space-y-2"
+        aria-busy="true"
+      >
+        <div
+          v-for="n in 3"
+          :key="n"
+          class="h-5 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"
+        ></div>
+        <span class="sr-only">Loading…</span>
       </div>
 
       <button

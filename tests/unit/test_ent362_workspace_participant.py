@@ -148,15 +148,34 @@ def test_a_roster_miss_is_the_same_refusal_as_an_unknown_agent(monkeypatch):
 
 def test_a_workspace_sender_reads_as_human_to_the_agents():
     """Otherwise an agent sees a bare email as an unlabelled kind and cannot
-    tell a customer in the room from another agent."""
+    tell a customer in the room from another agent.
+
+    This asserted through `_render_transcript`, a name that has never existed —
+    the renderer is `_format_delta` — behind a `hasattr` guard, so it skipped on
+    every run since ent#362 and the label it guards was unprotected. Found while
+    building trinity-enterprise#363, which leans on exactly this labelling.
+    Calling the real function directly: a guard that skips when its subject is
+    missing cannot fail when its subject is RENAMED, which is the one thing a
+    guard on a private name is for.
+    """
     from shared_sessions import service
-    rendered = service._render_transcript([
+    rendered = service._format_delta([
         {"sender_kind": service.WORKSPACE_KIND, "sender_identity": "client@example.com",
          "content": "hello", "kind": "message"},
-    ]) if hasattr(service, "_render_transcript") else None
-    if rendered is None:
-        pytest.skip("transcript renderer is private to the delta builder")
-    assert "(human)" in rendered
+    ])
+    assert "client@example.com (human)" in rendered
+
+
+def test_an_agent_sender_is_not_labelled_human():
+    """The other half: the label has to DISCRIMINATE. Asserting only that a
+    human is labelled passes just as well against a renderer that labels
+    everything."""
+    from shared_sessions import service
+    rendered = service._format_delta([
+        {"sender_kind": "agent", "sender_identity": "researcher", "content": "hi",
+         "kind": "message"},
+    ])
+    assert "(human)" not in rendered
 
 
 # --- wake semantics ----------------------------------------------------------

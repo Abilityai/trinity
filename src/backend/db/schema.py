@@ -225,6 +225,13 @@ TABLES = {
             -- default off — a plain token-in-URL webhook is unchanged.
             webhook_secret_encrypted TEXT,
             webhook_auth_enabled INTEGER DEFAULT 0,
+            -- ent#498: deliver this schedule's output into one person's
+            -- Workspace conversation with the agent. NULL — every existing row,
+            -- no backfill — is today's behaviour: the run terminates in an
+            -- execution row and nothing is delivered. The resolver fails CLOSED
+            -- on NULL, and an address that can no longer reach the agent is a
+            -- refused dispatch rather than a silent drop.
+            deliver_to_workspace_email TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
@@ -634,7 +641,14 @@ TABLES = {
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             cost REAL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            -- ent#534: NULL for a typed turn; 'voice' for a turn spoken in a
+            -- Workspace voice call. `voice_call_id` groups one call's rows so
+            -- the chat can fold them into one "Voice call · N min" block no
+            -- matter how many rows the history window returns or what typed
+            -- rows landed between them.
+            source TEXT,
+            voice_call_id TEXT
         )
     """,
 
