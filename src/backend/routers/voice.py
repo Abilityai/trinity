@@ -16,10 +16,18 @@ import types
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 
-from models import User, VoiceStartRequest, VoiceStartResponse, VoiceStopRequest, VoiceStopResponse
+from models import (
+    DEFAULT_CANVAS_ID,
+    User,
+    VoiceStartRequest,
+    VoiceStartResponse,
+    VoiceStopRequest,
+    VoiceStopResponse,
+)
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
+from services import canvas_service
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -150,18 +158,23 @@ async def get_voice_panel(
     name: str = Depends(get_authorized_agent),
     current_user: User = Depends(get_current_user),
 ):
-    """Return the current canvas panel state for a workspace voice session.
+    """Return the canvas a workspace voice session draws on (ent#536).
 
-    Returns empty state (not 404) when session has ended so the frontend
-    poll loop doesn't raise errors during the teardown window.
+    The voice panel IS the agent's default canvas, so this is the canvas row —
+    the same blocks the Canvas tab renders — not an in-memory copy. Returns an
+    empty canvas shape (not 404) when the session has ended or nothing has been
+    drawn yet, so the poll loop never raises during the teardown window.
     """
     session = await voice_service.get_session(session_id)
     if not session:
-        return {"type": "empty", "content": "", "title": None, "updated_at": None}
+        return canvas_service.empty_canvas(name)
     if session.agent_name != name:
         raise HTTPException(status_code=403, detail="Session does not belong to this agent")
     assert_owns_or_admin(current_user, session.user_id, detail="Not authorized for this voice session")
-    return session.panel_state
+    canvas = db.get_agent_canvas(name, DEFAULT_CANVAS_ID)
+    if not canvas:
+        return canvas_service.empty_canvas(name)
+    return canvas_service.decorate([canvas], name)[0]
 
 
 @router.get("/api/agents/{name}/voice/prompt")

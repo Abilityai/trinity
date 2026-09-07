@@ -35,7 +35,7 @@ const devSecurityHeaders = {
     "default-src 'self'; " +
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
     "style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data: blob:; " +
+    "img-src 'self' data: blob: https:; " +
     "media-src 'self' blob:; " +
     "font-src 'self'; " +
     "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev; " +

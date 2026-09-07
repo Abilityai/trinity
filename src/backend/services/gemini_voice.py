@@ -12,16 +12,16 @@ Architecture:
 import asyncio
 import json
 import logging
-import posixpath
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable
 
 from google import genai
 from google.genai import types as genai_types
 
 from config import GEMINI_API_KEY, VOICE_MODEL, VOICE_MAX_DURATION, REDIS_URL
+from models import DEFAULT_CANVAS_ID
+from services.canvas_blocks import WORKSPACE_ROOT, classify_image_src, map_panel_tool
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +31,14 @@ OUTPUT_SAMPLE_RATE = 24000  # 24kHz PCM output from Gemini
 
 # Max chars for tool call prompts (prevent injection via very long args)
 _TOOL_PROMPT_MAX = 2000
-# Max bytes stored in panel_state["content"] to bound memory per session
-_PANEL_CONTENT_MAX = 524_288  # 512 KB
 
-# Agent workspace root inside the container; show_image file paths must resolve under it.
-_WORKSPACE_ROOT = "/home/developer"
+# ent#536 — the voice panel IS the agent's default canvas. The panel tools are
+# thin verbs over the canvas block rules (`services/canvas_blocks.py`): the
+# same image confinement gate, the same block ids, the same write path the
+# agent's own `set_canvas` uses. Re-exported names keep the #979 tests and any
+# external importer working.
+_WORKSPACE_ROOT = WORKSPACE_ROOT
+_classify_image_src = classify_image_src
 
 _PANEL_TOOL_NAMES = {
     "show_markdown", "update_panel", "append_to_panel", "clear_panel",
@@ -132,66 +135,31 @@ _PANEL_TOOLS = genai_types.Tool(
 WORKSPACE_PANEL_INSTRUCTIONS = """
 ## Visual Canvas
 
-You have a visual canvas panel visible to the user on the right side of the screen. Use it proactively alongside your voice responses.
+You have a visual canvas visible to the user beside the conversation. It is the agent's own canvas — the same one you keep with `set_canvas` in text chat — so what you draw here persists after the call, on the Canvas tab. Use it proactively alongside your voice responses.
 
-Panel tools:
-- `show_markdown(content, title?)` — Render markdown. Use most often for notes, summaries, action items, analysis.
+Panel tools (each draws a block on the canvas):
+- `show_markdown(content, title?)` — Render markdown. Use most often for notes, summaries, action items, analysis. It may embed ```chart / ```kpi / ```table fences (JSON inside) and ```mermaid fences, which render as figures.
 - `show_diagram(diagram, title?)` — Render a Mermaid diagram. Use for flowcharts, sequence diagrams, mindmaps, timelines, state/class/ER diagrams — anytime structure or flow is easier shown than spoken.
-- `show_image(src, title?, caption?)` — Display an image by web URL or workspace file path.
-- `update_panel(html, title?)` — Replace panel with HTML for richer layouts.
-- `append_to_panel(html)` — Add to existing panel without clearing.
-- `clear_panel()` — Clear when shifting to a new topic.
+- `show_image(src, title?, caption?)` — Display an image by https URL or a file path in your workspace.
+- `update_panel(html, title?)` — Replace your panel block with static HTML for richer layouts.
+- `append_to_panel(html)` — Add to your panel block without clearing it.
+- `clear_panel()` — Remove what you drew when shifting to a new topic. Blocks written earlier with `set_canvas` are left alone.
 
 Guidelines:
-- The panel is a persistent whiteboard — voice is transient, the panel is the artefact. Each update is kept in history, so the user can scroll back through what you drew.
+- Voice is transient, the canvas is the artefact — it stays after the call.
 - Use `show_markdown` by default. Reach for `show_diagram` when a picture of the structure helps, `update_panel` only when custom layout genuinely adds value.
-- Don't mirror every voice response in the panel — use it when structured content helps.
+- Don't mirror every voice response on the canvas — use it when structured content helps.
 - Clear when the topic changes significantly.
 
 Mermaid rule (for `show_diagram`):
 - Pass raw Mermaid source only (no ```mermaid fences). Example: `graph TD; Start-->Stop`.
-- Keep diagrams focused; invalid syntax shows a contained error in the panel.
+- Keep diagrams focused; invalid syntax shows a contained error on the canvas.
 
 HTML rule (for `update_panel`):
-- Panel HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, styled `<div>`s, inline `style=` attributes, images.
+- HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, styled `<div>`s, images.
 - Do NOT use `<script>`, `<canvas>` + JS charting, or any JS-driven rendering — it will be stripped and show nothing.
-- For data visualisation, prefer `show_diagram` (Mermaid: fl/pie/quadrant/xychart) or `show_image` (a chart image by URL or workspace path). Reserve `update_panel` for rich static layouts that markdown can't express.
+- For data visualisation, put a ```chart fence in `show_markdown` (Trinity draws it from the data), or use `show_diagram` / `show_image`.
 """
-
-def _classify_image_src(src: str) -> Optional[tuple[str, str]]:
-    """Classify a show_image src as a web URL or a workspace-confined file path.
-
-    Returns (value, kind) where kind is "url" or "path", or None if the src is
-    neither an allowed web URL nor a path that resolves inside the agent
-    workspace. The frontend renders "url" directly and fetches "path" through the
-    authenticated /files/preview endpoint, so this is the only confinement gate
-    on the panel side — and it is stricter than the agent-server's prefix check,
-    rejecting sibling escapes like /home/developer-evil and any '..' traversal.
-    """
-    if not src:
-        return None
-    low = src.lower()
-    if low.startswith("http://") or low.startswith("https://"):
-        return (src, "url")
-    if low.startswith("data:") or "://" in low:
-        # data: URIs (unbounded inline bytes) and other schemes (file:, ftp:, …)
-        # are not allowed.
-        return None
-
-    # Treat as a workspace file path. Accept absolute (/home/developer/...) or
-    # relative (resolved against the workspace root). '~/' is workspace-relative.
-    path = src[2:] if src.startswith("~/") else src
-    # A ':' in the first path segment is a URI scheme (javascript:, mailto:, …),
-    # not a real path segment — reject before resolving.
-    if ":" in path.split("/", 1)[0]:
-        return None
-    if path.startswith("/"):
-        candidate = posixpath.normpath(path)
-    else:
-        candidate = posixpath.normpath(posixpath.join(_WORKSPACE_ROOT, path))
-    if candidate != _WORKSPACE_ROOT and not candidate.startswith(_WORKSPACE_ROOT + "/"):
-        return None
-    return (candidate, "path")
 
 
 # Single tool declaration for all voice sessions
@@ -263,9 +231,11 @@ class VoiceSession:
     # sessions use VOICE_MAX_DURATION; phone calls pass VOIP_MAX_CALL_DURATION.
     max_duration: int = VOICE_MAX_DURATION
     transcript: list = field(default_factory=list)
-    panel_state: dict = field(default_factory=lambda: {
-        "type": "empty", "content": "", "title": None, "updated_at": None
-    })
+    # ent#536 — the audience this session may WRITE at. `operator` unless the
+    # front door says otherwise: an Agent Detail call is an operator surface,
+    # and a Workspace call (ent#534) sets `roster` so the person in the call can
+    # see what was drawn. A voice write never lands on a canvas WIDER than this.
+    canvas_audience: str = "operator"
     _gemini_session: object = field(default=None, repr=False)
     _send_task: object = field(default=None, repr=False)
     _receive_task: object = field(default=None, repr=False)
@@ -551,137 +521,65 @@ class GeminiVoiceService:
                 VoiceTranscriptEntry(role="assistant", text=current_assistant_text.strip())
             )
 
+    # ent#536 — the voice panel IS the agent's default canvas.
+    #
+    # There is no in-session copy of the panel any more: the canvas row is the
+    # state, the live poll reads the row, and the Canvas tab shows the same
+    # blocks after the call. Each panel verb is mapped onto a block edit by
+    # `canvas_blocks.map_panel_tool` — `show_*` replaces the `voice` block,
+    # `append_to_panel` grows it, `clear_panel` removes the voice blocks and
+    # nothing else — and written through the SAME `canvas_service.write_canvas`
+    # the agent's `set_canvas` uses, so caps and per-kind rules cannot diverge.
+    #
+    # Audience is a property of the WRITE, not the canvas: the session carries
+    # the widest audience it may publish at (`canvas_audience`, default
+    # `operator`). A canvas stored WIDER than that is refused with a reason the
+    # model can voice — an operator's call must never land on a customer's
+    # Workspace because the agent had published its board there — and a canvas
+    # stored narrower keeps its stored audience, so a call never widens either.
+    _CANVAS_ID = DEFAULT_CANVAS_ID
+
     def _execute_panel_tool(self, session: VoiceSession, tool_name: str, args: dict) -> str:
-        """Handle panel tools in-process (no agent container call)."""
-        now = datetime.now(timezone.utc).isoformat()
-        if tool_name == "show_markdown":
-            session.panel_state = {
-                "type": "markdown",
-                "content": args.get("content", ""),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "show_diagram":
-            session.panel_state = {
-                "type": "mermaid",
-                "content": args.get("diagram", ""),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "show_image":
-            src = str(args.get("src", "")).strip()
-            if not src:
-                return "No image source provided."
-            kind = _classify_image_src(src)
-            if kind is None:
-                # Not a web URL and not a workspace-confined file path — reject.
-                return (
-                    "Image rejected: src must be an https:// URL or a path inside "
-                    "your workspace (/home/developer). Path traversal is not allowed."
-                )
-            value, image_kind = kind
-            session.panel_state = {
-                "type": "image",
-                "content": value,
-                "image_kind": image_kind,   # "url" | "path"
-                "caption": args.get("caption"),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "update_panel":
-            session.panel_state = {
-                "type": "html",
-                "content": args.get("html", ""),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "append_to_panel":
-            combined = session.panel_state.get("content", "") + args.get("html", "")
-            if len(combined) > _PANEL_CONTENT_MAX:
-                combined = combined[-_PANEL_CONTENT_MAX:]
-            session.panel_state = {
-                "type": session.panel_state.get("type", "html"),
-                "content": combined,
-                "title": session.panel_state.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "clear_panel":
-            session.panel_state = {
-                "type": "empty", "content": "", "title": None, "updated_at": now,
-            }
-        self._persist_panel_to_canvas(session)
-        return "Panel updated."
+        """Handle panel tools in-process (no agent container call).
 
-    # ent#438 — the voice panel IS the canvas now.
-    #
-    # `panel_state` stays as the in-session buffer the live overlay reads, and
-    # every mutation is additionally written to the durable canvas. That is the
-    # whole of FR-7: the capability MOVED rather than being dropped with a
-    # stated reason, so an operator who talked to an agent yesterday can still
-    # see what it drew.
-    #
-    # Deliberately `audience="operator"`: a voice session runs on an
-    # operator-authenticated surface, and it always did. A voice panel that
-    # silently became client-visible would be exactly the widening FR-4 exists
-    # to prevent — publishing to a roster stays an explicit `set_canvas` call.
-    _CANVAS_ID = "voice"
-
-    _PANEL_TYPE_TO_BLOCK = {
-        "markdown": "markdown",
-        "html": "html",
-        # A mermaid diagram is fenced markdown to every renderer Trinity has —
-        # artifacts render ```mermaid natively and `renderMarkdown` passes the
-        # fence through, so this needs no new block kind.
-        "mermaid": "markdown",
-    }
-
-    def _panel_blocks(self, panel: dict) -> list:
-        """The current panel as canvas blocks, or [] for an empty panel."""
-        content = (panel or {}).get("content") or ""
-        if not content:
-            return []
-        panel_type = (panel or {}).get("type")
-        title = (panel or {}).get("title")
-        if panel_type == "mermaid":
-            return [{"kind": "markdown", "title": title,
-                     "payload": {"markdown": f"```mermaid\n{content}\n```"}}]
-        if panel_type == "image":
-            # An image has no block kind of its own; markdown carries it and is
-            # sanitized on render like every other markdown block.
-            caption = (panel or {}).get("caption") or ""
-            return [{"kind": "markdown", "title": title,
-                     "payload": {"markdown": f"![{caption}]({content})"}}]
-        kind = self._PANEL_TYPE_TO_BLOCK.get(panel_type)
-        if kind == "markdown":
-            return [{"kind": "markdown", "title": title, "payload": {"markdown": content}}]
-        if kind == "html":
-            return [{"kind": "html", "title": title, "payload": {"html": content}}]
-        return [{"kind": "json", "title": title, "payload": {"content": content}}]
-
-    def _persist_panel_to_canvas(self, session: "VoiceSession") -> None:
-        """Mirror the live panel onto the agent's durable canvas.
-
-        Fail-soft and deliberately so: the voice turn is the thing the operator
-        is watching, and a canvas write that fails must not break the panel in
-        front of them or the tool result the model is waiting on. The live
-        `panel_state` is already updated by the time this runs, so a failure
-        costs durability, never the session.
+        Fail-soft on the store: the voice turn is the thing the person is
+        watching, and a canvas write that fails must not break the tool result
+        the model is waiting on. The result SAYS the canvas could not be saved
+        rather than claiming success, so the model does not describe a drawing
+        nobody can see.
         """
         try:
             from database import db
+            from services import canvas_service
 
-            db.upsert_agent_canvas(
+            current = db.get_agent_canvas(session.agent_name, self._CANVAS_ID)
+            stored_audience = (current or {}).get("audience") or session.canvas_audience
+            if not canvas_service.audience_within(stored_audience, session.canvas_audience):
+                return (
+                    f"Canvas not updated: your '{self._CANVAS_ID}' canvas is published to "
+                    f"'{stored_audience}' readers and this call may only write for "
+                    f"'{session.canvas_audience}'. Drawing here would show this conversation "
+                    "to them, so nothing was drawn."
+                )
+            blocks, message = map_panel_tool(
+                tool_name, args, (current or {}).get("blocks") or []
+            )
+            if blocks is None:
+                return message
+            canvas_service.write_canvas(
                 session.agent_name,
                 self._CANVAS_ID,
-                blocks=self._panel_blocks(session.panel_state),
-                title="Voice session",
-                audience="operator",
+                blocks,
+                title=(current or {}).get("title"),
+                audience=stored_audience,
                 execution_id=None,
             )
+            return message
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                "voice panel: canvas persist failed for %s: %s", session.agent_name, e
+                "voice panel: canvas write failed for %s: %s", session.agent_name, e
             )
+            return f"Canvas could not be saved: {str(e)[:200]}"
 
     async def _execute_and_respond(self, session: VoiceSession, call_id: str, fc):
         """Execute a Gemini tool call and send the response back. Runs as a background task."""

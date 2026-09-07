@@ -650,13 +650,34 @@ CANVAS_MAX_BLOCKS = 50
 CANVAS_RATE_LIMIT = int(os.getenv("CANVAS_RATE_LIMIT", "60"))
 CANVAS_RATE_WINDOW = int(os.getenv("CANVAS_RATE_WINDOW", "60"))
 
+# ent#536 — the ONE default canvas an agent and its voice mode both write to.
+# Named canvases remain for everything else; this is the id the MCP tools and
+# the voice panel tools fall back to, so both writers land on the same surface.
+DEFAULT_CANVAS_ID = "main"
+
+# Per-kind ceilings (ent#536), stated to the agent in the MCP description and the
+# platform prompt. The 512 KiB block cap alone is too loose for two inputs whose
+# cost is not proportional to their size: an inline image is bytes the browser
+# must decode on every read, and Mermaid parse time is superlinear on hostile
+# source.
+CANVAS_IMAGE_INLINE_MAX_BYTES = 64 * 1024   # data: URI length cap
+CANVAS_IMAGE_SRC_MAX_CHARS = 2048           # any other image src
+CANVAS_DIAGRAM_MAX_CHARS = 20_000           # Mermaid source
+
+# A block id shares the canvas id charset: it is addressed by `patch_canvas`
+# and lands in a named error, so it carries the same guard.
+CANVAS_BLOCK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
 # Block kinds. The first five delegate to the shared `components/reports/`
 # dispatch — reused, never forked, because those renderer keys are CI-pinned as
-# the canonical contract (`test_1535_report_prompt_guidance.py`). `chart` and
-# `html` are the two the canvas adds; the report `display_hint` enum is
-# deliberately NOT widened, because a canvas is a superset of a report's
-# rendering rather than a change to what a report is.
-CanvasBlockKind = Literal["table", "kpi", "markdown", "timeline", "json", "chart", "html"]
+# the canonical contract (`test_1535_report_prompt_guidance.py`). `chart`,
+# `html`, `image` and `diagram` are the canvas's own (ent#438, widened by
+# ent#536); the report `display_hint` enum is deliberately NOT widened, because
+# a canvas is a superset of a report's rendering rather than a change to what a
+# report is.
+CanvasBlockKind = Literal[
+    "table", "kpi", "markdown", "timeline", "json", "chart", "html", "image", "diagram",
+]
 
 # `operator` (default) is fail-closed: a canvas reaches a Workspace client only
 # because the agent explicitly said `roster`.
@@ -666,11 +687,32 @@ CanvasAudience = Literal["operator", "roster"]
 class CanvasBlock(BaseModel):
     """One rendered block on a canvas (ent#438)."""
     kind: CanvasBlockKind
+    # Optional on a full write — `set_canvas` assigns `b1..bN` to id-less
+    # blocks so every stored block is addressable by `patch_canvas` (ent#536).
+    id: Optional[str] = Field(None, pattern=CANVAS_BLOCK_ID_RE.pattern)
     title: Optional[str] = Field(None, max_length=300)
     # Free-form per kind, byte-capped as a whole at the router. A dict OR a
     # list, because `table` rows and `kpi` tiles are naturally arrays and
     # forcing a wrapper object on the agent buys nothing.
     payload: Union[Dict, List] = Field(default_factory=dict)
+
+
+class CanvasPatchBlock(CanvasBlock):
+    """A block in a `patch_canvas` write — the id is what names the target (ent#536)."""
+    id: str = Field(..., pattern=CANVAS_BLOCK_ID_RE.pattern)
+
+
+class CanvasPatch(BaseModel):
+    """Request body for replacing only the named blocks of a canvas (ent#536).
+
+    Order is kept and unknown ids are refused by name: the agent says what
+    changes, and the surface never silently gains or loses a block (the #438
+    rule that there is no append — restated for a partial write).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    blocks: List[CanvasPatchBlock] = Field(..., min_length=1, max_length=CANVAS_MAX_BLOCKS)
+    execution_id: Optional[str] = Field(None, max_length=128)
 
 
 class CanvasWrite(BaseModel):

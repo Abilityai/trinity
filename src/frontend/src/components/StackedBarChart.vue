@@ -24,6 +24,10 @@ const props = defineProps({
   // render an empty chart. Unmapped buckets show their own name.
   labels: { type: Object, default: () => ({}) },
   height: { type: Number, default: 150 },
+  // OPTIONAL x-label formatter (ent#536). Null = the UTC-day formatters every
+  // existing caller relies on (`date` is an ISO day); the canvas passes its own
+  // so a category column is not parsed as a date.
+  labelFormat: { type: Function, default: null },
 })
 
 const hover = ref(null)
@@ -64,10 +68,12 @@ function labelFor(b) {
 }
 
 function fmtDate(iso) {
+  if (props.labelFormat) return props.labelFormat(iso)
   const dt = new Date(iso + 'T00:00:00Z')
   return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
 function fmtDayShort(iso) {
+  if (props.labelFormat) return props.labelFormat(iso)
   const dt = new Date(iso + 'T00:00:00Z')
   return dt.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric', timeZone: 'UTC' })
 }
@@ -85,7 +91,7 @@ function showLabel(i) {
     <div class="flex items-end gap-px" :style="{ height: height + 'px' }">
       <div
         v-for="(d, i) in data"
-        :key="d.date"
+        :key="i"
         class="relative flex-1 flex flex-col-reverse justify-start items-center min-w-0"
         @mouseenter="hover = i"
         @mouseleave="hover = null"
@@ -133,7 +139,7 @@ function showLabel(i) {
     <div class="flex gap-px mt-1">
       <div
         v-for="(d, i) in data"
-        :key="d.date"
+        :key="i"
         class="flex-1 text-center text-[9px] text-gray-400 dark:text-gray-500 truncate"
       >
         {{ showLabel(i) ? fmtDayShort(d.date) : '' }}
