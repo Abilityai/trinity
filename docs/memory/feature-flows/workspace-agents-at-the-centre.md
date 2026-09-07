@@ -190,6 +190,13 @@ a second, and the reason is in the defect it fixes: the gesture already existed
 on the Files panel, and the `files?.[0]` bug existed there too, because each
 surface had written its own.
 
+Since #2582 the upload also **announces itself to the rail owner** from the
+store funnel (`clientPortal.js::uploadDocument`, the one function all three
+consumers already call), so a file appears under "Files you sent" before any
+agent reply and lights the rail dot — with no edit to this file or to
+`PortalRoom.vue`. See `workspace-rail.md` Slice 3 for why the signal is a
+pending SET rather than a scalar.
+
 | Consumer | Destination |
 |---|---|
 | `PortalConversation.vue` | the agent's inbox |

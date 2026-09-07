@@ -5,6 +5,7 @@
 | Date | Changes |
 |------|---------|
 | 2026-04-24 | Initial implementation (FILES-001 / #295). Steps 1–6 complete: schema, toggle + volume, internal share endpoint, public download, MCP tool, UI panel. |
+| 2026-09-07 | #2582 — the doc caught up with ent#461 (disposition is a server-decided allowlist, not a flat `attachment`) and with #568 (the `session_token` gate and the `require_email` policy check were deleted; both are AST-pinned dead). Added the one-way `?download=1` flag, the `HEAD` route, and the counter/audit split for a ranged prefix read. |
 
 ## Overview
 
@@ -74,12 +75,16 @@ User clicks URL →
     ├── IP rate limit (file-download bucket)
     ├── constant-time compare vs stored download_token
     ├── revoked / expired checks
-    ├── agent require_email policy gate (via validate_agent_session)
-    ├── stream /data/agent-files/{file_id} (64 KB chunks)
-    ├── Content-Disposition: attachment (RFC 6266 UTF-8)
+    ├── (no policy gate — #568 deleted require_email/session_token here;
+    │    the 192-bit sig IS the credential, pinned dead by
+    │    tests/unit/test_file_download_no_session_gate.py)
+    ├── Range → 206 / 416, else stream in 64 KB chunks (ent#461)
+    ├── Content-Disposition: inline for _INLINE_SAFE_TYPES, else attachment
+    │    (RFC 6266 UTF-8) — server-decided; ?download=1 may force attachment
+    │    ONLY, never inline (#2582)
     ├── X-Content-Type-Options: nosniff
-    ├── bump download_count + last_downloaded_at
-    └── audit: EXECUTION/file_share_download
+    ├── bump download_count + last_downloaded_at — full transfers only (#2582)
+    └── audit: EXECUTION/file_share_download (details.ranged_prefix)
 ```
 
 ---
@@ -130,7 +135,8 @@ No WebSocket updates yet — manual refresh on action (acceptable because volume
 | GET | `/api/agents/{name}/shared-files` | JWT (access) | List active shares |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | JWT (owner/admin) | Revoke (idempotent) |
 | POST | `/api/internal/agent-files/share` | `X-Internal-Secret` | Agent-server direct path; takes `agent_name` in body |
-| GET | `/api/files/{file_id}` | Token (`?sig=`) + optional `session_token` when agent requires email | Public download |
+| GET | `/api/files/{file_id}` | Token (`?sig=`) | Public download. Optional **one-way** `?download=1` forces `attachment` (#2582); tolerantly parsed, so a malformed value is ignored rather than 422'd. The `session_token` parameter is gone since #568 |
+| HEAD | `/api/files/{file_id}` | Token (`?sig=`) | Same validation and headers as GET, no body, no counter, no audit row. Honours the same `?download=1`, because a disposition that disagrees with GET mis-plans the player that probed |
 
 ### MCP tool
 
@@ -223,13 +229,13 @@ See `docs/drafts/amazing-file-outbound.md` §6 for the full threat model. Key pr
 | S1 | Path traversal — `share_file("../.env")` | `validate_publish_path()` rejects absolute, `..`, backslash; Docker SDK `get_archive` extracts into isolated buffer; backend never mounts agent workspace |
 | S2 | Credential leak via backend filesystem reach | Backend only reads the single file the agent names; never `bind`-mounts `/home/developer/` |
 | S3 | Predictable tokens | 192-bit `secrets.token_urlsafe(32)`; constant-time compare via `secrets.compare_digest` |
-| S6 | XSS via agent-uploaded HTML | `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff` — never inline |
+| S6 | XSS via agent-uploaded HTML | **`inline` is an ALLOWLIST, not a relaxation** (ent#461): only `_INLINE_SAFE_TYPES` (audio/video/image/PDF) — `text/html`, `application/xhtml+xml` and `image/svg+xml` stay `attachment`, and the type is python-magic-detected from the bytes, never agent-supplied, with an unavailable-fallback outside the allowlist. `X-Content-Type-Options: nosniff` is kept and becomes MORE load-bearing once anything is inline. The requester's `?download=1` is one-way toward `attachment` (#2582), so no requester input can widen this |
 | S7 | Filename header injection (CRLF) | Sanitizer allows `[A-Za-z0-9._\- ]` only; RFC 6266 UTF-8 percent-encoding for non-ASCII |
 | S8 | MIME spoofing | python-magic detects actual MIME; blocklist rejects PE/ELF/Mach-O/shebang before storage |
 | S9 | Storage DoS | 50 MB per-file + 500 MB per-agent quota (setting-configurable) |
 | S10 | Token enumeration | 192-bit entropy + IP rate limit + audit log |
 | S11 | Cross-tenant download | File addressed by `file_id` only; agent_name resolved from DB row |
-| S14 | Access-policy bypass | Download endpoint runs the same `_agent_requires_email` gate as public chat; session_token validated via `validate_agent_session` (cross-link lookup) |
+| S14 | Access-policy bypass | **Historical — the gate is gone (#568).** `build_download_url` never appended a `session_token` and the agent had no way to learn the recipient's value, so the gate permanently broke sharing for `require_email` agents rather than protecting it. The 192-bit `sig` is the sole credential; `tests/unit/test_file_download_no_session_gate.py` AST-pins the removal, including `_validate_download_request`'s exact argument list |
 | S15 | Agent impersonation via MCP | Backend enforces `current_user.agent_name == path agent_name` for agent-scoped keys (same-agent defense) |
 
 ### Deferred / documented limitations
