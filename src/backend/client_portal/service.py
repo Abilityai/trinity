@@ -33,6 +33,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
+
 from utils.helpers import utc_now_iso
 from services.chat_title import (
     chat_title_problem,
@@ -96,6 +98,25 @@ class InvalidChatTitle(ClientPortalError):
     def __init__(self, reason: str, raw=None):
         self.reason = reason
         super().__init__(400, chat_title_problem(reason, raw), category="internal")
+
+
+class MainResetRefused(ClientPortalError):
+    """ent#523 — Reset could not run right now, and the reason is actionable.
+
+    A NAMED 409 for the same reason `InvalidChatTitle` is a named 400: the
+    client shows a different sentence and a different next step for "wait for
+    the reply" than for "someone else already reset this", and a bare status
+    code cannot carry that. `code` is the token; `detail` is the sentence.
+    """
+
+    def __init__(self, code: str, detail: str):
+        self.code = code
+        # `busy` from the closed set below, not a new token: both refusals mean
+        # "something else holds this thread right now; the same action works in
+        # a moment", which is exactly what that category already says. Adding a
+        # ninth category for one route would widen a vocabulary whose value is
+        # being small.
+        super().__init__(409, detail, category="busy", retryable=True)
 
 
 # #2320: the client-safe failure taxonomy. Deliberately a small closed set of
@@ -1544,17 +1565,62 @@ def _resolve_session_id(agent_name: str, email: str, session_id: str | None,
     named thread would strand a turn meant for a conversation the caller could
     see. The ownership check runs first either way, so the flag is never a route
     past it.
+
+    ent#523: with no id and no fresh-thread intent this resolves to the pair's
+    **Main** chat, not to whichever thread was touched last. That is the whole
+    of AC 2's landing rule, and it lands here rather than at each caller because
+    every homeless turn already funnels through this function — an asks
+    ingestion (`ensure_thread_for_ask`), a scheduled brief (ent#498), a headless
+    API turn. "Most recent" was a reasonable guess when there was nowhere
+    designated; now there is, and a guess would scatter the agent's own messages
+    across whichever chat the user happened to open last.
     """
     if session_id:
         if not db.get_portal_session(session_id, agent_name, email):
             raise ClientPortalError(404, "Conversation not found")
         return session_id
-    latest = None if new_thread else db.get_latest_portal_session_id(agent_name, email)
-    if latest:
-        return latest
+    if new_thread:
+        new_id = uuid.uuid4().hex
+        db.create_portal_session(new_id, agent_name, email, utc_now_iso())
+        return new_id
+    return ensure_main_session(agent_name, email)
+
+
+def ensure_main_session(agent_name: str, email: str) -> str:
+    """The pair's pinned **Main** chat id, creating it on first need (ent#523).
+
+    Main is created LAZILY, at exactly two call sites — this function's two
+    callers, `_resolve_session_id` (a turn or an ask with no named thread) and
+    `list_sessions` (opening the agent, which is what renders the pinned tab).
+    Deliberately NOT from `list_all_sessions`: that batch spans every rostered
+    agent and runs on every sidebar refresh, so ensuring there would write one
+    row per agent the user has never opened, and an empty Main is not a "recent
+    chat".
+
+    Concurrency is handled by the DATABASE, not by a check. Two tabs, or two
+    uvicorn workers, can both miss the SELECT; `idx_portal_sessions_main` then
+    lets exactly one INSERT land and the loser re-reads the winner's row. A lock
+    would be the wrong instrument — this is a uniqueness fact, and the index
+    states it in one place for both backends.
+
+    Fails LOUD if the re-read comes back empty: that means the insert was
+    refused for a reason other than the race, and silently handing back a fresh
+    unsaved id would put the agent's next message in a thread nobody is pinned
+    to.
+    """
+    existing = db.get_main_portal_session_id(agent_name, email)
+    if existing:
+        return existing
     new_id = uuid.uuid4().hex
-    db.create_portal_session(new_id, agent_name, email, utc_now_iso())
-    return new_id
+    try:
+        db.create_portal_session(new_id, agent_name, email, utc_now_iso(), is_main=True)
+        return new_id
+    except IntegrityError:
+        # Lost the race — the winner's row is the answer, not ours.
+        won = db.get_main_portal_session_id(agent_name, email)
+        if won:
+            return won
+        raise ClientPortalError(500, "Could not open the main conversation")
 
 
 def ensure_thread_for_ask(agent_name: str, email: str) -> str:
@@ -1566,10 +1632,11 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
     durable and auditable: it is a column-ish fact on the row, not a guess the
     UI makes each time it draws.
 
-    Reuses the client's latest thread with that agent and opens one only if they
-    have never chatted — the same `_resolve_session_id(..., None)` a first client
-    turn takes, deliberately, so an ask does not accumulate threads beside the
-    conversation it belongs in.
+    Lands in the pair's **Main** chat — the same `_resolve_session_id(..., None)`
+    a first client turn takes, deliberately, so an ask does not accumulate
+    threads beside the conversation it belongs in. Before ent#523 that meant
+    "the client's latest thread"; Main is the designated answer that replaced
+    the guess, and this caller inherits it without knowing about Main at all.
 
     Public because the ingestion boundary (`services/operator_queue_service`)
     calls it, and reaching across a package for a private helper is how two
@@ -1582,9 +1649,19 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
 
 def _format_history_context(history: list[dict]) -> str:
     """Render prior turns (oldest-first) as a labelled context block. Empty when
-    there is no history."""
+    there is no history.
+
+    ent#523: SYSTEM rows are skipped. The speaker split here is binary —
+    "Client" for a user row, "You" for everything else — so the platform's own
+    line ("Main was reset. The previous conversation is saved as …") would be
+    replayed to the model as something the AGENT said. That is reachable on the
+    first turn after every Reset, and putting words in the agent's mouth is
+    worse than omitting chrome it did not write.
+    """
     lines = []
     for m in history:
+        if m.get("role") == "system":
+            continue
         who = "Client" if m.get("role") == "user" else "You"
         content = (m.get("content") or "").strip()
         if content:
@@ -2747,11 +2824,132 @@ def execution_belongs_to_caller(execution_id: str, agent_name: str, email: str) 
 
 
 def list_sessions(agent_name: str, email: str, include_owned: bool = False) -> dict:
-    """A client's conversation threads with a rostered agent (most-recent first).
-    Roster-scoped (miss → 404)."""
+    """A client's conversation threads with a rostered agent — **Main first**,
+    then most-recent (ent#523). Roster-scoped (miss → 404).
+
+    This is where Main comes into existence for a pair. Opening an agent is the
+    moment the pinned tab has to be there, and it is the one per-agent read on
+    the path, so ensuring here costs one extra statement on the first visit and
+    nothing afterwards. See `ensure_main_session` for why the cross-agent batch
+    deliberately does not do this.
+
+    Ensuring is best-effort: a failure to mint Main must not blank the chat list
+    the caller asked for. They get their existing threads and the next visit
+    tries again.
+    """
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
+    try:
+        ensure_main_session(agent_name, email)
+    except Exception:                                  # pragma: no cover - defensive
+        logger.warning("could not ensure main chat for %s", agent_name, exc_info=True)
     return {"agent_name": agent_name, "sessions": db.list_portal_sessions(agent_name, email)}
+
+
+# The system line Reset leaves in the fresh Main. Named so the test and the
+# renderer agree on it without either re-typing the string.
+MAIN_RESET_NOTICE = "Main was reset. The previous conversation is saved as \u201c{title}\u201d."
+_MAIN_RESET_FALLBACK_TITLE = "Previous conversation"
+
+
+def _reset_fallback_title(created_at: str | None) -> str:
+    """The name an untitled archive takes. Dated, because these accumulate.
+
+    Falls back to the bare phrase on an unparseable timestamp rather than
+    raising or printing a sentinel: a slightly less useful chat name is not
+    worth failing a Reset over.
+    """
+    try:
+        when = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        return f"{_MAIN_RESET_FALLBACK_TITLE} · {when.strftime('%-d %b')}"
+    except Exception:
+        return _MAIN_RESET_FALLBACK_TITLE
+
+
+def reset_main_session(agent_name: str, email: str, include_owned: bool = False) -> dict:
+    """Reset Main (ent#523): archive what is there, and start the agent cold.
+
+    Nothing is lost, which is why there is no confirmation anywhere in this path
+    (operator ruling 2026-09-06): the retired chat stays readable, resumable and
+    renameable — it simply stops being the thread the agent reaches you in — and
+    it surfaces immediately as the newest ordinary chat.
+
+    "Starts cold" needs no second reset primitive. A fresh row carries no
+    `cached_claude_session_id`, and `session_turn_service` resumes only on a
+    cached id, so coldness is a property of the new row rather than an action
+    taken against the old one. `routers/sessions.py::reset_session_memory` is a
+    different verb (clear the cache, keep the thread) and is deliberately not
+    called here. The agent's per-user memory (MEM-001) is untouched: nothing on
+    this path writes it.
+
+    Refused while a turn is in flight. Retiring the thread mid-turn would leave
+    the reply to land in a chat that is no longer Main — visible only to someone
+    who went looking for it, and billed either way.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+
+    main_id = ensure_main_session(agent_name, email)
+
+    if get_turn_inflight(main_id):
+        raise MainResetRefused(
+            "turn_in_flight",
+            "This chat is still working. Wait for the current reply, then reset.",
+        )
+
+    row = db.get_portal_session(main_id, agent_name, email) or {}
+
+    # An untouched Main is ALREADY what Reset produces, so resetting it is a
+    # no-op rather than an action. Archiving anyway would mint a second empty
+    # thread on every click and file it in the chat list under a name nobody
+    # chose — litter that reads as history. Reported honestly with a null
+    # `archived_session_id` so the client says "already a fresh chat" instead
+    # of naming an archive that does not exist.
+    if not int(row.get("message_count") or 0):
+        return {
+            "main_session_id": main_id,
+            "archived_session_id": None,
+            "archived_title": None,
+        }
+
+    # Only names an UNTITLED archive. A generated or a person's title already
+    # describes the conversation better than anything this path could invent.
+    # The date is part of the fallback because this name goes into a list
+    # alongside every previous reset's: "Previous conversation" three times over
+    # tells the user nothing about which is which, and the row's own timestamp
+    # is not rendered in the tab strip.
+    archive_title = row.get("title") or _reset_fallback_title(row.get("created_at"))
+
+    new_id = uuid.uuid4().hex
+    now = utc_now_iso()
+    if not db.archive_main_and_mint(
+        agent_name, email, main_id=main_id, new_id=new_id, now=now,
+        archive_title=archive_title,
+    ):
+        # A concurrent Reset retired the same row first. Theirs stands — return
+        # it rather than minting a second Main the unique index would refuse.
+        raise MainResetRefused(
+            "reset_raced",
+            "This chat was just reset somewhere else. Reload to see it.",
+        )
+
+    # The one line in the new Main that says where the history went. Written
+    # after the transaction commits: a failure here costs the signpost, never
+    # the reset itself, and the archived chat is visible in the list regardless.
+    try:
+        db.add_portal_message(
+            uuid.uuid4().hex, agent_name, email, "system",
+            MAIN_RESET_NOTICE.format(title=archive_title), None, now,
+            session_id=new_id,
+        )
+    except Exception:                                  # pragma: no cover - defensive
+        logger.warning("reset notice not written for %s", agent_name, exc_info=True)
+
+    return {
+        "main_session_id": new_id,
+        "archived_session_id": main_id,
+        "archived_title": archive_title,
+    }
 
 
 def list_all_sessions(email: str, include_owned: bool = False) -> dict:

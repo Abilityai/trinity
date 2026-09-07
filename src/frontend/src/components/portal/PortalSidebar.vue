@@ -115,8 +115,20 @@
                  decision, read twice — the same rule the server/client split
                  above follows. -->
             <span class="block text-sm truncate">{{ agentLabel(a) }}</span>
-            <span v-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
+            <!-- ent#523 AC 6: the last thing you talked about with this agent,
+                 under its name. It is the newest chat's TITLE, not a message
+                 body — the sidebar list is viewer-scoped metadata (#2198) and
+                 carries no message content, so a body preview would need a
+                 second fetch per agent, reinstating the N+1 that batch call
+                 exists to remove. The slug stays the subtitle when the agent
+                 renders under a label; the preview takes the line below it,
+                 and never both lines at once. -->
+            <span v-if="rowMeta[a.name]?.preview" class="block text-xs text-gray-400 truncate">{{ rowMeta[a.name].preview }}</span>
+            <span v-else-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
           </span>
+          <!-- ent#523 / board A3: when you last heard from this agent. Tight
+               enough to sit beside the name without competing with it. -->
+          <span v-if="rowMeta[a.name]?.time" class="shrink-0 text-[11px] text-gray-400 tabular-nums">{{ rowMeta[a.name].time }}</span>
           <!-- #2196: the agent can't currently run. LABEL, never disable —
                disabling would relocate the dead state rather than remove it,
                since a client whose agents are all stopped (a routine
@@ -289,6 +301,7 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
+  orderRosterAgents, agentRowMeta,
   asksByAgent, askBadgeTitle, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
@@ -424,9 +437,26 @@ const emptyLines = computed(() => searchEmptyLines(searchState.value, props.sear
 // ONE loop in the template feeds from this, so the row markup, its badges, its
 // availability chip and its open path are inherited by search rather than
 // copied into it — the only way the two modes cannot drift.
+// ent#523 AC 6 — the agents you worked with most recently first, then by name.
+//
+// This is NOT ent#491, which owns "order by most recent collaboration" and is
+// still incubating; `orderRosterAgents` ships the deterministic order this AC
+// states and leaves `primaryName` as the seam ent#491 fills. Applied BEFORE the
+// collapse so the rows that survive `visibleAgentRows`' limit are the ones the
+// person actually uses — ordering after it would sort a slice chosen by the old
+// order, which is the same bug one step later. Search results are ordered by
+// relevance and are deliberately left alone.
+const orderedRoster = computed(() => orderRosterAgents(props.roster, props.threads))
+
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible
-  : visibleAgentRows(props.roster, { expanded: agentsExpanded.value, askCounts: asksPerAgent.value })))
+  : visibleAgentRows(orderedRoster.value, { expanded: agentsExpanded.value, askCounts: asksPerAgent.value })))
+
+// The one-line preview under the name (AC 6): the newest chat you have with
+// this agent. Null when there is nothing to show, so a row with no history
+// keeps its two-line footprint rather than reserving space for an empty string.
+// ONE pass over the thread list per render, memoized — not four scans per row.
+const rowMeta = computed(() => agentRowMeta(props.threads))
 
 // ent#186: history + search rows show the conversation's agent avatar instead of
 // a bare color dot. The URL is resolved from the roster already loaded at sign-in

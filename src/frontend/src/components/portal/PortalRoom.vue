@@ -1,5 +1,27 @@
 <template>
-  <div class="flex flex-col h-full min-h-0">
+  <!-- ent#524: a room takes a file drop like a 1:1 does, and the file goes to
+       EVERY participating agent's inbox (operator decision 13, 2026-09-06) —
+       a room is one conversation, so its files should match its transcript.
+       One gesture, N inbox writes, and the chip names the recipients so the
+       fan-out is visible rather than assumed. -->
+  <div
+    class="relative flex flex-col h-full min-h-0"
+    @dragenter="dropHandlers.onDragEnter"
+    @dragover="dropHandlers.onDragOver"
+    @dragleave="dropHandlers.onDragLeave"
+    @drop="dropHandlers.onDrop"
+  >
+    <div
+      v-if="fileDragging && !isClosed"
+      class="absolute inset-2 z-20 pointer-events-none rounded-2xl border-2 border-dashed border-action-primary-400 bg-action-primary-50/80 dark:bg-action-primary-900/30 flex items-center justify-center"
+      data-testid="portal-room-drop-overlay"
+      aria-hidden="true"
+    >
+      <p class="text-sm font-medium text-action-primary-700 dark:text-action-primary-200">
+        Drop files to send to {{ recipientLabel }}
+      </p>
+    </div>
+
     <!-- Header: who is in the room (ent#361 AC#2) -->
     <header class="shrink-0 flex items-center gap-2 px-3 sm:px-4 h-14 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
       <button class="sm:hidden -ml-1 p-2 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200" aria-label="Menu" @click="$emit('open-menu')">
@@ -154,6 +176,28 @@
         <p v-if="isClosed" class="text-xs text-center text-gray-500 dark:text-gray-400 py-2">
           This conversation has ended{{ room?.stop_reason ? ` (${closedReason})` : '' }}. Start a new chat to keep going.
         </p>
+        <!-- ent#524: one chip per file, with its own outcome, and the
+             recipients named — a room's upload is a fan-out and the person
+             should see who received it. -->
+        <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
+        <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
+          <span
+            v-for="(f, i) in attachments"
+            :key="i"
+            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
+            :class="f.error
+              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
+            :title="f.error || `${f.name} → ${recipientLabel}`"
+            data-testid="portal-room-attachment-chip"
+          >
+            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+            <span class="max-w-[10rem] truncate">{{ f.name }}</span>
+            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
+            <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
+          </span>
+        </div>
         <form v-else class="flex items-end gap-2" @submit.prevent="send">
           <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
                wrapper as the 1:1 composer; it must carry the flex sizing the
@@ -234,6 +278,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
 import { workSignalFromRoom } from './portalRail'
+import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import {
   applyTypeaheadInsert,
   boundCandidates,
@@ -308,6 +353,33 @@ const agentParticipants = computed(() =>
   (room.value?.participants || []).filter((p) => p.kind === 'agent' && !p.left_at).map((p) => p.identity)
 )
 const isClosed = computed(() => room.value?.status === 'closed')
+
+// ent#524 — the same drop/batch implementation the 1:1 conversation uses. The
+// only difference is the destination: ONE upload call per participating agent,
+// so the file lands in each of their inboxes (operator decision 13). A single
+// failing participant is reported like any other per-file failure rather than
+// failing the whole drop.
+const recipientLabel = computed(() => {
+  const names = agentParticipants.value
+  if (!names.length) return 'this room'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.length} agents`
+})
+
+const {
+  dragging: fileDragging,
+  entries: attachments,
+  batchNotice,
+  handlers: dropHandlers,
+} = usePortalFileDrop(
+  async (file) => {
+    const names = agentParticipants.value
+    if (!names.length) throw new Error('This room has no agents to send to.')
+    for (const name of names) await store.uploadDocument(name, file)
+  },
+  { disabled: () => isClosed.value },
+)
 
 // Server-reported, so it survives a reload. The local `sending` flag still
 // covers the gap between posting and the first poll, when nobody has been

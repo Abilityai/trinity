@@ -18,7 +18,12 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 
 const props = defineProps({
-  // [{ id: string, label: string, badge?: string|number, signal?: 'live'|'updated' }]
+  // [{ id, label, badge?, signal?: 'live'|'updated', pinned?: boolean }]
+  // `pinned` (ent#523) draws a bookmark before the label — the Workspace's
+  // Main chat, which is pinned first for the life of the (user, agent) pair.
+  // Drawn in the MIRROR row too: a glyph the visible row renders and the
+  // mirror does not is a tab measured narrower than it draws, which is how a
+  // strip starts overflowing one tab too late.
   // `signal` (ent#474) draws the rail's activity dot after the label — the
   // ringed "live" shape or the plain "updated" one — in the visible row, the
   // overflow menu AND the mirror row, so the measured width includes it.
@@ -71,7 +76,7 @@ const activeInOverflow = computed(() =>
 // Re-measure when the tab set OR any label/badge changes (widths shift).
 // `flush: 'post'` runs after the mirror row has rendered the new content.
 const tabsSignature = computed(() =>
-  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}`).join('|')
+  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}`).join('|')
   + `#${moreMeasureText.value}`
 )
 watch(tabsSignature, () => measure(), { flush: 'post' })
@@ -213,6 +218,7 @@ onUnmounted(() => {
             : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600'
         ]"
       >
+        <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
         {{ tab.label }}
         <span
           v-if="tab.badge"
@@ -294,6 +300,7 @@ onUnmounted(() => {
             : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
         ]"
       >
+        <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
         <span>{{ tab.label }}</span>
         <span
           v-if="tab.badge"
@@ -329,6 +336,7 @@ onUnmounted(() => {
           :class="tabPad"
           class="border-b-2 font-medium whitespace-nowrap inline-flex items-center"
         >
+          <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
           {{ tab.label }}
           <span
             v-if="tab.badge"

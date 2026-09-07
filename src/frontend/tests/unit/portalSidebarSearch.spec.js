@@ -240,8 +240,9 @@ describe('what only source can answer — PortalSidebar.vue', () => {
     const shown = SIDEBAR.match(/const shownAgents = computed\([\s\S]*?\)\)/)
     expect(shown).toBeTruthy()
     expect(shown[0]).toMatch(/isSearching/)
-    // The steady state still goes through the #2424 rule directly.
-    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster/)
+    // The steady state still goes through the #2424 rule directly — over the
+    // ent#523 ordered roster, which is the same list one transform earlier.
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(orderedRoster\.value/)
   })
 
   it('writes the agent row exactly ONCE, so badges cannot drift by mode', () => {

@@ -25,7 +25,10 @@ import { availabilityChip } from '../../src/components/portal/portalUtils'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 const SIDEBAR = read('../../src/components/portal/PortalSidebar.vue')
-const AGENT_PAGE = read('../../src/components/portal/PortalAgentPage.vue')
+// ent#523: the agent page was dismantled; its header facts (health beside
+// availability) moved to the Agent-details panel, which is where the same
+// two rules are now pinned.
+const AGENT_PAGE = read('../../src/components/portal/PortalAgentDetails.vue')
 
 describe('#2196 which states get a chip', () => {
   it('labels an agent whose container is gone', () => {
@@ -124,14 +127,14 @@ describe('#2196 the surfaces consume the shared rule', () => {
     expect(SIDEBAR).toMatch(/<BaseBadge[^>]*chipFor\(a\)\.variant/)
   })
 
-  it('the agent page uses the SAME helper, not a second rule', () => {
+  it('agent details uses the SAME helper, not a second rule', () => {
     // Four inline conditions across four components is how four surfaces end up
     // disagreeing about the same agent.
     expect(AGENT_PAGE).toMatch(/availabilityChip/)
     expect(AGENT_PAGE).not.toMatch(/availability === 'unavailable'/)
   })
 
-  it('the agent page keeps availability BESIDE health, not inside it', () => {
+  it('agent details keeps availability BESIDE health, not inside it', () => {
     // Health is the last persisted agent_health_checks row — stale by design —
     // while availability is read at request time. One dot carrying both
     // freshness semantics tells the viewer neither.

@@ -1,5 +1,30 @@
 <template>
-  <div class="flex flex-col h-full min-h-0">
+  <!-- ent#524: the whole conversation is the drop target — "dropping one or
+       more files ANYWHERE on the conversation uploads them", on by default,
+       no setting. The listeners sit on the root rather than on the composer
+       because the thread is where the eye is; the affordance names what will
+       happen so a drop is never a guess. Dragging text or a link is not a file
+       drag (`isFileDrag`) and lights nothing. -->
+  <div
+    class="relative flex flex-col h-full min-h-0"
+    @dragenter="dropHandlers.onDragEnter"
+    @dragover="dropHandlers.onDragOver"
+    @dragleave="dropHandlers.onDragLeave"
+    @drop="dropHandlers.onDrop"
+  >
+    <!-- `pointer-events-none` so the overlay cannot swallow the drop it is
+         announcing — the listeners are on the container underneath. -->
+    <div
+      v-if="fileDragging"
+      class="absolute inset-2 z-20 pointer-events-none rounded-2xl border-2 border-dashed border-action-primary-400 bg-action-primary-50/80 dark:bg-action-primary-900/30 flex items-center justify-center"
+      data-testid="portal-drop-overlay"
+      aria-hidden="true"
+    >
+      <p class="text-sm font-medium text-action-primary-700 dark:text-action-primary-200">
+        Drop files to send to {{ agentDisplayName(agent) }}
+      </p>
+    </div>
+
     <!-- Header: agent identity + picker, files, voice -->
     <header class="shrink-0 flex items-center gap-2 px-3 sm:px-4 h-14 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
       <button
@@ -44,8 +69,17 @@
       <!-- ent#473: the thread's title, renameable in place. Below `sm` the
            picker and the controls already fill the bar; the tab strip under
            it still names the active chat. -->
+      <!-- ent#523: Main is named by its ROLE and is not renameable — it is the
+           same thread for the life of the pair and the place the agent reaches
+           you, so a title derived from whatever was said in it first (or a
+           person's rename) would make the pinned tab and this header disagree
+           about which chat you are in. Every other chat renames as before. -->
+      <span
+        v-if="isMainChat"
+        class="hidden sm:inline min-w-0 flex-1 truncate text-sm font-medium"
+      >{{ MAIN_TAB_LABEL }}</span>
       <PortalEditableTitle
-        v-if="currentThread"
+        v-else-if="currentThread"
         class="hidden sm:flex"
         :value="currentTitle"
         placeholder="New chat"
@@ -111,6 +145,33 @@
           <svg v-if="voiceMode" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5 9v6h4l5 4V5L9 9H5z" /></svg>
           <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l4-4m0 4l-4-4M5 9v6h4l5 4V5L9 9H5z" /></svg>
         </button>
+        <!-- ent#523: Reset, on Main only. No confirmation (operator,
+             2026-09-06: "we are not losing info") — the conversation is
+             archived and stays in the chat list, so the undo is simply
+             opening it again. Disabled while a turn is in flight because the
+             server refuses then anyway; showing it live would offer an action
+             that can only fail. -->
+        <!-- ent#523 / board A3: the agent's own context opens from an INFO
+             control in the header, beside the other per-conversation actions —
+             not from a text link in the band. The band is numbers; this is the
+             door to everything else about the agent. -->
+        <button
+          class="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+          title="Agent details"
+          aria-label="Agent details"
+          data-testid="portal-open-agent-details"
+          @click="$emit('open-details')"
+        >
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        </button>
+        <button
+          v-if="isMainChat"
+          class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="sending || resetting"
+          :title="sending ? 'Wait for the current reply, then reset' : 'Archive this conversation and start the agent cold'"
+          data-testid="portal-reset-main"
+          @click="onResetMain"
+        >{{ resetting ? 'Resetting…' : 'Reset' }}</button>
         <button
           class="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
           title="Files"
@@ -121,9 +182,15 @@
       </div>
     </header>
 
+    <!-- ent#523: the agent's numbers, always visible under the header. A slot
+         rather than a mount, for the reason the `#rail-strip` slot below is
+         one: the shell owns which agent is on screen and the panel it opens,
+         and the conversation should not grow a second opinion about either. -->
+    <slot name="band" />
+
     <!-- ent#451: this user's chats with the agent, as tabs (OverflowTabs) —
-         most recent first, the rest under "N more". Selecting one is an
-         ordinary thread open through the shell. -->
+         Main pinned first (ent#523), then most recent, the rest under
+         "N more". Selecting one is an ordinary thread open through the shell. -->
     <PortalChatTabs
       :threads="threads"
       :agent-name="agent.name"
@@ -146,7 +213,20 @@
         <!-- Briefing (new-chat state) rendered by the parent via slot -->
         <slot v-if="!loadingHistory && messages.length === 0 && !sending" name="empty" />
 
-        <div v-for="(m, i) in messages" :key="i" :class="m.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
+        <!-- ent#523: a SYSTEM line — the platform speaking about the thread,
+             not the agent speaking in it. Today its only author is Reset,
+             naming where the previous conversation went. Rendered centred and
+             muted, with no avatar and no rating control, precisely so it is
+             not read as something the agent said. Its own branch rather than a
+             variant of the assistant bubble: a bubble with the trimmings
+             hidden would still be an agent turn to anyone reading the code. -->
+        <div v-for="(m, i) in messages" :key="i">
+        <p
+          v-if="m.role === 'system'"
+          class="my-3 text-center text-xs text-gray-400 dark:text-gray-500"
+          data-testid="portal-system-line"
+        >{{ m.content }}</p>
+        <div v-else :class="m.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="m.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="m.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <div
@@ -185,6 +265,7 @@
               />
             </PortalAgentBubble>
           </div>
+        </div>
         </div>
 
         <!-- ent#525: the live execution card under the message that started
@@ -296,6 +377,17 @@
             @click="cancelError = ''"
           >Dismiss</button>
         </p>
+        <!-- ent#523 AC 10: an agent that cannot take a message says so BEFORE
+             the person types a paragraph into it. A label, never a disabled
+             input — disabling relocates the dead state rather than removing it,
+             and a client whose agents are all stopped (a routine resource-saving
+             posture) would get an entirely inert Workspace. The message still
+             sends; the server's own refusal stays the authority. -->
+        <p
+          v-if="availabilityNotice"
+          class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300"
+          data-testid="portal-availability-notice"
+        >{{ availabilityNotice.message }}</p>
         <!-- ent#440: what the loop is doing right now, and the one control that
              ends it. `aria-live` because the state changes with no keystroke —
              a screen-reader user otherwise cannot tell listening from thinking.
@@ -319,20 +411,30 @@
             @click="stopVoiceConversation()"
           >Stop</button>
         </div>
-        <!-- Attached (uploaded to the agent inbox) file chips -->
+        <!-- ent#524: one chip per file, each with its OWN progress and its own
+             outcome — a batch has no shared verdict, which is what makes "one
+             failure does not fail the batch" true rather than aspirational. A
+             rejected file names itself and the limit it broke. -->
+        <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
             v-for="(f, i) in attachments"
             :key="i"
-            class="inline-flex items-center gap-1 text-xs rounded-full bg-gray-100 dark:bg-gray-800 pl-2.5 pr-1.5 py-1 text-gray-600 dark:text-gray-300"
+            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
+            :class="f.error
+              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
+            :title="f.error || f.name"
+            data-testid="portal-attachment-chip"
           >
             <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
             <span class="max-w-[10rem] truncate">{{ f.name }}</span>
-            <svg v-if="f.uploading" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
           </span>
         </div>
         <form class="flex items-end gap-2" @submit.prevent="send">
-          <input ref="fileInput" type="file" class="hidden" @change="onPickFile" />
+          <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFile" />
           <!-- #2259: the composer's action buttons are `h-11 w-11` (44px, on the
                4px grid) rather than `p-2.5` around a 20px icon (40px, off it).
                `items-end` pins them to the bottom so they stay beside the LAST
@@ -447,7 +549,8 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice } from './portalUtils'
+import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
@@ -538,7 +641,7 @@ const props = defineProps({
   // ent#473: async (thread, title) => void, or null when renaming is unavailable.
   rename: { type: Function, default: null },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'open-details'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -569,6 +672,42 @@ const loadingHistory = ref(false)
 const historyLoaded = ref(!(props.sessionId && !props.newChat))
 const input = ref('')
 const sending = ref(false)
+// ent#523 — Reset, offered on Main only.
+const resetting = ref(false)
+// ent#523 AC 10 — the same pure rule the sidebar chip and the details header
+// read, so the four surfaces cannot disagree about one agent.
+const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
+const isMainChat = computed(() => {
+  const id = currentSessionId.value
+  if (!id) return false
+  const row = (props.threads || []).find((t) => !t.is_room && (t.id || t.session_id) === id)
+  return !!row?.is_main
+})
+
+// Archive this conversation and start the agent cold. No confirmation dialog
+// (operator, 2026-09-06) — nothing is lost, and the archived chat is one click
+// away in the tab strip the moment this returns.
+//
+// The shell owns what happens next (switching to the new Main, refreshing the
+// list), so this emits rather than navigating: the conversation does not know
+// its own route. A server refusal is surfaced through the same inline error the
+// send path uses, with the server's own sentence — `turn_in_flight` and
+// `reset_raced` need different words and only the server knows which happened.
+async function onResetMain() {
+  if (resetting.value || sending.value) return
+  resetting.value = true
+  cancelError.value = ''
+  try {
+    const result = await store.resetMainChat(props.agent.name)
+    emit('main-reset', result)
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    cancelError.value = (detail && typeof detail === 'object' ? detail.message : detail)
+      || 'Could not reset this chat right now.'
+  } finally {
+    resetting.value = false
+  }
+}
 // ent#155 — stopping an in-flight turn. The id arrives with the 202, so Stop is
 // offered only once there is something to stop; a turn that fell back to the
 // synchronous send has no id and correctly offers nothing.
@@ -680,7 +819,17 @@ function askAboutIt(item) {
   autoGrowAfterUpdate()
   nextTick(() => textarea.value?.focus())
 }
-const attachments = ref([])
+// ent#524 — drop + batch, shared with the room and the rail's Files tab.
+// `attachments` is the composable's entry list: the chips render straight from
+// it, so per-file progress and per-file failure are the same object.
+const {
+  dragging: fileDragging,
+  entries: attachments,
+  batchNotice,
+  addFiles,
+  clear: clearAttachments,
+  handlers: dropHandlers,
+} = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
 const scrollEl = ref(null)
@@ -1115,15 +1264,14 @@ function acceptActive(index) {
 }
 
 // ---- Attachments: upload to the agent inbox; the next turn sees them ----------
-async function onPickFile(e) {
-  const file = e.target.files?.[0]
+// ent#524: the whole selection, not `[0]`. Both the picker and the drop target
+// funnel into `addFiles`, so there is one batch implementation and one place
+// where a per-file outcome is decided.
+function onPickFile(e) {
+  const files = e.target.files
+  const p = addFiles(files)
   e.target.value = ''
-  if (!file) return
-  const entry = { name: file.name, uploading: true }
-  attachments.value.push(entry)
-  try { await store.uploadDocument(props.agent.name, file) }
-  catch { entry.error = true }
-  finally { entry.uploading = false }
+  return p
 }
 
 // ---- Send + resilient retry ---------------------------------------------------
@@ -1271,7 +1419,7 @@ async function deliver(text) {
     // chat, so the card list is re-read exactly then — no poll, and nothing to
     // refresh on a conversation nobody is talking in.
     deliverableTick.value += 1
-    attachments.value = []
+    clearAttachments()
     return true
   } catch (err) {
     return { error: deliveryFailureReason(err) }

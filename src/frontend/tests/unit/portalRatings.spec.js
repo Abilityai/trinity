@@ -27,7 +27,10 @@ const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)),
 const rating = read('../../src/components/portal/PortalRating.vue')
 const conversation = read('../../src/components/portal/PortalConversation.vue')
 const deliverables = read('../../src/components/portal/PortalDeliverables.vue')
-const agentPage = read('../../src/components/portal/PortalAgentPage.vue')
+// ent#523: the raw tally moved to the always-visible band when the agent
+// page was dismantled. The rule it pins is unchanged — counts, never a
+// percentage — so the spec follows the markup rather than being retired.
+const agentPage = read('../../src/components/portal/PortalAgentBand.vue')
 const store = read('../../src/stores/clientPortal.js')
 
 describe('the words differ by what is being judged', () => {
@@ -130,7 +133,7 @@ describe('what only source can answer', () => {
     expect(store).not.toMatch(/async submitRating\([\s\S]{0,400}catch \{[\s\S]{0,60}return null/)
   })
 
-  it('renders the agent-page tally as two counts', () => {
+  it('renders the agent band tally as two counts', () => {
     expect(agentPage).toContain('ratings.up')
     expect(agentPage).toContain('ratings.down')
     expect(agentPage).not.toMatch(/pct\(ratings/)

@@ -24,6 +24,12 @@ const props = defineProps({
   // render an empty chart. Unmapped buckets show their own name.
   labels: { type: Object, default: () => ({}) },
   height: { type: Number, default: 150 },
+  // ent#523: where the legend sits. 'below' (default) is every existing
+  // caller's layout, unchanged. 'side' puts it in a column BEFORE the bars —
+  // what board A3 draws for the Workspace band, where the chart shares one
+  // short row with the stat figures and a legend underneath would double the
+  // band's height.
+  legend: { type: String, default: 'below' },
   // OPTIONAL x-label formatter (ent#536). Null = the UTC-day formatters every
   // existing caller relies on (`date` is an ISO day); the canvas passes its own
   // so a category column is not parsed as a date.
@@ -86,7 +92,22 @@ function showLabel(i) {
 </script>
 
 <template>
-  <div>
+  <div :class="legend === 'side' ? 'flex items-end gap-3' : ''">
+    <!-- legend, when it sits BESIDE the bars (ent#523 / board A3). Same markup
+         as the block below; only the position differs, so the two cannot drift
+         in what they say. Rendered first so it reads left-to-right. -->
+    <div v-if="legend === 'side'" class="shrink-0 flex flex-col gap-0.5 pb-4">
+      <span
+        v-for="b in buckets"
+        :key="`side-${b}`"
+        class="inline-flex items-center text-[10px] leading-tight text-gray-600 dark:text-gray-300 whitespace-nowrap"
+      >
+        <span class="w-2 h-2 rounded-sm mr-1 shrink-0" :style="{ backgroundColor: colorFor(b) }"></span>
+        {{ labelFor(b) }}
+      </span>
+    </div>
+
+    <div :class="legend === 'side' ? 'flex-1 min-w-0' : ''">
     <!-- bars -->
     <div class="flex items-end gap-px" :style="{ height: height + 'px' }">
       <div
@@ -146,8 +167,10 @@ function showLabel(i) {
       </div>
     </div>
 
+    </div>
+
     <!-- legend with per-bucket window totals -->
-    <div class="flex flex-wrap gap-x-3 gap-y-1 mt-3">
+    <div v-if="legend !== 'side'" class="flex flex-wrap gap-x-3 gap-y-1 mt-3">
       <span
         v-for="b in buckets"
         :key="b"

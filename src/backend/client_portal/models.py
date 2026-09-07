@@ -248,6 +248,27 @@ class PortalSessionSummary(BaseModel):
     created_at: Optional[str] = None
     last_message_at: Optional[str] = None
     message_count: int = 0
+    # ent#523 — the pinned Main chat, and the tombstone Reset leaves. Both
+    # default to the pre-#523 reading (an ordinary live chat), so a row from an
+    # install that has not run the migration still validates.
+    is_main: bool = False
+    archived_at: Optional[str] = None
+
+
+class PortalMainReset(BaseModel):
+    """ent#523 — what Reset did, so the client can say it rather than guess.
+
+    `archived_title` is the name the retired chat now carries in the list, which
+    is what the system line in the new Main names too — the client renders the
+    server's word for it instead of composing a second one that could differ.
+
+    `archived_session_id` is **nullable, and that is the no-op signal**:
+    resetting an untouched Main archives nothing, because an untouched Main is
+    already what Reset produces. The client says "this is already a fresh chat"
+    on a null rather than naming an archive that was never created."""
+    main_session_id: str
+    archived_session_id: Optional[str] = None
+    archived_title: Optional[str] = None
 
 
 class PortalSessionRename(BaseModel):

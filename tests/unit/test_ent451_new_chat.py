@@ -43,20 +43,33 @@ def svc():
 
 
 class _Db:
-    """Records what the resolver did, with one pre-existing thread."""
+    """Records what the resolver did, with one pre-existing thread.
 
-    def __init__(self, latest="ps_existing"):
+    ent#523 added the pinned Main chat, so the stub grows a `main`: the
+    no-session branch resolves to Main now rather than to the most recent
+    thread. `latest` is kept because the OTHER branches still turn on "a thread
+    already exists".
+    """
+
+    def __init__(self, latest="ps_existing", main="ps_main"):
         self.latest = latest
+        self.main = main
         self.created = []
 
     def get_portal_session(self, session_id, agent_name, client_email):
-        return {"id": session_id} if session_id == self.latest else None
+        return {"id": session_id} if session_id in (self.latest, self.main) else None
 
     def get_latest_portal_session_id(self, agent_name, client_email):
         return self.latest
 
-    def create_portal_session(self, session_id, agent_name, client_email, now, **kw):
+    def get_main_portal_session_id(self, agent_name, client_email):
+        return self.main
+
+    def create_portal_session(self, session_id, agent_name, client_email, now,
+                              is_main=False, **kw):
         self.created.append(session_id)
+        if is_main:
+            self.main = session_id
 
 
 # ---------------------------------------------------------------------------
@@ -69,13 +82,23 @@ def test_an_explicit_thread_is_still_honoured(svc, monkeypatch):
     assert db.created == []
 
 
-def test_no_session_still_resumes_the_latest(svc, monkeypatch):
-    """Unchanged, and deliberately so: a deep link, a refresh and an API caller
-    that never held a session id all arrive this way, and for them resuming is
-    the right answer. Inverting this would fix New chat by breaking those."""
+def test_no_session_lands_in_main(svc, monkeypatch):
+    """ent#523 REVERSED this test's original rule, deliberately.
+
+    It used to assert "no session resumes the LATEST thread", on the reasoning
+    that a deep link, a refresh and an API caller that never held a session id
+    all arrive this way and resuming is right for them. That reasoning held only
+    while there was nowhere designated: "most recent" was a guess. ent#523 gives
+    every pair a pinned **Main** chat — the place the agent reaches you — so the
+    guess is replaced by an answer, and the callers this test was protecting
+    (plus asks, ent#364/#429, and briefs, ent#498) all land there instead.
+
+    What has NOT changed is that the branch still resolves to a real, existing
+    thread rather than opening one: `db.created` stays empty.
+    """
     db = _Db()
     monkeypatch.setattr(svc, "db", db, raising=False)
-    assert svc._resolve_session_id("a", "x@example.com", None) == "ps_existing"
+    assert svc._resolve_session_id("a", "x@example.com", None) == "ps_main"
     assert db.created == []
 
 

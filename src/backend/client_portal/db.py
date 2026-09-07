@@ -214,27 +214,92 @@ def get_portal_message(message_id: str) -> Optional[dict]:
 # --- Portal chat sessions (#78): one conversation thread per row --------------
 
 def create_portal_session(session_id: str, agent_name: str, client_email: str,
-                          now: str, title: Optional[str] = None) -> None:
+                          now: str, title: Optional[str] = None,
+                          is_main: bool = False) -> None:
+    """Open an empty thread. ``is_main`` (ent#523) marks it as the pair's pinned
+    Main chat and is guarded by ``idx_portal_sessions_main`` — a second live Main
+    raises ``IntegrityError`` rather than existing, which is what makes
+    ``ensure_main_session`` safe to race."""
     stmt = text(
         "INSERT INTO enterprise_portal_sessions "
-        "(id, agent_name, client_email, title, created_at, last_message_at, message_count) "
-        "VALUES (:id, :agent, :email, :title, :now, NULL, 0)"
+        "(id, agent_name, client_email, title, created_at, last_message_at, "
+        " message_count, is_main) "
+        "VALUES (:id, :agent, :email, :title, :now, NULL, 0, :is_main)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": session_id, "agent": agent_name, "email": (client_email or "").lower(),
-            "title": title, "now": now,
+            "title": title, "now": now, "is_main": 1 if is_main else 0,
         })
+
+
+def get_main_portal_session_id(agent_name: str, client_email: str) -> Optional[str]:
+    """The pair's LIVE Main chat id, or None if it has never been created (ent#523).
+
+    ``is_main = 1`` alone is the predicate: the flag is cleared in the same
+    statement that sets ``archived_at``, so a retired Main can never answer here.
+    """
+    stmt = text(
+        "SELECT id FROM enterprise_portal_sessions "
+        "WHERE agent_name = :agent AND client_email = :email AND is_main = 1 "
+        "LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "agent": agent_name, "email": (client_email or "").lower(),
+        }).first()
+        return row[0] if row else None
+
+
+def archive_main_and_mint(agent_name: str, client_email: str, *, main_id: str,
+                          new_id: str, now: str,
+                          archive_title: Optional[str] = None) -> bool:
+    """Reset (ent#523): retire ``main_id`` and mint ``new_id`` as the pair's Main,
+    in ONE transaction. Returns False if ``main_id`` was not the live Main when
+    the UPDATE ran — a concurrent Reset won, and the caller must not then insert
+    a second Main.
+
+    The order matters and is not stylistic: the archive's ``is_main`` must be
+    cleared BEFORE the insert, or ``idx_portal_sessions_main`` refuses the new
+    row. Both statements share the transaction, so a failure leaves the old Main
+    exactly as it was — Reset is all-or-nothing.
+
+    ``archive_title`` is applied only when the retired row has no title at all;
+    a person's title (``title_source = 'user'``) and a generated one are left
+    alone, so the archive appears in the chat list under the name it already had.
+    """
+    email = (client_email or "").lower()
+    with get_engine().begin() as conn:
+        updated = conn.execute(text(
+            "UPDATE enterprise_portal_sessions "
+            "SET is_main = 0, archived_at = :now, "
+            "    title = COALESCE(title, :archive_title) "
+            "WHERE id = :main AND agent_name = :agent AND client_email = :email "
+            "  AND is_main = 1"
+        ), {
+            "main": main_id, "agent": agent_name, "email": email,
+            "now": now, "archive_title": archive_title,
+        }).rowcount
+        if not updated:
+            return False
+        conn.execute(text(
+            "INSERT INTO enterprise_portal_sessions "
+            "(id, agent_name, client_email, title, created_at, last_message_at, "
+            " message_count, is_main) "
+            "VALUES (:id, :agent, :email, NULL, :now, NULL, 0, 1)"
+        ), {"id": new_id, "agent": agent_name, "email": email, "now": now})
+        return True
 
 
 def list_portal_sessions(agent_name: str, client_email: str) -> list[dict]:
     """A client's conversation threads with one agent, most-recently-active first.
     Sessions with no messages yet sort by ``created_at`` (``last_message_at`` NULL)."""
     stmt = text(
-        "SELECT id, title, created_at, last_message_at, message_count "
+        "SELECT id, title, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE agent_name = :agent AND client_email = :email "
-        "ORDER BY COALESCE(last_message_at, created_at) DESC"
+        "ORDER BY is_main DESC, COALESCE(last_message_at, created_at) DESC"
     )
     with get_engine().connect() as conn:
         return [dict(r) for r in conn.execute(stmt, {
@@ -276,7 +341,8 @@ def list_portal_sessions_for_agents(client_email: str, agent_names: list[str]) -
         # ask anyway. Same guard as `search_portal_sessions`.
         return []
     stmt = text(
-        "SELECT id, agent_name, title, created_at, last_message_at, message_count "
+        "SELECT id, agent_name, title, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE client_email = :email AND agent_name IN :agents "
         "ORDER BY COALESCE(last_message_at, created_at) DESC, id DESC"
@@ -311,7 +377,8 @@ def get_portal_session(session_id: str, agent_name: str, client_email: str) -> O
     """One session row, scoped to (agent, client) so a client can't read another's
     thread by id. Returns None on miss."""
     stmt = text(
-        "SELECT id, title, title_source, created_at, last_message_at, message_count "
+        "SELECT id, title, title_source, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE id = :id AND agent_name = :agent AND client_email = :email"
     )

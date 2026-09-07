@@ -969,20 +969,28 @@ def test_portal_chat_persists_the_turn(history_db):
 def test_portal_chat_feeds_prior_history_as_context(history_db):
     from unittest.mock import AsyncMock, patch
     from client_portal import service, db as pdb
-    # Seed the prior turns into a session so portal_chat (no explicit session_id)
-    # resumes that latest thread and feeds its history back as context (#78).
+    # Seed the prior turns into a session and NAME it on the turn.
+    #
+    # ent#523: this used to rely on "no session_id resumes the latest thread" to
+    # reach the seeded history. That resolution now lands in the pair's pinned
+    # Main chat instead, which is the point of the feature — so relying on it
+    # here would make this test about WHICH THREAD IS CHOSEN (owned by
+    # `test_ent523_main_chat.py`) rather than about what it is actually for:
+    # that a thread's prior turns are fed back as context. Naming the session
+    # keeps the subject and removes the coupling.
     pdb.create_portal_session("hs", "atlas", "bob@example.com", "2026-07-07T00:00:00Z")
     pdb.add_portal_message("h1", "atlas", "bob@example.com", "user", "the number is 7", None, "2026-07-07T00:00:01Z", session_id="hs")
     pdb.add_portal_message("h2", "atlas", "bob@example.com", "assistant", "noted", None, "2026-07-07T00:00:02Z", session_id="hs")
     cm, svc = _mock_execute(response="it was 7")
     with cm, patch.object(service, "_collect_inbox_for_turn", new=AsyncMock(return_value=([], [], []))):
-        _run(service.portal_chat("atlas", "what number did I say?", "bob@example.com"))
+        _run(service.portal_chat("atlas", "what number did I say?", "bob@example.com",
+                                 session_id="hs"))
     sent = svc.execute_task.call_args.kwargs["message"]
     assert "Conversation so far" in sent           # prior turns fed back as context
     assert "the number is 7" in sent and "noted" in sent
     assert sent.strip().endswith("what number did I say?")
     # the newly-persisted user turn is the ORIGINAL text, not the context-prefixed one
-    msgs = service.get_history("atlas", "bob@example.com")["messages"]
+    msgs = service.get_history("atlas", "bob@example.com", session_id="hs")["messages"]
     assert msgs[-2]["content"] == "what number did I say?"
 
 
