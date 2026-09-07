@@ -487,7 +487,15 @@ async def execute_task_internal(
     # row nobody ever fails.
     if request.deliver_to_workspace_email:
         try:
-            schedule_workspace_delivery.resolve_and_stamp(
+            # Off the event loop: `resolve_and_stamp` makes 4–6 synchronous
+            # SQLAlchemy calls, two of them writes. This handler is `async def`,
+            # and the canonical use case fires at ~03:30 UTC — inside the window
+            # where `db_backup_service` holds SQLite's lock, so the worst case is
+            # the 30s busy timeout per call, on the one loop serving every
+            # request. Same finding `channel_completion_report` records for its
+            # own portal write.
+            await asyncio.to_thread(
+                schedule_workspace_delivery.resolve_and_stamp,
                 request.execution_id, request.agent_name,
                 request.deliver_to_workspace_email,
             )

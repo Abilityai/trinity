@@ -85,6 +85,16 @@ waiting on that reply, and repointing it would deliver the answer to the wrong p
 Registered in `_EXPECTED_UPDATE_SITES` (`test_schedule_status_observability`) as a
 non-status writer.
 
+## Who may address whom
+
+`_enforce_delivery_target_authority` (`routers/schedules.py`), on **both** create
+and update: address yourself freely; address anyone else only as the agent's owner
+or an admin. Schedule creation is `assert_agent_access`, so without this a merely
+shared user could put a recurring message of their choosing into a colleague's Main
+chat as an ordinary turn from the agent. Create-only would be a formality — create
+without the field, PUT it a second later. Fail-closed on an unreadable ownership
+read, and clearing the target is never privileged.
+
 ## Refusals are visible (AC 5)
 
 | reason | when |

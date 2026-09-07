@@ -426,3 +426,79 @@ def test_the_delivery_leg_writes_an_assistant_row_from_the_session(monkeypatch):
     write = fn[fn.index("def _write()"):fn.index("try:", fn.index("def _write()"))]
     assert '"assistant"' in write
     assert "session_agent" in write and "client_email" in write
+
+
+# --- who may point a schedule at somebody else's Workspace -------------------
+#
+# Review finding. Schedule creation is `assert_agent_access` — owner OR shared OR
+# admin — and the delivery target may be any other person on the agent's roster.
+# So a merely-SHARED user could schedule a recurring message, with a prompt of
+# their choosing, into a colleague's Main chat, where it renders as an ordinary
+# turn from the agent (`ensure_main_session` will create the thread if needed).
+# ent#457's "a portal session belongs to exactly one client, so there is no third
+# party for an allow_proactive bit to protect" does not carry over: here the
+# schedule's AUTHOR need not be its RECIPIENT.
+
+class _User:
+    def __init__(self, uid="7", email="me@example.com"):
+        self.id, self.email, self.username = uid, email, "me"
+
+
+def _authority(monkeypatch, *, can_own, target, caller_email="me@example.com"):
+    from routers import schedules
+    monkeypatch.setattr(schedules.db, "can_user_share_agent", lambda *a: can_own)
+    return schedules._enforce_delivery_target_authority(
+        _User(email=caller_email), "analyst", target)
+
+
+def test_a_shared_user_may_deliver_to_their_own_workspace(monkeypatch):
+    """The common case — a person automating their own brief — must stay open to
+    a shared user, or the gate costs more than it buys."""
+    assert _authority(monkeypatch, can_own=False, target="me@example.com") is None
+
+
+def test_a_shared_user_may_not_deliver_to_a_colleague(monkeypatch):
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _authority(monkeypatch, can_own=False, target="colleague@example.com")
+    assert ei.value.status_code == 403
+    assert ei.value.detail["code"] == "delivery_target_requires_owner"
+
+
+def test_the_owner_may_deliver_to_a_colleague(monkeypatch):
+    assert _authority(monkeypatch, can_own=True, target="colleague@example.com") is None
+
+
+def test_clearing_the_target_needs_no_authority(monkeypatch):
+    """Stopping delivery is never a privileged act."""
+    assert _authority(monkeypatch, can_own=False, target=None) is None
+    assert _authority(monkeypatch, can_own=False, target="   ") is None
+
+
+def test_an_unreadable_ownership_check_refuses(monkeypatch):
+    """Fail closed: the question being answered is 'may this person put words in
+    the agent's mouth toward someone else'."""
+    from fastapi import HTTPException
+    from routers import schedules
+
+    def _boom(*a):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(schedules.db, "can_user_share_agent", _boom)
+    with pytest.raises(HTTPException) as ei:
+        schedules._enforce_delivery_target_authority(
+            _User(), "analyst", "colleague@example.com")
+    assert ei.value.status_code == 403
+
+
+def test_the_gate_is_on_both_the_create_and_the_update_path():
+    """Create-only would be a formality: a shared user could create without the
+    field and PUT it a second later."""
+    src = (REPO / "src/backend/routers/schedules.py").read_text()
+    assert src.count("_enforce_delivery_target_authority(") >= 3  # def + 2 call sites
+
+
+def test_the_case_comparison_is_normalised(monkeypatch):
+    """`current_user.email` and the schedule field are both free text; a case
+    difference must not turn 'myself' into 'a colleague'."""
+    assert _authority(monkeypatch, can_own=False, target="  ME@Example.COM  ",
+                      caller_email="me@example.com") is None

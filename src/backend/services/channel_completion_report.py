@@ -437,7 +437,11 @@ def _resolve_portal(
 
             waited = 0.0
             while waited < _INFLIGHT_WAIT_SECONDS:
-                if get_turn_inflight(chat_id) is None:
+                # `get_turn_inflight` is a SYNCHRONOUS Redis GET. Left on the
+                # loop it is up to 60 blocking calls per report, each up to the
+                # 1s socket timeout — so a degraded-but-not-down Redis stalls
+                # the single backend loop for a minute.
+                if await asyncio.to_thread(get_turn_inflight, chat_id) is None:
                     break
                 await asyncio.sleep(_INFLIGHT_POLL_SECONDS)
                 waited += _INFLIGHT_POLL_SECONDS
@@ -447,6 +451,18 @@ def _resolve_portal(
                     "delivering anyway rather than dropping the report (execution %s)",
                     chat_id, _INFLIGHT_WAIT_SECONDS, execution_id,
                 )
+        except asyncio.CancelledError:
+            # `CancelledError` is a BaseException, so `except Exception` below
+            # does NOT catch it — and a backend restart landing inside the wait
+            # would have unwound the effect guard with the terminal already
+            # applied and nothing to re-apply it. The report would be silently
+            # lost, which is exactly what the "never dropped, only deferred"
+            # claim above promises cannot happen. Fall through and WRITE: a
+            # report that lands beside an in-flight turn is a cosmetic misread,
+            # a report that never lands is the failure this contract exists to
+            # prevent.
+            logger.info("[ent#498] in-flight wait cancelled for session %s — "
+                        "delivering now rather than losing the report", chat_id)
         except Exception as e:  # noqa: BLE001 — a wait must never lose a report
             logger.warning("[ent#498] in-flight wait failed for session %s: %s",
                            chat_id, e)

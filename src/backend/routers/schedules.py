@@ -133,6 +133,49 @@ async def list_agent_schedules(name: AuthorizedAgent):
     return [ScheduleResponse(**s.model_dump()) for s in schedules]
 
 
+def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
+    """Who may point a schedule at somebody else's Workspace (ent#498 review).
+
+    Creating a schedule is `assert_agent_access` — owner OR shared OR admin — and
+    a delivery target may be any other person on the agent's roster. Left as-is,
+    any user merely SHARED on an agent could schedule a recurring message, with a
+    prompt of their choosing, into a colleague's Main chat with that agent, where
+    it renders as an ordinary turn from the agent. `ensure_main_session` will even
+    create that thread if it does not exist.
+
+    ent#457's reasoning — "a portal session belongs to exactly one client, so
+    there is no third party for an `allow_proactive` bit to protect" — does not
+    carry over: ent#498 introduces a third party, because the schedule's AUTHOR
+    need not be its RECIPIENT.
+
+    So the rule is: address yourself freely; address anyone else only if you own
+    the agent (or are an admin). That keeps the self-service case — the common one,
+    a person automating their own brief — open to a shared user, while the act of
+    putting words in the agent's mouth toward a colleague stays with the owner.
+
+    Not folded into `assert_agent_owner`: the check is conditional on the FIELD
+    being set and on who it names, so it cannot be a route-level dependency.
+    """
+    target = (email or "").strip().lower()
+    if not target:
+        return
+    if target == (getattr(current_user, "email", "") or "").strip().lower():
+        return
+    try:
+        can_own = db.can_user_share_agent(str(current_user.id), name)
+    except Exception:  # noqa: BLE001 — an unreadable ownership check refuses
+        can_own = False
+    if not can_own:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "Only the agent's owner can deliver a schedule's output "
+                         "to someone else's Workspace. You can deliver to your own.",
+                "code": "delivery_target_requires_owner",
+            },
+        )
+
+
 @router.post("/{name}/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 async def create_schedule(
     name: str,
@@ -184,6 +227,9 @@ async def create_schedule(
     # After #913 the field is Optional — only enforce when the caller set it.
     if schedule_data.timeout_seconds is not None:
         _enforce_timeout_below_agent_cap(name, schedule_data.timeout_seconds)
+
+    _enforce_delivery_target_authority(
+        current_user, name, schedule_data.deliver_to_workspace_email)
 
     schedule = db.create_schedule(name, current_user.username, schedule_data)
     if not schedule:
@@ -360,7 +406,14 @@ async def update_schedule(
         _enforce_timeout_below_agent_cap(name, updates.timeout_seconds)
 
     # Build updates dict — use exclude_unset to distinguish "not provided" from "explicitly set to null"
+    # ent#498 review: the same authority check as create, or the gate there is a
+    # formality — a shared user could create without the field and PUT it after.
+    # Keyed on `exclude_unset` so an untouched field is not re-checked, and a
+    # nulling PUT (stop delivering) is always allowed.
     update_dict = updates.model_dump(exclude_unset=True)
+    if update_dict.get("deliver_to_workspace_email"):
+        _enforce_delivery_target_authority(
+            current_user, name, update_dict["deliver_to_workspace_email"])
 
     updated_schedule = db.update_schedule(schedule_id, current_user.username, update_dict)
     if not updated_schedule:

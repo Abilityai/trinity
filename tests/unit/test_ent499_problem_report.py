@@ -21,11 +21,33 @@ REPO = Path(__file__).resolve().parents[2]
 
 # --- the id ------------------------------------------------------------------
 
-def test_one_item_per_person_per_target():
+def test_one_item_per_person_per_target_per_day():
     from client_portal.service import _problem_report_id
-    a = _problem_report_id("workspace:a@example.com", "message", "m1")
-    b = _problem_report_id("workspace:a@example.com", "message", "m1")
+    a = _problem_report_id("workspace:a@example.com", "message", "m1", day="2026-09-07")
+    b = _problem_report_id("workspace:a@example.com", "message", "m1", day="2026-09-07")
     assert a == b
+
+
+def test_a_complaint_the_next_day_is_not_silently_swallowed():
+    """The review fix. `create_item`'s ON CONFLICT ignores the existing row's
+    STATUS, so a same-id report raised after the operator acknowledged the first
+    one was dropped FOREVER — worse than a duplicate, because the second
+    complaint simply never reached anyone. Quantising to the UTC day keeps
+    "never duplicates" true where it matters and lets tomorrow through."""
+    from client_portal.service import _problem_report_id
+    today = _problem_report_id("workspace:a@example.com", "message", "m1", day="2026-09-07")
+    tomorrow = _problem_report_id("workspace:a@example.com", "message", "m1", day="2026-09-08")
+    assert today != tomorrow
+
+
+def test_the_bucket_defaults_to_today_not_to_a_constant():
+    """A default of `None` collapsing to a fixed string would restore the
+    permanent suppression while every equality test above still passed."""
+    from client_portal.service import _problem_report_id
+    from utils.helpers import utc_now_iso
+    assert (_problem_report_id("workspace:a@example.com", "message", "m1")
+            == _problem_report_id("workspace:a@example.com", "message", "m1",
+                                  day=utc_now_iso()[:10]))
 
 
 def test_the_id_does_not_move_with_the_comment():
@@ -34,16 +56,22 @@ def test_the_id_does_not_move_with_the_comment():
     the attack (`claim_capture_feedback_dispatch`'s rule)."""
     import inspect
     from client_portal.service import _problem_report_id
-    assert set(inspect.signature(_problem_report_id).parameters) == {
-        "evaluator", "target_kind", "target_id"}
+
+    params = set(inspect.signature(_problem_report_id).parameters)
+    # The invariant is that no COMMENT reaches the id — asserted as an absence,
+    # not as an exact parameter set. The exact-set form failed the moment the
+    # review added the `day` bucket, which is orthogonal to what this guards.
+    assert not (params & {"comment", "text", "body", "excerpt", "message"})
+    assert {"evaluator", "target_kind", "target_id"} <= params
 
 
 def test_different_people_and_different_targets_are_different_items():
     from client_portal.service import _problem_report_id
-    base = _problem_report_id("workspace:a@example.com", "message", "m1")
-    assert base != _problem_report_id("workspace:b@example.com", "message", "m1")
-    assert base != _problem_report_id("workspace:a@example.com", "message", "m2")
-    assert base != _problem_report_id("workspace:a@example.com", "deliverable", "m1")
+    d = "2026-09-07"
+    base = _problem_report_id("workspace:a@example.com", "message", "m1", day=d)
+    assert base != _problem_report_id("workspace:b@example.com", "message", "m1", day=d)
+    assert base != _problem_report_id("workspace:a@example.com", "message", "m2", day=d)
+    assert base != _problem_report_id("workspace:a@example.com", "deliverable", "m1", day=d)
 
 
 def test_the_id_carries_the_reserved_prefix_and_survives_the_sink_validator():

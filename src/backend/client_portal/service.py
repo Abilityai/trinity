@@ -4125,7 +4125,8 @@ async def dispatch_capture_feedback(agent_name: str, email: str, *, target_kind:
 PROBLEM_REPORT_COMMENT_CHARS = 600
 
 
-def _problem_report_id(evaluator: str, target_kind: str, target_id: str) -> str:
+def _problem_report_id(evaluator: str, target_kind: str, target_id: str,
+                       *, day: str | None = None) -> str:
     """One item per person per target.
 
     Derived from the resolved identity — never the comment — for the same reason
@@ -4141,15 +4142,24 @@ def _problem_report_id(evaluator: str, target_kind: str, target_id: str) -> str:
     addresses and not others. It also keeps the address out of a column the
     operator queue renders and the agent's own queue file can be synced with.
 
-    **Stated residual**: `create_item` has no UPDATE path, so an edited comment
-    does not reach an item already raised. That is the same residual ent#434's
-    alert carries and it is a shared fix at the sink, not a per-emitter one —
-    working around it here (a comment-dependent id) would trade one bounded item
-    per person for one per keystroke-set, which is the flood the budget exists
-    to stop.
+    **Quantised to the UTC day**, which is the review fix for a sharper problem
+    than the one below: `create_item`'s ON CONFLICT ignores the existing row's
+    STATUS, so once an operator had acknowledged a report that person could never
+    raise another about that target — a second complaint was silently dropped,
+    forever, which is worse than a duplicate. A day bucket keeps "never
+    duplicates" true in the sense that matters (one item per person per target per
+    day, whatever they click) while letting tomorrow's complaint through. It is
+    the same bucketing ent#434's alert id uses, for the same reason.
+
+    **Stated residual**: `create_item` still has no UPDATE path, so an edited
+    comment does not reach an item already raised *that day*. That is the shared
+    ent#434 residual and belongs at the sink — working around it here with a
+    comment-dependent id would trade one bounded item per person for one per
+    keystroke-set, which is the flood the budget exists to stop.
     """
+    bucket = day or utc_now_iso()[:10]
     digest = hashlib.sha256(
-        "\x00".join((evaluator, target_kind, target_id)).encode("utf-8")
+        "\x00".join((evaluator, target_kind, target_id, bucket)).encode("utf-8")
     ).hexdigest()[:32]
     return f"workspace-problem-{digest}"
 

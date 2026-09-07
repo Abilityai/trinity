@@ -1409,6 +1409,18 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   nor is shared it cannot open that thread, so a brief delivered there would be
   invisible. A blocked client (`is_client_blocked`) is refused for the same
   reason.
+- **Addressing someone else needs ownership** (review finding). Schedule creation
+  is `assert_agent_access` — owner OR shared OR admin — so without a gate any user
+  merely shared on an agent could schedule a recurring message, with a prompt of
+  their choosing, into a colleague's Main chat, where it renders as an ordinary
+  turn from the agent (`ensure_main_session` creates the thread if absent).
+  ent#457's "a portal session belongs to exactly one client, so there is no third
+  party for an `allow_proactive` bit to protect" does NOT carry over: here the
+  schedule's author need not be its recipient. The rule is *address yourself
+  freely, address anyone else only as the owner* — which leaves the common
+  self-service case open to a shared user. Enforced on **both** the create and the
+  update path (create-only would be a formality) and fail-closed on an unreadable
+  ownership read.
 - **A bad target is a visible failure, never a silent no-op** (AC 5). An unknown
   address, a revoked share or a blocked client **refuses the dispatch** and
   writes a FAILED terminal on the pre-created row naming the reason
