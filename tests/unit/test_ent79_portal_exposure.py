@@ -193,7 +193,10 @@ def roster_db(tmp_path, monkeypatch):
     # via this same init. (history_db layers seeds on top; this makes the tables
     # unconditionally present, matching production.)
     from conftest import ensure_schema_tables
-    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
+    # #2582: `portal_documents` now filters the caller's dismissals, so the
+    # table it reads has to exist here too.
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages",
+                         "enterprise_client_blocks", "portal_file_dismissals")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -582,7 +585,10 @@ def signin_db(tmp_path, monkeypatch):
     # ent#281: sign-in consults the block table, so the module's own schema must
     # exist here exactly as it does in production (`register()` creates it).
     from conftest import ensure_schema_tables
-    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
+    # #2582: `portal_documents` now filters the caller's dismissals, so the
+    # table it reads has to exist here too.
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages",
+                         "enterprise_client_blocks", "portal_file_dismissals")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -723,7 +729,11 @@ def test_portal_documents_relative_url_when_no_base(roster_db, monkeypatch):
         out = service.portal_documents("atlas", "bob@example.com")
     assert out["agent_name"] == "atlas"
     d = out["documents"][0]
-    assert d["download_url"] == "/api/files/f1?sig=tok"
+    # #2582 — the Files tab's URL carries the ONE-WAY `download=1` flag, so a
+    # Download saves instead of opening a tab. Only THIS base URL gets it; the
+    # agent's own chat link (`build_download_url` off `get_public_chat_url()`)
+    # is untouched, which is what keeps ent#461's mobile inline path working.
+    assert d["download_url"] == "/api/files/f1?sig=tok&download=1"
     assert d["filename"] == "report.pdf" and d["size_bytes"] == 1234
 
 
@@ -734,7 +744,9 @@ def test_portal_documents_absolute_url_from_portal_base(roster_db, monkeypatch):
              "size_bytes": 1, "mime_type": None, "created_at": None}]
     with _patch_shared_files(rows):
         out = service.portal_documents("atlas", "bob@example.com")
-    assert out["documents"][0]["download_url"] == "https://portal.vpn.internal/api/files/f1?sig=tok"
+    assert out["documents"][0]["download_url"] == (
+        "https://portal.vpn.internal/api/files/f1?sig=tok&download=1"   # #2582
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -914,7 +926,10 @@ def test_image_media_type():
 def history_db(roster_db):
     """roster_db + the private enterprise_portal_messages table."""
     from conftest import ensure_schema_tables
-    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
+    # #2582: `portal_documents` now filters the caller's dismissals, so the
+    # table it reads has to exist here too.
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages",
+                         "enterprise_client_blocks", "portal_file_dismissals")
     yield roster_db
 
 
