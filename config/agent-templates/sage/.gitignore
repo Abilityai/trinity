@@ -7,7 +7,6 @@
 .cache/
 .local/
 .npm/
-.ssh/
 .tmp/
 .trinity-clone-tmp/
 content/
@@ -72,6 +71,7 @@ __pycache__/
 credentials.json
 *.pem
 *.key
+.ssh/
 .trinity/*
 !.trinity/pre-check
 !.trinity/post-check

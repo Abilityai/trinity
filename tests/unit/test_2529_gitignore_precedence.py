@@ -222,6 +222,75 @@ def test_user_negation_cannot_un_ignore_a_credential(tmp_path):
     assert ".env" not in _push(home)
 
 
+def test_a_user_negation_cannot_un_ignore_ssh_key_material(tmp_path):
+    """The MIRROR of this issue's own bug, found in review and reproduced.
+
+    Hoisting the defaults block above the user region is only safe for a default
+    the agent may genuinely override. `.ssh/` is not one — `credential_paths.py`
+    classifies `.ssh/id_*` as secret material — and it started this branch in
+    the OVERRIDABLE region, one directory over from the `.env` case Decision 1
+    reasoned about.
+
+    The shape is the live fleet's, not a contrived one: `!.ssh` written by the
+    agent, with the canonical block APPENDED below it by every pre-#2529 Push.
+    Under the old append-only merge `.ssh/id_rsa` was ignored. Under a hoist
+    with `.ssh/` in the top region it is not, and the unattended 15-minute
+    `git add -A` commits a private key to the owner's GitHub repo.
+    """
+    gs = _gs()
+    home = _make_repo(
+        tmp_path,
+        {"CLAUDE.md": "a\n"},
+        "!.ssh\n" + "".join(f"{p}\n" for p in gs._GITIGNORE_PATTERNS),
+    )
+    (home / ".ssh").mkdir(exist_ok=True)
+    (home / ".ssh" / "id_rsa").write_text("PRIVATE KEY\n")
+    (home / ".ssh" / "authorized_keys").write_text("ssh-ed25519 AAAA\n")
+
+    # Pre-merge: ignored, because the appended canonical `.ssh/` is last.
+    pre = subprocess.run(
+        ["git", "check-ignore", "-q", ".ssh/id_rsa"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True,
+    )
+    assert pre.returncode == 0, "test setup no longer reproduces the live shape"
+
+    _push(home)
+
+    post = subprocess.run(
+        ["git", "check-ignore", "-q", ".ssh/id_rsa"],
+        cwd=home, env=dict(_ENV, HOME=str(home)), capture_output=True,
+    )
+    assert post.returncode == 0, (
+        ".ssh/id_rsa is NOT ignored after the merge — a user `!.ssh` beat the "
+        "managed default, and the next `git add -A` commits a private key"
+    )
+    # And the surface that actually leaks: what the auto-sync loop would stage.
+    _git(home, "add", "-A")
+    staged = set(_git(home, "diff", "--cached", "--name-only").split())
+    assert not {p for p in staged if p.startswith(".ssh/")}, (
+        f"the auto-sync `git add -A` would commit {sorted(staged)}"
+    )
+
+
+def test_credential_bearing_defaults_are_all_in_the_floor():
+    """A membership assertion, so adding a credential-bearing pattern to the
+    OVERRIDABLE region is a decision someone has to make on purpose.
+
+    The list is anchored on `services/credential_paths.py` — the platform's own
+    answer to "is this secret material" — rather than on the source file's
+    comment headings, which is exactly how `.ssh/` was missed: it sits under
+    "Instance-specific directories", not under "Credentials".
+    """
+    gs = _gs()
+    for pattern in (".env", ".env.*", ".mcp.json", "credentials.json",
+                    "*.pem", "*.key", ".ssh/"):
+        assert pattern in gs._GITIGNORE_PROTECTED, (
+            f"{pattern} is credential-bearing but sits in the overridable "
+            "defaults block — an agent negation would un-ignore it and the "
+            "next `git add -A` would commit it"
+        )
+
+
 def test_authored_trinity_hook_survives_a_user_wildcard(tmp_path):
     """The R2 regression, pinned: a user `*.sh` below a hoisted single block
     would beat `!.trinity/setup.sh` (trinity-enterprise#76 / #1704), and it would
@@ -689,6 +758,7 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
     assert item["id"].startswith("gitignore-untracked-alpha-")
     assert item["context"]["removed_count"] == 25
     assert len(item["context"]["removed_paths"]) == 20  # capped
+    assert item["priority"] == "high"  # a removal is a confirmed destructive act
     assert item["context"]["shadowed_negations"] == ["!content/keep.md -> content/"]
 
     # An empty sweep files nothing at all.
@@ -704,6 +774,68 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
         new=AsyncMock(side_effect=RuntimeError("db down")),
     ):
         await gs._emit_gitignore_untracked_alert("alpha", sweep)
+
+
+@pytest.mark.asyncio
+async def test_a_newly_unignored_path_is_reported_on_every_surface():
+    """The reporting gate is `changed_tracking`, not `removed`.
+
+    Found in review: the same rebuild that stops a managed default reversing an
+    agent negation can also newly UN-ignore a path, and the SAME Push's
+    `git add -A` then commits it. Gating every surface on `removed` alone made
+    that addition exactly as silent as the deletions #2529 exists to end — and
+    an addition is the worse half, because it is already in the remote's
+    history and may need a credential rotated rather than a file restored.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    gs = _gs()
+    from database import GitSyncResult
+
+    sweep = gs.GitignoreSweep(unignored=(".ssh/id_rsa", ".ssh/authorized_keys"))
+    assert sweep.changed_tracking is True
+    assert not sweep.removed  # the point: nothing was untracked
+
+    # 1. the one-line summary that rides on `message` (the only failure-path surface)
+    assert "newly un-ignored 2 path(s)" in sweep.summary_line()
+    assert "untracked" not in sweep.summary_line()
+
+    # 2. the commit message that CARRIES the addition
+    msg = gs._augment_commit_message("my message", sweep)
+    assert "+ .ssh/id_rsa" in msg and "newly un-ignored 2 path(s)" in msg
+
+    # 3. the structured response fields
+    out = gs._with_sweep(GitSyncResult(success=True, message="Synced"), sweep)
+    assert out.unignored_paths == [".ssh/id_rsa", ".ssh/authorized_keys"]
+    assert "newly un-ignored" in out.message
+
+    # 4. the durable operator-queue entry — the surface that outlives the session
+    with patch(
+        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
+    ) as create:
+        await gs._emit_gitignore_untracked_alert("alpha", sweep)
+    assert create.await_count == 1
+    _, item = create.await_args.args
+    assert item["context"]["unignored_paths"] == [".ssh/id_rsa", ".ssh/authorized_keys"]
+    assert item["context"]["unignored_count"] == 2
+    assert item["context"]["removed_count"] == 0
+    assert "previously gitignored" in item["title"]
+    assert "ROTATE" in item["question"]
+    # `medium`, not `high`: the `unignored` probe is `after - before` across two
+    # execs against a live container, so a file the agent's own session creates
+    # in that window lands here too. A removal is confirmed and keeps `high`.
+    assert item["priority"] == "medium"
+
+    # `shadowed` alone is NOT a change this Push made — standing advice about the
+    # file, not an event. It must not file an alert on every single Push.
+    advice_only = gs.GitignoreSweep(shadowed=("!content/keep.md -> content/",))
+    assert advice_only.changed_tracking is False
+    assert advice_only.summary_line() == ""
+    with patch(
+        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
+    ) as create:
+        await gs._emit_gitignore_untracked_alert("alpha", advice_only)
+    assert create.await_count == 0
 
 
 # ---------------------------------------------------------------------------

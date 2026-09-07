@@ -1630,6 +1630,18 @@ _GITIGNORE_CREDENTIAL_PATTERNS: Tuple[str, ...] = (
     "credentials.json",
     "*.pem",
     "*.key",
+    # `.ssh/` is here for the SAME reason `.env` is, and it is here because
+    # review caught it MISSING. The hoist above is only safe for a default the
+    # agent may genuinely override; `credential_paths.py` classifies
+    # `.ssh/id_*` as secret material, so this is not one. Reproduced on the
+    # live fleet shape (`!.ssh` above an appended canonical block): pre-merge
+    # `.ssh/id_rsa` is ignored, post-merge it is NOT, and the unattended
+    # 15-minute `git add -A` then commits a private key to the owner's GitHub
+    # repo — Decision 1's own hazard, one directory over. Note this yields no
+    # derived negation: nothing in `_TRINITY_AUTHORED_PATHS` lives under
+    # `.ssh/`, and a `!.ssh/config` under a dir-form rule is inert anyway
+    # (reported via `shadowed_negations`, not silently dropped).
+    ".ssh/",
     "!.env.example",
     "!.mcp.json.template",
 )
@@ -1746,15 +1758,42 @@ class GitignoreSweep:
     #: routinely five figures.
     removed_total: int = 0
 
+    @property
+    def removed_count(self) -> int:
+        """Exact number untracked — the list may be a `_SWEEP_PROBE_LINE_CAP` prefix."""
+        return max(self.removed_total, len(self.removed))
+
+    @property
+    def changed_tracking(self) -> bool:
+        """Did this Push change WHAT IS IN THE REPO, in either direction?
+
+        The gate for every reporting surface. It is deliberately not
+        ``bool(self.removed)``: review reproduced the mirror image of the bug
+        #2529 fixes — hoisting the defaults block above the user region can
+        newly UN-ignore a path an agent had negated, and the same Push's
+        `git add -A` then COMMITS it. `removed`-only gates made that addition
+        exactly as silent as the deletions this issue exists to end.
+        `shadowed` is NOT in the gate: it is standing advice about the file,
+        not a change this Push made.
+        """
+        return bool(self.removed or self.unignored)
+
     def summary_line(self) -> str:
         """One line for a commit message / an HTTP error detail, or ``""``."""
-        if not self.removed:
+        clauses = []
+        if self.removed:
+            clauses.append(
+                f"untracked {self.removed_count} file(s) that now match "
+                ".gitignore (working tree untouched)"
+            )
+        if self.unignored:
+            clauses.append(
+                f"newly un-ignored {len(self.unignored)} path(s), now committed "
+                "by this same sync"
+            )
+        if not clauses:
             return ""
-        total = max(self.removed_total, len(self.removed))
-        return (
-            f"Trinity: untracked {total} file(s) that now match "
-            ".gitignore (working tree untouched)"
-        )
+        return "Trinity: " + "; ".join(clauses)
 
 
 def _build_gitignore_merge_command(git_dir: str) -> str:
@@ -2210,7 +2249,7 @@ async def _emit_gitignore_untracked_alert(
     False when refused, and this still swallows, because an alerting failure
     must not fail a Push either.
     """
-    if not sweep.removed:
+    if not sweep.changed_tracking:
         return
     try:
         from services.operator_queue_service import create_bounded_alert
@@ -2218,6 +2257,44 @@ async def _emit_gitignore_untracked_alert(
 
         now = utc_now_iso()
         shown = list(sweep.removed[:20])
+        gained = list(sweep.unignored[:20])
+
+        # Both directions, named separately, because the operator response
+        # differs: a removal is recoverable from disk, an addition is already
+        # in the remote's history and may need a credential rotated.
+        parts = []
+        if sweep.removed:
+            parts.append(
+                f"removed {sweep.removed_count} file(s) from the index because "
+                "they match an ignore rule (the working tree is untouched, but "
+                "the deletion is committed and pushed) — if one was meant to "
+                "stay, negate it in the agent's own `.gitignore`, below the "
+                "managed defaults block, and re-add it with `git add -f`"
+            )
+        if sweep.unignored:
+            parts.append(
+                f"newly UN-ignored {len(sweep.unignored)} path(s) that this same "
+                "sync then committed — an agent rule now beats a managed default "
+                "that previously hid them; if any is a secret, ROTATE it and "
+                "remove the rule, because it is already in the remote's history"
+            )
+        if sweep.removed and sweep.unignored:
+            title = "Push changed which files are tracked (.gitignore sweep)"
+        elif sweep.removed:
+            title = "Push untracked files that now match .gitignore"
+        else:
+            title = "Push committed files that were previously gitignored"
+
+        # An unignored-ONLY entry drops to `medium`, and the reason is the
+        # contamination `GitignoreSweep.unignored` documents: it is
+        # `after - before` across two execs against a LIVE container, so a file
+        # the agent's own session happens to create in that window is reported
+        # here too. A removal is a confirmed destructive act and keeps `high`;
+        # an addition is "look at this" and can be a false positive, and a band
+        # that cries wolf stops being read. Volume is bounded either way by the
+        # #1677 budget seam.
+        priority = "high" if sweep.removed else "medium"
+
         await create_bounded_alert(
             agent_name,
             {
@@ -2225,29 +2302,24 @@ async def _emit_gitignore_untracked_alert(
                 "agent_name": agent_name,
                 "type": "gitignore_untracked",
                 "status": "pending",
-                "priority": "high",
-                "title": "Push untracked files that now match .gitignore",
-                "question": (
-                    f"{agent_name}: this Push removed "
-                    f"{max(sweep.removed_total, len(sweep.removed))} file(s) "
-                    "from the index because they match an ignore rule. The working "
-                    "tree is untouched, but the deletion is committed and pushed. "
-                    "If one of these was meant to stay in the repo, negate it in "
-                    "the agent's own `.gitignore` (below the managed defaults "
-                    "block) and re-add it with `git add -f`."
-                ),
+                "priority": priority,
+                "title": title,
+                "question": f"{agent_name}: this Push " + "; and it ".join(parts) + ".",
                 "context": {
                     "removed_paths": shown,
-                    "removed_count": max(sweep.removed_total, len(sweep.removed)),
+                    "removed_count": sweep.removed_count,
                     "shadowed_negations": list(sweep.shadowed[:20]),
-                    "unignored_paths": list(sweep.unignored[:20]),
+                    "unignored_paths": gained,
+                    "unignored_count": len(sweep.unignored),
                 },
                 "created_at": now,
             },
         )
         logger.warning(
-            "gitignore_untracked emitted for %s: %s path(s) untracked (%s)",
-            agent_name, max(sweep.removed_total, len(sweep.removed)), ", ".join(shown),
+            "gitignore_untracked emitted for %s: %s untracked (%s); "
+            "%s newly un-ignored (%s)",
+            agent_name, sweep.removed_count, ", ".join(shown) or "-",
+            len(sweep.unignored), ", ".join(gained) or "-",
         )
     except Exception:
         logger.exception("failed to emit gitignore_untracked alert")
@@ -2268,20 +2340,36 @@ def _augment_commit_message(message: Optional[str], sweep: GitignoreSweep) -> Op
     default (`Trinity sync: <ts>`, `agent_server/routers/git.py`) rather than
     dropping it, because supplying a message at all suppresses that default.
     """
-    if not sweep.removed:
+    if not sweep.changed_tracking:
         return message
     subject = message or f"Trinity sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    total = max(sweep.removed_total, len(sweep.removed))
-    shown = list(sweep.removed[:20])
-    body = [
-        "",
-        "",
-        f"Trinity: untracked {total} file(s) that now match "
-        ".gitignore (working tree untouched):",
-    ]
-    body += [f"- {path}" for path in shown]
-    if total > len(shown):
-        body.append(f"- ... and {total - len(shown)} more")
+    body = ["", ""]
+
+    if sweep.removed:
+        total = sweep.removed_count
+        shown = list(sweep.removed[:20])
+        body.append(
+            f"Trinity: untracked {total} file(s) that now match "
+            ".gitignore (working tree untouched):"
+        )
+        body += [f"- {path}" for path in shown]
+        if total > len(shown):
+            body.append(f"- ... and {total - len(shown)} more")
+
+    if sweep.unignored:
+        # The commit that ADDS them is this one, so naming them here is the
+        # only place the addition is visible in the repo's own history.
+        gained = list(sweep.unignored[:20])
+        if sweep.removed:
+            body.append("")
+        body.append(
+            f"Trinity: newly un-ignored {len(sweep.unignored)} path(s), "
+            "committed by this sync:"
+        )
+        body += [f"+ {path}" for path in gained]
+        if len(sweep.unignored) > len(gained):
+            body.append(f"+ ... and {len(sweep.unignored) - len(gained)} more")
+
     return subject + "\n".join(body)
 
 
