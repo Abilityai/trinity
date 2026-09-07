@@ -67,10 +67,11 @@ const CHART = [
 // Non-chart consumers that pre-date the ruling, re-pointed to #1921's sweep
 // (skeletons, not scanlines). Shrinking this list is the sweep; growing it is
 // a regression.
-const HOLDOVERS = [
-  'components/LibrarySkillsSection.vue',
-  'components/onboarding/FinishSetupCard.vue',
-]
+// #1921 swept both original entries (a skills LIST and a JSON `<pre>` — neither
+// is a chart) to skeleton placeholders. An empty list is the end state; it stays
+// as an explicit constant so a NEW non-chart importer still fails loudly rather
+// than quietly joining a list that no longer exists.
+const HOLDOVERS = []
 
 describe('#2540 — the scanline primitive is imported by chart surfaces only', () => {
   it('has exactly the allowlisted importers', () => {

@@ -19,8 +19,15 @@
     <!-- Loading State — only while there is NO data yet (#1927, p13/p14):
          first mount and an agent switch (the agentName watcher nulls the data),
          never a refetch with content on screen. -->
-    <div v-if="firstLoad" class="flex items-center justify-center py-8" data-testid="info-loading">
-      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
+    <div v-if="firstLoad" class="py-4 space-y-3" data-testid="info-loading" aria-busy="true">
+      <!-- #1921: shaped like the About lead + metadata rows it replaces, rather
+           than a centred spinner that occupies a different footprint than the
+           loaded panel and shifts the page when data lands. -->
+      <div class="h-4 w-1/3 rounded bg-gray-200 dark:bg-gray-800 animate-pulse motion-reduce:animate-none"></div>
+      <div class="h-3 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+      <div class="h-3 w-5/6 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+      <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
+      <span class="sr-only">Loading…</span>
     </div>
 
     <!-- Failed State (#1926) — a failed /info fetch used to be dressed up as
