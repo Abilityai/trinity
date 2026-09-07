@@ -11,8 +11,10 @@
  *   2. one agent's failure keeps the others' rows and says the list may be
  *      short; every agent failing on first load is `failed`, never `empty`;
  *   3. a stale response (a chat switch mid-flight) is dropped;
- *   4. uploads are read only on request, and an upload re-reads only its own
- *      agent's inbox — and not at all if the chat moved on meanwhile;
+ *   4. uploads are read only on request; `upload` only SENDS (the one funnel
+ *      every upload surface shares is what tells the rail, so a read here would
+ *      be a second docker exec), and the drain's `noteUpload` re-reads only its
+ *      own agent's inbox — not at all if the chat moved on meanwhile;
  *   5. push events for a participant refresh (debounced); events for anyone
  *      else, or with no agent, are ignored;
  *   6. the owner composable feeds nothing behind a door, nothing while the rail
@@ -138,7 +140,7 @@ describe('ent#475 — the feed store fetches what the door allows', () => {
     expect(s.hasLoaded).toBe(false)
   })
 
-  it('reads uploads on request, and an upload re-reads only its own agent — unless the chat moved on', async () => {
+  it('reads uploads on request; `upload` only sends, and the re-read skips a chat that moved on', async () => {
     const s = usePortalRailFeedsStore()
     s.setParticipants(['scout', 'sage'])
     s.setFeeds({ canvas: false, files: true })
@@ -146,12 +148,20 @@ describe('ent#475 — the feed store fetches what the door allows', () => {
     expect(portal.fetchUploads.mock.calls.map((c) => c[0])).toEqual(['scout', 'sage'])
     expect(s.uploadsLoaded).toEqual({ scout: true, sage: true })
     portal.fetchUploads.mockClear()
+    // #2582: `upload` SENDS. The re-read belongs to the one funnel every upload
+    // surface shares — `clientPortal.uploadDocument` queues the agent, the rail
+    // owner drains it — so a read here buys a second docker exec, not a safer
+    // listing.
     portal.uploadDocument.mockResolvedValue({ filename: 'x.txt' })
     await s.upload('scout', { name: 'x.txt' })
+    expect(portal.uploadDocument).toHaveBeenCalledWith('scout', { name: 'x.txt' })
+    expect(portal.fetchUploads).not.toHaveBeenCalled()
+    // The drain's read is the one that lands, and it touches only its own agent.
+    await s.noteUpload('scout')
     expect(portal.fetchUploads.mock.calls.map((c) => c[0])).toEqual(['scout'])
     portal.fetchUploads.mockClear()
-    portal.uploadDocument.mockImplementation(async () => { s.setParticipants(['other']); return { filename: 'y' } })
-    await s.upload('sage', { name: 'y' })
+    s.setParticipants(['other'])
+    await s.noteUpload('sage')
     expect(portal.fetchUploads).not.toHaveBeenCalled()
   })
 

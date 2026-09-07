@@ -335,13 +335,18 @@ describe('#2582 — the regressions a scalar signal would reintroduce', () => {
     expect(store.uploads).toEqual({})
   })
 
-  it('upload() delegates to noteUpload rather than carrying a second read', async () => {
+  it('upload() sends and does NOT read — the funnel is what tells the rail', async () => {
     portalRaw.fetchUploads.mockResolvedValue([{ filename: 'x.txt', uploaded_at: 'x' }])
     const store = usePortalRailFeedsStore()
     store.setParticipants(['scout'])
     store.setFeeds({ canvas: false, files: true })
     await store.upload('scout', { name: 'x.txt' })
-    expect(portalRaw.fetchUploads.mock.calls.map((c) => c[0])).toEqual(['scout'])
+    expect(portalRaw.uploadDocument).toHaveBeenCalledWith('scout', { name: 'x.txt' })
+    // Zero reads, not one. `uploadDocument` already queued the agent and the
+    // rail owner drains it; a read here would arrive while the drain's read is
+    // in flight, become its TRAILING re-fire, and cost every drop-zone upload a
+    // second container exec — eight for a four-file batch.
+    expect(portalRaw.fetchUploads).not.toHaveBeenCalled()
   })
 })
 

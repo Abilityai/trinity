@@ -220,15 +220,17 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
    * Send a file to a participant, then re-read that agent's inbox. Rethrows so
    * the body can show the server's named reason next to the control (#1926).
    *
-   * The re-read is `noteUpload`'s, not its own: `uploadDocument` already queues
-   * the agent for the rail owner (#2582), so a second implementation here would
-   * be a second listing racing the first.
+   * The re-read is NOT this function's. `uploadDocument` queues the agent for
+   * the rail owner (#2582) and the owner drains it — so calling `noteUpload`
+   * here as well does not make the listing safer, it just buys a SECOND docker
+   * exec: the drain's note arrives while this one is in flight, becomes the
+   * trailing re-fire, and every drop-zone upload costs two container reads
+   * instead of one (a four-file batch, eight). Send, and let the one funnel
+   * that every upload surface already shares do the telling.
    */
   async function upload(agentName, file) {
     const portal = useClientPortalStore()
-    const res = await portal.uploadDocument(agentName, file)
-    await noteUpload(agentName)
-    return res
+    return portal.uploadDocument(agentName, file)
   }
 
   /**
