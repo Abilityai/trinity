@@ -2124,3 +2124,43 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   `question`, because there the operator genuinely has a decision to express.
 - **Verified by test**: the pure rule's table including the changed default, and
   a source guard that neither card re-implements the switch.
+
+### 5.27 Workspace sidebar — agents ordered by most recent collaboration (trinity-enterprise#491)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_SIDEBAR_RECENCY
+- **GitHub Issue**: abilityai/trinity-enterprise#491
+- **Description**: The agent you last worked with sits on top, then the next, and
+  agents you have never talked to follow alphabetically. Per user, not per agent.
+- **A room counts for every agent in it.** There is no single agent a multi-agent
+  conversation is "with", so working in a room with three agents is recent
+  collaboration with all three — the same fan-out `unreadByAgent` already applies.
+  `orderRosterAgents` previously skipped `is_room` rows outright, so an agent you
+  only ever meet in a room read as never-used and sat at the bottom under the
+  alphabetical tiebreak.
+- **Rooms needed a real timestamp first.** `enterprise_rooms` has no
+  `last_message_at` column and `list_rooms` returned only `created_at`, so a room's
+  recency was its CREATION time — a busy month-old room ranked below one opened
+  this morning and never used. `shared_sessions.db.last_message_for_rooms` is a
+  batched `MAX(created_at) GROUP BY room_id`, the sibling of the existing
+  `count_messages_for_rooms`. **Derived, not denormalised**: a column on the room
+  would need a writer on every append for a value one GROUP BY already returns in
+  the same round trip. An empty room is absent from the result and keeps
+  `created_at`, which is the honest answer for a room nobody has spoken in.
+- **Sends re-sort; replies do not.** The two clauses pull against each other —
+  `last_message_at` moves identically for both, so a derived order would reshuffle
+  the list under the reader's cursor every time a brief landed for another agent.
+  The order therefore reads a **session-held snapshot** (`clientPortal.agentRecency`)
+  seeded from thread recency and advanced only by the user's own sends. The seed
+  fills **only missing keys**, so a refresh triggered by an incoming reply can
+  never walk back a send's bump; a reload re-derives from the server and is
+  correct again. `noteAgentInteraction` fires in `submitUserText` — the user's own
+  action — and credits every agent the message wakes, mirroring the room fan-out.
+- **Applied before the collapse**, so the rows surviving `visibleAgentRows`' limit
+  are the ones the person actually uses; ordering after it would sort a slice
+  chosen by the old order. The #2424 rule still holds — an agent with an open ask
+  is never collapsed out — and search results stay ordered by relevance.
+- **The primary-companion tier stays a seam.** ent#500 does not exist: there is no
+  `agent_assignments` table, no column, nothing server-side that can say who a
+  person's primary is. `orderRosterAgents` keeps its tested `primaryName`
+  parameter and the sidebar passes `null`, because a guessed primary would be a
+  confident wrong answer where an empty seam is merely incomplete.
