@@ -1,12 +1,9 @@
 <template>
   <div class="space-y-3">
     <template v-for="(seg, i) in segments" :key="i">
-      <!-- Prose goes through the shared report markdown renderer (DOMPurify). -->
-      <ReportRenderer
-        v-if="seg.type === 'markdown'"
-        display-hint="markdown"
-        :payload="{ markdown: seg.text }"
-      />
+      <!-- Prose goes through the canvas markdown renderer (DOMPurify under the
+           canvas-mode allowlist, ent#537) — the report renderer's twin. -->
+      <CanvasProse v-if="seg.type === 'markdown'" :markdown="seg.text" />
       <!-- Figures use the SAME leaves the standalone kinds use — never a
            second renderer. This component deliberately has no dependency on
            the block dispatcher: fences do not nest, and a cycle here would be
@@ -32,6 +29,7 @@
 import ReportRenderer from '../reports/ReportRenderer.vue'
 import CanvasChart from './CanvasChart.vue'
 import CanvasDiagram from './CanvasDiagram.vue'
+import CanvasProse from './CanvasProse.vue'
 import { chartModel } from './canvasUtils'
 
 defineProps({

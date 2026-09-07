@@ -23,6 +23,7 @@ from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     CANVAS_ID_RE,
     CANVAS_MAX_BLOCKS,
+    CANVAS_TEMPLATES,
     DEFAULT_CANVAS_ID,
 )
 from services.canvas_blocks import (  # noqa: F401 — re-exported for callers
@@ -52,6 +53,25 @@ def validate_canvas_id(canvas_id: str) -> str:
             "underscore",
         )
     return canvas_id
+
+
+def validate_template(template: Optional[str]) -> Optional[str]:
+    """Normalise a starter-layout name, refusing an unknown one BY NAME (ent#537).
+
+    ``None`` and ``""`` both mean "stacked blocks", the default. An unknown
+    name is refused rather than silently stacked because silently stacking
+    would teach the agent that the wrong name works; the refusal lists the
+    four so the fix is in the message.
+    """
+    if template is None or template == "":
+        return None
+    if not isinstance(template, str) or template not in CANVAS_TEMPLATES:
+        raise CanvasError(
+            400,
+            "unknown canvas template — use one of: " + ", ".join(CANVAS_TEMPLATES)
+            + " (or omit it for stacked blocks)",
+        )
+    return template
 
 
 def serialize_blocks(blocks: List[Dict]) -> str:
@@ -112,6 +132,7 @@ def write_canvas(
     title: Optional[str],
     audience: str,
     execution_id: Optional[str],
+    template: Optional[str] = None,
 ) -> Dict:
     """Validate and store a canvas — the ONLY path that writes ``agent_canvases``.
 
@@ -120,9 +141,13 @@ def write_canvas(
     execution resolution, one upsert — so a block renders identically whoever
     wrote it, and a cap the router enforces cannot be bypassed by the voice
     path. ``audience`` is REQUIRED: the caller decides who may read, never a
-    default hidden in here.
+    default hidden in here. ``template`` (ent#537) is the starter layout, or
+    None for stacked blocks; a writer that is EDITING an existing canvas
+    (`patch_canvas`, the voice verbs) passes the stored value through, so an
+    edit never silently un-layouts a board.
     """
     validate_canvas_id(canvas_id)
+    template = validate_template(template)
     validated = validate_blocks(blocks)
     # Serialize once HERE purely to enforce the byte cap before anything
     # touches the DB; db/canvas.py serializes again for storage. The double
@@ -138,6 +163,7 @@ def write_canvas(
         title=title,
         audience=normalize_audience(audience),
         execution_id=resolved,
+        template=template,
     )
 
 
@@ -152,7 +178,8 @@ def patch_canvas(
 
     Read-modify-write under the same last-writer-wins contract the db layer
     documents for the full write (one writer per canvas — the agent itself).
-    Title and audience are kept; the provenance stamp becomes this write's.
+    Title, audience and template are kept; the provenance stamp becomes this
+    write's.
     The merged list goes back through `write_canvas`, so a patch can no more
     exceed a cap or smuggle a bad image source than a full write can.
     """
@@ -168,6 +195,7 @@ def patch_canvas(
         title=current.get("title"),
         audience=current.get("audience") or AUDIENCE_OPERATOR,
         execution_id=execution_id,
+        template=current.get("template"),
     )
 
 
@@ -187,6 +215,7 @@ def empty_canvas(agent_name: str, canvas_id: str = DEFAULT_CANVAS_ID) -> Dict:
         "created_at": None,
         "updated_at": None,
         "updated_by_execution_id": None,
+        "template": None,
         "stale": False,
         "blocks": [],
     }
