@@ -1183,7 +1183,13 @@ async def sync_to_github(
     # and untrack any files that NOW match a rule. Runs on every Push so
     # existing agents migrate without re-init or container rebuild. Best
     # effort — failures are logged inside the helper and Push proceeds.
-    await _migrate_workspace_gitignore(agent_name)
+    #
+    # #2529: the sweep now says what it did, on ALL FOUR returns below — the
+    # index mutation has already happened by the time the HTTP call runs, so a
+    # 409 or an exception is exactly as obliged to report it as a 200.
+    sweep = _coerce_sweep(await _migrate_workspace_gitignore(agent_name))
+    _emit_gitignore_untracked_alert(agent_name, sweep)
+    message = _augment_commit_message(message, sweep)
 
     try:
         # Call the agent's internal sync endpoint
@@ -1206,14 +1212,14 @@ async def sync_to_github(
                 if data.get("commit_sha"):
                     db.update_git_sync(agent_name, data["commit_sha"])
 
-                return GitSyncResult(
+                return _with_sweep(GitSyncResult(
                     success=data.get("success", False),
                     commit_sha=data.get("commit_sha"),
                     message=data.get("message", "Sync completed"),
                     files_changed=data.get("files_changed", 0),
                     branch=data.get("branch"),
                     sync_time=datetime.fromisoformat(data["sync_time"]) if data.get("sync_time") else datetime.utcnow()
-                )
+                ), sweep)
             elif response.status_code == 409:
                 # Conflict - return with conflict info
                 data = response.json()
@@ -1225,23 +1231,23 @@ async def sync_to_github(
                     or response.headers.get("X-Conflict-Class")
                     or "UNKNOWN"
                 )
-                return GitSyncResult(
+                return _with_sweep(GitSyncResult(
                     success=False,
                     message=data.get("detail", "Sync conflict"),
                     conflict_type=conflict_type,
                     conflict_class=conflict_class,
-                )
+                ), sweep)
             else:
                 error_detail = response.json().get("detail", "Sync failed")
-                return GitSyncResult(
+                return _with_sweep(GitSyncResult(
                     success=False,
                     message=f"Sync failed: {error_detail}"
-                )
+                ), sweep)
     except Exception as e:
-        return GitSyncResult(
+        return _with_sweep(GitSyncResult(
             success=False,
             message=f"Sync error: {str(e)}"
-        )
+        ), sweep)
 
 
 async def get_git_log(agent_name: str, limit: int = 10) -> Optional[Dict[str, Any]]:
@@ -2047,8 +2053,8 @@ async def _detect_git_dir(container_name: str) -> str:
     return await _detect_git_dir_fallback(container_name)
 
 
-async def _migrate_workspace_gitignore(agent_name: str) -> None:
-    """Idempotently bring an existing agent's `.gitignore` up to the current
+async def _migrate_workspace_gitignore(agent_name: str) -> GitignoreSweep:
+    """Idempotently rebuild an existing agent's `.gitignore` around the current
     `_GITIGNORE_PATTERNS` and untrack any files that NOW match a rule.
 
     Runs on every Push (#462) so existing agents adopt new patterns without
@@ -2057,6 +2063,17 @@ async def _migrate_workspace_gitignore(agent_name: str) -> None:
 
     No-op if the container has no `.git` directory (agent not initialized for
     git sync).
+
+    Returns what the sweep actually did (#2529). Two field incidents went two
+    months unnoticed because this returned `None` and nothing downstream could
+    distinguish "5 files pushed" from "5 files pushed, 4 silent deletions".
+    EVERY failure path returns the empty sweep — reporting must never be able to
+    break a Push, so a caller can read the fields unconditionally.
+
+    Still exactly TWO execs on the happy path (plus the two pre-flight probes
+    this function already ran): both report probes are folded into the merge and
+    rm-cached commands rather than costing two more round-trips on the shared
+    4-thread Docker executor.
     """
     container_name = f"agent-{agent_name}"
     try:
@@ -2069,24 +2086,135 @@ async def _migrate_workspace_gitignore(agent_name: str) -> None:
             timeout=5,
         )
         if check_git.get("exit_code") != 0:
-            return
-        # 1. Append missing patterns (idempotent).
-        await execute_command_in_container(
+            return GitignoreSweep()
+        # 1. Rebuild the file around the canonical regions (idempotent), and
+        #    carry the untracked-BEFORE probe.
+        merge = await execute_command_in_container(
             container_name=container_name,
             command=_build_gitignore_merge_command(git_dir),
             timeout=10,
         )
-        # 2. Untrack any indexed files that now match an ignore rule.
-        await execute_command_in_container(
+        # 2. Untrack any indexed files that now match an ignore rule, and carry
+        #    the removed / untracked-AFTER / shadowed-negation probes.
+        sweep = await execute_command_in_container(
             container_name=container_name,
             command=_build_rm_cached_ignored_command(git_dir),
             timeout=30,
         )
+        return _parse_gitignore_sweep(merge.get("output"), sweep.get("output"))
     except Exception as exc:
         logger.warning(
             f"_migrate_workspace_gitignore failed for {agent_name}: {exc}. "
             "Push will proceed against the existing .gitignore."
         )
+        return GitignoreSweep()
+
+
+def _emit_gitignore_untracked_alert(agent_name: str, sweep: GitignoreSweep) -> None:
+    """File an operator-queue entry naming the paths a Push untracked (#2529).
+
+    THE surface that outlives the session. Every other one — the API response,
+    the MCP result, the toast, the commit message — is read by whoever ran the
+    Push, and BOTH confirmed field incidents were unattended 15-minute auto-sync
+    cycles whose damage surfaced two months later. `sync_health_service`'s
+    `git_bloat` entry (#1595) is the precedent for exactly this reasoning.
+
+    Best-effort by construction: mirrors the `_emit_*_alert` shape and swallows,
+    because an alerting failure must not fail a Push either.
+    """
+    if not sweep.removed:
+        return
+    try:
+        from utils.helpers import utc_now_iso
+
+        now = utc_now_iso()
+        shown = list(sweep.removed[:20])
+        db.create_operator_queue_item(
+            agent_name,
+            {
+                "id": f"gitignore-untracked-{agent_name}-{now}",
+                "agent_name": agent_name,
+                "type": "gitignore_untracked",
+                "status": "pending",
+                "priority": "high",
+                "title": "Push untracked files that now match .gitignore",
+                "question": (
+                    f"{agent_name}: this Push removed {len(sweep.removed)} file(s) "
+                    "from the index because they match an ignore rule. The working "
+                    "tree is untouched, but the deletion is committed and pushed. "
+                    "If one of these was meant to stay in the repo, negate it in "
+                    "the agent's own `.gitignore` (below the managed defaults "
+                    "block) and re-add it with `git add -f`."
+                ),
+                "context": {
+                    "removed_paths": shown,
+                    "removed_count": len(sweep.removed),
+                    "shadowed_negations": list(sweep.shadowed[:20]),
+                    "unignored_paths": list(sweep.unignored[:20]),
+                },
+                "created_at": now,
+            },
+        )
+        logger.warning(
+            "gitignore_untracked emitted for %s: %s path(s) untracked (%s)",
+            agent_name, len(sweep.removed), ", ".join(shown),
+        )
+    except Exception:
+        logger.exception("failed to emit gitignore_untracked alert")
+
+
+def _augment_commit_message(message: Optional[str], sweep: GitignoreSweep) -> Optional[str]:
+    """Name the untracked paths in the commit that carries their deletion.
+
+    BEST-EFFORT, and the honest reason is worth stating: `git rm --cached` only
+    STAGES. If this Push does not reach its own commit — or if the in-container
+    auto-sync loop commits first, since the backend's `docker exec` runs outside
+    the agent server's `_REPO_LOCK` — the deletions ride in someone else's commit
+    with someone else's message. That is exactly what `47efd80` was. The
+    operator-queue entry, not this, is the surface that does not depend on who
+    commits.
+
+    When the caller supplied no message we reproduce the agent server's own
+    default (`Trinity sync: <ts>`, `agent_server/routers/git.py`) rather than
+    dropping it, because supplying a message at all suppresses that default.
+    """
+    if not sweep.removed:
+        return message
+    subject = message or f"Trinity sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    shown = list(sweep.removed[:20])
+    body = [
+        "",
+        "",
+        f"Trinity: untracked {len(sweep.removed)} file(s) that now match "
+        ".gitignore (working tree untouched):",
+    ]
+    body += [f"- {path}" for path in shown]
+    if len(sweep.removed) > len(shown):
+        body.append(f"- ... and {len(sweep.removed) - len(shown)} more")
+    return subject + "\n".join(body)
+
+
+def _with_sweep(result: GitSyncResult, sweep: GitignoreSweep) -> GitSyncResult:
+    """Attach the sweep to a `GitSyncResult`, on the failure paths too.
+
+    The router raises `HTTPException(detail=result.message)` for 409/400 and
+    keeps NOTHING else, so a structured field alone is dead on exactly the paths
+    where the index mutation has already happened. Folding the one-line summary
+    into `message` here makes all four returns honest with one edit instead of
+    per-status-code special-casing in the router.
+    """
+    summary = sweep.summary_line()
+    message = result.message
+    if summary and summary not in (message or ""):
+        message = f"{message} — {summary}" if message else summary
+    return result.model_copy(
+        update={
+            "message": message,
+            "removed_paths": list(sweep.removed),
+            "unignored_paths": list(sweep.unignored),
+            "shadowed_negations": list(sweep.shadowed),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
