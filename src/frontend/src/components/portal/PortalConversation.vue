@@ -2011,9 +2011,11 @@ function cleanupVoice() {
 
 // ---- ent#534: the voice call — the orb takes the conversation ----------------
 // Modal, the way ChatGPT's voice mode is: you are either in the chat or in the
-// call. The call is the platform's real-time voice session (Agent Detail's orb,
-// reused, not forked), bound to THIS thread: its context is this chat's recent
-// turns and its transcript is written back here, turn by turn, as one collapsed
+// call. The call is the platform's real-time voice session (the shared orb
+// `chat/VoiceOverlay.vue` + `useVoiceSession`, reused not forked — and since
+// #2559 this is its ONLY consumer; Agent Detail offers a door here, not an orb
+// of its own), bound to THIS thread: its context is this chat's recent turns and
+// its transcript is written back here, turn by turn, as one collapsed
 // "Voice call · N min" block. While it is on, the header controls, the tabs and
 // the composer are inert; the shell swaps the rail for the agent's canvas. End
 // (button, orb, Escape) returns to the chat exactly where it was.
@@ -2108,7 +2110,12 @@ async function endVoiceCall() {
 }
 
 
-defineExpose({ focusComposer: () => textarea.value?.focus() })
+// `startVoiceCall` is exposed for the Talk door (#2559): `Portal.vue` holds a
+// `ref="conversationRef"` and calls it once, after `bootstrap()` consumed an
+// armed `?voice=1`. That ref is this `defineExpose`'s FIRST consumer — nothing
+// used `focusComposer` — so removing either token is a live break, not dead-code
+// cleanup.
+defineExpose({ focusComposer: () => textarea.value?.focus(), startVoiceCall })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends
