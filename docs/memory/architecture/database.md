@@ -171,6 +171,8 @@ CREATE TABLE agent_schedules (
     webhook_enabled INTEGER DEFAULT 0,           -- WEBHOOK-001
     webhook_secret_encrypted TEXT,               -- ent#77: AES-256-GCM HMAC signing secret (Invariant #12), nullable
     webhook_auth_enabled INTEGER DEFAULT 0,      -- ent#77: gate signature verification in the public trigger
+    deliver_to_workspace_email TEXT,             -- ent#498: land this schedule's output in one
+                                                --   person's Main Workspace chat; NULL = no delivery
     deleted_at TEXT,                             -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id)
 );

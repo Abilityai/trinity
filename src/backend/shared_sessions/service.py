@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from services.platform_prompt_service import build_user_facing_room_prompt
 from utils.helpers import utc_now_iso
 
 from . import db
@@ -109,6 +110,48 @@ def _user_identity(current_user) -> str:
 #
 # `kind` is free TEXT with no CHECK, so this needs no migration.
 WORKSPACE_KIND = "workspace_user"
+
+# Participant kinds that do NOT make a room client-facing.
+#
+# trinity-enterprise#363 says "a room containing a **workspace user**", and the
+# fleet-internal kinds are the complement of that. `user` is a PLATFORM account —
+# the operator and their team — and is deliberately here: an operator's own ops
+# room is not a customer-facing room, and telling its agents to keep costs,
+# infrastructure and queue plumbing out of it muzzles them on exactly the subject
+# the room was opened for.
+#
+# That matters more than it looks, because `create_room` always seats its creator
+# and the only removal path is `kind="agent"` — so a human participant can never
+# leave, and treating `user` as client-facing would make every room client-facing
+# and the else-branch below unreachable. An earlier revision of this did exactly
+# that: it generalised the ticket's "workspace user" to "any non-agent kind" and
+# shipped a test pinning the generalisation.
+#
+# An UNRECOGNISED kind still counts as a reader. That half of the complement is
+# right: ent#171's external A2A sender is the one already anticipated in
+# `db.count_budget_messages`, and a new kind is far likelier to be an outside
+# person than a machine.
+FLEET_INTERNAL_PARTICIPANT_KINDS = frozenset({"agent", "system", "user"})
+
+
+def room_is_user_facing(participants: list[dict]) -> bool:
+    """Is a CLIENT — someone outside the operator's own organisation — in this room?
+
+    Pure, so the rule is testable without a DB, and the ONE place the question is
+    answered (trinity-enterprise#363 AC 2: the signal is set by the platform from
+    MEMBERSHIP, never asserted by a participant — nothing a participant can write
+    reaches this).
+
+    A participant who has left (`left_at`) does not count: they cannot read what
+    is written after they go, and treating a departed client as present would
+    make the signal permanent for the life of the room.
+    """
+    for p in participants or []:
+        if p.get("left_at"):
+            continue
+        if str(p.get("kind") or "").strip() not in FLEET_INTERNAL_PARTICIPANT_KINDS:
+            return True
+    return False
 
 
 def _workspace_identity(principal) -> str:
@@ -710,12 +753,23 @@ def _format_delta(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool) -> str:
+def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
+                       user_facing: bool = False) -> str:
+    # The old header claimed "Other agents and people are in this room"
+    # UNCONDITIONALLY — false in an agent-only room, and far too weak in front of
+    # a customer to count as a disclosure (trinity-enterprise#363). It now says
+    # what is actually true; the load-bearing signal is the system-prompt block,
+    # this is only scene-setting that no longer contradicts it.
+    who = ("Other agents are in this room, and so is at least one person from "
+           "outside the fleet who can read everything written here."
+           if user_facing else
+           "Other agents are in this room.")
     header = (
         f"You are participating in the Trinity room \"{room['name']}\""
         + (f" — topic: {room['topic']}" if room.get("topic") else "")
         + ".\n\n"
-        "Other agents and people are in this room. You were @mentioned, so it is "
+        + who
+        + " You were @mentioned, so it is "
         "your turn to reply. Reply with your message only — it will be posted to "
         "the room as you. To bring in another participant, @mention them by name.\n\n"
     )
@@ -983,11 +1037,32 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
 
     from services.task_execution_service import get_task_execution_service
 
+    # trinity-enterprise#363. Derived HERE, per wake, from membership — not
+    # threaded down from `post_message`, which does hold the list: `_wake_agent`
+    # calls `post_message` back with the agent's reply and that wakes the next
+    # agent, so a threaded value would have to survive a round trip through a
+    # public function and could go stale the moment a reply recruits a human.
+    # One indexed read against a turn that costs an LLM call.
+    #
+    # Fails toward USER-FACING, the inverse of the usual capability default: an
+    # unreadable roster means we do not know who is watching, and a needless
+    # caution in an agent-only room costs a slightly more careful answer while a
+    # missed signal in front of a customer is the disclosure this prevents.
+    try:
+        user_facing = room_is_user_facing(db.list_participants(room_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: participant read for the user-facing signal "
+                       "failed (%s) — assuming a person is reading", room_id, e)
+        user_facing = True
+
+    room_prompt = build_user_facing_room_prompt() if user_facing else None
+
     try:
         result = await get_task_execution_service().execute_task(
             agent_name=agent_name,
-            message=_build_turn_prompt(room, agent_name, delta, cold),
+            message=_build_turn_prompt(room, agent_name, delta, cold, user_facing),
             triggered_by="room",
+            system_prompt=room_prompt,
             source_user_email=getattr(current_user, "email", None),
             timeout_seconds=ROOM_TURN_TIMEOUT_SECONDS,
             resume_session_id=cached,

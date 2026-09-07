@@ -186,7 +186,13 @@ class SchedulerDatabase:
             # Validation configuration (VALIDATE-001)
             validation_enabled=bool(row["validation_enabled"]) if "validation_enabled" in row_keys and row["validation_enabled"] is not None else False,
             validation_prompt=row["validation_prompt"] if "validation_prompt" in row_keys else None,
-            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120
+            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120,
+            # ent#498. Absent on a pre-migration row, and NULL means "deliver
+            # nowhere" — both read as None and the dispatch omits the field.
+            deliver_to_workspace_email=(
+                row["deliver_to_workspace_email"]
+                if "deliver_to_workspace_email" in row_keys else None
+            ),
         )
 
     @staticmethod

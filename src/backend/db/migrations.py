@@ -4072,6 +4072,27 @@ def _migrate_portal_session_main_chat(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_schedule_workspace_delivery(cursor, conn):
+    """Let a schedule deliver its output into a Workspace conversation (ent#498).
+
+    One nullable column, no backfill and no index. NULL — every existing row —
+    is today's behaviour, and the resolver fails CLOSED on it, so an install that
+    never sets the field cannot notice this ran.
+
+    No index deliberately: the column is read only through the schedule row the
+    scheduler already loaded by id, never selected on.
+
+    Postgres counterpart: `0056_schedule_workspace_delivery`.
+    """
+    _safe_add_column(
+        cursor, "agent_schedules", "deliver_to_workspace_email",
+        "ALTER TABLE agent_schedules ADD COLUMN deliver_to_workspace_email TEXT",
+        log_msg=("Adding deliver_to_workspace_email to agent_schedules for "
+                 "Workspace brief delivery (ent#498)..."),
+    )
+    conn.commit()
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -4198,4 +4219,5 @@ MIGRATIONS = [
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
     ("agent_canvases_template", _migrate_agent_canvases_template),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
+    ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
 ]

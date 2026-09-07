@@ -205,6 +205,9 @@ export interface Schedule {
   timeout_seconds: number;
   allowed_tools?: string[];
   model?: string;
+  // ent#498: deliver this schedule's output into that person's Workspace
+  // conversation with the agent. Absent = no delivery.
+  deliver_to_workspace_email?: string;
 }
 
 export interface ScheduleCreate {
@@ -220,6 +223,9 @@ export interface ScheduleCreate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // ent#498: deliver this schedule's output into that person's Workspace
+  // conversation with the agent. Absent = no delivery.
+  deliver_to_workspace_email?: string;
 }
 
 export interface ScheduleUpdate {
@@ -235,6 +241,9 @@ export interface ScheduleUpdate {
   // RETRY-001: Retry configuration
   max_retries?: number;
   retry_delay_seconds?: number;
+  // ent#498: `null` CLEARS the delivery target (the handler uses exclude_unset,
+  // so omitting keeps it) — hence nullable here and not merely optional.
+  deliver_to_workspace_email?: string | null;
 }
 
 export interface ScheduleExecution {
