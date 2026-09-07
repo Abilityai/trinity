@@ -1942,3 +1942,55 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (this surface unmounts on every chat switch).
 
 - **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
+
+### 5.24 Workspace — resizable columns (trinity-enterprise#492)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_COLUMN_RESIZE`
+- **Description**: All three Workspace columns are resizable. Two handles —
+  sidebar | conversation and conversation | side panel — set the two fixed
+  widths; the conversation is the flexible middle and its message column follows
+  the space it is given. Widths persist per user and are applied before first
+  paint; a double-click resets a column; keyboard users resize with arrows and
+  Home/End.
+- **Operator ask**: 2026-09-03, "I would like to have columns resizable, all
+  three of them."
+
+**Why flex and not a grid.** The issue's technical notes suggested
+`grid-template-columns`, and the first cut did exactly that. It is wrong here:
+the rail handle is conditional (AC 1 — present only while there is a column to
+drag), so the number of children CHANGES, and a grid places children by count.
+With the handle absent the rail fell into the handle's track while its own track
+sat empty — the rail's expand button was in the DOM and never clickable. Flex
+does not care how many children there are. The conversation is `flex-1 min-w-0`,
+so it is the flexible middle by construction, carries no width of its own, and
+cannot be dragged directly: widening the messages is done by narrowing a
+neighbour, which is what the AC asks for.
+
+**Identity is resolved synchronously, from storage.** AC 4 asks for two things
+that pull against each other — keyed per user, AND applied before first paint.
+The portal store's `clientEmail` cannot serve: it is `null` until a network
+response lands, so a key built on it READS under `anon` on every reload and
+WRITES under the email a moment later. Widths persisted perfectly and came back
+as the default. `resolveLayoutIdentity` reads `auth0_user`, which login writes to
+localStorage and which is therefore already there at setup; a portal client with
+no such record gets one `client` bucket, since that browser holds one portal
+token at a time. **Never derived from token material** — the key is written back
+to localStorage in the clear.
+
+- Clamps: sidebar 200–480, side panel 280–560, and the conversation has a 480px
+  floor. When the viewport cannot fit all three the **rail auto-collapses** —
+  the conversation is never the column that gets squeezed — checked on window
+  resize as well as on drag, because a window dragged narrower is the same
+  situation arrived at differently.
+- The message cap has ONE definition (`--ws-message-max`, 1100px, wider than the
+  `max-w-4xl` it replaces) and `PortalSkeleton` shares it: the skeleton exists to
+  hold the footprint the loaded surface lands on (#2540), so a placeholder capped
+  differently would shift the layout at the moment it is replaced.
+- Defaults equal the widths they replace (288 / 384), so an install that never
+  drags anything renders exactly as before.
+- One handle component for both splitters. `side` is a prop rather than a
+  caller-applied sign flip: the sidebar grows when dragged right, the side panel
+  narrows. It is an ARIA `separator` carrying `aria-valuenow/min/max`, uses
+  pointer capture so a drag across the Canvas tab's iframe does not stall, and
+  is hidden below `sm`, where the drawer and the bottom sheet take over.
+- **Flow**: `docs/memory/feature-flows/workspace-column-resize.md`
