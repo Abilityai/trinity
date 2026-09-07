@@ -76,7 +76,7 @@
         <span class="block mt-0.5">
           It is discarded when you turn sharing off and a new one is minted next time, so a
           revoke forgets you locally. It is never your install id and is never sent beside it.
-          Anything already sent stays with the receiver until a deletion signal exists.
+          Anything already sent stays with the receiver; on request it can be deleted there by this id.
         </span>
       </div>
 

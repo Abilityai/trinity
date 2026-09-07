@@ -1,0 +1,64 @@
+{
+  "version": "1.1",
+  "date": "2026-09-07",
+  "mode": "diff",
+  "scope": "abilityai/trinity-enterprise#190 — private submodule branch feature/190-benchmark-wiring vs enterprise origin/main 8627b38 (8 files, +1331/-81) and public branch feature/190-benchmark-wiring vs dev a9ec8728 (14 files incl. the learnings ledger, ~+600/-66); working tree pre-commit",
+  "phases_run": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"],
+  "attack_surface": {
+    "new_routes": [],
+    "changed_routes": [
+      "GET /api/enterprise/telemetry/benchmark — gate unchanged (requires_entitlement('telemetry') + require_admin, which rejects agent and connector principals and allow-lists mcp_scope); the handler now makes ONE outbound GET to the configured receiver's sibling path carrying the anonymous share id, only when the kill switch is off AND consent is on"
+    ],
+    "new_mcp_tools": [],
+    "new_renderer_inputs": [
+      "components/settings/FleetBenchmarkCard.vue: numbers projected through an allow-list (three metrics × six numeric fields), a validated single-line shared_at string in a title attribute, and backend-authored message/reason strings; no v-html, nothing from the wire reaches the DOM as free text"
+    ],
+    "new_outbound_integrations": [
+      "GET <TELEMETRY_SHARING_URL origin>/v1/telemetry-benchmark?sharing_id=… — credential-free by contract; URL derived from config (scheme http/https, tail must be telemetry-share), never from a caller; TLS verification default; follow_redirects=False; per-phase timeout 5 s + 6 s wall-clock deadline; Accept-Encoding: identity with any Content-Encoding refused; 64 KiB WIRE-byte ceiling; BoundedSemaphore(2); per-worker 5-minute memo of well-formed answers only"
+    ],
+    "csp_changes": [],
+    "ci_changes": [],
+    "dependency_changes": [],
+    "docker_or_compose_changes": []
+  },
+  "findings": [],
+  "observations": [
+    {
+      "id": "O1",
+      "confidence": 3,
+      "title": "Public requirements §45.1 FR-6 now states the gated view's behavioural contract (five statuses; non-minting, fail-open, bounded, briefly memoised)",
+      "note": "Reviewed against the enterprise-docs standing rule at the plan gate (premise 9, operator-approved): contract level only — no URL derivation, reason vocabulary, memo or transport internals, which live in the private flow doc. The guard pattern yields 0 hits in every changed public file, identical to dev. Not a disclosure finding."
+    },
+    {
+      "id": "O2",
+      "confidence": 2,
+      "title": "The httpx logger is pinned to WARNING process-wide from the private telemetry module",
+      "note": "Deliberate and strictly quieter: only httpx's own INFO request line is affected, and that line carries the share id (the receiver's credential) on this route. Documented in the module and pinned by a test that runs at root INFO. Not a finding."
+    },
+    {
+      "id": "O3",
+      "confidence": 4,
+      "title": "Threadpool exposure under a stalled receiver",
+      "note": "Hard exclusion #1 (DoS). Bounded regardless: non-blocking BoundedSemaphore(2) → 'busy', per-phase timeout, wall-clock deadline, memo of well-formed answers. Noted, not reported."
+    }
+  ],
+  "closed_before_audit": [
+    "httpx logs 'HTTP Request: GET <url>' at INFO on its own logger and the URL carries the share id (found by plan review, reproduced with MockTransport) — silenced at the module, pinned by test_the_httpx_request_line_is_silenced_at_import; learnings entry 2026-09-07",
+    "a body ceiling on decoded bytes (the 2026-08-05 ledger class) — replaced by a wire-byte cap on iter_raw() with compression refused and Content-Length early exit, mirroring template_registry_service._fetch_registry_text"
+  ],
+  "verification": {
+    "independent_verifiers": "none spawned — no finding survived the 8/10 gate",
+    "active": [
+      "enterprise suite 383 passed / 5 skipped on seeds 106, 12345, 99999 (66 new): agent principal 403 through the real require_admin; non-admin 403; unentitled 403; a transport failure still answers 200 with a named status; the id appears only as an 8-char prefix in our logs and is absent from every record at root INFO; a 302 is reported and never followed; a compressed body is refused before it is read; oversize by Content-Length and by stream; every transport exception maps to its class name and never carries the URL or the id; the request carries exactly one query parameter",
+      "standing guards green (66 tests): credential_paths + model_context vendored parity (Invariant #5), #186 enumeration uniformity, #2094 dependency/path-param pairing, #293 admin gate rejects agent keys, ent#435 settings sink guard",
+      "enterprise-docs guard pattern run locally: 0 hits in every changed public file (same as dev)",
+      "diff scan over both working trees: no secret prefixes, no private keys, no absolute host paths, no IPs beyond loopback placeholders, no real emails (only example.com test principals)",
+      "no verify=False / subprocess / os.system / v-html / innerHTML / eval in the changed code",
+      "live: eight sink fixtures (unknown → share_not_on_file, ready, http503, stall → ReadTimeout, gzip → encoding_refused, malformed, unrecognized_status, redirect → http_302) and the production receiver (not_enough_data, 3 of 5) answered exactly as classified; the backend was restored to the production URL afterwards"
+    ]
+  },
+  "supply_chain_summary": { "python": "no dependency changes", "node": "no dependency changes", "lockfiles": "unchanged", "install_scripts": "n/a" },
+  "filter_stats": { "raw_candidates": 3, "hard_excluded": 1, "below_gate": 2, "fixed_during_audit": 0, "reported": 0 },
+  "totals": { "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 3, "open": 0 },
+  "trend": { "prior_report": "cso-diff-2026-09-07-ent541-retention-parity-guard", "resolved": 0, "persistent": 0, "new": 0, "new_closed_in_diff": 2, "direction": "n/a (different surfaces)" }
+}
