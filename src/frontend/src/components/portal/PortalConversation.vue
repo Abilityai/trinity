@@ -1,5 +1,30 @@
 <template>
-  <div class="flex flex-col h-full min-h-0">
+  <!-- ent#524: the whole conversation is the drop target — "dropping one or
+       more files ANYWHERE on the conversation uploads them", on by default,
+       no setting. The listeners sit on the root rather than on the composer
+       because the thread is where the eye is; the affordance names what will
+       happen so a drop is never a guess. Dragging text or a link is not a file
+       drag (`isFileDrag`) and lights nothing. -->
+  <div
+    class="relative flex flex-col h-full min-h-0"
+    @dragenter="dropHandlers.onDragEnter"
+    @dragover="dropHandlers.onDragOver"
+    @dragleave="dropHandlers.onDragLeave"
+    @drop="dropHandlers.onDrop"
+  >
+    <!-- `pointer-events-none` so the overlay cannot swallow the drop it is
+         announcing — the listeners are on the container underneath. -->
+    <div
+      v-if="fileDragging"
+      class="absolute inset-2 z-20 pointer-events-none rounded-2xl border-2 border-dashed border-action-primary-400 bg-action-primary-50/80 dark:bg-action-primary-900/30 flex items-center justify-center"
+      data-testid="portal-drop-overlay"
+      aria-hidden="true"
+    >
+      <p class="text-sm font-medium text-action-primary-700 dark:text-action-primary-200">
+        Drop files to send to {{ agentDisplayName(agent) }}
+      </p>
+    </div>
+
     <!-- Header: agent identity + picker, files, voice -->
     <header class="shrink-0 flex items-center gap-2 px-3 sm:px-4 h-14 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
       <button
@@ -339,6 +364,17 @@
             @click="cancelError = ''"
           >Dismiss</button>
         </p>
+        <!-- ent#523 AC 10: an agent that cannot take a message says so BEFORE
+             the person types a paragraph into it. A label, never a disabled
+             input — disabling relocates the dead state rather than removing it,
+             and a client whose agents are all stopped (a routine resource-saving
+             posture) would get an entirely inert Workspace. The message still
+             sends; the server's own refusal stays the authority. -->
+        <p
+          v-if="availabilityNotice"
+          class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300"
+          data-testid="portal-availability-notice"
+        >{{ availabilityNotice.message }}</p>
         <!-- ent#440: what the loop is doing right now, and the one control that
              ends it. `aria-live` because the state changes with no keystroke —
              a screen-reader user otherwise cannot tell listening from thinking.
@@ -362,20 +398,30 @@
             @click="stopVoiceConversation()"
           >Stop</button>
         </div>
-        <!-- Attached (uploaded to the agent inbox) file chips -->
+        <!-- ent#524: one chip per file, each with its OWN progress and its own
+             outcome — a batch has no shared verdict, which is what makes "one
+             failure does not fail the batch" true rather than aspirational. A
+             rejected file names itself and the limit it broke. -->
+        <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
             v-for="(f, i) in attachments"
             :key="i"
-            class="inline-flex items-center gap-1 text-xs rounded-full bg-gray-100 dark:bg-gray-800 pl-2.5 pr-1.5 py-1 text-gray-600 dark:text-gray-300"
+            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
+            :class="f.error
+              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
+            :title="f.error || f.name"
+            data-testid="portal-attachment-chip"
           >
             <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
             <span class="max-w-[10rem] truncate">{{ f.name }}</span>
-            <svg v-if="f.uploading" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
           </span>
         </div>
         <form class="flex items-end gap-2" @submit.prevent="send">
-          <input ref="fileInput" type="file" class="hidden" @change="onPickFile" />
+          <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFile" />
           <!-- #2259: the composer's action buttons are `h-11 w-11` (44px, on the
                4px grid) rather than `p-2.5` around a 20px icon (40px, off it).
                `items-end` pins them to the bottom so they stay beside the LAST
@@ -490,7 +536,8 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice } from './portalUtils'
+import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
@@ -614,6 +661,9 @@ const input = ref('')
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
+// ent#523 AC 10 — the same pure rule the sidebar chip and the details header
+// read, so the four surfaces cannot disagree about one agent.
+const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
 const isMainChat = computed(() => {
   const id = currentSessionId.value
   if (!id) return false
@@ -756,7 +806,17 @@ function askAboutIt(item) {
   autoGrowAfterUpdate()
   nextTick(() => textarea.value?.focus())
 }
-const attachments = ref([])
+// ent#524 — drop + batch, shared with the room and the rail's Files tab.
+// `attachments` is the composable's entry list: the chips render straight from
+// it, so per-file progress and per-file failure are the same object.
+const {
+  dragging: fileDragging,
+  entries: attachments,
+  batchNotice,
+  addFiles,
+  clear: clearAttachments,
+  handlers: dropHandlers,
+} = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
 const scrollEl = ref(null)
@@ -1191,15 +1251,14 @@ function acceptActive(index) {
 }
 
 // ---- Attachments: upload to the agent inbox; the next turn sees them ----------
-async function onPickFile(e) {
-  const file = e.target.files?.[0]
+// ent#524: the whole selection, not `[0]`. Both the picker and the drop target
+// funnel into `addFiles`, so there is one batch implementation and one place
+// where a per-file outcome is decided.
+function onPickFile(e) {
+  const files = e.target.files
+  const p = addFiles(files)
   e.target.value = ''
-  if (!file) return
-  const entry = { name: file.name, uploading: true }
-  attachments.value.push(entry)
-  try { await store.uploadDocument(props.agent.name, file) }
-  catch { entry.error = true }
-  finally { entry.uploading = false }
+  return p
 }
 
 // ---- Send + resilient retry ---------------------------------------------------
@@ -1347,7 +1406,7 @@ async function deliver(text) {
     // chat, so the card list is re-read exactly then — no poll, and nothing to
     // refresh on a conversation nobody is talking in.
     deliverableTick.value += 1
-    attachments.value = []
+    clearAttachments()
     return true
   } catch (err) {
     return { error: deliveryFailureReason(err) }

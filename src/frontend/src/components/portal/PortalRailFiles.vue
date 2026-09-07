@@ -20,9 +20,9 @@
   <div
     class="space-y-5"
     data-testid="portal-rail-files"
-    @dragover.prevent="dragging = true"
+    @dragover.prevent="dragging = isFileDrag($event.dataTransfer)"
     @dragleave.prevent="dragging = false"
-    @drop.prevent="onDrop"
+    @drop.prevent="onDropFiles"
   >
     <!-- Send -->
     <div>
@@ -39,7 +39,7 @@
       >
         <svg class="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.9A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
         <span class="font-medium text-center">{{ uploading ? 'Sending…' : `Drop a file, or click to send to ${targetName}` }}</span>
-        <input type="file" class="hidden" :disabled="uploading" @change="onPick" />
+        <input type="file" multiple class="hidden" :disabled="uploading" @change="onPick" />
       </label>
       <InlineError v-if="uploadError" :message="uploadError" @dismiss="uploadError = ''" />
       <p v-else-if="uploadOk" class="mt-2 text-xs text-status-success-600 dark:text-status-success-400" role="status">{{ uploadOk }}</p>
@@ -102,6 +102,7 @@
 
 <script setup>
 import { computed, h, ref, watch } from 'vue'
+import { isFileDrag, rejectionFor, uploadFailureReason } from '@/composables/usePortalFileDrop'
 import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
@@ -116,6 +117,14 @@ const props = defineProps({
 const feeds = usePortalRailFeedsStore()
 
 const dragging = ref(false)
+
+// ent#524: dragging selected text or a link over this panel used to light the
+// drop zone and then do nothing on release. The shared rule answers it.
+function onDropFiles(e) {
+  dragging.value = false
+  if (!isFileDrag(e.dataTransfer)) return
+  return uploadBatch(e.dataTransfer.files)
+}
 const uploading = ref(false)
 const uploadError = ref('')
 const uploadOk = ref('')
@@ -176,8 +185,47 @@ async function upload(file) {
     uploading.value = false
   }
 }
-function onPick(e) { const f = e.target.files?.[0]; e.target.value = ''; upload(f) }
-function onDrop(e) { dragging.value = false; const f = e.dataTransfer?.files?.[0]; if (f) upload(f) }
+// ent#524: the whole selection, not `[0]`. This surface already HAD the drop
+// gesture and dropped every file after the first — silently, with a success
+// message — which is half the defect the issue was filed for. Both entry points
+// now go through the shared batch, so per-file progress and per-file failure are
+// the same here as on the conversation.
+function onPick(e) {
+  const files = e.target.files
+  const p = uploadBatch(files)
+  e.target.value = ''
+  return p
+}
+
+async function uploadBatch(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+  const agent = targetName.value
+  uploading.value = true
+  uploadError.value = ''
+  uploadOk.value = ''
+  const sent = []
+  const failed = []
+  for (const file of files) {
+    const rejection = rejectionFor(file)
+    if (rejection) { failed.push(`${file.name}: ${rejection}`); continue }
+    try {
+      const res = await feeds.upload(agent, file)
+      sent.push(res?.filename || file.name)
+    } catch (err) {
+      failed.push(`${file.name}: ${uploadFailureReason(err)}`)
+    }
+  }
+  uploading.value = false
+  // Both halves are stated. A batch that half-succeeded used to report only the
+  // success, which is exactly how four dropped files became one with no notice.
+  if (sent.length) {
+    uploadOk.value = sent.length === 1
+      ? `Sent “${sent[0]}” to ${agent}.`
+      : `Sent ${sent.length} files to ${agent}.`
+  }
+  if (failed.length) uploadError.value = failed.join(' · ')
+}
 
 function humanSize(n) {
   n = Number(n) || 0
