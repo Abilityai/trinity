@@ -149,9 +149,15 @@ exactly the audience it would be protecting.
   no default**. A default would let the agent-page call site keep compiling while silently
   serving the wrong card; the safe value differs per call site.
 - The runtime comes from `docker_service.agent_container_runtimes()` — a **second** sparse
-  `containers.list()`, gathered concurrently with the availability read. O(1) in fleet
-  size, not the inspect-per-agent #2160 forbids. It is a separate leaf rather than a
-  widening of `agent_container_states()` so #2196's guard suite keeps pinning what it pins.
+  `containers.list()`, O(1) in fleet size rather than the inspect-per-agent #2160 forbids.
+  It is a separate leaf rather than a widening of `agent_container_states()` so #2196's
+  guard suite keeps pinning what it pins, and it is awaited **sequentially** rather than
+  with `asyncio.gather`: `test_2163_roster_latency_floor.py` pins that `get_roster`
+  contains no fan-out at all. Two fixed O(1) reads are not the N-agent fan-out #2163
+  closed — but that guard is blanket on purpose, and loosening a guard to admit one's own
+  change is how the property it protects stops being true. The trade is one extra
+  `/containers/json` (~50-200ms) once per roster load, for a capability gate that does not
+  offer a Claude-model list to a Codex agent.
 
 > **The sparse trap, in its other form.** Under `sparse=True` docker-py's
 > `container.labels` **raises** — it reads `attrs["Config"]["Labels"]`, which only a full

@@ -844,14 +844,22 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # `_agent_briefing` (so #2163 can defer/bound/cache the briefing freely).
     # It also REPLACES the per-card `get_agent_container()` the briefing used to
     # make and throw away: N inspects become one list call.
-    # ent#403: the runtime for the same set, in its own single Docker call,
-    # GATHERED with the availability one so the roster's wall-clock is unchanged.
-    # Both are O(1) in fleet size; see `_runtime_map` for why it is a second call
-    # rather than a widening of `_availability_map`.
+    # ent#403: the runtime for the same set, in its own single Docker call.
+    #
+    # SEQUENTIAL, not `asyncio.gather`, and that is a deliberate trade. #2163's
+    # guard (`test_2163_roster_latency_floor.py`) pins that this function
+    # contains no fan-out AT ALL, because the defect it closed was a `gather`
+    # over N agents that made every sign-in wait for the slowest one. Two fixed
+    # O(1) Docker reads are not that defect — but the guard is blanket on
+    # purpose ("a source pin, because the behavioural test can be satisfied by a
+    # stub-shaped accident"), and loosening a guard to admit one's own change is
+    # how the property it protects stops being true. The cost is one extra
+    # `/containers/json` on the roster path (~50-200ms, O(1) in fleet size),
+    # paid once per roster load, in exchange for a capability gate that does not
+    # offer a Claude-model list to a Codex agent.
     names = [r["agent_name"] for r in rows]
-    availability, runtimes = await asyncio.gather(
-        _availability_map(names), _runtime_map(names)
-    )
+    availability = await _availability_map(names)
+    runtimes = await _runtime_map(names)
     # ent#403: the once-per-load model facts (option list + platform default +
     # its label), resolved HERE beside `tts_ready` and `default_voice` and
     # threaded into every card — never re-read per card.

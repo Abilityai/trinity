@@ -532,9 +532,12 @@ and its label — and threaded into `_row_to_card` as `model_context`; `is_platf
 `runtime` and `model_context` are **keyword-only with no default**, because a default
 would let the agent-page call site keep compiling while silently serving the wrong card.
 The runtime comes from `docker_service.agent_container_runtimes()`, a **second** sparse
-`containers.list()` gathered concurrently with the availability one — O(1) in fleet size,
-not the N+1 #2160 forbids, and a separate leaf rather than a widening of
-`agent_container_states()` so #2196's guard suite keeps pinning what it pins. Note the
+`containers.list()` — O(1) in fleet size, not the N+1 #2160 forbids, and a separate leaf
+rather than a widening of `agent_container_states()` so #2196's guard suite keeps pinning
+what it pins. Read **sequentially**, not with `asyncio.gather`: #2163's guard pins that
+`get_roster` contains no fan-out at all, and that blanket shape is the point — two fixed
+O(1) reads are not the N-agent fan-out it closed, but loosening a guard to admit one's own
+change is how the property stops being true. The trade is ~50-200ms once per roster load. Note the
 sparse trap in its other form: under `sparse=True` docker-py's `.labels` **raises** (it
 reads `attrs["Config"]["Labels"]`, which only a full inspect populates), so the runtime is
 read from `attrs["Labels"]` — the key the `/containers/json` summary actually carries.
