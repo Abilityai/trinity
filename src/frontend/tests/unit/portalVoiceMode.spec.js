@@ -441,6 +441,9 @@ describe('the door and the hand-off are wired (source, since there is no mount h
     expect(fn).toContain('pendingVoiceStart = voiceAutoStart({')
     expect(fn).toContain('armed: voiceAutoStartArmed(),')
     expect(fn).not.toContain('stripVoiceQuery()')
+    // ...but it DOES record that its own replace happened. That replace takes a
+    // bare path, so it drops the whole query — `voice` included.
+    expect(fn).toContain('landingReplaced = true; router.replace(`/workspace/c/${landing.sessionId}`)')
   })
 
   it('bootstrap resets the intent, reads the key before the first await, and strips ONCE in the finally', () => {
@@ -452,9 +455,17 @@ describe('the door and the hand-off are wired (source, since there is no mount h
     const keyRead = fn.indexOf('const voiceKeyPresent = route.query[VOICE_QUERY_KEY] !== undefined')
     expect(keyRead).toBeGreaterThan(-1)
     expect(keyRead).toBeLessThan(fn.indexOf('await '))
-    // One strip, in the finally, keyed on PRESENCE.
-    expect(fn).toMatch(/\} finally \{[\s\S]{0,400}if \(voiceKeyPresent\) \{ stripVoiceQuery\(\); disarmVoiceAutoStart\(\) \}/)
+    // One strip, in the finally, keyed on PRESENCE — and skipped when the
+    // landing replace already dropped the query. Two `router.replace` calls
+    // started in one tick do not compose: vue-router cancels the first
+    // (NAVIGATION_CANCELLED), so an unconditional strip here would land the
+    // door on `/workspace?agent=X` instead of `/workspace/c/<sid>`. `route`
+    // updates asynchronously, so the strip cannot detect that itself.
+    expect(fn).toMatch(/\} finally \{[\s\S]{0,600}if \(voiceKeyPresent\) \{ if \(!landingReplaced\) stripVoiceQuery\(\); disarmVoiceAutoStart\(\) \}/)
     expect(fn.match(/stripVoiceQuery\(\)/g)).toHaveLength(1)
+    // Reset with the intent, for the same reason: a stale `true` from a throw
+    // would suppress the next bootstrap's strip.
+    expect(fn.indexOf('landingReplaced = false')).toBeLessThan(fn.indexOf('try {'))
     // Then the hand-off, after the finally.
     expect(fn.indexOf('conversationRef.value?.startVoiceCall?.()')).toBeGreaterThan(fn.indexOf('if (voiceKeyPresent)'))
     expect(fn).toContain('await nextTick()')

@@ -684,6 +684,13 @@ const voicePanelVersion = ref(0)
 // exists for this hand-off — not for focus.
 const conversationRef = ref(null)
 let pendingVoiceStart = false
+// `resolveAgentQuery()` ends with a bare-PATH `router.replace` that drops the
+// WHOLE query — `voice` included — so on that branch the strip below would be a
+// second navigation started in the same tick, which vue-router cancels the first
+// for (NAVIGATION_CANCELLED). The door then lands on `/workspace?agent=X`
+// instead of the thread URL. `route` updates asynchronously, so the strip cannot
+// see that a replace is already in flight; this flag is how it is told.
+let landingReplaced = false
 
 // Drop `voice` from the CURRENT route (not a captured one), so this composes
 // with `resolveAgentQuery()`'s own landing replace rather than racing it.
@@ -1430,7 +1437,9 @@ function resolveAgentQuery() {
   // with the landing so a `?new=1` that still resolved a thread (it cannot
   // today, but the two are independent functions) never claims a fresh start.
   startingNewChat.value = forceNew && !landing.sessionId
-  if (landing.sessionId) router.replace(`/workspace/c/${landing.sessionId}`)
+  // The bare path drops the query, so this replace is ALSO the strip on this
+  // branch — recorded so the `finally` does not start a competing navigation.
+  if (landing.sessionId) { landingReplaced = true; router.replace(`/workspace/c/${landing.sessionId}`) }
   return true
 }
 
@@ -1475,6 +1484,7 @@ async function bootstrap() {
   // (`continueAsOperator`, `onVerify`) start a billed call nobody asked for,
   // with the URL already stripped so there is nothing left to explain it.
   pendingVoiceStart = false
+  landingReplaced = false
   // Read BEFORE the first await: `resolveAgentQuery()`'s landing replace and the
   // strip below both rewrite `route.query`.
   const voiceKeyPresent = route.query[VOICE_QUERY_KEY] !== undefined
@@ -1499,7 +1509,10 @@ async function bootstrap() {
     // Keyed on the key's PRESENCE, not on its value: a rejected value is still
     // present, and a residual `voice` in the query would also make
     // `shouldEscapeStage` navigate spuriously now that it is a stage key.
-    if (voiceKeyPresent) { stripVoiceQuery(); disarmVoiceAutoStart() }
+    // ...unless `resolveAgentQuery()` already replaced to the thread URL, whose
+    // bare path carries no query at all: stripping on top of an in-flight
+    // navigation cancels it, and the door loses `/workspace/c/<sid>`.
+    if (voiceKeyPresent) { if (!landingReplaced) stripVoiceQuery(); disarmVoiceAutoStart() }
   }
   if (pendingVoiceStart) {
     pendingVoiceStart = false
