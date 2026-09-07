@@ -1056,12 +1056,17 @@ def test_title_generation_failure_keeps_the_fallback(history_db):
     assert pdb.get_portal_session(sid, "atlas", "bob@example.com")["title"] == before
 
 
-def test_title_generated_from_the_visible_exchange_and_retried_once(history_db):
+def test_title_generated_from_the_opening_message_and_retried_once(history_db):
     """ent#186 titled a thread exactly once, from its opening exchange. ent#473
     keeps the opening attempt and adds ONE more when that attempt never landed
     — here the spawn is stubbed, so the thread's title stays the derived
     fallback (`title_source` NULL) and the second turn earns the retry. A
-    third turn is past the window and earns nothing."""
+    third turn is past the window and earns nothing.
+
+    #2579 moved the spawn to run CONCURRENTLY with the turn, so the reply does
+    not exist yet and every attempt is fed the client's message with an empty
+    reply. The attempt SEQUENCE is what ent#473 is about and it is unchanged;
+    the disambiguating reply is what the retry attempt now exists to supply."""
     from unittest.mock import AsyncMock, patch
     from client_portal import service
     calls = []
@@ -1074,12 +1079,12 @@ def test_title_generated_from_the_visible_exchange_and_retried_once(history_db):
         _run(service.portal_chat("atlas", "follow-up message", "bob@example.com", session_id=sid))
         _run(service.portal_chat("atlas", "third message", "bob@example.com", session_id=sid))
     assert [kw.get("attempt") for _, kw in calls] == ["first", "retry"]
-    # Only the client's message + the agent's visible reply — never the composed
-    # execution message (history context / file manifest / platform prompt).
+    # Only the client's own message — never the composed execution message
+    # (history context / file manifest / platform prompt).
     # Spawn carries the agent name first (subscription-token resolution, ent#186 follow-up).
-    assert calls[0][0] == ("atlas", sid, "opening message", "the visible reply")
-    # The retry feeds THIS exchange — the first one with a topic in it.
-    assert calls[1][0] == ("atlas", sid, "follow-up message", "the visible reply")
+    assert calls[0][0] == ("atlas", sid, "opening message", "")
+    # The retry feeds THIS turn's message — the first one with a topic in it.
+    assert calls[1][0] == ("atlas", sid, "follow-up message", "")
 
 
 def test_a_landed_title_is_not_regenerated_on_the_second_turn(history_db):
