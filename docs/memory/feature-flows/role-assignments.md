@@ -127,7 +127,11 @@ your primary human?" would be answered.
 Two mechanisms close that, and both are required:
 
 1. **The rendered field is a display name.** The answer contract has no
-   email-shaped key, so an address cannot ride in even by a provider's mistake.
+   email-shaped key — but a key name is not what makes the value safe, and the
+   provider found that out: a display name resolved from an account whose only
+   name-shaped column IS its address renders the address. The seam cannot check
+   this (it validates *types*, not *contents*), so the property has to hold in
+   the provider, and the seam's contract comment says which side owns it.
 2. **`triggered_by` is forwarded to the provider**, which suppresses on an
    outside audience. It is an **ALLOW-list**, not a denylist naming `public` and
    `paid`: a denylist is open at the top and a surface added tomorrow would

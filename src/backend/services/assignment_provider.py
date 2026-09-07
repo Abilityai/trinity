@@ -30,6 +30,10 @@ with the answer shaped as::
         "proactive_consent":    bool | None,
     }
 
+**The provider owns "never an email", not this module.** The validation below
+checks *types*, not contents — a display name that happens to be an address is a
+`str` and passes. The property has to be established where the value is resolved.
+
 ``triggered_by`` is passed through so a provider can suppress the answer for
 audiences that must not see staff identities (anonymous public links, paid
 chat, external portal turns). The seam does not decide that policy — it carries
