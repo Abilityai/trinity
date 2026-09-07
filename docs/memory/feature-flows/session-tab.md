@@ -67,7 +67,7 @@ Each row in the session selector dropdown shows: turn count, context % used, a c
 
 ### Lean cut for first-visible-surface (Phase 3.1)
 
-Voice mic and SSE dynamic status labels are **deferred** (each requires a backend extension to the turn endpoint — voice writes to the wrong DB tables today, async_mode + SSE on the turn endpoint is THINK-001-shaped work). File upload **shipped in Phase 5.2** (commit `24acbf12`) — `SessionMessageRequest.files` is accepted and the turn handler runs the same `process_file_uploads` helper Chat does, with images fed in as vision blocks. Slash-command playbook autocomplete works automatically because `SessionPanel` reuses `ChatInput` with the agent name + status.
+Voice mic and SSE dynamic status labels are **deferred** (each requires a backend extension to the turn endpoint — voice writes to the wrong DB tables today, async_mode + SSE on the turn endpoint is THINK-001-shaped work). **The voice half is settled rather than pending since #2559**: there is one front door for voice, the Workspace conversation, and no chat surface carries a composer mic any more — so the question is not "extend the turn endpoint to write voice here" but "open the Workspace on this agent", which is what `AgentHeader`'s Talk button does. File upload **shipped in Phase 5.2** (commit `24acbf12`) — `SessionMessageRequest.files` is accepted and the turn handler runs the same `process_file_uploads` helper Chat does, with images fed in as vision blocks. Slash-command playbook autocomplete works automatically because `SessionPanel` reuses `ChatInput` with the agent name + status.
 
 ---
 
