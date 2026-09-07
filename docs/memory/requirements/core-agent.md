@@ -762,8 +762,9 @@
   flight, no cancel is already running, the key is not a composed IME candidate,
   no other handler has claimed it, and nothing else currently owns Escape.
   What owns it is declared PER SURFACE and declared generously — Agent Detail
-  lists the voice overlay and the session menu, the Workspace lists the composer
-  typeahead, the agent picker and dictation — because a missed cancel costs one
+  lists the session menu (its voice overlay is retired, #2559), the Workspace
+  lists the composer typeahead, the agent picker, dictation and the voice call
+  — because a missed cancel costs one
   click on Stop while a wrong one destroys work the user is still waiting for.
   Escape with nothing running is a no-op that never clears the input.
 - **Restoring the words never destroys a draft**: the cancelled text is
