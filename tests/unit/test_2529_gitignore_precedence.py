@@ -651,3 +651,56 @@ def test_managed_lines_are_all_stripped_by_the_builder():
         assert shlex.quote(line) in command or line in command, (
             f"managed line {line!r} is not in the merge command's strip list"
         )
+
+
+def test_untracked_alert_is_budgeted_not_a_direct_create():
+    """#1677. The sibling `git_bloat`/`sync_failing` emitters are direct creates
+    because their cadence is the 60-second platform poller's. This one fires
+    from `sync_to_github`, which an AGENT can drive — `git_sync` is an MCP tool
+    an agent-scoped key may call on itself, and a `git add -f <ignored>` + sync
+    loop yields a fresh `removed` set every time against a timestamped (not
+    idempotent) id. That is the `_alert_skill_not_found` (#1410) shape the budget
+    seam exists for, so it routes through `create_bounded_alert` and its id
+    prefix is reserved against agent pre-creation (the C2 suppression class).
+    """
+    import services.operator_queue_service as oqs
+
+    assert "gitignore_untracked" in oqs._BUDGETED_ALERT_TYPES
+    assert "gitignore-untracked-" in oqs._RESERVED_ID_PREFIXES
+
+
+@pytest.mark.asyncio
+async def test_untracked_alert_names_the_paths_and_never_raises():
+    from unittest.mock import AsyncMock, patch
+
+    gs = _gs()
+    sweep = gs.GitignoreSweep(
+        removed=tuple(f"f{i}" for i in range(25)),
+        shadowed=("!content/keep.md -> content/",),
+    )
+    with patch(
+        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
+    ) as create:
+        await gs._emit_gitignore_untracked_alert("alpha", sweep)
+    assert create.await_count == 1
+    agent_name, item = create.await_args.args
+    assert agent_name == "alpha"
+    assert item["type"] == "gitignore_untracked"
+    assert item["id"].startswith("gitignore-untracked-alpha-")
+    assert item["context"]["removed_count"] == 25
+    assert len(item["context"]["removed_paths"]) == 20  # capped
+    assert item["context"]["shadowed_negations"] == ["!content/keep.md -> content/"]
+
+    # An empty sweep files nothing at all.
+    with patch(
+        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
+    ) as create:
+        await gs._emit_gitignore_untracked_alert("alpha", gs.GitignoreSweep())
+    assert create.await_count == 0
+
+    # And an alerting failure never reaches the Push.
+    with patch(
+        "services.operator_queue_service.create_bounded_alert",
+        new=AsyncMock(side_effect=RuntimeError("db down")),
+    ):
+        await gs._emit_gitignore_untracked_alert("alpha", sweep)

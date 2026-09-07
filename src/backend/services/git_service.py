@@ -1188,7 +1188,7 @@ async def sync_to_github(
     # index mutation has already happened by the time the HTTP call runs, so a
     # 409 or an exception is exactly as obliged to report it as a 200.
     sweep = _coerce_sweep(await _migrate_workspace_gitignore(agent_name))
-    _emit_gitignore_untracked_alert(agent_name, sweep)
+    await _emit_gitignore_untracked_alert(agent_name, sweep)
     message = _augment_commit_message(message, sweep)
 
     try:
@@ -2110,7 +2110,9 @@ async def _migrate_workspace_gitignore(agent_name: str) -> GitignoreSweep:
         return GitignoreSweep()
 
 
-def _emit_gitignore_untracked_alert(agent_name: str, sweep: GitignoreSweep) -> None:
+async def _emit_gitignore_untracked_alert(
+    agent_name: str, sweep: GitignoreSweep
+) -> None:
     """File an operator-queue entry naming the paths a Push untracked (#2529).
 
     THE surface that outlives the session. Every other one — the API response,
@@ -2119,17 +2121,31 @@ def _emit_gitignore_untracked_alert(agent_name: str, sweep: GitignoreSweep) -> N
     cycles whose damage surfaced two months later. `sync_health_service`'s
     `git_bloat` entry (#1595) is the precedent for exactly this reasoning.
 
-    Best-effort by construction: mirrors the `_emit_*_alert` shape and swallows,
-    because an alerting failure must not fail a Push either.
+    Routed through the #1677 BUDGET seam, not `db.create_operator_queue_item`.
+    The sibling `git_bloat`/`sync_failing` emitters are direct creates because
+    their cadence is the 60-second platform poller's; this one fires from
+    `sync_to_github`, which an AGENT can drive — `git_sync` is an MCP tool an
+    agent-scoped key may call on itself. A repeated `git add -f <ignored>` +
+    sync loop yields a fresh `removed` set every time, and the id is timestamped
+    rather than idempotent, so nothing upstream bounds the volume. That is the
+    `_alert_skill_not_found` shape (#1410) the budget seam exists for, and
+    `gitignore-untracked-` joins `_RESERVED_ID_PREFIXES` so an agent cannot
+    pre-create the id and silently suppress its own alert via the sink's
+    `on_conflict_do_nothing` (the C2 class).
+
+    Best-effort by construction: `create_bounded_alert` never raises and returns
+    False when refused, and this still swallows, because an alerting failure
+    must not fail a Push either.
     """
     if not sweep.removed:
         return
     try:
+        from services.operator_queue_service import create_bounded_alert
         from utils.helpers import utc_now_iso
 
         now = utc_now_iso()
         shown = list(sweep.removed[:20])
-        db.create_operator_queue_item(
+        await create_bounded_alert(
             agent_name,
             {
                 "id": f"gitignore-untracked-{agent_name}-{now}",

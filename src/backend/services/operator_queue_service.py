@@ -124,7 +124,11 @@ OPERATOR_ALERT_MAX_PENDING_PER_TYPE = int(
 # unregistered `item["type"]` is refused fail-closed: a caller-trusted string
 # would mint a fresh budget per distinct value (unbounded cap keyspace), so
 # registration is a one-line reviewed act here, never a call-site decision.
-_BUDGETED_ALERT_TYPES = frozenset({"skill_not_found"})
+# #2529 `gitignore_untracked`: the per-Push `.gitignore` sweep's alert. Budgeted
+# rather than exempted because `sync_to_github` is reachable from the `git_sync`
+# MCP tool, which an agent-scoped key may call on itself — so an agent can drive
+# the volume, which is the whole test the #1677 classification applies.
+_BUDGETED_ALERT_TYPES = frozenset({"skill_not_found", "gitignore_untracked"})
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
 # platform trigger enum only — NEVER agent-controlled free text (G-04: the
@@ -156,6 +160,7 @@ _RESERVED_ID_PREFIXES = (
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
+    "gitignore-untracked-",  # git_service per-Push sweep alert (#2529)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a

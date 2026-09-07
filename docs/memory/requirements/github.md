@@ -618,7 +618,14 @@
   - **Five surfaces, one of which outlives the session.** API response, `git_sync` MCP
     tool result, UI toast, the commit message, and — because both field incidents were
     unattended and surfaced two months late — an **operator-queue entry**
-    (`gitignore_untracked`, the #1595 `git_bloat` precedent). The commit-message half is
+    (`gitignore_untracked`, the #1595 `git_bloat` precedent). That entry is **budgeted**
+    (#1677 `create_bounded_alert`), not a direct create like its `git_bloat`/`sync_failing`
+    siblings: their cadence is the 60-second platform poller's, while this one fires from
+    `sync_to_github`, which the `git_sync` MCP tool lets an agent-scoped key drive on itself
+    — a repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set each time
+    against a timestamped, non-idempotent id. Its `gitignore-untracked-` prefix is reserved
+    so an agent cannot pre-create the id and suppress its own alert through the sink's
+    `on_conflict_do_nothing`. The commit-message half is
     explicitly **best-effort**: `git rm --cached` only *stages*, and if the in-container
     auto-sync loop commits first the deletions ride in someone else's commit — which is
     exactly what `47efd80` was. The operator-queue entry is the surface that does not

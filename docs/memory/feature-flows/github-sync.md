@@ -332,7 +332,11 @@ into a `GitignoreSweep`:
 
 The sweep reaches five surfaces: the API response, the `git_sync` MCP result,
 the UI toast, the commit message, and a `gitignore_untracked` **operator-queue**
-entry. The last one is the point: both field incidents were unattended
+entry — filed through the #1677 **budget seam** (`create_bounded_alert`), not as
+a direct create like its `git_bloat`/`sync_failing` siblings, because those fire
+on the 60-second platform poller's cadence while this one fires from
+`sync_to_github`, which the `git_sync` MCP tool lets an agent drive on itself.
+The last surface is the point: both field incidents were unattended
 15-minute cycles and surfaced two months late, and every other surface is read
 only by whoever ran the Push. The commit-message half is explicitly
 **best-effort** — `git rm --cached` only *stages*, and the backend's
