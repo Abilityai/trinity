@@ -869,3 +869,19 @@ def test_removed_count_is_exact_even_when_the_list_is_capped():
         "", f"{gs._SWEEP_TAG_REMOVED_COUNT}not-a-number\n{gs._SWEEP_TAG_REMOVED}p1\n"
     )
     assert fallback.removed_total == 1
+
+
+def test_probe_tags_are_prefix_distinct():
+    """`_tagged_output_lines` matches by `startswith`, so a tag that is a prefix
+    of another silently absorbs its lines. `removed` vs `removed-count` is one
+    character away from exactly that."""
+    gs = _gs()
+    tags = [
+        gs._SWEEP_TAG_BEFORE, gs._SWEEP_TAG_AFTER,
+        gs._SWEEP_TAG_REMOVED, gs._SWEEP_TAG_REMOVED_COUNT, gs._SWEEP_TAG_SHADOW,
+    ]
+    assert len(set(tags)) == len(tags)
+    for a in tags:
+        for b in tags:
+            if a is not b:
+                assert not b.startswith(a), f"{b!r} is absorbed by {a!r}"
