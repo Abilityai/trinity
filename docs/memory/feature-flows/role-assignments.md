@@ -133,6 +133,16 @@ Two mechanisms close that, and both are required:
    `paid`: a denylist is open at the top and a surface added tomorrow would
    disclose by default. A `None` label — audience unknown — is suppressed too.
 
+   Three suppressed labels are worth naming here, because the source scan below
+   cannot see them (no outside-facing router emits them) yet each has a reader
+   who may be outside the organisation: **`mcp`** (an MCP turn is `mcp` whether
+   the key is a user-scoped operator key or a CONNECTOR key — an end-user
+   consumption credential — and this seam receives the label, not the
+   principal), **`agent`** (transitive: a public-facing agent delegating to a
+   companion puts that companion's primary human one model-hop from a visitor),
+   and **`room`** (ent#363 exists because a room may contain a person outside
+   the fleet).
+
 One fact the second mechanism rests on, and it is asserted over the source
 rather than assumed: **a Workspace/portal turn is labelled `public`**, not a
 third label. `test_ent500_public_turn_no_pii.py` fails if `routers/public.py`,

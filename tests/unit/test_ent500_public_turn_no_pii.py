@@ -35,10 +35,29 @@ from services.platform_prompt_service import ExecutionContext, compose_system_pr
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 
-# The audiences that must never see an assignment line. `public` covers BOTH
-# the anonymous public link and every Workspace/portal turn — see
-# `test_outside_facing_surfaces_use_only_suppressed_trigger_labels`.
+# The trigger labels the OUTSIDE-FACING ROUTERS emit. `public` covers BOTH the
+# anonymous public link and every Workspace/portal turn — see
+# `test_outside_facing_surfaces_use_only_suppressed_trigger_labels`, which pins
+# that over the sources.
 OUTSIDE_AUDIENCES = ("public", "paid")
+
+# Labels a provider must ALSO suppress, and the reason each one is easy to get
+# wrong: none of them is emitted by an outside-facing router, so the source scan
+# above cannot see them. The reader is outside the organisation anyway.
+TRANSITIVE_AUDIENCES = {
+    # An MCP turn is `mcp` whether the key is a user-scoped OPERATOR key or a
+    # CONNECTOR key — an end-user consumption credential bound to one agent
+    # (ent#46). The seam receives the LABEL, not the principal, so it cannot
+    # tell them apart.
+    "mcp": "a connector key is an external end-user credential",
+    # Agent-to-agent is transitive: a public-facing agent delegating to a
+    # companion puts that companion's primary human one model-hop from a
+    # visitor.
+    "agent": "transitive — the calling agent may be serving an outside caller",
+    # ent#363 exists precisely because a room may contain a person outside the
+    # fleet, and its whole job is to tell the agent so.
+    "room": "a room may contain someone outside the fleet",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +81,10 @@ class _SuppressingProvider:
     ALLOW-list, so a trigger label invented tomorrow is suppressed by default
     rather than disclosed by default."""
 
-    ALLOWED = frozenset({"chat", "user", "task", "schedule", "webhook"})
+    ALLOWED = frozenset(
+        {"chat", "user", "manual", "self_task", "schedule", "retry", "webhook",
+         "event", "reminder", "loop", "fan_out", "system", "validation"}
+    )
 
     def __init__(self):
         self.seen: list[str | None] = []
@@ -91,7 +113,7 @@ def test_an_outside_turn_renders_no_assignment_lines(triggered_by, quiet_db):
     assert "A. Smith" not in out
 
 
-@pytest.mark.parametrize("triggered_by", ["chat", "user", "task", "schedule"])
+@pytest.mark.parametrize("triggered_by", ["chat", "user", "manual", "schedule"])
 def test_an_inside_turn_still_renders_them(triggered_by, quiet_db):
     """The suppression must be audience-scoped, not a blanket kill — otherwise
     the feature delivers nothing to the one audience it exists for."""
@@ -100,6 +122,24 @@ def test_an_inside_turn_still_renders_them(triggered_by, quiet_db):
         ExecutionContext(agent_name="ops-companion", triggered_by=triggered_by)
     )
     assert "- **Primary human**: A. Smith (role: head-of-ops)" in out
+
+
+@pytest.mark.parametrize("triggered_by", sorted(TRANSITIVE_AUDIENCES))
+def test_a_transitive_or_ambiguous_audience_renders_nothing(triggered_by, quiet_db):
+    """The three the source scan cannot catch.
+
+    None of these is emitted by an outside-facing router, so
+    `test_outside_facing_surfaces_use_only_suppressed_trigger_labels` says
+    nothing about them — yet each has a reader who may be outside the
+    organisation. Pinned here so the public contract states the requirement even
+    though the rule itself is enforced by the provider.
+    """
+    ap.register_provider(_SuppressingProvider())
+    out = compose_system_prompt(
+        ExecutionContext(agent_name="ops", triggered_by=triggered_by)
+    )
+    assert "Primary human" not in out, TRANSITIVE_AUDIENCES[triggered_by]
+    assert "A. Smith" not in out
 
 
 def test_an_unrecognised_trigger_label_is_suppressed_by_default(quiet_db):
@@ -115,7 +155,7 @@ def test_an_unrecognised_trigger_label_is_suppressed_by_default(quiet_db):
 def test_the_seam_forwards_the_trigger_label_verbatim(quiet_db):
     provider = _SuppressingProvider()
     ap.register_provider(provider)
-    for label in ("chat", "public", "paid", None):
+    for label in ("chat", "public", "paid", None):  # verbatim, including None
         compose_system_prompt(
             ExecutionContext(agent_name="ops", triggered_by=label)
         )
