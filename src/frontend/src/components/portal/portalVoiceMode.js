@@ -26,6 +26,51 @@ export function voiceEntryState({ isPlatform = false, realtimeVoice = null } = {
   return { render: true, enabled: false, reason: realtimeVoice?.reason || VOICE_UNAVAILABLE_FALLBACK }
 }
 
+// ---- The Talk door: `?voice=1` (trinity#2559) --------------------------------
+
+export const VOICE_QUERY_KEY = 'voice'
+
+// The intent is armed IN THE APP, by Agent Detail's Talk button, and consumed
+// once. A module-scoped `let` is the whole point: it lives exactly as long as
+// the document, so a pasted / bookmarked / mailed `?voice=1` — which always
+// arrives on a FRESH document — can never be armed, while the same-document
+// hand-off from Agent Detail (and the inline sign-in re-bootstrap that may
+// follow it) both keep it.
+//
+// `navigator.userActivation` cannot do this job, and reaching for it is the
+// trap: it is an audio-playback heuristic rather than a provenance check, it is
+// sticky per document, and the sign-in click sets it for the attacker.
+// `Portal.vue` runs `bootstrap()` only while signed in, so a pasted link
+// survives unconsumed until exactly the click that satisfies the browser's own
+// check — a link plus a sign-in was a hot mic. It is also fail-open on `null`.
+//
+// Chosen over `sessionStorage` (precedent: `stores/clientPortal.js`
+// `FALLBACK_SUPPRESSED_KEY`) because sessionStorage SURVIVES a reload, so a
+// one-shot there needs correct explicit deletion on every path; the module
+// `let` dies with the document, which is the semantics we want, for free.
+let armed = false
+export function armVoiceAutoStart() { armed = true }
+export function disarmVoiceAutoStart() { armed = false }
+export function voiceAutoStartArmed() { return armed }
+
+// vue-router hands back a string, or an array when the key repeats.
+export function voiceQueryRequested(value) {
+  const v = Array.isArray(value) ? value[0] : value
+  return v === '1'
+}
+
+// No `strip` verdict here: stripping is keyed on the key's PRESENCE and owned
+// by `Portal.vue::bootstrap()` — one site, every exit. A helper that stripped
+// on its own verdict left `?voice=0` resident, because a rejected value is
+// still present.
+export function voiceAutoStart({ query = null, landed = false, isPlatform = false, armed: isArmed = false } = {}) {
+  if (!voiceQueryRequested(query?.[VOICE_QUERY_KEY])) return { start: false, why: '' }
+  if (!isArmed) return { start: false, why: 'unarmed' }
+  if (!landed) return { start: false, why: 'unreachable' }
+  if (!isPlatform) return { start: false, why: 'principal' }
+  return { start: true, why: '' }
+}
+
 // ---- Pre-flight, before any request leaves the browser ----------------------
 
 export const VOICE_INSECURE_REASON =
