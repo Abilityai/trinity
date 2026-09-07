@@ -2190,11 +2190,17 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   `v-if="loading"`, so re-opening the picker with templates already fetched swapped
   the loaded grid back to a placeholder; and `GitPanel` did the same with git
   status. Both now key on a `firstLoad` verdict. The #1927 ratchet fell 72 → 69.
-- **One spinner was removed rather than converted.** The Dashboard's history
-  spinner fired on every background poll, beside a Refresh button that already
-  signals in-flight by disabling itself. "First load animates; scheduled
-  background refresh is invisible" — so the honest treatment was deletion, not a
-  nicer animation.
+- **One spinner was deleted and then restored, and the reason is worth keeping.**
+  The Dashboard's history spinner *looks* like a background-refresh indicator, and
+  the sweep removed it as one. It is not: `fetchHistoricalCommunications` has
+  exactly three callers — mount, the Refresh button, and a time-range change — and
+  no interval anywhere, so all three are first-load or explicit user actions,
+  which is when in-flight feedback is sanctioned. The deletion rested on "it fires
+  on every poll" without checking that a poll existed. #2536's e2e caught it,
+  because that test measures the view-switcher's bounding box *with and without
+  this element* — the deletion removed its instrument. **The rule "background
+  refresh is invisible" only applies once you have shown there is a background
+  refresh.**
 - **Sanctioned spinners are untouched** (AC 6): the 16px in-flight indicator inside
   a pressed control, on every Save/Trigger/Toggle button, and the refresh-icon spin
   that pairs with a disabled refresh control.
