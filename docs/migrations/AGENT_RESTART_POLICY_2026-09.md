@@ -35,6 +35,13 @@ Since #2541:
 honours it, so an agent an operator deliberately stopped or quarantined stays
 down across a reboot. `always` would resurrect it.
 
+> ⚠️ **The flag is set only when the stop succeeds.** `POST /api/ops/emergency-stop`
+> stops agents in parallel and reports **per agent** — an agent that returns
+> `{"result": "error"}` is still running, and after this change it now also
+> survives the next reboot, where before it would have died there by accident.
+> Read the emergency-stop response and re-issue for any agent not reported
+> `stopped`; a quarantine is not complete until every agent reports it.
+
 ---
 
 ## Why an upgrade step is required
