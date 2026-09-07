@@ -23,22 +23,45 @@ import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
  * carry the rules that only a real call can show.
  */
 
-// The fixture contract (#2199): default to an agent that does NOT exist, probe
-// with the shared authenticated helper, and let a definitive 404 SKIP while any
-// other probe failure fails loudly. Defaulting to `trinity-system` — an agent
-// that always exists — is the anti-pattern the helper's own docstring names.
+// The @smoke tier is HERMETIC — a synthetic name that exists only in the route
+// stubs below, never a fixture the stack has to provide. That is not a stylistic
+// choice, it is the only shape that runs in CI, and the reason is two-sided:
 //
-// Beyond existence (all this probe promises), these cases need the agent to be
-// on the signed-in operator's **Workspace roster**: `resolveAgentLanding` has to
-// land on it, or the door reaches the "you don't have access" stage instead. The
-// roster is shared ∪ owned, with no admin arm — so an admin's own agent, or one
-// shared with them, is the right fixture.
-const AGENT = process.env.TALK_AGENT || 'testfix'
+//  1. `frontend-e2e.yml` pins the e2e baseline at ZERO user agents on purpose
+//     ("Keep the e2e baseline at zero user agents", the ent#124 seeder sentinel),
+//     so any real fixture name is absent and a `#2199` existence probe SKIPS.
+//  2. Even given an agent, the CI admin is bootstrapped from `ADMIN_PASSWORD`
+//     with **no email**, and `client_portal/portal_auth.py:147` 403s a platform
+//     principal without one — so `GET /my-agents` cannot answer, the roster is
+//     empty, and the door lands on "You don't have access" instead of the call.
+//
+// Both were observed, not predicted: with a describe-level probe the whole tier
+// reported `5 skipped`, and with a real agent the load-bearing case failed on an
+// empty roster. `workspace-code-blocks.spec.js` is the house pattern followed
+// here (synthetic name + a fully `route.fulfill`ed roster), and
+// `workspace-absorbs-session.spec.js:30-32` states the rule this file broke: the
+// existence probe belongs INSIDE the @interactive test, never in a
+// describe-level `beforeEach`, or it takes the @smoke tier down with it.
+const AGENT = 'e2e-talk-door'
 
-const VOICE_START = '**/api/enterprise/client-portal/agents/*/voice/start'
-const ROSTER = '**/api/enterprise/client-portal/my-agents'
+// The @interactive tier is the opposite: a REAL agent, on the caller's Workspace
+// roster (shared ∪ owned — there is no admin arm), because only a real call can
+// carry what those cases assert. Fixture contract #2199: default to a name that
+// does NOT exist so a definitive 404 SKIPs and any other probe failure is loud.
+const INTERACTIVE_AGENT = process.env.TALK_AGENT || 'testfix'
+
+const API = '**/api/enterprise/client-portal'
+const VOICE_START = `${API}/agents/*/voice/start`
+const ROSTER = `${API}/my-agents*`
+const SESSIONS = `${API}/sessions`
 const FLAGS = '**/api/settings/feature-flags'
 const VOICE_STATUS = '**/api/agents/*/voice/status'
+
+const json = (body) => ({
+  status: 200,
+  contentType: 'application/json',
+  body: JSON.stringify(body),
+})
 
 /** Count every request to a URL pattern, whoever answers it. */
 function countRequests(page, test) {
@@ -48,41 +71,112 @@ function countRequests(page, test) {
 }
 
 /**
- * Make the destination claim it can run a call, and swallow the start request.
+ * Stand up the whole Workspace destination, and swallow the start request.
  *
- * Without the roster patch the local stack reports `realtime_voice.available:
- * false` (the dev `GEMINI_API_KEY` is empty), and `startVoiceCall` bails in
- * `PortalConversation` BEFORE it ever reaches `voice.startWith` — so a
- * "no start POST was made" assertion would pass for a reason that has nothing to
- * do with the rule under test. That false green is the trap this helper exists
- * to close.
+ * Two traps this closes, both of which produce a test that passes for the wrong
+ * reason rather than one that fails honestly:
+ *
+ *  - `realtime_voice.available` must be true, or `startVoiceCall` bails in
+ *    `PortalConversation` BEFORE `voice.startWith` — so "no start POST was made"
+ *    would hold for a reason unrelated to the rule under test.
+ *  - the roster must actually CONTAIN the agent, or `resolveAgentLanding` puts
+ *    the door on the "You don't have access" stage, where nothing can start.
  */
 async function stubWorkspaceVoice(page) {
-  await page.route(ROSTER, async (route) => {
-    const response = await route.fetch()
-    const body = await response.json().catch(() => null)
-    if (!body) return route.fulfill({ response })
-    body.realtime_voice = { available: true, reason: null }
-    return route.fulfill({ response, json: body })
-  })
-  await page.route(VOICE_START, (route) => route.fulfill({
+  // Fully synthetic — `route.fetch()` + mutate was the original shape here and it
+  // inherits whatever the live roster says, including the CI admin's 403. The
+  // payload is `PortalRoster` (client_portal/models.py:189): `agents` is the
+  // landing set `resolveAgentLanding` searches, and `realtime_voice` is the
+  // ent#534 capability the destination reads before it will start a call.
+  await page.route(ROSTER, (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
+    body: JSON.stringify({
+      client_email: 'e2e@example.com',
+      agents: [{
+        name: AGENT,
+        display_label: 'Talk Door',
+        description: 'e2e fixture',
+        availability: 'ready',
+        playbooks: [],
+      }],
+      realtime_voice: { available: true, reason: null },
+      multi_agent_chat_available: false,
+    }),
+  }))
+  // The Workspace shell's own reads. Empty is the right answer — it puts the
+  // door on the "no thread yet" path, which is the one Talk actually takes for
+  // an agent the operator has never chatted with, and therefore the one worth
+  // proving. Un-stubbed these hit the live backend, which 403s a platform
+  // principal with no email (`portal_auth.py:147`).
+  await page.route(`${SESSIONS}*`, (route) => route.fulfill(json({ sessions: [] })))
+  await page.route(`${API}/chat-state*`, (route) => route.fulfill(json({ chats: [] })))
+  await page.route(`${API}/agents/${AGENT}/history*`, (route) => route.fulfill(json({
+    agent_name: AGENT, session_id: null, messages: [],
+  })))
+
+  // `startVoiceCall` opens a thread BEFORE the first word is spoken
+  // (`PortalConversation.vue:2087-2093`) — "the transcript needs a home". Its
+  // failure branch sets "Could not open a chat for the call." and returns
+  // WITHOUT ever reaching `voice.startWith`, so leaving this to the live backend
+  // is exactly how the start POST goes missing while the page still looks right.
+  await page.route(`${API}/agents/${AGENT}/sessions`, (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(json({ id: 'e2e-talk-door-session', agent_name: AGENT }))
+  })
+
+  await page.route(VOICE_START, (route) => route.fulfill(json({
     // Enough to satisfy the caller; the socket never opens because the URL
     // points nowhere, which is what keeps this case mic-free and flake-free.
+    voice_session_id: 'e2e-voice-session',
+    websocket_url: '/ws/voice/e2e-voice-session',
+    portal_session_id: 'e2e-portal-session',
+  })))
+}
+
+/**
+ * Make Agent Detail render a header for the synthetic agent.
+ *
+ * Talk lives in `AgentHeader`, which only renders once `agent` resolves — so
+ * without this the page is "Agent not found" and every `getByTestId('agent-talk')`
+ * times out. `GET /api/agents/{name}` is the single call `agents.js::fetchAgent`
+ * makes; the shape is a real `trinity-system` payload trimmed to the fields the
+ * header reads. Everything else Agent Detail fetches (info, token stats,
+ * dashboard) tolerates a 404, which is what the un-stubbed backend returns.
+ */
+async function stubAgentDetail(page) {
+  await page.route(`**/api/agents/${AGENT}`, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
     body: JSON.stringify({
-      voice_session_id: 'e2e-voice-session',
-      websocket_url: '/ws/voice/e2e-voice-session',
-      portal_session_id: 'e2e-portal-session',
+      name: AGENT,
+      status: 'running',
+      port: 2299,
+      created: new Date().toISOString(),
+      resources: { cpu: '1', memory: '1g' },
+      container_id: 'e2e-talk-door-container',
+      template: 'local:test-echo',
+      runtime: 'claude-code',
+      ephemeral: false,
+      display_label: null,
+      owner: 'admin',
+      is_owner: true,
+      is_shared: false,
+      is_system: false,
+      can_share: true,
+      can_delete: true,
+      autonomy_enabled: false,
+      read_only_enabled: false,
+      avatar_url: null,
+      shares: [],
+      circuit_breaker: null,
     }),
   }))
 }
 
-test.beforeEach(async ({ baseURL }) => {
-  test.skip(!(await agentExists(AGENT, { baseURL })), missingAgentReason(AGENT, 'TALK_AGENT'))
-})
-
 test.describe('the Talk door', () => {
+  test.beforeEach(async ({ page }) => { await stubAgentDetail(page) })
+
   test('@smoke clicking Talk lands in the Workspace and STARTS the call', async ({ page }) => {
     const starts = countRequests(page, (u) => /\/client-portal\/agents\/[^/]+\/voice\/start/.test(u))
     const statusProbes = countRequests(page, (u) => /\/api\/agents\/[^/]+\/voice\/status/.test(u))
@@ -165,6 +259,8 @@ test.describe('the Talk door', () => {
 })
 
 test.describe('nothing on Agent Detail offers voice any more', () => {
+  test.beforeEach(async ({ page }) => { await stubAgentDetail(page) })
+
   test('@smoke the chat composer has no microphone', async ({ page }) => {
     await page.goto(`/agents/${AGENT}?tab=chat`)
     await expect(page.getByTestId('agent-talk')).toBeVisible({ timeout: 20000 })
@@ -174,16 +270,47 @@ test.describe('nothing on Agent Detail offers voice any more', () => {
   })
 })
 
+/**
+ * Patch only the capability bit on the LIVE roster, leaving the agent list real.
+ *
+ * The @interactive tier drives a real call against a real agent, so it cannot use
+ * the synthetic roster above — `resolveAgentLanding` has to find the actual
+ * fixture. What it does need is `realtime_voice.available`, because a laptop with
+ * an empty `GEMINI_API_KEY` reports unavailable and `startVoiceCall` bails at
+ * `PortalConversation.vue` BEFORE `voice.startWith`; the assertions would then
+ * pass for a reason unrelated to the rule under test.
+ *
+ * Note this tier does NOT stub `POST …/voice/start` — stubbing it would fulfil
+ * the request with a websocket_url pointing nowhere, and "the orb came up" would
+ * be true with no call behind it. That is the whole difference between this tier
+ * and @smoke, and it is why a real provider key is a precondition here.
+ */
+async function patchLiveRosterVoice(page) {
+  await page.route(ROSTER, async (route) => {
+    const response = await route.fetch()
+    const body = await response.json().catch(() => null)
+    if (!body) return route.fulfill({ response })
+    body.realtime_voice = { available: true, reason: null }
+    return route.fulfill({ response, json: body })
+  })
+}
+
 test.describe('@interactive the call itself', () => {
   test.use({ permissions: ['microphone'] })
 
-  test('Talk lands on the agent and the orb comes up', async ({ page }) => {
-    // Needs a real provider key. Patching the roster is still required — with an
-    // empty GEMINI_API_KEY the instance reports unavailable and the call bails
-    // before `voice.startWith`, which would make this pass for the wrong reason.
-    await stubWorkspaceVoice(page)
+  // #2199, and `workspace-absorbs-session.spec.js:30-32`: the probe is INSIDE
+  // this describe, never at file level, so it cannot sterilise the @smoke tier.
+  test.beforeEach(async ({ baseURL }) => {
+    test.skip(
+      !(await agentExists(INTERACTIVE_AGENT, { baseURL })),
+      missingAgentReason(INTERACTIVE_AGENT, 'TALK_AGENT'),
+    )
+  })
 
-    await page.goto(`/agents/${AGENT}`)
+  test('Talk lands on the agent and the orb comes up', async ({ page }) => {
+    await patchLiveRosterVoice(page)
+
+    await page.goto(`/agents/${INTERACTIVE_AGENT}`)
     await page.getByTestId('agent-talk').click()
     await page.waitForURL(/\/workspace/, { timeout: 20000 })
 
@@ -206,9 +333,9 @@ test.describe('@interactive the call itself', () => {
     const starts = countRequests(page, (u) => /\/client-portal\/agents\/[^/]+\/voice\/start/.test(u))
     await context.clearCookies()
     await page.addInitScript(() => { try { localStorage.clear(); sessionStorage.clear() } catch { /* noop */ } })
-    await stubWorkspaceVoice(page)
+    await patchLiveRosterVoice(page)
 
-    await page.goto(`/workspace?agent=${AGENT}&voice=1`)
+    await page.goto(`/workspace?agent=${INTERACTIVE_AGENT}&voice=1`)
     await page.waitForLoadState('networkidle')
     // Sign in however this instance asks (code entry / continue as operator);
     // any click here is what would have armed the browser's own heuristic.
