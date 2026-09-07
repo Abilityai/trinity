@@ -53,6 +53,21 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
   // more read after it. `_notePending` is the per-agent trailing set.
   const _noteInFlight = new Set()
   const _notePending = new Set()
+  // The chat's identity. Bumped ONLY by a participant change or a clear —
+  // never by `refresh()` — because an inbox read must not be cancelled just
+  // because some other fetch cycle started.
+  let _scopeToken = 0
+  // agent -> monotonic counter of inbox reads. This, not `_fetchToken`, is what
+  // orders `refresh`'s upload listing against `noteUpload`'s.
+  //
+  // A single shared token cannot do this job, and getting it wrong is silent:
+  // a room's drop fans one file out to THREE agents, so three `noteUpload`s run
+  // concurrently, and under one counter each would invalidate the last — two of
+  // the three listings discarded, the earlier agents left stale. The two
+  // questions are genuinely different ("has the chat moved on?" is global;
+  // "is this agent's listing still the newest?" is per agent), so they need two
+  // counters. Found by the room fan-out test, not by reading.
+  const _uploadEpoch = new Map()
 
   const canvasCount = computed(() => Object.values(canvases.value).reduce((n, l) => n + l.length, 0))
   const documentCount = computed(() => Object.values(documents.value).reduce((n, l) => n + l.length, 0))
@@ -72,8 +87,10 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     hasLoaded.value = false
     error.value = null
     _fetchToken++
+    _scopeToken++
     _noteInFlight.clear()
     _notePending.clear()
+    _uploadEpoch.clear()
   }
 
   function setFeeds({ canvas = false, files = false } = {}) {
@@ -94,6 +111,11 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     if (!names.length || (!wants.canvas && !wants.files)) return
     const portal = useClientPortalStore()
     const token = ++_fetchToken
+    // Snapshot the per-agent inbox epochs BEFORE the awaits. An upload noted
+    // while this refresh is in flight makes this refresh's listing for that
+    // agent stale on arrival — and `nextUploads` is rebuilt from a map read
+    // AFTER the awaits, so without this the stale rows win silently.
+    const epochAt = new Map(_uploadEpoch)
     loading.value = true
     try {
       const jobs = []
@@ -119,7 +141,10 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
         const rows = Array.isArray(r.value) ? r.value : []
         if (kind === 'canvas') nextCanvases[name] = rows
         else if (kind === 'documents') nextDocuments[name] = rows
-        else { nextUploads[name] = rows; nextUploadsLoaded[name] = true }
+        else if ((_uploadEpoch.get(name) || 0) === (epochAt.get(name) || 0)) {
+          nextUploads[name] = rows
+          nextUploadsLoaded[name] = true
+        }
       })
       if (anyOk) {
         canvases.value = nextCanvases
@@ -152,27 +177,34 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
    *
    * Three properties, each of which a simpler shape gets wrong:
    *
-   *   * it SHARES `_fetchToken` with `refresh()`. Without that, a
-   *     `refresh({uploads: true})` issued before the upload but resolving after
-   *     this read would clobber the fresh listing with the pre-upload one — and
-   *     it rebuilds `nextUploads` from a snapshot taken after its own awaits,
-   *     so the clobber is silent.
+   *   * it takes a per-agent EPOCH, which `refresh()` snapshots before its
+   *     awaits. Without that ordering a `refresh({uploads: true})` issued
+   *     before the upload but resolving after this read clobbers the fresh
+   *     listing with the pre-upload one — and it rebuilds `nextUploads` from a
+   *     map read after its own awaits, so the clobber is silent. Per AGENT and
+   *     not one shared counter: a room's drop runs three of these concurrently
+   *     for three different agents, and a shared counter lets each invalidate
+   *     the last.
    *   * it coalesces LEADING and TRAILING. A note arriving while a read is in
    *     flight cannot join that read: the listing was taken before the newer
    *     file existed, which is defect 1 reproduced exactly. It queues one more
    *     read instead.
    *   * it is a no-op for an agent that is not a participant, and it re-checks
-   *     that AFTER the await, because the chat can switch mid-read.
+   *     the chat's identity AFTER the await, because the chat can switch
+   *     mid-read.
    */
   async function noteUpload(agentName) {
     if (!agentName || !participants.value.includes(agentName)) return
     if (_noteInFlight.has(agentName)) { _notePending.add(agentName); return }
     _noteInFlight.add(agentName)
     const portal = useClientPortalStore()
-    const token = ++_fetchToken
+    const scope = _scopeToken
+    const epoch = (_uploadEpoch.get(agentName) || 0) + 1
+    _uploadEpoch.set(agentName, epoch)
     try {
       const rows = await portal.fetchUploads(agentName)
-      if (token !== _fetchToken) return          // a newer read (or a chat switch) already won
+      if (scope !== _scopeToken) return                    // the chat moved on
+      if (_uploadEpoch.get(agentName) !== epoch) return    // a newer read of THIS inbox won
       if (!participants.value.includes(agentName)) return
       uploads.value = { ...uploads.value, [agentName]: Array.isArray(rows) ? rows : [] }
       uploadsLoaded.value = { ...uploadsLoaded.value, [agentName]: true }
@@ -222,6 +254,8 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null }
     _noteInFlight.clear()
     _notePending.clear()
+    _uploadEpoch.clear()
+    _scopeToken++
     participants.value = []
     feeds.value = { canvas: false, files: false }
     canvases.value = {}

@@ -39,8 +39,21 @@ const portal = vi.hoisted(() => ({
   fetchUploads: vi.fn(),
   uploadDocument: vi.fn(),
   isPlatformSession: true,
+  // #2582 — the owner composable watches this. A plain object here would make
+  // that watcher permanently inert, so a future test of the upload drain would
+  // pass or fail for a reason that has nothing to do with the code under test.
+  // `reactive()` below is what keeps it honest; the fields are what keep the
+  // drain's `clearUploadPending` from throwing if it ever does fire.
+  pendingUploadNotes: {},
+  clearUploadPending: vi.fn(),
 }))
-vi.mock('@/stores/clientPortal', () => ({ useClientPortalStore: () => portal }))
+// `reactive()` caches by target, so every call returns the SAME proxy and a
+// watcher registered on it actually fires. (The drain's own behaviour is
+// covered in `portalRailFiles.spec.js`.)
+vi.mock('@/stores/clientPortal', async () => {
+  const { reactive } = await import('vue')
+  return { useClientPortalStore: () => reactive(portal) }
+})
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
 vi.mock('@/api', () => ({ default: api }))
