@@ -71,6 +71,12 @@ sys.path.insert(0, _BACKEND_STR)
 
 from db_harness import db_backend, run as _hrun, scalar as _hscalar  # noqa: E402,F401
 
+# The whole module is the PG guard: `schema-parity.yml` selects on this marker
+# and runs it with TEST_POSTGRES_URL set, so `db_backend` parametrizes onto real
+# PostgreSQL. It stays on the module (not just the [postgres] params) on purpose
+# — the [sqlite] arm going red pre-fix for a DIFFERENT reason is evidence too.
+pytestmark = pytest.mark.requires_postgres
+
 _DB_MODULES = ("db.connection", "db.schedules", "db.activities", "database")
 # The snapshot/restore pair `tests/lint_sys_modules.py` recognises (precedent:
 # test_1832_duration_clamp.py). The db.* modules must be evicted so each fixture
