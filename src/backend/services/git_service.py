@@ -1510,9 +1510,18 @@ def _build_gitignore_append_command(git_dir: str, patterns) -> str:
     """Build a bash command that appends any missing ``patterns`` to
     ``{git_dir}/.gitignore`` without clobbering user-supplied rules.
     Idempotent — each pattern is gated by an exact-line ``grep -qxF`` check,
-    so a second run is a no-op. Generic over the pattern list so both the
-    fleet-wide ignore merge and the per-agent data_paths append (#1169) share
-    one implementation.
+    so a second run is a no-op. Used by the per-agent data_paths append (#1169);
+    the fleet-wide merge no longer appends at all (see
+    ``_build_gitignore_merge_command``).
+
+    #2529 interaction, stated because it looks wrong at first glance: appending
+    to the END now lands the declared data paths BELOW the protected floor.
+    Harmless — they are positive ignores over agent-declared data directories,
+    so they shadow nothing the floor protects — and self-correcting, because
+    they are not managed lines and the next merge carries them into the user
+    region with everything else. Both writers dedupe by exact line, so neither
+    order duplicates them (pinned by
+    ``test_2529_gitignore_precedence.py::test_data_paths_append_lands_in_the_user_region_and_does_not_churn``).
     """
     parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
     for p in patterns:

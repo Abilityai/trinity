@@ -704,3 +704,52 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
         new=AsyncMock(side_effect=RuntimeError("db down")),
     ):
         await gs._emit_gitignore_untracked_alert("alpha", sweep)
+
+
+# ---------------------------------------------------------------------------
+# The other writers of an agent's `.gitignore` (Decision 8: the coverage frame
+# is the FILE, not the three merge call sites)
+# ---------------------------------------------------------------------------
+
+def test_data_paths_append_lands_in_the_user_region_and_does_not_churn(tmp_path):
+    """`materialize_data_paths` (#1169) appends through the generic
+    `_build_gitignore_append_command`, i.e. to the END of the file — which after
+    #2529 is BELOW the protected floor. Harmless (they are positive ignores
+    matching agent-declared data dirs, so they shadow nothing the floor
+    protects) and SELF-CORRECTING: they are not managed lines, so the next merge
+    carries them into the user region with everything else. The property that
+    matters is that neither step duplicates them, or the 15-minute auto-sync
+    loop would re-commit a growing `.gitignore` forever."""
+    gs = _gs()
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "")
+    _run(gs._build_gitignore_merge_command(str(home)), home)
+    paths = ["data/", "datasets/big/"]
+    _run(gs._build_gitignore_append_command(str(home), paths), home)
+    _, user_before, _ = _regions(home)
+    # Appended past the floor on this pass...
+    assert user_before[-2:] != paths
+    assert (home / ".gitignore").read_text().rstrip().endswith("datasets/big/")
+
+    _run(gs._build_gitignore_merge_command(str(home)), home)
+    _, user, _ = _regions(home)
+    assert user == paths, f"data paths did not land in the user region: {user}"
+
+    # Idempotent across both writers, in both orders.
+    _run(gs._build_gitignore_append_command(str(home), paths), home)
+    _run(gs._build_gitignore_merge_command(str(home)), home)
+    _, user, _ = _regions(home)
+    assert user == paths, f"a data path was duplicated: {user}"
+
+
+def test_a_user_line_matching_a_canonical_pattern_is_deduped_not_doubled(tmp_path):
+    """A user who typed a canonical pattern themselves keeps ONE copy of it —
+    ours, in the managed block. The honest cost, documented in the agent guide:
+    if they had written `*.log` / `!important.log` / `*.log`, only the negation
+    survives below the block, which WEAKENS an ignore they meant. It can never
+    untrack something new, the floor covers the cases where weakening would be
+    dangerous, and `shadowed_negations` reports the rest."""
+    home = _make_repo(tmp_path, {"CLAUDE.md": "a\n"}, "*.log\n!important.log\n*.log\nmine/\n")
+    _run(_gs()._build_gitignore_merge_command(str(home)), home)
+    top, user, _ = _regions(home)
+    assert top.count("*.log") == 1
+    assert user == ["!important.log", "mine/"]
