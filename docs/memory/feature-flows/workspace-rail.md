@@ -311,6 +311,11 @@ Escape and the arrows are registered with **`{ capture: true }`** and call
 `preventDefault()`. Capture is required: the conversation's turn-cancel listener
 is on `document` in the bubble phase, so a bubble listener would let Escape
 cancel an in-flight turn before `shouldCancelOnEscape` sees `defaultPrevented`.
+**The delete confirm carries the same handler**, because `ConfirmDialog` has no
+key handling of its own — an unguarded Escape there dismissed nothing and
+cancelled the turn instead. The two capture listeners fire in registration
+order (the tab body mounts before the modal it opens), so each returns early on
+`event.defaultPrevented` and one keystroke closes one overlay.
 **Known residual, filed as a follow-up:** `PortalConversation.vue` handles
 Escape for an active voice call in a branch *above* that rule, so a preview
 opened during a voice call also ends the call.

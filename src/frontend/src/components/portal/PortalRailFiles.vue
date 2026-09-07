@@ -181,7 +181,7 @@
 </template>
 
 <script setup>
-import { computed, h, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { isFileDrag, rejectionFor, uploadFailureReason } from '@/composables/usePortalFileDrop'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
@@ -501,6 +501,21 @@ async function runPending() {
     busyVerb.value = null
   }
 }
+
+// The confirm is a FOURTH owner of Escape on this surface, and it needs the
+// same shape as the preview's (`chat-turn-cancellation.md`). `ConfirmDialog`
+// has no key handling of its own, so without this an Escape on an open confirm
+// dismisses nothing and falls through to the conversation's BUBBLE-phase
+// listener with `defaultPrevented` still false — cancelling an in-flight turn
+// instead. Capture, so it runs before that listener; `preventDefault()`,
+// because `shouldCancelOnEscape` reads nothing else.
+function onConfirmKeydown(e) {
+  if (e.key !== 'Escape' || pending.value === null) return
+  e.preventDefault()
+  pending.value = null
+}
+onMounted(() => document.addEventListener('keydown', onConfirmKeydown, { capture: true }))
+onBeforeUnmount(() => document.removeEventListener('keydown', onConfirmKeydown, { capture: true }))
 
 function formatDate(iso) {
   try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) }

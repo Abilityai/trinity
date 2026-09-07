@@ -266,6 +266,12 @@ watch(() => [props.index, file.value?.filename, file.value?.id], load, { immedia
 // `defaultPrevented`, so a preview opened during a voice call also ends the
 // call. Not fixed here — this merges after the voice track.
 function onKeydown(e) {
+  // Capture-phase listeners on `document` run in REGISTRATION order, and the
+  // tab body mounts before this modal — so a confirm it raised owns Escape
+  // first and marks the event. Honour that rather than closing both overlays
+  // on one keystroke; it is the same `defaultPrevented` protocol we ask the
+  // conversation to honour.
+  if (e.defaultPrevented) return
   if (e.key === 'Escape') {
     e.preventDefault()
     emit('close')

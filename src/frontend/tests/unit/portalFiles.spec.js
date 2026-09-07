@@ -380,6 +380,34 @@ describe('ent#548 — PortalFilePreview keyboard and lifecycle', () => {
     expect(PREVIEW).not.toMatch(/z-50/)
   })
 
+  it('yields to an overlay that already claimed the keystroke', () => {
+    // Capture listeners on `document` fire in registration order and the tab
+    // body mounts first, so a confirm it raised marks the event before this
+    // modal sees it. Without the guard one Escape closes both.
+    const handler = PREVIEW.slice(PREVIEW.indexOf('function onKeydown'))
+    const guardAt = handler.indexOf('e.defaultPrevented')
+    const escapeAt = handler.indexOf("e.key === 'Escape'")
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(escapeAt).toBeGreaterThan(guardAt)
+  })
+
+  it('the delete confirm owns Escape too, in the capture phase', () => {
+    // ConfirmDialog.vue has NO key handling of its own, so an unguarded Escape
+    // on an open confirm dismisses nothing and reaches the conversation's
+    // bubble-phase turn-cancel listener with `defaultPrevented` false — killing
+    // an in-flight turn. Same shape as the preview's, for the same reason.
+    expect(RAIL_FILES).toMatch(
+      /addEventListener\('keydown', onConfirmKeydown, \{ capture: true \}\)/,
+    )
+    expect(RAIL_FILES).toMatch(
+      /removeEventListener\('keydown', onConfirmKeydown, \{ capture: true \}\)/,
+    )
+    const handler = RAIL_FILES.slice(RAIL_FILES.indexOf('function onConfirmKeydown'))
+    expect(handler).toMatch(
+      /e\.key !== 'Escape' \|\| pending\.value === null[\s\S]{0,80}preventDefault\(\)/,
+    )
+  })
+
   it('is mounted with v-if, never v-show', () => {
     // The rail column and the mobile sheet are SIBLINGS in Portal.vue, so a
     // phone with the sheet open mounts the tab body twice — and a teleported
