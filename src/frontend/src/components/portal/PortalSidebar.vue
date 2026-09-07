@@ -234,6 +234,7 @@
             :thread="t"
             :active="isActive(t)"
             :avatar-for="avatarFor"
+            :rename="rename"
             @open="$emit('open-thread', t)"
             @toggle-star="$emit('toggle-star', t)"
           />
@@ -247,6 +248,7 @@
             :thread="t"
             :active="isActive(t)"
             :avatar-for="avatarFor"
+            :rename="rename"
             @open="$emit('open-thread', t)"
             @toggle-star="$emit('toggle-star', t)"
           />
@@ -306,6 +308,9 @@ const props = defineProps({
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
+  // ent#473: async (thread, title) => void — the shell owns the optimistic
+  // list update and the request; a row only edits.
+  rename: { type: Function, default: null },
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star',

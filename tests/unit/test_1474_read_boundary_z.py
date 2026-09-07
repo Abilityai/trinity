@@ -96,7 +96,10 @@ def _make_exec_schema(conn: sqlite3.Connection) -> None:
             business_status TEXT,
             validation_execution_id TEXT,
             turn_integrity TEXT,
-            queued_at TEXT
+            queued_at TEXT,
+            source_channel TEXT,
+            source_channel_chat_id TEXT,
+            loop_id TEXT
         )
         """
     )

@@ -31,6 +31,35 @@ cp .env.example .env
 # API Docs: http://localhost:8000/docs
 ```
 
+## Which compose files go together (#2528)
+
+Trinity ships **three complete stacks**, not one base file plus overlays.
+`docker-compose.prod.yml` and `docker-compose.hosted.yml` are standalone: each
+restates the hardening (`security_opt`, `group_add`, `cap_drop`) because nothing
+else supplies it. The supported file sets are exactly these, and CI renders every
+one of them (`container-security.yml` → `verify-compose-file-sets`):
+
+| Install | Command | Where `/data` lives |
+|---|---|---|
+| Dev (source build, localhost) | `./scripts/deploy/start.sh` — i.e. `docker compose up -d` (auto-merges `docker-compose.override.yml` if present) | named volume `trinity-data` |
+| Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
+| Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
+
+**Never stack the dev file under prod or hosted** (`-f docker-compose.yml -f
+docker-compose.prod.yml`). Compose merges list-type keys by concatenation, so the
+combination either fails validation on the duplicated hardening entries (Compose
+≥ 2.24) or, on older versions, silently gives the frontend two host mappings for
+one port and it never joins its network. The "duplicates" are not the bug — the
+stack is.
+
+**Never run a bare `docker compose up -d` on a production host.** It loads the
+dev file, whose `/data` is the named volume, and boots a healthy-looking backend
+on an empty database while the real one sits untouched in `TRINITY_DATA_PATH`.
+`start.sh` refuses this crossing and names the file set the host was installed
+with; `quickstart.sh` is now an alias for `start.sh`, so it inherits the refusal.
+If both stores already exist (the state a wrong-file start leaves behind),
+`start.sh` warns which one it is about to use rather than staying silent.
+
 ## Installing on a server — use the pull-only path (#2280)
 
 **On a server, `--hosted` is the default you want.** The Quick Start above builds

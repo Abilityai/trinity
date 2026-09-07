@@ -111,6 +111,40 @@ enterprise-tracker feature is *gated unless ruled otherwise*, so the ruling must
 be inferred later from the mere fact that it merged; it inherits ent#356's move of the
 whole client-portal surface into OSS core.
 
+**The agent's chats are tabs, and a title has three hands (ent#451 remaining slice,
+ent#473).** Above the thread, `PortalChatTabs.vue` renders this user's threads with the
+active agent as `OverflowTabs` (`dense`, counted `moreLabel` → "N more"), most recent
+first — a slice of the sidebar's list, never a second fetch; a room is not an agent's
+tab, and an unsaved new chat is not a tab until its first message is sent (ruling
+2026-09-06). **New chat** is in the conversation header with ⌘J / Ctrl+J, armed on
+`window` at mount above `bootstrap()`'s await and resolving the agent in front of the
+person (page or conversation; a room or the root opens the picker). A title is written
+by three hands — the derived fallback, the ent#186 generator, and a person — and
+`enterprise_portal_sessions.title_source` (NULL · `generated` · `user`; SQLite
+`portal_session_title_source` + Alembic `0052`, no backfill) records which. **The
+generated write is guarded in the UPDATE itself** (`set_portal_session_title` →
+`title_source != 'user'`, returning whether it landed): generation runs off the reply
+path, so a rename typed inside the first turn's window races the model's guess and a
+read-then-write in the caller would leave exactly that window open. `_title_plan(row,
+history)` earns a turn `first` (empty title), `retry` (the exchange after the opener,
+`message_count <= 2`, when the hand is still NULL or the opener `is_greeting`) or
+nothing — exactly one more, never a person's title. The validator is one leaf,
+`services/chat_title.py`, imported by BOTH `client_portal` and `shared_sessions` so a
+thread and a room refuse the same titles with the same named 400 (`invalid_title` +
+reason + a sentence with an example); the thread UPDATE is (agent, client)-scoped
+(uniform 404), the room rename is membership-then-person (a member agent talks, it does
+not rename — 403 `not_a_person`, the ent#220 line) and broadcasts a thin `room_renamed`
+trigger with the id only (#918). Generator health is an in-process record
+(`title_generation_health()`) that WARNS once on the transition into `no_credential`
+or `failing` (3 consecutive), stays quiet in it, re-arms on recovery, and rides
+`GET /api/settings/portal-session-policy` → `title_generation` for the Workspace
+sessions panel's notice — the operator side of a path that is otherwise fail-soft by
+design. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
+room header (its clicks and keys stop inside it, or a rename would open the chat it is
+renaming). **OSS-core by decision, deliberately ungated** — the ent#356/ent#451 ruling
+for the whole surface, recorded here so it is never inferred from the merge. See
+[workspace-chat-tabs-and-titles.md](../feature-flows/workspace-chat-tabs-and-titles.md).
+
 **New-chat briefing hints (ent#138 / ent#380):** each agent has a briefing —
 description + capability hint cards `playbooks[]{title,description,starter_prompt}` —
 resolved best-effort by `service.py::_agent_briefing` from the agent's
@@ -320,6 +354,42 @@ first docked tab is **Work**, empty by the operator's split — #457's Activity 
 its `#tab-work` slot; loops / canvas / files re-home in #472's second child; #492 lands
 the grid variables the rail's widths then follow. See
 [workspace-rail.md](../feature-flows/workspace-rail.md).
+
+**Work — the live card and the rail's first tab (trinity-enterprise#525, the visual half
+of ent#457).** `client_portal/work/` is the read (`GET …/client-portal/work?agents=&chat_id=`,
+**platform door only** — a portal token gets a uniform 404 before any read, ent#78's
+auth-path invariant restated by the 2026-09-06 ruling; the frontend's `visibleTabs` gate is
+UX, this line is containment). It projects the executions ledger for the person who asked:
+*Now* (in-flight rows), *Earlier* (terminal rows inside a 30-day window, bounded at 30 with the
+window total counted server-side) and, given the open thread, that chat's **delegated
+children** — found by `source_channel_chat_id`, never by agent, because a child's
+`agent_name` is the delegate (ent#265 D0 / #2386 copy the chat binding onto the child row;
+`idx_executions_status` drives the in-flight selector, so no migration). The DB queries are the
+fleet dashboard's (`get_fleet_executions` / `get_fleet_execution_stats`, which gained
+`source_channel`, `source_channel_chat_id`, `loop_id`) under the **portal roster** — never the
+operator fleet ACL, which resolves through `list_all_agents_fast()` and answers `[]` on a
+Docker fault (the #2196 class). Every name on the payload is roster-masked (a child on an agent
+the caller cannot see is a step, unnamed — the ent#467 disclosure class); `title`/`error` are
+sanitized and bounded; only a `portal` stamp becomes a `chat_id`. **Honesty rules:** a RUNNING
+row past 1.5× the agent's turn bound (floor 30 min) is `stale` — not live, no clock, no
+signal, no poll — because the 120-minute sweep leaves ghost rows after a restart; `can_stop`
+mirrors exactly what the terminate route accepts; steps are **three-state** (`reported` /
+`none` = "doesn't report steps" / `unknown` = stopped, unreachable, unreadable, or two runs on
+one agent so no instance can be attributed) — a stopped agent must never be described as one
+that does not report. The #919 read (`work/pipeline_state.py`) mirrors `pipelines.ts`'s
+hardening: id grammar before any path, `size` from the listing before the download, a streamed
+byte budget, `safe_yaml`, no retries, 2 s per call in a 3 s wall budget, a 10 s per-agent
+cache. Frontend: `stores/portalWork.js` is fed by `usePortalRailFeeds` (the ONE owner), polls
+12 s **only while something is live**, refreshes on `agent_activity` (started AND terminal) and
+loop events for a participant (debounced 2 s); the Work signal is **one merged set** — the
+feed's live rows plus the conversation's in-flight emit joined **by execution id**
+(`workSignalFromItems`), never two signals summed. `PortalWorkCard` is the one card for the chat
+(under the message; the stream's last line is the current step while live; the terminal card
+renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it** is a prefill,
+never a send — the ruled lesser control) and for `PortalWork`, the tab body (Waiting on you =
+`PortalAsks` over `store.asks` filtered to participants, the fourth rendering of the ask row;
+rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
+ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
 
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal

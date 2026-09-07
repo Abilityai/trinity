@@ -991,6 +991,33 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // Open a fresh conversation thread ("New chat"). Returns the empty session.
+    // ent#473 — a person titles their thread. One PATCH per committed rename;
+    // the boundary's named 400 (`invalid_title`) is left on the error for the
+    // editor to render verbatim.
+    async renameThread(agentName, sessionId, title) {
+      const { data } = await portalHttp.patch(
+        `/api/enterprise/client-portal/agents/${agentName}/sessions/${encodeURIComponent(sessionId)}`,
+        { title },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    // ent#473 — the room twin. Membership-scoped server-side; a coded refusal
+    // passes through `_noteRoomsRefusal` untouched (#2128).
+    async renameRoom(roomId, name) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.patch(
+          `/api/rooms/${roomId}`, { name },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
     async createSession(agentName) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
@@ -1275,6 +1302,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.asks = []
         return []
       }
+    },
+
+    // ent#525: the chat's work — what its participants are doing now and did
+    // recently — one request for every participant. Platform door only: the
+    // route 404s a portal token, and the rail never feeds the store for one.
+    // Throws (the store reads the failure as "couldn't load", never as empty).
+    async fetchWork(agentNames, chatId = null) {
+      const params = { agents: (agentNames || []).filter(Boolean).join(',') }
+      if (chatId) params.chat_id = chatId
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/work', {
+        headers: this.authHeader,
+        params,
+      })
+      return data
     },
 
     // Answer one ask. The row is removed from local state on success rather than

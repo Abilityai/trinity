@@ -476,6 +476,32 @@ def list_rooms(current_user) -> dict:
     return {"rooms": rooms}
 
 
+def rename_room(current_user, room_id: str, name) -> dict:
+    """A person titles a room (ent#473). Membership first — a non-member gets
+    the uniform 404, never a 403 that confirms the room exists — then a person
+    check: a member AGENT is reachable through its own MCP key and is a
+    prompt-injection surface, and a room's name is what every participant
+    reads it by, so an agent may talk in the room but not rename it (the
+    ent#220 line, one notch below `_require_moderator`, since a rename is not
+    a lifecycle or roster change and any human in the room may make it).
+    Validated through the shared leaf so a thread and a room refuse the same
+    titles for the same reasons, with the same named 400."""
+    from services.chat_title import chat_title_problem, normalize_chat_title
+
+    _require_membership(room_id, current_user)
+    kind, _identity = _caller(current_user)
+    if kind == "agent":
+        raise RoomError(403, "not_a_person", "Only a person can rename a room")
+    clean, reason = normalize_chat_title(name)
+    if clean is None:
+        raise RoomError(400, "invalid_title", chat_title_problem(reason, name), reason=reason)
+    db.rename_room(room_id, clean)
+    # A thin trigger carrying identifiers only (#918): listeners refetch the
+    # room through the membership-scoped read, so the name never rides `/ws`.
+    _broadcast("room_renamed", {"room_id": room_id})
+    return {"room_id": room_id, "name": clean}
+
+
 def close_room(current_user, room_id: str, reason: str = "user_closed") -> dict:
     _require_moderator(room_id, current_user)
     closed = db.close_room(room_id, reason, utc_now_iso())

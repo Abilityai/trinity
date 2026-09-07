@@ -1607,6 +1607,12 @@ class FleetExecutionSummary(BaseModel):
     # Turn-integrity flags (#2467) — small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
     queued_at: Optional[datetime] = None
+    # ent#525: `get_fleet_executions` also selects `source_channel`,
+    # `source_channel_chat_id` and `loop_id` for the Workspace Work read
+    # (`client_portal/work/`), which projects the raw rows itself. They are
+    # deliberately NOT fields here — pydantic drops the extra keys — so the
+    # operator dashboard's payload gains no channel destination ids
+    # (`test_ent525_portal_work.py` pins it).
 
     class Config:
         from_attributes = True

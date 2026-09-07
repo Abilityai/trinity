@@ -1362,8 +1362,7 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   store rather than a reuse of the agent-at-a-time `stores/loops.js`, which the
   operator panel owns; a shared singleton would have each surface clearing the
   other's list on navigation (the `skillsLibrary` vs `skills` split, ent#263).
-- **Deferred**: AC #3 (loop history in the Activity tab) waits on ent#457, which
-  builds that tab. Stated rather than silently dropped: this issue explicitly
-  says history "lives in #457's Activity tab" and must not grow a parallel
-  surface, so the honest sequencing is to render there once it exists.
+- **AC #3 (loop history)** landed with ent#525: a loop run is one execution
+  kind (`loop`) in the rail's Work tab — *Now* and *Earlier* — and there is
+  no parallel surface (core-agent §5.21).
 
