@@ -294,6 +294,7 @@ _EXPECTED_UPDATE_SITES = {
     "resummarize_legacy_tool_calls",       # #1741: rewrites tool_calls to the summary shape; `status` untouched (no status in the WHERE either)
     "scrub_terminal_backlog_metadata",     # #1449: nulls backlog_metadata (reads status in a WHERE filter only)
     "restamp_execution_dispatch",          # #2433: re-anchors started_at/queued_at at dispatch after a backend-queue park; CAS on status == RUNNING + NULL lease, `status` untouched
+    "stamp_execution_channel_context",     # ent#498: attaches a delivery destination to a pre-created row; `status` untouched and not read — the CAS is on source_channel IS NULL, so it only ever ADDS a destination and can never repoint an inbound channel turn whose adapter is waiting on that reply
 }
 
 

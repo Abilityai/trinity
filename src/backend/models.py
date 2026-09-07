@@ -2939,6 +2939,13 @@ class InternalTaskExecutionRequest(BaseModel):
     schedule_cron: Optional[str] = None
     schedule_next_run: Optional[str] = None
     attempt: Optional[int] = None
+    # ent#498: deliver this run's output into the named person's Main Workspace
+    # chat with the agent. The scheduler carries only the ADDRESS — it cannot
+    # import the portal package to resolve a session, and it always sends
+    # `execution_id`, so channel columns passed as kwargs would be inert
+    # (#2426). `execute_task_internal` resolves and stamps the pre-created row
+    # before dispatch.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ValidateExecutionRequest(BaseModel):
@@ -3398,6 +3405,26 @@ class ScheduleUpdateRequest(BaseModel):
     validation_enabled: Optional[bool] = None
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: Optional[int] = None
+    # ent#498. The handler uses `exclude_unset=True`, so omitting the field
+    # leaves it alone while an explicit `null` CLEARS the delivery target — the
+    # only way to turn delivery off, and the reason this is not `= Field(...)`.
+    deliver_to_workspace_email: Optional[str] = None
+
+    @field_validator("deliver_to_workspace_email")
+    @classmethod
+    def _normalize_delivery_email(cls, v: Optional[str]) -> Optional[str]:
+        """Same normalisation as `ScheduleCreate` — see `db_models.py` for why.
+
+        Deliberately re-stated rather than imported: `models.py` is the API
+        contract layer and `db_models.py` the persistence layer, and the one
+        import between them today runs the other way. Pinned equal by
+        `tests/unit/test_ent498_workspace_delivery.py`, which drives BOTH models
+        over one table of inputs, so a divergence fails rather than shipping an
+        update path laxer than the create path.
+        """
+        from db_models import ScheduleCreate
+
+        return ScheduleCreate._normalize_delivery_email(v)
 
 
 class ScheduleResponse(BaseModel):
@@ -3422,6 +3449,10 @@ class ScheduleResponse(BaseModel):
     validation_enabled: bool = False
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: int = 120
+    # ent#498: surfaced so an API/MCP caller can read back what it set. Without
+    # it the field is silently dropped from every response — `ScheduleResponse`
+    # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
+    deliver_to_workspace_email: Optional[str] = None
 
     class Config:
         from_attributes = True

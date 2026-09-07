@@ -99,6 +99,16 @@ ALLOWLIST = {
         "admission-path terminal, no activity yet."
     ),
     (
+        "routers/internal.py",
+        "_fail_execution_row",
+    ): (
+        "ent#498 admission-path terminal: the Workspace delivery target is "
+        "resolved BEFORE execute_task, so a refusal fails a row that step 3 "
+        "never reached and no dispatch activity exists to close. Same lifecycle "
+        "position as the _raise_* admission terminals above, and guarded on a "
+        "non-terminal status so a late refusal cannot overwrite a finished run."
+    ),
+    (
         "services/chat_execution_service.py",
         "_acquire_task_capacity",
     ): (
