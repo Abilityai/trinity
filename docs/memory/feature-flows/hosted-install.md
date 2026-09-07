@@ -71,7 +71,7 @@ One script, two image sources. Secret generation, the `ADMIN_PASSWORD` contract 
   ├─ .env bootstrap + secret generation + ensure_docker_gid
   ├─ resolve_image_tag()      shell/CI > .env > latest
   ├─ TUNNEL_TOKEN set → COMPOSE_FILES+=(--profile tunnel) + persist COMPOSE_PROFILES to .env
-  ├─ data-switch guard (BOTH directions — refuse, never warn)
+  ├─ data-switch guard (BOTH directions — refuse; both-stores-present — warn, naming the one in use, #2528)
   ├─ docker pull ghcr.io/abilityai/trinity-agent-base:$TAG
   │     └─ docker tag … trinity-agent-base:latest       # fatal on failure, never falls back to building
   ├─ Docker-Desktop log-source override appended BY NAME (auto-merge is off)
@@ -96,6 +96,8 @@ One script, two image sources. Secret generation, the `ADMIN_PASSWORD` contract 
 Dev and hosted share a compose project name but **not** a `/data` source: `docker-compose.yml` mounts the named volume `trinity-data`, hosted binds `${TRINITY_DATA_PATH:-./trinity-data}`. So `--hosted` in a checkout that has been running the dev stack would come up on an **empty** database and migrate from zero while the real one sat untouched in the volume — with Redis, a named volume both files share, **not** reset, i.e. a half-migrated install carrying live session and lock state pointing at rows that no longer exist.
 
 Both crossings are refused with the copy command, not warned about: the failure is silent, and by the time it is noticed the fresh DB may already have been written to. `TRINITY_DATA_PATH` is the documented escape for a deliberate fresh start.
+
+**The reverse refusal names prod, not only hosted, and a third state warns (#2528).** The bind mount is what both `docker-compose.prod.yml` and `docker-compose.hosted.yml` write, so a source-built production host reaches the same state — the restart that filed #2528 was a source-built production host, via `quickstart.sh`'s bare `docker compose up -d` (that script is now an alias for `start.sh` and inherits the guard). The message used to assert "installed with `--hosted`" and offer only `--hosted` as the remedy, which on a prod box would have pulled GHCR images onto a host that builds its own; it now prints each install's own invocation and the never-stack rule (`docker-compose.prod.yml` is standalone — `-f docker-compose.yml -f docker-compose.prod.yml` does not validate). When **both** stores exist — the real DB in the bind mount and a freshly seeded one in the named volume, which is exactly what a wrong-file start leaves behind — neither refusal fires, and a repeat of the same mistake was silent. That state gets a **warning**, not a refusal: the copy-across remedy leaves both in place, so refusing would block the operator who followed it. The warning names the store the stack will use and the one it will ignore. Guard executed under `bash` with a `docker` shim in `tests/unit/test_2528_compose_file_sets.py`; the supported compose file sets themselves are rendered in CI (`container-security.yml` → `verify-compose-file-sets`) and tabulated in `docs/DEPLOYMENT.md`.
 
 The project name is derived by **compose's own rule** (`compose_project_name()`: lowercase → keep `[a-z0-9_-]` → trim leading `_`/`-`, `COMPOSE_PROJECT_NAME` winning, shell over `.env`). The two disagreeing derivations it replaces stripped `_` and `-`, which compose keeps — so in a checkout named `project_trinity`, `trinity-dev`, or a worktree like `trinity-2280`, the derived name matched no real volume and this guard failed **open** on exactly the directory names most likely to be in use.
 
@@ -133,6 +135,7 @@ A plain `docker compose -f docker-compose.hosted.yml pull` skips the base image 
 | `tests/unit/test_2280_hosted_compose_parity.py` | Wholesale prod↔hosted service parity, third-party pin equality, top-level volumes/networks, the 8 GB floor in the header, `FRONTEND_PORT` in both files |
 | `tests/unit/test_2280_publish_workflow_and_stop.py` | The verify step never passes a mixed-case owner as an image reference and lowercases the one it builds; `flavor: latest=false`; every non-sha tag gated on `github.event_name == 'push'` and the sha tag on nothing; `stop.sh` never runs `compose down` and selects its file from the compose label |
 | `tests/unit/test_2390_start_sh_env_and_project_name.py` | `env_value()` dotenv parity with compose (quotes, inline comments, last-wins) and `compose_project_name()` against compose's real derivation, including the `_`/`-`-bearing directory names that made the data guard fail open |
+| `tests/unit/test_2528_compose_file_sets.py` | `quickstart.sh` is an alias for `start.sh` (static + argv passthrough); the data-switch guard executed under `bash` with a `docker` shim — reverse refusal names prod, both-stores-present warns naming the store in use, clean states silent; both standalone compose headers state they are not overlays; every supported file set renders locally (skips without a Compose CLI) and is listed verbatim in `container-security.yml` → `verify-compose-file-sets` |
 
 ## Outstanding
 
