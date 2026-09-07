@@ -517,3 +517,76 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   bumped both routers mount and the **ungated OSS one wins** the match order. Pinned by
   `test_ent443_rooms_oss_core.py`.
 
+
+## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
+
+Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`
+keeps its URL and resolves to a chat; `PortalAgentPage.vue` is gone, dismantled into an
+always-visible band and an on-demand details panel. ent#360's reasoning is not reverted
+— an agent still has a home with its history, what it can do, and a place to ask you
+something — it is simply no longer a STOP on the way to the conversation.
+
+**Main.** Every `(user, agent)` pair has one pinned Main chat: the place the agent
+reaches you when no conversation named itself. `enterprise_portal_sessions.is_main`
+marks it and `archived_at` marks the one Reset retired (both tracks: SQLite
+`portal_session_main_chat` + Alembic `0053`, no backfill). Uniqueness is the **partial
+unique index** `idx_portal_sessions_main` (`WHERE is_main = 1`), not a check-then-insert:
+`ensure_main_session` is reachable from two request paths and runs in every uvicorn
+worker, and the loser of the race catches `IntegrityError` and adopts the winner's row.
+The predicate is load-bearing rather than an optimisation — an archived row keeps its
+`(agent_name, client_email)` pair forever, so an unconditional unique index would refuse
+the **second** Reset. Main is minted lazily by `list_sessions` (opening an agent, which
+is what renders the pinned tab) and by `_resolve_session_id`, and deliberately **not** by
+the cross-agent batch (#2198), which runs on every sidebar refresh and would write a row
+per agent the person has never opened.
+
+**The landing rule is one edit.** `_resolve_session_id(agent, email, None)` resolves to
+Main rather than the most recent thread, which is the whole of the rule for an
+agent-initiated message, an ask raised outside a chat (ent#364/#429) and a scheduled
+brief (ent#498) — all three already funnel through it via `ensure_thread_for_ask`. An
+explicit session id still wins.
+
+**Reset needs no second reset primitive.** `POST …/sessions/main/reset` archives the
+current Main and mints a fresh one in ONE transaction (clear the flag before the insert,
+or the index refuses it), then writes one `role = 'system'` line in the new Main naming
+the archive. "Starts cold" is a property of the new row — it carries no
+`cached_claude_session_id` and `session_turn_service` resumes only on a cached id — so
+`routers/sessions.py::reset_session_memory` is untouched and uncalled: clearing a cache
+and keeping the thread is a different verb from retiring the thread. The archive keeps
+its own cached id (still resumable, still in `session_cleanup_service`'s keep-set) and
+its own title; only an untitled one is named, and dated, because these accumulate in one
+list. Refused with a named 409 while a turn is in flight (`turn_in_flight`) or when a
+concurrent Reset won (`reset_raced`); resetting an untouched Main is a no-op reported as
+`archived_session_id: null`. **No confirmation dialog** (operator, 2026-09-06) — nothing
+is lost, and `ConfirmDialog` is not a caller here.
+
+**One page.** `PortalAgentBand.vue` carries the stats strip and the Activity chart under
+the header, always visible (operator, 2026-09-06), and is the **only** surface on this
+page entitled to the scanline (#2540 — it is the chart-loading motion). `PortalAgentDetails.vue`
+carries chats, what it can do, and reports, and opens **into the rail's place** as a
+SIBLING of the rail, never a rail tab (ruled 2026-09-05): the rail is participant-scoped
+with a fixed five-tab set, while this is about one agent and is dismissed rather than
+switched away from; the rail's state is a setup ref, so closing details returns it on the
+tab it was showing. Both read one payload through `composables/usePortalAgentPage.js`.
+Canvas, Files and recent work are **not** duplicated here — they have been rail tabs since
+ent#475/#525. `portalUtils.js::landingThread` is the one rule for which chat you land in,
+and the `?agent=` deep link's `resolveAgentLanding` defers to it so the two entry points
+cannot disagree. Main is named by its role in both the tab strip and the header and is
+not renameable; archived chats leave the tab strip and stay in the sidebar and in details;
+an unused Main is filtered from the **sidebar** only (a projection, not a filter on
+`threads`, because the strip must show Main from the first visit).
+
+**Files onto the conversation (ent#524).** `composables/usePortalFileDrop.js` is the ONE
+drop/batch implementation, used by the conversation, the room and the rail's Files tab —
+the issue forbids a second, and the defect it fixes was exactly that each surface had
+written its own `files?.[0]` and reported success while discarding the rest. Both
+`<input type="file">` carry `multiple`; every file gets its own chip, progress and
+outcome; a refused file names itself and the limit; a 429 batch says which files landed
+and when to retry. Uploads run **sequentially** — twenty parallel requests is the surest
+way to trip the per-email limiter (ent#287). A room's drop fans out to every
+participating agent's inbox and the chip names the recipients (operator decision 13). The
+destination is the caller's `upload`, so the ent#484/#486 working folder can take it over
+without the gesture changing.
+
+**Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
+**Requirements**: `requirements/core-agent.md` §5.23

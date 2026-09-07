@@ -188,12 +188,18 @@ looked identical to one that worked every time. Now:
 - Per process: sibling workers keep their own view, which is honest — each
   one is the one that made the calls.
 
-## What this deliberately leaves to #523
+## What this deliberately left to #523 — and how it landed
 
 The pinned **Main** chat (first tab), **Reset**, the merged agent page, and
 the sidebar's "a recent-chat row opens the agent page with that chat active".
-Until then a row opens the thread view, which now carries the agent's tabs —
-so opening a row already lands inside that agent's chat list.
+
+All four shipped in ent#523 (2026-09-07), and the last one turned out to need
+no routing at all: once the agent page IS the conversation, a recent-chat row's
+existing `/workspace/c/:sid` push is already "the agent page with that chat
+active". `agentChatTabs` gained the Main pin and now drops archived chats — a
+retired Main is still a chat, but a tab per Reset would push the live ones under
+"N more" to make room for conversations the person deliberately retired. See
+[workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md).
 
 ## Tests
 

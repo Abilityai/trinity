@@ -1333,7 +1333,7 @@ already holds.
 - **Out of scope**: the State tab (#439), the resize handles (#492), the
   conversation-wide drop target (#524), and a backend broadcast for canvas
   writes / shared files (registered in the debt inbox). The Work tab's
-  content landed as §5.21 (ent#525).
+  content landed as §5.22 (ent#525).
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (slice 2 section),
   `workspace-loops.md`, `agent-canvas.md`
 
@@ -1444,7 +1444,7 @@ already holds.
   `src/frontend/tests/unit/portalChatTabsAndTitles.spec.js`.
 - **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
 
-### 5.21 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
+### 5.22 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_TAB`
 - **Description**: When a message starts a long-running job, the Workspace
@@ -1818,3 +1818,92 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
   already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
 - **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`
+
+### 5.23 Workspace — agents at the centre: the pinned Main chat, Reset, and files onto the conversation (trinity-enterprise#523, trinity-enterprise#524)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_AGENTS_AT_CENTRE`
+- **Description**: Clicking an agent opens the **conversation** you were last
+  in, not a report about it. Every `(user, agent)` pair has one pinned **Main**
+  chat — the place the agent reaches you when no conversation named itself —
+  and **Reset** archives it and starts the agent cold. The agent's numbers sit
+  in an always-visible band above the thread; the rest of its context opens on
+  demand as **Agent details**, in the rail's place. Files can be dropped
+  anywhere on the conversation, several at a time.
+- **Operator rulings**: 2026-09-05 (decision 8, "Version A · Contacts" — agents
+  are the central entity); 2026-09-06 09:27 (Reset has **no** confirmation —
+  nothing is lost); 2026-09-06 11:12 (the stats strip and the Activity chart
+  sit in a band under the header, always visible; the scanline is chart-only,
+  abilityai/trinity#2540); 2026-09-06 13:28 (design approved, board A3);
+  2026-09-06 decision 13 (a file dropped in a room goes to every participating
+  agent's inbox).
+
+**Main and Reset**
+
+- `enterprise_portal_sessions.is_main` marks the pinned chat and `archived_at`
+  the one Reset retired. **One live Main per pair** is enforced by the partial
+  unique index `idx_portal_sessions_main` (`WHERE is_main = 1`), not by a
+  check-then-insert: `ensure_main_session` is reachable from two request paths
+  in every uvicorn worker. The predicate is load-bearing — an archived row
+  keeps its (agent, client) pair forever, so an unconditional unique index
+  would refuse the **second** Reset.
+- **No backfill.** Existing rows read `is_main = 0`; Main is minted lazily by
+  `list_sessions` (opening an agent, which is what renders the pinned tab) and
+  by `_resolve_session_id`. Deliberately **not** by the cross-agent batch
+  (#2198), which would write a row per rostered agent on every sidebar refresh.
+- **Reset needs no second reset primitive.** A fresh row carries no
+  `cached_claude_session_id` and the turn engine resumes only on a cached id,
+  so "starts cold" is a property of the new row rather than an action against
+  the old one. `routers/sessions.py::reset_session_memory` is untouched — that
+  verb clears a cache and keeps the thread; this one retires the thread. The
+  agent's per-user memory (MEM-001) is not touched. Refused with a named 409
+  (`turn_in_flight`) while a turn is running, and `reset_raced` when a
+  concurrent Reset won. Resetting an **untouched** Main is a no-op reported as
+  `archived_session_id: null`.
+- **Landing rule**: `_resolve_session_id(agent, email, None)` resolves to Main.
+  That single edit covers an agent-initiated message, an ask raised outside a
+  chat (ent#364/#429) and a scheduled brief (ent#498), because all three funnel
+  through it; an explicit session id still wins.
+
+**One page**
+
+- `/workspace/a/:agentName` keeps its URL and resolves to a chat.
+  `portalUtils.js::landingThread` is the rule — most recently active, Main as
+  the floor — and the `?agent=` deep link's `resolveAgentLanding` defers to it,
+  so the two entry points cannot land a first-time visitor in different places.
+- `PortalAgentPage.vue` is dismantled: stats + the Activity chart to
+  `PortalAgentBand.vue` (always visible); chats / what it can do / reports to
+  `PortalAgentDetails.vue`; Canvas and Files were already rail tabs (ent#475);
+  recent work was already the rail's Work tab (ent#525); asks keep the
+  conversation's mount, which was the surviving one after #2449.
+- **Agent details is a sibling of the rail, not a rail tab** (ruled
+  2026-09-05): the rail is participant-scoped with a fixed five-tab set, while
+  this is about one agent and is dismissed rather than switched away from.
+  Closing it returns the rail on the tab it was showing.
+- Main is named by its **role** in the tab strip and the header and is not
+  renameable. Archived chats leave the tab strip and stay in the sidebar and in
+  Agent details. An unused Main is filtered from the **sidebar** only.
+- The sidebar orders agents by most recent collaboration then name, applied
+  before the collapse. This is **not** ent#491 (incubating): `orderRosterAgents`
+  ships the order this AC states and leaves `primaryName` as its seam.
+- The composer **labels** an unavailable agent (#2196's `availability`), never
+  disables — disabling relocates the dead state rather than removing it.
+
+**Files onto the conversation (ent#524)**
+
+- `composables/usePortalFileDrop.js` is the ONE implementation, used by the
+  conversation, the room and the rail's Files tab. The gesture and the batch
+  live here; the **destination** is the caller's `upload`, so it can move to the
+  ent#484/#486 working folder without the gesture changing.
+- Both `<input type="file">` carry `multiple`; no path reads `[0]`. Every file
+  gets its own chip, progress and outcome; one failure does not fail the batch;
+  a refused file names itself and the limit; a 429 batch says which files landed
+  and when to retry. Uploads run **sequentially** — twenty parallel requests is
+  the surest way to trip the per-email limiter (ent#287).
+- A room's drop fans out to every participating agent's inbox and the chip names
+  the recipients.
+- A chip renders from one derived `attachmentState` ('uploading' | 'failed' |
+  'sent') rather than a bare `v-if="uploading"`, which the #1927 ratchet counts
+  and cannot distinguish from a fetch-in-flight gate.
+- **Scoping is unchanged**: roster/inbox rules and the ent#78 auth-path
+  invariant hold for both doors.
+- **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
