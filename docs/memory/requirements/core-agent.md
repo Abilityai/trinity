@@ -2377,10 +2377,15 @@ to localStorage in the clear.
   WhatsApp / iOS, and a `bool` query param 422s on `?download=` or `?download=x`
   — a new failure mode on a route that today ignores a malformed query. The
   Files tab's URL carries the flag; the agent's own chat link does not, so
-  ent#461's mobile inline path is untouched. The rendered control is a
-  `<button>` driving a blob save, so AC-3's `download` **attribute** is
-  deliberately dropped — it is inert on a cross-origin anchor, which is exactly
-  why the server-side flag exists.
+  ent#461's mobile inline path is untouched. Download itself takes TWO paths, and the split is what
+  makes the flag load-bearing rather than decorative: an agent share is saved by
+  a plain anchor click on its already-`attachment` URL (natively streamed, no
+  memory spike, and no programmatic blob save — the classic iOS Safari failure
+  on a mobile-first surface), while a client upload, which has no URL at all,
+  goes through the authenticated portal route as a blob because there is no
+  alternative. AC-3's `download` **attribute** is set on that anchor as
+  belt-and-braces; a browser ignores it cross-origin, which is precisely why the
+  server-side flag and not the attribute is the mechanism.
 - **AC-4 — preview (ent#548)**: images (png/jpg/gif/webp/**svg**) and displayable
   text (md, txt, csv, json, code) open in a modal over the Workspace with
   **next / previous across the previewable files in the current list**, keyboard

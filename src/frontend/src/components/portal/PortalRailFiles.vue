@@ -374,15 +374,43 @@ function openPreview(row) {
   previewIndex.value = i
 }
 
-// AC-3's `download` ATTRIBUTE is deliberately not here, and this is the record
-// of that: the control is a `<button>` driving a blob save, which cannot carry
-// it — and the attribute is inert on a cross-origin anchor anyway, which is
-// precisely why the server-side one-way `?download=1` flag exists.
+/**
+ * Save one row. TWO paths, and the split is the point of the server-side flag.
+ *
+ * An agent share has a signed URL that the server now serves
+ * `Content-Disposition: attachment` (the one-way `?download=1`), so the browser
+ * saves it from a plain anchor click — natively streamed, no memory spike, and
+ * no programmatic blob save, which is the classic iOS Safari failure on a
+ * mobile-first surface. That is what the flag is FOR; fetching the bytes here
+ * only to hand them back would make it decorative and would pull up to 50 MB
+ * into the tab to do it.
+ *
+ * A client upload has no URL at all — no DB row, no token — so it must go
+ * through the authenticated portal route as a blob. There is no alternative
+ * there, which is why the blob path exists at all.
+ *
+ * AC-3 also names the `download` ATTRIBUTE. It is set on the anchor below, and
+ * it is honest to note that a browser ignores it cross-origin — which is
+ * exactly why the server-side flag is the mechanism and the attribute is the
+ * belt-and-braces, not the other way round.
+ */
 async function download(row) {
   if (!row) return
+  clearRowError(row.key)
+
+  if (row.kind !== 'upload') {
+    const a = document.createElement('a')
+    a.href = row.item.download_url
+    a.download = row.item.filename || 'download'
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    return
+  }
+
   busyKey.value = row.key
   busyVerb.value = 'download'
-  clearRowError(row.key)
   let url = null
   try {
     const blob = await loadBlob(row)

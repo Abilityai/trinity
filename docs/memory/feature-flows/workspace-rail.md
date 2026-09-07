@@ -267,6 +267,12 @@ token compared with `compare_digest`, not an HMAC over the URL, so appending the
 flag cannot invalidate it. Only the Files tab's URL carries it; the agent's chat
 link does not.
 
+**Download therefore takes two paths.** An agent share is saved by an anchor
+click on its already-`attachment` URL — natively streamed, no memory spike (a
+share may be 50 MB), and no programmatic blob save, which is the classic iOS
+Safari failure on a surface whose primary form is a phone sheet. Fetching those
+bytes into the tab only to hand them back would make the flag decorative.
+
 Own uploads had no control at all, because a client upload has no DB row — it is
 a file in a container directory. Reading one back is
 `GET …/uploads/{filename}` through `extract_from_agent`, deleting one is

@@ -424,6 +424,25 @@ describe('#2582 / ent#548 — the design-system contract on both files', () => {
     expect(PREVIEW).not.toMatch(/<LoadFailed/)
   })
 
+  it('Download uses the SERVER flag for a share and the blob route only for an upload', () => {
+    // The split is what makes `?download=1` load-bearing rather than
+    // decorative. A share has a signed URL the server now serves `attachment`,
+    // so a plain anchor click saves it — natively streamed, no memory spike,
+    // and no programmatic blob save, which is the classic iOS Safari failure on
+    // a mobile-first surface. An upload has no URL at all, so it has no choice.
+    const fn = RAIL_FILES.slice(RAIL_FILES.indexOf('async function download(row)'))
+    const body = fn.slice(0, fn.indexOf('\n}\n'))
+    expect(body).toMatch(/if \(row\.kind !== 'upload'\)/)
+    const sharePath = body.slice(0, body.indexOf('busyKey.value = row.key'))
+    expect(sharePath).toMatch(/a\.href = row\.item\.download_url/)
+    expect(sharePath).toMatch(/a\.download = /)          // AC-3's attribute, belt-and-braces
+    expect(sharePath).not.toMatch(/loadBlob/)             // no fetch on the share path
+    const uploadPath = body.slice(body.indexOf('busyKey.value = row.key'))
+    expect(uploadPath).toMatch(/await loadBlob\(row\)/)
+    expect(uploadPath).toMatch(/createObjectURL/)
+    expect(uploadPath).toMatch(/revokeObjectURL/)
+  })
+
   it('composes primitives rather than hand-rolling them', () => {
     expect(PREVIEW).toMatch(/BaseButton/)
     expect(RAIL_FILES).toMatch(/import BaseButton from '@\/components\/base\/BaseButton\.vue'/)
