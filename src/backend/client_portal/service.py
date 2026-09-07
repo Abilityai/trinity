@@ -1285,6 +1285,16 @@ _TITLE_MAX_TOKENS = 32
 # which holds no ANTHROPIC_API_KEY — still generate titles (ent#186 follow-up).
 _OAUTH_BETA = "oauth-2025-04-20"
 
+# The two-block prompt: the client's message AND the agent's visible reply.
+#
+# #2579 NOTE — since the spawn moved to run concurrently with the turn there is
+# exactly one call site and it always passes `reply=""`, so in production only
+# `_TITLE_PROMPT_OPENER` below is reached today; this variant survives on the
+# `reply` branch of `_generate_thread_title` and in its tests. It is kept rather
+# than deleted deliberately: the reply is the disambiguator for a terse opener,
+# and restoring an exchange-fed attempt (the `retry`, or a later post-turn pass)
+# should be a call-site change, not a prompt rewrite. Said out loud so the next
+# reader does not assume both are live.
 _TITLE_PROMPT = """\
 Write a short title for a client's conversation thread, based on the opening \
 exchange below.

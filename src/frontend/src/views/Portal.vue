@@ -1293,10 +1293,16 @@ function onConversationTurnDone(sessionId) {
   // arrives unseen. Marking read unconditionally cleared exactly the badge the
   // feature exists to show, and made it near-unreachable in normal use.
   const open = activeSessionId.value || pendingSession.value
-  return (shouldMarkTurnRead(sessionId, open)
-    ? markRead('thread', sessionId)
-    : Promise.resolve()
-  ).then(refreshThreads).then(() => armTitleSettle(sessionId))
+  // #2579: the settle cycle asks the SAME question, for the same reason. This
+  // fires for a thread the user has navigated away from — that is the main way
+  // a reply legitimately arrives unseen — and a cycle armed on a background
+  // thread would go on replacing the list for 16s and could raise a notice
+  // above a different conversation. `watch(convKey)` only catches the switch
+  // that happens after arming; this catches the one that happened before.
+  const stillHere = shouldMarkTurnRead(sessionId, open)
+  return (stillHere ? markRead('thread', sessionId) : Promise.resolve())
+    .then(refreshThreads)
+    .then(() => { if (stillHere) armTitleSettle(sessionId) })
 }
 
 // --- Titles settle (#2579) --------------------------------------------------

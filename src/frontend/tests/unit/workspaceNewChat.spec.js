@@ -211,6 +211,16 @@ describe('#2579 — the title settle cycle', () => {
     // Arming is idempotent: the handler clears synchronously but arms after an
     // await, so two events close together would leave two cycles running.
     expect(s).toMatch(/function armTitleSettle\(sessionId\) \{\s*clearTitleSettle\(\)/)
+  })
+
+  it('only arms for the thread the user is STILL in', () => {
+    // The event fires for a thread navigated away from — the main way a reply
+    // legitimately arrives unseen. A cycle armed there keeps replacing the list
+    // for 16s and can raise a notice above a different conversation.
+    // `watch(convKey)` only catches a switch that happens AFTER arming.
+    const s = src()
+    expect(s).toMatch(/const stillHere = shouldMarkTurnRead\(sessionId, open\)/)
+    expect(s).toMatch(/\.then\(\(\) => \{ if \(stillHere\) armTitleSettle\(sessionId\) \}\)/)
     expect(s).toMatch(/watch\(convKey, \(\) => \{ clearTitleSettle\(\) \}\)/)
     expect(s).toMatch(/onBeforeUnmount\(\(\) => \{[\s\S]*?clearTitleSettle\(\)/)
   })
