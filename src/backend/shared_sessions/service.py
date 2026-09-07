@@ -502,10 +502,19 @@ def list_rooms(current_user) -> dict:
     room_ids = [r["id"] for r in rooms]
     participants_by_room = db.list_participants_for_rooms(room_ids)
     counts_by_room = db.count_messages_for_rooms(room_ids)
+    # ent#491: real recency for a room. Without it the Workspace sorts a room by
+    # when it was CREATED, so a busy month-old room ranks below one opened this
+    # morning and never used — the opposite of "most recent collaboration first".
+    # Same batching as the counts above: one more GROUP BY on the same table, not
+    # a per-room read.
+    last_by_room = db.last_message_for_rooms(room_ids)
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
         r["message_count"] = counts_by_room.get(r["id"], 0)
+        # Absent for an empty room; the client already falls back to `created_at`,
+        # which for a room nobody has spoken in is the honest answer.
+        r["last_message_at"] = last_by_room.get(r["id"])
         r["participant_count"] = len(participants)
         # ent#359: the Workspace sidebar draws a room's participant avatars, so
         # a room row is visually distinct from a 1:1. This list already loads

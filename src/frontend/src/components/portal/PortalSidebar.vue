@@ -439,14 +439,17 @@ const emptyLines = computed(() => searchEmptyLines(searchState.value, props.sear
 // copied into it — the only way the two modes cannot drift.
 // ent#523 AC 6 — the agents you worked with most recently first, then by name.
 //
-// This is NOT ent#491, which owns "order by most recent collaboration" and is
-// still incubating; `orderRosterAgents` ships the deterministic order this AC
-// states and leaves `primaryName` as the seam ent#491 fills. Applied BEFORE the
+// ent#491 now fills the recency half: rooms count (crediting every agent in
+// them), and the fourth argument is the session-stable snapshot that keeps an
+// incoming reply from re-sorting the list under the cursor. `primaryName` stays
+// null — ent#500 does not exist, so there is nothing to name a primary with, and
+// guessing one would be worse than the seam. Applied BEFORE the
 // collapse so the rows that survive `visibleAgentRows`' limit are the ones the
 // person actually uses — ordering after it would sort a slice chosen by the old
 // order, which is the same bug one step later. Search results are ordered by
 // relevance and are deliberately left alone.
-const orderedRoster = computed(() => orderRosterAgents(props.roster, props.threads))
+const orderedRoster = computed(() => orderRosterAgents(
+  props.roster, props.threads, null, asksStore.agentRecency))
 
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible

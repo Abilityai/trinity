@@ -2195,3 +2195,86 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   `question`, because there the operator genuinely has a decision to express.
 - **Verified by test**: the pure rule's table including the changed default, and
   a source guard that neither card re-implements the switch.
+
+### 5.27 Workspace sidebar — agents ordered by most recent collaboration (trinity-enterprise#491)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_SIDEBAR_RECENCY
+- **GitHub Issue**: abilityai/trinity-enterprise#491
+- **Description**: The agent you last worked with sits on top, then the next, and
+  agents you have never talked to follow alphabetically. Per user, not per agent.
+- **A room counts for every agent in it.** There is no single agent a multi-agent
+  conversation is "with", so working in a room with three agents is recent
+  collaboration with all three — the same fan-out `unreadByAgent` already applies.
+  `orderRosterAgents` previously skipped `is_room` rows outright, so an agent you
+  only ever meet in a room read as never-used and sat at the bottom under the
+  alphabetical tiebreak.
+- **Rooms needed a real timestamp first.** `enterprise_rooms` has no
+  `last_message_at` column and `list_rooms` returned only `created_at`, so a room's
+  recency was its CREATION time — a busy month-old room ranked below one opened
+  this morning and never used. `shared_sessions.db.last_message_for_rooms` is a
+  batched `MAX(created_at) GROUP BY room_id`, the sibling of the existing
+  `count_messages_for_rooms`. **Derived, not denormalised**: a column on the room
+  would need a writer on every append for a value one GROUP BY already returns in
+  the same round trip. An empty room is absent from the result and keeps
+  `created_at`, which is the honest answer for a room nobody has spoken in.
+- **Sends re-sort; replies do not.** The two clauses pull against each other —
+  `last_message_at` moves identically for both, so a derived order would reshuffle
+  the list under the reader's cursor every time a brief landed for another agent.
+  The order therefore reads a **session-held snapshot** (`clientPortal.agentRecency`)
+  seeded from thread recency and advanced only by the user's own sends. The seed
+  fills **only missing keys**, so a refresh triggered by an incoming reply can
+  never walk back a send's bump; a reload re-derives from the server and is
+  correct again. `noteAgentInteraction` fires in `submitUserText` — the user's own
+  action — and credits every agent the message wakes, mirroring the room fan-out.
+- **Applied before the collapse**, so the rows surviving `visibleAgentRows`' limit
+  are the ones the person actually uses; ordering after it would sort a slice
+  chosen by the old order. The #2424 rule still holds — an agent with an open ask
+  is never collapsed out — and search results stay ordered by relevance.
+- **The primary-companion tier stays a seam.** ent#500 does not exist: there is no
+  `agent_assignments` table, no column, nothing server-side that can say who a
+  person's primary is. `orderRosterAgents` keeps its tested `primaryName`
+  parameter and the sidebar passes `null`, because a guessed primary would be a
+  confident wrong answer where an empty seam is merely incomplete.
+
+### 5.28 One non-chart loading treatment — the skeleton sweep (#1921)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: UI_SKELETON_SWEEP
+- **GitHub Issue**: abilityai/trinity#1921
+- **Description**: Bespoke spinners, `animate-spin` rings and bare "Loading…" text
+  on **non-chart** data surfaces become skeleton placeholders keyed on "no data
+  yet". The scanline beam stays only where a chart loads (principle 12 as amended
+  by #2540).
+- **The primitive was the first fix.** `SkeletonLoader.vue` — the component the
+  sweep exists to spread — used a bare `animate-pulse` with no
+  `motion-reduce:animate-none`, so it failed the issue's own reduced-motion
+  criterion and every surface converted to it would have inherited the violation.
+- **`HOLDOVERS` is now empty.** Both non-chart `ScanlineReveal` consumers (a skills
+  list, a JSON `<pre>`) are converted, so the beam is chart-only **in fact**, not
+  only by rule. The allowlist stays as an explicit empty constant: a new non-chart
+  importer must still fail loudly rather than quietly join a list that no longer
+  exists.
+- **Footprint, not decoration.** Each placeholder mirrors the loaded surface —
+  list rows for a list, table-cell bars for a table row, form fields for a form —
+  because a centred ring in a differently-sized box is itself the layout shift
+  principle 4 forbids.
+- **Two real bugs fell out of it**: `TemplateSelector` gated on a bare
+  `v-if="loading"`, so re-opening the picker with templates already fetched swapped
+  the loaded grid back to a placeholder; and `GitPanel` did the same with git
+  status. Both now key on a `firstLoad` verdict. The #1927 ratchet fell 72 → 69.
+- **One spinner was deleted and then restored, and the reason is worth keeping.**
+  The Dashboard's history spinner *looks* like a background-refresh indicator, and
+  the sweep removed it as one. It is not: `fetchHistoricalCommunications` has
+  exactly three callers — mount, the Refresh button, and a time-range change — and
+  no interval anywhere, so all three are first-load or explicit user actions,
+  which is when in-flight feedback is sanctioned. The deletion rested on "it fires
+  on every poll" without checking that a poll existed. #2536's e2e caught it,
+  because that test measures the view-switcher's bounding box *with and without
+  this element* — the deletion removed its instrument. **The rule "background
+  refresh is invisible" only applies once you have shown there is a background
+  refresh.**
+- **Sanctioned spinners are untouched** (AC 6): the 16px in-flight indicator inside
+  a pressed control, on every Save/Trigger/Toggle button, and the refresh-icon spin
+  that pairs with a disabled refresh control.
+- **`/m` (MobileAdmin) is plain CSS, not Tailwind**, so it gets the same recipe
+  spelled out locally — pulse in the chrome fill, `prefers-reduced-motion` static,
+  an `sr-only` line — rather than a Tailwind class that would not apply there.
