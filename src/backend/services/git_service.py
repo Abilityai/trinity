@@ -1872,12 +1872,18 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     script = (
         f"cd {q(git_dir)} && "
         f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
-        '{ [ -z "$ignored" ] || printf \'%s\\n\' "$ignored" | '
-        f"sed 's#^#{_SWEEP_TAG_REMOVED}#'; }} && "
         'if [ -n "$ignored" ]; then '
         f"git ls-files -ci -z --exclude-standard -- . {exempt} | "
         "xargs -0 git rm --cached --quiet -r --; "
         "fi && "
+        # AFTER the rm, never before: a failed `git rm` aborts the `&&` chain
+        # here, so nothing is reported. Silence on a failed sweep is what the
+        # code did before #2529 anyway; a `removed_paths` list — and an
+        # operator-queue entry — naming files that are in fact still tracked
+        # would be a false alarm on the one surface whose whole job is to be
+        # trusted.
+        '{ [ -z "$ignored" ] || printf \'%s\\n\' "$ignored" | '
+        f"sed 's#^#{_SWEEP_TAG_REMOVED}#'; }} && "
         "{ git ls-files --others --exclude-standard | "
         f"sed 's#^#{_SWEEP_TAG_AFTER}#'; :; }} && "
         # `^!.` (not `^!`) — a bare `!` line would reach check-ignore as an

@@ -786,3 +786,23 @@ def test_a_previously_swept_file_comes_back_and_is_reported(tmp_path):
     # And the agent's own `git add -A` now picks it up.
     _git(home, "add", "-A")
     assert ".env.example" in _git(home, "ls-files").split()
+
+
+def test_removed_is_reported_only_after_the_rm_actually_ran():
+    """Order inside the sweep command, pinned. The `$ignored` list is captured
+    BEFORE the `git rm --cached`, so echoing it before the rm would name files
+    that are still tracked whenever the rm fails — a false alarm on the one
+    surface (the operator-queue entry) whose whole job is to be trusted. Echoing
+    it after means a failed rm aborts the `&&` chain and reports nothing, which
+    is what this code did before #2529 anyway."""
+    gs = _gs()
+    script = shlex.split(gs._build_rm_cached_ignored_command("/home/developer"))[2]
+    rm_at = script.index("git rm --cached")
+    report_at = script.index(gs._SWEEP_TAG_REMOVED)
+    assert rm_at < report_at, (
+        "the removed-paths report is emitted BEFORE the git rm — a failed sweep "
+        "would then be reported as a successful one"
+    )
+    # And both probes that describe the POST-sweep world come after it too.
+    assert rm_at < script.index(gs._SWEEP_TAG_AFTER)
+    assert rm_at < script.index(gs._SWEEP_TAG_SHADOW)
