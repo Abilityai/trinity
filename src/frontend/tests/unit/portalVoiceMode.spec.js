@@ -247,7 +247,11 @@ describe('the call is the Agent Detail orb, reused — not forked', () => {
     const start = CODE.slice(CODE.indexOf('async function startVoiceCall()'), CODE.indexOf('async function endVoiceCall()'))
     expect(start.indexOf('store.createSession(props.agent.name)')).toBeGreaterThan(-1)
     expect(start.indexOf('store.createSession(props.agent.name)')).toBeLessThan(start.indexOf('voice.startWith('))
-    expect(start).toContain("emit('session-adopted', sid)")
+    // #2579: adoption runs through the one `adoptSession` seam now — this site
+    // no longer emits by hand, because raising `bornHere` at only some of the
+    // three adoption sites drops the provisional tab for the whole round trip
+    // of starting a call. The emit still happens, inside it.
+    expect(start).toContain('adoptSession(sid)')
   })
   it('the composable exposes the end reason, the saved handshake and the panel version', () => {
     for (const name of ['endReason', 'endMessage', 'panelVersion', 'awaitSaved', 'startWith']) {

@@ -308,6 +308,32 @@
           <template #band>
             <PortalAgentBand :agent-name="activeAgent.name" />
           </template>
+          <!-- #2579 AC 3 — the operator's mark on a fallback title. The same
+               `titleGenerationNotice` copy the settings panel renders, raised
+               here because this is where the fallback is being LOOKED at.
+               Admin-only (see `refreshTitleHealth`), so a client never sees it
+               and never even asks for it. Dismissible on purpose rather than as
+               decoration: this line names the agent and says the install has no
+               Anthropic key, on the surface an operator is most likely to be
+               screen-sharing. Semantic status tokens only. -->
+          <template #notice>
+            <div
+              v-if="titleNotice"
+              class="shrink-0 flex items-center gap-2 px-3 sm:px-4 py-1.5 text-xs border-b border-status-warning-200 dark:border-status-warning-500/30 bg-status-warning-50 dark:bg-status-warning-500/10"
+              role="status"
+              aria-live="polite"
+              data-testid="portal-title-notice"
+            >
+              <span class="shrink-0 font-medium text-status-warning-800 dark:text-status-warning-300">{{ titleNotice.title }}</span>
+              <span class="min-w-0 truncate text-status-warning-700 dark:text-status-warning-300" :title="titleNotice.body">{{ titleNotice.body }}</span>
+              <button
+                type="button"
+                class="ml-auto shrink-0 underline hover:no-underline text-status-warning-700 dark:text-status-warning-300"
+                data-testid="portal-title-notice-dismiss"
+                @click="titleNoticeDismissed = true"
+              >Dismiss</button>
+            </div>
+          </template>
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
           </template>
@@ -528,6 +554,8 @@ import { stageZone } from '@/components/portal/portalBriefingState'
 import {
   isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
   landingThread,
+  agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
+  TITLE_SETTLE_DELAYS_MS,
 } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
@@ -1050,29 +1078,84 @@ async function landOnAgent(name) {
   const target = landingThread(threads.value, name)
   if (target) { openThread(target); return }
   try {
-    const { sessions } = await store.fetchSessions(name)
+    // #2579: this branch used to destructure `{ sessions }` off the store's
+    // return value — which is an ARRAY (`data.sessions || []`). `sessions` was
+    // therefore always `undefined`, `landingThread` always missed, and the
+    // repair branch this comment describes never once ran: a first-time
+    // visitor always fell through to a fresh chat, and the Main the call had
+    // just minted server-side never reached the screen. It now goes through
+    // `ensureMainListed`, which does the same per-agent read AND folds the
+    // result into `threads` — one seam for "the list must show this agent's
+    // Main", shared with the watcher below.
+    await ensureMainListed(name)
     // The watcher fires on the route param AND on the thread list arriving, so
     // two landings can be in flight at once on a cold deep link: the first
     // misses (no threads yet) and goes to the network, the second finds the
     // list and navigates. Without this the first one's late resolution
     // navigates too — moving the person off a chat they have since chosen. The
     // route is the authority; if it no longer names this agent, this landing
-    // has been overtaken and has nothing to say.
+    // has been overtaken and has nothing to say. Re-checked HERE, after the
+    // await: the ensure spends two round trips where the old code spent one.
     if (activeAgentPageName.value !== name) return
-    const rows = (sessions || []).map((sn) => ({ ...sn, agent_name: name }))
-    const landed = landingThread(rows, name)
-    if (landed) {
-      await refreshThreads()
-      if (activeAgentPageName.value !== name) return
-      openThread(landed)
-      return
-    }
+    const landed = landingThread(threads.value, name)
+    if (landed) { openThread(landed); return }
   } catch {
     // Fall through: a fresh chat is a better answer than a dead stage.
   }
   if (activeAgentPageName.value !== name) return
   newChatWithAgent(name)
 }
+
+// #2579 — make sure this agent's pinned Main is IN the list on screen.
+//
+// The cross-agent batch deliberately never mints a Main (it would write a row
+// per rostered agent on every sidebar refresh), and the per-agent
+// `list_sessions` is the read that does. So a (user, agent) pair whose chats
+// predate ent#523 has a Main nowhere: not in the list, and not in the database
+// until something calls the per-agent route. This is that something.
+//
+// Two things to be honest about:
+//   * it is a GET that INSERTS. `list_sessions` → `ensure_main_session`, so
+//     visiting N agents creates N empty rows. That is ent#523's stated intent
+//     ("opening an agent is the moment the pinned tab has to be there").
+//   * the retry cap is not defensive tidiness. `fetchAllSessions` NEVER
+//     rejects — on failure it flags `sessionsFailed` and returns the last good
+//     list — so a resolved entry over a still-missing Main would make the miss
+//     permanent for the whole session. Deleting the entry on a miss lets the
+//     next visit try again; the cap stops that becoming a loop, because
+//     `refreshThreads` re-fires the `threads.value.length` watchers that call
+//     back into here.
+const mainEnsured = new Map()   // agent name → in-flight promise
+const mainAttempts = new Map()  // agent name → attempts spent (cap below)
+const MAIN_ENSURE_ATTEMPTS = 2
+
+function ensureMainListed(name) {
+  if (!name) return Promise.resolve()
+  if (agentHasMain(threads.value, name)) return Promise.resolve()
+  const inflight = mainEnsured.get(name)
+  if (inflight) return inflight
+  const spent = mainAttempts.get(name) || 0
+  if (spent >= MAIN_ENSURE_ATTEMPTS) return Promise.resolve()
+  mainAttempts.set(name, spent + 1)
+  const p = store.fetchSessions(name)
+    .then(() => refreshThreads())
+    .then(() => {
+      // Still no Main? Then this attempt bought nothing, and the entry must not
+      // stand as a resolved "already handled" for the rest of the session.
+      if (!agentHasMain(threads.value, name)) mainEnsured.delete(name)
+    })
+    .catch(() => { mainEnsured.delete(name) })
+  mainEnsured.set(name, p)
+  return p
+}
+
+// Guarded exactly like the landing watcher below: signed in, roster resolved,
+// a name to act on. A brand-new agent gets its Main on the first visit rather
+// than on whichever later refresh happened to follow a write.
+watch(activeAgentName, (name) => {
+  if (!name || !store.isClientSignedIn || !store.rosterLoaded) return
+  ensureMainListed(name)
+})
 
 // ent#523 — Reset finished. The shell owns what happens next, since the
 // conversation does not know its own route: land in the fresh Main and refresh
@@ -1199,6 +1282,11 @@ async function refreshThreads() {
 // after the read cursor set at dispatch and badge the chat they are sitting in
 // — a notification for something they are actively reading.
 function onConversationTurnDone(sessionId) {
+  // #2579: this event has four emitters, and one of them (the send's own
+  // `sessions-changed`) can fire with a null id. Everything below needs a
+  // thread to be about.
+  clearTitleSettle()
+  if (!sessionId) return refreshThreads()
   // Only if the user is STILL in that thread. The conversation's send is an
   // async closure that outlives the component, so this fires even when they
   // have navigated away mid-turn — which is the main way a reply legitimately
@@ -1208,8 +1296,83 @@ function onConversationTurnDone(sessionId) {
   return (shouldMarkTurnRead(sessionId, open)
     ? markRead('thread', sessionId)
     : Promise.resolve()
-  ).then(refreshThreads)
+  ).then(refreshThreads).then(() => armTitleSettle(sessionId))
 }
+
+// --- Titles settle (#2579) --------------------------------------------------
+//
+// #2579 moved the generator's spawn to run CONCURRENTLY with the turn, so in
+// the ordinary case the generated title is already on the row this refresh
+// reads. This is the belt for the cases that move does not close: a turn faster
+// than the model call, the `retry` attempt (which by construction lands after
+// its own turn), and a slow provider.
+//
+// It re-reads the LIST — no chat-state fetch — on a bounded schedule and stops
+// the moment the title differs from what it saw at turn-done. Deliberately not
+// a mirror of the server's `PORTAL_TITLE_TIMEOUT_SECONDS`, which is
+// operator-tunable: exhausting the schedule is a trigger to ASK the health
+// record, never a verdict of its own (the #2133 class).
+const titleSettleTimers = []
+let titleAtTurnDone = null
+const titleHealth = ref(null)
+const titleNoticeDismissed = ref(false)
+
+function clearTitleSettle() {
+  while (titleSettleTimers.length) clearTimeout(titleSettleTimers.pop())
+  titleAtTurnDone = null
+}
+
+function threadRow(sessionId) {
+  return (threads.value || []).find((t) => !t.is_room && (t.id || t.session_id) === sessionId) || null
+}
+
+function armTitleSettle(sessionId) {
+  const row = threadRow(sessionId)
+  if (!row || !titleSettling(row)) return
+  titleAtTurnDone = row.title || ''
+  TITLE_SETTLE_DELAYS_MS.forEach((ms, i) => {
+    titleSettleTimers.push(setTimeout(() => settleTick(sessionId, i === TITLE_SETTLE_DELAYS_MS.length - 1), ms))
+  })
+}
+
+async function settleTick(sessionId, last) {
+  // List only. `fetchAllSessions` NEVER rejects — it flags `sessionsFailed` and
+  // hands back the last good list — so without asking it, a flaky network reads
+  // as "the title never changed" and would report a working generator broken.
+  const list = await store.fetchAllSessions().catch(() => null)
+  if (list === null || store.sessionsFailed) { clearTitleSettle(); return }
+  threads.value = decorate(list)
+  const row = threadRow(sessionId)
+  // Gone (Reset, delete): stop, and leave the health verdict alone. A deleted
+  // row is not evidence that generation works.
+  if (!row) { clearTitleSettle(); return }
+  if ((row.title || '') !== titleAtTurnDone) {
+    // It landed — generation demonstrably works, whoever did it. A person's
+    // rename stops the cycle too, and that is right: `_title_plan` returns None
+    // for `title_source == 'user'`, so there is nothing left to wait for.
+    titleHealth.value = null
+    clearTitleSettle()
+    return
+  }
+  if (last) { clearTitleSettle(); refreshTitleHealth() }
+}
+
+// Only a platform admin, and only after a title demonstrably failed to settle
+// on a SUCCESSFUL read. Never at bootstrap — this is a diagnostic, not a page
+// dependency — and any refusal means no notice rather than an error in a
+// client's face.
+async function refreshTitleHealth() {
+  if (!shouldFetchTitleHealth(store.isPlatformSession, authStore.role)) return
+  try {
+    titleHealth.value = await store.fetchTitleGenerationHealth()
+  } catch {
+    titleHealth.value = null
+  }
+}
+
+const titleNotice = computed(() =>
+  titleNoticeDismissed.value ? null : titleGenerationNotice(titleHealth.value)
+)
 
 // Optimistic: a star is a personal bookmark, and waiting on a round trip to
 // redraw it makes the control feel broken. Reverted in place on failure so the
@@ -1467,7 +1630,15 @@ onBeforeUnmount(() => {
   stopAsksPoll()          // ent#364 — the poll must not outlive the view
   clearInterval(resendTimer)
   clearTimeout(searchTimer)
+  clearTitleSettle()      // #2579 — nor may the settle cycle
 })
+
+// #2579 — the third clear site, and the one that matters most in practice.
+// `convKey` is the seam that already MEANS "the conversation changed"; neither
+// of the other two fires on a thread switch, so without this a cycle armed in
+// chat A keeps replacing `threads.value` under the user for 16 seconds and can
+// raise a notice above chat B.
+watch(convKey, () => { clearTitleSettle() })
 
 // #2258: true from the click until the credential is gone and the route has
 // moved. Gates the template's first branch so neither principal sees a state
@@ -1487,6 +1658,13 @@ async function onSignOut() {
   try {
     const target = await store.signOutEverywhere()
     threads.value = []; activeAgentName.value = null; pendingSession.value = null
+    // #2579: this handler resets state IN PLACE — the OTP form is a branch of
+    // this same component, so the view is never remounted. Without clearing
+    // these, client B signing in on the same tab inherits client A's resolved
+    // promises and never gets a Main: exactly the defect they exist to fix,
+    // reintroduced for the second principal.
+    mainEnsured.clear(); mainAttempts.clear()
+    clearTitleSettle(); titleHealth.value = null; titleNoticeDismissed.value = false
     step.value = 'email'; email.value = ''; code.value = ''
     if (target === PLATFORM_LOGIN_ROUTE) {
       await router.push(PLATFORM_LOGIN_ROUTE)

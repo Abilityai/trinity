@@ -1004,12 +1004,39 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
+    //
+    // #2579: this read is also the only one that MINTS the pinned Main chat
+    // (`list_sessions` → `ensure_main_session`); the cross-agent batch
+    // deliberately never does. Returns an ARRAY, not `{ sessions }` — a caller
+    // that destructures gets `undefined` and silently takes its miss branch.
     async fetchSessions(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
         { headers: this.authHeader }
       )
       return data.sessions || []
+    },
+
+    // #2579 — the operator-only title-generation health, for the notice under
+    // the Workspace tab strip. Same payload the settings panel reads.
+    //
+    // `portalHttp`, deliberately, not `@/api`. This store owns its own axios
+    // instance whose request interceptor rebuilds `Authorization` from
+    // `authHeader` — which for a platform session IS the platform JWT — and
+    // whose 401 handler routes an operator through `_onPlatformSessionLost`.
+    // `@/api` would add a second, harsher path into this same file: it hard-
+    // navigates to `/login` on a 401 under `/workspace`, so a stale token on a
+    // BACKGROUND diagnostic probe would bounce an operator out of the
+    // conversation they are reading, through a route the Workspace never uses.
+    //
+    // Fail-soft on purpose: the caller treats any refusal as "no notice". The
+    // endpoint is `assert_admin`-gated, which is the authority; the client-side
+    // `shouldFetchTitleHealth` gate only avoids the request.
+    async fetchTitleGenerationHealth() {
+      const { data } = await portalHttp.get('/api/settings/portal-session-policy', {
+        headers: this.authHeader,
+      })
+      return data?.title_generation || null
     },
 
     // Open a fresh conversation thread ("New chat"). Returns the empty session.
