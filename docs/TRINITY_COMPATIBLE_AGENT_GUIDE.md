@@ -329,8 +329,9 @@ bites you, the sync now **tells you**: its result carries
 index, so the file is still on disk. Two steps:
 
 ```bash
-# 1. Negate it in your .gitignore, BELOW the managed defaults block
-echo '!path/to/file' >> .gitignore   # then move the line above the floor markers
+# 1. Negate it in your .gitignore. Appending is fine — the next sync moves the
+#    line into the user region for you, where it beats the defaults block.
+echo '!path/to/file' >> .gitignore
 
 # 2. Re-add it once — it was ignored, so a plain `git add` will skip it
 git add -f path/to/file
