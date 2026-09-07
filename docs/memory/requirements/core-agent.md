@@ -1996,3 +1996,119 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (this surface unmounts on every chat switch).
 
 - **Flow**: `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
+
+### 5.24 A room tells its agents when a person is reading (trinity-enterprise#363)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_ROOM_USER_FACING_SIGNAL
+- **GitHub Issue**: abilityai/trinity-enterprise#363
+- **Description**: An agent woken in a room that contains a **human** participant
+  receives an explicit signal in its injected context saying the transcript is
+  being read by a person outside the fleet, and guidance on what that should
+  change about its output. A room with only agents in it is unchanged.
+- **Why this is a security requirement, not a politeness one.** Full transcript
+  visibility is the deliberate choice for Workspace rooms — watching the team
+  work is the differentiator over a summary — and that choice is only safe if
+  the agents know they are being watched. Without the signal, agent-to-agent
+  messages in a user-facing room discuss internals, other customers, costs and
+  platform mechanics **in front of the customer**. The issue is filed
+  `theme-security` for that reason.
+- **What existed and why it was not enough.** ent#362 labels each transcript
+  line whose `sender_kind` is `user`/`workspace_user` with a `(human)` suffix.
+  That is per-MESSAGE and only appears if that person happened to speak inside
+  the delta window — so an agent woken into a room where the human is reading
+  silently sees a transcript of agents talking to agents and nothing else. The
+  room header additionally said "Other agents and people are in this room"
+  **unconditionally**, which is false in an agent-only room and far too weak in
+  a user-facing one: it is scene-setting, not a disclosure.
+- **Set by the platform from membership, never asserted by a participant** (AC 2).
+  `_wake_agent` derives the fact from `db.list_participants(room_id)` — a
+  participant `kind` outside the agent/system set, still present (`left_at IS
+  NULL`) — and passes it as `system_prompt`. Nothing a participant can write
+  reaches the decision, and no participant identity reaches the block: the
+  signal states **that** a person is reading, never who, because the block is
+  composed into a prompt and a client's address is neither needed for the
+  behaviour change nor safe to hand every agent in the room.
+- **Derived per wake, not threaded.** `post_message` already holds the
+  participant list, but `_wake_agent` calls `post_message` back with the agent's
+  reply, which wakes further agents — so a value threaded down the first call
+  would have to survive a round trip through a public function. Re-deriving is
+  one indexed read per wake against a turn that costs an LLM call, and it cannot
+  go stale mid-chain when a human is recruited by the reply.
+- **Fail direction is stated: unreadable membership reads as USER-FACING.** The
+  inverse of the usual capability default (#2128 fails closed to "absent"),
+  because the two mistakes are not symmetrical — a needless caution in an
+  agent-only room costs a slightly more careful answer, while a missed signal in
+  front of a customer is the disclosure this requirement exists to prevent.
+- **The header stops lying.** `_build_turn_prompt` now says who is actually in
+  the room, so the unconditional sentence is replaced by a true one in both
+  cases; the `(human)` per-line label is kept, because per-line attribution and
+  a room-level disclosure answer different questions.
+- **Verified by test** (AC 5): a room with a workspace user injects the block, an
+  agent-only room passes `system_prompt=None`, a participant who has left does
+  not count, and no participant identity appears in the composed prompt.
+
+### 5.25 Report-a-problem — a negative Workspace rating reaches the operator (trinity-enterprise#499)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: WORKSPACE_PROBLEM_REPORT
+- **GitHub Issue**: abilityai/trinity-enterprise#499
+- **Description**: A thumbs-down on a message or deliverable (§5.15) raises a
+  **rate-bounded** `operator_queue` item naming the agent, the person, what was
+  rated and their comment, so the instance's operator learns a client is unhappy
+  without the rated agent being in the loop.
+- **The agent is not the reporting channel.** ent#366's rule — a readable score
+  is a loop an agent may optimise for, and a stranger's verbatim words handed to
+  the thing being criticised is a prompt-injection path into it — is why the
+  operator's copy goes to the queue directly and the agent-facing redaction
+  (`comment_withheld`) is untouched. The operator sees the comment; the agent
+  still does not.
+- **Routed through the budget, never allowlisted** (#1677). The volume here is
+  driven by a *client* clicking, so this is an agent-influenceable emitter by
+  the classification rule and goes through
+  `operator_queue_service.create_bounded_alert` with its own registered type
+  `workspace_problem_report` and reserved id prefix `workspace-problem-`. A
+  direct `create_operator_queue_item` would fail the CI emitter guard, and
+  reusing the generic `alert` type would have made five unrelated alerts on that
+  agent silence every problem report.
+- **One item per person per target, by construction.** The id is derived from
+  the evaluator and the target, so a re-rate hits `create_item`'s
+  `ON CONFLICT DO NOTHING`. **Stated residual**: `create_item` has no UPDATE
+  path, so an edited comment does not reach an item already raised — the same
+  residual ent#434's alert carries, and it is a shared fix, not a per-emitter
+  one.
+- **Emitted off the response path.** `create_bounded_alert` is async and the
+  rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
+  existing `capture-feedback` dispatch. A rating is recorded whether or not the
+  alert is raised: the client's action must never fail because the operator's
+  copy could not be written.
+- **An unknown queue type is acknowledgeable** — see the prerequisite below.
+  Without it this item would render with no action at all, five would accumulate
+  and the budget would jam permanently.
+- **With no operator configured** (OSS single-user) the item still records: it is
+  a durable row, and the queue is read by whoever runs the instance.
+- **ent#329 has shipped**, so the AC's "acted on at the next wake-up" caveat (C15)
+  is spent. It is deliberately NOT replaced with a claim about resume: this item
+  is an **alert**, nothing is waiting on an answer, and `operator_resume_enabled`
+  is per-agent and off by default — so a sentence promising a re-trigger would be
+  wrong on most installs.
+
+### 5.26 An operator-queue item of an unrecognised type can still be closed (trinity-enterprise#499 prerequisite)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: OPERATOR_QUEUE_UNKNOWN_TYPE_ACK
+- **Description**: The desktop queue card and detail panel choose their controls
+  through the shared `queueResponseKind` rule rather than a hardcoded `v-if`
+  chain, and an item whose `type` is none of `approval`/`question`/`alert` offers
+  **acknowledge**.
+- **This is a live bug, found while building §5.25.** `skill_not_found` (#1410)
+  has shipped a non-protocol `type` since it landed; `QueueCard.vue` and
+  `QueueItemDetail.vue` branch `approval → question → alert` and render **no
+  control** for anything else, so those items cannot be closed from the queue at
+  all. `utils/operatorQueue.js::queueResponseKind` — the module whose docstring
+  says it is "the ONE home of … the controls-kind switch" — already existed and
+  the two cards were the second producer it exists to prevent.
+- **The default moves from `question` to `acknowledge`.** An unknown type is
+  *informational*: `question` is the type that asks for an answer, and offering a
+  freeform box invites an operator to type a reply nothing is waiting for — which
+  under ent#329 can spend a turn. `approval` with no options keeps falling to
+  `question`, because there the operator genuinely has a decision to express.
+- **Verified by test**: the pure rule's table including the changed default, and
+  a source guard that neither card re-implements the switch.

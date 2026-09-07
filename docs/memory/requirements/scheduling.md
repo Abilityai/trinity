@@ -1366,3 +1366,70 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   kind (`loop`) in the rail's Work tab — *Now* and *Earlier* — and there is
   no parallel surface (core-agent §5.21).
 
+
+### 10.18 A schedule can deliver its output into a Workspace conversation (trinity-enterprise#498)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Requirement ID**: SCHEDULE_WORKSPACE_DELIVERY
+- **GitHub Issue**: abilityai/trinity-enterprise#498
+- **Journey**: J11 — *a companion's brief reaches me where I already work, without
+  me asking* (`tests/journeys/catalog.yaml`, harness abilityai/trinity#2565)
+- **Description**: `agent_schedules` gains one nullable column,
+  `deliver_to_workspace_email`. When set and the schedule fires, the execution's
+  output lands as a new turn in that person's **Main** Workspace chat with the
+  agent (§5.23). Absent → today's behaviour, byte-for-byte. **API and MCP only
+  this cut**: no schedule-form toggle.
+- **Why this is the most visible piece of Tandem.** A role companion's daily
+  brief is a scheduled playbook call whose output has to reach one primary human
+  where they already work. Until now every scheduled run terminated in an
+  execution row — the operator's surface — and a person who is not the operator
+  never saw it.
+- **Almost all of it already existed.** `channel_completion_report` has resolved,
+  persisted and effect-guarded a portal-bound completion since ent#457, and
+  `report_completion` is trigger-agnostic: `schedule` is deliberately **not** in
+  `INLINE_CHANNEL_TRIGGERS`, because a scheduled run has no surface that already
+  answered. What was missing was only that a scheduled execution row never
+  carried `source_channel='portal'`.
+- **The stamp is written backend-side, and that is forced.** The scheduler
+  creates the execution row itself and always sends `execution_id`, so
+  `execute_task`'s channel-persisting branch (`if not execution_id:`) can never
+  run for a cron fire — passing the columns as kwargs would be silently inert
+  (the #2426 class). The scheduler is also a separate process that cannot import
+  the portal package, so it cannot resolve *which* session. So the scheduler
+  carries the **email**, and `POST /api/internal/execute-task` resolves the Main
+  session and stamps the pre-created row **before** dispatch.
+- **The destination is Main** (ruled 2026-09-06, decision 6b), reached through
+  `client_portal.service.ensure_main_session` — the same landing rule an
+  agent-initiated message and an ask outside a chat already use, so a brief is
+  not a fourth thing that decides where to land. An explicit session id still
+  wins wherever one exists.
+- **Access is checked against where the message will land**, not against a
+  broader notion of permission: `agent_on_roster(agent, email, include_owned=True)`
+  — the Workspace's own roster (shared ∪ owned). `email_has_agent_access` was
+  rejected because it admits any admin, and an admin who neither owns the agent
+  nor is shared it cannot open that thread, so a brief delivered there would be
+  invisible. A blocked client (`is_client_blocked`) is refused for the same
+  reason.
+- **A bad target is a visible failure, never a silent no-op** (AC 5). An unknown
+  address, a revoked share or a blocked client **refuses the dispatch** and
+  writes a FAILED terminal on the pre-created row naming the reason
+  (`workspace_delivery_target_unreachable`). Running the turn anyway would spend
+  the tokens and put the answer somewhere nobody can read; failing before the
+  spend is both cheaper and louder.
+- **At-most-once per fire is inherited, not rebuilt.** `report_completion`'s
+  `effect_guard` is keyed on the execution id, and a fire is one execution — so a
+  re-delivered fire posts once by construction (#1083's rule).
+- **Never interleaved with an in-flight turn** (C9). The portal delivery leg
+  waits, bounded, on the ent#286 in-flight marker for that session before writing,
+  then writes regardless — the report is never dropped, only deferred. This
+  narrows the pre-existing ent#457 ambiguity (`PortalConversation` detects a reply
+  by an assistant-row count delta, so a row landing mid-turn can be read as that
+  turn's answer) for every portal report, not only scheduled ones. The complete
+  fix needs a per-row discriminator `enterprise_portal_messages` does not carry.
+- **Delivery is durable, not live-pushed.** The Workspace does not poll thread
+  history, so the brief appears on the next load or thread switch — acceptable at
+  daily cadence, and stated rather than implied.
+- **Rateable like any agent message** (#366) by construction: it is an ordinary
+  `assistant` row in that session, so ent#366's visibility rule already admits it.
+- **Not this issue**: rooms as a destination and agent-initiated `post_to_room`
+  (both trinity-enterprise#442), and a schedule-form toggle.
+- **Flow**: `docs/memory/feature-flows/schedule-workspace-delivery.md`
