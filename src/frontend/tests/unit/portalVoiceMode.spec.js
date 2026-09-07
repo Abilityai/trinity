@@ -38,7 +38,18 @@ import {
 } from '../../src/components/portal/portalVoiceMode'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
-const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/<!--[\s\S]*?-->/g, '')
+// HTML comments are stripped until none remain: a single pass leaves a live
+// `<!--` behind on a nested/overlapping comment (the hardeningGuide.spec shape;
+// CodeQL js/incomplete-multi-character-sanitization).
+const stripHtmlComments = (src) => {
+  let out = src
+  for (;;) {
+    const next = out.replace(/<!--[\s\S]*?-->/g, '')
+    if (next === out) return out
+    out = next
+  }
+}
+const stripComments = (src) => stripHtmlComments(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''))
 
 const CONVERSATION = read('../../src/components/portal/PortalConversation.vue')
 const SHELL = read('../../src/views/Portal.vue')
