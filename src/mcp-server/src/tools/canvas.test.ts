@@ -139,3 +139,43 @@ describe("filterCanvasesForAgentScope", () => {
     assert.deepEqual(filterCanvasesForAgentScope(rows, new Set(["worker"])), [{ agent_name: "worker" }]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ent#537 — starter layouts: `template` on the write, `slot` on the block
+// ---------------------------------------------------------------------------
+import { CANVAS_LAYOUT_SLOTS, CANVAS_TEMPLATES } from "./canvas.js";
+
+describe("starter layouts (ent#537)", () => {
+  it("advertises the four templates and passes template + slot through to the backend", async () => {
+    assert.deepEqual([...CANVAS_TEMPLATES], ["dashboard", "report", "brief", "status-board"]);
+    for (const t of CANVAS_TEMPLATES) assert.ok(CANVAS_LAYOUT_SLOTS[t].length >= 3, t);
+
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const tools = makeTools(calls);
+    const params = tools.set_canvas.parameters;
+    const parsed = params.parse({
+      template: "dashboard",
+      blocks: [{ kind: "kpi", slot: "kpis", payload: { tiles: [] } }],
+    });
+    assert.equal(parsed.template, "dashboard");
+    assert.equal(parsed.blocks[0].slot, "kpis");
+    assert.throws(() => params.parse({ template: "poster", blocks: [] }), /Invalid/i);
+    assert.throws(() => params.parse({ blocks: [{ kind: "kpi", slot: "Kpis!" }] }), /Invalid|regex|pattern/i);
+
+    await tools.set_canvas.execute(parsed, { session: AGENT_CTX });
+    const body = calls[0].args[2] as Record<string, unknown>;
+    assert.equal(body.template, "dashboard");
+    assert.equal((body.blocks as Array<{ slot?: string }>)[0].slot, "kpis");
+
+    // Omitted when not given — an older backend whose CanvasWrite forbids
+    // extras must still accept the write.
+    await tools.set_canvas.execute({ blocks: [] }, { session: AGENT_CTX });
+    assert.equal("template" in JSON.parse(JSON.stringify(calls[1].args[2])), false);
+  });
+
+  it("the tool description names each template with its slots", () => {
+    const tools = makeTools([]);
+    const desc = JSON.stringify(tools.set_canvas.parameters.shape.template.description);
+    for (const t of CANVAS_TEMPLATES) assert.ok(desc.includes(`${t}(${CANVAS_LAYOUT_SLOTS[t].join(", ")})`), t);
+  });
+});

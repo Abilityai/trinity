@@ -3957,6 +3957,27 @@ def _migrate_agent_canvases_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_template(cursor, conn):
+    """ent#537 — a canvas may declare a starter layout by name.
+
+    `agent_canvases.template` holds 'dashboard' | 'report' | 'brief' |
+    'status-board', or NULL for the stacked default every pre-#537 row keeps.
+    A property of the SURFACE (like `audience`), so a column rather than a key
+    inside `blocks`; the per-block `slot` that fills a layout lives in the
+    blocks JSON because it travels with the block through `patch_canvas`.
+    No backfill: NULL is the honest reading of a row nobody laid out.
+
+    Mirrored by the Alembic revision 0054_agent_canvases_template.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "template",
+        "ALTER TABLE agent_canvases ADD COLUMN template TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_title_source(cursor, conn):
     """ent#473 — which hand wrote a Workspace thread's title.
 
@@ -4134,4 +4155,5 @@ MIGRATIONS = [
     ("agent_canvases_table", _migrate_agent_canvases_table),
     ("portal_session_title_source", _migrate_portal_session_title_source),
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
+    ("agent_canvases_template", _migrate_agent_canvases_template),
 ]

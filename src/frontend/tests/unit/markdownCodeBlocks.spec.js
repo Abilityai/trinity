@@ -247,8 +247,16 @@ describe('the sanitizer keeps what the decorator emits', () => {
     expect(purify).toMatch(/ALLOW_ARIA_ATTR[^;]{0,80}!==\s*false/)
   })
 
-  it('the app does not narrow that policy', () => {
-    expect(MARKDOWN_JS).not.toMatch(/setConfig|FORBID_|ALLOWED_TAGS|ALLOWED_ATTR/)
+  it('the app does not narrow that policy for anything the decorator emits', () => {
+    // No global reconfiguration and no allowlist rewrite. The ONE narrowing is
+    // ent#537's `FORBID_TAGS: ['style']` — DOMPurify's default admits the
+    // <style> ELEMENT, which is document-global — and the decorator never
+    // emits one; canvas mode additionally drops `id`, on a path the decorator
+    // does not run on. Anything beyond those two is a policy change.
+    expect(MARKDOWN_JS).not.toMatch(/setConfig|ALLOWED_TAGS|ALLOWED_ATTR/)
+    const forbids = [...MARKDOWN_JS.matchAll(/FORBID_(TAGS|ATTR): \[([^\]]*)\]/g)].map((m) => `${m[1]}:${m[2]}`)
+    expect(new Set(forbids)).toEqual(new Set(["TAGS:'style'", "ATTR:'id'"]))
+    expect(MARKDOWN_JS).toContain("const BASE_CONFIG = Object.freeze({ FORBID_TAGS: ['style'] })")
   })
 })
 
@@ -256,7 +264,7 @@ describe('what only source can answer — markdown.js', () => {
   it('exports the opt-in renderer, and orders the pipeline strip → decorate → sanitize', () => {
     expect(MARKDOWN_JS).toContain('export function renderMarkdownWithCodeBlocks')
     expect(MARKDOWN_JS).toContain(
-      'DOMPurify.sanitize(decorateCodeBlocks(stripCodeBlockMarkers(marked(content))))',
+      'DOMPurify.sanitize(decorateCodeBlocks(stripCodeBlockMarkers(marked(content))), BASE_CONFIG)',
     )
   })
 
@@ -294,7 +302,7 @@ describe('what only source can answer — markdown.js', () => {
   it('leaves renderMarkdown untouched — twelve consumers depend on it', () => {
     const body = MARKDOWN_JS.slice(MARKDOWN_JS.indexOf('export function renderMarkdown(content)'))
     expect(body).toContain('const html = marked(content)')
-    expect(body).toContain('return DOMPurify.sanitize(html)')
+    expect(body).toContain('return DOMPurify.sanitize(html, BASE_CONFIG)')
     expect(body).not.toContain('decorateCodeBlocks')
   })
 })

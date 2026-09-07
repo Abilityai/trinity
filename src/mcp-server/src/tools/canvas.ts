@@ -45,6 +45,21 @@ const BLOCK_KINDS = [
   "table", "kpi", "markdown", "timeline", "json", "chart", "html", "image", "diagram",
 ] as const;
 
+// ent#537 — starter layouts and the slots each names. Keep in step with
+// `CANVAS_LAYOUT_SLOTS` in the backend `models.py` and `LAYOUTS` in the
+// frontend `canvasLayouts.js`; `test_ent537_canvas_design_kit.py` pins them.
+export const CANVAS_TEMPLATES = ["dashboard", "report", "brief", "status-board"] as const;
+export const CANVAS_LAYOUT_SLOTS: Record<(typeof CANVAS_TEMPLATES)[number], readonly string[]> = {
+  dashboard: ["header", "kpis", "main", "side", "footer"],
+  report: ["header", "summary", "body", "figures", "appendix"],
+  brief: ["header", "key-points", "body"],
+  "status-board": ["header", "status", "issues", "next", "log"],
+};
+
+const LAYOUT_GUIDE = CANVAS_TEMPLATES
+  .map((t) => `${t}(${CANVAS_LAYOUT_SLOTS[t].join(", ")})`)
+  .join(" · ");
+
 // One sentence per kind, with the payload shape the renderer actually reads.
 // The platform prompt teaches the same shapes (test_ent536_canvas_prompt_guidance
 // pins the two against each other).
@@ -61,7 +76,10 @@ const KIND_GUIDE =
   "image = {src, caption?} where src is an https URL, a path to a file in your workspace " +
   "(e.g. 'content/chart.png'), or data:image/png|jpeg|gif|webp;base64 under 64 KB · " +
   "html = {html} static markup, sanitised, scripts never run · json = raw. " +
-  "Never put JavaScript in a block — you provide the data, Trinity draws it.";
+  "Never put JavaScript in a block — you provide the data, Trinity draws it. " +
+  "In html/markdown, style with the canvas kit classes ONLY (ck-card, ck-card-title, ck-grid-2/3/4, " +
+  "ck-section, ck-callout ck-info|ck-success|ck-warning|ck-danger, ck-chip, ck-kpi, ck-table, " +
+  "ck-figure + ck-caption, ck-muted); other classes, <style> and inline styles are dropped.";
 
 const blockSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe(
@@ -70,6 +88,10 @@ const blockSchema = z.object({
   ),
   kind: z.enum(BLOCK_KINDS).describe(KIND_GUIDE),
   title: z.string().max(300).optional().describe("Optional heading for this block."),
+  slot: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/).optional().describe(
+    "Which slot of the canvas's `template` this block fills (e.g. 'kpis', 'main'). A block " +
+    "without one, or naming a slot the template lacks, renders after the layout — never hidden.",
+  ),
   payload: z.union([z.record(z.string(), z.unknown()), z.array(z.unknown())]).optional()
     .describe("The block's data, in the shape its kind describes."),
 });
@@ -136,6 +158,10 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
           "'roster' = also the people this agent is shared with, on your agent's Workspace page. " +
           "Choose 'roster' only for output you mean for them — it is how a canvas reaches a customer.",
         ),
+        template: z.enum(CANVAS_TEMPLATES).optional().describe(
+          "Optional starter layout. Each names the slots blocks fill via their `slot`: " +
+          LAYOUT_GUIDE + ". Omit for stacked blocks. Unslotted blocks render after the layout.",
+        ),
         execution_id: z.string().optional().describe(
           "Optional. The execution_id of the turn you are writing from. It stamps the canvas with " +
           "which run produced it, which is what lets Trinity tell a reader honestly whether the " +
@@ -146,8 +172,9 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         params: {
           canvas_id?: string;
           title?: string;
-          blocks: Array<{ id?: string; kind: string; title?: string; payload?: unknown }>;
+          blocks: Array<{ id?: string; kind: string; title?: string; slot?: string; payload?: unknown }>;
           audience?: "operator" | "roster";
+          template?: (typeof CANVAS_TEMPLATES)[number];
           execution_id?: string;
         },
         context?: { session?: McpAuthContext },
@@ -165,6 +192,9 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
             title: params.title,
             blocks: params.blocks,
             audience: params.audience,
+            // Omitted when undefined (JSON.stringify drops it), so an older
+            // backend whose CanvasWrite forbids extras still accepts the write.
+            template: params.template,
             execution_id: params.execution_id,
           });
           return JSON.stringify({ success: true, canvas: result }, null, 2);
@@ -199,7 +229,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
       execute: async (
         params: {
           canvas_id?: string;
-          blocks: Array<{ id: string; kind: string; title?: string; payload?: unknown }>;
+          blocks: Array<{ id: string; kind: string; title?: string; slot?: string; payload?: unknown }>;
           execution_id?: string;
         },
         context?: { session?: McpAuthContext },
