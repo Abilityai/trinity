@@ -31,16 +31,23 @@ import { stripComments } from './helpers/stripComments'
 
 const src = (p) => stripComments(readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8'))
 
-const PAGE = '../../src/components/portal/PortalAgentPage.vue'
+// ent#523: the agent page was dismantled and its Reports section moved to
+// the Agent-details panel. Every rule below is about the REPORTS rendering —
+// the shared dispatch, the stricter client fallback, the three states — so
+// the spec follows the section to its new home rather than being retired.
+const PAGE = '../../src/components/portal/PortalAgentDetails.vue'
 const RENDERER = '../../src/components/reports/ReportRenderer.vue'
 const SUMMARY = '../../src/components/reports/ReportSummary.vue'
 
 /** The Reports tab's template block, isolated from the rest of the page. */
 function reportsBlock() {
+  // ent#523: the panel is sections, not tabs, so the block is delimited by its
+  // own heading and the end of the scroll region rather than by the neighbouring
+  // tab that used to follow it.
   const page = src(PAGE)
-  const start = page.indexOf("tab === 'reports'")
+  const start = page.indexOf('>Reports</h2>')
   expect(start).toBeGreaterThan(-1)
-  const end = page.indexOf("tab === 'files'", start)
+  const end = page.indexOf('</section>', start)
   expect(end).toBeGreaterThan(start)
   return page.slice(start, end)
 }
@@ -115,10 +122,14 @@ describe('the Reports tab', () => {
     expect(reportsBlock()).not.toMatch(/\bmax-h-/)
   })
 
-  it('leaves the Overview block alone (#2169 owns it)', () => {
+  it('leaves the activity chart to the band (ent#523 moved it there)', () => {
+    // #2169's Overview block is gone with the agent page. The chart it owned is
+    // the band's, and the details panel must not grow a second copy — two charts
+    // for one agent is exactly the duplication the dismantle removed.
     const page = src(PAGE)
-    expect(page).toContain("tab === 'overview'")
-    expect(page).toContain('StackedBarChart')
+    expect(page).not.toContain('StackedBarChart')
+    const band = src('../../src/components/portal/PortalAgentBand.vue')
+    expect(band).toContain('StackedBarChart')
   })
 })
 

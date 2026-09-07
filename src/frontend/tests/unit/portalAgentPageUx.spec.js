@@ -53,7 +53,13 @@ import {
 } from '@/utils/executionBuckets'
 
 const PORTAL = fileURLToPath(new URL('../../src/views/Portal.vue', import.meta.url))
-const PAGE = fileURLToPath(new URL('../../src/components/portal/PortalAgentPage.vue', import.meta.url))
+// ent#523: the agent page was dismantled — the chart and the stats it owned
+// are the always-visible band's now, and the asks it rendered were the second
+// of two copies (the conversation kept the surviving one). `PAGE` follows the
+// chart, which is what most of this file is about; the asks guards below name
+// their new surface explicitly.
+const PAGE = fileURLToPath(new URL('../../src/components/portal/PortalAgentBand.vue', import.meta.url))
+const CONVERSATION = fileURLToPath(new URL('../../src/components/portal/PortalConversation.vue', import.meta.url))
 const CHART = fileURLToPath(new URL('../../src/components/StackedBarChart.vue', import.meta.url))
 
 // Comments are stripped so prose about a rule isn't scanned as code. Shared,
@@ -218,7 +224,7 @@ describe('bucket labels', () => {
     }
   })
 
-  it('is presentation only — the page stacks by the untranslated buckets', () => {
+  it('is presentation only — the band stacks by the untranslated buckets', () => {
     const src = pageSource()
     // If the labels were passed as `:buckets`, every `by_type[bucket]` lookup
     // would miss and the chart would render blank.
@@ -246,24 +252,23 @@ describe('StackedBarChart labels prop', () => {
 // ---------------------------------------------------------------------------
 
 describe('Overview containment', () => {
-  it('keeps asks on the Overview rather than a new tab', () => {
-    // #2449 repoint: the marker moved, the property did not. The page used to
-    // render asks from TWO sources — this section off `page.asks`, and
-    // `<PortalAsks>` off the `/asks` store — so every ask appeared twice. The
-    // duplicate is gone; `<PortalAsks>` is the rendering, and it is still on the
-    // Overview rather than behind a sixth tab.
-    const src = pageSource()
+  it('keeps asks in front of the composer rather than behind a tab', () => {
+    // ent#523 repoint, the second for this guard: #2449 removed the page's
+    // duplicate ask rendering, and ent#523 removed the page. The surviving
+    // mount is the conversation's — which is where a pending decision belongs,
+    // directly above the box you would answer it in — and it is still inline
+    // rather than behind a tab.
+    const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
     expect(src).toContain('<PortalAsks')
     expect(src).not.toMatch(/id:\s*'asks'/)
   })
 
   it('does not advertise an asks section for an agent with nothing waiting', () => {
-    // Survives the #2449 de-duplication: the surviving mount is guarded on the
-    // store list being non-empty, so an agent with nothing waiting renders no
-    // section at all — same rule, one source.
-    expect(pageSource()).toMatch(
-      /v-if="store\.asksForAgent\(agentName\)\.length"[\s\S]{0,160}<PortalAsks/,
-    )
+    // Survives both repoints: the surviving mount is guarded on the store list
+    // being non-empty, so an agent with nothing waiting renders no section at
+    // all — same rule, one source, now on the conversation.
+    const src = stripComments(readFileSync(CONVERSATION, 'utf8'))
+    expect(src).toMatch(/v-if="agentAsks\.length"[\s\S]{0,200}<PortalAsks/)
   })
 
   it('does not nest a scroll region inside the asks rendering', () => {
@@ -302,27 +307,40 @@ describe('Overview containment', () => {
   // would now be a wrong number rather than a rounded one. The badge is a plain
   // count of the pending list, pinned in `portalAskSingleSource.spec.js`.
 
-  it('lets the activity chart fill its column', () => {
-    // The chart carried `max-w-2xl` when it sat alone above a full-width row.
-    // Inside a half-width column that cap is dead weight below ~1656px, and the
-    // section it capped is now one of two equal columns.
+  it('lets the activity chart fill its cell', () => {
+    // The cap this pinned (`max-w-2xl`, from when the chart sat alone above a
+    // full-width row) must not come back with the chart's third home. ent#523
+    // moved it into the band, where it is the flexible cell between the stat
+    // figures and the window selector.
     const src = pageSource()
-    expect(src).toContain('Activity · last')
+    expect(src).toContain('StackedBarChart')
     expect(src).not.toMatch(/max-w-2xl/)
   })
 
-  it('does not advertise an asks section for an agent with nothing waiting', () => {
-    // #2449 repoint: the guard moved with the rendering. The surviving mount is
-    // conditioned on the store list being non-empty, so an agent with nothing
-    // waiting renders no section — same rule, one source instead of two.
-    expect(pageSource()).toMatch(
-      /v-if="store\.asksForAgent\(agentName\)\.length"[\s\S]{0,160}<PortalAsks/,
-    )
-  })
+  // The duplicate of the asks guard that used to sit here is gone: the file
+  // carried the same rule twice (once per describe block) against the same
+  // source, and after ent#523 moved the rendering to the conversation, keeping
+  // both would have meant maintaining two copies of one assertion about a
+  // surface this describe block no longer covers. It lives once, above.
 
   it('shapes the loading skeleton like the row it precedes', () => {
-    // Layout stability (contract principles #4/#6): a one-column skeleton in
-    // front of a two-column row reflows the page on every load.
-    expect(pageSource()).toMatch(/loading && !page"[^>]*class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b/)
+    // Layout stability (contract principles #4/#6). The RULE survives ent#523;
+    // the shape it is measured against does not — the two-column Overview grid
+    // this pinned went with the agent page, and the band is a single row of
+    // stat figures. So the skeleton is that row: three figure-sized blocks, not
+    // a grid. Retired deliberately and replaced, rather than deleted, per this
+    // file's own #2169 convention.
+    const src = pageSource()
+    expect(src).toMatch(/v-if="!loaded"[\s\S]{0,400}animate-pulse/)
+    expect(src).not.toMatch(/xl:grid-cols-2/)
+  })
+
+  it('gates the band on the verdict, never on a request being open', () => {
+    // #2540/#1927: `loaded` is "no data yet". Gating on `loading` would blank
+    // the numbers on every window change and would be counted by the
+    // loading-gate ratchet.
+    const src = pageSource()
+    expect(src).toMatch(/v-if="!loaded"/)
+    expect(src).not.toMatch(/v-if="loading"/)
   })
 })

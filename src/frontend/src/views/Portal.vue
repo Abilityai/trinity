@@ -104,7 +104,7 @@
       <div class="hidden sm:flex shrink-0">
         <PortalSidebar
           :roster="store.agents"
-          :threads="threads"
+          :threads="sidebarThreads"
           :client-email="store.clientEmail"
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
@@ -127,7 +127,7 @@
         <div class="absolute inset-y-0 left-0">
           <PortalSidebar
             :roster="store.agents"
-            :threads="threads"
+            :threads="sidebarThreads"
             :client-email="store.clientEmail"
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
@@ -152,17 +152,17 @@
         <!-- ent#361: a room takes the stage when the URL names one. The
              single-agent conversation is untouched below — different
              substrate, different component, no shared state. -->
-        <!-- ent#360: an agent is a destination with its own URL. Takes the
-             stage ahead of room/chat, since a route can only name one. -->
-        <PortalAgentPage
-          v-if="activeAgentPageName"
-          :key="activeAgentPageName"
-          :agent-name="activeAgentPageName"
-          :threads="threads"
-          @start-chat="onStartChatFromPage"
-          @open-thread="openThread"
-          @open-menu="mobileNav = true"
-        />
+        <!-- ent#523: `/workspace/a/:agentName` is no longer a REPORT about the
+             agent — it resolves to the chat you were last in and renders the
+             conversation, with the agent's numbers in the band above it and its
+             context one click away in Agent details. The URL is kept (every
+             link to it still works); `landOnAgent` replaces it with the
+             thread's own URL as soon as the list is in hand. The skeleton below
+             covers that beat, so nothing renders here.
+
+             ent#360's reasoning is not reverted — an agent still has a home with
+             its history, what it can do and a place to ask you something. It is
+             simply no longer a STOP on the way to the conversation. -->
 
         <!-- #2540: the stage's first load — while the roster AND the deep
              link's target resolve — is a SKELETON of the conversation frame
@@ -172,10 +172,11 @@
              with a roster on screen never re-enters it; and on `stage.state`,
              not `stage.loading`, because a bare `<x>.loading` gate is what the
              #1927 ratchet counts. The branch chain is its `v-else`: the
-             placeholder short-circuits the chain, so no terminal arm can render
-             under it (the ent#253 lesson). The scanline beam that was here
+             placeholder HEADS the chain now that ent#523 retired the agent-page
+             branch that used to precede it, so no terminal arm can render under
+             it (the ent#253 lesson). The scanline beam that was here
              (#2163) is the CHART motion and is gone from every non-chart zone. -->
-        <PortalSkeleton v-else-if="stage.state === 'loading'" variant="stage" />
+        <PortalSkeleton v-if="stage.state === 'loading'" variant="stage" />
         <template v-else>
         <PortalRoom
           v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
@@ -263,7 +264,14 @@
           @open-thread="openThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
+          @main-reset="onMainReset"
         >
+          <!-- ent#523: the agent's numbers, always visible under the header.
+               Mounted by the shell because the shell owns which agent is on
+               screen and which side panel is open. -->
+          <template #band>
+            <PortalAgentBand :agent-name="activeAgent.name" @open-details="detailsOpen = true" />
+          </template>
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
           </template>
@@ -330,8 +338,22 @@
            the agent page and on every stage that holds no conversation
            (`railVisibleFor`); collapsed by default. Below `sm` the column is
            replaced by the strip above the composer + the sheet below. -->
+      <!-- ent#523: Agent details opens INTO THE RAIL'S PLACE (ruled
+           2026-09-05) — a sibling of the rail, not a tab. The rail's own state
+           is a setup ref of this view, so it is untouched by this swap and
+           closing returns it on the tab it was showing. -->
+      <PortalAgentDetails
+        v-if="detailsOpen && activeAgent"
+        :agent-name="activeAgent.name"
+        :agent="activeAgent"
+        :threads="threads"
+        @close="detailsOpen = false"
+        @open-thread="(t) => { detailsOpen = false; openThread(t) }"
+        @use-playbook="(text) => { detailsOpen = false; usePlaybook(text) }"
+      />
+
       <PortalRail
-        v-if="railVisible"
+        v-else-if="railVisible"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -417,7 +439,8 @@ import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
-import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
+import PortalAgentBand from '@/components/portal/PortalAgentBand.vue'
+import PortalAgentDetails from '@/components/portal/PortalAgentDetails.vue'
 import PortalSkeleton from '@/components/portal/PortalSkeleton.vue'
 import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
@@ -435,7 +458,10 @@ import {
   visibleTabs,
 } from '@/components/portal/portalRail'
 import { stageZone } from '@/components/portal/portalBriefingState'
-import { isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
+import {
+  isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
+  landingThread,
+} from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
@@ -567,6 +593,11 @@ const stage = computed(() => stageZone({
 const railState = ref(loadRailState(safeStorage()))
 watch(railState, (s) => saveRailState(safeStorage(), s), { deep: true })
 const railSheetOpen = ref(false)
+// ent#523 — Agent details, which takes the rail's place while open. A setup ref
+// of this view for the same reason `railState` is one: it must survive the
+// conversation remounting on a chat switch. Closed on every agent change, since
+// a panel about the previous agent is worse than no panel.
+const detailsOpen = ref(false)
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
@@ -881,19 +912,68 @@ function openRoom(roomId) {
 // where a row carrying an unread badge opened the unread chat instead. The
 // count still shows on the row; the page's Overview lists the chats it belongs
 // to, so the conversation is one click further, not lost.
+// ent#523: clicking an agent opens the CONVERSATION you were last in, not a
+// report about the agent. The `/workspace/a/:name` URL is kept — every existing
+// link, and the sidebar row, still route through it — and `landOnAgent`
+// swaps it for the thread's own URL once the list is in hand. Landing here
+// rather than pushing the thread URL directly is deliberate: the thread list
+// may not have loaded yet on a cold deep link, and this way the URL is honest
+// at every instant instead of pointing at a chat we have not resolved.
 function openAgentPage(name) {
   if (!name) return
   unreachableAgent.value = null
   pendingSession.value = null
   startingNewChat.value = false
   activeRoomId.value = null
+  detailsOpen.value = false
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
 
-// "Start a chat" from the page, optionally seeded by a capability card.
-function onStartChatFromPage(name, starter) {
+// ent#523 — turn `/workspace/a/:name` into the chat to land in.
+// Named `landOnAgent` to stay clear of the pure `resolveAgentLanding` above,
+// which answers the same question for the `?agent=` deep link; both defer to
+// `landingThread` so there is ONE rule for which chat you land in.
+//
+// `landingThread` is the rule (most recently active, Main as the floor); it is
+// pure and lives in portalUtils so it is testable without a mount. With no
+// chats at all the agent's Main has not been minted yet, so the shell asks the
+// server for the list — which is what mints it — and lands on what comes back.
+// A failure leaves the caller on the agent URL with the stage's own error
+// states, rather than dropping them somewhere unrelated.
+async function landOnAgent(name) {
+  if (!name) return
+  activeAgentName.value = name
+  const target = landingThread(threads.value, name)
+  if (target) { openThread(target); return }
+  try {
+    const { sessions } = await store.fetchSessions(name)
+    const rows = (sessions || []).map((sn) => ({ ...sn, agent_name: name }))
+    const landed = landingThread(rows, name)
+    if (landed) {
+      await refreshThreads()
+      openThread(landed)
+      return
+    }
+  } catch {
+    // Fall through: a fresh chat is a better answer than a dead stage.
+  }
   newChatWithAgent(name)
-  if (starter) usePlaybook(starter)
+}
+
+// ent#523 — Reset finished. The shell owns what happens next, since the
+// conversation does not know its own route: land in the fresh Main and refresh
+// the list so the archive appears as an ordinary chat. A no-op reset
+// (`archived_session_id: null`, an untouched Main) leaves the person exactly
+// where they are — re-navigating to the same thread would flash the stage for
+// no reason.
+async function onMainReset(result) {
+  await refreshThreads()
+  if (!result?.archived_session_id) return
+  const id = result.main_session_id
+  if (!id) return
+  pendingSession.value = id
+  convGen.value++
+  router.push(`/workspace/c/${id}`)
 }
 
 function newChatWithAgent(name) {
@@ -958,6 +1038,17 @@ const chatState = ref({})
 const chatKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
 
 const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starred)
+
+// ent#523: what the SIDEBAR lists, which is not what the tab strip lists.
+//
+// An unused Main is not a "recent chat" — it exists for every pair the moment
+// the agent is opened, so listing it would put a "New chat" row under every
+// agent the person has never talked to, and the agent's own row already is the
+// way into it. The tab strip must show Main from the first visit, so this is a
+// projection for one consumer rather than a filter on `threads` itself.
+const sidebarThreads = computed(() => threads.value.filter(
+  (t) => !(t.is_main && !t.last_message_at),
+))
 
 function decorate(list) {
   return list.map((t) => {
@@ -1114,6 +1205,29 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   // here rather than in `openThread`, and it is the commonest way in — without
   // this the sidebar badges the conversation on screen, through every reload.
   markRead('thread', sid)
+})
+
+// ent#523: `/workspace/a/:agentName` resolves to a conversation.
+//
+// Watched on BOTH the route param and the thread list, for the same reason the
+// `sessionId` watcher above watches both: on a cold deep link the agent name
+// arrives long before the threads do, so a param-only watcher would resolve
+// against an empty list and always mint a new chat. Re-entrancy is guarded by
+// the fact that `landOnAgent` navigates away from this route as soon as it
+// succeeds; while it has not, re-running is harmless and idempotent.
+watch([activeAgentPageName, () => threads.value.length], ([name]) => {
+  if (!name || !store.isClientSignedIn) return
+  // Wait for the roster verdict. Landing before it means `activeAgent` cannot
+  // resolve the name yet, and the "you don't have access" branch would fire for
+  // an agent the caller can perfectly well reach.
+  if (!store.rosterLoaded) return
+  landOnAgent(name)
+})
+
+// A panel about the PREVIOUS agent is worse than no panel, so details closes on
+// every agent change rather than following the conversation across.
+watch(() => activeAgent.value?.name, (next, prev) => {
+  if (next !== prev) detailsOpen.value = false
 })
 
 // ent#358: `/workspace?agent=<name>` opens that agent's conversation directly —

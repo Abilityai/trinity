@@ -55,6 +55,14 @@ const CHART = [
   'components/AgentTile.vue',            // grid tile chart zones (ent#245)
   'components/DashboardPanel.vue',       // agent-defined dashboard charts (ent#253)
   'components/tiles/ExecutionsTile.vue', // the Executions grid tile (ent#449)
+  // ent#523 — the Workspace agent band. A Workspace surface AND a chart
+  // surface: the ruling is "charts only", not "not in the Workspace", and the
+  // beam here wraps the `StackedBarChart` alone. The band's own stat figures
+  // load with a skeleton beside it, which is the same ruling read the other
+  // way round. The `no Workspace surface imports it` test below is deliberately
+  // NOT extended to cover this file — its three named surfaces are the stage,
+  // the thread and the briefing, none of which draws a chart.
+  'components/portal/PortalAgentBand.vue',
 ]
 // Non-chart consumers that pre-date the ruling, re-pointed to #1921's sweep
 // (skeletons, not scanlines). Shrinking this list is the sweep; growing it is
@@ -85,7 +93,15 @@ describe('#2540 — the scanline primitive is imported by chart surfaces only', 
 describe('#2540 — the three Workspace zones load with a skeleton keyed on a verdict', () => {
   it('the stage: a stage skeleton ahead of the branch chain, keyed on stage.state', () => {
     const src = code('views/Portal.vue')
-    expect(src).toContain(`<PortalSkeleton v-else-if="stage.state === 'loading'" variant="stage" />`)
+    // ent#523 retired the agent-page branch this placeholder used to follow, so
+    // it HEADS the chain (`v-if`) instead of sitting second in it. Both
+    // spellings are accepted deliberately: what this guard is about is that the
+    // placeholder keys on the stage VERDICT and that the branches are its
+    // `v-else` — not which ordinal it holds in a chain whose membership is
+    // allowed to change.
+    expect(src).toMatch(
+      /<PortalSkeleton v-(else-)?if="stage\.state === 'loading'" variant="stage" \/>/,
+    )
     // The chain is the placeholder's v-else, so no terminal arm can render
     // under a placeholder (the ent#253 lesson).
     const at = src.indexOf(`variant="stage"`)

@@ -44,8 +44,17 @@
       <!-- ent#473: the thread's title, renameable in place. Below `sm` the
            picker and the controls already fill the bar; the tab strip under
            it still names the active chat. -->
+      <!-- ent#523: Main is named by its ROLE and is not renameable — it is the
+           same thread for the life of the pair and the place the agent reaches
+           you, so a title derived from whatever was said in it first (or a
+           person's rename) would make the pinned tab and this header disagree
+           about which chat you are in. Every other chat renames as before. -->
+      <span
+        v-if="isMainChat"
+        class="hidden sm:inline min-w-0 flex-1 truncate text-sm font-medium"
+      >{{ MAIN_TAB_LABEL }}</span>
       <PortalEditableTitle
-        v-if="currentThread"
+        v-else-if="currentThread"
         class="hidden sm:flex"
         :value="currentTitle"
         placeholder="New chat"
@@ -111,6 +120,20 @@
           <svg v-if="voiceMode" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5 9v6h4l5 4V5L9 9H5z" /></svg>
           <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l4-4m0 4l-4-4M5 9v6h4l5 4V5L9 9H5z" /></svg>
         </button>
+        <!-- ent#523: Reset, on Main only. No confirmation (operator,
+             2026-09-06: "we are not losing info") — the conversation is
+             archived and stays in the chat list, so the undo is simply
+             opening it again. Disabled while a turn is in flight because the
+             server refuses then anyway; showing it live would offer an action
+             that can only fail. -->
+        <button
+          v-if="isMainChat"
+          class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="sending || resetting"
+          :title="sending ? 'Wait for the current reply, then reset' : 'Archive this conversation and start the agent cold'"
+          data-testid="portal-reset-main"
+          @click="onResetMain"
+        >{{ resetting ? 'Resetting…' : 'Reset' }}</button>
         <button
           class="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
           title="Files"
@@ -121,9 +144,15 @@
       </div>
     </header>
 
+    <!-- ent#523: the agent's numbers, always visible under the header. A slot
+         rather than a mount, for the reason the `#rail-strip` slot below is
+         one: the shell owns which agent is on screen and the panel it opens,
+         and the conversation should not grow a second opinion about either. -->
+    <slot name="band" />
+
     <!-- ent#451: this user's chats with the agent, as tabs (OverflowTabs) —
-         most recent first, the rest under "N more". Selecting one is an
-         ordinary thread open through the shell. -->
+         Main pinned first (ent#523), then most recent, the rest under
+         "N more". Selecting one is an ordinary thread open through the shell. -->
     <PortalChatTabs
       :threads="threads"
       :agent-name="agent.name"
@@ -146,7 +175,20 @@
         <!-- Briefing (new-chat state) rendered by the parent via slot -->
         <slot v-if="!loadingHistory && messages.length === 0 && !sending" name="empty" />
 
-        <div v-for="(m, i) in messages" :key="i" :class="m.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
+        <!-- ent#523: a SYSTEM line — the platform speaking about the thread,
+             not the agent speaking in it. Today its only author is Reset,
+             naming where the previous conversation went. Rendered centred and
+             muted, with no avatar and no rating control, precisely so it is
+             not read as something the agent said. Its own branch rather than a
+             variant of the assistant bubble: a bubble with the trimmings
+             hidden would still be an agent turn to anyone reading the code. -->
+        <div v-for="(m, i) in messages" :key="i">
+        <p
+          v-if="m.role === 'system'"
+          class="my-3 text-center text-xs text-gray-400 dark:text-gray-500"
+          data-testid="portal-system-line"
+        >{{ m.content }}</p>
+        <div v-else :class="m.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="m.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="m.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <div
@@ -185,6 +227,7 @@
               />
             </PortalAgentBubble>
           </div>
+        </div>
         </div>
 
         <!-- ent#525: the live execution card under the message that started
@@ -447,7 +490,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL } from './portalUtils'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
@@ -538,7 +581,7 @@ const props = defineProps({
   // ent#473: async (thread, title) => void, or null when renaming is unavailable.
   rename: { type: Function, default: null },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -569,6 +612,39 @@ const loadingHistory = ref(false)
 const historyLoaded = ref(!(props.sessionId && !props.newChat))
 const input = ref('')
 const sending = ref(false)
+// ent#523 — Reset, offered on Main only.
+const resetting = ref(false)
+const isMainChat = computed(() => {
+  const id = currentSessionId.value
+  if (!id) return false
+  const row = (props.threads || []).find((t) => !t.is_room && (t.id || t.session_id) === id)
+  return !!row?.is_main
+})
+
+// Archive this conversation and start the agent cold. No confirmation dialog
+// (operator, 2026-09-06) — nothing is lost, and the archived chat is one click
+// away in the tab strip the moment this returns.
+//
+// The shell owns what happens next (switching to the new Main, refreshing the
+// list), so this emits rather than navigating: the conversation does not know
+// its own route. A server refusal is surfaced through the same inline error the
+// send path uses, with the server's own sentence — `turn_in_flight` and
+// `reset_raced` need different words and only the server knows which happened.
+async function onResetMain() {
+  if (resetting.value || sending.value) return
+  resetting.value = true
+  cancelError.value = ''
+  try {
+    const result = await store.resetMainChat(props.agent.name)
+    emit('main-reset', result)
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    cancelError.value = (detail && typeof detail === 'object' ? detail.message : detail)
+      || 'Could not reset this chat right now.'
+  } finally {
+    resetting.value = false
+  }
+}
 // ent#155 — stopping an in-flight turn. The id arrives with the 202, so Stop is
 // offered only once there is something to stop; a turn that fell back to the
 // synchronous send has no id and correctly offers nothing.

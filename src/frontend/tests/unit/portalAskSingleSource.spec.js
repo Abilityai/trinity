@@ -35,8 +35,15 @@ import { stripComments } from './helpers/stripComments'
 // shared helper also handles unterminated and nested HTML comments, which a
 // hand-rolled non-greedy regex does not.
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src')
-const PAGE = join(SRC, 'components', 'portal', 'PortalAgentPage.vue')
+// ent#523: the agent page was dismantled. It mounted `PortalAsks` as ONE of
+// two copies on screen — the conversation mounts the other, and that is the
+// one that survived (a pending ask belongs above the composer you would
+// answer it in). #2449's rule is unchanged and now guards that surface.
+const PAGE = join(SRC, 'components', 'portal', 'PortalConversation.vue')
 const page = stripComments(readFileSync(PAGE, 'utf8'))
+const SIDEBAR = stripComments(
+  readFileSync(join(SRC, 'components', 'portal', 'PortalSidebar.vue'), 'utf8'),
+)
 
 function walk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -44,7 +51,7 @@ function walk(dir) {
   )
 }
 
-describe('#2449 — one ask entity, one rendering on the agent page', () => {
+describe('#2449 — one ask entity, one rendering per surface', () => {
   it('mounts PortalAsks, the shared component, exactly once', () => {
     expect(page.match(/<PortalAsks\b/g) || []).toHaveLength(1)
   })
@@ -62,11 +69,16 @@ describe('#2449 — one ask entity, one rendering on the agent page', () => {
     expect(page).not.toMatch(/page\.value\?\.asks|page\.asks\b/)
   })
 
-  it('counts the badge from the SAME store list the section renders', () => {
-    expect(page).toContain('store.asksForAgent(props.agentName)')
-    // Pending-only, matching the store's own `openAsks` rationale — an expired
-    // ask is not something the badge should nag about.
-    expect(page).toMatch(/asksForAgent\(props\.agentName\)[\s\S]{0,80}status === 'pending'/)
+  it('renders the section from the store list, not a page payload', () => {
+    expect(page).toContain('store.asksForAgent(props.agent.name)')
+  })
+
+  it('counts the surviving badge from the SAME store, pending-only', () => {
+    // ent#523: the agent page's own count went with the page; the sidebar row
+    // badge is the one that remains, and it reads the store's `openAsks` —
+    // pending-only by that getter's own rationale, since an expired ask is not
+    // something a badge should nag about.
+    expect(SIDEBAR).toContain('asksByAgent(asksStore.openAsks)')
   })
 
   it('no frontend file reads page.asks any more', () => {
