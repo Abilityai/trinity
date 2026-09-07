@@ -2356,9 +2356,12 @@ to localStorage in the clear.
   re-read (so a later file is missing from a listing snapshotted before it
   landed), and a room fan-out mutates the same signal three times inside one
   Vue flush window (so only the last agent survives). The drain coalesces
-  **leading and trailing** and shares the feed store's `_fetchToken` with
-  `refresh()`, so a refresh issued before an upload but resolving after it
-  cannot clobber the fresh listing.
+  **leading and trailing** and is ordered against `refresh()` by a **per-agent
+  inbox epoch** the refresh snapshots before its awaits, so a refresh issued
+  before an upload but resolving after it cannot clobber the fresh listing.
+  Per agent and not one shared counter: a room's drop runs three of these
+  concurrently for three different agents, and a shared counter lets each
+  invalidate the last — two of the three listings silently discarded.
 - **AC-2 — own uploads are downloadable**: "Files you sent" carries the same
   Download control the agent's shares carry.
   `GET /api/enterprise/client-portal/agents/{name}/uploads/{filename}` reads the

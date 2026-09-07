@@ -598,8 +598,11 @@ targeted inbox re-read. A set and not a scalar, because the two real gestures bo
 a scalar: a multi-file batch uploads sequentially without awaiting the re-read (a listing
 snapshotted before file 2 landed), and a room's fan-out mutates the signal once per agent
 inside one Vue flush window (only the last survives). The drain coalesces leading AND
-trailing and shares the feed store's `_fetchToken` with `refresh()`, so a refresh issued
-before the upload but resolving after it cannot clobber the fresh listing.
+trailing and is ordered against `refresh()` by a **per-agent inbox epoch** the refresh
+snapshots before its awaits, so a refresh issued before the upload but resolving after it
+cannot clobber the fresh listing. Per agent and not one shared token, because a room's drop
+runs three of these concurrently for three different agents and a shared counter lets each
+invalidate the last.
 
 **The Files tab's own verbs (#2582 + ent#548).** Rows render from ONE flat projection
 (`components/portal/portalFiles.js::flattenFiles`) that owns both the render order and the

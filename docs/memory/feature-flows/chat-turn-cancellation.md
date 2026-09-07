@@ -253,6 +253,26 @@ in `dev` — naming its ref here once threw a `ReferenceError` on every Escape
 keydown and made the whole feature dead on that surface, so `turnCancel.spec.js`
 pins the identifier's absence.
 
+**A THIRD way of owning Escape arrived with #2582, and it is not the overlay
+list.** The Files tab's preview lightbox (`PortalFilePreview.vue`) is mounted by
+a rail tab body, not by the conversation, so there is no ref for the
+conversation's list to name. It takes Escape by registering its own `document`
+listener with **`{ capture: true }`** and calling `preventDefault()` — which
+`shouldCancelOnEscape` then honours through its `event.defaultPrevented` arm.
+Capture is load-bearing rather than stylistic: the conversation's listener is on
+`document` in the BUBBLE phase, so a bubble listener in the modal would run
+SECOND and the turn would already have been cancelled by the time the modal
+closed. Any future overlay owned by a surface that cannot reach the
+conversation's overlay array should use this shape rather than plumbing a ref
+across the rail boundary.
+
+**Known residual (follow-up filed).** `PortalConversation.vue` handles Escape
+for an ACTIVE VOICE CALL in a branch *above* `shouldCancelOnEscape`, and that
+branch never consults `defaultPrevented` — so a preview opened during a voice
+call closes the preview *and* ends the call. `preventDefault()` cannot help,
+because nothing reads it there. Recorded rather than fixed in #2582: that branch
+belongs to the voice track.
+
 ## The words come back without destroying a draft
 
 The AC asks that a restore "prepends or merges sensibly". Prepend is the
@@ -414,6 +434,10 @@ the same swap inline.
 - 2026-08-25 (ent#155): Escape + Stop on all three conversation surfaces; two
   new credential-scoped terminate routes; `terminate_execution` made
   principal-agnostic
+- 2026-09-07 (#2582): a third Escape owner — a rail-mounted overlay takes it in
+  the CAPTURE phase with `preventDefault()` rather than joining the overlay
+  list, because it has no ref the conversation could name; and the voice-call
+  branch that ignores `defaultPrevented` is recorded as a residual
 - 2026-08-28 (#2433): a row parked in the backend agent-call queue is
   cancellable (`_cancel_inflight_if_parked` → `cancelled_while_parked`, on all
   three surfaces by delegation; the grant raises `BackendAgentCallCancelled`

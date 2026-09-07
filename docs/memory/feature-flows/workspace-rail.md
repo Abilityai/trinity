@@ -233,10 +233,20 @@ promise) re-breaks the defect it fixes, twice:
   window into a single watcher invocation carrying only the last value.
 
 So: a set, a **trailing re-fire** (a dirty flag that re-runs once after the
-in-flight read settles), and the drain guarded by the feed store's existing
-`_fetchToken` — shared with `refresh()`, or a `refresh({uploads:true})` issued
-before the upload and resolving after it clobbers the fresh listing with the
-pre-upload one.
+in-flight read settles), and an ordering against `refresh()` — which
+`refresh({uploads:true})` needs, or one issued before the upload and resolving
+after it clobbers the fresh listing with the pre-upload one, silently, because
+it rebuilds its map from a snapshot taken after its own awaits.
+
+**That ordering is a per-agent epoch, not the store's shared `_fetchToken`, and
+the room fan-out is what proved it.** The first cut did share the token, and the
+test failed: three concurrent per-agent reads each bumped the one counter, so
+each invalidated the last and two of the three listings were discarded. The two
+questions are different — *"has the chat moved on?"* is global (`_scopeToken`,
+bumped only by a participant change or a clear) and *"is this agent's listing
+still the newest?"* is per agent (`_uploadEpoch`, which `refresh()` snapshots
+before its awaits and re-checks per agent when it lands). One counter cannot
+answer both.
 
 **Stated reachability limit.** `feeds.uploads` is populated only on tab-open,
 turn-end-while-open, or a `noteUpload`. On a fresh page load with Files closed,
@@ -369,9 +379,15 @@ reviewer clicks.
   access-first ordering, the dismissal's non-validation and row cap, both purge
   paths, the `AgentRef` registration, and both migration tracks.
 * `src/frontend/tests/unit/portalRailFiles.spec.js` — an upload lights the dot
-  with Files closed, a two-file batch does not lose the second, a room fan-out
-  notes all three, and a `refresh` resolving after `noteUpload` does not clobber
-  it.
+  with Files closed, opening the tab clears it, a two-file batch does not lose
+  the second, a room fan-out notes all three, and a `refresh` resolving after
+  `noteUpload` does not clobber it. **The fan-out test found the shared-token
+  defect described above**; three mutation controls (a shared counter, no
+  trailing re-fire, a refresh ignoring the epoch snapshot) each fail exactly
+  their own test. The composable is mounted inside an `effectScope` stopped per
+  test — its watcher on the shared portal mock has no component to unmount it,
+  so the oldest survivor otherwise drains the queue against a previous test's
+  store.
 * `src/frontend/tests/unit/portalFiles.spec.js` — `previewKind`, `neighbour`,
   `flattenFiles` order equalling render order, the `fileActions` matrix, and the
   component's own source guards (an `<img>`, no `v-html`, capture + preventDefault,
