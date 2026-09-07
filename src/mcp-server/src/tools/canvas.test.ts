@@ -121,8 +121,9 @@ describe("patch_canvas", () => {
 describe("the kind guide", () => {
   it("advertises every canvas kind with a payload shape (the prompt is pinned against this list)", () => {
     const tools = makeTools([]);
-    const shape = tools.set_canvas.parameters.shape.blocks._def.type.shape.kind;
-    const kinds: string[] = shape._def.values;
+    // zod v4 accessors: `.element` for the array item, `.options` for the enum values.
+    const shape = tools.set_canvas.parameters.shape.blocks.element.shape.kind;
+    const kinds: readonly string[] = shape.options;
     assert.deepEqual(
       [...kinds].sort(),
       ["chart", "diagram", "html", "image", "json", "kpi", "markdown", "table", "timeline"],
