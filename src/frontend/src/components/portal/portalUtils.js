@@ -320,11 +320,16 @@ export function agentChatTabs(threads, agentName) {
   if (!agentName) return []
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
-    // ent#523: an ARCHIVED chat is still a chat — it stays in the sidebar and in
-    // Agent details — but it is not a tab. Reset would otherwise grow the strip
-    // by one permanent entry every time it is used, pushing the live chats under
-    // "N more" to make room for conversations the person deliberately retired.
-    .filter((t) => !t.archived_at)
+    // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
+    // "one system line in Main names the archived chat, which becomes the
+    // newest tab" (2026-09-06) — and it is right: an archive is an ordinary
+    // past chat, and hiding the thing the system line just pointed at is the
+    // one place the person is most likely to look next.
+    //
+    // An earlier draft filtered these out, reasoning that Reset would grow the
+    // strip by one permanent entry per use. That was solving a problem
+    // `OverflowTabs` already solves: the strip renders what fits and counts the
+    // rest under "N more", so growth costs nothing visually.
   const ts = (t) => {
     const iso = t.last_message_at || t.created_at
     const n = iso ? new Date(iso).getTime() : 0

@@ -155,7 +155,7 @@ rule is a plain function (the ent#392 precedent):
 
 | Function | Rule |
 |---|---|
-| `agentChatTabs` | Main first, then recency; archived chats are not tabs; Main is labelled by its **role** |
+| `agentChatTabs` | Main first, then recency; an archive stays a tab (ruled “becomes the newest tab”); Main is labelled by its **role** |
 | `landingThread` | most recently active, **Main as the floor**; never an archived chat |
 | `resolveAgentLanding` | the `?agent=` deep link, delegating to `landingThread` so there is one answer |
 | `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam |
@@ -167,6 +167,11 @@ rule is a plain function (the ent#392 precedent):
 - **Main is not renameable.** It is the same thread for the life of the pair;
   a derived or typed title would make the pinned tab and the header disagree
   about which chat you are in.
+- **A tab is not a landing.** An archived chat stays in the strip — the operator
+  ruled it "becomes the newest tab", and hiding what the system line just pointed
+  at is exactly where the person looks next — but `landingThread` never puts you
+  in one without asking. Two rules, two questions: where can I go, and where am
+  I put.
 - **An unused Main is filtered from the sidebar only.** It exists for every pair
   the moment an agent is opened; the tab strip must still show it from the first
   visit, so this is a projection for one consumer (`sidebarThreads`), not a

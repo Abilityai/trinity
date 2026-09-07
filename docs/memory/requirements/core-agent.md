@@ -1880,8 +1880,10 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   this is about one agent and is dismissed rather than switched away from.
   Closing it returns the rail on the tab it was showing.
 - Main is named by its **role** in the tab strip and the header and is not
-  renameable. Archived chats leave the tab strip and stay in the sidebar and in
-  Agent details. An unused Main is filtered from the **sidebar** only.
+  renameable. An archived chat stays a tab — the operator ruled it “becomes the
+  newest tab” — and growth is bounded by `OverflowTabs`' counted “N more” rather
+  than by hiding rows; you simply never LAND in one by default. An unused Main is
+  filtered from the **sidebar** only.
 - The sidebar orders agents by most recent collaboration then name, applied
   before the collapse. This is **not** ent#491 (incubating): `orderRosterAgents`
   ships the order this AC states and leaves `primaryName` as its seam.

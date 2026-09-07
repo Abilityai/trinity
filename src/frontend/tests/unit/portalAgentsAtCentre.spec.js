@@ -48,7 +48,7 @@ const chat = (id, over = {}) => ({ id, agent_name: 'a', ...over })
 // The tab strip
 // ---------------------------------------------------------------------------
 
-describe('ent#523 — Main is pinned, archives are not tabs', () => {
+describe('ent#523 — Main is pinned, archives stay reachable', () => {
   it('puts Main first even when it is the least recently active', () => {
     const tabs = agentChatTabs([
       chat('c1', { last_message_at: '2026-09-07T12:00:00Z' }),
@@ -64,14 +64,18 @@ describe('ent#523 — Main is pinned, archives are not tabs', () => {
     expect(tab.label).toBe(MAIN_TAB_LABEL)
   })
 
-  it('leaves archived chats out of the strip', () => {
-    // Reset would otherwise add one permanent tab per use, pushing the live
-    // chats under "N more" to make room for retired ones.
+  it('keeps the archived chat as a tab — the operator ruled it becomes the newest one', () => {
+    // "one system line in Main names the archived chat, which becomes the
+    // newest tab" (operator, 2026-09-06). An archive is an ordinary past chat,
+    // and hiding the thing the system line just pointed at is the one place
+    // the person is most likely to look next. Growth is bounded by
+    // OverflowTabs' counted "N more", not by hiding rows.
     const tabs = agentChatTabs([
       main(),
       chat('old', { archived_at: '2026-09-07T10:00:00Z', last_message_at: '2026-09-07T10:00:00Z' }),
+      chat('older', { last_message_at: '2026-09-01T10:00:00Z' }),
     ], 'a')
-    expect(tabs.map((t) => t.id)).toEqual(['main'])
+    expect(tabs.map((t) => t.id)).toEqual(['main', 'old', 'older'])
   })
 
   it('still sorts the rest by recency', () => {
@@ -105,6 +109,8 @@ describe('ent#523 — landing', () => {
   })
 
   it('never lands you in an archived chat', () => {
+    // Deliberately unlike the tab rule above: a tab is somewhere you can GO, a
+    // landing is where you are PUT without asking.
     const landed = landingThread([
       main(),
       chat('old', { archived_at: 'x', last_message_at: '2026-09-07T23:00:00Z' }),

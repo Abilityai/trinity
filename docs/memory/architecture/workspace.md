@@ -572,7 +572,7 @@ Canvas, Files and recent work are **not** duplicated here — they have been rai
 ent#475/#525. `portalUtils.js::landingThread` is the one rule for which chat you land in,
 and the `?agent=` deep link's `resolveAgentLanding` defers to it so the two entry points
 cannot disagree. Main is named by its role in both the tab strip and the header and is
-not renameable; archived chats leave the tab strip and stay in the sidebar and in details;
+not renameable; an archived chat stays a tab (ruled “becomes the newest tab”), though you never LAND in one by default;
 an unused Main is filtered from the **sidebar** only (a projection, not a filter on
 `threads`, because the strip must show Main from the first visit).
 

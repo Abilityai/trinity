@@ -1632,10 +1632,11 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
     durable and auditable: it is a column-ish fact on the row, not a guess the
     UI makes each time it draws.
 
-    Reuses the client's latest thread with that agent and opens one only if they
-    have never chatted — the same `_resolve_session_id(..., None)` a first client
-    turn takes, deliberately, so an ask does not accumulate threads beside the
-    conversation it belongs in.
+    Lands in the pair's **Main** chat — the same `_resolve_session_id(..., None)`
+    a first client turn takes, deliberately, so an ask does not accumulate
+    threads beside the conversation it belongs in. Before ent#523 that meant
+    "the client's latest thread"; Main is the designated answer that replaced
+    the guess, and this caller inherits it without knowing about Main at all.
 
     Public because the ingestion boundary (`services/operator_queue_service`)
     calls it, and reaching across a package for a private helper is how two
@@ -1648,9 +1649,19 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
 
 def _format_history_context(history: list[dict]) -> str:
     """Render prior turns (oldest-first) as a labelled context block. Empty when
-    there is no history."""
+    there is no history.
+
+    ent#523: SYSTEM rows are skipped. The speaker split here is binary —
+    "Client" for a user row, "You" for everything else — so the platform's own
+    line ("Main was reset. The previous conversation is saved as …") would be
+    replayed to the model as something the AGENT said. That is reachable on the
+    first turn after every Reset, and putting words in the agent's mouth is
+    worse than omitting chrome it did not write.
+    """
     lines = []
     for m in history:
+        if m.get("role") == "system":
+            continue
         who = "Client" if m.get("role") == "user" else "You"
         content = (m.get("content") or "").strip()
         if content:

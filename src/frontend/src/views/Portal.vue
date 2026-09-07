@@ -947,16 +947,26 @@ async function landOnAgent(name) {
   if (target) { openThread(target); return }
   try {
     const { sessions } = await store.fetchSessions(name)
+    // The watcher fires on the route param AND on the thread list arriving, so
+    // two landings can be in flight at once on a cold deep link: the first
+    // misses (no threads yet) and goes to the network, the second finds the
+    // list and navigates. Without this the first one's late resolution
+    // navigates too — moving the person off a chat they have since chosen. The
+    // route is the authority; if it no longer names this agent, this landing
+    // has been overtaken and has nothing to say.
+    if (activeAgentPageName.value !== name) return
     const rows = (sessions || []).map((sn) => ({ ...sn, agent_name: name }))
     const landed = landingThread(rows, name)
     if (landed) {
       await refreshThreads()
+      if (activeAgentPageName.value !== name) return
       openThread(landed)
       return
     }
   } catch {
     // Fall through: a fresh chat is a better answer than a dead stage.
   }
+  if (activeAgentPageName.value !== name) return
   newChatWithAgent(name)
 }
 
