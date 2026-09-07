@@ -19,7 +19,7 @@ None.
 
 ## Closed before the audit (found by the plan review, fixed in the diff)
 
-1. **httpx's own INFO line carries the credential-bearing URL.** httpx logs `HTTP Request: GET <url> "…"` at INFO on the `httpx` logger; on this route the URL carries the share id, which is the receiver's credential. The backend configures no level for that logger, so it was silent only because root sits at WARNING. Closed: the logger is pinned to WARNING at the telemetry module (strictly quieter, documented) and a test at root INFO asserts the id is absent from every captured record. Learnings entry 2026-09-07.
+1. **httpx's own INFO line carries the credential-bearing URL.** httpx logs `HTTP Request: GET <url> "…"` at INFO on the `httpx` logger; on this route the URL carries the share id, which is the receiver's credential. The plan review believed the backend left that logger unconfigured; the PR review (#546, I1) showed `logging_config.py::setup_logging()` already pins it to WARNING unconditionally at lifespan, so the line was silent in production all along and the audit's original premise was wrong. Kept as a belt: an import-time pin at the telemetry module with a comment naming the OSS line as the primary, and a test at root INFO asserting the id is absent from every captured record. Learnings entry 2026-09-07 records the scoped-grep mistake.
 2. **A body ceiling on decoded bytes** (the 2026-08-05 ledger class): replaced by a wire-byte cap on `iter_raw()` with compression refused and a `Content-Length` early exit, mirroring the OSS template-registry fetch.
 
 ## Verification performed
@@ -34,7 +34,7 @@ None.
 ## Observations (below the gate)
 
 - **O1 (3/10)** Public requirements §45.1 FR-6 states the gated view's behavioural contract (five statuses; non-minting, fail-open, bounded, briefly memoised). Reviewed against the enterprise-docs standing rule at the plan gate and operator-approved: contract level only; the internals live in the private flow doc; the guard pattern is silent. Not a disclosure finding.
-- **O2 (2/10)** The httpx logger pin is process-wide. Deliberate and strictly quieter; documented and tested. Not a finding.
+- **O2 (2/10)** The httpx logger pin is process-wide and, as the PR review noted, redundant with the OSS pin at lifespan. Kept deliberately as a belt with both owners named; strictly quieter; tested. Not a finding.
 - **O3 (4/10)** Threadpool exposure under a stalled receiver. Hard exclusion #1 (DoS), and bounded regardless. Noted, not reported.
 
 ## Trend
