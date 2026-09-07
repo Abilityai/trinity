@@ -768,8 +768,14 @@ async def get_agent_card(email: str | None, agent_name: str,
     # not pay a fleet-scale Docker call, which is this function's whole point.
     availability = await _agent_availability(agent_name)
     # ent#403: the SINGLE runtime read, not the batch — same #2160 rule as the
-    # availability read above. Gathered with nothing else because this page has
-    # one agent; the roster's two batch reads are the ones worth overlapping.
+    # availability read above.
+    #
+    # The agent page renders no composer, so it never USES `model_default`. It
+    # is resolved anyway, and pays one inspect for it, because #2160's own note
+    # on this function is that "the page and the sidebar could not disagree
+    # about an agent's capabilities" — two representations of one card that
+    # answer differently is the defect, not the cost. Negligible beside this
+    # function's existing availability read and its bounded briefing HTTP.
     runtime = await _agent_runtime(agent_name)
     card = _row_to_card(row, tts_service.is_available(), _default_voice_id(),
                         availability=availability,
