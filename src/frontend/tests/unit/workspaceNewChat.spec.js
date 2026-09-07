@@ -208,6 +208,9 @@ describe('#2579 — the title settle cycle', () => {
     // under the user for 16s and can raise a notice above chat B.
     const s = src()
     expect((s.match(/clearTitleSettle\(\)/g) || []).length).toBeGreaterThanOrEqual(4)
+    // Arming is idempotent: the handler clears synchronously but arms after an
+    // await, so two events close together would leave two cycles running.
+    expect(s).toMatch(/function armTitleSettle\(sessionId\) \{\s*clearTitleSettle\(\)/)
     expect(s).toMatch(/watch\(convKey, \(\) => \{ clearTitleSettle\(\) \}\)/)
     expect(s).toMatch(/onBeforeUnmount\(\(\) => \{[\s\S]*?clearTitleSettle\(\)/)
   })

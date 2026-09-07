@@ -1327,6 +1327,12 @@ function threadRow(sessionId) {
 }
 
 function armTitleSettle(sessionId) {
+  // Idempotent. `onConversationTurnDone` clears synchronously but arms after an
+  // await, so two events close together (the voice path emits `sessions-changed`
+  // right after `createSession`, and again when the turn lands) would otherwise
+  // leave the first cycle's timers running beside the second's, against a
+  // baseline the second overwrote.
+  clearTitleSettle()
   const row = threadRow(sessionId)
   if (!row || !titleSettling(row)) return
   titleAtTurnDone = row.title || ''
