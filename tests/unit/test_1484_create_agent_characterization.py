@@ -201,6 +201,11 @@ def _load_crud(monkeypatch, docker_available=True):
     capabilities_mod = MagicMock()
     capabilities_mod.AGENT_TMPFS_MOUNT = {"/tmp": "size=512m"}
     capabilities_mod.AGENT_DEFAULT_TMPDIR = "/home/developer/.tmp"
+    # #2541. Like AGENT_TMPFS_MOUNT above, this is a stand-in: the assertion it
+    # serves proves the create site PLUMBS the shared constant into
+    # containers_run. The constant's own value is pinned in
+    # tests/unit/test_2541_restart_policy_parity.py, which reads the real module.
+    capabilities_mod.AGENT_RESTART_POLICY = {"Name": "unless-stopped"}
     capabilities_mod.normalize_cpu = MagicMock(side_effect=lambda v, d: v or d)
     capabilities_mod.normalize_memory = MagicMock(side_effect=lambda v, d: v or d)
 
@@ -429,6 +434,29 @@ async def test_case1_local_template_happy_path(crud_env):
     ctx["db"].register_agent_owner.assert_called_once()
     ctx["git_service"].materialize_persistent_state.assert_awaited_once()
     ctx["git_service"].materialize_data_paths.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_sets_unless_stopped_restart_policy(crud_env):
+    """#2541 — every user agent is born with restart_policy=unless-stopped, so
+    it survives a host reboot / daemon restart / non-graceful exit, exactly like
+    `trinity-system` always did.
+
+    Without the fix this raises KeyError: Docker's default is `no`, and the
+    2026-09-04 power-off left 8 of 19 agents Exited for ~42 hours.
+
+    This pins the PLUMBING — that the create site hands the shared constant to
+    containers_run (the harness stubs `capabilities`, so the value here is the
+    fixture's). That the constant is `unless-stopped` and not `always`, which
+    would resurrect an agent an operator deliberately stopped (RESTART-002), is
+    pinned against the real module in test_2541_restart_policy_parity.py.
+    """
+    crud, ctx = crud_env
+    await crud.create_agent_internal(_local_config("rp-agent"), _user(), None)
+
+    kw = _agent_run_kwargs(ctx)
+    assert kw["restart_policy"] == {"Name": "unless-stopped"}
+
 
 
 # ===========================================================================
