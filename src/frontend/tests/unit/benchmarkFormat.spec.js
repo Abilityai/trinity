@@ -104,6 +104,15 @@ describe('formatMetricValue', () => {
       expect(formatMetricValue('percent', bad)).toBe('—')
     }
   })
+  it('treats a rate outside 0..1 as "not a fraction" and dashes it, never clamps or multiplies (#2574 I1)', () => {
+    expect(formatMetricValue('percent', 95)).toBe('—')
+    expect(formatMetricValue('percent', 1.0001)).toBe('—')
+    expect(formatMetricValue('percent', -0.1)).toBe('—')
+    expect(formatMetricValue('percent', 0)).toBe('0%')
+    expect(formatMetricValue('percent', 1)).toBe('100%')
+    expect(formatMetricValue('rate', -3)).toBe('—')
+    expect(formatMetricValue('count', -1)).toBe('—')
+  })
 })
 
 describe('metricRows', () => {

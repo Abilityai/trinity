@@ -65,11 +65,23 @@ export function ordinal(n) {
   }
 }
 
+/**
+ * Units are the receiver's contract, verified against its source (the
+ * benchmark handler computes `execution_success_rate` as
+ * `executions_success / executions_total`, a 0..1 fraction rounded to four
+ * decimals; `executions_per_day` is a non-negative rate; `agents` a count).
+ * A rate outside 0..1 is not a fraction, so it renders as the em dash the table
+ * already uses for "I don't have this" — never clamped into a confident
+ * `100%`, and never multiplied into `9500%` (#2574 review, I1).
+ */
 export function formatMetricValue(kind, value) {
   if (!isFiniteNumber(value)) return EM_DASH
-  if (kind === 'percent') return `${Math.round(value * 100)}%`
-  if (kind === 'rate') return value.toFixed(1)
-  return String(Math.round(value))
+  if (kind === 'percent') {
+    if (value < 0 || value > 1) return EM_DASH
+    return `${Math.round(value * 100)}%`
+  }
+  if (kind === 'rate') return value < 0 ? EM_DASH : value.toFixed(1)
+  return value < 0 ? EM_DASH : String(Math.round(value))
 }
 
 export function formatPercentile(p) {
