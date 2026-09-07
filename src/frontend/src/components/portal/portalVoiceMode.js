@@ -149,6 +149,10 @@ export const VOICE_SPLIT = Object.freeze({ orb: 40, canvas: 60 })
 // mount anything.
 export const VOICE_LOCKED_CONTROLS = Object.freeze([
   'new-chat', 'agent-picker', 'star', 'reset-main', 'chat-tabs', 'composer', 'mic', 'attach', 'send',
+  // ent#403: the model picker is part of the composer, and the call runs on the
+  // voice provider's own model — leaving it live would offer a choice the call
+  // cannot honour.
+  'model-picker',
 ])
 
 // ---- The canvas column's refresh rule -----------------------------------------

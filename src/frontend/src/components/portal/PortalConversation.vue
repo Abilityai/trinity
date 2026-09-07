@@ -586,6 +586,42 @@
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
           </button>
+          <!-- ent#403: the model choice. A `<select>` and not a hand-rolled
+               trigger, so it is the `BaseSelect` primitive rather than a
+               lookalike — and so `portalComposerAlignment.spec.js`'s rule that
+               every `<button>` in this form is `h-11 w-11` still holds without
+               this control having to pretend to be one.
+
+               `FIELD_CLASS` starts `w-full`, and a native select otherwise
+               sizes to its widest option, so the wrapper carries an explicit
+               `max-w` — the textarea beside it is `flex-1 min-w-0` on the
+               geometry #2259 tuned, and an unbounded select would eat it. The
+               bound is smaller on narrow viewports (AC 8) rather than hidden:
+               a control that vanishes on a phone is a capability that vanishes
+               with it.
+
+               Renders only when the SERVER says this principal may choose
+               (`agent.model_default` is null for a portal-token client and for
+               a non-Claude runtime) — the roster is the capability channel
+               (#2128), never a feature flag, which is JWT-gated and empty for
+               exactly this audience. -->
+          <BaseSelect
+            v-if="modelControl.render"
+            v-model="selectedModel"
+            class="shrink-0 max-w-[7.5rem] sm:max-w-[11rem]"
+            :disabled="voiceCallActive || !modelControl.enabled"
+            :title="modelControl.reason || 'Which model this chat runs on'"
+            aria-label="Model for this chat"
+            data-testid="portal-model-picker"
+          >
+            <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
+            <option
+              v-for="opt in modelControl.options"
+              :key="opt.id"
+              :value="opt.id"
+              :title="optionTitle(opt)"
+            >{{ optionText(opt) }}</option>
+          </BaseSelect>
           <!-- ent#392: this is the composer's FIRST anchored overlay, so the
                wrapper is new. It must inherit the flex sizing the textarea used
                to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
@@ -730,6 +766,21 @@ import {
   voiceHeaderLine,
   voicePreflight,
 } from './portalVoiceMode'
+// ent#403: the model choice's rules, in their own pure module for the same
+// reason voice mode's are — nothing rendered is reachable from vitest here.
+import BaseSelect from '../base/BaseSelect.vue'
+import { useUserPreferencesStore } from '@/stores/userPreferences'
+import { PREF_KEYS } from '@/utils/gridStorageKeys'
+import {
+  INHERIT_VALUE,
+  defaultOptionText,
+  modelControlState,
+  optionText,
+  optionTitle,
+  shouldClearChoice,
+  storedFor,
+  withChoice,
+} from './portalModelChoice'
 
 const props = defineProps({
   // `stt_available` (#2212) is the platform's ability to transcribe server-side
@@ -963,6 +1014,11 @@ function rememberVerdict(outcome) {
   const last = messages.value[messages.value.length - 1]
   if (!last || last.role !== 'user') { terminalOutcome.value = null; return }
   terminalOutcome.value = outcome
+  // ent#403: the durable verdict reaches here on load and on reattach too, so
+  // the self-heal runs on the reload path as well as on this tab's own settle.
+  // Without it the stored model survives a refresh and the next turn re-fails
+  // in exactly the same way, with nothing on screen naming the cause.
+  clearModelChoiceOnFailure(outcome)
 }
 
 // "Ask about it": the ruled lesser control — a prefill, never a send.
@@ -1472,9 +1528,14 @@ async function deliver(text) {
     // Read before anything is dispatched: after the fact it is impossible to
     // tell this turn's reply from the previous one's.
     const baseline = await persistedAssistantCount(currentSessionId.value)
+    // ent#403: read the choice ONCE, here, so the streaming dispatch and its
+    // synchronous fallback below run the same turn on the same model — a value
+    // re-read between the two could differ if the record settled in between.
+    const chosenModel = modelControl.value.enabled ? selectedModel.value : ''
     try {
       started = await store.startPortalChat(props.agent.name, text, currentSessionId.value,
-                                            { newThread: props.newChat && !currentSessionId.value })
+                                            { newThread: props.newChat && !currentSessionId.value,
+                                              model: chosenModel })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -1489,7 +1550,8 @@ async function deliver(text) {
       // eslint-disable-next-line no-console
       console.debug('[workspace] streaming route unavailable, using sync send', dispatchErr)
       data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value,
-                                        { newThread: props.newChat && !currentSessionId.value })
+                                        { newThread: props.newChat && !currentSessionId.value,
+                                          model: chosenModel })
     }
 
     if (started) {
@@ -1529,7 +1591,12 @@ async function deliver(text) {
         // verdict of "never started" is precisely the evidence that rule always
         // lacked.
         return { failed: true, error: data.outcome.message,
-                 retryable: data.outcome.retryable === true }
+                 retryable: data.outcome.retryable === true,
+                 // ent#403: the TOKEN, not the prose. `invalid_model` is the one
+                 // verdict the client acts on rather than merely renders — it
+                 // clears the stored choice. Matching on the sentence would
+                 // break on the next copy edit.
+                 category: data.outcome.category }
       }
       if (data?.lost && data.idle) {
         // The server reports nothing running, and offered no verdict either.
@@ -1928,7 +1995,13 @@ function settleDelivery(index, text, res) {
     return { ok: false, cancelled: true }
   }
   markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
-  terminalOutcome.value = { category: res?.lost ? 'lost' : 'failed', message: res?.error || 'Something went wrong.',
+  // ent#403: a turn the chosen model could not complete clears that choice, so
+  // the server's "switched back to the agent's default" is true next turn.
+  // AFTER `markFailed` deliberately: `turnCancel.spec.js` pins the adjacency of
+  // the cancel check to `markFailed`, and that rule is the more important one.
+  clearModelChoiceOnFailure(res)
+  terminalOutcome.value = { category: res?.category || (res?.lost ? 'lost' : 'failed'),
+                            message: res?.error || 'Something went wrong.',
                             retryable: res?.retryable ?? !res?.lost, execution_id: lastDeliveredExecutionId.value }
   return { ok: false, error: res?.error, lost: res?.lost }
 }
@@ -2154,6 +2227,70 @@ function cleanupVoice() {
 // The ent#440 hands-free STT→typed-turn→TTS loop that used to live here is
 // retired by the same ruling (one voice entry point). Hold-to-dictate (#2212)
 // and spoken replies (#2157) stay: they are input/output aids, not a mode.
+// ---- The model choice (trinity-enterprise#403) ---------------------------------
+//
+// A short curated dropdown for PLATFORM users. The rules are in
+// `portalModelChoice.js`; this is the dispatcher over them plus the two wires
+// they cannot own: the server preference record, and the send path.
+//
+// The choice is the user's SERVER record (`workspace_model`), not browser
+// storage — per (user, agent) by construction, since the server keys the row by
+// user. Known and accepted: the record arrives asynchronously, so the select can
+// read "Agent's default" for one frame before adopting the stored value. It
+// causes no layout jank (unlike a column width) and NO turn can run on the wrong
+// model, because nothing is sent until Send.
+const prefs = useUserPreferencesStore()
+const modelPrefRecord = computed(() => prefs.records[PREF_KEYS.workspaceModel]?.value || {})
+const modelOptions = computed(() => store.modelOptions || [])
+// ent#361: the same rule `send()` applies — while the draft @mentions another
+// agent it is bound for a ROOM, whose composer has no model control.
+const draftIsRoomBound = computed(() => {
+  if (!store.multiAgentChatAvailable || !props.agent?.name) return false
+  const text = input.value.trim()
+  if (!text) return false
+  return mentionedAgents(text, props.roster, { exclude: [props.agent.name] }).length > 0
+})
+const modelControl = computed(() => modelControlState({
+  isPlatform: store.isPlatformSession,
+  modelDefault: props.agent?.model_default || null,
+  options: modelOptions.value,
+  roomBound: draftIsRoomBound.value,
+}))
+// `serverGeneration` bumps on load and on a 409 adoption, so the select follows
+// the record the server actually holds rather than a value this tab guessed.
+// Arrow properties, not `get() {}` / `set() {}` shorthand: `portalUndefinedCalls.spec.js`
+// scans this file for `name(` and would read the shorthand method names as
+// calls to undefined functions.
+const selectedModel = computed({
+  get: () => {
+    void prefs.serverGeneration
+    return storedFor(modelPrefRecord.value, props.agent?.name, modelOptions.value)
+  },
+  set: (value) => setModelChoice(value),
+})
+const modelDefaultText = computed(() => defaultOptionText(props.agent?.model_default))
+
+function setModelChoice(value) {
+  if (!props.agent?.name) return
+  prefs.save(
+    PREF_KEYS.workspaceModel,
+    withChoice(modelPrefRecord.value, props.agent.name, value),
+    { origin: 'gesture' },
+  )
+}
+
+// The self-heal. A model the agent could not complete on is cleared back to
+// inherit, so the server's "switched back to the agent's default" sentence is
+// TRUE on the next turn instead of looping the person into the same failure on
+// every retry and every reload.
+function clearModelChoiceOnFailure(outcome) {
+  if (shouldClearChoice(outcome)) setModelChoice(INHERIT_VALUE)
+}
+
+// Read the record once the agent is known. `load()` is idempotent per identity
+// and shared with the Dashboard Grid, so this is free when it has already run.
+onMounted(() => { void prefs.load() })
+
 const voice = useVoiceSession(props.agent.name)
 const voiceStarting = ref(false)
 const voiceEndNotice = ref('')

@@ -264,6 +264,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // control is not rendered at all. Named for the capability, not the
     // provider (ent#354).
     realtimeVoice: { available: false, reason: null },
+    // ent#403 — the curated model list the composer may offer, from the roster.
+    // Instance-level, so it rides the roster and not every card; empty is the
+    // fail-closed value and renders no control, exactly like the two flags
+    // above. The per-agent resolved default lives on the CARD
+    // (`agent.model_default`), because that is the only part that varies.
+    modelOptions: [],
     // Set once a roster attempt REACHED A VERDICT for this session. The room
     // route needs to tell "still loading" from "loaded, and the answer is no" —
     // without it a hard-loaded /workspace/r/:id would flash a refusal it then
@@ -465,6 +471,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
       this.realtimeVoice = { available: false, reason: null }
+      // ent#403: a per-session capability like the two above — a different
+      // client signing in on the same browser must not inherit this list.
+      this.modelOptions = []
       this.rosterLoaded = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
@@ -545,10 +554,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // not "I don't know which". The backend cannot tell those apart from the
     // absence alone — which is why New chat used to land in the existing
     // conversation — and it ignores the flag when a session IS named.
-    async sendPortalChat(agentName, message, sessionId = null, { newThread = false } = {}) {
+    // ent#403: `model` is the user's explicit pick, or null/'' to inherit. Sent
+    // on BOTH turn actions — a field honoured by only one brings the bug back
+    // exactly when streaming fails and this fallback runs.
+    async sendPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
-        { message, session_id: sessionId, new_thread: newThread },
+        { message, session_id: sessionId, new_thread: newThread, model: model || null },
         { headers: this.authHeader }
       )
       return data
@@ -559,10 +571,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `sendPortalChat` above is untouched — it stays the documented API surface
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
-    async startPortalChat(agentName, message, sessionId = null, { newThread = false } = {}) {
+    async startPortalChat(agentName, message, sessionId = null, { newThread = false, model = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
-        { message, session_id: sessionId, new_thread: newThread },
+        { message, session_id: sessionId, new_thread: newThread, model: model || null },
         { headers: this.authHeader }
       )
       return data   // {execution_id, session_id}
@@ -1563,6 +1575,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
           available: data.realtime_voice?.available === true,
           reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
         }
+        // ent#403: same strictness, same fail-closed direction — an older
+        // backend without the field, or a shape that is not an array, reads as
+        // "no options", which renders no control rather than a dead one.
+        this.modelOptions = Array.isArray(data.model_options)
+          ? data.model_options.filter((o) => o && o.id && o.tier)
+          : []
         this.rosterLoaded = true
         // #2163: fired HERE and not from `Portal.vue::bootstrap()`, because
         // both "Try again" buttons call this action directly — a

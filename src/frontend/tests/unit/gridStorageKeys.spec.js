@@ -76,7 +76,15 @@ describe('#2199 grid layout storage key has one source of truth', () => {
     expect(all).toContain(mod.ORG_KEY)
     expect(all).toContain(mod.LEGACY_ADOPTED_KEY)
     for (const k of mod.userScopedKeys('admin')) expect(all).toContain(k)
-    expect(Object.values(mod.PREF_KEYS)).toEqual(['grid_layout', 'grid_widgets', 'grid_org'])
+    // ent#403: PREF_KEYS is the frontend half of the SERVER allowlist, not a
+    // grid-only map — `test_ent413_user_ui_preferences.py` asserts it EQUALS
+    // `user_preferences_service.PREFERENCE_KEYS`. So this list grows with every
+    // new server preference; the three grid keys are asserted by name so a
+    // rename of one still fails here.
+    expect(Object.values(mod.PREF_KEYS)).toEqual(
+      expect.arrayContaining(['grid_layout', 'grid_widgets', 'grid_org']),
+    )
+    expect(mod.PREF_KEYS.workspaceModel).toBe('workspace_model')
   })
 
   it('no e2e spec or composable hand-copies the org key literal (ent#413)', () => {
