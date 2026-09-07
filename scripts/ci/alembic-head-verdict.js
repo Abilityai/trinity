@@ -27,6 +27,13 @@
  *   2. A clean PR never GAINS a sticky comment. It only ever edits one that
  *      already exists, into a resolved body. Publishing a green comment on
  *      every migration PR is noise the signal then hides in.
+ *
+ *   3. Every value rendered here is ATTACKER-CONTROLLED. Revision ids and
+ *      filenames come out of the PR's own files — any fork author on a public
+ *      repo — and land in a comment that carries `github-actions[bot]`'s voice.
+ *      So the guard output is fenced against its own backticks (`fenced`) and
+ *      an id is only rendered into the copy-pasteable `alembic merge` command
+ *      when it looks like an id (`isSafeRevisionId`).
  */
 
 /** Marker that identifies this workflow's sticky comment. */
@@ -41,6 +48,45 @@ const MAX_DESCRIPTION = 140;
 function truncate(text, limit = MAX_DESCRIPTION) {
   if (text.length <= limit) return text;
   return `${text.slice(0, limit - 1)}…`;
+}
+
+/**
+ * A revision id we are willing to put inside a command a human may paste.
+ *
+ * EVERYTHING THIS MODULE RENDERS IS ATTACKER-CONTROLLED. The heads and the
+ * quoted guard output are read out of the *PR's own* revision files — on a
+ * public repo that means any fork author picks them — and the result is posted
+ * as a comment authored by `github-actions[bot]`, which carries the repo's
+ * voice. A revision id is `revision = "<any string>"`, so `\S+` (what
+ * `parseGuardOutput` captures) happily includes `$(…)`, backticks and `;`.
+ * The `alembic merge` line invites a maintainer to paste it into a shell, so an
+ * id that does not look like an id is not rendered into that command at all —
+ * the generic `<head-a> <head-b>` placeholder is the safe degradation, and the
+ * verbatim guard output in the fenced block above it still names the real ids.
+ *
+ * Alembic ids are ≤255 (Invariant #3) and Trinity's are `NNNN_<table>_<change>`.
+ */
+const SAFE_REVISION_ID = /^[A-Za-z0-9._-]{1,255}$/;
+
+function isSafeRevisionId(id) {
+  return SAFE_REVISION_ID.test(String(id ?? ''));
+}
+
+/**
+ * Fence `text` so its own backtick runs cannot terminate the block.
+ *
+ * CommonMark closes a fenced block on the first line whose leading run of
+ * backticks is at least as long as the opening one, so a hard-coded ``` fence
+ * around author-controlled text lets a revision id or filename containing a
+ * newline plus ``` escape into the comment as live markdown — enough to forge
+ * reassuring prose inside a bot-authored comment. Opening with one backtick
+ * more than the longest run present makes that unreachable for any input.
+ */
+function fenced(text) {
+  const body = String(text ?? '').trim();
+  const longest = (body.match(/`+/g) || []).reduce((n, run) => Math.max(n, run.length), 0);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return [fence, body, fence];
 }
 
 /**
@@ -81,9 +127,10 @@ function forkBody({ detail, heads, devHead, headSha, runUrl }) {
   const rechain = devHead
     ? `rechain this PR's revision off \`${devHead}\` (the current \`dev\` head)`
     : "rechain this PR's revision off the current `dev` head";
+  const pair = heads.slice(0, 2);
   const merge =
-    heads.length >= 2
-      ? `\`alembic merge -m "…" ${heads.slice(0, 2).join(' ')}\``
+    pair.length >= 2 && pair.every(isSafeRevisionId)
+      ? `\`alembic merge -m "…" ${pair.join(' ')}\``
       : '`alembic merge -m "…" <head-a> <head-b>`';
   return [
     MARKER,
@@ -95,15 +142,16 @@ function forkBody({ detail, heads, devHead, headSha, runUrl }) {
     '',
     '<details><summary><code>scripts/ci/check_alembic_heads.py</code> against <code>dev</code> + this PR, merged in memory</summary>',
     '',
-    '```',
-    String(detail || '').trim(),
-    '```',
+    ...fenced(detail),
     '',
     '</details>',
     '',
     `**Fix**: ${rechain}, or — if the forked revision may already be applied somewhere — add a merge ` +
       `revision (${merge}), whose tuple \`down_revision\` converges the line from any starting state. ` +
       'See Architectural Invariant #3.',
+    '',
+    'Push the fix and `schema-parity` re-checks it against the merge ref immediately; this comment ' +
+      'clears on the next push to `dev` touching `src/backend/migrations/versions/**`.',
     '',
     footer({ headSha, runUrl }),
   ].join('\n');
@@ -259,6 +307,8 @@ module.exports = {
   verdictFor,
   parseGuardOutput,
   stickyBodiesMatch,
+  isSafeRevisionId,
+  fenced,
   MARKER,
   CONTEXT,
   MAX_DESCRIPTION,
