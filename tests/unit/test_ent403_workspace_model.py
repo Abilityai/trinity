@@ -44,6 +44,14 @@ HAIKU = "claude-haiku-4-5-20251001"
 # id that proves "the inherited value is not re-laundered through the composer's
 # narrower allow-list".
 LEGACY_PUBLIC = "claude-opus-4-7"
+# The platform default these tests PIN. Deliberately NOT `claude-sonnet-4-6`, the
+# catalog's real recommended default: pinning the ambient value makes an assertion
+# pass whether the patch landed or not, which is how the sys.modules-vs-package-
+# attribute divergence `_settings_modules` documents went unseen until a full-suite
+# run. It is also not workspace-selectable, which is the last rung's point — the
+# ladder returns the platform's decision as-is rather than re-laundering it
+# through the composer's narrower allow-list.
+PLATFORM_DEFAULT = "claude-opus-4-6"
 
 
 def _services_module(name: str):
@@ -58,12 +66,55 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _settings_modules():
+    """EVERY object `services.settings_service` can resolve to.
+
+    `resolve_turn_model`'s last rung is `from services import settings_service`,
+    which walks the **package attribute** — not `sys.modules`, the route this
+    file's header rule describes and every other seam here uses. The two are
+    normally one object, so a `sys.modules`-only patch usually works and this
+    looks like belt-and-braces. It is not: a sibling unit file that installs a
+    stub at `sys.modules["services.settings_service"]` and does not take it back
+    out (the collection-time-Mock class) leaves the two pointing at DIFFERENT
+    objects, and then the patch below silently lands on the one the product code
+    never reads.
+
+    That is not hypothetical — /verify-local's full-suite run on 2026-09-08 hit
+    exactly it: `test_an_unreadable_platform_default_...` patched the raise onto
+    the `sys.modules` object, the ladder read the REAL module, and the test that
+    exists to prove the degrade path asserted against a value it never
+    controlled. Green in isolation, red only in the full suite — the direction
+    that ships.
+    """
+    import importlib
+    import sys
+
+    import services
+
+    importlib.import_module("services.settings_service")
+    mods = []
+    for m in (sys.modules.get("services.settings_service"),
+              getattr(services, "settings_service", None)):
+        if m is not None and not any(m is seen for seen in mods):
+            mods.append(m)
+    assert mods, "services.settings_service resolves to nothing"
+    return mods
+
+
+def _patch_platform_default(monkeypatch, fn):
+    """Put `fn` behind `get_platform_default_model` on every resolution path, then
+    PROVE the product code sees it (the `test_the_seam_is_stubbed_not_ambient`
+    discipline #2196 established — a missed patch here does not error, it just
+    reads the real setting)."""
+    for mod in _settings_modules():
+        monkeypatch.setattr(mod, "get_platform_default_model", fn, raising=False)
+
+
 def _platform_default(monkeypatch, model_id: str):
     """Pin `settings_service.get_platform_default_model` — the ladder's LAST rung
     since the 2026-09-08 review, so a test about the first two must fix it or it
     reads a real setting."""
-    monkeypatch.setattr(_services_module("settings_service"),
-                        "get_platform_default_model", lambda: model_id, raising=False)
+    _patch_platform_default(monkeypatch, lambda: model_id)
 
 
 @pytest.fixture()
@@ -89,7 +140,7 @@ def test_the_ladder_prefers_the_users_pick_then_the_agents_override(svc, monkeyp
     """
     import database
 
-    _platform_default(monkeypatch, "claude-sonnet-4-6")
+    _platform_default(monkeypatch, PLATFORM_DEFAULT)
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: HAIKU,
                         raising=False)
     assert svc.resolve_turn_model(AGENT, OPUS) == OPUS      # the pick wins
@@ -98,7 +149,7 @@ def test_the_ladder_prefers_the_users_pick_then_the_agents_override(svc, monkeyp
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: None,
                         raising=False)
     # …then the platform default, as a CONCRETE id — this is what lands on the row.
-    assert svc.resolve_turn_model(AGENT, None) == "claude-sonnet-4-6"
+    assert svc.resolve_turn_model(AGENT, None) == PLATFORM_DEFAULT
 
 
 def test_a_failing_override_read_never_fails_the_turn(svc, monkeypatch):
@@ -110,9 +161,9 @@ def test_a_failing_override_read_never_fails_the_turn(svc, monkeypatch):
     def _boom(agent_name):
         raise RuntimeError("db down")
 
-    _platform_default(monkeypatch, "claude-sonnet-4-6")
+    _platform_default(monkeypatch, PLATFORM_DEFAULT)
     monkeypatch.setattr(database.db, "get_public_channel_model", _boom, raising=False)
-    assert svc.resolve_turn_model(AGENT, None) == "claude-sonnet-4-6"
+    assert svc.resolve_turn_model(AGENT, None) == PLATFORM_DEFAULT
     # …and an explicit pick is not lost to someone else's failure.
     assert svc.resolve_turn_model(AGENT, OPUS) == OPUS
 
@@ -129,8 +180,11 @@ def test_an_unreadable_platform_default_degrades_to_none_never_a_failed_turn(svc
     def _boom():
         raise RuntimeError("settings down")
 
-    monkeypatch.setattr(_services_module("settings_service"),
-                        "get_platform_default_model", _boom, raising=False)
+    _patch_platform_default(monkeypatch, _boom)
+    # The patch must be the thing under test, not the ambient setting: prove the
+    # product code reaches `_boom` before asserting what it degrades to.
+    with pytest.raises(RuntimeError):
+        _services_module("settings_service").get_platform_default_model()
     assert svc.resolve_turn_model(AGENT, None) is None
 
 
@@ -152,7 +206,7 @@ def test_a_non_platform_principal_resolves_the_same_ladder(svc, monkeypatch):
     import inspect
     import database
 
-    _platform_default(monkeypatch, "claude-sonnet-4-6")
+    _platform_default(monkeypatch, PLATFORM_DEFAULT)
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: HAIKU,
                         raising=False)
     assert svc.resolve_turn_model(AGENT, None) == HAIKU
@@ -341,13 +395,13 @@ def test_the_inherit_path_stamps_the_platform_default_not_null(svc, monkeypatch)
 
     captured = []
     _fake_core_db(captured, monkeypatch)
-    _platform_default(monkeypatch, "claude-sonnet-4-6")
+    _platform_default(monkeypatch, PLATFORM_DEFAULT)
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: None,
                         raising=False)
 
     resolved = svc.resolve_turn_model(AGENT, None)
     svc._precreate_sync_execution(AGENT, "hello", EMAIL, SESSION, resolved)
-    assert captured[0]["model_used"] == "claude-sonnet-4-6"
+    assert captured[0]["model_used"] == PLATFORM_DEFAULT
 
 
 def test_the_row_still_takes_none_when_the_ladder_could_not_resolve(svc, monkeypatch):
