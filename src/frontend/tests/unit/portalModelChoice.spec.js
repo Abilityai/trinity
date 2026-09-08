@@ -263,11 +263,8 @@ describe('the composer is wired to the rules', () => {
     expect(block).not.toMatch(/featureFlag/i)
   })
 
-  it('bounds its own width so the textarea keeps its own', () => {
-    // `FIELD_CLASS` is `w-full` and a native select otherwise sizes to its
-    // widest option, beside a `flex-1 min-w-0` textarea (#2259's geometry).
-    expect(CODE).toMatch(/<BaseSelect[\s\S]{0,300}max-w-\[/)
-  })
+  // Typing-space geometry is measured in e2e/workspace-model-choice.spec.js.
+  // The old max-width source assertion passed with a 34px textarea.
 
   it('goes inert during a voice call, and is on the locked list', () => {
     expect(CODE).toMatch(/<BaseSelect[\s\S]{0,300}:disabled="voiceCallActive \|\| !modelControl\.enabled"/)

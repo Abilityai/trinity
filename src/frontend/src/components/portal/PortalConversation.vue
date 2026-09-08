@@ -512,6 +512,27 @@
              pressable and is not is worse than no button.
              So: the toggle stays live, and the fields it sits beside go inert
              around it. -->
+        <!-- The model gets its own row: fixed-width action buttons plus a
+             select leave only 34px for typing on phones and narrow columns.
+             Keep the native primitive and server capability gate, while the
+             textarea retains the available width beside the 44px actions. -->
+        <BaseSelect
+          v-if="modelControl.render"
+          v-model="selectedModel"
+          class="mb-2 w-full max-w-sm"
+          :disabled="voiceCallActive || !modelControl.enabled"
+          :title="modelControl.reason || 'Which model this chat runs on'"
+          aria-label="Model for this chat"
+          data-testid="portal-model-picker"
+        >
+          <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
+          <option
+            v-for="opt in modelControl.options"
+            :key="opt.id"
+            :value="opt.id"
+            :title="optionTitle(opt)"
+          >{{ optionText(opt) }}</option>
+        </BaseSelect>
         <form
           class="flex items-end gap-2"
           :aria-disabled="voiceCallActive ? 'true' : undefined"
@@ -586,42 +607,6 @@
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
           </button>
-          <!-- ent#403: the model choice. A `<select>` and not a hand-rolled
-               trigger, so it is the `BaseSelect` primitive rather than a
-               lookalike — and so `portalComposerAlignment.spec.js`'s rule that
-               every `<button>` in this form is `h-11 w-11` still holds without
-               this control having to pretend to be one.
-
-               `FIELD_CLASS` starts `w-full`, and a native select otherwise
-               sizes to its widest option, so the wrapper carries an explicit
-               `max-w` — the textarea beside it is `flex-1 min-w-0` on the
-               geometry #2259 tuned, and an unbounded select would eat it. The
-               bound is smaller on narrow viewports (AC 8) rather than hidden:
-               a control that vanishes on a phone is a capability that vanishes
-               with it.
-
-               Renders only when the SERVER says this principal may choose
-               (`agent.model_default` is null for a portal-token client and for
-               a non-Claude runtime) — the roster is the capability channel
-               (#2128), never a feature flag, which is JWT-gated and empty for
-               exactly this audience. -->
-          <BaseSelect
-            v-if="modelControl.render"
-            v-model="selectedModel"
-            class="shrink-0 max-w-[7.5rem] sm:max-w-[11rem]"
-            :disabled="voiceCallActive || !modelControl.enabled"
-            :title="modelControl.reason || 'Which model this chat runs on'"
-            aria-label="Model for this chat"
-            data-testid="portal-model-picker"
-          >
-            <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
-            <option
-              v-for="opt in modelControl.options"
-              :key="opt.id"
-              :value="opt.id"
-              :title="optionTitle(opt)"
-            >{{ optionText(opt) }}</option>
-          </BaseSelect>
           <!-- ent#392: this is the composer's FIRST anchored overlay, so the
                wrapper is new. It must inherit the flex sizing the textarea used
                to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
