@@ -550,6 +550,12 @@ INSTALL_SOURCE_UNKNOWN = "unknown"
 INSTALL_SOURCE_VALUES = frozenset({
     "do-marketplace",
     "vultr-marketplace",
+    # A doc-driven install onto a DigitalOcean droplet (#2380). Distinct from
+    # the generic `script` because the installer that writes it has PROVEN it is
+    # on DigitalOcean — `start.sh --provision --cloud digitalocean` refuses to
+    # run at all unless DO's metadata service answers — so the value is a fact
+    # the machine established, not a claim an operator typed.
+    "do-script",
     "script",
     INSTALL_SOURCE_UNKNOWN,
 })
@@ -558,6 +564,21 @@ INSTALL_SOURCE_VALUES = frozenset({
 # in the frontend so the browser holds no second copy of the predicate (the
 # ent#386 rule); the flag surface ships the resolved boolean, not this set.
 MARKETPLACE_INSTALL_SOURCES = frozenset({"do-marketplace", "vultr-marketplace"})
+
+# Which installs the first-run hardening guide is offered to. Deliberately a
+# SEPARATE set from `MARKETPLACE_INSTALL_SOURCES` rather than a widening of it:
+# `marketplace_install` answers "did this come from a vendor listing", which is
+# a different question with other consumers, and conflating them would make a
+# doc-driven install start claiming a marketplace provenance it does not have.
+#
+# What the two sets share is the property the guide actually needs — the install
+# is known to have landed on a public cloud VM at a bare IP with no domain, so
+# the advice applies. What it must NOT include is `script` or `unknown`: the
+# managed fleet runs plain HTTP behind a WireGuard/Tailscale tunnel, with no
+# domain, no HTTPS flag and a 100.x address, so a gate on TLS state (or on "any
+# install") would fire permanently on every paying client's instance. Provenance
+# is why this gate exists.
+HARDENING_GUIDE_INSTALL_SOURCES = MARKETPLACE_INSTALL_SOURCES | {"do-script"}
 
 TRINITY_INSTALL_SOURCE = os.getenv(INSTALL_SOURCE_ENV_VAR, "").strip().lower()
 

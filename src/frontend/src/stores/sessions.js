@@ -59,21 +59,24 @@ export const useSessionsStore = defineStore('sessions', {
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
 
     // #2380 — install provenance + the URL posture this instance ADVERTISES.
-    // `marketplaceInstall` is THE gate for the first-run hardening guide and is
-    // resolved server-side, so the browser holds no second copy of which
-    // sources count as a marketplace (the ent#386 rule); `installSource` rides
+    // `hardeningGuideEligible` is THE gate for the first-run hardening guide and
+    // is resolved server-side, so the browser holds no second copy of which
+    // provenances qualify (the ent#386 rule). It is NOT `marketplace_install`,
+    // which the payload still carries and still means what it says: a droplet
+    // installed by following the DigitalOcean deploy doc gets the guide without
+    // claiming to have come from a vendor listing. `installSource` rides
     // beside it for display only. `installTlsPosture` says what URL the
     // instance hands out — nothing here probes a socket or reads a
     // certificate, so no consumer may render it as a verified "secure".
     installSource: 'unknown',
-    marketplaceInstall: false,
+    hardeningGuideEligible: false,
     installTlsPosture: 'unconfigured',
     // ent#437: the four booleans the Finish-setup consent card gates on. They
     // ride the flags document so the card decides from a payload the page
     // already awaits and never calls the admin status route on a Dashboard load
     // it will not act on. `dismissed` defaults TRUE (hidden) until the answer
-    // arrives — the safe direction for a nudge, exactly like `marketplaceInstall`
-    // defaulting false for the hardening guide.
+    // arrives — the safe direction for a nudge, exactly like
+    // `hardeningGuideEligible` defaulting false for the hardening guide.
     telemetrySharingEnabled: false,
     telemetrySharingHardDisabled: false,
     telemetrySharingDismissed: true,
@@ -131,7 +134,7 @@ export const useSessionsStore = defineStore('sessions', {
         // so a null/absent field lands on the closed value rather than
         // undefined — which reads as falsy but prints as "undefined".
         this.installSource = r.data?.install_source || 'unknown'
-        this.marketplaceInstall = !!r.data?.marketplace_install
+        this.hardeningGuideEligible = !!r.data?.hardening_guide_eligible
         this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
         // ent#437: an absent field reads as hidden (`dismissed`), never as a
         // fresh ask — an older backend must not pop the card on every load.
@@ -154,11 +157,11 @@ export const useSessionsStore = defineStore('sessions', {
         this.claudeAuthConfigured = false
         this.a2aAvailable = false
         // #2380 fails CLOSED like every flag above it: `unknown` provenance is
-        // not a marketplace, so the hardening guide stays hidden. Showing a
+        // not eligible, so the hardening guide stays hidden. Showing a
         // security prompt on a correctly-configured managed instance is the
         // exact failure this feature is shaped to avoid.
         this.installSource = 'unknown'
-        this.marketplaceInstall = false
+        this.hardeningGuideEligible = false
         this.installTlsPosture = 'unconfigured'
         // ent#437 fails in the HIDDEN direction: a failed flags fetch must not
         // pop a consent ask, so `dismissed` reads true until a real answer.

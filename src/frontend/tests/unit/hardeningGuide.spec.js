@@ -9,7 +9,7 @@
  *      missed nudge is a non-event; a "secure this instance" card sitting over
  *      a managed instance that is already behind Tailscale is an accusation
  *      nobody can act on.
- *   2. **Never before the answer arrives.** `marketplaceInstall` starts false,
+ *   2. **Never before the answer arrives.** `hardeningGuideEligible` starts false,
  *      so a false→true flip after the fetch is indistinguishable from a real
  *      one — without the `featureFlagsLoaded` term the card flashes in on every
  *      page load.
@@ -93,7 +93,7 @@ const withoutComments = (source) => {
 const marketplaceIp = {
   featureFlagsLoaded: true,
   isAdmin: true,
-  marketplaceInstall: true,
+  hardeningGuideEligible: true,
   installTlsPosture: 'https-ip',
   dismissed: false,
 }
@@ -122,10 +122,21 @@ describe('visibility', () => {
     // The whole managed fleet lands here: plain HTTP behind Tailscale is
     // indistinguishable from an unhardened droplet by every other signal, so
     // provenance is the only gate that can tell them apart.
-    expect(isHardeningGuideVisible({ ...marketplaceIp, marketplaceInstall: false })).toBe(false)
+    expect(isHardeningGuideVisible({ ...marketplaceIp, hardeningGuideEligible: false })).toBe(false)
     expect(
-      isHardeningGuideVisible({ ...marketplaceIp, marketplaceInstall: false, installTlsPosture: 'http' })
+      isHardeningGuideVisible({ ...marketplaceIp, hardeningGuideEligible: false, installTlsPosture: 'http' })
     ).toBe(false)
+  })
+
+  it('shows on a droplet installed from the DigitalOcean deploy doc', () => {
+    // #2380's original AC said the guide renders ONLY for a marketplace value.
+    // Amended by the issue author: somebody who followed the DigitalOcean deploy
+    // doc is on the same public droplet at the same bare IP and needs the same
+    // advice. The eligibility set is widened server-side; the browser only sees
+    // the resolved boolean, so this case is identical here by construction and
+    // the widening is pinned in `tests/unit/test_2380_provision_single_source`
+    // and the backend flag test.
+    expect(isHardeningGuideVisible({ ...marketplaceIp, hardeningGuideEligible: true })).toBe(true)
   })
 
   it('renders nothing before the flags load', () => {
@@ -476,17 +487,44 @@ describe('the two paths are complementary, not alternatives', () => {
   })
 })
 
+describe('the certificate-renewal caveat (#2380 item 7)', () => {
+  const ip = POSTURE_COPY['https-ip']
+
+  it('warns that a long shutdown outlives a short-lived certificate', () => {
+    expect(ip.detail).toMatch(/six days/i)
+    expect(ip.detail).toMatch(/switched off|shut down|shutdown/i)
+    expect(ip.detail).toMatch(/renew/i)
+  })
+
+  it('states it as a property of the profile, never of THIS connection', () => {
+    // The binding AC on POSTURE_COPY: nothing here may assert a property of the
+    // actual connection, because TLS terminates outside the backend and no
+    // socket is ever probed. The renewal sentence is hedged the same way the
+    // certificate sentence already is — "expect", "if ... set this up".
+    expect(ip.detail).toMatch(/If a marketplace image or the DigitalOcean install script set this up/)
+    expect(ip.detail).toMatch(/\bexpect\b/)
+    for (const forbidden of [
+      /your certificate expires/i,
+      /this certificate is/i,
+      /is secure\b/i,
+      /is valid\b/i,
+    ]) {
+      expect(ip.detail).not.toMatch(forbidden)
+    }
+  })
+})
+
 describe('the store fails closed', () => {
   const flagPayload = {
     install_source: 'do-marketplace',
-    marketplace_install: true,
+    hardening_guide_eligible: true,
     install_tls_posture: 'https-ip',
   }
 
   it('starts closed before anything is fetched', () => {
     expect(store.featureFlagsLoaded).toBe(false)
     expect(store.installSource).toBe('unknown')
-    expect(store.marketplaceInstall).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
   })
 
@@ -495,13 +533,13 @@ describe('the store fails closed', () => {
     await store.loadFeatureFlags()
 
     expect(store.installSource).toBe('do-marketplace')
-    expect(store.marketplaceInstall).toBe(true)
+    expect(store.hardeningGuideEligible).toBe(true)
     expect(store.installTlsPosture).toBe('https-ip')
     expect(
       isHardeningGuideVisible({
         featureFlagsLoaded: store.featureFlagsLoaded,
         isAdmin: true, // held constant: these cases exercise the flag path
-        marketplaceInstall: store.marketplaceInstall,
+        hardeningGuideEligible: store.hardeningGuideEligible,
         installTlsPosture: store.installTlsPosture,
         dismissed: false,
       })
@@ -514,7 +552,7 @@ describe('the store fails closed', () => {
 
     // Not `undefined` — that reads as falsy but prints as "undefined".
     expect(store.installSource).toBe('unknown')
-    expect(store.marketplaceInstall).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
   })
 
@@ -523,7 +561,7 @@ describe('the store fails closed', () => {
     await store.loadFeatureFlags()
 
     expect(store.installSource).toBe('unknown')
-    expect(store.marketplaceInstall).toBe(false)
+    expect(store.hardeningGuideEligible).toBe(false)
     expect(store.installTlsPosture).toBe('unconfigured')
     expect(store.featureFlagsLoaded).toBe(true) // resolved, just not to a gate
 
@@ -531,7 +569,7 @@ describe('the store fails closed', () => {
       isHardeningGuideVisible({
         featureFlagsLoaded: store.featureFlagsLoaded,
         isAdmin: true, // held constant: these cases exercise the flag path
-        marketplaceInstall: store.marketplaceInstall,
+        hardeningGuideEligible: store.hardeningGuideEligible,
         installTlsPosture: store.installTlsPosture,
         dismissed: false,
       })

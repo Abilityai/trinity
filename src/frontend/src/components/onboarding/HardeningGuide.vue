@@ -8,10 +8,13 @@
 
   Four properties are load-bearing:
 
-  1. **The gate is `marketplace_install`, resolved server-side.** Every other
-     install — the whole managed fleet included — is false, so this never
-     appears over an instance somebody already put behind Tailscale. The
-     browser holds no copy of which sources count as a marketplace.
+  1. **The gate is `hardening_guide_eligible`, resolved server-side.** It is
+     PROVENANCE, not TLS state: the marketplace images plus a droplet installed
+     by following the DigitalOcean deploy doc. Every other install — the whole
+     managed fleet included — is false, so this never appears over an instance
+     somebody already put behind Tailscale, which has no domain and no HTTPS
+     flag either and would be caught by any posture-based gate. The browser
+     holds no copy of which provenances qualify.
 
   2. **Admins only.** Not cosmetics: Settings → General is `adminOnly`, so for
      anyone else the card's one action falls through to the default tab, and
@@ -221,7 +224,7 @@ const visible = computed(
       // `role`, not `userRole` — the latter never existed on the auth store, so
       // this card had been permanently hidden (found by the ent#437 eyeball).
       isAdmin: authStore.profileVerified && authStore.role === 'admin',
-      marketplaceInstall: store.marketplaceInstall,
+      hardeningGuideEligible: store.hardeningGuideEligible,
       installTlsPosture: store.installTlsPosture,
       dismissed: dismissed.value[stage.value],
     }) &&
