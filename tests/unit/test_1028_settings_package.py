@@ -161,13 +161,25 @@ def test_the_catch_all_is_included_last():
 
 
 def _logical_lines(path: Path) -> int:
-    """Lines that carry code. Blank separators and whole-line comments are not
-    what the 800-line class measures — counting them would make restoring a
-    PEP-8 blank line between two defs read as the module growing."""
-    return sum(
-        1 for line in path.read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    )
+    """Lines that carry text — everything except blank separators.
+
+    Blank lines are excluded and comments are NOT, and the asymmetry is the
+    whole point rather than an oversight.
+
+    Restoring a PEP-8 blank line between two defs is not a module growing, so a
+    metric that counts blanks makes formatting look like size. But excluding
+    comments as well would move the calibration: this package's files carry
+    110-208 comment lines each, so a comment-blind count would hand
+    `credentials.py` ~160 lines of headroom the 800 ceiling never gave it —
+    re-baselining the guard under cover of a fix, which is the thing this file
+    exists to make hard.
+
+    Measured, not assumed: `credentials.py` is 687 non-blank lines both at
+    `6d8c93a4` (raw 778) and after the blank-line restoration (raw 806). This
+    metric is invariant under exactly the change that prompted it and under
+    nothing else.
+    """
+    return sum(1 for line in path.read_text().splitlines() if line.strip())
 
 
 def test_every_module_is_under_the_critical_threshold():
