@@ -460,7 +460,8 @@ def _turn_failed_detail(availability: str) -> str:
 
 
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
-                 availability: str = "unknown") -> PortalAgentCard:
+                 availability: str = "unknown",
+                 can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
 
@@ -508,6 +509,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # endpoint it would call cannot disagree.
         stt_available=bool(tts_ready),
         availability=availability,
+        # ent#553 — threaded in like `availability`, never computed here: the
+        # caller knows its own principal kind and this builder is shared with
+        # the single-agent lookup.
+        can_manage_canvases=can_manage_canvases,
     )
 
 
@@ -616,9 +621,18 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # It also REPLACES the per-card `get_agent_container()` the briefing used to
     # make and throw away: N inspects become one list call.
     availability = await _availability_map([r["agent_name"] for r in rows])
+    # ent#553 — resolved through `may_manage_canvases`, the SAME predicate the
+    # write routes enforce with, rather than a faster per-row comparison
+    # against `r["owner"]`. That shortcut would be two ownership answers that
+    # merely agree today, and this file already carries the scar of a display
+    # rule drifting from the rule it displays. The cost is a couple of indexed
+    # lookups per agent on a load that already makes a Docker call; if it ever
+    # matters, memoize INSIDE the predicate so both callers benefit.
     cards = [
         _row_to_card(r, tts_ready, default_voice,
-                     availability=availability.get(r["agent_name"], "unknown"))
+                     availability=availability.get(r["agent_name"], "unknown"),
+                     can_manage_canvases=may_manage_canvases(
+                         r["agent_name"], email, is_platform=include_owned))
         for r in rows
     ]
     # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
@@ -1230,6 +1244,39 @@ def agent_on_roster(agent_name: str, email: str | None,
     secondary surface; fatal once it is the only one.
     """
     return agent_name in roster_agent_names(email, include_owned)
+
+
+def may_manage_canvases(agent_name: str, email: str | None, *,
+                        is_platform: bool) -> bool:
+    """May this Workspace caller delete or pin ``agent_name``'s canvases (ent#553)?
+
+    Owner-or-admin, and platform-only. Two consequences worth stating:
+
+    * an **external client never can**, whatever their roster says. A canvas is
+      one shared surface with no per-user copy, so there is no "hide it from my
+      list" they could be given instead — the ent#548 answer for files, where a
+      non-owner unshares their own copy, has no equivalent here.
+    * the predicate is `db.can_user_share_agent`, the SAME one
+      `dependencies.assert_agent_owner` reaches on the operator surface. Not a
+      second implementation that agrees today: the Workspace and Agent Detail
+      must never disagree about who owns an agent, and the cheapest way to
+      guarantee that is to have one answer.
+
+    Fails closed on every unknown: no email, no `users` row (a client), or a
+    lookup that returns nothing.
+    """
+    # `db` in this module is `client_portal.db`, the portal's OWN tables — the
+    # platform facade is imported locally as `core_db`, the convention every
+    # other cross-table read here follows. Reaching for the wrong one raises
+    # AttributeError on a path that runs for every roster load.
+    from database import db as core_db
+
+    if not is_platform or not email:
+        return False
+    user = core_db.get_user_by_email(email)
+    if not user or not user.get("username"):
+        return False
+    return bool(core_db.can_user_share_agent(user["username"], agent_name))
 
 
 def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:

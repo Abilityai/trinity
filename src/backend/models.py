@@ -647,6 +647,25 @@ CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CANVAS_BLOCKS_MAX_BYTES = 512 * 1024  # 512 KiB
 CANVAS_MAX_BLOCKS = 50
 
+# ent#553 — the bound on the number of canvases ONE agent may hold.
+#
+# `agent_canvases` is bounded per canvas by its composite key (a write replaces
+# the row), but `canvas_id` is agent-chosen, so an agent writing one canvas per
+# run grows the table without limit. ent#438 read the first fact and concluded
+# the table needed no retention; the unbounded axis was missed, not decided.
+#
+# A CAP rather than a retention window, by operator ruling 2026-09-08: a window
+# deletes a person's surfaces on a timer, which is the failure direction #1638
+# established, whereas a cap refuses a WRITE and never destroys anything. The
+# refusal is named and tells the agent to retire a canvas (`clear_canvas`).
+# Generous on purpose — it is a runaway guard, not a budget anyone should feel.
+CANVAS_MAX_PER_AGENT = int(os.getenv("CANVAS_MAX_PER_AGENT", "100"))
+
+# ent#553 — how many canvases one bulk delete may name. A separate constant
+# from the per-agent cap: this bounds ONE request's `IN (...)` clause, that
+# bounds the table.
+CANVAS_BULK_DELETE_MAX = 100
+
 CANVAS_RATE_LIMIT = int(os.getenv("CANVAS_RATE_LIMIT", "60"))
 CANVAS_RATE_WINDOW = int(os.getenv("CANVAS_RATE_WINDOW", "60"))
 
@@ -774,11 +793,49 @@ class CanvasSummary(BaseModel):
     template: Optional[str] = None
     # Derived, never stored: the agent has run since this canvas was written.
     stale: bool = False
+    # ent#553 — a human's pin. Stored, unlike `stale`, and never agent-written.
+    pinned: bool = False
 
 
 class Canvas(CanvasSummary):
     """Detail-response model — summary plus the blocks (ent#438)."""
     blocks: List[Dict] = Field(default_factory=list)
+
+
+class CanvasPinRequest(BaseModel):
+    """Pin or unpin one canvas (ent#553).
+
+    `pinned` is required-but-explicit rather than a toggle: a toggle round-trips
+    the client's stale idea of the current state, so two people pinning at once
+    get whichever order the requests landed in. Stating the target value makes
+    the write idempotent and the intent readable in the audit row.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: bool
+
+
+class CanvasBulkDelete(BaseModel):
+    """Remove several canvases in one action (ent#553).
+
+    Bounded because the ids land in one `IN (...)` clause, and named explicitly
+    rather than reusing the block cap — these count different things.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    canvas_ids: List[str] = Field(..., min_length=1, max_length=CANVAS_BULK_DELETE_MAX)
+
+
+class CanvasBulkDeleteResult(BaseModel):
+    """What a bulk delete actually removed (ent#553).
+
+    `deleted` is the ids that existed, not the ids that were asked for, so the
+    UI can say "3 of 5 removed" honestly — and `requested` keeps the caller's
+    count visible beside it rather than making the client remember what it sent.
+    """
+    agent_name: str
+    requested: int
+    deleted: List[str]
 
 
 class ReportCreate(BaseModel):

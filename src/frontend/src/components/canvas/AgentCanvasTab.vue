@@ -15,7 +15,13 @@
     <CanvasPanel
       :canvases="canvases"
       :fetch-detail="fetchDetail"
+      :can-manage="canManage"
+      :delete-canvas="removeCanvas"
+      :bulk-delete-canvases="removeCanvases"
+      :pin-canvas="pinCanvas"
+      :canvas-limit="canvasLimit"
       viewer="operator"
+      @changed="load"
     />
   </div>
 </template>
@@ -29,6 +35,15 @@ const props = defineProps({ agentName: { type: String, required: true } })
 
 const canvases = ref([])
 const error = ref('')
+// ent#553 — Agent Detail is the operator surface, so the affordance is shown
+// and the SERVER decides: a non-owner's call is refused by the same predicate
+// the Workspace uses. Showing it here rather than resolving ownership in the
+// client keeps one authority; the failure is a named message, not a dead
+// control, because this tab is only reachable by someone with agent access.
+const canManage = ref(true)
+// Surfaced so the header can warn before the agent meets the refusal. 0 = the
+// panel says nothing, which is the honest reading of "not told".
+const canvasLimit = ref(0)
 
 async function load() {
   error.value = ''
@@ -47,6 +62,29 @@ async function fetchDetail(canvasId) {
     `/api/agents/${encodeURIComponent(props.agentName)}/canvas/${encodeURIComponent(canvasId)}`,
   )
   return data
+}
+
+async function removeCanvas(canvasId) {
+  await api.delete(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/${encodeURIComponent(canvasId)}`,
+  )
+  return true
+}
+
+async function removeCanvases(canvasIds) {
+  const { data } = await api.post(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/bulk-delete`,
+    { canvas_ids: canvasIds },
+  )
+  return data
+}
+
+async function pinCanvas(canvasId, pinned) {
+  await api.put(
+    `/api/agents/${encodeURIComponent(props.agentName)}/canvas/${encodeURIComponent(canvasId)}/pin`,
+    { pinned },
+  )
+  return true
 }
 
 onMounted(load)

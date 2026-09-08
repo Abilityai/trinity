@@ -528,6 +528,11 @@ TABLES = {
             -- 'brief' | 'status-board'); NULL = stacked blocks. A property of
             -- the surface, like `audience`; a block's `slot` lives in `blocks`.
             template TEXT,
+            -- ent#553: pinned canvases sort above the rest so the default one
+            -- and the ones in daily use stay reachable as the pile grows. A
+            -- HUMAN's ordering preference, not the agent's — the write path
+            -- never sets it, so an agent cannot pin itself to the top.
+            pinned INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (agent_name, canvas_id)
         )
     """,

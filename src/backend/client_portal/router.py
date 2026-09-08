@@ -33,11 +33,17 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import REPORT_ROWS_PAGE_MAX, User
+from models import (
+    REPORT_ROWS_PAGE_MAX,
+    CanvasBulkDelete,
+    CanvasPinRequest,
+    User,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
+from database import db
 from . import agent_page, service
 from .models import (
     PortalSessionRename,
@@ -729,6 +735,23 @@ def portal_agent_canvases(
         agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
 
+@router.post("/agents/{agent_name}/canvas/bulk-delete")
+def portal_bulk_delete_canvases(
+    agent_name: str,
+    body: CanvasBulkDelete,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove several of this agent's canvases from the Workspace (ent#553).
+
+    Declared above the parameterized canvas routes (Invariant #4).
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    deleted = db.delete_agent_canvases(agent_name, body.canvas_ids)
+    return {"agent_name": agent_name, "requested": len(body.canvas_ids),
+            "deleted": deleted}
+
+
 @router.get("/agents/{agent_name}/canvas/{canvas_id}")
 def portal_agent_canvas_detail(
     agent_name: str,
@@ -754,6 +777,51 @@ def portal_agent_canvas_detail(
     if canvas is None:
         raise HTTPException(status_code=404, detail="Canvas not found")
     return canvas
+
+
+def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None:
+    """Owner-or-admin, platform-only — the ent#553 gate for changing a canvas.
+
+    A uniform 404, not a 403: this prefix's contract is that a caller learns
+    nothing about what they cannot reach, and an external client who could tell
+    "exists but you may not" from "does not exist" has been told which canvases
+    the agent keeps for its operator.
+    """
+    if not service.may_manage_canvases(agent_name, principal.email,
+                                       is_platform=principal.is_platform):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+
+@router.delete("/agents/{agent_name}/canvas/{canvas_id}")
+def portal_delete_canvas(
+    agent_name: str,
+    canvas_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Remove one canvas from the Workspace (ent#553).
+
+    Idempotent, matching the operator route: a list one poll out of date must
+    not turn a second click into an error.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    deleted = db.delete_agent_canvas(agent_name, canvas_id)
+    return {"canvas_id": canvas_id, "deleted": bool(deleted)}
+
+
+@router.put("/agents/{agent_name}/canvas/{canvas_id}/pin")
+def portal_pin_canvas(
+    agent_name: str,
+    canvas_id: str,
+    body: CanvasPinRequest,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Pin or unpin one canvas so it stays at the top of the rail (ent#553)."""
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    _require_canvas_manager(agent_name, principal)
+    if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return {"canvas_id": canvas_id, "pinned": body.pinned}
 
 
 @router.get("/agents/{agent_name}/reports", response_model=PortalAgentReports)

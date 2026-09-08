@@ -23,19 +23,23 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from database import db
-from dependencies import AuthorizedAgent, get_current_user
+from dependencies import AuthorizedAgent, assert_agent_owner, get_current_user
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     CANVAS_RATE_LIMIT,
     CANVAS_RATE_WINDOW,
     Canvas,
+    CanvasBulkDelete,
+    CanvasBulkDeleteResult,
     CanvasPatch,
+    CanvasPinRequest,
     CanvasSummary,
     CanvasWrite,
     User,
 )
 from services import canvas_service, rate_limiter
 from services.canvas_service import CanvasError
+from services.platform_audit_service import AuditEventType, platform_audit_service
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,33 @@ def _require_self(current_user: User, name: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Agent-scoped key may only write its own canvas",
         )
+
+
+def _gate_human_removal(current_user: User, name: str) -> None:
+    """Who may delete or pin a canvas (ent#553).
+
+    Two principals, two rules, and the split is the decision:
+
+    * an **agent-scoped key** may only touch its OWN canvas — unchanged, the
+      #918 self-gate. `clear_canvas` is an agent tidying up after itself.
+    * a **human** must be the agent's owner (or an admin). This mirrors the
+      answer ent#548 gives for files — the owner deletes the shared artifact —
+      and it NARROWS the previous behaviour, where any user the agent was
+      shared with could delete through this route. Safe to narrow: no UI called
+      it, so no workflow depended on the wider gate.
+
+    A canvas is one shared surface with no per-user copy, so there is no
+    "remove it from my list only" middle ground to offer a non-owner; per the
+    issue's AC #2 they see no control at all rather than one that 403s.
+
+    `assert_agent_owner` is the right helper despite its docstring warning:
+    that warning is about deleting an AGENT (where the `is_system` guard
+    matters), not about a row belonging to one.
+    """
+    if current_user.agent_name:
+        _require_self(current_user, name)
+        return
+    assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
 
 def _gate_write(current_user: User, name: str, request: Request) -> None:
@@ -89,6 +120,56 @@ async def list_canvases(name: AuthorizedAgent):
     would be the inverse of the access model.
     """
     return canvas_service.decorate(db.list_agent_canvases(name), name)
+
+
+@router.post("/{name}/canvas/bulk-delete", response_model=CanvasBulkDeleteResult)
+async def bulk_delete_canvases(
+    name: AuthorizedAgent,
+    body: CanvasBulkDelete,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Remove several canvases in one action (ent#553).
+
+    Declared BEFORE the parameterized routes (Invariant #4). Nothing collides
+    on `POST` today, but the ordering is what keeps that true if one is added.
+
+    A POST rather than a `DELETE` carrying a body: request bodies on DELETE are
+    permitted-but-unreliable across proxies and clients, and this one is not
+    optional — dropping it would turn "delete these five" into a syntax error
+    at best and, on a route shaped `DELETE /canvas`, a delete-everything at
+    worst. The verb is worth less than that guarantee.
+
+    Reports what actually went, not what was asked for, so the UI can say
+    "3 of 5 removed" rather than implying success for ids that were already
+    gone.
+    """
+    _gate_human_removal(current_user, name)
+    for canvas_id in body.canvas_ids:
+        try:
+            canvas_service.validate_canvas_id(canvas_id)
+        except CanvasError as e:
+            raise _map(e)
+
+    deleted = db.delete_agent_canvases(name, body.canvas_ids)
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="canvas_bulk_delete",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        # Ids only. A canvas's blocks are agent-authored free-form content and
+        # the audit log is broadly readable (the G-04 rule).
+        details={"requested": len(body.canvas_ids), "deleted": deleted},
+    )
+    return CanvasBulkDeleteResult(
+        agent_name=name, requested=len(body.canvas_ids), deleted=deleted
+    )
 
 
 @router.get("/{name}/canvas/{canvas_id}", response_model=Canvas)
@@ -169,6 +250,34 @@ async def patch_canvas(
     return canvas_service.decorate([canvas], name)[0]
 
 
+@router.put("/{name}/canvas/{canvas_id}/pin", response_model=CanvasSummary)
+async def pin_canvas(
+    name: AuthorizedAgent,
+    canvas_id: str,
+    body: CanvasPinRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Pin or unpin one canvas so it sorts to the top (ent#553).
+
+    Gated like delete, not like write: a pin is the READER's ordering and is
+    stored once for everyone, so it is a human decision about a shared surface.
+    An agent-scoped key reaching this route can only ever pin its own canvas,
+    but nothing in the agent-facing surface offers it — `pinned` is deliberately
+    absent from the MCP tools, so an agent cannot promote itself up the list.
+    """
+    _gate_human_removal(current_user, name)
+    try:
+        canvas_service.validate_canvas_id(canvas_id)
+    except CanvasError as e:
+        raise _map(e)
+    if not db.set_agent_canvas_pinned(name, canvas_id, body.pinned):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    canvas = db.get_agent_canvas(name, canvas_id)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return canvas_service.decorate([canvas], name)[0]
+
+
 @router.delete("/{name}/canvas/{canvas_id}")
 async def clear_canvas(
     name: AuthorizedAgent,
@@ -177,12 +286,18 @@ async def clear_canvas(
 ):
     """Remove a canvas. Idempotent — clearing an absent canvas is a success.
 
-    Idempotent rather than 404-on-missing because the caller is an agent
+    Idempotent rather than 404-on-missing because one caller is an agent
     tidying up after itself: "make sure this surface is gone" has succeeded
     either way, and a 404 here would push every agent into a
-    check-then-delete race with its own concurrent turns.
+    check-then-delete race with its own concurrent turns. The human caller
+    inherits that idempotence, which is also right for a UI whose list may be
+    one poll behind.
+
+    ent#553: the gate widened from "agents may delete their own" to that PLUS
+    "the owner may delete any of this agent's", and narrowed for everyone else
+    — see `_gate_human_removal`.
     """
-    _require_self(current_user, name)
+    _gate_human_removal(current_user, name)
     try:
         canvas_service.validate_canvas_id(canvas_id)
     except CanvasError as e:

@@ -152,6 +152,115 @@ export function emptyState(viewer) {
 }
 
 // ---------------------------------------------------------------------------
+// Living with a lot of canvases (ent#553)
+// ---------------------------------------------------------------------------
+
+/**
+ * Order a canvas list: pinned first, then most-recently-updated.
+ *
+ * The backend already returns this order. Re-deriving it here is deliberate,
+ * not redundant: the list is mutated in place by an optimistic pin or delete,
+ * and a client that only re-sorted on refetch would show a just-pinned canvas
+ * still sitting in the middle. Same two keys, so the two cannot disagree.
+ *
+ * Sorts a COPY — sorting props in place mutates the store's array.
+ */
+export function sortCanvases(list) {
+  return (Array.isArray(list) ? [...list] : []).sort((a, b) => {
+    const pinned = Number(!!b?.pinned) - Number(!!a?.pinned)
+    if (pinned) return pinned
+    return String(b?.updated_at || '').localeCompare(String(a?.updated_at || ''))
+  })
+}
+
+/**
+ * Filter by title (AC 4). Matches the id too, because an agent may never set a
+ * title and the id is then the only thing the person can see to search for.
+ *
+ * An empty query returns everything rather than nothing — the filter is a
+ * narrowing of a list that is already correct, never a search that must be
+ * satisfied before anything renders.
+ */
+export function filterCanvases(list, query) {
+  const needle = String(query || '').trim().toLowerCase()
+  const rows = Array.isArray(list) ? list : []
+  if (!needle) return rows
+  return rows.filter((c) => {
+    const title = String(c?.title || '').toLowerCase()
+    const id = String(c?.canvas_id || '').toLowerCase()
+    return title.includes(needle) || id.includes(needle)
+  })
+}
+
+/**
+ * The one confirmation a bulk delete shows, naming the count (AC 3).
+ *
+ * Singular and plural are spelled out rather than pluralised with an "(s)":
+ * this is the last thing a person reads before destroying work.
+ */
+export function bulkDeletePrompt(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return null
+  if (n === 1) return 'Delete this canvas? The agent can create it again, but its current contents will be gone.'
+  return `Delete ${n} canvases? The agent can create them again, but their current contents will be gone.`
+}
+
+/**
+ * How full an agent's canvas allowance is, for the header line (AC 6).
+ *
+ * `atLimit` drives a message BEFORE the agent hits the refusal, because the
+ * person who can act on it (retire one) is not the one who receives the error
+ * (the agent, mid-run).
+ */
+export function canvasHeadroom(count, max) {
+  const used = Number(count) || 0
+  const limit = Number(max) || 0
+  if (!limit) return { used, limit: 0, atLimit: false, label: null }
+  const atLimit = used >= limit
+  const near = used >= Math.floor(limit * 0.9)
+  return {
+    used,
+    limit,
+    atLimit,
+    label: atLimit
+      ? `${used} of ${limit} canvases — the agent cannot create another until one is removed`
+      : near
+        ? `${used} of ${limit} canvases`
+        : null,
+  }
+}
+
+/**
+ * Selection state for the bulk bar, derived rather than stored.
+ *
+ * `selected` is filtered against the VISIBLE list, so ids left over from a
+ * previous filter or a canvas someone else deleted cannot inflate the count
+ * the confirmation names — the number a person is shown is the number that
+ * will actually be sent.
+ */
+export function selectionState(selectedIds, visible) {
+  const rows = Array.isArray(visible) ? visible : []
+  const ids = new Set(Array.isArray(selectedIds) ? selectedIds : [])
+  const present = rows.filter((c) => ids.has(c?.canvas_id)).map((c) => c.canvas_id)
+  return {
+    ids: present,
+    count: present.length,
+    all: rows.length > 0 && present.length === rows.length,
+    any: present.length > 0,
+  }
+}
+
+/** What a bulk delete actually did, said honestly (never "5 removed" for 3). */
+export function bulkDeleteOutcome(requested, deleted) {
+  const asked = Number(requested) || 0
+  const got = Array.isArray(deleted) ? deleted.length : Number(deleted) || 0
+  if (!asked) return null
+  if (got === asked) return got === 1 ? 'Canvas deleted' : `${got} canvases deleted`
+  if (got === 0) return 'Nothing was deleted — those canvases were already gone'
+  return `${got} of ${asked} deleted — the rest were already gone`
+}
+
+// ---------------------------------------------------------------------------
 // Agent-authored strings — normalised before any component reads them
 // ---------------------------------------------------------------------------
 

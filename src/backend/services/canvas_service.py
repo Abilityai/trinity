@@ -18,7 +18,12 @@ import logging
 from typing import Dict, List, Optional
 
 from database import db
-from db.canvas import AUDIENCE_OPERATOR, AUDIENCE_ROSTER, normalize_audience
+from db.canvas import (
+    AUDIENCE_OPERATOR,
+    AUDIENCE_ROSTER,
+    CanvasLimitExceeded,
+    normalize_audience,
+)
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     CANVAS_ID_RE,
@@ -156,15 +161,22 @@ def write_canvas(
     # future caller reaches through.
     serialize_blocks(validated)
     resolved = resolve_execution_id(execution_id, agent_name)
-    return db.upsert_agent_canvas(
-        agent_name,
-        canvas_id,
-        blocks=validated,
-        title=title,
-        audience=normalize_audience(audience),
-        execution_id=resolved,
-        template=template,
-    )
+    try:
+        return db.upsert_agent_canvas(
+            agent_name,
+            canvas_id,
+            blocks=validated,
+            title=title,
+            audience=normalize_audience(audience),
+            execution_id=resolved,
+            template=template,
+        )
+    except CanvasLimitExceeded as e:
+        # ent#553 — the cap is enforced in the db layer (it needs the count and
+        # the insert in one transaction), and translated here so the router
+        # keeps one error vocabulary. 409, not 413: nothing about this payload
+        # is too large, the agent is out of room and must retire a canvas.
+        raise CanvasError(409, str(e))
 
 
 def patch_canvas(
@@ -217,6 +229,10 @@ def empty_canvas(agent_name: str, canvas_id: str = DEFAULT_CANVAS_ID) -> Dict:
         "updated_by_execution_id": None,
         "template": None,
         "stale": False,
+        # ent#553 — a canvas that does not exist yet is not pinned. Present
+        # rather than omitted because the shape is contractually the Canvas
+        # model's, and the voice poll deserializes it.
+        "pinned": False,
         "blocks": [],
     }
 
