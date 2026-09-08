@@ -17,7 +17,7 @@
       <!-- #2540/#1927: gated on the VERDICT (`loaded`), never on a request
            being open, so a window change or a background refresh leaves the
            numbers on screen instead of flashing back to placeholders. -->
-      <template v-if="!loaded">
+      <template v-if="!loaded && !error">
         <div class="flex items-center gap-6" aria-busy="true">
           <div v-for="i in 3" :key="i" class="animate-pulse">
             <div class="h-5 w-10 rounded bg-gray-200 dark:bg-gray-800"></div>
@@ -26,6 +26,20 @@
         </div>
         <span class="sr-only">Loading this agent's activity…</span>
       </template>
+
+      <!-- #2597: the other half of ent#253's rule. `InlineError` below is
+           gated on `loaded`, so it covers a failed REFRESH only — a failed
+           FIRST load left the skeleton above pulsing forever, with no error and
+           no way to retry. It takes its own arm out of the same chain rather
+           than rendering beside the skeleton, so the band never shows "loading"
+           and "failed" at once. -->
+      <LoadFailed
+        v-else-if="!loaded"
+        dense
+        title="Couldn't load this agent's activity"
+        :message="error"
+        @retry="reload"
+      />
 
       <template v-else>
         <div>
@@ -118,6 +132,7 @@
  * times and each issuing its own would double every page load.
  */
 import { ref, computed, toRef } from 'vue'
+import LoadFailed from '@/components/LoadFailed.vue'
 import StackedBarChart from '@/components/StackedBarChart.vue'
 import ScanlineReveal from '@/components/ScanlineReveal.vue'
 import InlineError from '@/components/InlineError.vue'
