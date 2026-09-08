@@ -24,6 +24,7 @@ import {
   RAIL_SCOPE_PARTICIPANTS,
   RAIL_SIGNAL_LIVE,
   RAIL_SIGNAL_UPDATED,
+  RAIL_SIGNAL_NONE,
   RAIL_STORAGE_KEY,
   RAIL_TABS,
   RAIL_TAB_ORDER,
@@ -74,7 +75,10 @@ const CLIENT = { isPlatform: false, participants: ['scout'] }
 // Slice 2 (ent#475) registered the design's four tabs; the ordering and door
 // tests run over the real registry, deliberately shuffled, so the fixed order
 // is proven to come from `RAIL_TAB_ORDER` and not from registration order.
-const FOUR = [...RAIL_TABS].reverse()
+// Shuffled deliberately: the ordering tests must prove the order comes from
+// `RAIL_TAB_ORDER` and not from registration order. Renamed from FOUR at ent#547
+// — a name that counts the tabs is a name that goes stale the moment one docks.
+const ALL_TABS = [...RAIL_TABS].reverse()
 const tab = (id) => RAIL_TABS.find((t) => t.id === id)
 
 const memStorage = () => {
@@ -93,18 +97,40 @@ describe('ent#474 — the tab contract', () => {
       expect(typeof tab.label).toBe('string')
       expect(Object.values(RAIL_DOORS)).toContain(tab.door)
       expect(tab.scope).toBe(RAIL_SCOPE_PARTICIPANTS)
-      expect([RAIL_SIGNAL_LIVE, RAIL_SIGNAL_UPDATED]).toContain(tab.signal)
-      expect(typeof tab.empty.title).toBe('string')
-      expect(typeof tab.empty.action).toBe('string')
       expect(RAIL_TAB_ORDER).toContain(tab.id)
+      // ent#547 amends the contract with a THIRD shape: a static tab, which
+      // declares `signal: RAIL_SIGNAL_NONE` and `empty: null`.
+      //
+      // The amendment is deliberate, and narrow. A tab whose body always renders
+      // (Info: an agent always has a name, a health state and a chat list) has
+      // no empty state to teach, and a tab nothing ever writes a signal for has
+      // no activity to report. The original contract's five mandatory fields
+      // would have been satisfied by inventing an `empty.action` nobody can
+      // reach and borrowing `updated` for a dot that can never light — a
+      // registry that reads as honest while stating two things that are false.
+      // So the two absences are DECLARED, and the guard checks the declaration
+      // is coherent rather than that every field is filled.
+      const isStatic = tab.signal === RAIL_SIGNAL_NONE
+      if (isStatic) {
+        expect(tab.empty, `${tab.id}: a static tab declares no empty state`).toBeNull()
+      } else {
+        expect([RAIL_SIGNAL_LIVE, RAIL_SIGNAL_UPDATED]).toContain(tab.signal)
+        expect(typeof tab.empty.title).toBe('string')
+        expect(typeof tab.empty.action).toBe('string')
+      }
     }
   })
 
   it('registers the design\'s four tabs with their doors, icons and signals (ent#475)', () => {
-    expect(RAIL_TABS.map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files'])
+    expect(RAIL_TABS.map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
     expect(tab('loops')).toMatchObject({ door: RAIL_DOORS.PLATFORM, signal: RAIL_SIGNAL_LIVE, icon: 'refresh' })
     expect(tab('canvas')).toMatchObject({ door: RAIL_DOORS.AUDIENCE, signal: RAIL_SIGNAL_UPDATED, icon: 'template' })
     expect(tab('files')).toMatchObject({ door: RAIL_DOORS.AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'paperclip' })
+    // ent#547 — Info, the static tab. Its icon must have its OWN entry in
+    // `PortalRail.vue`'s ICONS map; `iconPath` falls back to `bolt` for an
+    // unknown id, so a missing entry is silent and shows Work's glyph.
+    expect(tab('info')).toMatchObject({ door: RAIL_DOORS.SOLO_AGENT, signal: RAIL_SIGNAL_NONE, icon: 'info' })
+    expect(src('components/portal/PortalRail.vue')).toMatch(/\n\s*info:\s*'M/)
     // Each teaches its next action (design pass, "Tab contract").
     expect(railEmptyCopy(tab('loops'), ['scout'])).toMatchObject({ title: 'No loops running', action: 'Start a loop', event: 'start-loop' })
     expect(railEmptyCopy(tab('canvas'), ['scout'])).toMatchObject({ title: 'No canvas yet', action: 'Ask for a canvas', event: 'ask-canvas' })
@@ -124,8 +150,9 @@ describe('ent#474 — the tab contract', () => {
   })
 
   it('keeps the fixed order Work · Loops · Canvas · Files', () => {
-    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files'])
-    expect(visibleTabs(FOUR, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files'])
+    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+    // PLATFORM has exactly one participant, so Info's SOLO_AGENT door passes.
+    expect(visibleTabs(ALL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
   })
 
   it('persists under the one approved key', () => {
@@ -166,15 +193,22 @@ describe('ent#474 — doors', () => {
     // Design artboard 6: the external-client door. Work and Loops never render
     // for a client, and — because the shell feeds stores off THIS list
     // (`feedsFor`) — are never fetched for one either.
-    expect(visibleTabs(RAIL_TABS, CLIENT).map((t) => t.id)).toEqual(['canvas', 'files'])
-    expect(visibleTabs(RAIL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files'])
-    // A client with no participant yet (a room's first beat) keeps Canvas only.
+    // ent#547: Info joins this list for a client too, and that is the POINT of
+    // its door. The header control it replaces carried no gate at all, so it
+    // rendered for external clients; a PLATFORM door would have been a silent
+    // capability removal for exactly the audience the Workspace exists for
+    // (the #2128 class). SOLO_AGENT gates on the conversation's shape, never on
+    // who is asking.
+    expect(visibleTabs(RAIL_TABS, CLIENT).map((t) => t.id)).toEqual(['canvas', 'files', 'info'])
+    expect(visibleTabs(RAIL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+    // A client with no participant yet (a room's first beat) keeps Canvas only —
+    // Info needs exactly one, so it is absent here as well as in a room.
     expect(visibleTabs(RAIL_TABS, { isPlatform: false, participants: [] }).map((t) => t.id)).toEqual(['canvas'])
   })
 
   it('ignores malformed registry entries', () => {
     expect(visibleTabs([null, { label: 'no id', door: RAIL_DOORS.AUDIENCE }, ...RAIL_TABS], PLATFORM)
-      .map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files'])
+      .map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
     expect(visibleTabs(undefined, PLATFORM)).toEqual([])
   })
 })
@@ -211,7 +245,7 @@ describe('ent#474 — state: collapsed by default, persisted, validated', () => 
   })
 
   it('a remembered tab this session may not see falls back to the first it may', () => {
-    const visible = visibleTabs(FOUR, CLIENT)     // canvas, files
+    const visible = visibleTabs(ALL_TABS, CLIENT)     // canvas, files
     expect(activeTabFor({ tab: 'work' }, visible)).toBe('canvas')
     expect(activeTabFor({ tab: 'files' }, visible)).toBe('files')
     expect(activeTabFor({ tab: 'work' }, [])).toBeNull()
@@ -248,25 +282,36 @@ describe('ent#474 — the collapsed signal', () => {
 
   it('reports only VISIBLE tabs — a signal for a hidden tab never leaks', () => {
     const signals = { work: { live: 1 }, canvas: { updated: true }, files: { updated: true } }
-    const forClient = collapsedSignals(signals, visibleTabs(FOUR, CLIENT))
-    expect(forClient.map((s) => s.id)).toEqual(['canvas', 'files'])
-    expect(forClient.every((s) => s.shape === RAIL_SIGNAL_UPDATED)).toBe(true)
+    const forClient = collapsedSignals(signals, visibleTabs(ALL_TABS, CLIENT))
+    expect(forClient.map((s) => s.id)).toEqual(['canvas', 'files', 'info'])
+    // ent#547: the static tab is in the strip and carries NO shape — nothing
+    // writes an `info` entry into the signals map, so `signalFor` answers
+    // `emptySignal()` and its dot never lights. That is the static contract
+    // holding at read time, with no special case in the reader.
+    expect(forClient.filter((s) => s.id !== 'info').every((s) => s.shape === RAIL_SIGNAL_UPDATED)).toBe(true)
+    expect(forClient.find((s) => s.id === 'info').shape).toBeNull()
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, CLIENT))).toBe(false)
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, PLATFORM))).toBe(true)
   })
 
   it('the mobile strip says the same thing in words, and names the tabs when there is nothing to say', () => {
-    const visible = visibleTabs(FOUR, PLATFORM)
+    const visible = visibleTabs(ALL_TABS, PLATFORM)
     const signals = { work: { live: 1 }, loops: { live: 1 }, canvas: { updated: true }, files: { updated: true } }
     expect(stripSegments(signals, visible)).toEqual([
       { id: 'work', shape: RAIL_SIGNAL_LIVE, text: 'Work · 1 running' },
       { id: 'loops', shape: RAIL_SIGNAL_LIVE, text: 'Loops · 1 running' },
       { id: 'canvas', shape: RAIL_SIGNAL_UPDATED, text: 'Canvas updated' },
       { id: 'files', shape: RAIL_SIGNAL_UPDATED, text: 'Files updated' },
+      // ent#547: Info is deliberately ABSENT here. When anything is signalling,
+      // `stripSegments` reports only the tabs that carry a shape — the strip is
+      // a summary of what is happening, and a static tab is never part of that.
+      // It reappears in the "nothing to say" branch below, where the strip falls
+      // back to naming every visible tab.
     ])
     expect(stripSegments({}, visibleTabs(RAIL_TABS, CLIENT))).toEqual([
       { id: 'canvas', shape: null, text: 'Canvas' },
       { id: 'files', shape: null, text: 'Files' },
+      { id: 'info', shape: null, text: 'Info' },
     ])
   })
 
@@ -368,23 +413,40 @@ describe('ent#474 — shell wiring (source guards)', () => {
     expect(el).toContain(':tabs="railTabs"')
   })
 
-  it('gives Agent details the rail\u2019s place, not a rail tab (ent#523)', () => {
-    // The rail's five-tab set is fixed (ent#472) and scoped to the
-    // conversation's participants; agent details is about ONE agent and is
-    // dismissed rather than switched away from. Mounting it as a sibling in the
-    // same column is what lets the rail keep its own state across the swap.
-    const detailsAt = portal.indexOf('<PortalAgentDetails')
-    const railAt = portal.indexOf('<PortalRail\n')
-    expect(detailsAt, 'the details panel must exist').toBeGreaterThan(-1)
-    expect(detailsAt).toBeLessThan(railAt)
-    // ent#534: the voice call's canvas column takes the same place FIRST
-    // (`v-if="voiceCall.active && activeAgent"`), so details is the `v-else-if`
-    // — still a sibling in the rail's column, still not a tab.
-    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,160}v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
-    expect(portal).toMatch(/<PortalAgentDetails[\s\S]{0,200}v-else-if="detailsOpen && activeAgent"/)
-    // It must NOT be registered as a rail tab.
+  it('gives Agent details a rail TAB, reversing the ent#523 arrangement (ent#547)', () => {
+    // REWRITTEN, not deleted. Until 2026-09-07 this test asserted the opposite —
+    // that agent details was a sibling of the rail and explicitly "not a rail
+    // tab" (ruled 2026-09-05, on the grounds that the rail is participant-scoped
+    // with a fixed tab set, and that details is dismissed rather than switched
+    // away from). The operator reversed that after testing `dev`. Both grounds
+    // are answered rather than dropped: the tab's SOLO_AGENT door is the
+    // participant scoping, and collapsing the rail is the dismissal.
+    //
+    // Its old final assertion is why this is a rewrite and not an edit. It read
+    //     expect(railTabs).not.toContain('details')
+    // and a tab registered under the id `info` keeps that GREEN — the guard
+    // would have gone on passing while the rule it is named for was reversed,
+    // which is the "guard pointing the wrong way" failure this repo has recorded
+    // before. A test that cannot fail on the change it governs is worse than no
+    // test, so the assertions below pin the new arrangement positively.
     const railTabs = src('components/portal/portalRail.js')
-    expect(railTabs).not.toContain('details')
+    expect(railTabs).toContain("id: 'info'")
+    expect(railTabs).toContain('SOLO_AGENT')
+
+    // The sibling mount and its open/close state are gone from the shell.
+    expect(portal).not.toContain('detailsOpen')
+    expect(portal).not.toMatch(/<PortalAgentDetails[\s\S]{0,200}v-else-if=/)
+
+    // ent#534: the voice canvas still takes the column first; the rail is now
+    // the only other arm.
+    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,160}v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
+    expect(portal).toMatch(/<PortalRail[\s\S]{0,80}v-else-if="railVisible"/)
+
+    // BOTH rail mounts must dock the body. The column and the mobile sheet are
+    // separate `<PortalRail>` instances, and a slot given to one alone leaves
+    // the phone on the registry's generic empty state instead of the panel.
+    expect(portal.match(/#tab-info/g) || []).toHaveLength(2)
+    expect(portal.match(/<PortalAgentDetails/g) || []).toHaveLength(2)
   })
 
   it('reads and persists rail state as a setup ref under the one key', () => {
@@ -678,8 +740,18 @@ describe('ent#475 — the old placements are gone (source guards)', () => {
     const portal = src('views/Portal.vue')
     expect(portal).not.toContain('PortalFilesPanel')
     expect(portal).not.toContain('filesOpen')
-    expect(portal).toContain(`@open-files="openRailOn('files')"`)
-    expect(src('components/portal/PortalConversation.vue')).toContain("$emit('open-files')")
+    // ent#547: the header paperclip is GONE — one paperclip, in the composer.
+    // It opened the rail's Files tab using the same glyph the composer uses to
+    // ATTACH, so the two sat a few hundred pixels apart doing different things.
+    // Files is still reachable from the rail strip, so no capability moved; and
+    // the emit is removed with its only raiser, since a declared emit nothing
+    // fires is a contract nothing keeps.
+    expect(portal).not.toContain(`@open-files=`)
+    const conv = src('components/portal/PortalConversation.vue')
+    expect(conv).not.toContain("$emit('open-files')")
+    expect(conv).not.toContain("'open-files'")
+    // The composer keeps exactly one file input and one control that opens it.
+    expect(conv.match(/type="file"/g) || []).toHaveLength(1)
   })
 
   it('the loops body no longer owns the store\'s participants, and keeps its inner door', () => {

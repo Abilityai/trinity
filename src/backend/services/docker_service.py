@@ -92,13 +92,21 @@ def get_agent_status_from_container(container) -> AgentStatus:
 
     # Normalize Docker status to simpler values for frontend
     # Docker statuses: created, running, paused, restarting, removing, exited, dead
+    #
+    # #2541: `restarting` counts as stopped. It became reachable for every agent
+    # when containers started being born `unless-stopped` — most visibly as the
+    # transient state during a host-reboot recovery, i.e. exactly when someone is
+    # watching. Passed through verbatim it matches neither of the frontend's
+    # exact-equality filters (stores/agents.js `runningAgents`/`stoppedAgents`),
+    # so the agent shows in NEITHER list; and `agent_container_states` below has
+    # always called such a container "stopped". All three mappings now agree.
     docker_status = container.status
-    if docker_status in ("exited", "dead", "created"):
+    if docker_status in ("exited", "dead", "created", "restarting"):
         normalized_status = "stopped"
     elif docker_status == "running":
         normalized_status = "running"
     else:
-        normalized_status = docker_status  # paused, restarting, etc.
+        normalized_status = docker_status  # paused, removing, etc.
 
     # Extract runtime from container environment variables
     runtime = "claude-code"  # Default
@@ -206,9 +214,12 @@ def list_all_agents_fast() -> List[AgentStatus]:
             # Use container name as authoritative source (handles rename correctly)
             agent_name = container.name.removeprefix("agent-")
 
-            # Normalize Docker status to simpler values for frontend
+            # Normalize Docker status to simpler values for frontend.
+            # Kept byte-equivalent to `get_agent_status_from_container` above —
+            # including `restarting` (#2541). The two are copy-pasted twins, so
+            # a fix applied to one only is a fix that reaches one API surface.
             docker_status = container.status
-            if docker_status in ("exited", "dead", "created"):
+            if docker_status in ("exited", "dead", "created", "restarting"):
                 normalized_status = "stopped"
             elif docker_status == "running":
                 normalized_status = "running"
@@ -303,10 +314,12 @@ def agent_container_states() -> Optional[Dict[str, str]]:
     ``list_all_agents_fast`` says "use container name as authoritative source".
 
     The status is classified EXPLICITLY. ``list_all_agents_fast`` falls through
-    with ``else: normalized_status = docker_status``, which passes ``paused``,
-    ``restarting`` and — routinely, during any delete — ``removing`` straight to
-    the caller; consumers of this function map the result onto a closed set, so a
-    raw status escaping here would fail their validation instead of degrading.
+    with ``else: normalized_status = docker_status``, which passes ``paused``
+    and — routinely, during any delete — ``removing`` straight to the caller;
+    consumers of this function map the result onto a closed set, so a raw status
+    escaping here would fail their validation instead of degrading. (``restarting``
+    was in that list until #2541 folded it into the stopped tuple on both
+    normalizers, so all three mappings now agree on it — see RESTART-005.)
     """
     if not docker_client:
         return None

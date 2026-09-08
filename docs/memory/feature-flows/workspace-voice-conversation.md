@@ -176,7 +176,22 @@ label row records it.
 
 ## Modal, with every failure in words
 
-- **Voice control** (`data-testid="portal-voice-call"`): rendered for platform
+- **Voice control** (`data-testid="portal-voice-call"`) — **moved to the composer
+  row by ent#547** (2026-09-07), left of attach, where ChatGPT puts it; it was in
+  the header. Same control, same modal call, restyled to the composer's 44px box
+  (#2259) because `portalComposerAlignment.spec.js` holds every button in that form
+  to it.
+  It sits **outside** the wrapper that carries `pointer-events-none` while a call
+  is active, and that is the whole reason the move needed care: this is a TOGGLE —
+  the same button starts and ends the call — so inside the inert region it would
+  render in its pressed styling for the call's duration and refuse the click that
+  ends it. A visibly-live control that does nothing is worse than none, and it is
+  the dead affordance ent#547's own AC forbids, manufactured by ent#547's own move.
+  Escape and the status line's "End call" remain as they were.
+  The composer row is now voice-call · attach · dictate · send. The dictation mic
+  (browser STT) is a **separate** control and stays: speaking into the field and
+  holding a live call with the orb are different capabilities.
+- **Voice control (original placement note)**: rendered for platform
   sessions only (`voiceEntryState`); disabled with the reason as its title when
   the instance cannot (`realtime_voice.reason`: voice turned off / no provider
   key). A portal-token client sees nothing — the socket needs a JWT they do not
@@ -186,6 +201,12 @@ label row records it.
   page"), no microphone API, a turn in flight.
 - **New chat**: the thread is created (`store.createSession`) and adopted
   BEFORE the call starts, so the transcript has a home before the first word.
+  Since #2579 the adoption runs through the conversation's one `adoptSession()`
+  seam rather than a hand-written emit — it also raises the `bornHere` flag
+  that keeps the provisional "New chat" tab on screen across the round trip,
+  and this was one of the three sites that would otherwise have been missed
+  (starting a call from a fresh chat would drop the whole strip until the list
+  refreshed).
 - **While on**: `VoiceOverlay` over the thread region; New chat, the picker,
   star, Reset, the tabs (`PortalChatTabs :disabled`), attach, mic, textarea and
   Send inert; the speaker toggle hidden; one status line

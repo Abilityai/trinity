@@ -131,7 +131,23 @@
           </span>
           <!-- ent#523 / board A3: when you last heard from this agent. Tight
                enough to sit beside the name without competing with it. -->
-          <span v-if="rowMeta[a.name]?.time" class="shrink-0 text-[11px] text-gray-400 tabular-nums">{{ rowMeta[a.name].time }}</span>
+          <!-- #2580: a reserved, right-aligned COLUMN, and rendered on every row
+               whether or not there is a time to put in it.
+               "Right-align the dates" is not an alignment class here — the span
+               was already `shrink-0` directly after a `flex-1` name block, i.e.
+               as far right as it could get. It read as ragged for two other
+               reasons, and both are width, not alignment: the values are
+               variable-width ("5m", "yesterday") so their left edges never lined
+               up down the column, and the span disappeared entirely on an agent
+               you have never talked to, which moved the whole row's truncation
+               point. `w-14 text-right` fixes the column; rendering it always
+               (the `v-if` moved inside) keeps the name's truncation point
+               identical on every row — the same reason the availability slot
+               below reserves its own footprint. `tabular-nums` was already
+               right and is what makes a fixed column line up digit-for-digit. -->
+          <span class="shrink-0 w-14 text-right text-[11px] text-gray-400 tabular-nums">
+            <template v-if="rowMeta[a.name]?.time">{{ rowMeta[a.name].time }}</template>
+          </span>
           <!-- #2196: the agent can't currently run. LABEL, never disable —
                disabling would relocate the dead state rather than remove it,
                since a client whose agents are all stopped (a routine
