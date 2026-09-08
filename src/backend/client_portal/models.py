@@ -255,6 +255,17 @@ class PortalChatResponse(BaseModel):
     response: str
     cost: Optional[float] = None
     session_id: Optional[str] = None
+    # #2580: the persisted row's id, so the caller can rate the reply it was just
+    # given instead of waiting for a reload to learn what to point at. The
+    # streaming path never needed this — it reads the row back out of history —
+    # but this synchronous route is its fallback, and a defect that only shows up
+    # on the fallback is still the defect.
+    #
+    # Optional, and genuinely so: the history write is best-effort (a hiccup must
+    # not fail an already-billed turn), so a reply can exist with no row behind
+    # it. `None` then, and the client's `v-if="message.id"` correctly withholds
+    # the thumbs rather than offering a control whose POST would 404.
+    message_id: Optional[str] = None
 
 
 class PortalTurnStarted(BaseModel):

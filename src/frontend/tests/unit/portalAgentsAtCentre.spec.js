@@ -496,12 +496,18 @@ describe('ent#523 — the approved design (board A3)', () => {
     expect(TABS).toMatch(/t\.pinned \? 'p' : ''/)
   })
 
-  it('Agent details opens from the header, not from the band', () => {
-    // Board A3 puts it with the per-conversation actions; the band is numbers.
+  it('Agent details opens from the RAIL, not from the header or the band (ent#547)', () => {
+    // Board A3 put this control in the header, with the per-conversation
+    // actions, and this test pinned it there. The operator moved it on
+    // 2026-09-07: the agent's context is the rail's Info tab now, so the header
+    // loses the button entirely. The band never owned it and still does not —
+    // that half of the original rule is unchanged and still asserted.
     const CONV = read('../../src/components/portal/PortalConversation.vue')
     const BAND_SRC = read('../../src/components/portal/PortalAgentBand.vue')
-    expect(CONV).toContain('data-testid="portal-open-agent-details"')
+    expect(CONV).not.toContain('data-testid="portal-open-agent-details"')
+    expect(CONV).not.toContain("'open-details'")
     expect(BAND_SRC).not.toContain('portal-open-agent-details')
+    expect(read('../../src/components/portal/portalRail.js')).toContain("id: 'info'")
   })
 
   it('the chart is named rather than left a bare plot beside numbers', () => {

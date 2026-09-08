@@ -5,6 +5,14 @@
        because the thread is where the eye is; the affordance names what will
        happen so a drop is never a guess. Dragging text or a link is not a file
        drag (`isFileDrag`) and lights nothing. -->
+  <!-- `h-full` is correct while this is `<main>`'s only child, which it is: the
+       band renders through the `#band` slot below, INSIDE this column. If the
+       band is ever lifted out to a sibling (the #2580 follow-up that would let
+       its instance survive a thread switch), this must become `flex-1 min-h-0`
+       in the same change — `h-full` would still resolve to 100% of `<main>`, so
+       the column would total band + 100% and push the composer past the bottom
+       of a shell that is `overflow-hidden`: off-screen, with no scrollbar to get
+       it back. -->
   <div
     class="relative flex flex-col h-full min-h-0"
     @dragenter="dropHandlers.onDragEnter"
@@ -119,26 +127,10 @@
           :starred="starred"
           @toggle="$emit('toggle-star', { id: currentSessionId, is_room: false, starred })"
         />
-        <!-- ent#534: Voice — the real-time call with the orb, in THIS chat.
-             Rendered for platform sessions only (the audio socket takes the
-             platform JWT); when the instance cannot do it the control is
-             disabled WITH the reason as its title, never a dead button.
-             Pressing it opens the orb over the thread; End (or Escape) returns
-             here and the call's transcript is in the chat. -->
-        <button
-          v-if="voiceEntry.render"
-          class="p-2 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed"
-          :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
-          :disabled="!voiceEntry.enabled || voiceStarting"
-          :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-          :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-          :aria-pressed="voiceCallActive"
-          data-testid="portal-voice-call"
-          @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
-        >
-          <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
-          <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
-        </button>
+        <!-- ent#547: the voice call now starts from the COMPOSER ROW, beside
+             attach — where ChatGPT puts it, and beside the other thing you do
+             to say something. See the composer for the placement and for why it
+             sits outside the row's inert wrapper. -->
         <!-- Hidden while a call is on: the orb owns playback then. -->
         <button
           v-if="ttsEnabled && !voiceCallActive"
@@ -156,19 +148,13 @@
              opening it again. Disabled while a turn is in flight because the
              server refuses then anyway; showing it live would offer an action
              that can only fail. -->
-        <!-- ent#523 / board A3: the agent's own context opens from an INFO
-             control in the header, beside the other per-conversation actions —
-             not from a text link in the band. The band is numbers; this is the
-             door to everything else about the agent. -->
-        <button
-          class="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-          title="Agent details"
-          aria-label="Agent details"
-          data-testid="portal-open-agent-details"
-          @click="$emit('open-details')"
-        >
-          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-        </button>
+        <!-- ent#547: the Agent-details button is GONE from the header. The
+             agent's context is the rail's Info tab now (operator, 2026-09-07 —
+             a header-launched sibling panel "reads as one more top-level
+             thing"), so the door is the rail strip, beside Work, Loops, Canvas
+             and Files. ent#523's reasoning above it — "the band is numbers;
+             this is the door to everything else" — still holds; only the door's
+             location moved. -->
         <button
           v-if="isMainChat"
           class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
@@ -177,13 +163,12 @@
           data-testid="portal-reset-main"
           @click="onResetMain"
         >{{ resetting ? 'Resetting…' : 'Reset' }}</button>
-        <button
-          class="p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-          title="Files"
-          @click="$emit('open-files')"
-        >
-          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-        </button>
+        <!-- ent#547: ONE paperclip, and it is the composer's. This header
+             control opened the rail's Files tab with the same glyph the
+             composer uses to ATTACH — two paperclips a few hundred pixels
+             apart doing different things (open a panel / pick a file). The
+             rail strip still opens Files, and ent#524's drop-anywhere is
+             untouched. -->
       </div>
     </header>
 
@@ -195,14 +180,27 @@
 
     <!-- ent#451: this user's chats with the agent, as tabs (OverflowTabs) —
          Main pinned first (ent#523), then most recent, the rest under
-         "N more". Selecting one is an ordinary thread open through the shell. -->
+         "N more". Selecting one is an ordinary thread open through the shell.
+         #2579: `draft` asks for the provisional "New chat" tab — either this
+         is still an unsaved fresh start, or it was born here a moment ago and
+         the list has not caught up yet. -->
     <PortalChatTabs
       :threads="threads"
       :agent-name="agent.name"
       :active-id="currentSessionId"
       :disabled="voiceCallActive"
+      :draft="newChat || bornHere"
       @select="(t) => emit('open-thread', t)"
     />
+
+    <!-- #2579: the shell's line under the strip (today: the admin-only notice
+         that generated titles are not being generated). A SLOT rather than a
+         prop for the reason the `#band` slot two blocks up is one — the shell
+         owns every fact it carries, and this conversation should not grow a
+         second opinion about them. It also keeps this PR's footprint in the
+         header band to one line, which matters: two sibling PRs restructure
+         exactly this region next. -->
+    <slot name="notice" />
 
     <!-- ent#534: the call's one status line — what the orb is doing, or why
          the call ended when it ended other than by End. `aria-live` because
@@ -329,9 +327,20 @@
                  line of controls under the answer they are about. -->
             <PortalAgentBubble :content="item.message.content">
               <!-- ent#366: one click, on the answer being judged. Only on a
-                   PERSISTED agent message — a reply composed locally during the
-                   live turn has no row id yet, and a thumb needs something to
-                   point at. It becomes rateable on the next load. -->
+                   PERSISTED agent message — a thumb needs a row to point at, and
+                   a client-fabricated id would simply 404 against the ratings
+                   route.
+                   #2580: the gate STAYS, but it is no longer what delays a fresh
+                   reply. Every path that produces an assistant row now carries
+                   the persisted id with the text (`assistantRow`), so a reply is
+                   rateable as it lands. The gate remains as the consumer's
+                   refusal to act on an empty id — carry the flag and the
+                   identifier together, and let the reader still check (the
+                   2026-09-07 ledger rule). It is what correctly keeps the thumbs
+                   off the one row that genuinely has no id: a reply delivered
+                   when the server could not persist it. System lines and a voice
+                   call's spoken turns are unrateable by a different route — they
+                   never reach this branch at all. -->
               <PortalRating
                 v-if="item.message.id"
                 :agent-name="agent.name"
@@ -490,13 +499,63 @@
         </div>
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
+        <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
+             around everything except the call toggle, and that split is the
+             whole point rather than a tidy-up.
+             The call control is a TOGGLE — the same button starts the call and
+             ends it. Dropped inside a region carrying `pointer-events-none`, it
+             would render in its active/pressed styling for the entire call and
+             refuse the click that ends it: a control that is visibly live and
+             does nothing, which is precisely the dead affordance this issue's
+             own AC 5 forbids, manufactured by AC 4's move. Escape and the
+             status line's "End call" would still work, but a button that looks
+             pressable and is not is worse than no button.
+             So: the toggle stays live, and the fields it sits beside go inert
+             around it. -->
         <form
           class="flex items-end gap-2"
-          :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''"
           :aria-disabled="voiceCallActive ? 'true' : undefined"
           @submit.prevent="send"
         >
           <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFile" />
+          <!-- ent#534's control, at ent#547's address: the composer row, LEFT of
+               attach. Rendered for platform sessions only (the audio socket
+               takes the platform JWT); when the instance cannot do it the
+               control is disabled WITH the reason as its title, never a dead
+               button. Pressing it opens the orb over the thread; End (or
+               Escape) returns here and the call's transcript is in the chat.
+               Sized `h-11 w-11` like its neighbours rather than kept at the
+               header's `p-2`: the composer's boxes are 44px on the 4px grid
+               (#2259), and `portalComposerAlignment.spec.js` holds every button
+               in this form to that. -->
+          <button
+            v-if="voiceEntry.render"
+            type="button"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
+            :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
+            :disabled="!voiceEntry.enabled || voiceStarting"
+            :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+            :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+            :aria-pressed="voiceCallActive"
+            data-testid="portal-voice-call"
+            @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
+          >
+            <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
+          </button>
+          <!-- Everything the orb takes over while a call runs. A real flex row,
+               NOT `display: contents`: an element with `display: contents`
+               generates no box, and `opacity` needs one — so the dimming would
+               silently do nothing while `pointer-events` (which inherits) still
+               worked, leaving the composer fully bright and completely
+               unclickable. It re-declares `items-end gap-2` because it is now
+               the row the buttons and the field are items of, and `flex-1
+               min-w-0` so the textarea still takes the slack the form used to
+               give it directly. -->
+          <div
+            class="flex-1 min-w-0 flex items-end gap-2"
+            :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''"
+          >
           <!-- #2259: the composer's action buttons are `h-11 w-11` (44px, on the
                4px grid) rather than `p-2.5` around a 20px icon (40px, off it).
                `items-end` pins them to the bottom so they stay beside the LAST
@@ -593,6 +652,7 @@
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
           </button>
+          </div>
         </form>
       </div>
     </div>
@@ -613,7 +673,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import PortalTypeahead from './PortalTypeahead.vue'
 import PortalAsks from './PortalAsks.vue'
@@ -693,7 +753,11 @@ const props = defineProps({
   // ent#473: async (thread, title) => void, or null when renaming is unavailable.
   rename: { type: Function, default: null },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'open-details', 'voice-call', 'voice-panel'])
+// ent#547: `open-files` and `open-details` are gone with the two header
+// controls that raised them — the rail strip is the door to both now.
+// Declared emits are the component's contract, so a name left here after
+// its only `$emit` is deleted is a promise nothing keeps.
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -717,6 +781,42 @@ const store = useClientPortalStore()
 const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
+
+// #2579 — "this thread was born in THIS mounted conversation, and the list may
+// not know it yet". It bridges a real gap rather than duplicating
+// `props.newChat`: the shell flips `startingNewChat` off the instant it hears
+// `session-adopted`, which is BEFORE the refreshed thread list arrives, so
+// without this the provisional tab vanishes for a round trip — or, when this
+// was the agent's only chat, the whole strip does.
+//
+// It resets by construction on any real thread switch (`convGen` bumps and this
+// instance is replaced) and deliberately survives adoption, because
+// `onSessionAdopted` does NOT bump `convGen`.
+const bornHere = ref(false)
+
+// The ONE adoption seam (#2579). Three call sites emit `session-adopted` —
+// streaming, the synchronous `/chat` fallback, and the voice path's
+// `createSession`. Setting the flag at one of them is how the tab would vanish
+// exactly when streaming is unavailable (the asymmetry ent#451's own spec
+// exists to catch), or for the whole round trip of starting a call.
+function adoptSession(id) {
+  currentSessionId.value = id
+  bornHere.value = true
+  emit('session-adopted', id)
+}
+
+// #2579 — spend the flag the moment the list catches up. Display is identical
+// either way (the real row now carries the active id, so `agentChatTabs`
+// inserts nothing), but a flag that outlives its purpose is one refactor away
+// from labelling a real conversation "New chat".
+watch(() => props.threads, (list) => {
+  if (!bornHere.value || !currentSessionId.value) return
+  const id = currentSessionId.value
+  if ((list || []).some((t) => !t.is_room && (t.id || t.session_id) === id)) bornHere.value = false
+})
+
+function focusComposer() { textarea.value?.focus() }
+
 const loadingHistory = ref(false)
 // #2163 — "a verdict exists for this thread's history" (mirrors `onMounted`'s
 // condition). Never goes false again on this instance, so the adoption-path
@@ -918,13 +1018,17 @@ async function loadThread(sessionId) {
     budgetReadAt = Date.now()
     currentSessionId.value = sessionId || resolved || null
     // ent#366: `id` and the caller's OWN rating ride along, so a reload shows
-    // the thumb they already gave. A message composed locally during a live turn
-    // has no row yet and therefore no id — it becomes rateable on the next load.
-    messages.value = (msgs || []).map((m) => ({
-      role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
-      // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
-      source: m.source || null, voiceCallId: m.voice_call_id || null,
-    }))
+    // the thumb they already gave.
+    // #2580: through the shared mapper, which is what keeps this site and the
+    // two live-turn sites agreeing about the row's shape. A user row keeps its
+    // own role; only the assistant shape is shared.
+    messages.value = (msgs || []).map((m) => (
+      m.role === 'assistant'
+        ? assistantRow(m)
+        // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
+        : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
+            source: m.source || null, voiceCallId: m.voice_call_id || null }
+    ))
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -1020,7 +1124,9 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
       rememberVerdict(verdict)
     }
     if (data?.response) {
-      messages.value.push({ role: 'assistant', content: data.response })
+      // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
+      // rateable the moment it lands rather than on the next load.
+      messages.value.push(assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }))
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
       // keeps its server-side unread count and the sidebar badges the
@@ -1070,7 +1176,15 @@ onMounted(async () => {
   // fresh conversation rather than updating one, so the watcher above never
   // runs for it.
   if (props.sessionId && !props.newChat) await loadThread(props.sessionId)
-  else messages.value = []
+  else {
+    messages.value = []
+    // #2579 AC 2: New chat has to put the caret in the composer in the SAME
+    // gesture that makes the tab appear. It has to happen here, in the fresh
+    // instance: pressing New chat bumps `convGen`, which remounts this
+    // component, so any focus set before the press is thrown away. A disabled
+    // textarea (a live voice call) makes it a no-op by construction.
+    if (props.newChat) nextTick(focusComposer)
+  }
   autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
 })
 // Review finding: `overflow-y` is now pinned, so the height must be recomputed when
@@ -1390,8 +1504,7 @@ async function deliver(text) {
       if (started.session_id && currentSessionId.value !== started.session_id) {
         // Adopt the thread NOW rather than at the end, so a refresh mid-turn
         // reattaches to it instead of opening a second conversation.
-        currentSessionId.value = started.session_id
-        emit('session-adopted', started.session_id)
+        adoptSession(started.session_id)
       }
       streaming.value = true
       liveActivity.value = []
@@ -1446,15 +1559,24 @@ async function deliver(text) {
       }
     }
 
-    messages.value.push({ role: 'assistant', content: data.response || '(no response)' })
+    // #2580: same row shape, same id. On the streaming path `data` comes from
+    // `awaitPersistedReply` and carries the persisted id; on the synchronous
+    // fallback it comes from `POST .../chat`, which now returns `message_id`
+    // (the server used to mint that id inline and throw it away). Either way the
+    // gate below is the id itself, never a flag that rose before it existed —
+    // the 2026-09-07 ledger rule.
+    messages.value.push(assistantRow({
+      content: data.response || '(no response)',
+      id: data.id || data.message_id,
+      my_rating: data.myRating,
+    }))
     terminalOutcome.value = null   // ent#525: the reply IS the outcome
     // ent#534: never narrate over a live voice call — the orb owns playback
     // then (the speaker toggle is hidden for the call's duration).
     if (voiceMode.value && ttsEnabled.value && data.response
         && !voiceCallActive.value) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
-      currentSessionId.value = data.session_id
-      emit('session-adopted', data.session_id)
+      adoptSession(data.session_id)
     }
     // ent#359: carry WHICH thread finished. The shell marks a completed turn
     // read only when the user is still looking at it — this event fires even
@@ -1653,11 +1775,12 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
       await wait()
       continue
     }
-    const assistants = (data.messages || []).filter((m) => m.role === 'assistant')
-    if (assistants.length > baselineAssistants) {
-      const last = assistants[assistants.length - 1]
-      return { response: last.content, cost: last.cost, session_id: data.sessionId || sessionId }
-    }
+    // #2580: `replyFromHistory` carries the persisted row's `id` and the
+    // caller's own rating out with the text. They were always in hand here —
+    // this reads the row the server WROTE — and were being dropped, which is
+    // the whole of the "not rateable until reload" defect.
+    const reply = replyFromHistory(data.messages, baselineAssistants)
+    if (reply) return { ...reply, session_id: data.sessionId || sessionId }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
     // read before the idle timer so a diagnosed failure is reported at once
@@ -2086,8 +2209,7 @@ async function startVoiceCall() {
       const created = await store.createSession(props.agent.name)
       sid = created?.id || created?.session_id || null
       if (!sid) { voiceError.value = 'Could not open a chat for the call.'; return }
-      currentSessionId.value = sid
-      emit('session-adopted', sid)
+      adoptSession(sid)
       emit('sessions-changed', sid)
     }
     const ok = await voice.startWith(
@@ -2108,7 +2230,7 @@ async function endVoiceCall() {
 }
 
 
-defineExpose({ focusComposer: () => textarea.value?.focus() })
+defineExpose({ focusComposer })
 
 // ent#474 — the rail's Work signal for a 1:1, DERIVED from the in-flight flag
 // on every change and never latched: it clears in the same `finally` that ends

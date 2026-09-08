@@ -1,6 +1,6 @@
 # Feature Flow: Dashboard Timeline View
 
-> **Last Updated**: 2026-03-10 (Avatar display in Timeline Tiles)
+> **Last Updated**: 2026-09-07 (#2434 — a swept activity now renders as an *estimated* 30s bar)
 > **Status**: Implemented
 > **Requirements Doc**: `docs/requirements/DASHBOARD_TIMELINE_VIEW.md`, `docs/requirements/TIMELINE_ALL_EXECUTIONS.md`, `docs/requirements/TIMELINE_SCHEDULE_MARKERS.md`
 
@@ -422,11 +422,26 @@ return {
 > handlers, the lease reaper, the pull sink) used to write the execution terminal
 > and leave the activity `started` — the bar kept growing for up to two hours
 > after the run was over, then snapped to a fabricated ~120-minute failure when
-> the generic backstop closed it with `duration_ms = now − started_at`. **No
+> the generic backstop closed it with `duration_ms = now − started_at` (#2434
+> replaced that fabrication with NULL — see below). **No
 > frontend change was needed or made:** the fix is that the CAS winner of the
 > terminal write now closes the paired activity, so `activity_state` goes
 > terminal within the same cycle as the execution row. See
 > [activity-stream.md → The Close Contract](activity-stream.md#the-close-contract-1804).
+
+> **#2434 — the visible change, and it is an improvement.** Those sweeps now
+> record `duration_ms = NULL` rather than a fabricated `now − started_at`, because
+> past the PostgreSQL `int4` ceiling (24.855 days) the fabricated value was not
+> storable and its `UPDATE` rolled back the whole sweep's transaction. On this
+> component a NULL `duration_ms` takes the existing estimate path —
+> `ReplayTimeline.vue:668` `const durationMs = event.duration_ms || 30000` with
+> `isEstimated = !event.duration_ms` at `:674` — so a swept activity draws a
+> **30-second bar flagged *estimated*** where it used to draw a fabricated
+> ~120-minute one. **Again no frontend change was needed or made**, but unlike
+> #1804 this one is user-visible: the duration-proportional widths documented in
+> [Duration-Based Activity Bar Widths](#8-duration-based-activity-bar-widths)
+> render a swept row at the minimum-estimate width, and the tooltip marks it
+> estimated rather than asserting a duration nobody measured.
 
 ### 9. NOW Marker at 90% Viewport Position
 

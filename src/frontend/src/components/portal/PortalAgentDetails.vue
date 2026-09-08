@@ -1,20 +1,24 @@
 <template>
-  <!-- ent#523: the agent's context, opened from the band INTO THE RAIL'S PLACE
-       (ruled 2026-09-05, board A2). A sibling of the rail, never a rail tab:
-       the rail is scoped to the conversation's participants and its five-tab
-       set is fixed (ent#472), while this is about ONE agent and is dismissed
-       rather than switched away from. Closing returns the rail exactly as it
-       was — its state is a setup ref of the view, untouched by this mount.
+  <!-- ent#547: the agent's context, as the rail's INFO TAB.
+       ent#523 opened it from the header into the rail's place as a sibling
+       (ruled 2026-09-05); the operator reversed that on 2026-09-07 after testing
+       `dev` — a header-launched sibling panel "reads as one more top-level
+       thing". `portalRail.js`'s `info` entry carries the full argument, including
+       why the tab's door is SOLO_AGENT and what blocks a room form.
 
        Canvas and Files are deliberately absent: they are rail tabs since
        ent#475, and duplicating them here would give the same capability two
-       homes that can disagree. -->
-  <aside
-    class="hidden sm:flex shrink-0 w-[var(--ws-rail,24rem)] flex-col border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
-    data-testid="portal-agent-details"
-    aria-label="Agent details"
-  >
-    <header class="shrink-0 h-14 px-4 flex items-center gap-2 border-b border-gray-200 dark:border-gray-800">
+       homes that can disagree. That reasoning is now literal — this IS a rail
+       tab, and the three sit in one strip.
+
+       As a tab BODY this owns no chrome. `PortalRail` supplies the column, the
+       scroll axis and the padding, so an `overflow-y-auto` here would nest two
+       scrollers and a `p-4` would double the inset; the close control is the
+       rail's own collapse. What the retired header DID own and must not be lost
+       with it is the identity row below — the avatar, and #2196's deliberately
+       separate health/availability pair. -->
+  <div data-testid="portal-agent-details" class="space-y-6">
+    <div class="flex items-center gap-2">
       <PortalAvatar :name="agentName" :avatar-url="header?.avatar_url" :size="28" />
       <div class="min-w-0 flex-1">
         <div class="text-sm font-medium truncate">{{ label }}</div>
@@ -24,7 +28,8 @@
              design, and `unknown` on most installs because monitoring is
              default-OFF) while availability is read at request time. One widget
              carrying both would tell the viewer neither. Carried across from
-             the retired agent page unchanged. -->
+             the retired agent page unchanged, and then across again from the
+             panel header ent#547 retired. -->
         <div class="flex items-center gap-2.5 text-[11px] text-gray-400">
           <span class="inline-flex items-center gap-1">
             <span class="w-1.5 h-1.5 rounded-full" :class="healthDot"></span>{{ healthLabel }}
@@ -34,127 +39,117 @@
           </span>
         </div>
       </div>
-      <button
-        type="button"
-        class="shrink-0 p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-        aria-label="Close agent details"
-        @click="$emit('close')"
-      >
-        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
-      </button>
-    </header>
+    </div>
 
-    <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-6">
-      <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
+    <p v-if="header?.description" class="text-sm text-gray-600 dark:text-gray-300">{{ header.description }}</p>
 
-      <!-- ---------------------------- CHATS ------------------------------ -->
-      <!-- The FULL list, which is what this panel is for: the tab strip shows
-           what fits and hides the rest, and the design pass puts the complete
-           one here. Archived chats included — a retired Main is still a chat
-           you can open, it just stopped being the one the agent reaches you
-           in. -->
-      <section>
-        <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Your chats</h2>
-        <p v-if="!chats.length" class="text-sm text-gray-400">No conversations yet.</p>
-        <ul v-else class="divide-y divide-gray-100 dark:divide-gray-800">
-          <li v-for="c in chats" :key="c.id || c.session_id">
-            <button
-              class="w-full py-2 flex items-center gap-2 text-left text-sm hover:opacity-80"
-              @click="$emit('open-thread', c)"
-            >
-              <span
-                v-if="c.is_main"
-                class="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-action-primary-600 dark:text-action-primary-400"
-              >{{ MAIN_TAB_LABEL }}</span>
-              <span class="flex-1 min-w-0 truncate" :class="{ 'text-gray-400': c.archived_at }">
-                {{ c.is_main ? 'Current conversation' : chatTitle(c) }}
-              </span>
-              <span
-                v-if="c.unread"
-                class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-600 text-white text-[10px] font-semibold flex items-center justify-center"
-              >{{ c.unread }}</span>
-              <span class="text-[11px] text-gray-400 shrink-0">{{ relative(c.last_message_at) }}</span>
-            </button>
-          </li>
-        </ul>
-      </section>
-
-      <!-- ------------------------ WHAT IT CAN DO ------------------------- -->
-      <!-- ent#138's rule, unchanged by the move: a card PRE-FILLS the composer
-           and never auto-sends. -->
-      <section>
-        <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">What it can do</h2>
-        <p v-if="!capabilities.length" class="text-sm text-gray-400">
-          This agent hasn't published anything it can do yet.
-        </p>
-        <div v-else class="space-y-2">
+    <!-- ---------------------------- CHATS ------------------------------ -->
+    <!-- The FULL list, which is what this panel is for: the tab strip shows
+         what fits and hides the rest, and the design pass puts the complete
+         one here. Archived chats included — a retired Main is still a chat
+         you can open, it just stopped being the one the agent reaches you
+         in. -->
+    <section>
+      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Your chats</h2>
+      <p v-if="!chats.length" class="text-sm text-gray-400">No conversations yet.</p>
+      <ul v-else class="divide-y divide-gray-100 dark:divide-gray-800">
+        <li v-for="c in chats" :key="c.id || c.session_id">
           <button
-            v-for="c in capabilities"
-            :key="c.title"
-            class="w-full text-left rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition"
-            @click="$emit('use-playbook', c.starter_prompt)"
+            class="w-full py-2 flex items-center gap-2 text-left text-sm hover:opacity-80"
+            @click="$emit('open-thread', c)"
           >
-            <div class="text-sm font-medium">{{ c.title }}</div>
-            <div v-if="c.description" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ c.description }}</div>
-          </button>
-        </div>
-      </section>
-
-      <!-- --------------------------- REPORTS ----------------------------- -->
-      <!-- #2162: through the SHARED components/reports/ dispatch, with the
-           client-side `ReportSummary` fallback rather than the operator
-           surfaces' raw JSON viewer. Carried over verbatim — that split is a
-           disclosure decision, not a style one. -->
-      <section>
-        <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Reports</h2>
-        <div v-if="!reportsLoaded && !reportsError" class="space-y-2" aria-busy="true">
-          <div v-for="row in 2" :key="row" class="animate-pulse h-12 rounded-xl bg-gray-100 dark:bg-gray-800/60"></div>
-          <span class="sr-only">Loading this agent's reports…</span>
-        </div>
-        <LoadFailed
-          v-else-if="reportsError"
-          dense
-          title="Couldn't load reports"
-          :message="reportsError"
-          @retry="loadReports"
-        />
-        <p v-else-if="!reports.length" class="text-sm text-gray-400">This agent hasn't published any reports.</p>
-        <div v-for="r in reports" :key="r.id" class="mb-2 rounded-xl border border-gray-200 dark:border-gray-800">
-          <button class="w-full px-3 py-2.5 flex items-center gap-2 text-left" @click="toggleReport(r.id)">
-            <span class="min-w-0 flex-1">
-              <span class="block text-sm font-medium truncate">{{ r.title || r.report_type }}</span>
-              <span class="block text-[11px] text-gray-400">{{ r.report_type }} · {{ relative(r.created_at) }}</span>
+            <span
+              v-if="c.is_main"
+              class="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-action-primary-600 dark:text-action-primary-400"
+            >{{ MAIN_TAB_LABEL }}</span>
+            <span class="flex-1 min-w-0 truncate" :class="{ 'text-gray-400': c.archived_at }">
+              {{ c.is_main ? 'Current conversation' : chatTitle(c) }}
             </span>
-            <svg class="w-4 h-4 text-gray-400 shrink-0 transition" :class="{ 'rotate-180': openReport === r.id }" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+            <span
+              v-if="c.unread"
+              class="shrink-0 min-w-[1.125rem] px-1 h-[1.125rem] rounded-full bg-action-primary-600 text-white text-[10px] font-semibold flex items-center justify-center"
+            >{{ c.unread }}</span>
+            <span class="text-[11px] text-gray-400 shrink-0">{{ relative(c.last_message_at) }}</span>
           </button>
-          <div v-if="openReport === r.id" class="px-3 pb-3 border-t border-gray-100 dark:border-gray-800">
-            <InlineError
-              v-if="reportErrors[r.id]"
-              class="mt-3"
-              :message="reportErrors[r.id]"
-              retryable
-              @retry="retryReport(r.id)"
-              @dismiss="dismissReportError(r.id)"
+        </li>
+      </ul>
+    </section>
+
+    <!-- ------------------------ WHAT IT CAN DO ------------------------- -->
+    <!-- ent#138's rule, unchanged by the move: a card PRE-FILLS the composer
+         and never auto-sends. -->
+    <section>
+      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">What it can do</h2>
+      <p v-if="!capabilities.length" class="text-sm text-gray-400">
+        This agent hasn't published anything it can do yet.
+      </p>
+      <div v-else class="space-y-2">
+        <button
+          v-for="c in capabilities"
+          :key="c.title"
+          class="w-full text-left rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition"
+          @click="$emit('use-playbook', c.starter_prompt)"
+        >
+          <div class="text-sm font-medium">{{ c.title }}</div>
+          <div v-if="c.description" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ c.description }}</div>
+        </button>
+      </div>
+    </section>
+
+    <!-- --------------------------- REPORTS ----------------------------- -->
+    <!-- #2162: through the SHARED components/reports/ dispatch, with the
+         client-side `ReportSummary` fallback rather than the operator
+         surfaces' raw JSON viewer. Carried over verbatim — that split is a
+         disclosure decision, not a style one. -->
+    <section>
+      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Reports</h2>
+      <div v-if="!reportsLoaded && !reportsError" class="space-y-2" aria-busy="true">
+        <div v-for="row in 2" :key="row" class="animate-pulse h-12 rounded-xl bg-gray-100 dark:bg-gray-800/60"></div>
+        <span class="sr-only">Loading this agent's reports…</span>
+      </div>
+      <LoadFailed
+        v-else-if="reportsError"
+        dense
+        title="Couldn't load reports"
+        :message="reportsError"
+        @retry="loadReports"
+      />
+      <p v-else-if="!reports.length" class="text-sm text-gray-400">This agent hasn't published any reports.</p>
+      <div v-for="r in reports" :key="r.id" class="mb-2 rounded-xl border border-gray-200 dark:border-gray-800">
+        <button class="w-full px-3 py-2.5 flex items-center gap-2 text-left" @click="toggleReport(r.id)">
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-medium truncate">{{ r.title || r.report_type }}</span>
+            <span class="block text-[11px] text-gray-400">{{ r.report_type }} · {{ relative(r.created_at) }}</span>
+          </span>
+          <svg class="w-4 h-4 text-gray-400 shrink-0 transition" :class="{ 'rotate-180': openReport === r.id }" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+        </button>
+        <div v-if="openReport === r.id" class="px-3 pb-3 border-t border-gray-100 dark:border-gray-800">
+          <InlineError
+            v-if="reportErrors[r.id]"
+            class="mt-3"
+            :message="reportErrors[r.id]"
+            retryable
+            @retry="retryReport(r.id)"
+            @dismiss="dismissReportError(r.id)"
+          />
+          <div v-else-if="!reportPayloads[r.id]" class="pt-3 space-y-2" aria-busy="true">
+            <div v-for="row in 2" :key="row" class="animate-pulse h-8 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
+            <span class="sr-only">Loading this report…</span>
+          </div>
+          <div v-else class="pt-3">
+            <ReportRenderer
+              :report-type="r.report_type"
+              :display-hint="r.display_hint"
+              :payload="reportPayloads[r.id]"
+              :meta="reportRowMeta[r.id]"
+              :load-more="reportRowMeta[r.id] ? () => loadMoreRows(r.id) : null"
+              :fallback-component="ReportSummary"
             />
-            <div v-else-if="!reportPayloads[r.id]" class="pt-3 space-y-2" aria-busy="true">
-              <div v-for="row in 2" :key="row" class="animate-pulse h-8 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
-              <span class="sr-only">Loading this report…</span>
-            </div>
-            <div v-else class="pt-3">
-              <ReportRenderer
-                :report-type="r.report_type"
-                :display-hint="r.display_hint"
-                :payload="reportPayloads[r.id]"
-                :meta="reportRowMeta[r.id]"
-                :load-more="reportRowMeta[r.id] ? () => loadMoreRows(r.id) : null"
-                :fallback-component="ReportSummary"
-              />
-            </div>
           </div>
         </div>
-      </section>
-    </div>
-  </aside>
+      </div>
+    </section>
+  </div>
 </template>
 
 <script setup>
@@ -181,7 +176,11 @@ const props = defineProps({
   agent: { type: Object, default: null },
   threads: { type: Array, default: () => [] },
 })
-defineEmits(['close', 'open-thread', 'use-playbook'])
+// ent#547: no `close`. As a rail tab the dismissal is the rail's own collapse
+// control, not a button this body owns — a second X inside the column would
+// be a second way to do one thing, and the two would disagree about whether
+// the rail is shut or merely on another tab.
+defineEmits(['open-thread', 'use-playbook'])
 
 const store = useClientPortalStore()
 const openReport = ref(null)

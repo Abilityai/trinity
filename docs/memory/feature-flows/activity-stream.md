@@ -1,5 +1,14 @@
 # Feature: Unified Activity Stream
 
+> **Updated 2026-09-07 (#2434):** The two sweeps that **fabricate** a close —
+> `close_open_activities_for_executions` (the #1804 bulk recovery closer) and
+> `mark_stale_activities_failed` (the 120-minute backstop) — now record
+> `duration_ms = NULL` instead of `now − started_at`. The measured path
+> (`complete_activity`) keeps its number but routes through
+> `utils/helpers.py::duration_ms_between`, which returns `None` above the
+> PostgreSQL `int4` ceiling (24.855 days) rather than raising. See
+> [Duration Calculation](#duration-calculation-2434).
+
 ## Overview
 Centralized activity tracking system that persists all agent activities (chat sessions, tool calls, schedule executions) to SQLite with real-time WebSocket broadcasting. Provides granular observability, cross-agent timeline queries, and full audit trail with parent-child relationships for tool calls within chat sessions.
 
@@ -137,6 +146,11 @@ The row then sat at `activity_state='started'` — the Dashboard Timeline render
 that as *still working* — until the generic 120-minute sweep closed it with a
 fabricated `duration_ms = now − started_at` that nothing recomputes. A 15-minute
 run, permanently recorded as a ~120-minute failure.
+
+(#2434 finished that thought: past 24.855 days the fiction stopped being
+*storable* at all, and since the sweep batches its whole UPDATE loop in one
+transaction, the resulting overflow rolled back the entire batch and froze every
+stale row on the instance. Both bulk closers now record NULL.)
 
 Third appearance of the class: #45 (tool-call activities never completed) and
 #767 (CB probes inflating timeline duration) each patched **one producer** and
@@ -756,14 +770,27 @@ if details:
     existing_details.update(details)
 ```
 
-**Duration Calculation** (`db/activities.py:89-92`)
+**Duration Calculation (#2434)** (`db/activities.py::complete_activity`)
 ```python
-from utils.helpers import utc_now_iso, parse_iso_timestamp
+from utils.helpers import duration_ms_between, parse_iso_timestamp, utc_now_iso
 
-started_at = parse_iso_timestamp(row[0])  # Timezone-aware UTC parsing
+started_at = parse_iso_timestamp(row["started_at"])  # Timezone-aware UTC parsing
 completed_at = parse_iso_timestamp(utc_now_iso())
-duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+duration_ms = duration_ms_between(started_at, completed_at)   # None if unmeasurable
 ```
+
+`duration_ms_between` guards **both** ends of the range at the write, so no
+reader has to:
+
+| Input | Result | Why |
+|---|---|---|
+| `completed_at < started_at` (clock skew across processes) | `0` | #1832 — the backend runs `--workers 2` and the scheduler is a separate image |
+| normal elapsed time | the milliseconds | the measurement |
+| `> 2**31 - 1` ms (24.855 days) | `None` + a `logger.warning` carrying the row id | #2434 — `duration_ms` is a PostgreSQL `INTEGER`; a gap that large means `started_at` is stale, and persisting it raises `NumericValueOutOfRange`, which aborts the whole sweep's shared transaction |
+
+The two **bulk** closers do not call it at all: they write `duration_ms = NULL`
+unconditionally, because they are inventing the end time rather than observing
+it. A duration nobody measured is not a number.
 
 > **Timezone Note (2026-01-15)**: All timestamps use UTC with 'Z' suffix. See [Timezone Handling Guide](/docs/TIMEZONE_HANDLING.md) for details on using `utc_now_iso()`, `parse_iso_timestamp()` and frontend equivalents `parseUTC()`, `getTimestampMs()`.
 
@@ -894,7 +921,7 @@ sqlite3 ~/trinity-data/trinity.db "SELECT id, activity_type, parent_activity_id 
 
 - [ ] chat_start activity exists with status "completed"
 - [ ] tool_call activities exist with parent_activity_id pointing to chat_start
-- [ ] duration_ms calculated for completed activities
+- [ ] duration_ms calculated for activities closed by their own writer — and **NULL** for ones closed by a sweep (#2434)
 - [ ] details JSON contains expected fields
 
 ### 3. Test WebSocket Broadcasting
