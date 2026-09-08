@@ -14,7 +14,7 @@
   <div class="min-h-screen bg-gray-50 dark:bg-gray-950 print:bg-white">
     <div class="mx-auto max-w-3xl px-4 py-8 print:max-w-none print:px-0 print:py-0">
 
-      <div v-if="loading" class="py-16 text-center text-sm text-gray-500" data-testid="shared-canvas-loading">
+      <div v-if="view.state === 'loading'" class="py-16 text-center text-sm text-gray-500" data-testid="shared-canvas-loading">
         Loading…
       </div>
 
@@ -67,10 +67,21 @@
 
         <!-- ONE document renderer, shared with every authenticated surface,
              so the PDF is identical wherever it was produced from (AC #7). -->
-        <div class="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900 print:rounded-none print:border-0 print:bg-white print:p-0"
+        <div class="rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900"
              data-testid="shared-canvas-body">
           <CanvasDocument :canvas="canvas" :agent-name="agentName" />
         </div>
+
+        <!-- The print copy, teleported to <body> exactly as the operator
+             surfaces do. This page has less chrome around it, but "less" is
+             not "none" — and using the same mechanism is what makes AC #7's
+             "identical from every surface" true rather than approximately
+             true. -->
+        <Teleport to="body">
+          <div v-if="printing" class="canvas-print-root" data-testid="shared-canvas-print-doc">
+            <CanvasDocument :canvas="canvas" :agent-name="agentName" />
+          </div>
+        </Teleport>
 
       </template>
     </div>
@@ -78,24 +89,37 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '../api'
 import CanvasDocument from '../components/canvas/CanvasDocument.vue'
 import { freshness } from '../components/canvas/canvasUtils'
+import { viewState } from '../utils/loadingState'
 import { shareProblem } from '../components/canvas/canvasShare'
 
 const route = useRoute()
-const loading = ref(true)
+// #1927 / design-system p13-p15: `loading` means "no data yet", never "a fetch
+// is in flight". A bare `v-if="loading"` would blank a rendered canvas on any
+// later refetch — the exact gate the ratchet exists to stop, and it caught this
+// one. The page fetches once today, so this is the rule holding rather than a
+// bug being fixed; it stays correct if a refresh is ever added.
+const hasLoaded = ref(false)
 const canvas = ref(null)
 const agentName = ref('')
 const problem = ref(null)
 const pdfNote = ref('')
+const printing = ref(false)
 
 const fresh = computed(() => freshness(canvas.value || {}))
+const view = computed(() => viewState({
+  hasLoaded: hasLoaded.value,
+  // A share refusal is not a load failure: `problem` already carries the
+  // server's own words and its own branch, so it must not also collapse this
+  // into the generic failed state.
+  count: canvas.value ? 1 : 0,
+}))
 
 async function load() {
-  loading.value = true
   problem.value = null
   try {
     const { data } = await api.get(`/api/public/canvas/${encodeURIComponent(route.params.token)}`)
@@ -105,11 +129,11 @@ async function load() {
     // The server names the state; the page turns it into words and an action.
     problem.value = shareProblem(e?.response?.status, e?.response?.data?.detail)
   } finally {
-    loading.value = false
+    hasLoaded.value = true
   }
 }
 
-function downloadPdf() {
+async function downloadPdf() {
   // Print-first (AC #4): the browser's own PDF over a print stylesheet, so
   // there is ONE renderer and the document cannot drift from the screen. No
   // headless service to run, and charts/diagrams print as whatever the page
@@ -120,10 +144,14 @@ function downloadPdf() {
     pdfNote.value = 'This browser cannot produce a PDF here. The share link still works, and printing the page saves it as a PDF.'
     return
   }
+  printing.value = true
+  await nextTick()
   try {
     window.print()
   } catch (e) {
     pdfNote.value = 'The PDF could not be produced. Use your browser’s Print → Save as PDF.'
+  } finally {
+    printing.value = false
   }
 }
 

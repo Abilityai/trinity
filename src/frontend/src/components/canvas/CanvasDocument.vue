@@ -57,12 +57,34 @@ const generatedOn = computed(() => new Date().toISOString().slice(0, 10))
 
 <style>
 /* Global, not scoped: these rules have to reach the kit's own markup, which
-   renders inside CanvasKit's slot and carries no scope attribute. */
+   renders inside CanvasKit's slot and carries no scope attribute — and the
+   print root below is teleported to <body>, outside any component's scope. */
 .canvas-document__foot {
   display: none;
 }
 
+/* The print root is a `<body>` child (teleported), invisible on screen. */
+.canvas-print-root {
+  display: none;
+}
+
 @media print {
+  /* THE rule that makes this a document rather than a screenshot of the app.
+     Without it `window.print()` prints the whole page — nav bar, tabs, the
+     on-screen panel and this copy — which is what shipped first and is not
+     "one clean column" by any reading (AC #4).
+
+     `body > *` rather than a class on the app root: the print root is
+     teleported to <body>, so hiding every OTHER body child needs no knowledge
+     of how the app is mounted, and works the same on the standalone shared
+     page as on Agent Detail. */
+  body > *:not(.canvas-print-root) {
+    display: none !important;
+  }
+  .canvas-print-root {
+    display: block !important;
+  }
+
   /* A block is never cut in half across a page break (AC #4). */
   .canvas-document__block {
     break-inside: avoid;

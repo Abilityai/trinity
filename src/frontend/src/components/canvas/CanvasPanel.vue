@@ -199,12 +199,19 @@
           <p v-if="shareNote" class="mt-2 text-[11px] text-gray-500 dark:text-gray-400" data-testid="canvas-share-note">{{ shareNote }}</p>
         </div>
 
-        <!-- The printable document: hidden on screen, the ONLY thing printed.
+        <!-- The printable document, teleported to <body>. It has to be a body
+             CHILD for the print rules to isolate it: they hide every other
+             body child, which is what stops the browser printing the whole app
+             around the canvas. Rendered only while printing, so the DOM does
+             not carry a permanent hidden copy of every canvas.
+
              Same component the shared-link page renders, so the PDF is
              identical whichever surface produced it (AC #7). -->
-        <div class="hidden print:block" data-testid="canvas-print-doc">
-          <CanvasDocument :canvas="detail || selected" :agent-name="agentName" />
-        </div>
+        <Teleport to="body">
+          <div v-if="printing" class="canvas-print-root" data-testid="canvas-print-doc">
+            <CanvasDocument :canvas="detail || selected" :agent-name="agentName" />
+          </div>
+        </Teleport>
 
         <p
           v-if="fresh.stale"
@@ -258,7 +265,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import CanvasBlock from './CanvasBlock.vue'
 import CanvasKit from './CanvasKit.vue'
 import { placeBlocks } from './canvasLayouts'
@@ -336,6 +343,8 @@ const shareScope = ref('authorized')   // the NARROW one is preselected
 const shares = ref([])
 const shareNote = ref('')
 const pdfNote = ref('')
+// Only true while the print dialog is being prepared/shown.
+const printing = ref(false)
 const shareScopes = SHARE_SCOPES.map((scope) => ({ scope, ...scopeCopy(scope) }))
 
 function summarize(sh) { return shareSummary(sh) }
@@ -379,7 +388,7 @@ async function revokeShare(sh) {
   }
 }
 
-function downloadPdf() {
+async function downloadPdf() {
   // Print-first (AC #4): the browser's own PDF over a print stylesheet. One
   // renderer — `CanvasDocument` — so the document cannot drift from the screen,
   // and no headless service to run or keep in step.
@@ -388,10 +397,19 @@ function downloadPdf() {
     pdfNote.value = 'This browser cannot produce a PDF here — use Print and choose Save as PDF.'
     return
   }
+  // Mount the teleported document first and let Vue flush, or `print()` fires
+  // against a DOM that does not contain it yet and the sheet comes out empty.
+  printing.value = true
+  await nextTick()
   try {
     window.print()
   } catch {
     pdfNote.value = 'The PDF could not be produced. Use your browser’s Print → Save as PDF.'
+  } finally {
+    // `print()` blocks in every browser that implements it, but Safari has
+    // historically returned early — `afterprint` is the reliable teardown and
+    // this is the belt for browsers that never fire it.
+    printing.value = false
   }
 }
 
