@@ -202,11 +202,26 @@ describe('#2320 — where the verdict is read in the poll loop', () => {
     // A turn that ANSWERED is not a failure, whatever a stale record says. The
     // reply check must come first, or a late-arriving reply is discarded in
     // favour of an older verdict.
+    //
+    // #2580 re-stated this assertion rather than relaxing it. It used to pin the
+    // reply branch as the literal `return { response: last.content` — one whole
+    // expression — so it went red when that branch legitimately moved behind the
+    // shared `replyFromHistory` helper, on a change that preserved everything
+    // this test exists to protect. That is the 2026-08-24 ledger entry exactly
+    // ("a guard that pins a rule as ONE literal source string fails the next
+    // legitimate edit, and the tempting fix deletes the rule"), so the rule is
+    // kept and only its spelling is loosened: what matters is that SOME reply
+    // return precedes the verdict return, not how the reply is built.
     const body = code().split('async function awaitPersistedReply')[1]
-    const replyAt = body.indexOf('return { response: last.content')
+    const replyAt = body.search(/if \(reply\) return|return \{ response:/)
     const outcomeAt = body.indexOf('return { failed: true, outcome }')
-    expect(replyAt).toBeGreaterThan(-1)
+    expect(replyAt, 'the reply branch must exist').toBeGreaterThan(-1)
+    expect(outcomeAt, 'the verdict branch must exist').toBeGreaterThan(-1)
     expect(outcomeAt).toBeGreaterThan(replyAt)
+    // The reply must still be READ from the persisted history rows, which is
+    // what makes it carry a row id (#2580) — not composed locally from the
+    // stream. Losing that would silently reinstate the un-rateable reply.
+    expect(body).toContain('replyFromHistory(data.messages, baselineAssistants)')
   })
 
   it('reads the verdict before the idle timer, not after it', () => {
