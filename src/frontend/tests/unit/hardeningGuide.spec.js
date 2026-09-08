@@ -465,6 +465,13 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(prose).toContain('Trinity does not issue certificates itself')
     expect(prose).toMatch(/whatever terminates TLS in front of it/)
     expect(prose).toMatch(/hands out the name instead of the IP/)
+    // What CHANGED (#2380 follow-up): the sentence used to end "...picks up the
+    // name", implying the proxy reconfigures itself from a Trinity setting. It
+    // does not, on any install this card is shown to — so the copy now names
+    // the command that reconfigures it. All three claims above stay true and
+    // stay asserted; only the actor moved from "whatever is out there,
+    // somehow" to a command the operator runs.
+    expect(prose).not.toMatch(/picks up the name/)
   })
 
   it('does not phrase them as an either/or', () => {
@@ -484,6 +491,33 @@ describe('the two paths are complementary, not alternatives', () => {
     for (const p of ['BaseCard', 'BaseBadge', 'BaseButton']) {
       expect(GUIDE_SFC, `${p} must be composed`).toContain(`import ${p} from`)
     }
+  })
+})
+
+describe('step one names the command that actually completes it', () => {
+  it('tells the operator to run set-domain.sh on the server', () => {
+    // The copy used to stop at "set the Public URL in Settings", which is a
+    // display setting: nothing in the tree reconfigures the proxy from it. The
+    // operator would set it, `install_tls_posture` would flip to `https-domain`
+    // by string-parsing that setting, this card would treat step one as done and
+    // advance — and the domain would serve a certificate error, because the web
+    // server in front of Trinity still answered only to the IP. The card retired
+    // on a state it had helped break.
+    expect(GUIDE_SFC).toContain('scripts/deploy/set-domain.sh')
+    expect(GUIDE_SFC).toMatch(/sudo/)
+  })
+
+  it('does not claim the proxy picks up the name on its own', () => {
+    // Template copy wraps across lines, so match on collapsed whitespace.
+    const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
+    expect(prose).not.toMatch(/picks up the name/i)
+  })
+
+  it('says why it cannot be a button', () => {
+    // Not an apology — the constraint is real (no host privileges from a
+    // container) and it is the same one that keeps the tunnel step to prose.
+    const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
+    expect(prose).toMatch(/container with no access to the web server/i)
   })
 })
 

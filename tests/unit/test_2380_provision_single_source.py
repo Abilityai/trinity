@@ -40,6 +40,10 @@ _FIRSTBOOT = (
     _ROOT / "packer" / "digitalocean" / "files" / "opt" / "trinity-firstboot" / "firstboot.sh"
 )
 _BAKERY = _ROOT / "packer" / "digitalocean" / "scripts" / "01-provision.sh"
+_SET_DOMAIN = _ROOT / "scripts" / "deploy" / "set-domain.sh"
+_CARD = (
+    _ROOT / "src" / "frontend" / "src" / "components" / "onboarding" / "HardeningGuide.vue"
+)
 
 
 def _code(path: Path) -> str:
@@ -158,3 +162,50 @@ def test_provision_is_off_by_default_and_refuses_a_workstation() -> None:
 
 def test_start_sh_is_still_syntactically_valid() -> None:
     subprocess.run([sys.executable and "bash", "-n", str(_START)], check=True)
+
+
+def test_the_card_names_a_command_that_exists() -> None:
+    """The hardening card tells the operator to run a specific path on the
+    server. That is a cross-tree reference from a Vue template to a shell script,
+    which nothing else checks — move or rename the script and the card keeps
+    confidently printing a command that does not exist, on a first login, as the
+    one instruction it gives.
+
+    Asserted from the CARD's text rather than a constant, because the card is
+    what the operator copies."""
+    if not _CARD.exists():  # OSS checkout without the frontend tree
+        return
+    card = _CARD.read_text()
+    assert "set-domain.sh" in card, "the card no longer names the domain command"
+    # The path as printed, minus the install prefix the droplet uses.
+    assert "/opt/trinity/scripts/deploy/set-domain.sh" in card
+    assert _SET_DOMAIN.exists(), (
+        "the card tells operators to run scripts/deploy/set-domain.sh and it is not there"
+    )
+
+
+def test_set_domain_puts_the_old_config_back_when_it_fails() -> None:
+    """Every failure path after the rewrite must restore. A half-applied domain
+    switch is strictly worse than not starting: the operator had a working
+    instance on an IP certificate, and would be left with a name that does not
+    resolve to a certificate and an IP that no longer has a site block."""
+    body = _SET_DOMAIN.read_text()
+    assert "restore()" in body, "no restore path"
+    # A backup is taken before the file is written, not after.
+    backup_at = body.index('cp -p /etc/caddy/Caddyfile "$BACKUP"')
+    write_at = body.index("cat > /etc/caddy/Caddyfile")
+    assert backup_at < write_at, "the Caddyfile is rewritten before it is backed up"
+    # Each post-rewrite failure calls restore before dying.
+    for failure in ("caddy validate", "would not reload", "No valid certificate"):
+        assert failure in body
+    assert body.count("restore") >= 4, "a failure path is missing its restore"
+
+
+def test_set_domain_refuses_before_it_touches_anything_if_dns_is_wrong() -> None:
+    """The whole point of the preflight: issuance validates over the name, so a
+    stale A record turns a working instance into a broken one. The check has to
+    precede the backup, or 'refuses' is just 'reverts'."""
+    body = _SET_DOMAIN.read_text()
+    dns_at = body.index("getent ahostsv4")
+    backup_at = body.index('cp -p /etc/caddy/Caddyfile "$BACKUP"')
+    assert dns_at < backup_at, "the DNS preflight runs after the config is touched"
