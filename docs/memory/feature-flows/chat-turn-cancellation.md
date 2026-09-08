@@ -253,6 +253,30 @@ in `dev` — naming its ref here once threw a `ReferenceError` on every Escape
 keydown and made the whole feature dead on that surface, so `turnCancel.spec.js`
 pins the identifier's absence.
 
+**Two owners, one set of preconditions (#2598).** ent#534 gave the Workspace
+voice call the *first* branch of `onEscapeKeydown` — correct, because while a
+call is up the composer and the picker are inert and there is no turn to cancel.
+What was wrong is that the branch re-decided the preconditions instead of asking
+for them: it tested `voiceCallActive && event.key === 'Escape'` and nothing
+else. `defaultPrevented` is the protocol on this surface — #2582's file preview
+and delete confirm claim Escape in the capture phase precisely so they cannot
+destroy an in-flight turn, and that works only because `shouldCancelOnEscape`
+reads it. It was invisible to the branch above, so one keystroke closed the
+overlay **and** ended the call. `preventDefault()` cannot help where nothing
+reads it.
+
+The fix is a sibling rule, not a guard clause: `shouldEndCallOnEscape(event,
+{ callActive })` beside `shouldCancelOnEscape`, both starting from one private
+`ownsEscape(event)` — Escape, not composing, not already claimed. A bare
+`if (event.defaultPrevented) return` in the SFC would have fixed the reported
+symptom and left the next Escape owner free to make the same mistake, and it
+would have kept the decision in a component `vitest` cannot mount. The ordering
+property ent#534 cares about (the call is asked first) is unchanged and still
+pinned by `portalVoiceMode.spec.js`.
+
+It also closed a second instance of the same class that nobody had reported: the
+old branch ignored `isComposing`, so abandoning an IME candidate with Escape
+ended the call.
 **A THIRD way of owning Escape arrived with #2582, and it is not the overlay
 list.** The Files tab's preview lightbox (`PortalFilePreview.vue`) is mounted by
 a rail tab body, not by the conversation, so there is no ref for the
@@ -324,8 +348,9 @@ frontend change.
 
 ## Where the rules live
 
-`src/frontend/src/utils/turnCancel.js` — `shouldCancelOnEscape`, `restoreDraft`,
-`cancelOutcome`, `isTerminalStatus`. Pure, and shared by all three surfaces,
+`src/frontend/src/utils/turnCancel.js` — `shouldCancelOnEscape`,
+`shouldEndCallOnEscape` (#2598), `restoreDraft`, `cancelOutcome`,
+`isTerminalStatus`. Pure, and shared by all three surfaces,
 because `vitest.config.js` runs `environment: 'node'` with no mount harness: a
 rule decided inside an SFC is a rule no test can reach.
 
@@ -366,8 +391,10 @@ the same swap inline.
   statuses and real termination for `running`/`queued`; a missing execution as
   404; and an agent-side failure reworded for a client without naming the agent
   host.
-- `src/frontend/tests/unit/turnCancel.spec.js` (40) — every arm of the Escape
-  rule including IME and `defaultPrevented`; the restore/merge including
+- `src/frontend/tests/unit/turnCancel.spec.js` (48) — every arm of both Escape
+  rules including IME and `defaultPrevented`, and — from source — that the
+  Workspace's voice branch dispatches on `shouldEndCallOnEscape` rather than
+  re-deciding it (#2598: a predicate the branch bypasses passes its own tests); the restore/merge including
   idempotence and whitespace-only drafts; the three outcome shapes; and, from
   source, that all three surfaces import the shared rules rather than
   re-deciding them, capture and clear the id and the text together, register and

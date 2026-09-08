@@ -103,6 +103,7 @@ from .capabilities import (  # noqa: F401
     AGENT_TMPFS_MOUNT,
     AGENT_DEFAULT_TMPDIR,
     AGENT_LOG_CONFIG,
+    AGENT_RESTART_POLICY,
     normalize_cpu,
     normalize_memory,
 )
@@ -889,7 +890,11 @@ async def recreate_container_with_updated_config(
 
     # Extract configuration from old container
     old_config = old_container.attrs.get("Config", {})
-    old_host_config = old_container.attrs.get("HostConfig", {})
+    # #2541: HostConfig is deliberately NOT read any more. #1816 extracted it to
+    # carry the old container's restart policy forward; the shared tail now bakes
+    # AGENT_RESTART_POLICY unconditionally, like every other property here, so
+    # keeping the extraction would recreate the exact dead-variable shape #1816
+    # was filed to fix.
 
     # Get key settings
     image = old_config.get("Image", "trinity-agent-base:latest")
@@ -1073,19 +1078,6 @@ async def recreate_container_with_updated_config(
     # Update label to reflect current setting
     labels["trinity.full-capabilities"] = str(full_capabilities).lower()
 
-    # #1816: carry the old container's restart policy onto the replacement.
-    # `old_host_config` was extracted at the top of this function and then never
-    # read — a genuinely dead variable, and precisely why `unless-stopped`
-    # silently vanished from EVERY recreated agent. `trinity-system` is created
-    # with it, so before this a single recreate downgraded the platform
-    # orchestrator to "stays down after a crash or a host reboot".
-    #
-    # Null-safe by construction: `.get("RestartPolicy", {})` returns None when
-    # the key exists with a null value (Docker does emit that), and `.get` on
-    # None would abort the recreate with an AttributeError — the container is
-    # already removed by then, so the agent would be left with none at all.
-    restart_policy = old_host_config.get("RestartPolicy") or {}
-
     # #1809: refresh the base-image version label from the image this recreate
     # will actually run. Labels are carried forward verbatim from the old
     # container, and every AgentStatus reader prefers the container label over
@@ -1169,7 +1161,6 @@ async def recreate_container_with_updated_config(
             cpu=cpu,
             memory=memory,
             full_capabilities=full_capabilities,
-            restart_policy=restart_policy,
         )
         # #2092: put the run state back. Here, NOT in the shared provisioning
         # helper — that one also serves agent creation, where "the original was
@@ -1230,11 +1221,11 @@ async def _provision_folders_and_run_agent_container(
     cpu,
     memory,
     full_capabilities: bool,
-    restart_policy: Optional[dict] = None,
 ):
     """Shared tail for every container (re)build: add DB-driven shared/public
     folder mounts onto ``base_volumes`` then run the container with the full
-    security posture (cap-drop ALL, AppArmor, noexec tmpfs, resource limits).
+    security posture (cap-drop ALL, AppArmor, noexec tmpfs, resource limits,
+    bounded log, ``unless-stopped``).
 
     Extracted so `recreate_container_with_updated_config` (spec from the old
     container) and `recreate_missing_container` (spec from persisted DB state
@@ -1242,18 +1233,14 @@ async def _provision_folders_and_run_agent_container(
     security envelope can never drift between them (AC: "goes through the
     supported creation path, not a hand-rolled docker run").
 
-    Args:
-        restart_policy: #1816 — Docker restart policy to carry onto the
-            replacement, e.g. ``{"Name": "unless-stopped"}``. Forwarded ONLY
-            when it names a policy: docker-py rejects a ``None`` and an empty
-            ``{"Name": ""}`` is Docker's "no policy", which is also what
-            omitting the kwarg produces. ``None`` (the default, and every
-            pre-#1816 caller) is therefore exactly today's behaviour.
-
-            Load-bearing for ``trinity-system``, which is created with
-            ``unless-stopped`` and, before this, silently LOST it on every
-            recreate — the old container's HostConfig was extracted and never
-            read.
+    #2541 retired the ``restart_policy`` keyword #1816 added here. Carrying the
+    old container's policy forward was faithful, and therefore carried ``no``
+    forward forever; and the OTHER caller — the #1559 recovery rebuild — passed
+    nothing at all, so a recovered agent was rebuilt on ``no`` even when it had
+    ``unless-stopped``. The tail now bakes ``AGENT_RESTART_POLICY``
+    unconditionally, like every other property below, which serves #1816's
+    intent (``trinity-system`` must not lose ``unless-stopped`` on recreate) as
+    a fleet-wide guarantee rather than a carry-forward.
     """
     volumes = dict(base_volumes)
 
@@ -1365,10 +1352,12 @@ async def _provision_folders_and_run_agent_container(
         # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
         # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
         nano_cpus=int(cpu) * 1_000_000_000,
-        # #1816: carry the restart policy forward (see the arg docstring). The
-        # kwarg is omitted entirely when there is no policy to set, so this is
-        # a no-op for every pre-#1816 caller.
-        **({"restart_policy": restart_policy} if (restart_policy or {}).get("Name") else {}),
+        # #2541: re-bake the restart policy unconditionally — this is the
+        # retrofit seam for BOTH recreate paths, so an agent born `no` before
+        # #2541 adopts `unless-stopped` the first time it passes through here.
+        # Unconditional on purpose: the old container's policy is exactly what
+        # must NOT be preserved (see the docstring).
+        restart_policy=AGENT_RESTART_POLICY,
     )
 
     logger.info(f"Recreated container for agent {agent_name} with updated configuration")
@@ -1491,10 +1480,13 @@ async def recreate_missing_container(agent_name: str):
     cannot reproduce the orchestrator's contract — it mints a fresh
     *agent-scoped* MCP key after deactivating the existing **system-scoped** one
     (whose plaintext is unrecoverable, so the downgrade is irreversible), omits
-    the `trinity.is-system` label and the read-only `/template` bind, drops
-    `restart_policy: unless-stopped`, arms `TRINITY_BACKEND_URL` (the scope-403
-    heartbeat loop #1816 exists to avoid), and follows the fleet capabilities
-    setting instead of the contractual one. #1816 made this reachable from the
+    the `trinity.is-system` label and the read-only `/template` bind, arms
+    `TRINITY_BACKEND_URL` (the scope-403 heartbeat loop #1816 exists to avoid),
+    and follows the fleet capabilities setting instead of the contractual one.
+    (#2541 removed one item from that list: the rebuild no longer drops
+    `restart_policy: unless-stopped` — it goes through the shared tail, which
+    now bakes it unconditionally. Every other reason stands, so the fence does
+    not move.) #1816 made this reachable from the
     boot path and from `POST /api/system-agent/restart` (both now delegate to
     `start_agent_internal`), where a concurrent `--workers N` recreate can null
     the container lookup mid-flight. Failing closed is safe and self-healing:
