@@ -208,9 +208,10 @@ describe('ent#492 — the layout is driven by variables', () => {
     expect(PORTAL).toContain(':style="columns.gridStyle.value"')
     // The conversation is the flexible middle and carries no width of its own,
     // which is what makes it impossible to drag directly. The one exception is
-    // a voice call (ent#534), where it takes the orb's fixed 40% share and the
-    // canvas takes the rest — outside a call it must still be plain `flex-1`.
-    expect(PORTAL).toMatch(/<main\s+class="min-w-0 flex flex-col[^"]*"\s+:class="voiceCall\.active \? 'flex-1 sm:flex-none sm:w-\[40%\]' : 'flex-1'"/)
+    // a voice call (ent#534), where it takes the orb's 40% share of the space
+    // beside the sidebar — as a flex share (2 of 2 + 3), not a percentage of
+    // the row (#2583) — outside a call it must still be plain `flex-1`.
+    expect(PORTAL).toMatch(/<main\s+class="min-w-0 flex flex-col[^"]*"\s+:class="voiceCall\.active \? 'flex-1 sm:flex-\[2_1_0%\]' : 'flex-1'"/)
     expect(PORTAL).toMatch(/sm:w-\[var\(--ws-sidebar,18rem\)\]/)
   })
 

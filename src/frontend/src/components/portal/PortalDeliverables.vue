@@ -75,7 +75,13 @@
                affordance ent#365 left this card as the surface for. Different
                words from a message's thumbs because a deliverable is judged as
                a piece of work, not as an answer. -->
+          <!-- #2580: the `mt-1.5` moved here from `PortalRating`'s root. This is
+               the call site that is NOT inside an action row, so it is the one
+               that has to supply its own spacing; the bubble's row supplies its
+               own. Dropping the margin without adding it here collapses this
+               card's rating against the text above it. -->
           <PortalRating
+            class="mt-1.5"
             :agent-name="agentName"
             target-kind="deliverable"
             :target-id="d.id"

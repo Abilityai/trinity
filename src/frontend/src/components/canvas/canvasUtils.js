@@ -300,8 +300,22 @@ export function tsLabelFormatter(labels) {
   }
 }
 
+/**
+ * Minimum px between x-axis labels, from the longest label the formatter
+ * will print: ~6px per character at the axis's 10px font plus a gutter,
+ * clamped so a date axis keeps uPlot's default and a 30-category axis of
+ * "Category number N" prints every fifth name instead of all thirty on top
+ * of each other (#2583).
+ */
+export function axisLabelSpace(labels, format) {
+  let longest = 0
+  for (const l of labels || []) longest = Math.max(longest, String(format(l) ?? '').length)
+  return Math.min(240, Math.max(50, longest * 6 + 12))
+}
+
 /** Props for `TrendLineChart` (line / area). */
 export function trendChartProps(model) {
+  const labelFormat = tsLabelFormatter(model.labels)
   return {
     dates: model.labels,
     series: model.series.map((s) => ({
@@ -310,7 +324,8 @@ export function trendChartProps(model) {
       color: s.color,
       fill: model.type === 'area',
     })),
-    labelFormat: tsLabelFormatter(model.labels),
+    labelFormat,
+    labelSpace: axisLabelSpace(model.labels, labelFormat),
   }
 }
 
