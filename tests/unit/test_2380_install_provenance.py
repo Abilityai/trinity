@@ -65,6 +65,7 @@ _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 MARKETPLACE = "do-marketplace"
 OTHER_MARKETPLACE = "vultr-marketplace"
 SCRIPT = "script"
+DO_SCRIPT = "do-script"
 UNKNOWN = "unknown"
 
 
@@ -148,7 +149,7 @@ class TestConfigContract:
         cfg = _config()
         assert cfg.INSTALL_SOURCE_UNKNOWN == UNKNOWN
         assert cfg.INSTALL_SOURCE_VALUES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE, SCRIPT, UNKNOWN}
+            {MARKETPLACE, OTHER_MARKETPLACE, SCRIPT, DO_SCRIPT, UNKNOWN}
         )
 
     def test_marketplace_sources_are_a_strict_subset(self):
@@ -160,6 +161,31 @@ class TestConfigContract:
         )
         assert cfg.MARKETPLACE_INSTALL_SOURCES < cfg.INSTALL_SOURCE_VALUES
         assert cfg.INSTALL_SOURCE_UNKNOWN not in cfg.MARKETPLACE_INSTALL_SOURCES
+        # A doc-driven DigitalOcean install is NOT a marketplace install. It is
+        # eligible for the hardening guide (below), which is a different
+        # question with a different set — widening this one instead would make
+        # the install claim a vendor listing it never came from.
+        assert DO_SCRIPT not in cfg.MARKETPLACE_INSTALL_SOURCES
+
+    def test_the_guide_set_is_marketplace_plus_the_do_script_install(self):
+        """#2380's amended AC. The guide's subject is "public cloud VM at a bare
+        IP with no domain", which a droplet installed from the DigitalOcean
+        deploy doc satisfies exactly as a marketplace image does — the installer
+        that writes `do-script` refuses to run unless DO's metadata service
+        answers, so the value is established, not asserted.
+
+        What must NOT be in here is `script` or `unknown`. The managed fleet
+        runs plain HTTP behind a WireGuard/Tailscale tunnel with no domain and a
+        100.x address, so any gate wider than provenance — "no TLS configured",
+        say — fires on every paying client's instance, permanently."""
+        cfg = _config()
+        assert cfg.HARDENING_GUIDE_INSTALL_SOURCES == frozenset(
+            {MARKETPLACE, OTHER_MARKETPLACE, DO_SCRIPT}
+        )
+        assert cfg.MARKETPLACE_INSTALL_SOURCES < cfg.HARDENING_GUIDE_INSTALL_SOURCES
+        assert cfg.HARDENING_GUIDE_INSTALL_SOURCES < cfg.INSTALL_SOURCE_VALUES
+        assert SCRIPT not in cfg.HARDENING_GUIDE_INSTALL_SOURCES
+        assert UNKNOWN not in cfg.HARDENING_GUIDE_INSTALL_SOURCES
 
 
 # ===========================================================================
@@ -566,6 +592,7 @@ class TestResolver:
             (MARKETPLACE, True),
             (OTHER_MARKETPLACE, True),
             (SCRIPT, False),
+            (DO_SCRIPT, False),
             (UNKNOWN, False),
         ],
     )
@@ -575,6 +602,27 @@ class TestResolver:
         svc = _service(monkeypatch, _Reader({"install_source": value}))
 
         assert svc.is_marketplace_install() is expected
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (MARKETPLACE, True),
+            (OTHER_MARKETPLACE, True),
+            (DO_SCRIPT, True),
+            (SCRIPT, False),
+            (UNKNOWN, False),
+        ],
+    )
+    def test_the_guide_gate_covers_the_do_script_install_and_nothing_wider(
+        self, monkeypatch, value, expected
+    ):
+        """The pair (`script` False, `do-script` True) is the whole point: a
+        generic script install says nothing about where it landed, while
+        `do-script` is written only by an installer that proved it was on a
+        DigitalOcean instance."""
+        svc = _service(monkeypatch, _Reader({"install_source": value}))
+
+        assert svc.is_hardening_guide_eligible() is expected
 
     # -- fail-open ------------------------------------------------------------
 
@@ -945,7 +993,7 @@ class TestRouterGuards:
 # ROUTER — /feature-flags
 # ===========================================================================
 
-def _flags(monkeypatch, *, source, marketplace, posture):
+def _flags(monkeypatch, *, source, marketplace, posture, guide=None):
     """Drive `get_public_feature_flags` with every DB-backed service stubbed.
 
     Mirrors `test_2217_canary_status.py`: a pure handler test that still
@@ -964,6 +1012,9 @@ def _flags(monkeypatch, *, source, marketplace, posture):
         get_anthropic_api_key=lambda: None,
         get_install_source=lambda: source,
         is_marketplace_install=lambda: marketplace,
+        # Defaults to the marketplace answer so existing cases keep their
+        # meaning; the do-script case passes it explicitly.
+        is_hardening_guide_eligible=lambda: (marketplace if guide is None else guide),
         get_install_tls_posture=lambda: posture,
     )
     monkeypatch.setattr(rs, "settings_service", stub_settings)
@@ -1000,6 +1051,7 @@ class TestFeatureFlagSurface:
 
         assert flags["install_source"] == MARKETPLACE
         assert flags["marketplace_install"] is True
+        assert flags["hardening_guide_eligible"] is True
         assert flags["install_tls_posture"] == "http"
 
     def test_a_non_marketplace_install_reports_the_gate_closed(self, monkeypatch):
@@ -1036,6 +1088,33 @@ class TestFeatureFlagSurface:
 
         assert flags["install_source"] == UNKNOWN
         assert flags["marketplace_install"] is False
+
+    def test_a_do_script_install_ships_the_guide_gate_open_but_not_marketplace(
+        self, monkeypatch
+    ):
+        """#2380's amended AC, on the wire. The two booleans deliberately
+        DISAGREE here: the droplet is eligible for the guide and is not a
+        marketplace install, and the payload has to be able to say both."""
+        flags = _flags(
+            monkeypatch,
+            source=DO_SCRIPT, marketplace=False, guide=True, posture="https-ip",
+        )
+
+        assert flags["install_source"] == DO_SCRIPT
+        assert flags["marketplace_install"] is False
+        assert flags["hardening_guide_eligible"] is True
+
+    def test_the_managed_fleet_shape_keeps_both_gates_closed(self, monkeypatch):
+        """`script` provenance over plain HTTP with no domain — the shape every
+        managed instance has. Widening the guide to `do-script` must not have
+        widened it to this."""
+        flags = _flags(
+            monkeypatch,
+            source=SCRIPT, marketplace=False, guide=False, posture="http",
+        )
+
+        assert flags["marketplace_install"] is False
+        assert flags["hardening_guide_eligible"] is False
 
     def test_the_surface_carries_no_url(self, monkeypatch):
         """`public_chat_url` sits behind an admin-only read and this endpoint

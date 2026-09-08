@@ -2,104 +2,44 @@
 # Build-time provisioner for the Trinity DigitalOcean 1-Click snapshot (#2281).
 # Everything here is baked into the image and shared by every droplet created
 # from it — so nothing droplet-specific and nothing secret may be produced here.
+#
+# The machine setup itself (Docker, pinned Caddy, ufw, the DOCKER-USER firewall
+# unit) is NOT written here any more: it is `start.sh --provision --machine-only`
+# (#2380), the same code a doc-driven install runs. This script is now only what
+# is genuinely specific to baking a snapshot — pre-pulling the images so first
+# boot fetches nothing, and installing the staged MOTD / cloud-init files.
 set -euo pipefail
 
-# Packer's shell provisioner runs a non-login, non-interactive SSH shell, whose
-# PATH does not reliably carry the sbin directories. Every tool used up to the
-# firewall block lives in /usr/bin (apt-get, gpg, systemctl, git, docker), so the
-# first /usr/sbin binary reached is `ufw` — and the build died there with
-# "ufw: command not found" (exit 127) AFTER pulling all five images, five and a
-# half minutes in. Ubuntu 24.04 also merged /sbin into /usr/sbin, so both names
-# are listed for older bases.
-#
-# Set once at the top rather than absolute-pathing each call: the next sbin tool
-# added below would otherwise reintroduce the same failure, at the same late
-# point in the build.
+# Packer's shell provisioner runs a non-login, non-interactive SSH shell whose
+# PATH does not reliably carry the sbin directories, and the provisioning step
+# below needs them (ufw, iptables). Ubuntu 24.04 merged /sbin into /usr/sbin, so
+# both names are listed for older bases.
 export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
 
 : "${TRINITY_IMAGE_TAG:?TRINITY_IMAGE_TAG must be passed by the Packer build}"
 
 echo "=== Trinity 1-Click build: baking ${TRINITY_IMAGE_TAG} ==="
 
-# --- Base packages -----------------------------------------------------------
-apt-get update -q
-apt-get install -y -q ca-certificates curl gnupg git jq ufw debian-goodies
-
-# --- Docker (official repo, not the distro package) --------------------------
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  > /etc/apt/sources.list.d/docker.list
-apt-get update -q
-apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-systemctl enable docker
-
-# --- Docker firewall persistence (NOT iptables-persistent) -------------------
-# iptables-persistent cannot be installed here. `ufw` declares
-# `Breaks: iptables-persistent, netfilter-persistent` with no version, so apt
-# resolves `apt-get install iptables-persistent` by REMOVING ufw — silently, and
-# the build then died 90 lines later at `ufw --force reset` with
-# "ufw: command not found" (exit 127), after pulling all five images.
+# --- Checkout ----------------------------------------------------------------
+# Cloned FIRST, because the provisioning logic now lives in the checkout.
+# Pinned to the same tag as the images: a snapshot whose checkout and images
+# disagree is the one combination `start.sh --hosted` cannot detect — compose
+# from one release, containers from another.
 #
-# ufw is the one that has to stay: DigitalOcean's own 99-img-check.sh calls
-# `ufw status` unconditionally on Ubuntu and reports "No firewall is configured"
-# if it is missing, which is not something to hand a Marketplace reviewer.
-#
-# The DOCKER-USER rules are persisted instead by trinity-docker-firewall.service,
-# installed below. That is also the better mechanism on its own merits:
-# netfilter-persistent restores rules at boot with no ordering against
-# docker.service, and the DOCKER-USER chain does not exist until Docker creates
-# it — so the thing being replaced was itself racy.
-
-# --- Caddy (reverse proxy + automatic certificates) --------------------------
-# PINNED, and the floor is load-bearing rather than hygiene. The whole
-# no-domain HTTPS story rests on Caddy issuing a Let's Encrypt certificate for
-# a bare IP, and Caddy could not do that until recently:
-# caddyserver/caddy#7399 — v2.10.0 fails outright with
-# "subject '<ip>' cannot have public IP certificate", the IPv4 fix landed via
-# mholt/acmez#47 (2025-12-17), and IPv6 was not resolved until 2026-04-25.
-# v2.11.3 (2026-05-12) is the first stable release carrying both.
-#
-# An unpinned `apt-get install caddy` happened to work only because the repo's
-# current stable is new enough. That is a silent dependency on a moving
-# upstream for a property this image is built around, and the symptom of
-# getting it wrong appears on a customer's droplet as a browser warning.
-CADDY_VERSION="2.11.4"
-CADDY_MIN_VERSION="2.11.3"
-curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
-  > /etc/apt/sources.list.d/caddy-stable.list
+# `debian-goodies` is not used by Trinity; DigitalOcean's own img_check.sh
+# expects `checkrestart` to be available.
 apt-get update -q
-apt-get install -y -q "caddy=${CADDY_VERSION}"
-
-# Assert the floor rather than trusting the pin. The pin can be edited, the
-# repo can drop a version, and a `caddy upgrade` on a running droplet can move
-# it — this is the check that survives all three. Deliberately NOT `apt-mark
-# hold`: forward versions carry the fix, and holding would block security
-# updates for the life of the droplet.
-_caddy_installed="$(caddy version | head -1 | sed 's/^v//' | cut -d' ' -f1)"
-if [ "$(printf '%s\n%s\n' "$CADDY_MIN_VERSION" "$_caddy_installed" \
-        | sort -V | head -1)" != "$CADDY_MIN_VERSION" ]; then
-    echo "FATAL: caddy ${_caddy_installed} is below ${CADDY_MIN_VERSION}, which" >&2
-    echo "       cannot issue Let's Encrypt IP certificates (caddyserver/caddy#7399)." >&2
-    exit 1
-fi
-echo "Caddy ${_caddy_installed} (floor ${CADDY_MIN_VERSION}) — IP certificates supported."
-# Not enabled here: first boot writes the Caddyfile (it needs the droplet's own
-# IP) and starts it. A Caddy enabled with the packaged default would race first
-# boot for :80 and take a certificate for the wrong name.
-systemctl disable caddy
-
-# --- Trinity checkout --------------------------------------------------------
-# Pinned to the same tag as the images. A snapshot whose checkout and images
-# disagree is the one combination `start.sh --hosted` cannot detect: compose
-# would come from one release and the containers from another.
+apt-get install -y -q ca-certificates curl git debian-goodies
 git clone --depth 1 --branch "${TRINITY_IMAGE_TAG}" \
   https://github.com/abilityai/trinity.git /opt/trinity
+cd /opt/trinity
+
+# --- Machine provisioning (shared with the docs install path) ----------------
+# Docker, Caddy 2.11.x with the IP-certificate floor asserted, ufw, and
+# trinity-docker-firewall.service. --machine-only stops before anything
+# droplet-specific: no IP, no Caddyfile, no certificate, no .env, no Trinity.
+# First boot runs the matching --site-only half.
+./scripts/deploy/start.sh --provision --cloud digitalocean --machine-only
 
 # --- Pull the images so first boot pulls nothing -----------------------------
 # This is the entire point of the snapshot. Tags must match
@@ -139,34 +79,17 @@ docker pull "$OTEL_IMAGE"
 mkdir -p /etc/trinity
 echo "${TRINITY_IMAGE_TAG}" > /etc/trinity/baked-image-tag
 
-# --- Firewall ----------------------------------------------------------------
-# ufw governs host ports. It does NOT govern Docker-published ports — Docker
-# inserts its own iptables rules ahead of ufw's chain, so `ufw deny 8000` on a
-# droplet publishing 8000:8000 is silently inert. That gap is closed by the
-# DOCKER-USER rules the first-boot script installs; ufw here covers ssh and the
-# Caddy listeners only.
-ufw --force reset
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
-
 # --- Place the per-instance and MOTD files -----------------------------------
+# Only files that have no home in the checkout: the cloud-init hook, the login
+# banner, and the first-boot script the hook calls. The firewall script and its
+# systemd unit are NOT staged any more — the script ships in the checkout and
+# the unit is written by --provision, pointing at it.
 install -D -m 0755 /tmp/trinity-files/opt/trinity-firstboot/firstboot.sh \
   /opt/trinity-firstboot/firstboot.sh
 install -D -m 0755 /tmp/trinity-files/var/lib/cloud/scripts/per-instance/001-trinity \
   /var/lib/cloud/scripts/per-instance/001-trinity
 install -D -m 0755 /tmp/trinity-files/etc/update-motd.d/99-trinity \
   /etc/update-motd.d/99-trinity
-install -D -m 0755 /tmp/trinity-files/opt/trinity-firstboot/docker-firewall.sh \
-  /opt/trinity-firstboot/docker-firewall.sh
-install -D -m 0644 /tmp/trinity-files/etc/systemd/system/trinity-docker-firewall.service \
-  /etc/systemd/system/trinity-docker-firewall.service
-# Enabled at BUILD time so the rules are reapplied on every boot of every droplet,
-# including reboots that never re-run first boot (cloud-init is per-instance).
-systemctl enable trinity-docker-firewall.service
 rm -rf /tmp/trinity-files
 
 # Ubuntu's stock MOTD is noisy and pushes ours off the first screen; the
