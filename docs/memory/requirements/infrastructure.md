@@ -840,8 +840,12 @@
   `git submodule update --init <path>`. Existing clones initialized while
   `.gitmodules` had `update = checkout` (i.e. `.claude` post-init) carry a
   protective local override; enterprise clones do NOT and need the one-time
-  config line (documented in `docs/ENTERPRISE.md`; `deploy-dev.yml` sets it
-  and judges init success by the populated marker file, since skip == exit 0).
+  config line (documented in `docs/ENTERPRISE.md`; `deploy-dev.yml` sets it,
+  judges init success by the populated marker file, since skip == exit 0,
+  fetches the superproject with `--no-recurse-submodules` so a pointer bump
+  cannot make the fetch dial the submodule's SSH URL before the PAT transport
+  exists, and fails the run after the health check when the sync leaves a
+  stale tree — #2578).
 - **Public install doc**: `docs/ENTERPRISE.md` — generic seam only (mount
   commands, HTTPS-PAT URL override, rebuild, verification via boot line /
   feature-flags / `edition`); guard-compliant per

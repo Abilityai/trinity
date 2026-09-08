@@ -148,6 +148,30 @@ submodule is not mounted — an unentitled dev instance means the recorded gitli
 is never exercised before prod. Set the repo variable `DEPLOY_ALLOW_OSS_ONLY=true`
 if a particular host legitimately has no enterprise access.
 
+**The superproject fetch never recurses (#2578).** The workflow's own `git fetch`,
+`git checkout` and `git pull` carry `--no-recurse-submodules`. Without it, git's
+default on-demand recursion fires on every commit that moves the enterprise
+pointer, dials the submodule's *stored* SSH URL before the PAT transport above
+exists, dies at host-key verification, and — under `set -e` — stops the deploy
+at the pull. It hid for weeks because the superproject refs advance before the
+recursion runs, so the next unrelated push deploys the bump one push late. The
+submodule block is the only sync path, by design. Pulling on the host by hand
+follows the same shape: `git pull --ff-only --no-recurse-submodules origin dev`,
+then sync the submodule *with a transport that works on that host* — the
+`git -c "url.https://x-access-token:${PAT}@github.com/.insteadOf=git@github.com:"
+submodule update --init src/backend/enterprise` form above, or Option B pinned in
+the clone — because the host's submodule origin is the SSH URL, and a plain
+`git submodule update` dies at the same host-key check.
+
+A sync that fails on a moved pointer leaves the **old** enterprise tree checked
+out. The deploy reports that as `Enterprise submodule STALE`, builds the version
+with a `.dirty` suffix, and **fails after the health check** (#2578): the platform
+code is the new commit, the enterprise code is the old pin, and every later deploy
+fails the same way until the transport is restored. There is no escape hatch for a
+stale tree — a host meant to run OSS-only unmounts it
+(`git submodule deinit -f src/backend/enterprise`) and sets
+`DEPLOY_ALLOW_OSS_ONLY=true`.
+
 ### 3. Get the code into the container
 
 The enterprise tree reaches the backend via a **bind-mount**, never the image —
@@ -190,12 +214,19 @@ curl -s -H "Authorization: Bearer <token>" http://localhost:8000/api/version
 
 ### Keeping it updated
 
-With the step-1 override in place, routine updates just work:
+With the step-1 override in place, routine updates are two commands — and the
+pull never recurses (#2578):
 
 ```bash
-git pull
+git pull --no-recurse-submodules
 git submodule update --init --recursive
 ```
+
+Without the flag, git's default on-demand recursion fetches the submodule
+*inside* the pull whenever the pointer moved, using the submodule's stored URL
+and whatever transport that host happens to have — the exact failure the dev
+deploy hit. Keeping the two steps separate means the second one runs with the
+transport you chose in step 2.
 
 **Existing clones (mounted before #1443):** the `update = none` default
 applies to your clone too — plain `git submodule update` starts *skipping*
