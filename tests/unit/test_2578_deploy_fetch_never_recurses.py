@@ -275,6 +275,29 @@ def check_the_incident_body_names_the_enterprise_stages(notify: str) -> None:
     assert "trinity#2578" in notify
 
 
+# GitHub evaluates a step input that contains ANY `${{ … }}` as ONE expression,
+# and expressions are capped at 21,000 characters — "Invalid workflow file:
+# (Line: 50, Col: 19): Exceeded max expression length 21000" (#2625). The ssh
+# script carries three expressions, so the whole script is size-capped, and
+# neither PyYAML nor `bash -n` can see that. The workflow runs only on push to
+# `dev`, so the first signal of the overflow was a red run with ZERO jobs — which
+# also silenced the notify-failure job. The #2626 end state (no expression in the
+# script) lifts the cap; until then this guard keeps a margin in hand.
+EXPRESSION_CAP = 21_000
+EXPRESSION_CAP_MARGIN = 1_000
+
+
+def check_the_script_fits_githubs_expression_cap(script: str) -> None:
+    if "${{" not in script:
+        return  # no expression, no cap
+    assert len(script) <= EXPRESSION_CAP - EXPRESSION_CAP_MARGIN, (
+        f"the ssh script is {len(script)} characters; GitHub caps an expression-bearing "
+        f"input at {EXPRESSION_CAP} and this guard keeps {EXPRESSION_CAP_MARGIN} in hand "
+        "(#2625). Trim prose — the reasoning lives in the PR, docs/ENTERPRISE.md and the "
+        "ledger — or move the `${{ }}` out of the script (trinity#2626)."
+    )
+
+
 @pytest.fixture(scope="module")
 def script() -> str:
     return _deploy_script(_doc())
@@ -298,6 +321,10 @@ def test_a_stale_enterprise_tree_fails_the_run(script):
 
 def test_the_incident_body_names_the_enterprise_stages():
     check_the_incident_body_names_the_enterprise_stages(_notify_script(_doc()))
+
+
+def test_the_ssh_script_fits_githubs_expression_cap(script):
+    check_the_script_fits_githubs_expression_cap(script)
 
 
 _CLASSIFIER = _REPO / "scripts" / "ci" / "classify-submodule-failure.sh"
@@ -399,12 +426,18 @@ _REGISTRATION_ELSE = (
         # The incident body forgets the stage again.
         (lambda t: t.replace("trinity#2578", "trinity#0000"),
          check_the_incident_body_names_the_enterprise_stages, "notify"),
+        # #2625: the expression-bearing script grows past GitHub's cap.
+        (lambda t: t.replace(
+            '            echo "=== Done ==="\n',
+            '            echo "=== Done ==="\n' + "            # padding for the meta-test, never in the real file\n" * 40),
+         check_the_script_fits_githubs_expression_cap, "script"),
     ],
     ids=[
         "fetch-recurses", "pull-recurses", "checkout-unflagged", "flag-only-in-comment",
         "second-unflagged-fetch", "remote-update", "ff-only-dropped",
         "stale-only-warns", "stale-flag-never-raised", "stale-escape-hatch",
         "stale-exit-preempts-seeding", "classifier-without-stale-state", "incident-body-stage",
+        "script-over-expression-cap",
     ],
 )
 def test_guard_rejects_pre_fix_content(mutation, checker, target):
