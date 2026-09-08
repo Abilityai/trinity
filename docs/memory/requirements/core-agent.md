@@ -2114,10 +2114,15 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   `PortalAgentDetails.vue`; Canvas and Files were already rail tabs (ent#475);
   recent work was already the rail's Work tab (ent#525); asks keep the
   conversation's mount, which was the surviving one after #2449.
-- **Agent details is a sibling of the rail, not a rail tab** (ruled
+- **Agent details was a sibling of the rail, not a rail tab** (ruled
   2026-09-05): the rail is participant-scoped with a fixed five-tab set, while
   this is about one agent and is dismissed rather than switched away from.
-  Closing it returns the rail on the tab it was showing.
+  Closing it returned the rail on the tab it was showing. ⚠️ **Superseded
+  2026-09-07 by §5.30** — the operator reversed this after testing `dev`: a
+  header-launched sibling panel "reads as one more top-level thing", and Info is
+  now a rail tab. The 2026-09-05 reasoning is recorded, not deleted, because it
+  names the two properties the tab form had to answer for (participant scoping,
+  and dismissal vs switching) — §5.30 answers both.
 - Main is named by its **role** in the tab strip and the header and is not
   renameable. An archived chat stays a tab — the operator ruled it “becomes the
   newest tab” — and growth is bounded by `OverflowTabs`' counted “N more” rather
@@ -2432,3 +2437,126 @@ to localStorage in the clear.
   pointer capture so a drag across the Canvas tab's iframe does not stall, and
   is hidden below `sm`, where the drawer and the bottom sheet take over.
 - **Flow**: `docs/memory/feature-flows/workspace-column-resize.md`
+
+### 5.30 Workspace — the compact header, Info as a rail tab, and four polish defects (trinity-enterprise#547, abilityai/trinity#2580)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_COMPACT_HEADER`
+- **Description**: The conversation's header band is made **compact**, and three
+  controls move off it. The Activity chart loses its legend and its period
+  selector and is fixed at 7 days; **Agent info becomes a rail tab** rather than
+  a header-launched sibling panel; the duplicated header paperclip is removed so
+  the composer holds the only one; and the voice call starts from the composer
+  row. Shipped with the four conversation-page defects the same components carry.
+- **Operator rulings**: 2026-09-07 (after testing `dev` — the header is too tall
+  and carries controls that belong with the message input; Agent info as a
+  header-launched sibling "reads as one more top-level thing"). This **reverses**
+  the 2026-09-05 ruling recorded in §5.23.
+
+**The band (ent#547 AC 1)**
+
+- The chart carries **no legend and no period selector**; the window is fixed at
+  **7 days**. Series identity is the hover tooltip, which already names each
+  bucket with its swatch, its count and the day's total.
+- The band's height is **measured, not asserted**: at 1440px it was 99px and is
+  now 56px (57%), against the AC's ≤60% target. The number is verified in
+  Chromium by `e2e/workspace-compact-header.spec.js`, because vitest runs
+  `environment: 'node'` with no layout engine and a source assertion that a class
+  exists cannot prove a height.
+- **What actually governs the height** — the load-bearing fact, and the one a
+  future editor will get wrong: once the legend is gone the chart **stops driving
+  the band**. The floor is the stats strip (a stat block is 39px) plus the band's
+  padding. The chart is therefore free at any height **up to 39px**, and costs
+  nothing below it. The legend was the real height: it is laid out `flex-col`, so
+  it grows **13px per bucket** — ~29px at one bucket but ~133px at nine, which is
+  why a busy agent's band was the tall one.
+- Within that 39px the chart may keep its **title** (16px) **or** its x-axis day
+  labels (18px), not both. The title stays: it is pinned by a guard with a stated
+  board-A3 reason ("without it the bars read as another statistic"), while the
+  axis is four sparse labels whose full dates the tooltip already carries.
+- The stats strip stays, per the AC.
+
+**Info as a rail tab (ent#547 AC 2)**
+
+- The rail's tabs are **Work · Loops · Canvas · Files · Info** (State when #439
+  lands). The header's "Agent details" button is removed; `detailsOpen` and the
+  sibling mount go with it, and `thirdColumnResizable` collapses to the rail term.
+- **The door is `RAIL_DOORS.SOLO_AGENT`** — exactly one participant. Not
+  `PLATFORM`: today's header button carries **no** gate, so it renders for
+  external portal clients, and a platform door would silently remove a panel they
+  have today (the #2128 class, on the surface `architecture/workspace.md` warns
+  about). Not `AUDIENCE`, which renders with no participants at all.
+- **Info is 1:1 only in v1, and does NOT group by agent in a room.** This is a
+  deliberate, recorded deviation from the issue's AC. `stores/clientPortal.js`
+  holds report state as a **singleton keyed to one agent**: `loadAgentReports`
+  calls `resetAgentReports` whenever the requested agent differs, which bumps
+  `_reportsGeneration` and invalidates every sibling's in-flight request. N
+  mounted panels therefore leave N−1 stuck in a **permanent loading skeleton** —
+  not an empty state, a lie. Grouping is unblocked by keying that store per agent
+  (follow-up), which is a store change, not a rail change.
+- **Info is a STATIC tab** — a declared category, not a hole in the contract. It
+  carries `signal: RAIL_SIGNAL_NONE` and `empty: null` because an agent always
+  has a name, a health state and a chat list, so the tab has no activity to
+  signal and no empty state to teach. Declaring a borrowed `updated` would light
+  no dot and document a rule that does not exist, diluting the "a dot means
+  something happened" vocabulary the design pass built. `signalFor` already
+  returns `emptySignal()` for a tab nothing writes a signal for, so the static
+  form needs no special case at read time.
+- Mobile is a **gain, not a regression**: `PortalAgentDetails` was `hidden sm:flex`,
+  so the header's button did nothing visible on a phone. As a rail tab it reaches
+  the rail's bottom sheet. Both rail mounts (the column and the sheet) receive the
+  `#tab-info` slot — one of them alone would give the phone the generic registry
+  empty state instead of the panel.
+
+**One paperclip, and voice at the composer (ent#547 AC 3, AC 4)**
+
+- The header's Files control is removed; the composer's paperclip is the only one.
+  Drag-and-drop (ent#524) is unchanged, and the rail's Files tab still opens from
+  the rail.
+- The composer row is **voice call · attach · dictate**, then the field, then Send.
+  The call and the dictation mic are **separate controls** for separate
+  capabilities — a live call with the orb, and speaking into the field.
+- **The call toggle sits OUTSIDE the composer's inert region.** The form carries
+  `pointer-events-none` while a call is active, so a call button placed inside it
+  would render in its active/pressed styling and refuse the click that ends the
+  call — the exact dead affordance AC 5 forbids, created by the AC 4 move. The
+  inert class moves onto a wrapper around everything except the call toggle.
+- Moved buttons take the composer's **44px box** (`h-11 w-11`, on the 4px grid),
+  not the header's `p-2`: `portalComposerAlignment.spec.js` iterates every button
+  in the composer form and asserts all four classes.
+
+**The four defects (#2580)**
+
+- **The band no longer re-renders on a chat-tab switch.** `PortalConversation`
+  carries `:key="convKey"` and `convGen` bumps on every explicit thread switch, so
+  the band — rendered into that component's `#band` slot — sat **inside** a
+  thread-keyed subtree and was torn down and refetched per switch. The band is
+  hoisted to the shell and keys on the **agent**. Two constraints make the hoist
+  more than a move: the conversation arm must be wrapped in a
+  `<template v-else-if>` or the band severs Vue's `v-if`/`v-else-if` chain and the
+  arms below it stop rendering; and the conversation's root drops `h-full` for
+  `flex-1 min-h-0`, or a band sibling pushes the composer under the fold of an
+  `overflow-hidden` shell.
+- **Sidebar timestamps are a reserved, right-aligned column.** The fix is
+  ordering and width, not an alignment class: the timestamp already sat
+  `shrink-0` but was followed by three further siblings (the reserved
+  availability-chip slot, the ask badge, the unread pill), so it was never at the
+  right edge. It gets its own reserved width and renders even when empty, so a row
+  does not re-truncate its title as an agent starts or stops.
+- **copy · like · dislike sit on one baseline.** `PortalAgentBubble`'s action row
+  is `mt-1.5 flex items-center gap-1` and `PortalRating`'s root repeated all four
+  classes, so the thumbs sat 6px low inside an `items-center` row. `PortalRating`
+  also had **two roots**, so its comment box opened as a flex sibling *beside* the
+  thumbs instead of beneath the message. It is now a single root that owns no
+  margin — and the margin moves to the `PortalDeliverables` call site, which
+  mounts the same component **outside** any flex row and relied on it.
+- **A reply is rateable as soon as its row id exists.** No refetch was needed and
+  none was added: `awaitPersistedReply` already reads the persisted row out of
+  history and was returning only its content and cost, discarding `id` and
+  `my_rating`. Both push sites now carry them. The synchronous fallback genuinely
+  had no id — the server generated one inline and dropped it — so `portal_chat`
+  returns `message_id` and `PortalChatResponse` **declares** it, since a service
+  dict key that the response model does not declare is stripped in silence.
+  The consumer keeps its `v-if="item.message.id"` gate: per the 2026-09-07
+  ledger entry, carry the flag and the identifier together and let the consumer
+  refuse to act on an empty id. System, spoken (voice-call) and progress items
+  stay deliberately unrateable.

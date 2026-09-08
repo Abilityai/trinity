@@ -297,7 +297,6 @@
           @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
           @sessions-changed="onConversationTurnDone"
-          @open-files="openRailOn('files')"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -305,15 +304,35 @@
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
           @main-reset="onMainReset"
-          @open-details="detailsOpen = true"
           @voice-call="onVoiceCall"
           @voice-panel="(v) => { voicePanelVersion = v }"
         >
-          <!-- ent#523: the agent's numbers, always visible under the header.
-               Mounted by the shell because the shell owns which agent is on
-               screen and which side panel is open. -->
+          <!-- ent#523: the agent's numbers, always visible UNDER the header
+               (operator, 2026-09-06: a band "under the header"). Mounted by the
+               shell because the shell owns which agent is on screen.
+               #2580: the band is keyed on the AGENT, which is the issue's own
+               words for the rule. It stays in this slot rather than being
+               hoisted to a sibling of the conversation, and that is a decision,
+               not an oversight: hoisting is the only way to keep the component
+               INSTANCE across a thread switch, but slot content renders where
+               the child puts it — and the child puts this below its `h-14`
+               header, which is where the operator ruled it goes. Hoisted, the
+               band renders above the agent picker, so you read an agent's
+               numbers before its name.
+               So the remount is left in place and made FREE instead: see
+               `usePortalAgentPage`, which now serves the cached payload
+               synchronously during setup (so `loaded` is true on the first
+               paint — no skeleton, no scanline) and skips the refetch inside a
+               freshness window (no request). Every symptom the issue lists —
+               re-render, refetch, scanline, flicker — is gone; what survives is
+               a cheap instance re-creation nobody can see.
+               Making it literal means lifting the header out of
+               `PortalConversation` so the band can sit between them as a
+               sibling. That is a real refactor (the header reads `currentThread`,
+               `isMainChat`, `resetting`, `sending` and the voice state) and it
+               is the follow-up, not this PR. -->
           <template #band>
-            <PortalAgentBand :agent-name="activeAgent.name" />
+            <PortalAgentBand :key="activeAgent.name" :agent-name="activeAgent.name" />
           </template>
           <!-- #2579 AC 3 — the operator's mark on a fallback title. The same
                `titleGenerationNotice` copy the settings panel renders, raised
@@ -439,16 +458,9 @@
         :voice-session-id="voiceCall.voiceSessionId || ''"
         :panel-version="voicePanelVersion"
       />
-      <PortalAgentDetails
-        v-else-if="detailsOpen && activeAgent"
-        :agent-name="activeAgent.name"
-        :agent="activeAgent"
-        :threads="threads"
-        @close="detailsOpen = false"
-        @open-thread="(t) => { detailsOpen = false; openThread(t) }"
-        @use-playbook="(text) => { detailsOpen = false; usePlaybook(text) }"
-      />
-
+      <!-- ent#547: `PortalAgentDetails` is no longer a sibling arm here. It is
+           the rail's Info tab, so this chain is back to two: the voice canvas
+           takes the column during a call, the rail has it otherwise. -->
       <PortalRail
         v-else-if="railVisible"
         :tabs="railTabs"
@@ -474,6 +486,20 @@
         </template>
         <template #tab-files="{ participants }">
           <PortalRailFiles :participants="participants" />
+        </template>
+        <!-- ent#547: Info — the one docked tab whose body owns its own reads
+             rather than taking a shell-fed store (see `feedsFor`). Its door is
+             SOLO_AGENT, so `participants` here is always exactly one name and
+             `activeAgent` is that agent. -->
+        <template #tab-info>
+          <PortalAgentDetails
+            v-if="activeAgent"
+            :agent-name="activeAgent.name"
+            :agent="activeAgent"
+            :threads="threads"
+            @open-thread="openThread"
+            @use-playbook="usePlaybook"
+          />
         </template>
       </PortalRail>
     </div>
@@ -505,6 +531,21 @@
       </template>
       <template #tab-files="{ participants }">
         <PortalRailFiles :participants="participants" />
+      </template>
+      <!-- ent#547: the sheet needs its OWN `#tab-info`. A slot supplied to the
+           column mount alone would leave a phone on the registry's generic empty
+           state — and this form is a net GAIN on mobile, because the header
+           button it replaces opened a panel that was `hidden sm:flex`, i.e. did
+           nothing visible there at all. -->
+      <template #tab-info>
+        <PortalAgentDetails
+          v-if="activeAgent"
+          :agent-name="activeAgent.name"
+          :agent="activeAgent"
+          :threads="threads"
+          @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
+          @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
+        />
       </template>
     </PortalRail>
 
@@ -695,11 +736,9 @@ const stage = computed(() => stageZone({
 const railState = ref(loadRailState(safeStorage()))
 watch(railState, (s) => saveRailState(safeStorage(), s), { deep: true })
 const railSheetOpen = ref(false)
-// ent#523 — Agent details, which takes the rail's place while open. A setup ref
-// of this view for the same reason `railState` is one: it must survive the
-// conversation remounting on a chat switch. Closed on every agent change, since
-// a panel about the previous agent is worse than no panel.
-const detailsOpen = ref(false)
+// ent#547: `detailsOpen` is gone. Agent details is the rail's Info tab, so its
+// open/closed state IS `railState` — one ref for "what is the third column
+// showing", where there were two that could disagree.
 
 // ent#534 — the voice call the conversation reports. Owned here because the
 // shell decides what the right column shows and whether a chat may be left:
@@ -730,9 +769,10 @@ const columns = useColumnResize({
 // open, or Agent details, which takes its place at the same width. Not during
 // a voice call (ent#534): the canvas takes that column at a fixed share and
 // would ignore the width the handle drags.
+// ent#547: one term, not two. Agent details used to open a column WITHOUT
+// `railState.open` being true, which is why it needed its own clause here.
 const thirdColumnResizable = computed(() => (
-  !voiceCall.value.active
-  && ((detailsOpen.value && !!activeAgent.value) || (railVisible.value && railState.value.open))
+  !voiceCall.value.active && railVisible.value && railState.value.open
 ))
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
@@ -1064,7 +1104,6 @@ function openAgentPage(name) {
   pendingSession.value = null
   startingNewChat.value = false
   activeRoomId.value = null
-  detailsOpen.value = false
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
 
@@ -1540,11 +1579,14 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
   landOnAgent(name)
 })
 
-// A panel about the PREVIOUS agent is worse than no panel, so details closes on
-// every agent change rather than following the conversation across.
-watch(() => activeAgent.value?.name, (next, prev) => {
-  if (next !== prev) detailsOpen.value = false
-})
+// ent#547: the "close details on every agent change" watcher is retired with
+// `detailsOpen`. Its reason — a panel about the PREVIOUS agent is worse than no
+// panel — is now satisfied by the body rather than by shutting the column:
+// `PortalAgentDetails` watches `agentName` and reloads its reports, and
+// `usePortalAgentPage` watches it for the shared payload, so the tab follows the
+// agent instead of closing. That is the behaviour a TAB should have — the rail's
+// other four follow the conversation too — and it is why the tab form does not
+// need the dismissal the sibling form did.
 
 // ent#492: a sign-in inside this tab changes whose layout this is, and the
 // identity is read from storage at setup — so it has to be re-read once the
