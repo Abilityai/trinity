@@ -60,6 +60,29 @@ def canvas_db(tmp_path, monkeypatch):
     yield str(db_file)
 
 
+def _set_cap(monkeypatch, value):
+    """Set the per-agent canvas cap the LIVE code will actually read.
+
+    Not `monkeypatch.setattr(db.canvas, "CANVAS_MAX_PER_AGENT", ...)`, which is
+    what this file did first and which fails in a full-suite run while passing
+    in isolation. Some earlier test evicts `db.canvas` from `sys.modules`, so a
+    fresh `import db.canvas` hands back a NEW module object while the live
+    `db._canvas_ops` is still an instance of the OLD class — whose method reads
+    the OLD module's globals. The patch then lands somewhere nothing consults
+    and the cap stays at its default, so the "refuses" assertions fail.
+
+    Patching the bound method's own `__globals__` targets whichever module dict
+    the running code actually closes over, whether or not an eviction happened.
+    Same fix as #2589, for the same reason.
+    """
+    from database import db
+    monkeypatch.setitem(
+        type(db._canvas_ops).upsert_canvas.__globals__,
+        "CANVAS_MAX_PER_AGENT",
+        value,
+    )
+
+
 def _write(agent: str, canvas_id: str, **kw):
     from database import db
     return db.upsert_agent_canvas(agent, canvas_id, blocks=kw.pop("blocks", []), **kw)
@@ -70,9 +93,8 @@ def _write(agent: str, canvas_id: str, **kw):
 def test_the_cap_refuses_a_new_canvas_by_name(canvas_db, monkeypatch):
     """The refusal names the count, the limit, and the way out. An agent reads
     this string — "you are full" with no remedy is a dead end."""
-    import db.canvas as canvas_mod
     from db.canvas import CanvasLimitExceeded
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 3)
+    _set_cap(monkeypatch, 3)
 
     for i in range(3):
         _write("agent-a", f"c{i}")
@@ -88,8 +110,7 @@ def test_updating_an_existing_canvas_is_never_refused_at_the_cap(canvas_db, monk
     """The property that makes the cap safe to ship. An agent at its limit must
     still be able to keep its live surfaces current; a cap that blocked updates
     would freeze the fleet's dashboards the moment it bit."""
-    import db.canvas as canvas_mod
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+    _set_cap(monkeypatch, 2)
 
     _write("agent-a", "c0", title="first")
     _write("agent-a", "c1", title="second")
@@ -103,8 +124,7 @@ def test_the_cap_is_per_agent_not_global(canvas_db, monkeypatch):
     from sqlalchemy import insert
     from db.engine import get_engine
     from db.tables import agent_ownership
-    import db.canvas as canvas_mod
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+    _set_cap(monkeypatch, 2)
 
     with get_engine().begin() as conn:
         conn.execute(insert(agent_ownership).values(
@@ -219,11 +239,10 @@ def test_the_default_canvas_can_be_deleted_and_comes_back_empty(canvas_db):
 def test_deleting_the_default_canvas_frees_a_slot_against_the_cap(canvas_db, monkeypatch):
     """The remedy the refusal names has to actually work on every canvas,
     including the default one."""
-    import db.canvas as canvas_mod
     from db.canvas import CanvasLimitExceeded
     from database import db
     from models import DEFAULT_CANVAS_ID
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+    _set_cap(monkeypatch, 2)
 
     _write("agent-a", DEFAULT_CANVAS_ID)
     _write("agent-a", "other")
