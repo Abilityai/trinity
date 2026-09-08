@@ -302,21 +302,38 @@ export function renameFailureMessage(err) {
   return "Couldn't save the new title. Check your connection and try again."
 }
 
-// --- The agent's chats as tabs (ent#451) ------------------------------------
+// --- The agent's chats as tabs (ent#451, #2579) -----------------------------
 // This user's threads with the active agent, most recent first, as the tab
 // strip above the thread. Rooms are not an agent's tabs (a room has no single
-// agent subject), and another agent's threads are not this agent's. A chat
-// that has not sent its first message is not a tab yet (ruling 2026-09-06:
-// "a new chat exists — tab and sidebar row — once its first message is sent"),
-// so an unsaved new chat renders no active tab rather than a phantom one.
-// #523's pinned Main chat is this list's first slot when it lands; nothing
-// here assumes there is not one.
+// agent subject), and another agent's threads are not this agent's.
+//
+// #2579 REVERSES one half of the 2026-09-06 ruling, deliberately. The ruling —
+// "a new chat exists (tab and sidebar row) once its first message is sent" —
+// stays true for the THREAD: nothing is created before the first message, and
+// this function still never invents a row. What changed is the STRIP: pressing
+// New chat and seeing nothing at all change is the defect the operator
+// reported, so an unsaved ACTIVE chat is drawn as a provisional tab labelled
+// "New chat" with `thread: null` behind it.
+//
+// The provisional tab is keyed ONLY off the caller's explicit `draft` intent,
+// never off "the active id is not in the list". That distinction is the whole
+// safety of it: a cold deep link to a thread the cross-agent batch has not
+// listed yet would otherwise wear a "New chat" label over a real conversation.
+// It carries no special styling either — the label IS the mark, and a second
+// visual language for a tab that lives for one round trip is noise.
+//
+// It is inserted directly AFTER Main, which is the slot the real row takes
+// once the list carries it (the sort below falls back to `created_at`), so
+// adoption swaps the tab in place instead of making it jump.
+export const NEW_CHAT_TAB_ID = '__new_chat__'
+export const NEW_CHAT_TAB_LABEL = 'New chat'
+
 // ent#523: the pinned Main chat's tab label. A constant because three places
 // have to agree on it — the strip, the details list, and the test — and a chat
 // whose title is literally "Main" would otherwise be indistinguishable from it.
 export const MAIN_TAB_LABEL = 'Main'
 
-export function agentChatTabs(threads, agentName) {
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false } = {}) {
   if (!agentName) return []
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
@@ -335,7 +352,7 @@ export function agentChatTabs(threads, agentName) {
     const n = iso ? new Date(iso).getTime() : 0
     return Number.isNaN(n) ? 0 : n
   }
-  return mine
+  const tabs = mine
     .slice()
     // Main first, then recency. Sorted rather than spliced so there is one
     // comparator to reason about, and so a payload that (wrongly) carries two
@@ -353,6 +370,69 @@ export function agentChatTabs(threads, agentName) {
       pinned: !!t.is_main,
       thread: t,
     }))
+  // #2579: the provisional tab. Only on an explicit draft, and only while no
+  // real row already carries the active id — once the list catches up with the
+  // adopted thread the real tab takes over in the same slot.
+  if (draft && !tabs.some((t) => t.id === activeId)) {
+    const after = tabs.length && tabs[0].pinned ? 1 : 0
+    tabs.splice(after, 0, {
+      // Keyed to the adopted id when there is one, so the tab the person is
+      // looking at keeps its identity across the gap between "the thread now
+      // exists" and "the list says so".
+      id: activeId || NEW_CHAT_TAB_ID,
+      label: NEW_CHAT_TAB_LABEL,
+      provisional: true,
+      pinned: false,
+      thread: null,
+    })
+  }
+  return tabs
+}
+
+// #2579: does this agent already have a Main chat on screen? The shell asks
+// before spending a per-agent round trip to mint one (the batch deliberately
+// never mints, so a pair whose chats predate ent#523 has no Main in the list).
+export function agentHasMain(threads, agentName) {
+  if (!agentName) return false
+  return (Array.isArray(threads) ? threads : [])
+    .some((t) => t && !t.is_room && t.agent_name === agentName && !!t.is_main)
+}
+
+// #2579: is this thread inside the window where a generated title may still
+// land? Two `touch_portal_session(added=1)` calls happen per exchange (the
+// user's message and the reply), and `_title_plan` gates on the PRE-turn
+// `message_count <= 2` — so a post-turn count of 2..4 is exactly the `first`
+// plus one `retry` window, and nothing wider.
+//
+// The `>= 2` floor is required, not defensive: `sessions-changed` fires from
+// four sites in the conversation, one of them right after the voice path's
+// `createSession` on a ZERO-message thread, and arming a settle cycle there
+// would poll for a title nothing is generating.
+//
+// Main is NOT excluded. Its tab is labelled by role, but its sidebar row
+// renders `threadTitle`, and post-ent#523 Main is the default landing thread —
+// so excluding it left the single most common conversation showing its first
+// message as its name.
+export function titleSettling(t) {
+  const n = Number(t?.message_count ?? 0)
+  return n >= 2 && n <= 4
+}
+
+// #2579: the re-read schedule after a turn, in ms since turn-done.
+//
+// A best-effort refresh WINDOW, and deliberately NOT a mirror of the server's
+// `PORTAL_TITLE_TIMEOUT_SECONDS` — that is operator-tunable, and a client that
+// invents its own ceiling for a server budget is the #2133 class. Exhausting
+// this schedule is therefore a trigger to ASK the authority (the health
+// record), never a verdict that generation is broken.
+export const TITLE_SETTLE_DELAYS_MS = [2000, 6000, 16000]
+
+// #2579: who may fetch the admin-only title-health endpoint. Request
+// avoidance, not a security gate — `assert_admin` on the endpoint is the
+// authority — but it matters that a portal client never asks: the endpoint is
+// dead for that audience (the #2128 lesson), so the notice must be too.
+export function shouldFetchTitleHealth(isPlatformSession, role) {
+  return !!isPlatformSession && role === 'admin'
 }
 
 // The overflow trigger's label: counted, as the contract asks ("N more").

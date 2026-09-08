@@ -119,3 +119,153 @@ describe('ent#451 — only the first turn of a new chat opens a thread', () => {
     expect(settles).toBeGreaterThanOrEqual(nulls)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #2579 — pressing New chat has to CHANGE something, and Main has to be there
+// ---------------------------------------------------------------------------
+describe('#2579 — the fresh chat is visible and focused', () => {
+  it('adoption runs through ONE seam, and only that seam emits', () => {
+    // Three sites adopt a session: streaming, the sync /chat fallback, and the
+    // voice path's createSession. Raising `bornHere` at some of them drops the
+    // provisional tab exactly when streaming is unavailable — the asymmetry
+    // ent#451's own spec exists to catch. 4 = the declaration + 3 call sites.
+    const src = codeOnly(CONV())
+    expect((src.match(/adoptSession\(/g) || [])).toHaveLength(4)
+    expect((src.match(/emit\('session-adopted'/g) || [])).toHaveLength(1)
+    expect(src).toMatch(/function adoptSession\(id\) \{[\s\S]*?bornHere\.value = true[\s\S]*?emit\('session-adopted', id\)/)
+  })
+
+  it('the provisional tab survives the gap between adoption and the refreshed list', () => {
+    // The shell clears `startingNewChat` on adoption, BEFORE the new list
+    // arrives; `bornHere` is the bridge, and it is spent when the row lands.
+    const src = codeOnly(CONV())
+    expect(src).toMatch(/const bornHere = ref\(false\)/)
+    expect(src).toMatch(/:draft="newChat \|\| bornHere"/)
+    expect(src).toMatch(/watch\(\(\) => props\.threads, \(list\) => \{[\s\S]*?bornHere\.value = false/)
+  })
+
+  it('the composer is focused in the REMOUNTED instance, not before the press', () => {
+    // New chat bumps `convGen`, which remounts the conversation, so focus set
+    // before the press is thrown away. It has to happen in `onMounted`.
+    const src = codeOnly(CONV())
+    expect(src).toMatch(/if \(props\.newChat\) nextTick\(focusComposer\)/)
+    expect(src).toMatch(/function focusComposer\(\) \{ textarea\.value\?\.focus\(\) \}/)
+    // Membership, not the exact shape: #2559 adds `startVoiceCall` beside it for
+    // the Talk door. What this case needs is that the parent can still reach
+    // `focusComposer` — pinning the one-token form would fail any sibling PR
+    // that legitimately exposes a second thing.
+    expect(src).toMatch(/defineExpose\(\{[^}]*\bfocusComposer\b[^}]*\}\)/)
+  })
+
+  it('the notice is a SLOT, not a prop plus markup in the conversation', () => {
+    // The shell owns every fact it carries, and two sibling PRs restructure
+    // this header band next.
+    expect(codeOnly(CONV())).toMatch(/<slot name="notice" \/>/)
+    expect(codeOnly(PORTAL())).toMatch(/<template #notice>/)
+    expect(codeOnly(PORTAL())).toMatch(/data-testid="portal-title-notice"/)
+    expect(codeOnly(PORTAL())).toMatch(/role="status"[\s\S]{0,80}aria-live="polite"/)
+  })
+})
+
+describe('#2579 — Main is listed from the first visit', () => {
+  it('landOnAgent no longer destructures an array, and re-checks the route AFTER the ensure', () => {
+    // `store.fetchSessions` returns `data.sessions || []` — an ARRAY. The old
+    // `const { sessions } = await …` was always undefined, so the repair
+    // branch never ran once. The ensure awaits two round trips where the old
+    // code awaited one, so the overtake guard has to sit between them.
+    const src = codeOnly(PORTAL())
+    expect(src).not.toMatch(/const \{ sessions \} = await store\.fetchSessions/)
+    expect(src).toMatch(/await ensureMainListed\(name\)[\s\S]{0,400}?if \(activeAgentPageName\.value !== name\) return/)
+  })
+
+  it('the ensure is a deduped, capped promise per agent — and both maps die at sign-out', () => {
+    // `fetchAllSessions` NEVER rejects, so a resolved entry over a still-missing
+    // Main would make the miss permanent for the session. And `onSignOut`
+    // resets in place (the OTP form is a branch of this same component), so
+    // client B would inherit client A's resolved promises.
+    const src = codeOnly(PORTAL())
+    expect(src).toMatch(/const mainEnsured = new Map\(\)/)
+    expect(src).toMatch(/const mainAttempts = new Map\(\)/)
+    expect(src).toMatch(/if \(agentHasMain\(threads\.value, name\)\) return Promise\.resolve\(\)/)
+    expect(src).toMatch(/if \(spent >= MAIN_ENSURE_ATTEMPTS\) return Promise\.resolve\(\)/)
+    expect(src).toMatch(/\.catch\(\(\) => \{ mainEnsured\.delete\(name\) \}\)/)
+    expect(src).toMatch(/watch\(activeAgentName, \(name\) => \{[\s\S]*?ensureMainListed\(name\)/)
+    expect(src).toMatch(/mainEnsured\.clear\(\); mainAttempts\.clear\(\)/)
+  })
+})
+
+describe('#2579 — the title settle cycle', () => {
+  const src = () => codeOnly(PORTAL())
+
+  it('bails on a falsy session id and on a failed list read', () => {
+    // `sessions-changed` can fire with a null id, and `fetchAllSessions` returns
+    // the LAST GOOD list rather than rejecting — without the flag check a flaky
+    // network reads as "the title never changed" and reports a working
+    // generator broken.
+    expect(src()).toMatch(/if \(!sessionId\) return refreshThreads\(\)/)
+    expect(src()).toMatch(/if \(list === null \|\| store\.sessionsFailed\) \{ clearTitleSettle\(\); return \}/)
+  })
+
+  it('is cleared from three sites, one of them the conversation change', () => {
+    // Neither the next turn-done nor onBeforeUnmount fires on a thread switch;
+    // without `watch(convKey)` a cycle armed in chat A keeps replacing the list
+    // under the user for 16s and can raise a notice above chat B.
+    const s = src()
+    expect((s.match(/clearTitleSettle\(\)/g) || []).length).toBeGreaterThanOrEqual(4)
+    // Arming is idempotent: the handler clears synchronously but arms after an
+    // await, so two events close together would leave two cycles running.
+    expect(s).toMatch(/function armTitleSettle\(sessionId\) \{\s*clearTitleSettle\(\)/)
+  })
+
+  it('only arms for the thread the user is STILL in', () => {
+    // The event fires for a thread navigated away from — the main way a reply
+    // legitimately arrives unseen. A cycle armed there keeps replacing the list
+    // for 16s and can raise a notice above a different conversation.
+    // `watch(convKey)` only catches a switch that happens AFTER arming.
+    const s = src()
+    expect(s).toMatch(/const stillHere = shouldMarkTurnRead\(sessionId, open\)/)
+    expect(s).toMatch(/\.then\(\(\) => \{ if \(stillHere\) armTitleSettle\(sessionId\) \}\)/)
+    expect(s).toMatch(/watch\(convKey, \(\) => \{ clearTitleSettle\(\) \}\)/)
+    expect(s).toMatch(/onBeforeUnmount\(\(\) => \{[\s\S]*?clearTitleSettle\(\)/)
+  })
+
+  it('re-asks the same question INSIDE the arm, because the caller decided it two awaits ago', () => {
+    // /review. `stillHere` is computed synchronously at the event; the arm runs
+    // after `markRead` and `refreshThreads`. A thread switch inside that window
+    // passes the caller's check AND fires `watch(convKey)` while nothing is
+    // armed yet — so without this second check the cycle is armed on a
+    // conversation the person has already left, which is precisely what the
+    // caller's own comment claims is prevented.
+    const s = src()
+    expect(s).toMatch(
+      /function armTitleSettle\(sessionId\) \{\s*clearTitleSettle\(\)\s*if \(!shouldMarkTurnRead\(sessionId, activeSessionId\.value \|\| pendingSession\.value\)\) return/
+    )
+  })
+
+  it('a list-only re-read still owes the ent#491 seeding it replaces', () => {
+    // /review. `settleTick` assigns `threads.value` exactly as `refreshThreads`
+    // does, so it must seed agent recency the same way or an unranked agent
+    // stays unranked for as long as the cycle keeps overwriting the list.
+    const s = src()
+    expect(s).toMatch(/threads\.value = decorate\(list\)\s*store\.seedAgentRecency\(threads\.value\)/)
+  })
+
+  it('a vanished row stops the cycle WITHOUT a verdict', () => {
+    // A deleted row (Reset, delete) is not evidence the generator works.
+    expect(src()).toMatch(/if \(!row\) \{ clearTitleSettle\(\); return \}/)
+  })
+
+  it('the health fetch is gated, never at bootstrap, and never through @/api', () => {
+    const s = src()
+    expect(s).toMatch(/if \(!shouldFetchTitleHealth\(store\.isPlatformSession, authStore\.role\)\) return/)
+    // Only the exhausted cycle asks — one call site, inside settleTick.
+    expect((s.match(/refreshTitleHealth\(\)/g) || [])).toHaveLength(2)   // the definition + one caller
+    // `@/api` hard-navigates to /login on a 401 under /workspace; a background
+    // diagnostic must not bounce an operator out of their conversation.
+    const store = codeOnly(STORE())
+    expect(store).toMatch(/async fetchTitleGenerationHealth\(\) \{\s*const \{ data \} = await portalHttp\.get/)
+    expect(store).toMatch(/'\/api\/settings\/portal-session-policy'/)
+    // The same field the settings panel reads — one health path, not two.
+    expect(store).toMatch(/return data\?\.title_generation \|\| null/)
+  })
+})

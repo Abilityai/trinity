@@ -112,13 +112,49 @@ be inferred later from the mere fact that it merged; it inherits ent#356's move 
 whole client-portal surface into OSS core.
 
 **The agent's chats are tabs, and a title has three hands (ent#451 remaining slice,
-ent#473).** Above the thread, `PortalChatTabs.vue` renders this user's threads with the
-active agent as `OverflowTabs` (`dense`, counted `moreLabel` → "N more"), most recent
-first — a slice of the sidebar's list, never a second fetch; a room is not an agent's
-tab, and an unsaved new chat is not a tab until its first message is sent (ruling
-2026-09-06). **New chat** is in the conversation header with ⌘J / Ctrl+J, armed on
-`window` at mount above `bootstrap()`'s await and resolving the agent in front of the
-person (page or conversation; a room or the root opens the picker). A title is written
+ent#473, #2579).** Above the thread, `PortalChatTabs.vue` renders this user's threads
+with the active agent as `OverflowTabs` (`dense`, `fixed-width`, counted `moreLabel` →
+"N more"), most recent first — a slice of the sidebar's list, never a second fetch; a
+room is not an agent's tab. **New chat** is in the conversation header with ⌘J / Ctrl+J,
+armed on `window` at mount above `bootstrap()`'s await and resolving the agent in front
+of the person (page or conversation; a room or the root opens the picker).
+
+**#2579 fixed four defects in that strip, and one of them is a recorded reversal.** The
+2026-09-06 ruling ("a new chat exists — tab and sidebar row — once its first message is
+sent") stays true for the **thread**; the **strip** now draws an unsaved active chat as
+a provisional tab labelled `New chat` with `thread: null`, inserted directly after Main
+(the slot the real row takes, so adoption causes no jump) and refusing to emit a select.
+It is keyed **only** off explicit intent — `Portal.vue::startingNewChat`, ORed with
+`PortalConversation`'s `bornHere` — never off "the active id is not in the list", or a
+cold deep link to a thread the batch has not listed yet would wear the label.
+`bornHere` exists because the shell clears `startingNewChat` on `session-adopted`,
+*before* the refreshed list arrives; it is raised in the ONE `adoptSession()` seam all
+three adoption sites go through (streaming, the sync `/chat` fallback, the voice path's
+`createSession` — setting it at one drops the tab exactly when streaming is
+unavailable) and spent when the row lands. **New chat focuses the composer** from
+`onMounted`'s else-branch, because the press bumps `convGen` and remounts the
+conversation, so focus set before it is thrown away. **Tabs are a fixed width**
+(`OverflowTabs` `fixedWidth`, `FIXED_TAB_WIDTH = 'w-40'`, Main included) with clamped
+labels and the full title on `title=`; every width class is gated on the prop, and
+`shrink-0` + the visible nav's `overflow-hidden` are load-bearing (`inlineCount` starts
+at `+Infinity`, so a truncating label would let flex squeeze the pre-measure row while
+the `max-content` mirror still reports 160 — the parity class the pinned-glyph comment
+is about). Geometry is proven in `e2e/workspace-chat-tabs.spec.js`; the node-env unit
+specs can only pin the class strings.
+
+**Main is ensured by the shell, through the read that already mints it (#2579).** The
+batch's no-mint ruling is untouched — `Portal.vue::ensureMainListed(name)` calls the
+per-agent `list_sessions` (which calls `ensure_main_session`) once per agent per
+session when the on-screen list carries no Main for that agent, then re-reads the batch.
+It is a **GET that inserts**. Map-deduplicated in flight, capped at two attempts, and
+both maps cleared in `onSignOut` — that handler resets state in place (the OTP form is a
+branch of the same component), so client B would otherwise inherit client A's resolved
+promises. The cap is load-bearing rather than tidy: `fetchAllSessions` **never rejects**
+(it flags `sessionsFailed` and returns the last good list), so a resolved entry over a
+still-missing Main would make the miss permanent for the session. `landOnAgent`'s repair
+branch had in fact never run — it destructured `{ sessions }` off an array.
+
+A title is written
 by three hands — the derived fallback, the ent#186 generator, and a person — and
 `enterprise_portal_sessions.title_source` (NULL · `generated` · `user`; SQLite
 `portal_session_title_source` + Alembic `0052`, no backfill) records which. **The
@@ -139,7 +175,39 @@ trigger with the id only (#918). Generator health is an in-process record
 or `failing` (3 consecutive), stays quiet in it, re-arms on recovery, and rides
 `GET /api/settings/portal-session-policy` → `title_generation` for the Workspace
 sessions panel's notice — the operator side of a path that is otherwise fail-soft by
-design. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
+design.
+
+**#2579 — the generator runs concurrently with the turn, and the client keeps a belt.**
+The spawn was fired as the turn *returned*, so the client's own turn-done refresh always
+lost the race and read the derived fallback; the generated title arrived only on some
+later refresh, which is why a chat wore its first message as its name. The ordering is
+now `_persist_user_turn` → `_spawn_title_generation(..., reply="")` → the turn, and
+**both** halves matter: before the turn so the refresh does not lose the race, after the
+persist because the derived fallback must exist first (the generated write is guarded
+against a person's rename, not against an empty row). `_title_plan` does not move — it
+was already decided pre-turn. With no reply, `_generate_thread_title` picks
+`_TITLE_PROMPT_OPENER`, a separate constant rather than the two-block prompt formatted
+with an empty `<assistant_reply>` (an empty block in a prompt that names it invites the
+model to describe the emptiness); it carries the same never-follow-instructions
+hardening. Two deliberate consequences: the title comes from the opening message alone
+(the `retry` attempt is the disambiguator that remains) and a **failed** turn still
+titles its thread, consistent with `_persist_user_turn`'s own ruling. Client-side, the
+shell re-reads the list on `TITLE_SETTLE_DELAYS_MS` after a turn on a thread inside the
+two-attempt window (`titleSettling`, post-turn `message_count` 2..4, Main included) and
+stops as soon as the title differs. That schedule is a best-effort window and
+deliberately **not** a mirror of `PORTAL_TITLE_TIMEOUT_SECONDS` (operator-tunable — the
+#2133 class), so exhausting it asks the health record rather than deciding; the cycle
+aborts on `store.sessionsFailed`, stops without a verdict on a vanished row, and is
+cleared from three sites (the next turn-done, `onBeforeUnmount`, and `watch(convKey)` —
+the only one that fires on a thread switch). The notice rides
+`PortalConversation`'s `#notice` slot for platform admins only
+(`shouldFetchTitleHealth`), through `clientPortal.js::fetchTitleGenerationHealth` on
+`portalHttp` — never `@/api`, whose 401 handler hard-navigates to `/login` under
+`/workspace` and would bounce an operator out of a conversation over a background
+diagnostic. **Known blind spot, accepted:** `_title_health` is a module global and prod
+runs `--workers 2`, so a probe can land on a worker that ran no generation and answer
+`unknown`, which shows no notice. Honest under-reporting; making it cross-worker means
+new Redis-shared state for a diagnostic. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
 room header (its clicks and keys stop inside it, or a rename would open the chat it is
 renaming). **OSS-core by decision, deliberately ungated** — the ent#356/ent#451 ruling
 for the whole surface, recorded here so it is never inferred from the merge. See

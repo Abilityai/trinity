@@ -1004,12 +1004,44 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
+    //
+    // #2579: this read is also the only one that MINTS the pinned Main chat
+    // (`list_sessions` → `ensure_main_session`); the cross-agent batch
+    // deliberately never does. Returns an ARRAY, not `{ sessions }` — a caller
+    // that destructures gets `undefined` and silently takes its miss branch.
     async fetchSessions(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
         { headers: this.authHeader }
       )
       return data.sessions || []
+    },
+
+    // #2579 — the operator-only title-generation health, for the notice under
+    // the Workspace tab strip. Same payload the settings panel reads.
+    //
+    // `portalHttp`, deliberately, not `@/api` — for the credential, not for the
+    // bounce. This store's request interceptor is the ONE place that decides a
+    // workspace `Authorization` (portal token, else the platform JWT, else
+    // nothing), and every other workspace read already goes through it; adding
+    // `@/api` here would put a second credential decision in this file for a
+    // single diagnostic.
+    //
+    // /review correction: an earlier version of this note claimed `@/api` would
+    // bounce an operator on a 401 where `portalHttp` would not. It would not —
+    // `portalHttp`'s own 401 handler calls `_onPlatformSessionLost` for exactly
+    // a platform session, which logs out and pushes `/login`. The difference is
+    // a router push versus `@/api`'s hard `window.location.href`, so the choice
+    // stands but the reason recorded for it did not.
+    //
+    // Fail-soft on purpose: the caller treats any refusal as "no notice". The
+    // endpoint is `assert_admin`-gated, which is the authority; the client-side
+    // `shouldFetchTitleHealth` gate only avoids the request.
+    async fetchTitleGenerationHealth() {
+      const { data } = await portalHttp.get('/api/settings/portal-session-policy', {
+        headers: this.authHeader,
+      })
+      return data?.title_generation || null
     },
 
     // Open a fresh conversation thread ("New chat"). Returns the empty session.

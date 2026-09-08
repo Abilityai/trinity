@@ -228,6 +228,29 @@ The existing `OverflowTabs` component (#1114, `docs/memory/feature-flows/agent-d
 - **Do:** OverflowTabs with the counted "+N more" menu.
 - **Don't:** tabs wrapping to a second row, or silent truncation.
 
+**Fixed-width variant — `fixedWidth` (#2579, amendment to "never truncate").** "Never
+truncate" governs the **set**: the strip overflows into a counted menu rather than
+dropping or wrapping tabs, and that is unchanged. It does *not* mean every label must be
+laid out at its intrinsic width — which for a strip of **unbounded** labels (user and
+model text, today only the Workspace chat tabs) means one long title stretches its tab
+and pushes every sibling under "N more". Such a strip may opt into `fixedWidth`.
+
+**Recipe:** every tab `FIXED_TAB_WIDTH` (`w-40` / 160px) and `shrink-0`, Main and short
+labels included — uniform width is the point, so an ellipsis is a property of the
+content, not a jagged strip; the label clamps in a `min-w-0 truncate` span; the full
+text rides `title=` on the button **and** on the overflow-menu row, so nothing is
+recoverable only by widening the window.
+
+- **Do:** opt in per consumer; keep every width class behind the prop.
+- **Don't:** make it the default, couple it to `dense`, or clamp a strip of short fixed
+  labels — a tooltip on "Overview" is noise, and a 160px "Files" tab is waste.
+- **Watch:** the width class belongs in **both** rows (a mirror that measures narrower
+  than the visible row overflows one tab too late), but `shrink-0` and the visible nav's
+  `overflow-hidden` belong to the **visible** row only. `inlineCount` starts at
+  `+Infinity`, so every tab is inline before the first measurement; a truncating label
+  drops the button's min-content to padding, and flex's default shrink would squeeze the
+  row for a frame while the `width: max-content` mirror still reports 160.
+
 ### Data table
 
 **Recipe:** header — chrome bg, mono 10.5 caps tracking .1em, weight 500, tertiary ink, `position: sticky; top: 0` while scrolling · rows ≥40px (padding 10×14), 1px dividers (gray-200 / gray-750), hover row → chrome bg · status cells use BaseBadge · numbers right-aligned, mono 12.5, tabular-nums.
