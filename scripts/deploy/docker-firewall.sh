@@ -25,11 +25,21 @@
 #      it the agents lose outbound internet completely: their traffic leaves via
 #      the public interface and the answers arrive back on it, inbound, into the
 #      container. This rule is the difference between "closed" and "broken".
-#   2. -i docker0 / -i br+ — container->internet and container->container.
+#   2. link-local (169.254.0.0/16, RFC 3927) is dropped OUTBOUND from containers,
+#      and it has to sit ahead of the RETURNs below or container traffic leaves
+#      before ever reaching it. That range is where every cloud publishes its
+#      instance metadata service, and on this platform the droplet's user-data is
+#      served from it verbatim, for the life of the machine — which on a
+#      script-installed instance means the Trinity admin password and the Claude
+#      subscription token. Nothing Trinity runs has any business reading it, and
+#      an agent is precisely the untrusted-code case. Written as the RFC range
+#      rather than the well-known .169.254 address: the property being blocked is
+#      "link-local, host-adjacent, not routable", not one magic host.
+#   3. -i docker0 / -i br+ — container->internet and container->container.
 #      Naming what is INSIDE, rather than which interface is outside, is why this
 #      also covers a cloud provider's PRIVATE interface (DigitalOcean's eth1 /
 #      VPC) for free. The old rule named eth0 and left the VPC side open.
-#   3. everything else entering a container: DROP.
+#   4. everything else entering a container: DROP.
 #
 # IPv4 only, deliberately: Docker only maintains a DOCKER-USER chain in ip6tables
 # when the daemon has IPv6 enabled, which no Trinity compose file does.
@@ -52,6 +62,7 @@ done
 if iptables -N TRINITY-FW 2>/dev/null || ! iptables -C TRINITY-FW -j DROP 2>/dev/null; then
     iptables -F TRINITY-FW
     iptables -A TRINITY-FW -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+    iptables -A TRINITY-FW -d 169.254.0.0/16 -j DROP
     iptables -A TRINITY-FW -i docker0 -j RETURN
     iptables -A TRINITY-FW -i br+ -j RETURN
     iptables -A TRINITY-FW -j DROP

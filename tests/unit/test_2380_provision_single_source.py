@@ -89,22 +89,52 @@ def test_firewall_has_no_port_list() -> None:
     assert "multiport" not in body, "a --dports list is a maintained list by another name"
 
 
-def test_firewall_returns_established_before_it_drops() -> None:
-    """Order is the property. A DROP ahead of the conntrack RETURN closes the
-    published ports *and* kills every container's outbound internet, because the
-    replies arrive inbound on the public interface."""
-    rules = [
+def _firewall_rules() -> list[str]:
+    return [
         line.strip()
         for line in _FIREWALL.read_text().splitlines()
         if re.match(r"^\s*iptables -A TRINITY-FW\b", line)
     ]
+
+
+def test_firewall_returns_established_before_it_drops() -> None:
+    """Order is the property. A catch-all DROP ahead of the conntrack RETURN
+    closes the published ports *and* kills every container's outbound internet,
+    because the replies arrive inbound on the public interface."""
+    rules = _firewall_rules()
     assert rules, "TRINITY-FW is no longer populated by -A rules"
-    drop = next(i for i, r in enumerate(rules) if r.endswith("-j DROP"))
+    catch_all = next(i for i, r in enumerate(rules) if r == "iptables -A TRINITY-FW -j DROP")
     established = next(i for i, r in enumerate(rules) if "RELATED,ESTABLISHED" in r)
     bridges = [i for i, r in enumerate(rules) if "-i docker0" in r or "-i br+" in r]
-    assert established < drop, "container replies must RETURN before the DROP"
-    assert bridges and max(bridges) < drop, "container-originated traffic must RETURN before the DROP"
-    assert drop == len(rules) - 1, "the DROP must be the last rule in the chain"
+    assert established < catch_all, "container replies must RETURN before the DROP"
+    assert bridges and max(bridges) < catch_all, "container-originated traffic must RETURN before the DROP"
+    assert catch_all == len(rules) - 1, "the catch-all DROP must be the last rule in the chain"
+
+
+def test_containers_cannot_reach_the_cloud_metadata_service() -> None:
+    """The droplet's user-data is served verbatim from link-local for the life of
+    the machine, and on a script-installed instance it carries the Trinity admin
+    password and the operator's Claude subscription token. An agent container is
+    exactly the untrusted-code case, so the range is blocked outbound.
+
+    Two things are asserted, and the ordering one is the load-bearing half: the
+    DROP has to sit AHEAD of the bridge RETURNs, or container traffic returns out
+    of the chain before ever reaching it and the rule is decoration."""
+    rules = _firewall_rules()
+    link_local = [i for i, r in enumerate(rules) if "169.254.0.0/16" in r and r.endswith("-j DROP")]
+    assert link_local, "no link-local DROP — containers can read the instance metadata service"
+    bridges = [i for i, r in enumerate(rules) if "-i docker0" in r or "-i br+" in r]
+    assert bridges, "the bridge RETURNs are gone; this test's ordering claim is meaningless"
+    assert max(link_local) < min(bridges), (
+        "the link-local DROP must precede the bridge RETURNs, or container "
+        "traffic RETURNs before it is ever evaluated"
+    )
+    # The RFC 3927 range, not the well-known single host: the property is
+    # "link-local, host-adjacent, not routable", and every cloud's metadata
+    # endpoint lives in it.
+    assert not any(
+        r.endswith("-j DROP") and "169.254.169.254" in r and "/16" not in r for r in rules
+    ), "block the RFC 3927 range, not one magic address"
 
 
 def test_provision_is_off_by_default_and_refuses_a_workstation() -> None:

@@ -144,7 +144,10 @@ the TLS story holds at all — it is the SPA, moved off `:80` so Caddy can own
 certificate and past the `http→https` redirect. Now everything entering a
 container from off-box is dropped, whatever the port, with two RETURNs ahead of
 it: replies to connections a container opened (without which agents lose outbound
-internet), and traffic from Docker's own bridges. Naming what is *inside* rather
+internet), and traffic from Docker's own bridges. Link-local (169.254.0.0/16) is
+dropped outbound between the two, ahead of the bridge RETURNs — that range serves
+the droplet's own user-data verbatim for the life of the machine, and an agent
+container has no business reading it. Naming what is *inside* rather
 than which interface is outside also covers DigitalOcean's private `eth1` for
 free. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
 
