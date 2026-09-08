@@ -21,7 +21,7 @@ Related: [public-channel-model.md](public-channel-model.md) (#894, the middle ru
 [workspace-absorbs-session.md](workspace-absorbs-session.md) (the turn engine),
 [workspace-roster-briefing.md](workspace-roster-briefing.md) (the payload this rides on).
 
-## User story
+## User Story
 
 > As someone working with an agent in the Workspace, I want to pick how capable or how fast
 > this chat should be, in words I understand, without being shown a list of raw model ids —
@@ -29,6 +29,15 @@ Related: [public-channel-model.md](public-channel-model.md) (#894, the middle ru
 > I selected.
 
 ---
+
+## Entry Points
+
+| Surface | Where | What it does |
+|---|---|---|
+| UI | `PortalConversation.vue` — the composer row, between the mic button and the textarea | the `BaseSelect`; renders only when the roster says this principal may choose |
+| API (read) | `GET /api/enterprise/client-portal/my-agents` | carries `model_options` (instance-level) and each card's `model_default` — the capability channel (#2128) |
+| API (turn) | `POST /api/enterprise/client-portal/agents/{name}/chat` and `.../chat/stream` | both accept `model`; both validate it before anything else. `/chat` is also ent#83's headless surface and the browser's fallback when streaming fails, which is why a check on one route only is a gap that opens exactly when the other is in use |
+| API (write) | `PUT /api/users/me/preferences/workspace_model` | the user's server record — not a new endpoint, one line in `PREFERENCE_KEYS` |
 
 ## The three states
 
@@ -292,7 +301,7 @@ as the cause.
 
 ---
 
-## Degradation — honest, and never a lie about billing
+## Error Handling — degradation that is honest, and never a lie about billing
 
 | case | answer |
 |---|---|
@@ -347,7 +356,18 @@ runs on the voice provider's own model.
 
 ---
 
-## Security
+## Side Effects
+
+| Effect | Where | Note |
+|---|---|---|
+| `schedule_executions.model_used` written | both pre-creation sites | **write-once at row creation** — there is no UPDATE path, which is why the ladder must resolve to a concrete id (see *The turn*) |
+| The user's `workspace_model` record written | `PUT /api/users/me/preferences/workspace_model` | per (user, agent); a `gesture` origin, so it is the user's own change and not a reconciliation |
+| The record CLEARED by the self-heal | on `settleDelivery` only | deliberately not on `rememberVerdict`, which also runs on load/reattach off the durable Redis verdict (15-min TTL) — clearing there wiped a re-picked model on every refresh inside that window, for every device |
+| Idempotency key scope carries the **requested** model | both turn routes | a different pick must not replay the previous turn's snapshot; the *requested* and not the resolved value, so an owner editing `public_channel_model` between two genuine retries of one request does not fork the scope |
+| No new audit event, no new WS broadcast | — | the turn's own activity and events are unchanged; `triggered_by` stays `"public"` |
+| One extra `/containers/json` per roster load | `_runtime_map` | O(1) in fleet size, not the N+1 #2160 forbids. Registered as known debt — it duplicates `agent_container_states`' call |
+
+## Security Considerations
 
 - **New attack surface:** one request field, `PortalChatRequest.model`.
 - **The closed allow-list is the security control, not a nicety.** The value reaches the
@@ -395,9 +415,7 @@ the same ladder, and it belongs in the release note.
 
 ---
 
-## Files
-
-### Backend
+## Backend Layer
 
 | File | Change |
 |---|---|
@@ -414,7 +432,7 @@ the same ladder, and it belongs in the release note.
 `services/session_turn_service.py` is **not touched** — `run_resumable_turn` already
 forwards `model` through `**execute_kwargs` on the initial call and on the cold retry.
 
-### Frontend
+## Frontend Layer
 
 | File | Change |
 |---|---|
@@ -434,6 +452,25 @@ forwards `model` through `**execute_kwargs` on the initial call and on the cold 
 | `tests/unit/test_2086_model_catalog_parity.py` | the emitted key set; `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`; every workspace entry has a distinct tier |
 | `src/frontend/tests/unit/portalModelChoice.spec.js` | the pure rules; the curated set against the generated catalog; source-structure assertions for the wiring |
 
+The runtime read the capability gate is *driven by* has its own block in the first file:
+`agent_container_runtimes` reading `attrs["Labels"]` under `sparse=True` (docker-py's
+`.labels` **raises** there, so a `.labels` rewrite would be swallowed by the leaf's own
+`except` and answer `None` forever — the control silently returns on every Codex agent),
+keyed by container name and not by the stale `trinity.agent-name` label, `{}` vs `None`,
+a label-less legacy container reading `claude-code`, and `_runtime_map`'s
+narrow/validate/never-raise guards. Twin of
+`test_2196_roster_availability.py::test_the_batch_read_uses_the_sparse_attrs_shape`.
+
+**Status: ⚠️ — verified as far as this machine can go, and no further.**
+
+Proven on a live sibling stack (real Docker, real database, the real routes): the runtime
+gate against a live daemon (a `codex` agent gets `model_default: null`, a `claude-code` one
+gets a populated card); **all three ladder rungs stamping the real execution row** — an
+explicit pick, `model: ""` resolving to the platform default rather than NULL, and the #894
+override reaching the row *including for an external portal-token client*; the 422's string
+detail bounded at 64; and a portal client's hand-crafted `model` refused **403**, not
+ignored.
+
 **Verification honesty.** `ANTHROPIC_API_KEY` is present but empty locally, so a
 locally-created agent cannot execute a turn: the suites prove the value is threaded,
 validated and stamped — **not** that the agent ran on it. And because vitest runs
@@ -445,3 +482,15 @@ human checks.
 reconciled with what the agent actually ran — matching `execute_task`'s own semantics.
 There is also no per-instance curation: narrowing or disabling the control is a code change,
 not a setting.
+
+---
+
+## Related Flows
+
+| Flow | Relationship |
+|---|---|
+| [public-channel-model.md](public-channel-model.md) (#894) | **Upstream.** Owns the per-agent override this flow's middle rung reads, and the `PUBLIC_CHANNEL_MODELS` set the curated set is a subset of. That flow's own doc records the deliberate change: the rung now applies to every portal turn, not only a platform user's. |
+| [workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md) | **Upstream.** The roster this flow hangs `model_options` and each card's `model_default` on — the capability channel a portal principal actually has (#2128). |
+| [workspace-chat-tabs-and-titles.md](workspace-chat-tabs-and-titles.md) | **Sibling.** The same composer and the same session; a chat tab does not change which model a turn runs on. |
+| `model_catalog` (#2086) | **Upstream.** The ONE catalog. Curation is two appended fields on it, never a second hand-typed list; `src/frontend/src/constants/modelCatalog.js` is generated from it. |
+| Workspace sequence — ent#547 (header), trinity#2581, #2582/ent#548 (Files tab) | **Siblings.** All touch `PortalConversation.vue`; merge order is fixed for that reason. This is step 3 of 7. |
