@@ -660,7 +660,41 @@ and when to retry. Uploads run **sequentially** — twenty parallel requests is 
 way to trip the per-email limiter (ent#287). A room's drop fans out to every
 participating agent's inbox and the chip names the recipients (operator decision 13). The
 destination is the caller's `upload`, so the ent#484/#486 working folder can take it over
-without the gesture changing.
+without the gesture changing. **Since #2582 the upload also announces itself to the rail
+owner**: `stores/clientPortal.js::uploadDocument` — the single funnel all three surfaces
+already call — adds the agent to a pending SET that `usePortalRailFeeds` drains into a
+targeted inbox re-read. A set and not a scalar, because the two real gestures both defeat
+a scalar: a multi-file batch uploads sequentially without awaiting the re-read (a listing
+snapshotted before file 2 landed), and a room's fan-out mutates the signal once per agent
+inside one Vue flush window (only the last survives). The drain coalesces leading AND
+trailing and is ordered against `refresh()` by a **per-agent inbox epoch** the refresh
+snapshots before its awaits, so a refresh issued before the upload but resolving after it
+cannot clobber the fresh listing. Per agent and not one shared token, because a room's drop
+runs three of these concurrently for three different agents and a shared counter lets each
+invalidate the last.
+
+**The Files tab's own verbs (#2582 + ent#548).** Rows render from ONE flat projection
+(`components/portal/portalFiles.js::flattenFiles`) that owns both the render order and the
+preview index — two orderings would drift and the modal would silently open the wrong
+file. Download on either list; a preview modal for images and displayable text with
+next/previous over the *previewable* subset; and a delete whose affordance depends on the
+case:
+
+| Case | Affordance | Mechanism |
+|---|---|---|
+| My own upload | **Delete** (real) | `rm -f --` in the container inbox |
+| Agent-shared, I am a viewer | **Remove from my list** | a `portal_file_dismissals` row; the share is untouched |
+| Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
+
+**The matrix is session-type dependent and the UI copy says so.** `PortalPrincipal` is
+`(email, is_platform)` and carries no role, so `include_owned` is `principal.is_platform`
+at every call site (ent#358). Therefore a **non-owner admin is a viewer here** — stricter
+than the platform surface, and correct — and an **owner signed in with a magic-link portal
+token also gets the viewer affordance**. `portal_owns_agent` is the same membership the
+roster card renders, so the UI and the enforcement cannot disagree: the affordance is
+simply not offered rather than offered-and-refused. `portal_file_dismissals` is per-viewer
+storage because `agent_shared_files` has no audience column and `user_ui_preferences` is
+FK'd to `users.id`, which a portal principal has no row in.
 
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
 

@@ -648,6 +648,87 @@
 - **Flow**: `docs/memory/feature-flows/activity-stream.md`,
   `docs/memory/feature-flows/task-execution-service.md`
 
+### 10.15.1 Unmeasurable Durations Are NULL (#2434)
+- **Status**: ✅ Implemented (2026-09-07, Issue #2434); amends §10.15
+- **GitHub Issue**: #2434; recurrence chain #1832 (low end) → #2243 (high end, in CI) → #2434 (high end, in production)
+- **Description**: `duration_ms` is a SQLAlchemy `Integer` (PostgreSQL `int4`, ceiling `2^31−1` ms =
+  **24.855 days**). The §10.15 backstop and every watchdog sweep closed a stale row with a
+  **fabricated** `duration_ms = now − started_at`. Past 24.8 days that `UPDATE` raises
+  `psycopg2.errors.NumericValueOutOfRange`. **The blast radius is the transaction, not the row**:
+  each sweep runs its SELECT *and* its whole per-row UPDATE loop inside one
+  `with get_engine().begin() as conn:`, so on PostgreSQL the first overflow aborts the transaction,
+  every later `conn.execute` raises `InFailedSqlTransaction`, and `begin()` rolls back rows already
+  updated in that batch. While one ≥24.8-day row exists, **no stale execution and no stale activity
+  anywhere in the fleet is ever closed**, every cycle, forever — and each sweep reports itself
+  complete (`recovered=0 … errors=1`) because `cleanup_service` catches, logs and returns a falsy
+  value. #2216's restore path leads straight here: an instance restored from a backup older than
+  24.8 days lands wedged on first boot. Invisible in CI because **SQLite does not enforce INTEGER
+  width** — the same code path succeeds on an 8-byte int.
+- **The rule**: *a duration nobody measured is `NULL`, never a number.*
+  - **Fabrication sites write `NULL` unconditionally** — the sweep is inventing the end time, so
+    there is no measurement to record at any magnitude. `db/schedules/cleanup.py`
+    (`mark_stale_executions_failed`, `mark_no_session_executions_failed`,
+    `fail_stale_slot_execution`, `mark_execution_failed_by_watchdog`) and `db/activities.py`
+    (`close_open_activities_for_executions`, `mark_stale_activities_failed`). Deliberately **one
+    rule, not a magnitude-dependent two**: *all* swept rows now record NULL, not only overflowing
+    ones. The weakest case is `mark_no_session_executions_failed`, whose ~60 s lifetime is arguably
+    real; it is included for uniformity and that is recorded rather than glossed.
+  - **Measured writers route through one representability helper**,
+    `utils/helpers.py::duration_ms_between(started_at, completed_at)` — `max(0, …)` at the low end
+    (#1832, unchanged) and `None` above the int4 ceiling, where a value that large means
+    `started_at` is stale or corrupt, not that the work ran that long. Applied at
+    `db/schedules/executions.py::update_execution_status`, `db/activities.py::complete_activity`,
+    and both `src/scheduler/database.py` finalizers. The helper takes both datetimes as parameters
+    and never calls `now()` — the backend passes **aware** datetimes and the scheduler **naive**
+    ones, and mixing them would raise. Its high branch logs a `warning` carrying the row id and the
+    computed value, so the number survives where an operator can find it (NULL alone collides three
+    meanings: swept, unrepresentable, bulk-terminated).
+  - `finalize_orphaned_skipped_executions` keeps its literal `duration_ms=0` (a skipped row ran for
+    zero time — that *is* a measurement).
+  - Invariant #16 applies: `src/scheduler` cannot import `utils/helpers.py`, so the helper is a
+    **vendored behavioural mirror** in `src/scheduler/utils.py`, parity-tested — not an import.
+- **NULL is already a blessed value on terminal rows**: canary **E-03**
+  (`canary/invariants/e03_completed_rows_populated.py`) deliberately omits a `duration_ms IS NOT
+  NULL` clause because the bulk queue-terminators already leave it NULL. The column is already
+  nullable — **no schema change, so Invariant #9's dual-track migration is not engaged** (no SQLite
+  `MIGRATIONS` entry, no Alembic revision, no `schema.py` / `tables.py` edit).
+- **The column is deliberately NOT widened.** `execution_timeout_seconds` is hard-bounded to
+  [60, 7200] (TIMEOUT-001), so a legitimate `schedule_executions` duration tops out at 7.2M ms —
+  298× below the int4 ceiling — and `agent_loop_runs.duration_ms` is copied from an execution, so it
+  inherits that bound. Stated honestly, that bound does **not** cover `agent_activities` (non-dispatch
+  activity types have no owning closer and can be arbitrarily old — the §10.15 class) or
+  `voip_call_logs` (`VOIP_MAX_CALL_DURATION` is an unvalidated env int). So the helper is required
+  **regardless of column width**, and widening is an independent, optional hardening — deferred, not
+  an alternative. Widening would also fix neither the poison-transaction property above nor
+  `process_schedule_executions.duration_ms`, which exists in no migration track at all. Four OSS
+  tables carry the column (`schedule_executions`, `agent_loop_runs`, `agent_activities`,
+  `voip_call_logs`), not the six the issue names, plus that scheduler-only fifth.
+- **Hostile input path closed in the same change**: `models.TaskResultPayload.execution_time_ms` is
+  agent-supplied and was unbounded, arriving on the #1083 async result callback and landing in two
+  `Integer` columns — bounded to `ge=0, le=2**31-1`.
+- **Reader contract**: every consumer already tolerates NULL — two NULL-skipping SQL `AVG`
+  aggregates, four guarded `int()` call sites, **zero** `ORDER BY` / comparison / `sorted()` on the
+  column, and every Pydantic duration field `Optional`. One user-visible change:
+  `ReplayTimeline.vue` renders a swept activity as a 30 s bar flagged *estimated* instead of a
+  fabricated ~120-minute one.
+- **Operator remedy for an already-wedged instance**: the upgrade **restart** self-heals — boot
+  recovery closes the rows, capacity is released, `_reconcile_orphaned_slots` reclaims the slot, and
+  canary **E-01** (pinned permanently critical by this bug, with no way to clear it) goes green on
+  the next cycle. No manual SQL required post-upgrade.
+- **Guards**: `tests/unit/test_2434_duration_overflow.py` (the regression proof — **db-ops layer,
+  never the service layer**, which catches and returns falsy so a service-layer test passes on
+  pre-fix code; seeds **two** stale rows so the batch-integrity property is what is pinned, since a
+  one-row seed passes against a per-row `except`), the extended AST source guard in
+  `tests/unit/test_1832_duration_clamp.py` (now covering `ast.keyword` sinks — `.values(duration_ms=…)`
+  is the actual sink at all six fabrication sites — and classifying acceptance per site), and
+  `tests/unit/test_1713_scheduler_utils_parity.py` for the vendored mirror. The proof requires
+  **PostgreSQL**: a SQLite-only run cannot fail, so `schema-parity.yml` (a *required*, unconditional
+  check that already path-matches `src/backend/db/**` and `utils/helpers.py`) now stands up a
+  `postgres:16-alpine` service and exports `TEST_POSTGRES_URL` for the backend-parametrized tests.
+- **Flow**: `docs/memory/feature-flows/cleanup-service.md`,
+  `docs/memory/feature-flows/activity-stream.md`,
+  `docs/memory/feature-flows/dashboard-timeline-view.md`
+
 ### 10.16 Template-Declared Schedules at Creation (trinity-enterprise#89)
 - **Status**: ✅ Implemented (2026-08-02, trinity-enterprise#89, sub of Epic #122)
 - **GitHub Issue**: trinity-enterprise#89 (code lands as a public `abilityai/trinity` PR)

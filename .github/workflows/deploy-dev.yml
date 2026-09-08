@@ -52,8 +52,17 @@ jobs:
             cd ~/trinity
 
             echo "=== Pull ==="
-            git fetch origin dev
-            git checkout dev
+            # #2578 — `--no-recurse-submodules` on every git command here: git's
+            # default on-demand recursion fetches the submodule whenever a fetched
+            # commit moves its gitlink, over its STORED SSH remote, BEFORE the PAT
+            # transport below exists — a full stop under `set -e` on every pointer
+            # bump, self-healing on the next push (the refs advance first). The
+            # flag beats every config source; the pull runs its own fetch so it
+            # needs its own; the checkout's is a belt. The block below is the ONLY
+            # sync path. Reasoning: trinity#2578, docs/ENTERPRISE.md. Keep this
+            # script short: it embeds expressions, so GitHub caps it (trinity#2625).
+            git fetch --no-recurse-submodules origin dev
+            git checkout --no-recurse-submodules dev
             # The dev VM has a persistent checkout that may carry hand-applied
             # fixes (e.g. docker-compose.prod.yml tweaks). `git pull` aborts on
             # dirty tree, blocking every deploy. Stash with a deploy-run-keyed
@@ -80,7 +89,7 @@ jobs:
             # blocks the pull; untracked Docker-owned files don't block git.
             STASH_MSG="auto-stash-deploy-${{ github.run_id }}"
             git stash push -m "${STASH_MSG}" || echo "No local changes to stash"
-            git pull --ff-only origin dev
+            git pull --ff-only --no-recurse-submodules origin dev
             echo "Version: $(git log -1 --oneline)"
 
             echo "=== Submodule (enterprise) ==="
@@ -116,6 +125,7 @@ jobs:
             # so the VM-side fix documented in docs/ENTERPRISE.md remains valid.
             ENT_PAT="${{ secrets.ENT_SUBMODULE_PAT }}"
             ENT_LOG=$(mktemp)
+            ENT_STALE=0
             if [ -n "$ENT_PAT" ]; then
               echo "ENTERPRISE: using HTTPS transport (ENT_SUBMODULE_PAT configured)"
               git -c "url.https://x-access-token:${ENT_PAT}@github.com/.insteadOf=git@github.com:" \
@@ -140,7 +150,12 @@ jobs:
               WANT=$(git rev-parse HEAD:src/backend/enterprise 2>/dev/null || echo "none")
               HAVE=$(git -C src/backend/enterprise rev-parse HEAD 2>/dev/null || echo "none")
               if [ "$WANT" != "$HAVE" ]; then
-                echo "::warning::Enterprise submodule STALE: checked out ${HAVE}, dev records ${WANT} — update failed; deploying the old enterprise tree"
+                echo "::warning::Enterprise submodule STALE: checked out ${HAVE}, dev records ${WANT} — update failed; the old tree is deployed and this run FAILS at the end (#2578)"
+                # #2578 — the run fails at the END of the script; classify the
+                # cause here, beside the evidence (the classifier always exits 0).
+                ENT_STALE=1
+                bash scripts/ci/classify-submodule-failure.sh "$ENT_LOG" stale \
+                  | sed 's/^/ENTERPRISE: /' || true
               fi
             else
               echo "::warning::Enterprise submodule init failed — deploying in OSS-only mode"
@@ -309,6 +324,13 @@ jobs:
             # check guarded the louder failure while the quiet one shipped. The
             # else-branch below closes that.
             if [ -f src/backend/enterprise/backend/__init__.py ]; then
+              # #2578 — a STALE tree is a FAILED deploy: this block is now the
+              # ONLY sync path, and a sole path that merely warns ships the OLD
+              # pin under a green run (the #2246 class). Printed first; the exit
+              # is at the END of the script; no DEPLOY_ALLOW_OSS_ONLY hatch.
+              if [ "$ENT_STALE" = "1" ]; then
+                echo "::error::Enterprise submodule STALE: checked out ${HAVE}, dev records ${WANT} — this commit's platform code on the OLD enterprise pin (VERSION carries .dirty); every later deploy fails the same way until the transport is restored. See the ENTERPRISE: lines above, docs/ENTERPRISE.md (incl. the OSS-only-host remedy), trinity#2578."
+              fi
               if printf '%s\n' "$BOOT_LOG" | grep -q 'Trinity Enterprise registration FAILED'; then
                 echo "::error::Enterprise registration FAILED — the submodule is mounted but this instance is running OSS-only (every entitled route will 403). See trinity#2068."
                 printf '%s\n' "$BOOT_LOG" | grep -A 20 'Trinity Enterprise registration FAILED' | head -40
@@ -393,6 +415,12 @@ jobs:
             echo "=== Error check ==="
             sudo docker logs trinity-backend --tail 50 2>&1 | grep -iE 'error|exception|failed' | head -10 || echo "No errors"
 
+            # #2578 — the STALE verdict is enforced here, after every other
+            # diagnostic (registration, seeding, error check) has landed.
+            if [ "$ENT_STALE" = "1" ]; then
+              exit 1
+            fi
+
             echo "=== Done ==="
 
   # #2204: a red deploy must not be able to run silently. 39 consecutive
@@ -463,15 +491,19 @@ jobs:
 
           ## What this means
 
-          The dev instance is **not** running this commit. Every merge to
-          \`dev\` from now until this is fixed ships nothing, and no other
-          signal will report that -- CI stays green and PRs merge cleanly.
+          The dev instance is **not** running this commit -- or is running its
+          platform code on a stale or unmounted enterprise tree (a run that
+          failed after the health check; see check 5). Every merge to
+          \`dev\` from now until this is fixed ships nothing you can trust, and
+          no other signal will report that -- CI stays green and PRs merge
+          cleanly.
 
           ## First checks
 
           1. Open the failed run above and read the last \`===\` section header
-             reached. The deploy script is sectioned (\`Pull\`, \`Build\`,
-             \`Restart\`, \`Health\`, \`Agent seeding check\`) so the header
+             reached. The deploy script is sectioned (\`Pull\`,
+             \`Submodule (enterprise)\`, \`Build\`, \`Restart\`, \`Health\`,
+             \`Enterprise registration\`, \`Agent seeding check\`) so the header
              names the stage.
           2. If it failed at \`Agent seeding check\`, the instance is up but its
              fleet is incomplete -- see trinity#2215.
@@ -482,6 +514,12 @@ jobs:
              that cannot be opened crash-loops every worker before uvicorn
              binds, and the other services then sit in \`Created\` behind
              \`depends_on: service_healthy\`.
+          5. If it failed at \`Enterprise registration\` with \`STALE\` or
+             \`OSS-only\`, the enterprise submodule did not sync: the
+             \`ENTERPRISE:\` lines above it name the classified cause (host-key,
+             authorization, network) and the remedy -- see trinity#2246 and
+             trinity#2578. This recurs on every push until the transport is
+             restored, and this issue is the only alert while it stays open.
 
           ## Closing this issue
 

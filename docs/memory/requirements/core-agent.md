@@ -1418,7 +1418,9 @@ well, and the agent never touches CSS.
   mobile tap); `PortalFilesPanel.vue` is deleted; per-agent inbox scoping is
   unchanged (the same client-portal routes). Uploads are read from the
   container inbox, so they are fetched only while Files is the open active
-  tab and after an upload.
+  tab, after an upload **from any surface** (§5.30 — the upload notifies the
+  rail owner through the store funnel, not only from this body), and after a
+  delete.
 - **AC-3 — Canvas tab**: the participating agents' canvases through the
   SAME `CanvasPanel` + `store.fetchAgentCanvas(es)` the Workspace agent page
   uses — one rendering layer, one store, the #438 staleness mark included.
@@ -1440,7 +1442,12 @@ well, and the agent never touches CSS.
   tab. Feeds refresh on: participants change, a conversation turn ending, a
   room's `working` list going idle, `loop_*` and terminal `agent_activity`
   events for a participant (platform sessions, debounced 2s), the tab being
-  opened, and a successful upload. No timer while idle.
+  opened, and a successful upload. No timer while idle. **§5.30 widens the
+  Files signal to cover the viewer's own uploads**: it is derived from
+  `filesSignalItems(documents, uploads)` — one projection read by both the
+  signal and the seen-marking — so a file the client just sent lights the dot
+  the same way an agent's share does. The two collections stay separate; only
+  the signal merges them.
 - **AC-5 — nothing lost**: checked against ent#458's and ent#438's lists —
   start with guardrails, Stop, grouping, teaching empty state, live push →
   poll backstop (unchanged in the store); canvas kinds, addressability,
@@ -2561,3 +2568,113 @@ to localStorage in the clear.
   ledger entry, carry the flag and the identifier together and let the consumer
   refuse to act on an empty id. System, spoken (voice-call) and progress items
   stay deliberately unrateable.
+
+### 5.31 Workspace Files tab — uploads at once, an honest Download, preview and delete (trinity#2582, trinity-enterprise#548)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_FILES_TAB_ACTIONS`
+- **Description**: An operator tested the ent#475 Files tab on `dev` (2026-09-07)
+  and found three defects and asked for two capabilities. Both halves ship as
+  one change set, because both edit `PortalRailFiles.vue` and splitting them
+  would relocate the contention rather than remove it. OSS-core and deliberately
+  ungated by the standing Workspace ruling (ent#356).
+- **AC-1 — an upload appears at once**: a file sent from ANY surface (the
+  conversation composer, a room's fan-out, the Files tab's own drop zone)
+  appears under "Files you sent" **before any agent reply**, and lights the rail
+  dot. The notification happens in `stores/clientPortal.js::uploadDocument` —
+  the single funnel all three surfaces already go through — as a **pending-agent
+  SET** drained by the rail owner, never a scalar. A scalar re-breaks the defect
+  it fixes: a multi-file drop uploads sequentially without awaiting the feed
+  re-read (so a later file is missing from a listing snapshotted before it
+  landed), and a room fan-out mutates the same signal three times inside one
+  Vue flush window (so only the last agent survives). The drain coalesces
+  **leading and trailing** and is ordered against `refresh()` by a **per-agent
+  inbox epoch** the refresh snapshots before its awaits, so a refresh issued
+  before an upload but resolving after it cannot clobber the fresh listing.
+  Per agent and not one shared counter: a room's drop runs three of these
+  concurrently for three different agents, and a shared counter lets each
+  invalidate the last — two of the three listings silently discarded.
+- **AC-2 — own uploads are downloadable**: "Files you sent" carries the same
+  Download control the agent's shares carry.
+  `GET /api/enterprise/client-portal/agents/{name}/uploads/{filename}` reads the
+  file back out of the per-client inbox and serves it
+  `Content-Disposition: attachment`. Roster-gated (uniform 404), two-tier
+  rate-limited, audited.
+- **AC-3 — Download saves, it does not open a tab**: `GET /api/files/{id}`
+  and its `HEAD` accept a **one-way** `?download=1` flag that may only ever
+  force `attachment`. There is no `?disposition=`, and no way to force
+  `inline` — that direction is the ent#461 XSS defence and stays server-decided
+  from `is_inline_safe()`. The flag is parsed **tolerantly** (`Optional[str]`,
+  truthy check), never as `bool`: this is the public link opened from Telegram /
+  WhatsApp / iOS, and a `bool` query param 422s on `?download=` or `?download=x`
+  — a new failure mode on a route that today ignores a malformed query. The
+  Files tab's URL carries the flag; the agent's own chat link does not, so
+  ent#461's mobile inline path is untouched. Download itself takes TWO paths, and the split is what
+  makes the flag load-bearing rather than decorative: an agent share is saved by
+  a plain anchor click on its already-`attachment` URL (natively streamed, no
+  memory spike, and no programmatic blob save — the classic iOS Safari failure
+  on a mobile-first surface), while a client upload, which has no URL at all,
+  goes through the authenticated portal route as a blob because there is no
+  alternative. AC-3's `download` **attribute** is set on that anchor as
+  belt-and-braces; a browser ignores it cross-origin, which is precisely why the
+  server-side flag and not the attribute is the mechanism.
+- **AC-4 — preview (ent#548)**: images (png/jpg/gif/webp/**svg**) and displayable
+  text (md, txt, csv, json, code) open in a modal over the Workspace with
+  **next / previous across the previewable files in the current list**, keyboard
+  arrows and Escape, and a Download action inside the modal. Non-previewable
+  types show name / size / type with Download — **never a blank modal**, and a
+  failed byte fetch degrades to that same card rather than a retry loop. SVG
+  renders through `<img :src="objectUrl">` only — never inline `<svg>`, never
+  `v-html` — because an uploaded SVG is a script host. Markdown goes through the
+  one sanitiser (`PortalMarkdown`); other text renders in a `<pre>`, escaped by
+  interpolation, **capped at 256 KB with the cap stated in the UI** ("Showing the
+  first 256 KB of 1.1 MB · Download the full file"); an image over 10 MB shows
+  the card instead of fetching. Bytes are fetched **whole and sliced
+  client-side, with no `Range` header** — `main.py`'s CORS `allow_headers` does
+  not list `Range`, so a ranged preview dies silently on any deployment whose
+  portal base URL differs from the API's origin, and slicing also keeps preview
+  off the download-counter path entirely.
+- **AC-5 — delete (ent#548)**, backend-enforced with the UI mirroring it off the
+  roster payload (#2128):
+
+  | Case | Affordance | Mechanism |
+  |---|---|---|
+  | My own upload | **Delete** (real) | `rm -f --` in the agent container's inbox |
+  | Agent-shared, I am a viewer | **Remove from my list** | a `portal_file_dismissals` row; the share is untouched |
+  | Agent-shared, I am the agent's owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims the bytes) |
+
+  **The matrix is session-type dependent, and the UI copy says so.**
+  `PortalPrincipal` is `(email, is_platform)` and carries no role, so
+  `include_owned` is `principal.is_platform` at every call site (ent#358). Two
+  consequences, both intended: a **non-owner admin is a viewer** in the
+  Workspace (stricter than the platform surface, and correct), and an **owner
+  signed in with a magic-link portal token also gets the viewer affordance**.
+  Because the ownership predicate is the *same* membership the roster card
+  renders (`portal_owns_agent`), the UI and the enforcement cannot disagree —
+  the affordance is simply not offered. Every verb is confirmed once with the
+  consequence restated, audited (`portal_upload_download`, `portal_upload_delete`,
+  `portal_share_revoke`, `portal_share_dismiss` — `actor_email` carries the
+  principal, which has no user row), refreshes the list **and** moves the rail
+  dot, and names its own failure reason next to the control.
+- **AC-6 — scoping unchanged**: a client sees and can act on their own uploads
+  and the agent's active shares, never another client's inbox. The inbox
+  directory is the isolation (ent#308) and it is untouched.
+- **Storage**: new OSS table `portal_file_dismissals(client_email, file_id,
+  agent_name, dismissed_at)`, PK `(client_email, file_id)`, both migration tracks
+  (Invariant #9), registered in `db/agent_cleanup.py::AGENT_REFS`. `agent_name`
+  is load-bearing: `agent_shared_files` is a CASCADE ref, so deleting an agent
+  hard-deletes its shares without going through the sweeper and would orphan
+  every dismissal keyed on those ids forever. A dismissal **does not validate
+  the `file_id`** — a 404 for an unknown id would be an existence oracle over
+  every share in the install (Invariant #8), exactly as `set_chat_star` already
+  resolved it — and is **row-capped** instead.
+- **Stated limits**: `feeds.uploads` is populated only on tab-open,
+  turn-end-while-open, or a `noteUpload`, so on a fresh page load with Files
+  closed the dot cannot light for an upload made on another device or in a
+  previous session (this also avoids a one-time false-dot burst on deploy). A
+  preview no longer inflates the owner's `download_count` — a ranged prefix read
+  is still audited, marked `ranged_prefix: true`, but does not bump the counter.
+  Every rostered client of an agent already sees every active share of that
+  agent; a dismissal is a preference, not authorization (follow-up with the
+  audience model, ent#484/#489).
+- **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
+  `file-sharing-outbound.md`

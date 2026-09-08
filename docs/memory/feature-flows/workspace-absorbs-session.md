@@ -106,9 +106,16 @@ JSONL one hour after it was written (the age guard) and every thread on that
 agent would go cold — no error, no log, no failed request. Just an agent that
 forgot.
 
-The keep set is now the union of both tables, and a failure reading **either**
-half aborts the sweep rather than reaping against a partial set: skipping a
-cycle costs disk, reaping blind costs conversations.
+The keep set is now the union of every table that resumes, and a failure
+reading **any** of them aborts the sweep rather than reaping against a partial
+set: skipping a cycle costs disk, reaping blind costs conversations.
+
+It was two tables here; #2610 added a third (an open room's
+`enterprise_room_participants`), after rooms shipped as a resume surface without
+one and every multi-agent room lost its memory on the next sweep — this
+section's failure, one surface over. So the rule this section states is now
+guarded rather than remembered: `test_2610_resume_surface_parity` fails when a
+table gains a resume-handle column that no keep-set accessor covers.
 
 ### 5. The surface came out
 
