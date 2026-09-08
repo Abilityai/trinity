@@ -195,7 +195,7 @@
              the chain and the composer vanishes exactly when this banner
              appears. Pinned by `roomComposerChain.spec.js`.
 
-             The proactive half. The header line is ambient; this is
+             The header line is ambient; this is
              where the person is about to SPEND one, so the last few messages
              say so in full, once, right above the box. Only at `critical`: a
              banner that is always there is a banner nobody reads. -->
