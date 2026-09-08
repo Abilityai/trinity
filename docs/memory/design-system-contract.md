@@ -5,7 +5,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 ## Color — token-only
 
 - Use semantic tokens for every color: `status-*` (result of an event), `state-*` (operating mode), `brand-*` (third-party identity), `accent-*` (decoration), `action-*` (interaction). Everything else is gray.
-- Never write a raw Tailwind palette class (`bg-green-500`, `text-red-600`) or a hex. CI ratchets raw-color counts down; new code must be at zero.
+- Never write a raw Tailwind palette class (`bg-green-500`, `text-red-600`) or a hex. `tests/unit/rawColorRatchet.spec.js` ratchets per-file counts down and holds a file with no baseline entry to **zero** non-gray palette classes — new code must be at zero, and that half is now machine-checked rather than prose (#2605).
 - Workhorse shades: 500/600 solids; 100 tinted grounds (light); 700 text-on-tint (light); 500/16% grounds + 300 text (dark); 400–500 solid accents (dark).
 - `gray-750` (#2a303c) is the custom dark chrome/border shade — use it, don't approximate it.
 
@@ -92,7 +92,7 @@ Consistency:
 
 Before requesting review, verify:
 
-- [ ] Zero raw palette classes or hexes — semantic tokens only (`npm run check:tokens` passes; baseline not grown)
+- [ ] Zero raw palette classes or hexes — semantic tokens only (`npm run check:tokens` passes; baseline not grown — enforced by `tests/unit/rawColorRatchet.spec.js` under `npm run test:unit`, #2605). A deliberate increase is re-frozen in its OWN commit with the growth named, never absorbed into a feature diff: `node src/frontend/scripts/scan-raw-colors.mjs src/frontend --baseline src/frontend/raw-color-baseline.json`
 - [ ] Every button/input/select/toggle/textarea/badge/card/modal/tab/table is a Base* primitive, not hand-rolled
 - [ ] Verified in light AND dark; dark meta text is gray-300/400, never gray-500
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
