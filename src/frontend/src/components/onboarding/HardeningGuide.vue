@@ -56,21 +56,37 @@
           </p>
 
           <!--
-            ONE action on the card face. Adding a domain is the only step that is
-            collectable in-app, and it is also the completion condition that
-            retires this card — so it is the primary, and everything explanatory
-            moves behind the disclosure below. A first login should be able to
-            act on this in one glance without reading two columns of prose.
+            The action on the card face is the COMMAND, and it is on the face
+            rather than behind the disclosure because of what happened when it
+            was not.
+
+            This card used to carry a primary button reading "Add a domain" that
+            navigated to Settings → General → Public URL. That field is a bare
+            input with a Save button and no guard: setting it changes the name
+            Trinity hands out and reconfigures nothing. So the operator who HAD a
+            domain — the one the button is for — followed it, saved, flipped
+            `install_tls_posture` to `https-domain` by string-parsing their own
+            input, and got a domain serving a certificate error while their old
+            IP link kept working. Worse, the card then advanced to the tunnel
+            stage, and this section (`v-if` on the address stage) vanished with
+            the only instruction that would have fixed it.
+
+            A one-glance action is still the goal; it is now an action that
+            works. There is no navigation button because there is nowhere useful
+            to navigate: the command sets the Public URL itself.
           -->
           <div v-if="stage === 'address'" class="mt-3">
-            <BaseButton
-              variant="primary"
-              size="sm"
-              data-testid="hardening-guide-settings"
-              @click="openSettings"
-            >
-              Add a domain
-            </BaseButton>
+            <p class="text-[12.5px] leading-[1.5] text-gray-600 dark:text-gray-300">
+              Point your domain’s A record at this server, then run this on it:
+            </p>
+            <code
+              data-testid="hardening-guide-command"
+              class="mt-1.5 block select-all overflow-x-auto whitespace-nowrap rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 font-mono text-[12px] text-gray-700 dark:border-gray-750 dark:bg-gray-850 dark:text-gray-300"
+            >sudo /opt/trinity/scripts/deploy/set-domain.sh your-domain.com</code>
+            <p class="mt-1.5 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+              It refuses if DNS is not pointing here yet, and puts everything back if
+              anything fails.
+            </p>
           </div>
 
           <!--
@@ -117,18 +133,17 @@
                   a button on this page.
                 -->
                 <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-                  Point a domain’s A record at this server, then run
-                  <span class="font-mono text-gray-600 dark:text-gray-300">sudo /opt/trinity/scripts/deploy/set-domain.sh your-domain.com</span>
-                  on the server itself. Trinity does not issue certificates itself — that
-                  command reconfigures whatever terminates TLS in front of it, so the name
-                  gets an ordinary long-lived certificate instead of a short-lived IP one. It
-                  also keeps the old address redirecting so existing links survive, and sets
-                  the <span class="text-gray-600 dark:text-gray-300">Public URL</span> so
-                  Trinity hands out the name instead of the IP. It refuses if DNS is not
-                  pointing here yet, and puts everything back if anything fails. It cannot be
-                  a button on this page: Trinity runs in a container with no access to the web
-                  server in front of it, which is also why the tunnel step below is
-                  instructions rather than a button.
+                  Trinity does not issue certificates itself — the command above reconfigures
+                  whatever terminates TLS in front of it, so the name gets an ordinary
+                  long-lived certificate instead of a short-lived IP one. It also keeps the old
+                  address redirecting so existing links survive, and sets the
+                  <span class="text-gray-600 dark:text-gray-300">Public URL</span> so Trinity
+                  hands out the name instead of the IP — you do not need to set that by hand,
+                  and setting it by hand is not enough on its own, because nothing here
+                  reconfigures a web server from a settings field. It runs on the server
+                  because Trinity is in a container with no access to the web server in front
+                  of it, which is also why the tunnel step below is instructions rather than a
+                  button.
                 </p>
               </div>
 
@@ -197,7 +212,6 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionsStore } from '../../stores/sessions'
 import BaseCard from '../base/BaseCard.vue'
@@ -213,7 +227,6 @@ import {
 
 const store = useSessionsStore()
 const authStore = useAuthStore()
-const router = useRouter()
 
 // Which of the two steps the card is on. `https-domain` means step one landed,
 // so the card advances rather than retiring — see `hardeningGuide.js`.
@@ -255,8 +268,6 @@ const dismiss = () => {
   dismissed.value = { ...dismissed.value, [stage.value]: true }
   persistHardeningGuideDismissed(stage.value)
 }
-
-const openSettings = () => router.push('/settings?tab=general')
 
 onMounted(() => {
   // Shared, cached, and already awaited by the rest of the page: `once()` means

@@ -214,7 +214,10 @@ describe('visibility', () => {
     expect(GUIDE_SFC).toContain("persistHardeningGuideDismissed(stage.value)")
     // Step one's action cannot render once the domain exists — there is nothing
     // left to collect in-app, and a button that leads nowhere is the defect.
-    expect(GUIDE_SFC).toMatch(/v-if="stage === 'address'"[\s\S]{0,400}Add a domain/)
+    // The address stage's action is the command, gated on the same stage. It
+    // used to be an "Add a domain" button; see the card's own docblock for why
+    // that button was the failure rather than the fix.
+    expect(GUIDE_SFC).toMatch(/v-if="stage === 'address'"[\s\S]{0,600}set-domain\.sh/)
   })
 
   it('advances in-session on the save that configures the domain', () => {
@@ -415,7 +418,11 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(GUIDE_SFC).toMatch(/Serve it without exposing it/)
     expect(GUIDE_SFC).toMatch(/A record/)
     // Deep-links at the field that actually writes `public_chat_url`.
-    expect(GUIDE_SFC).toContain("/settings?tab=general")
+    // Was: asserts the card links to Settings → General. It no longer does, and
+    // must not — that field reconfigures nothing, and sending an operator with a
+    // domain there is precisely what left them advertising a name no web server
+    // answered to. The address step is the command instead.
+    expect(GUIDE_SFC).toContain('set-domain.sh')
   })
 
   it('offers a Cloudflare Tunnel, not a VPN (#2380, decided 2026-09-01)', () => {
@@ -447,10 +454,13 @@ describe('the two paths are complementary, not alternatives', () => {
     // internet; it must be actionable at a glance, not two columns of prose.
     expect(GUIDE_SFC).toContain('<details')
     expect(GUIDE_SFC).toContain('data-testid="hardening-guide-why"')
-    // Exactly one non-dismiss button, and it is the one collectable-in-app step.
-    expect(GUIDE_SFC).toMatch(/variant="primary"[\s\S]{0,200}Add a domain/)
+    // One action on the face, and it is the one that WORKS. It is a command
+    // rather than a button because the step cannot be performed from this page —
+    // Trinity has no host privileges. The only BaseButton left is the dismiss.
+    expect(GUIDE_SFC).toMatch(/data-testid="hardening-guide-command"/)
+    expect(GUIDE_SFC).toMatch(/select-all/) // one click selects the whole command
     const buttons = GUIDE_SFC.match(/<BaseButton/g) || []
-    expect(buttons.length, 'one action + one dismiss').toBe(2)
+    expect(buttons.length, 'dismiss only — the action is a command, not a button').toBe(1)
   })
 
   it('does not promise a certificate change Trinity does not perform', () => {
