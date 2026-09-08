@@ -171,7 +171,7 @@ jobs:
                 # transport or authorization, and the remedy line belongs
                 # beside the evidence. The classifier always exits 0.
                 ENT_STALE=1
-                bash scripts/ci/classify-submodule-failure.sh "$ENT_LOG" \
+                bash scripts/ci/classify-submodule-failure.sh "$ENT_LOG" stale \
                   | sed 's/^/ENTERPRISE: /' || true
               fi
             else
@@ -349,8 +349,9 @@ jobs:
               # enterprise pin under a green run — the #2246 class one notch
               # over ("it hid for weeks BECAUSE it was only a ::warning::").
               # Printed FIRST because it is the primary cause of whatever the
-              # registration checks below say about the old tree; the exit
-              # comes AFTER them so their diagnostics still land in the log.
+              # registration checks below say about the old tree; the exit is
+              # at the END of the script, after every later diagnostic (these
+              # checks, the #2204 seeding check, the error check) has landed.
               # No DEPLOY_ALLOW_OSS_ONLY hatch here: that variable means "a VM
               # that legitimately has no enterprise access", which never
               # reaches this populated branch — a stale tree is never
@@ -376,10 +377,6 @@ jobs:
               if printf '%s\n' "$BOOT_LOG" | grep -q 'FAILED module(s)'; then
                 echo "::warning::Enterprise registration completed with FAILED module(s) — some entitled features are unavailable on this instance"
                 printf '%s\n' "$BOOT_LOG" | grep 'FAILED module(s)' | head -5
-              fi
-              # #2578 — the STALE verdict, announced above, is enforced here.
-              if [ "$ENT_STALE" = "1" ]; then
-                exit 1
               fi
             else
               # #2246 — an unentitled dev instance is a FAILED deploy, not a
@@ -445,6 +442,17 @@ jobs:
 
             echo "=== Error check ==="
             sudo docker logs trinity-backend --tail 50 2>&1 | grep -iE 'error|exception|failed' | head -10 || echo "No errors"
+
+            # #2578 — the STALE verdict, announced in the registration section,
+            # is enforced HERE, after every other diagnostic (registration, the
+            # #2204 seeding check, the error check) has landed in the log. An
+            # earlier exit would skip the seeding check, whose "Failed to create
+            # agent" line exists only in this container run's boot log — a deploy
+            # that is both stale and seeding-incomplete would lose that signal,
+            # not merely delay it.
+            if [ "$ENT_STALE" = "1" ]; then
+              exit 1
+            fi
 
             echo "=== Done ==="
 

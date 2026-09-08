@@ -11,7 +11,7 @@
     "new_inputs": [],
     "ci_cd": [
       ".github/workflows/deploy-dev.yml: --no-recurse-submodules on git fetch/checkout/pull in the Pull block",
-      ".github/workflows/deploy-dev.yml: ENT_STALE flag + classify-submodule-failure.sh in the stale branch; ::error:: + exit 1 after the registration checks",
+      ".github/workflows/deploy-dev.yml: ENT_STALE flag + classify-submodule-failure.sh in the stale branch; ::error:: in the registration section + exit 1 at the end of the script (after the seeding and error checks)",
       ".github/workflows/deploy-dev.yml: notify-failure body names the Submodule/Enterprise registration stages"
     ],
     "new_workflow_expressions": 0,

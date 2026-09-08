@@ -214,12 +214,19 @@ curl -s -H "Authorization: Bearer <token>" http://localhost:8000/api/version
 
 ### Keeping it updated
 
-With the step-1 override in place, routine updates just work:
+With the step-1 override in place, routine updates are two commands — and the
+pull never recurses (#2578):
 
 ```bash
-git pull
+git pull --no-recurse-submodules
 git submodule update --init --recursive
 ```
+
+Without the flag, git's default on-demand recursion fetches the submodule
+*inside* the pull whenever the pointer moved, using the submodule's stored URL
+and whatever transport that host happens to have — the exact failure the dev
+deploy hit. Keeping the two steps separate means the second one runs with the
+transport you chose in step 2.
 
 **Existing clones (mounted before #1443):** the `update = none` default
 applies to your clone too — plain `git submodule update` starts *skipping*

@@ -189,7 +189,10 @@ def check_no_git_command_recurses(script: str) -> None:
                     offenders.append(f"missing {FLAG}: {line}")
     assert not offenders, "\n".join(offenders)
     # A scan that matched nothing would pass vacuously — the 2026-08-03 class.
-    assert WATCHED <= found, f"the scan found only {sorted(found)} — did the Pull block change shape?"
+    # Anchored on fetch and pull only: the checkout is a belt that a later
+    # simplification may legitimately drop, and its absence must not read as a
+    # regression (review appendix).
+    assert {"fetch", "pull"} <= found, f"the scan found only {sorted(found)} — did the Pull block change shape?"
 
 
 def check_the_pull_keeps_ff_only(script: str) -> None:
@@ -212,9 +215,12 @@ def check_a_stale_tree_fails_the_run(script: str) -> None:
     The flag is raised where the drift is measured (the submodule block), the
     error is printed FIRST in the registration section (it is the primary cause
     of whatever the registration greps say about the old tree), and the exit
-    comes AFTER those greps so their diagnostics still land. No
-    ``DEPLOY_ALLOW_OSS_ONLY`` hatch on the stale path, and — as test_2246 pins —
-    still no ``exit 1`` inside the submodule block itself.
+    comes at the END of the script — after the registration greps, the #2204
+    seeding check and the error check have all landed (review I1: the seeding
+    line exists only in this container run's boot log, so an earlier exit loses
+    it rather than delaying it). No ``DEPLOY_ALLOW_OSS_ONLY`` hatch on the stale
+    path, and — as test_2246 pins — still no ``exit 1`` inside the submodule
+    block itself.
     """
     lines = script.splitlines()
 
@@ -231,8 +237,8 @@ def check_a_stale_tree_fails_the_run(script: str) -> None:
     assert init < warn, "ENT_STALE must be initialised before the submodule block"
     warn_block = [l.strip() for l in lines[warn:block_end(warn)]]
     assert "ENT_STALE=1" in warn_block, "the STALE branch must raise the flag"
-    assert any("classify-submodule-failure.sh" in l for l in warn_block), (
-        "the STALE branch must classify the cause next to the evidence"
+    assert any("classify-submodule-failure.sh" in l and '"$ENT_LOG" stale' in l for l in warn_block), (
+        "the STALE branch must classify the cause next to the evidence, telling the classifier the tree is stale"
     )
 
     health = first(lambda l: '=== Health ===' in l)
@@ -250,6 +256,12 @@ def check_a_stale_tree_fails_the_run(script: str) -> None:
     assert announce < first_registration_grep, "the STALE error is the primary cause — print it first"
     enforce_block = [l.strip() for l in lines[enforce:block_end(enforce)]]
     assert "exit 1" in enforce_block, "the last ENT_STALE gate must exit 1"
+    # Review I1: the enforcement must come AFTER the #2204 seeding check's own
+    # verdict — its "Failed to create agent" line exists only in this container
+    # run's boot log, so an earlier exit would lose that signal, not delay it.
+    seeding = first(lambda l: "=== Agent seeding check" in l, registration)
+    seeding_exit = first(lambda l: l.strip() == "exit 1", seeding)
+    assert enforce > seeding_exit, "the STALE exit preempts the seeding check (review I1)"
     assert not any("vars.DEPLOY_ALLOW_OSS_ONLY" in l for l in lines[enforce:block_end(enforce)]), (
         "no escape hatch on the stale path — a stale tree is never legitimate"
     )
@@ -288,6 +300,30 @@ def test_the_incident_body_names_the_enterprise_stages():
     check_the_incident_body_names_the_enterprise_stages(_notify_script(_doc()))
 
 
+_CLASSIFIER = _REPO / "scripts" / "ci" / "classify-submodule-failure.sh"
+
+
+def _classify(text: str, *args: str) -> str:
+    proc = subprocess.run(
+        ["bash", str(_CLASSIFIER), "-", *args], input=text, capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr  # a classifier never fails the deploy it diagnoses
+    return proc.stdout
+
+
+def test_the_classifier_words_silence_for_the_stale_caller():
+    """Review I3: the #2246 classifier now has a second caller — the STALE branch —
+    where the tree IS populated, at the old pin. Its `no-output` CAUSE must not
+    assert an unpopulated tree there; the transport classes read the same."""
+    stale = _classify("", "stale")
+    assert stale.startswith("CLASS: no-output"), stale
+    assert "OLD pin" in stale and "unpopulated" not in stale, stale
+    default = _classify("")
+    assert default.startswith("CLASS: no-output"), default
+    assert "unpopulated" in default, default
+    assert _classify("Host key verification failed.\n", "stale").startswith("CLASS: host-key")
+
+
 # ---------------------------------------------------------------------------
 # Meta-test: the guard goes red on the pre-fix content (learnings 2026-08-05:
 # "delete the real line and watch it go red"). Each mutation must CHANGE the
@@ -298,9 +334,21 @@ _FETCH = f"            git fetch {FLAG} origin dev\n"
 _CHECKOUT = f"            git checkout {FLAG} dev\n"
 _PULL = f"            git pull --ff-only {FLAG} origin dev\n"
 _ENFORCE = (
+    '            if [ "$ENT_STALE" = "1" ]; then\n'
+    "              exit 1\n"
+    "            fi\n"
+)
+# The pre-review placement of the enforcement: inside the registration branch,
+# ahead of the #2204 seeding check (review I1).
+_ENFORCE_EARLY = (
     '              if [ "$ENT_STALE" = "1" ]; then\n'
     "                exit 1\n"
     "              fi\n"
+)
+_REGISTRATION_ELSE = (
+    "              fi\n"
+    "            else\n"
+    "              # #2246 — an unentitled dev instance is a FAILED deploy"
 )
 
 
@@ -337,9 +385,16 @@ _ENFORCE = (
         # T1: an escape hatch sneaks onto the stale path.
         (lambda t: t.replace(
             _ENFORCE,
-            '              if [ "$ENT_STALE" = "1" ] && [ "${{ vars.DEPLOY_ALLOW_OSS_ONLY }}" != "true" ]; then\n'
-            "                exit 1\n"
-            "              fi\n"),
+            '            if [ "$ENT_STALE" = "1" ] && [ "${{ vars.DEPLOY_ALLOW_OSS_ONLY }}" != "true" ]; then\n'
+            "              exit 1\n"
+            "            fi\n"),
+         check_a_stale_tree_fails_the_run, "script"),
+        # Review I1: the exit moves back inside the registration branch, ahead of the seeding check.
+        (lambda t: t.replace(_ENFORCE, "").replace(
+            _REGISTRATION_ELSE, _REGISTRATION_ELSE.replace("            else\n", _ENFORCE_EARLY + "            else\n")),
+         check_a_stale_tree_fails_the_run, "script"),
+        # Review I3: the classifier is called without the `stale` tree state.
+        (lambda t: t.replace('classify-submodule-failure.sh "$ENT_LOG" stale', 'classify-submodule-failure.sh "$ENT_LOG"'),
          check_a_stale_tree_fails_the_run, "script"),
         # The incident body forgets the stage again.
         (lambda t: t.replace("trinity#2578", "trinity#0000"),
@@ -348,7 +403,8 @@ _ENFORCE = (
     ids=[
         "fetch-recurses", "pull-recurses", "checkout-unflagged", "flag-only-in-comment",
         "second-unflagged-fetch", "remote-update", "ff-only-dropped",
-        "stale-only-warns", "stale-flag-never-raised", "stale-escape-hatch", "incident-body-stage",
+        "stale-only-warns", "stale-flag-never-raised", "stale-escape-hatch",
+        "stale-exit-preempts-seeding", "classifier-without-stale-state", "incident-body-stage",
     ],
 )
 def test_guard_rejects_pre_fix_content(mutation, checker, target):
