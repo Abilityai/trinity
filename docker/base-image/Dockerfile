@@ -2,7 +2,7 @@
 # slim). This eliminates the dependency on ppa:deadsnakes/ppa, which has
 # no SLA and historically blocked deployment of critical agent-runtime
 # fixes for days at a time when the PPA was unreachable. See #658.
-FROM python:3.13-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Version tracking - set at build time via --build-arg VERSION=x.y.z
 ARG VERSION=latest
