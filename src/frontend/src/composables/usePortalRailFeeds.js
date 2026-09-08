@@ -1,10 +1,12 @@
 import { computed, ref, watch } from 'vue'
+import { useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalLoopsStore } from '@/stores/portalLoops'
 import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { workSignalFromItems } from '@/components/portal/portalWork'
 import {
   feedsFor,
+  filesSignalItems,
   loadSeen,
   loopsSignalFrom,
   markSeen,
@@ -73,6 +75,7 @@ export function usePortalRailFeeds({
   const loops = usePortalLoopsStore()
   const feeds = usePortalRailFeedsStore()
   const work = usePortalWorkStore()
+  const portal = useClientPortalStore()
 
   const wants = computed(() => feedsFor(tabs.value))
   const participantsKey = computed(() => participants.value.join(' '))
@@ -123,6 +126,29 @@ export function usePortalRailFeeds({
     else if (tab === 'canvas') feeds.refresh()
   })
 
+  // #2582 — a file landed in a participant's inbox from SOME surface (the
+  // composer, a room's fan-out, this tab's own drop zone). The store funnel
+  // queued the agent; this drains it.
+  //
+  // The queue is a SET and this drains ALL of it, because the two real gestures
+  // both defeat a scalar: a sequential multi-file batch, and a room's fan-out
+  // across three different agents inside one Vue flush window. The drain is
+  // unconditional on `wants.files` — the point is that the DOT lights with the
+  // tab closed — but it is still door-gated (a session that fails the Files
+  // door has `wants.files` false and never even fetched documents) and
+  // participant-gated inside `noteUpload`.
+  watch(() => portal.pendingUploadNotes, (pending) => {
+    const names = Object.keys(pending || {})
+    if (!names.length) return
+    if (!visible.value || !wants.value.files) { portal.clearUploadPending(names); return }
+    const mine = names.filter((n) => participants.value.includes(n))
+    // Clear FIRST, so a note arriving while these reads run is a new entry
+    // rather than one this drain already claimed. `noteUpload` owns its own
+    // leading/trailing coalescing from there.
+    portal.clearUploadPending(names)
+    for (const name of mine) void feeds.noteUpload(name)
+  })
+
   // ---- seen markers ---------------------------------------------------------
   const seen = ref(loadSeen(storage()))
   watch(seen, (s) => saveSeen(storage(), s), { deep: true })
@@ -134,8 +160,12 @@ export function usePortalRailFeeds({
         itemsByAgent: feeds.canvases, field: 'updated_at', participants: participants.value,
       })
     } else if (tab === 'files') {
+      // #2582 — the SAME projection the signal reads. Marking only `documents`
+      // seen here would leave an upload's dot lit after the tab was viewed.
       seen.value = markSeen(seen.value, 'files', {
-        itemsByAgent: feeds.documents, field: 'created_at', participants: participants.value,
+        itemsByAgent: filesSignalItems(feeds.documents, feeds.uploads),
+        field: 'created_at',
+        participants: participants.value,
       })
     }
   })
@@ -153,8 +183,13 @@ export function usePortalRailFeeds({
     canvas: updatedSignal({
       itemsByAgent: feeds.canvases, seen: seen.value.canvas, field: 'updated_at', participants: participants.value,
     }),
+    // #2582: the agent's shares AND the viewer's own uploads, through one
+    // projection that `markSeen` above reads too.
     files: updatedSignal({
-      itemsByAgent: feeds.documents, seen: seen.value.files, field: 'created_at', participants: participants.value,
+      itemsByAgent: filesSignalItems(feeds.documents, feeds.uploads),
+      seen: seen.value.files,
+      field: 'created_at',
+      participants: participants.value,
     }),
   }))
 

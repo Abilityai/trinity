@@ -599,6 +599,46 @@ export function updatedSignal({ itemsByAgent = {}, seen = {}, field, participant
   return { live: 0, updated: agents.length > 0, agents }
 }
 
+/**
+ * What the Files tab's dot and its seen-marker BOTH read (#2582).
+ *
+ * The signal was keyed on `feeds.documents` and `created_at` alone, so a file
+ * the client had just sent could never light it. Merging uploads INTO
+ * `documents` would break the two-list UI split ("Files you sent" / "Files from
+ * {agent}"), so the collections stay separate and only this projection joins
+ * them: each upload is republished under the `created_at` key the existing
+ * `updatedSignal` / `markSeen` pair already compares.
+ *
+ * One mechanism, tested once — and it must feed BOTH sides, or opening the tab
+ * would mark documents seen while leaving the uploads' dot lit forever.
+ *
+ * Stated limit: `uploads` is populated only on tab-open, a turn ending while
+ * Files is open, or a `noteUpload`. On a fresh page load with Files closed this
+ * sees `{}`, so the dot cannot light for an upload made on another device or in
+ * a previous session. That is also what stops a one-time false-dot burst on
+ * deploy.
+ *
+ * Clock note: `uploaded_at` is a CONTAINER mtime while `created_at` is a backend
+ * `utc_now_iso()`, and one marker covers both — so a badly skewed agent clock
+ * can park the marker ahead and swallow a later real share. Narrow, and stated.
+ */
+export function filesSignalItems(documents = {}, uploads = {}) {
+  const out = {}
+  const agents = new Set([
+    ...Object.keys(documents && typeof documents === 'object' ? documents : {}),
+    ...Object.keys(uploads && typeof uploads === 'object' ? uploads : {}),
+  ])
+  for (const agent of agents) {
+    const docs = Array.isArray(documents?.[agent]) ? documents[agent] : []
+    const ups = Array.isArray(uploads?.[agent]) ? uploads[agent] : []
+    out[agent] = [
+      ...docs,
+      ...ups.map((u) => ({ ...u, created_at: u?.uploaded_at ?? null })),
+    ]
+  }
+  return out
+}
+
 /** The second persisted key (ent#475): per-tab, per-agent "last seen" markers. */
 export const RAIL_SEEN_STORAGE_KEY = 'trinity-workspace-rail-seen'
 export const RAIL_SEEN_TABS = Object.freeze(['canvas', 'files'])
