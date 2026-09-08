@@ -163,10 +163,20 @@ done
 echo "=== Trinity is ready at https://\$(cat /etc/trinity/public-ip) ==="
 USERDATA
 
+# Attach whatever SSH keys the account already has. A droplet nobody can get a
+# shell on is a droplet nobody can support: without this, DigitalOcean emails a
+# root password to the account owner and the only way in is the browser console.
+# Keys already on the account are the operator's own, and this is their account
+# and their server — it does not create, upload or generate anything.
+SSH_KEYS="$(doctl compute ssh-key list --format ID --no-header 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+SSH_ARGS=()
+[ -n "$SSH_KEYS" ] && SSH_ARGS=(--ssh-keys "$SSH_KEYS")
+
 printf '\n  Creating the droplet...\n' >&2
 doctl compute droplet create "$DROPLET_NAME" \
     --image "$IMAGE" --size "$SIZE" --region "$REGION" \
     --user-data-file "$USER_DATA" \
+    "${SSH_ARGS[@]}" \
     --wait --format ID,Name,PublicIPv4 --no-header >&2
 
 IP="$(doctl compute droplet list "$DROPLET_NAME" \
