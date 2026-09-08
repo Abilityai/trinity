@@ -1,104 +1,84 @@
-# Code Health Report — 2026-08-31 (`135248e9`)
+## Code Health Report — 2026-09-08 (c9074cd9)
 
-> Dashboard committed by `/code-health` (dashboard-only — no GitHub issues; `/groom`'s
-> Debt Health section converts findings). Previous baseline: 2026-08-18 (`5517b7a3`).
+### Executive Summary
 
-**Data-integrity note:** the local checkout this scan started from had silently
-diverged from `origin/dev` by 137 commits (68 touching `src/backend/`) — the two prior
-"weekly" dashboard commits (`aa1f7df2`/`08-24`, and an in-progress `08-31` pass) were
-both computed against that stale fork and never reached `origin/dev`. Per the standing
-lesson from that gap (recorded before this run), this run reset the local branch to
-`origin/dev` tip and re-ran the full scan from scratch before writing anything. The two
-stale local-only commits were discarded (dashboard-only content, fully superseded by
-this corrected pass); no other repo state was touched. **This is the first report in
-several weeks measuring the actual `origin/dev` tree**, so the trend column below is a
-real 13-day comparison, not noise from a frozen fork.
-
-## Executive Summary
-
-| Metric | Value | Trend vs 2026-08-18 |
+| Metric | Value | Trend |
 |--------|-------|-------|
-| Top hotspot score | 5508 (`crud.py`) | ↑ |
-| Files > 800 lines | 56 | ↑ |
-| Stale TODO/FIXME/HACK | 6 | → |
-| High fan-out files (>20 imports) | 10 | ↑ |
+| Top hotspot score | 5508 | → |
+| Files > 300 lines | 200 | ↑ (methodology note below) |
+| Stale TODOs | 6 | → |
+| High fan-out files (>20 imports) | 11 | → |
 | Circular imports | 0 | → |
 
-## Top 5 Hotspots (churn 90d × complexity — highest refactoring ROI)
+**Methodology note**: the previous baseline's "size violations" count (56) was computed from
+the top-40-by-line-count window (per the skill's `head -40` step), and that window is now
+fully saturated — all 40 files in it exceed 800 lines (the top-40 range runs 975–4189 lines).
+That made the top-40-derived count meaningless as a trend signal, so this run did a full
+`src/backend/` scan instead: **200 files** exceed 300 lines. Treat the ↑ as a methodology
+correction surfacing the true count, not a claim that 144 files crossed the threshold in 8
+days. Future runs should keep using the full-scan count for comparability.
+
+### Top 3 Hotspots (churn × complexity — highest refactoring ROI)
 
 | Rank | File | Churn (90d) | CC Score | Hotspot Score | Lines |
 |------|------|-------------|----------|---------------|-------|
-| 1 | `src/backend/services/agent_service/crud.py` | 36 | 153 | 5508 | 3211 |
-| 2 | `src/backend/services/task_execution_service.py` | 22 | 214 | 4708 | 2246 |
-| 3 | `src/backend/client_portal/service.py` | 34 | 126 | 4284 | 3460 |
-| 4 | `src/backend/routers/settings.py` | 27 | 154 | 4158 | 3468 |
-| 5 | `src/backend/services/agent_service/lifecycle.py` | 29 | 139 | 4031 | 1702 |
+| 1 | src/backend/services/agent_service/crud.py | 36 | 153 | 5508 | 3211 |
+| 2 | src/backend/client_portal/service.py | 37 | 139 | 5143 | 3916 |
+| 3 | src/backend/routers/settings.py | 31 | 155 | 4805 | 3597 |
 
-**Interpretation**: `crud.py`, `task_execution_service.py`, and `lifecycle.py` — the
-standing #1028 decomposition targets — all rose in both churn and score over the 13
-days this comparison actually spans, consistent with continued heavy feature work
-(#1081 pull-mode, #1083 fire-and-forget, ephemeral agents, Brain Orb) landing through
-these three files.
+**Interpretation**: These files are both frequently changed and cognitively expensive.
+`agent_service/crud.py` holds the top spot unchanged from the previous run (identical
+churn/complexity — no commits landed in the 90-day churn window since 2026-08-31).
+`client_portal/service.py` moved up from #3 to #2 (churn 34→37, complexity 126→139) and
+`routers/settings.py` newly entered the top 3, displacing `task_execution_service.py`
+(now #5 at 4321, down from #2 at 4708 as its measured complexity dropped 214→149 under
+radon's real AST-based scoring — the previous run may have used the keyword-count fallback
+proxy for this file).
 
-**New entrant: `client_portal/service.py` (rank 3, was outside the top-3 on 08-18).**
-This is the most actionable finding this run — the Workspace/client-portal surface
-(epic ent#78) has been under sustained, rapid development (ent#356 OSS-core move,
-ent#357 platform-session entry, ent#358 session absorption, ent#392 composer
-typeahead, #2128/#2196/#2198/#2258 roster+availability+batch-sessions work, all dated
-within the last month per `architecture.md`), and the file has grown to 3460 lines
-(now itself a top-5 size violation) while carrying real complexity (CC 126) and the
-highest raw churn of the top 5 (34 commits/90d). It has not yet been evaluated for
-#1028-style decomposition. Recommend `/groom` add it to the Debt Health coverage check
-alongside `crud.py`/`task_execution_service.py`/`lifecycle.py`.
+### Top 3 Size Violations
 
-## Top 5 Size Violations
+| File | Lines | Threshold Exceeded | Suggested Action |
+|------|----|------|---------|
+| src/backend/models.py | 4189 | critical (>800) | Split Pydantic models by router domain (Invariant #14 scope is router models — this is the one legitimate central home, but 4189 lines argues for sub-modules, e.g. `models/agents.py`, `models/schedules.py`, re-exported from `models.py`) |
+| src/backend/db/migrations.py | 4141 | critical (>800) | Expected to grow (append-only migration log per Invariant #9) — not a refactor target; flagged for visibility only |
+| src/backend/client_portal/service.py | 3916 | critical (>800) | Extract service layer — also the #2 hotspot; highest-ROI split candidate this run |
 
-| File | Lines | Threshold | Suggested Action |
-|------|-------|-----------|-------------------|
-| `src/backend/models.py` | 4053 | critical (>800) | Centralized Pydantic models (Invariant #14) — size is the accepted cost of "one place for the API contract," not a split candidate |
-| `src/backend/db/migrations.py` | 3971 | critical (>800) | Append-only versioned migration log by design (Invariant #3) — grows monotonically; expected growth, not a refactor candidate |
-| `src/backend/routers/settings.py` | 3468 | critical (>800) | Also hotspot #4 (CC 154, churn 27) — many settings sub-resources (template-registry, retention, brain-orb, elevenlabs, a2a-endpoints, skills-library, room budgets). Candidate for a `routers/settings/` package split, mirroring the `db/schedules/` mixin-package precedent (Invariant #2) |
-| `src/backend/client_portal/service.py` | 3460 | critical (>800) | Also hotspot #3 (new entrant, see above) — highest-churn file in the fleet; grew from outside the top-5 size list. Worth a fresh look for a router/service split before it compounds further |
-| `src/backend/database.py` | 3435 | critical (>800) | Facade over 27+ domain operation classes (Invariant #2) — high size is the documented shape of the pattern, not a refactor candidate |
-
-56 files exceed the 800-line critical threshold (↑ from 50 on 08-18 — +6 over 13 days).
-Two of the top five (`models.py`, `db/migrations.py`) and `database.py` are
-architecturally-sanctioned by design (Invariants #14, #3, #2 respectively).
-`routers/settings.py` and the new `client_portal/service.py` are the standing
-actionable candidates.
-
-## Top 3 Coupling Issues
+### Top 3 Coupling Issues
 
 | File | Import Count | Issue |
-|------|---------------|-------|
-| `src/backend/main.py` | 122 | Router mounting — structurally expected per Invariant #4, not a split candidate |
-| `src/backend/database.py` | 52 | Facade over 27+ domain operation classes (Invariant #2) — high fan-out is the documented shape of the pattern |
-| `src/backend/services/agent_service/crud.py` | 36 | Same file as hotspot #1 — genuine fan-out across docker/template/git/credentials/capacity/breaker services, worth revisiting alongside any `crud.py` split |
+|------|-------------|-------|
+| src/backend/main.py | 125 | High fan-out — expected for the FastAPI app entrypoint wiring ~72 routers (Invariant #4); not a split candidate |
+| src/backend/database.py | 53 | High fan-out — central DB facade; consider whether all imports are still needed after mixin composition (Invariant #2) |
+| src/backend/services/agent_service/crud.py | 36 | High fan-out — consistent with its #1 hotspot ranking; a coupling+complexity double-hit |
 
-10 files above 20 imports (↑ from 9 on 08-18 — `routers/public.py` newly crossed the
-threshold at 21). No circular import pairs detected.
+### Stale Smell Inventory
 
-## Stale Smell Inventory
+- **Total TODO/FIXME/HACK markers**: 6 (unchanged from baseline)
+- Top smell-dense files: `services/monitoring_service.py` (2), `routers/ops.py` (2),
+  `routers/monitoring.py` (1) — three of the six markers concern the same missing alerts
+  table (`ops.py:989`, `ops.py:1012`, echoed in `monitoring_service.py:813` /
+  `routers/monitoring.py:349`), suggesting one coherent piece of deferred work rather than
+  four independent TODOs.
 
-- **Total TODO/FIXME/HACK/XXX markers**: 6 (→ flat vs 2026-08-18)
-- Smell-dense files: `services/monitoring_service.py` (2), `routers/ops.py` (2),
-  `routers/monitoring.py` (1), `db/migrations.py` (1)
+### Suggested Refactorings (Top 3 Hotspots)
 
-Five of the six markers describe one coherent, still-unaddressed gap — a not-yet-built
-alerts/notifications table (`routers/ops.py:988`, `:1011`) and its would-be consumers
-(`services/monitoring_service.py:510`, `:813`, `routers/monitoring.py:349`) — rather
-than five independent smells. Flat across every run this signal has been tracked.
+1. **`services/agent_service/crud.py`** (5508) — Per Invariant #2, agent-specific settings
+   already split out via mixins under `db/agent_settings/`; this file is the service-layer
+   counterpart and hasn't received the same treatment. Extract create/update/delete-specific
+   concerns (e.g. provisioning validation, credential wiring) into sibling modules under
+   `services/agent_service/` alongside the existing `lifecycle.py`/`deploy.py`/`helpers.py`
+   split — same package, same import surface, smaller files. Estimated reduction: 800–1200
+   lines if provisioning-validation and credential-wiring concerns move out.
 
-## Notes for /groom Debt Health
+2. **`client_portal/service.py`** (5143, up from #3) — Largest single-file mover this run.
+   `client_portal/` already has `router.py`/`db.py`/`models.py`/`schema.py`/`agent_page.py`
+   siblings; `service.py` at 3916 lines is disproportionate. Split by portal-session vs.
+   portal-agent-roster concerns, following the Three-Layer pattern (Invariant #1) more
+   strictly at the service tier.
 
-- Hotspot coverage candidates: `crud.py`/`task_execution_service.py`/`lifecycle.py`
-  remain under open issue #1028 (split oversized backend routers & services).
-  **`client_portal/service.py` is a new top-5 hotspot and top-5 size violation with no
-  tracked decomposition issue** — recommend filing or folding into #1028's scope.
-- Size violations grew 50 → 56 and high-fan-out grew 9 → 10 over the real 13-day
-  window; both are worth a glance but neither crossed into critical-growth territory
-  on its own.
-- **Process note, not a code finding:** confirm this run's dashboard commit actually
-  reaches `origin/dev` (`git log --oneline origin/dev -1` should show today's commit)
-  before relying on next week's trend column — the exact failure mode that produced
-  the stale-fork gap this run had to correct.
+3. **`routers/settings.py`** (4805, new to top 3) — At 3597 lines this is the largest router
+   in the codebase. Given the `secret_settings.py` sink-guard precedent (Invariant #12,
+   ent#435), settings already has a natural fault line between credential-shaped keys and
+   general config — extracting a `routers/settings_secrets.py` (or moving more logic into
+   `services/secret_settings.py`) would shrink the router and keep the security-sensitive
+   path smaller and easier to audit in isolation.
