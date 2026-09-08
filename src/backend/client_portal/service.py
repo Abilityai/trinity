@@ -2091,7 +2091,7 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
     the synchronous ent#83 route resolving differently, which is precisely the
     "two sources silently disagree" AC 5 exists to kill. So on deploy the model
     changes for existing external-client conversations wherever an owner set the
-    override — recorded in `requirements/core-agent.md` §5.23 as the deliberate
+    override — recorded in `requirements/core-agent.md` §5.32 as the deliberate
     change it is.
 
     ``db.get_public_channel_model`` already degrades an allow-list-absent stored

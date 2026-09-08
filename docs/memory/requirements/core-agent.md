@@ -1729,154 +1729,6 @@ well, and the agent never touches CSS.
   writes (steps ride the poll while running).
 - **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
-### 5.23 Workspace chat — a user-friendly model dropdown (trinity-enterprise#403)
-
-- **Status**: ✅ Implemented · **ID**: `WORKSPACE_MODEL_CHOICE`
-- **Description**: The Workspace composer had no model control: every turn ran on
-  whatever the agent defaulted to, and the person in the conversation could
-  neither see it nor change it. It gains a **short, curated, plain-language**
-  dropdown for **platform users** — three tiers, not the operator combobox
-  (`ModelSelector.vue` is a preset list plus free-text over raw model ids: right
-  for an operator panel, wrong in front of a client). The control's default
-  option plainly reads as the agent's own choice, and nothing is preselected that
-  makes it look like the user picked it.
-- **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
-  `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
-  §47.2 in `public-access.md`), never a second hand-typed list — the drift the
-  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
-  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
-  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
-  "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
-  entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
-  the combobox this reacts against. Two import-time assertions make the
-  subset rule and the missing-tier case build failures:
-  `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`, and every workspace entry has a
-  tier.
-- **AC-2 — three states, not two** (the #894 shape preserved): explicit choice →
-  the agent's `public_channel_model` → the platform default. **AC 5 is settled as
-  *inherit*, never a third model source** — the whole point of the issue is not
-  leaving two sources silently disagreeing. Blank (`""`), whitespace and an
-  omitted field all mean inherit and are normalised to `None` **before**
-  validation, copying `PUT /api/agents/{name}/public-channel-model`'s own idiom;
-  without that normalisation every default turn 422s.
-- **AC-3 — the capability channel is the roster** (#2128): the option list rides
-  `PortalRoster.model_options` (instance-level, like `realtime_voice` and
-  `multi_agent_chat_available` — options on every card would ship N copies on the
-  path #2159/#2163 exist to protect) and the resolved default rides
-  `PortalAgentCard.model_default {model, label, source}`. Both **fail closed**:
-  an older client, a partial payload, an empty list or a failed read renders no
-  control rather than a dead one. `model_default` is `None` for every
-  non-platform principal and for a **non-Claude runtime** (a Claude-model list on
-  a Codex agent is a dead affordance — the platform does not pass `--model` to
-  that runtime at all). A UI gate written against `GET
-  /api/settings/feature-flags` would be dead for exactly this audience; the gate
-  is the platform-session bit the payload already carries.
-- **AC-4 — the choice is the user's server record, not the browser's**:
-  `"workspace_model"` is one line in `user_preferences_service.PREFERENCE_KEYS`
-  (never a new table — the record is generic by design), value shape
-  `{"<agent_name>": "<model-id>"}`, consumed through the existing
-  `stores/userPreferences.js` engine (debounce, CAS, 409 adoption). Per
-  **(user, agent)** by construction — the server knows who is asking — so "never
-  leaks between agents or between clients" is a property of the storage rather
-  than of a key we have to get right. It also dissolves the
-  `useColumnResize`-documented trap: the portal store's `clientEmail` starts
-  `null` and is filled from a network response, so a browser key built on it
-  reads `anon` on every reload and writes under the email a moment later.
-- **AC-5 — self-healing**: the stored value is a raw model id and the catalog
-  churns by design, so a stored id absent from `model_options` is **dropped on
-  load** and the control falls back to inherit — mirroring what
-  `db.get_public_channel_model` already does for a retired
-  `public_channel_model`. Without it a retired id is sent on every turn, refused
-  every time, forever, with nothing pointing at the stored preference.
-- **AC-6 — honest degradation, and never a lie about billing**: an unselectable
-  model is refused up front — 422 with a **string** detail naming the rejected
-  value (a refused id has no tier — only curated entries carry one)
-  (`deliveryFailureReason` returns `detail` only when it is a string; anything
-  else degrades to "error 422"). A model that cannot be *served* is **not**
-  reclassified: there is no `model` code in the #2320 error ladder, and the
-  `AUTH`/`BILLING` branch merges into one "reached its usage limit" answer — so
-  rewording it whenever a model was chosen would blame the model for an exhausted
-  subscription. Only the **generic `agent_error`** branch names the chosen model,
-  and it **clears the stored choice**, so the sentence it prints is true and the
-  user is not looped into the same failure on every retry. The clear runs on the
-  settle of a turn **this tab actually sent**, and deliberately not on the
-  load/reattach path (review, 2026-09-08): the durable verdict lives 15 minutes,
-  so clearing there re-fired on every reload inside that window and wiped a
-  deliberate re-pick. A re-send is the only way the loop can recur, and a re-send
-  settles through the arm that is kept.
-- **AC-7 — the model reaches the row, on EVERY turn**: the ladder's last rung is
-  the **platform default as a concrete id**, not `None` (review, 2026-09-08).
-  `schedule_executions.model_used` is
-  written **only at row creation**, and both portal turn paths pre-create the row
-  (`start_portal_turn`, `_precreate_sync_execution`) — so this is a row-creation
-  change at two sites, not a kwarg change (the #2426 class, named in
-  `_precreate_sync_execution`'s own docstring). The value is resolved **once**,
-  immediately after the availability gate, and threaded to both the row and the
-  turn; a cold retry (`session_turn_service`) creates a second row and stamps it
-  from the same forwarded value, so the two rows agree. **Deferral, stated:**
-  `model_used` records the model *requested at dispatch*, not one reconciled with
-  what the agent actually ran — matching `execute_task`'s own semantics. The last
-  rung reads `settings_service.get_platform_default_model()`, the same function
-  `execute_task` calls, so the row and the turn hold one opinion rather than two;
-  stopping at `None` (the shape reviewed out) recorded NULL for the default state
-  of every agent — no pick, no override — which is most Workspace turns, blanking
-  exactly the execution-page display AC 7 pairs with. `None` still reaches the row
-  when the platform default itself is unreadable: worse than a stamped row, better
-  than a refused turn.
-- **AC-8 — the room transition**: an `@mention` diverts the send into
-  `escalate-to-room`, and `PortalRoom.vue` has its own composer with no dropdown.
-  The select is therefore **disabled with a title while the draft is room-bound**
-  rather than displaying a setting it is not honouring.
-- **Deliberate behaviour change (AC 2 reads against this)**: the
-  `public_channel_model` rung applies to **every** portal turn, not only a
-  platform user's. The issue calls its absence a defect ("not consulted on the
-  Workspace path, even though a Workspace turn dispatches as
-  `triggered_by="public"`"), and applying it only for platform principals would
-  leave the streaming route and the synchronous ent#83 route resolving
-  differently — a brand-new "two sources silently disagree". So on deploy, the
-  model changes for existing external-client conversations wherever an owner set
-  `public_channel_model`. Pinned by a test that a non-platform principal resolves
-  the same ladder. `triggered_by` stays `"public"` on every path.
-- **Accepted exposure, reviewed and not overlooked** (operator call, 2026-09-07):
-  **there is no ownership check on the override.** `is_platform` is the whole
-  door, per the ruling that the Workspace audience is internal users. But
-  `_roster_rows` unions agents merely *shared with* the caller, so a rostered
-  non-owner can pin every turn to Opus and beat the owner's deliberate Haiku
-  setting — while #894 itself is owner-gated (`assert_agent_owner`) precisely
-  because the model is a cost decision. Raised by three reviewers and knowingly
-  accepted: the roster gate is the control and the execution row's `model_used`
-  is the after-the-fact audit. Existing rate limits bound request *count*, not
-  spend. **The smallest reversal is one `assert_agent_owner` call at each of the
-  two router entry points — no payload or UI change.**
-- **Security**: one new request field, `PortalChatRequest.model`. It reaches the
-  agent as `cmd.extend(["--model", model])` — an argv list with no `shell=True`,
-  so there is no shell-injection path, but an arbitrary string as a CLI value is
-  argv/flag-smuggling surface against the agent runtime, and the Workspace does
-  not send a model today, so this field *creates* it. **The closed allowlist is
-  the security control** (never a regex, never a prefix check), enforced at the
-  router — the payload gate is cosmetic. A `model` from a principal without the
-  control is refused 403. ent#163 `/auth/exchange` mints a *portal session*, so a
-  delegated principal is `is_platform=False` and the gate is not bypassable
-  there. The **requested** model joins the streaming route's idempotency scope, so
-  a retry with a different model is a real turn rather than a silent replay of the
-  old snapshot (Invariant #18). The requested value and not the resolved one,
-  deliberately: an owner editing `public_channel_model` between two genuine
-  retries of ONE request must not fork the scope and turn a replay into a second
-  billed turn.
-- **Out of scope (stated)**: the operator `ModelSelector.vue` (untouched); a
-  capability *probe* asking whether an instance can serve a model;
-  **per-instance curation** (narrowing or disabling the control is a code change,
-  not a setting); multi-agent **rooms** (only the transition out of the composer
-  is handled).
-- **Backend**: `services/model_catalog.py`, `services/user_preferences_service.py`,
-  `client_portal/{db,models,service,router}.py`,
-  `services/docker_service.py::agent_container_runtimes`. No table, no migration,
-  no Alembic revision. OSS-core, deliberately ungated (the standing Workspace
-  ruling, ent#356).
-- **Tests**: `tests/unit/test_ent403_workspace_model.py`;
-  `src/frontend/tests/unit/portalModelChoice.spec.js`.
-- **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`
-
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
@@ -2825,3 +2677,151 @@ to localStorage in the clear.
   audience model, ent#484/#489).
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (Slice 3),
   `file-sharing-outbound.md`
+
+### 5.32 Workspace chat — a user-friendly model dropdown (trinity-enterprise#403)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_MODEL_CHOICE`
+- **Description**: The Workspace composer had no model control: every turn ran on
+  whatever the agent defaulted to, and the person in the conversation could
+  neither see it nor change it. It gains a **short, curated, plain-language**
+  dropdown for **platform users** — three tiers, not the operator combobox
+  (`ModelSelector.vue` is a preset list plus free-text over raw model ids: right
+  for an operator panel, wrong in front of a client). The control's default
+  option plainly reads as the agent's own choice, and nothing is preselected that
+  makes it look like the user picked it.
+- **AC-1 — curation is a policy dimension on the ONE catalog**: `workspace` +
+  `workspace_tier` are appended to `ModelEntry` (`services/model_catalog.py`,
+  §47.2 in `public-access.md`), never a second hand-typed list — the drift the
+  #2086 registry exists to prevent. Three entries carry it: `claude-opus-5`
+  ("Most capable"), `claude-sonnet-5` ("Balanced — fast and smart"),
+  `claude-haiku-4-5-20251001` ("Fastest"). Fable 5 is out (its `note` also reads
+  "Most capable"; Opus-vs-Fable is an operator distinction), and every "Legacy"
+  entry is out — a client-facing surface offering "Claude Opus 4.6 — Legacy" *is*
+  the combobox this reacts against. Two import-time assertions make the
+  subset rule and the missing-tier case build failures:
+  `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`, and every workspace entry has a
+  tier.
+- **AC-2 — three states, not two** (the #894 shape preserved): explicit choice →
+  the agent's `public_channel_model` → the platform default. **AC 5 is settled as
+  *inherit*, never a third model source** — the whole point of the issue is not
+  leaving two sources silently disagreeing. Blank (`""`), whitespace and an
+  omitted field all mean inherit and are normalised to `None` **before**
+  validation, copying `PUT /api/agents/{name}/public-channel-model`'s own idiom;
+  without that normalisation every default turn 422s.
+- **AC-3 — the capability channel is the roster** (#2128): the option list rides
+  `PortalRoster.model_options` (instance-level, like `realtime_voice` and
+  `multi_agent_chat_available` — options on every card would ship N copies on the
+  path #2159/#2163 exist to protect) and the resolved default rides
+  `PortalAgentCard.model_default {model, label, source}`. Both **fail closed**:
+  an older client, a partial payload, an empty list or a failed read renders no
+  control rather than a dead one. `model_default` is `None` for every
+  non-platform principal and for a **non-Claude runtime** (a Claude-model list on
+  a Codex agent is a dead affordance — the platform does not pass `--model` to
+  that runtime at all). A UI gate written against `GET
+  /api/settings/feature-flags` would be dead for exactly this audience; the gate
+  is the platform-session bit the payload already carries.
+- **AC-4 — the choice is the user's server record, not the browser's**:
+  `"workspace_model"` is one line in `user_preferences_service.PREFERENCE_KEYS`
+  (never a new table — the record is generic by design), value shape
+  `{"<agent_name>": "<model-id>"}`, consumed through the existing
+  `stores/userPreferences.js` engine (debounce, CAS, 409 adoption). Per
+  **(user, agent)** by construction — the server knows who is asking — so "never
+  leaks between agents or between clients" is a property of the storage rather
+  than of a key we have to get right. It also dissolves the
+  `useColumnResize`-documented trap: the portal store's `clientEmail` starts
+  `null` and is filled from a network response, so a browser key built on it
+  reads `anon` on every reload and writes under the email a moment later.
+- **AC-5 — self-healing**: the stored value is a raw model id and the catalog
+  churns by design, so a stored id absent from `model_options` is **dropped on
+  load** and the control falls back to inherit — mirroring what
+  `db.get_public_channel_model` already does for a retired
+  `public_channel_model`. Without it a retired id is sent on every turn, refused
+  every time, forever, with nothing pointing at the stored preference.
+- **AC-6 — honest degradation, and never a lie about billing**: an unselectable
+  model is refused up front — 422 with a **string** detail naming the rejected
+  value (a refused id has no tier — only curated entries carry one)
+  (`deliveryFailureReason` returns `detail` only when it is a string; anything
+  else degrades to "error 422"). A model that cannot be *served* is **not**
+  reclassified: there is no `model` code in the #2320 error ladder, and the
+  `AUTH`/`BILLING` branch merges into one "reached its usage limit" answer — so
+  rewording it whenever a model was chosen would blame the model for an exhausted
+  subscription. Only the **generic `agent_error`** branch names the chosen model,
+  and it **clears the stored choice**, so the sentence it prints is true and the
+  user is not looped into the same failure on every retry. The clear runs on the
+  settle of a turn **this tab actually sent**, and deliberately not on the
+  load/reattach path (review, 2026-09-08): the durable verdict lives 15 minutes,
+  so clearing there re-fired on every reload inside that window and wiped a
+  deliberate re-pick. A re-send is the only way the loop can recur, and a re-send
+  settles through the arm that is kept.
+- **AC-7 — the model reaches the row, on EVERY turn**: the ladder's last rung is
+  the **platform default as a concrete id**, not `None` (review, 2026-09-08).
+  `schedule_executions.model_used` is
+  written **only at row creation**, and both portal turn paths pre-create the row
+  (`start_portal_turn`, `_precreate_sync_execution`) — so this is a row-creation
+  change at two sites, not a kwarg change (the #2426 class, named in
+  `_precreate_sync_execution`'s own docstring). The value is resolved **once**,
+  immediately after the availability gate, and threaded to both the row and the
+  turn; a cold retry (`session_turn_service`) creates a second row and stamps it
+  from the same forwarded value, so the two rows agree. **Deferral, stated:**
+  `model_used` records the model *requested at dispatch*, not one reconciled with
+  what the agent actually ran — matching `execute_task`'s own semantics. The last
+  rung reads `settings_service.get_platform_default_model()`, the same function
+  `execute_task` calls, so the row and the turn hold one opinion rather than two;
+  stopping at `None` (the shape reviewed out) recorded NULL for the default state
+  of every agent — no pick, no override — which is most Workspace turns, blanking
+  exactly the execution-page display AC 7 pairs with. `None` still reaches the row
+  when the platform default itself is unreadable: worse than a stamped row, better
+  than a refused turn.
+- **AC-8 — the room transition**: an `@mention` diverts the send into
+  `escalate-to-room`, and `PortalRoom.vue` has its own composer with no dropdown.
+  The select is therefore **disabled with a title while the draft is room-bound**
+  rather than displaying a setting it is not honouring.
+- **Deliberate behaviour change (AC 2 reads against this)**: the
+  `public_channel_model` rung applies to **every** portal turn, not only a
+  platform user's. The issue calls its absence a defect ("not consulted on the
+  Workspace path, even though a Workspace turn dispatches as
+  `triggered_by="public"`"), and applying it only for platform principals would
+  leave the streaming route and the synchronous ent#83 route resolving
+  differently — a brand-new "two sources silently disagree". So on deploy, the
+  model changes for existing external-client conversations wherever an owner set
+  `public_channel_model`. Pinned by a test that a non-platform principal resolves
+  the same ladder. `triggered_by` stays `"public"` on every path.
+- **Accepted exposure, reviewed and not overlooked** (operator call, 2026-09-07):
+  **there is no ownership check on the override.** `is_platform` is the whole
+  door, per the ruling that the Workspace audience is internal users. But
+  `_roster_rows` unions agents merely *shared with* the caller, so a rostered
+  non-owner can pin every turn to Opus and beat the owner's deliberate Haiku
+  setting — while #894 itself is owner-gated (`assert_agent_owner`) precisely
+  because the model is a cost decision. Raised by three reviewers and knowingly
+  accepted: the roster gate is the control and the execution row's `model_used`
+  is the after-the-fact audit. Existing rate limits bound request *count*, not
+  spend. **The smallest reversal is one `assert_agent_owner` call at each of the
+  two router entry points — no payload or UI change.**
+- **Security**: one new request field, `PortalChatRequest.model`. It reaches the
+  agent as `cmd.extend(["--model", model])` — an argv list with no `shell=True`,
+  so there is no shell-injection path, but an arbitrary string as a CLI value is
+  argv/flag-smuggling surface against the agent runtime, and the Workspace does
+  not send a model today, so this field *creates* it. **The closed allowlist is
+  the security control** (never a regex, never a prefix check), enforced at the
+  router — the payload gate is cosmetic. A `model` from a principal without the
+  control is refused 403. ent#163 `/auth/exchange` mints a *portal session*, so a
+  delegated principal is `is_platform=False` and the gate is not bypassable
+  there. The **requested** model joins the streaming route's idempotency scope, so
+  a retry with a different model is a real turn rather than a silent replay of the
+  old snapshot (Invariant #18). The requested value and not the resolved one,
+  deliberately: an owner editing `public_channel_model` between two genuine
+  retries of ONE request must not fork the scope and turn a replay into a second
+  billed turn.
+- **Out of scope (stated)**: the operator `ModelSelector.vue` (untouched); a
+  capability *probe* asking whether an instance can serve a model;
+  **per-instance curation** (narrowing or disabling the control is a code change,
+  not a setting); multi-agent **rooms** (only the transition out of the composer
+  is handled).
+- **Backend**: `services/model_catalog.py`, `services/user_preferences_service.py`,
+  `client_portal/{db,models,service,router}.py`,
+  `services/docker_service.py::agent_container_runtimes`. No table, no migration,
+  no Alembic revision. OSS-core, deliberately ungated (the standing Workspace
+  ruling, ent#356).
+- **Tests**: `tests/unit/test_ent403_workspace_model.py`;
+  `src/frontend/tests/unit/portalModelChoice.spec.js`.
+- **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`
