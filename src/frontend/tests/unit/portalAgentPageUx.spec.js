@@ -331,7 +331,11 @@ describe('Overview containment', () => {
     // a grid. Retired deliberately and replaced, rather than deleted, per this
     // file's own #2169 convention.
     const src = pageSource()
-    expect(src).toMatch(/v-if="!loaded"[\s\S]{0,400}animate-pulse/)
+    // #2597 made the skeleton the SECOND arm of the chain (`v-else-if`), after
+    // a failed-first-load arm. The gate is matched position-independently so
+    // this test keeps asserting its own property — the skeleton's SHAPE — and
+    // stops failing whenever an arm is added above it.
+    expect(src).toMatch(/v-(?:else-)?if="!loaded"[\s\S]{0,400}animate-pulse/)
     expect(src).not.toMatch(/xl:grid-cols-2/)
   })
 
@@ -340,7 +344,9 @@ describe('Overview containment', () => {
     // the numbers on every window change and would be counted by the
     // loading-gate ratchet.
     const src = pageSource()
-    expect(src).toMatch(/v-if="!loaded"/)
+    // Position-independent for the #2597 reason above. The negative assertion
+    // — never `loading` — is the point of this test and is untouched.
+    expect(src).toMatch(/v-(?:else-)?if="!loaded"/)
     expect(src).not.toMatch(/v-if="loading"/)
   })
 })

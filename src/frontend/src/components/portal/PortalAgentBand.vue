@@ -13,30 +13,36 @@
     class="shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-4 py-2.5"
     data-testid="portal-agent-band"
   >
-    <!-- #2597: a failed FIRST load, kept OUT of the stat row below.
-         `InlineError` is the same primitive the failed-refresh case at the
-         bottom of this file already uses, so the band has one failure language
-         rather than two — and it is row-shaped, where `LoadFailed`'s centred
-         icon column would become a flex item in a row of stat figures and
-         roughly triple the band's height, shifting the whole conversation
-         column down (contract principle 4).
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+      <!-- #2597: a failed FIRST load is the first ARM of this chain, not a
+           banner above it and not a replacement for the whole row.
 
-         It must be its own arm, not merely a banner: the `v-else` branch below
-         renders `stats`, which falls back to `{ total_executions: 0 }` on a
-         failure — zeros are a claim about performance, and "no data" is a claim
-         about nothing. Rendering them here would be the very bug this fixes. -->
-    <InlineError
-      v-if="error && !loaded"
-      :message="error"
-      retryable
-      @retry="reload"
-    />
+           An arm, because the `v-else` branch renders `stats`, which falls back
+           to `{ total_executions: 0 }` — zeros are a claim about performance
+           where "no data" is a claim about nothing, so anything that let them
+           render here would be the very defect this fixes.
 
-    <div v-else class="flex flex-wrap items-center gap-x-6 gap-y-2">
+           Inside the row, because the window `<select>` below is a sibling of
+           this chain rather than part of it: replacing the whole row took the
+           selector away with the numbers, and changing the window is a second
+           way out of a failure (`watch(timeWindow)` re-fetches) alongside the
+           retry. `InlineError` is row-shaped, so it costs no layout — the same
+           is NOT true of `LoadFailed`, whose centred `py-6` column in a
+           `py-2.5` band would roughly triple its height and shift the
+           conversation column (contract principle 4). It is also the primitive
+           the failed-REFRESH case at the bottom of this file already uses, so
+           the band has one failure language rather than two. -->
+      <InlineError
+        v-if="error && !loaded"
+        :message="error"
+        retryable
+        @retry="reload"
+      />
+
       <!-- #2540/#1927: gated on the VERDICT (`loaded`), never on a request
            being open, so a window change or a background refresh leaves the
            numbers on screen instead of flashing back to placeholders. -->
-      <template v-if="!loaded">
+      <template v-else-if="!loaded">
         <div class="flex items-center gap-6" aria-busy="true">
           <div v-for="i in 3" :key="i" class="animate-pulse">
             <div class="h-5 w-10 rounded bg-gray-200 dark:bg-gray-800"></div>

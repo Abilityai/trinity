@@ -116,16 +116,36 @@ describe('#2597 — the band fails the other way, and is fixed with it', () => {
     expect(band).toMatch(/<InlineError v-if="error && loaded"/)
   })
 
-  it('never renders the stat row on a failed first load', () => {
+  it('never renders the stat numbers on a failed first load', () => {
     // The stats branch reads `stats`, which falls back to
     // `{ total_executions: 0 }` — zeros are a claim about performance where
     // "no data" is a claim about nothing, so this is the same "empty agent"
-    // defect the details panel had. The failure arm must therefore be a
-    // SIBLING of the whole stat row, not a branch inside it.
+    // defect the details panel had. The failure must therefore be an ARM of
+    // the same v-if chain, never a banner rendered beside a live row.
     const failIdx = band.indexOf('v-if="error && !loaded"')
-    const rowIdx = band.indexOf('v-else class="flex flex-wrap items-center')
+    const skeletonIdx = band.indexOf('v-else-if="!loaded"')
+    const statsIdx = band.indexOf('<template v-else>')
     expect(failIdx).toBeGreaterThan(-1)
-    expect(rowIdx).toBeGreaterThan(failIdx)
+    expect(skeletonIdx).toBeGreaterThan(failIdx)
+    expect(statsIdx).toBeGreaterThan(skeletonIdx)
+  })
+
+  it('keeps the time-window selector reachable while the failure shows', () => {
+    // Caught re-reviewing my own first fix. Replacing the WHOLE row with the
+    // failure took the `<select>` with it — and changing the window is a
+    // second way out of a failure (`watch(timeWindow)` re-fetches) alongside
+    // the retry button. The selector is a sibling of the v-if chain, so it
+    // must sit inside the same flex row and outside every arm.
+    const rowIdx = band.indexOf('class="flex flex-wrap items-center')
+    const failIdx = band.indexOf('v-if="error && !loaded"')
+    const selectIdx = band.indexOf('<select')
+    expect(rowIdx).toBeGreaterThan(-1)
+    expect(failIdx).toBeGreaterThan(rowIdx)   // the arm is INSIDE the row
+    expect(selectIdx).toBeGreaterThan(failIdx)
+    // …and not swallowed by an arm: no `v-if`/`v-else` opens between the last
+    // arm's close and the selector.
+    const tail = band.slice(band.lastIndexOf('</template>'), selectIdx)
+    expect(tail).not.toMatch(/v-(if|else)/)
   })
 
   it('uses one failure language, not two', () => {
