@@ -27,8 +27,8 @@
   **No `Range` header.** The text cap is applied by fetching the whole blob and
   slicing client-side. `main.py`'s CORS `allow_headers` does not list `Range`,
   so a ranged preview dies silently on any deployment whose portal base URL is
-  genuinely cross-origin — and slicing also keeps the preview off
-  `/api/files/{id}`'s transfer-start counter path entirely.
+  genuinely cross-origin. The blob loader marks shared-file reads with
+  `preview=1` so these full transfers do not count as downloads.
 -->
 <template>
   <Teleport to="body">

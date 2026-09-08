@@ -397,6 +397,7 @@ async def download_shared_file(
     sig: Optional[str] = None,
     download_token: Optional[str] = None,
     download: Optional[str] = None,
+    preview: Optional[str] = None,
 ):
     """
     Serve a file previously registered via POST /api/internal/agent-files/share.
@@ -408,6 +409,10 @@ async def download_shared_file(
       `Content-Disposition: attachment`; nothing can force `inline`, which stays
       the server's `is_inline_safe()` decision (ent#461). Parsed tolerantly, so
       a malformed value is ignored rather than 422'd — see `_is_download_forced`.
+
+    - preview (optional, #2582): marks a full-blob preview for auditing and
+      excludes it from the download count. Does not alter authorization, link
+      consumption, or Content-Disposition.
 
     `download_token` is accepted as a legacy alias but deprecated —
     Trinity's credential sanitizer redacts `...TOKEN...=value` query
@@ -453,10 +458,12 @@ async def download_shared_file(
     # the audit row is still written and carries this flag; only the counter is
     # gated on a full transfer.
     is_ranged_prefix = rng is not None and rng[1] < file_size - 1
+    # Workspace previews fetch whole blobs; range size cannot identify intent.
+    is_preview = (preview or "").strip().lower() in ("1", "true", "yes", "on")
 
     if is_transfer_start:
         # Counters — best-effort
-        if not is_ranged_prefix:
+        if not is_ranged_prefix and not is_preview:
             try:
                 db.mark_shared_file_downloaded(file_id)
             except Exception as e:  # pragma: no cover
@@ -480,6 +487,7 @@ async def download_shared_file(
                     # #2582 — a partial read of the head of the file (a preview),
                     # distinguishable forever from a real transfer.
                     "ranged_prefix": is_ranged_prefix,
+                    "preview": is_preview,
                     "user_agent": (request.headers.get("user-agent") or "")[:200],
                 },
                 endpoint=str(request.url.path),

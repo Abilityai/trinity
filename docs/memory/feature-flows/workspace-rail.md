@@ -350,8 +350,9 @@ serve neither an external client nor agent-shared bytes (which live at
 * Text is capped at **256 KB** and fetched **whole, with no `Range` header**,
   then sliced client-side. `main.py`'s CORS `allow_headers` does not list
   `Range`, so a ranged preview dies silently wherever the portal base URL is
-  genuinely cross-origin — and slicing keeps preview off the download-counter
-  path entirely. The cap is stated in the UI, not only in code.
+  genuinely cross-origin. Shared-file preview reads carry `preview=1`; the
+  server audits them with `details.preview=true` without incrementing the
+  download counter. The cap is stated in the UI, not only in code.
 * Non-previewable types, and a **failed byte fetch**, both land on the same
   name/size/type + Download card. "Never a blank modal" has to cover a failure,
   not only an unknown type.

@@ -488,3 +488,18 @@ describe('#2582 / ent#548 — the design-system contract on both files', () => {
     expect(RAIL_FILES).toMatch(/await errorDetail\(err/)
   })
 })
+
+describe('share preview URL', () => {
+  it('marks full-blob previews without changing the download link or bearer token', async () => {
+    const { sharePreviewPath } = await import('../../src/components/portal/portalFiles.js')
+    const download = '/api/files/f1?sig=a%2Bb&download=1'
+    const preview = new URL(sharePreviewPath(download, 'https://portal.example.com'), 'https://portal.example.com')
+    expect(preview.pathname).toBe('/api/files/f1')
+    expect(preview.searchParams.get('sig')).toBe('a+b')
+    expect(preview.searchParams.get('preview')).toBe('1')
+    expect(preview.searchParams.get('download')).toBe('1')
+    expect(download).not.toContain('preview')
+    expect(sharePreviewPath('https://cdn.example.com/api/files/f1?sig=t', 'https://portal.example.com'))
+      .toBe('https://cdn.example.com/api/files/f1?sig=t&preview=1')
+  })
+})

@@ -198,7 +198,7 @@ import {
   fileActions,
   flattenFiles,
   humanSize,
-  sameOriginPath,
+  sharePreviewPath,
 } from './portalFiles'
 
 const props = defineProps({
@@ -359,7 +359,7 @@ async function loadBlob(row) {
   if (row.kind === 'upload') {
     return portal.fetchUploadBlob(row.agent, row.item.filename)
   }
-  const res = await fetch(sameOriginPath(row.item.download_url, window.location.origin))
+  const res = await fetch(sharePreviewPath(row.item.download_url, window.location.origin))
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.blob()
 }

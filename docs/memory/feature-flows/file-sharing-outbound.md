@@ -83,8 +83,8 @@ User clicks URL →
     │    (RFC 6266 UTF-8) — server-decided; ?download=1 may force attachment
     │    ONLY, never inline (#2582)
     ├── X-Content-Type-Options: nosniff
-    ├── bump download_count + last_downloaded_at — full transfers only (#2582)
-    └── audit: EXECUTION/file_share_download (details.ranged_prefix)
+    ├── bump download_count + last_downloaded_at — full transfers excluding `?preview=1` (#2582)
+    └── audit: EXECUTION/file_share_download (details.ranged_prefix, details.preview)
 ```
 
 ---

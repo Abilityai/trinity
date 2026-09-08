@@ -223,3 +223,10 @@ export async function errorDetail(err, fallback = 'Something went wrong.') {
   if (detail && typeof detail.message === 'string') return detail.message
   return fallback
 }
+
+/** Mark a preview read without mutating the original download URL. */
+export function sharePreviewPath(url, base) {
+  const parsed = new URL(url, base)
+  parsed.searchParams.set('preview', '1')
+  return sameOriginPath(parsed.href, base)
+}

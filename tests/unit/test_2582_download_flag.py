@@ -335,3 +335,34 @@ def test_portal_documents_appends_the_flag_and_build_download_url_does_not():
 
     agent_src = inspect.getsource(agent_shared_files_service.build_download_url)
     assert "download=1" not in agent_src
+
+
+@pytest.mark.parametrize('query', ['&preview=1', '&preview=true', '&preview=1&download=1'])
+def test_full_blob_preview_is_audited_without_counting(client, query):
+    res = client.get('/api/files/f1?sig=tok' + query)
+    assert res.status_code == 200
+    assert len(res.content) == client._size
+    assert client._marked == []
+    assert client._audited[-1]['details']['preview'] is True
+
+
+def test_preview_preserves_auth_and_attachment_policy(client):
+    assert client.get('/api/files/f1?sig=wrong&preview=1').status_code == 401
+    res = client.get('/api/files/f1?sig=tok&preview=1&download=1')
+    assert res.headers['content-disposition'].startswith('attachment;')
+
+
+@pytest.mark.parametrize('query', ['', '&preview=0', '&preview=false', '&preview=x'])
+def test_normal_download_still_counts_after_preview(client, query):
+    client.get('/api/files/f1?sig=tok&preview=1')
+    client._marked.clear()
+    assert client.get('/api/files/f1?sig=tok&download=1' + query).status_code == 200
+    assert client._marked == ['f1']
+
+
+def test_preview_does_not_grant_inline_html(html_client):
+    res = html_client.get('/api/files/f1?sig=tok&preview=1&download=0')
+    assert res.status_code == 200
+    assert res.headers['content-disposition'].startswith('attachment;')
+    assert res.headers['x-content-type-options'] == 'nosniff'
+    assert html_client._marked == []
