@@ -100,20 +100,38 @@ describe('#2597 — the Info body tells the truth about its own fetch', () => {
 })
 
 describe('#2597 — the band fails the other way, and is fixed with it', () => {
-  it('does not leave a failed first load as a permanent skeleton', () => {
+  it('gives a failed first load its own arm, with a retry', () => {
     // `InlineError v-if="error && loaded"` covers a refresh only. Without a
     // first-load arm the band shows its three pulsing placeholders forever,
     // with no error and no retry.
-    expect(band).toMatch(/<LoadFailed[\s\S]{0,240}@retry="reload"/)
+    //
+    // Pinned as the PROPERTY — an arm gated on `error && !loaded` that offers
+    // a retry — rather than as a named component. The first cut of this fix
+    // used `LoadFailed` and a guard naming it would have been re-pointed at the
+    // primitive rather than at the rule when that changed.
+    expect(band).toMatch(/v-if="error && !loaded"[\s\S]{0,200}@retry="reload"/)
   })
 
   it('still keeps a failed refresh beside the numbers', () => {
     expect(band).toMatch(/<InlineError v-if="error && loaded"/)
   })
 
-  it('does not show the skeleton and the failure at once', () => {
-    // The skeleton branch is `v-if="!loaded"`; a first-load failure must take
-    // its own arm out of that same chain, not render alongside it.
-    expect(band).toMatch(/v-if="!loaded && !error"/)
+  it('never renders the stat row on a failed first load', () => {
+    // The stats branch reads `stats`, which falls back to
+    // `{ total_executions: 0 }` — zeros are a claim about performance where
+    // "no data" is a claim about nothing, so this is the same "empty agent"
+    // defect the details panel had. The failure arm must therefore be a
+    // SIBLING of the whole stat row, not a branch inside it.
+    const failIdx = band.indexOf('v-if="error && !loaded"')
+    const rowIdx = band.indexOf('v-else class="flex flex-wrap items-center')
+    expect(failIdx).toBeGreaterThan(-1)
+    expect(rowIdx).toBeGreaterThan(failIdx)
+  })
+
+  it('uses one failure language, not two', () => {
+    // Both faces of the failure are `InlineError`. A centred `LoadFailed`
+    // block inside a horizontal band would also roughly triple its height on
+    // failure and shift the conversation column (contract principle 4).
+    expect(band).not.toContain('LoadFailed')
   })
 })

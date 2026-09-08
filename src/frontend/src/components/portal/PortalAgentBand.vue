@@ -13,11 +13,30 @@
     class="shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-4 py-2.5"
     data-testid="portal-agent-band"
   >
-    <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
+    <!-- #2597: a failed FIRST load, kept OUT of the stat row below.
+         `InlineError` is the same primitive the failed-refresh case at the
+         bottom of this file already uses, so the band has one failure language
+         rather than two — and it is row-shaped, where `LoadFailed`'s centred
+         icon column would become a flex item in a row of stat figures and
+         roughly triple the band's height, shifting the whole conversation
+         column down (contract principle 4).
+
+         It must be its own arm, not merely a banner: the `v-else` branch below
+         renders `stats`, which falls back to `{ total_executions: 0 }` on a
+         failure — zeros are a claim about performance, and "no data" is a claim
+         about nothing. Rendering them here would be the very bug this fixes. -->
+    <InlineError
+      v-if="error && !loaded"
+      :message="error"
+      retryable
+      @retry="reload"
+    />
+
+    <div v-else class="flex flex-wrap items-center gap-x-6 gap-y-2">
       <!-- #2540/#1927: gated on the VERDICT (`loaded`), never on a request
            being open, so a window change or a background refresh leaves the
            numbers on screen instead of flashing back to placeholders. -->
-      <template v-if="!loaded && !error">
+      <template v-if="!loaded">
         <div class="flex items-center gap-6" aria-busy="true">
           <div v-for="i in 3" :key="i" class="animate-pulse">
             <div class="h-5 w-10 rounded bg-gray-200 dark:bg-gray-800"></div>
@@ -26,20 +45,6 @@
         </div>
         <span class="sr-only">Loading this agent's activity…</span>
       </template>
-
-      <!-- #2597: the other half of ent#253's rule. `InlineError` below is
-           gated on `loaded`, so it covers a failed REFRESH only — a failed
-           FIRST load left the skeleton above pulsing forever, with no error and
-           no way to retry. It takes its own arm out of the same chain rather
-           than rendering beside the skeleton, so the band never shows "loading"
-           and "failed" at once. -->
-      <LoadFailed
-        v-else-if="!loaded"
-        dense
-        title="Couldn't load this agent's activity"
-        :message="error"
-        @retry="reload"
-      />
 
       <template v-else>
         <div>
@@ -132,7 +137,6 @@
  * times and each issuing its own would double every page load.
  */
 import { ref, computed, toRef } from 'vue'
-import LoadFailed from '@/components/LoadFailed.vue'
 import StackedBarChart from '@/components/StackedBarChart.vue'
 import ScanlineReveal from '@/components/ScanlineReveal.vue'
 import InlineError from '@/components/InlineError.vue'

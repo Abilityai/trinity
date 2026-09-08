@@ -330,11 +330,8 @@ describe('Overview containment', () => {
     // stat figures. So the skeleton is that row: three figure-sized blocks, not
     // a grid. Retired deliberately and replaced, rather than deleted, per this
     // file's own #2169 convention.
-    // #2597 narrowed the gate to `!loaded && !error` so a failed FIRST load
-    // takes its own arm instead of pulsing forever. The shape rule below is
-    // unchanged and is what this test is actually about.
     const src = pageSource()
-    expect(src).toMatch(/v-if="!loaded && !error"[\s\S]{0,400}animate-pulse/)
+    expect(src).toMatch(/v-if="!loaded"[\s\S]{0,400}animate-pulse/)
     expect(src).not.toMatch(/xl:grid-cols-2/)
   })
 
@@ -343,9 +340,7 @@ describe('Overview containment', () => {
     // the numbers on every window change and would be counted by the
     // loading-gate ratchet.
     const src = pageSource()
-    // #2597: still the VERDICT, now also excluding the failure arm. The
-    // negative assertion — never `loading` — is the point and is untouched.
-    expect(src).toMatch(/v-if="!loaded && !error"/)
+    expect(src).toMatch(/v-if="!loaded"/)
     expect(src).not.toMatch(/v-if="loading"/)
   })
 })
