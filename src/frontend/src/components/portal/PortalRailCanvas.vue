@@ -55,6 +55,7 @@
             :delete-canvas="(id) => portal.deleteAgentCanvas(agent, id)"
             :bulk-delete-canvases="(ids) => portal.bulkDeleteAgentCanvases(agent, ids)"
             :pin-canvas="(id, pinned) => portal.pinAgentCanvas(agent, id, pinned)"
+            :agent-name="agent"
             viewer="client"
             @changed="feeds.refresh()"
           />

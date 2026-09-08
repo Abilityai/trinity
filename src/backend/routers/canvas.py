@@ -30,6 +30,8 @@ from models import (
     CANVAS_RATE_WINDOW,
     Canvas,
     CanvasBulkDelete,
+    CanvasShare,
+    CanvasShareCreate,
     CanvasBulkDeleteResult,
     CanvasPatch,
     CanvasPinRequest,
@@ -44,6 +46,16 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["canvas"])
+
+
+def _share_url(token: str) -> str:
+    """The address a share link is handed out as.
+
+    Relative on purpose: the frontend resolves it against its own origin, so a
+    link keeps working behind whatever hostname the instance is reached by
+    (Tailscale name, tunnel, localhost) instead of baking one in at mint time.
+    """
+    return f"/canvas/s/{token}"
 
 
 def _map(exc: CanvasError) -> HTTPException:
@@ -170,6 +182,101 @@ async def bulk_delete_canvases(
     return CanvasBulkDeleteResult(
         agent_name=name, requested=len(body.canvas_ids), deleted=deleted
     )
+
+
+@router.get("/{name}/canvas/shares", response_model=List[CanvasShare])
+async def list_canvas_shares(
+    name: AuthorizedAgent,
+    current_user: User = Depends(get_current_user),
+    canvas_id: str | None = None,
+):
+    """Every live share link for this agent, or for one canvas (ent#554).
+
+    Declared ABOVE `/{name}/canvas/{canvas_id}` (Invariant #4) — "shares" is a
+    valid canvas id shape, so this route would otherwise be captured by it and
+    answer "canvas not found" forever.
+
+    Owner-gated like the mutations: a link's TOKEN is in the payload, so this
+    read hands over the capability itself and cannot be wider than the write.
+    """
+    _gate_human_removal(current_user, name)
+    rows = db.list_canvas_shares(name, canvas_id)
+    return [CanvasShare(**r, url=_share_url(r["token"])) for r in rows]
+
+
+@router.post("/{name}/canvas/{canvas_id}/share", response_model=CanvasShare)
+async def create_canvas_share(
+    name: AuthorizedAgent,
+    canvas_id: str,
+    body: CanvasShareCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Mint a share link for one canvas (ent#554).
+
+    Owner-or-admin and human-only via `_gate_human_removal`: a share is a
+    GRANT, not a use, and the agent that writes a canvas does not decide who
+    outside the platform may read it.
+
+    `public` is audited distinctly from `authorized` because it is the one that
+    widens the audience — the audit trail should make "who made this readable
+    by anyone with the URL" answerable without reading the payload.
+    """
+    _gate_human_removal(current_user, name)
+    try:
+        canvas_service.validate_canvas_id(canvas_id)
+    except CanvasError as e:
+        raise _map(e)
+    if not db.get_agent_canvas(name, canvas_id):
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+    share = db.create_canvas_share(
+        name, canvas_id, scope=body.scope,
+        created_by=str(getattr(current_user, "id", "")) or None,
+        expires_at=body.expires_at,
+    )
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHORIZATION,
+        event_action="canvas_share_public" if body.scope == "public" else "canvas_share",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        # No token: the audit log is broadly readable and the token IS the
+        # capability (the G-04 rule).
+        details={"canvas_id": canvas_id, "scope": share["scope"], "share_id": share["id"]},
+    )
+    return CanvasShare(**share, url=_share_url(share["token"]))
+
+
+@router.delete("/{name}/canvas/shares/{share_id}")
+async def revoke_canvas_share(
+    name: AuthorizedAgent,
+    share_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Turn a share link off (ent#554). The row is kept, not deleted, so the
+    link can say it was revoked instead of 404-ing blankly."""
+    _gate_human_removal(current_user, name)
+    revoked = db.revoke_canvas_share(name, share_id)
+    if revoked:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="canvas_share_revoke",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=name,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"share_id": share_id},
+        )
+    return {"share_id": share_id, "revoked": bool(revoked)}
 
 
 @router.get("/{name}/canvas/{canvas_id}", response_model=Canvas)

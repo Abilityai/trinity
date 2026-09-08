@@ -106,6 +106,74 @@ CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at D
   direction; the table therefore stays deliberately absent from
   `RETENTION_OPS_KEYS`, now for a stated reason rather than a mistaken one.
 
+## Sharing and export (ent#554)
+
+A canvas can leave the Workspace two ways: a **share link** and a **PDF**.
+
+### The share link
+
+`agent_canvas_shares` — deliberately its OWN table, not a typed row in
+`agent_public_links`. That table has a `type` column that looks made for this,
+but **nothing in its read path filters on it**: `get_public_link_by_token`,
+`is_link_valid` and `routers/public.py::_validate_public_link` all resolve a
+token whatever its type. A canvas row there would therefore also be a working
+public-**chat** token — anyone sent a canvas could talk to the agent. (The same
+trap is already latent for `type='site'`, unexploited only because nothing
+creates those rows today; `db_models.py` says "currently only 'chat' is
+supported".) A separate table makes the isolation structural rather than
+dependent on every consumer remembering to check.
+
+**Two scopes, and the default is the narrow one.**
+
+| scope | reach | how it is enforced |
+|---|---|---|
+| `authorized` (default) | the people who could already see the canvas | the link is a DEEP link: the view requires a signed-in principal and re-checks `can_user_access_agent`. The link POINTS at a canvas; it never grants access to one. |
+| `public` | anyone holding the URL | an explicit, separate, audited choice; protected only by 256 bits of token entropy |
+
+Failing narrow is enforced in five independent places — the column default, the
+Pydantic default, `normalize_scope`'s fallback for an unrecognised value, the
+order of `SHARE_SCOPES`, and the radio the dialog preselects — because a link
+that reaches further than the sharer understood is the one failure this feature
+must not have. Creating a `public` link audits under its own action
+(`canvas_share_public`), so "who made this readable by anyone with the URL" is
+answerable without reading payloads; the token is never in the audit row (it IS
+the capability — the G-04 rule).
+
+**A shared canvas is LIVE, and says so** (AC #3, operator ruling 2026-09-08).
+The link renders the canvas as it is now, carrying its `updated_at` and stale
+mark, and the page states that it is not a copy taken at share time. This
+follows ent#438's model — a canvas is a surface an agent keeps *current* — and
+means a share stores nothing. The cost is that content can change after you
+share it; the mitigation is revocation, not freezing.
+
+**Revocation keeps the row.** `revoked_at` is stamped, never deleted, because a
+revoked link has to be able to SAY it was revoked (AC #2) and it cannot do that
+once the row is gone. The status vocabulary splits along disclosure: `revoked`
+and `expired` are returned only for a token that MATCHED a row — whoever holds
+such a link was already told the canvas exists — while an unknown token and a
+canvas deleted out from under a link both collapse into one `not_found`, so a
+stranger guessing tokens learns nothing from the difference. An unparseable
+`expires_at` reads as expired: a link whose lifetime cannot be read is one we
+cannot promise is live.
+
+### The PDF
+
+**Print-first**, per the issue's own guidance: a print stylesheet over the
+design kit plus the browser's own PDF. No headless-browser service to run, and
+— the deciding reason — no second renderer to keep in step with `CanvasBlock`.
+A server-side renderer was the stated fallback and was not needed: pagination
+(`break-inside: avoid` per block) and fidelity both come out of the same markup
+the screen uses.
+
+`components/canvas/CanvasDocument.vue` is the one printable form, rendered by
+both the shared-link page and every authenticated surface, so AC #7's "works
+identically from every canvas surface" is true by construction rather than by
+three surfaces agreeing. It carries the title, agent and generation date (AC
+#5), and forces the light rendering under `@media print` whatever theme the
+viewer is in. The controls are `print:hidden` — chrome is never part of the
+document — and when `window.print` is unavailable the button says so and the
+share link still works (AC #6).
+
 ## Lifecycle — removing, pinning, and living with a lot of them (ent#553)
 
 An agent that uses its canvas as intended accumulates dozens: one per report,

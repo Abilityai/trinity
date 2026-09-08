@@ -4002,6 +4002,44 @@ def _migrate_agent_canvases_pinned(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvas_shares_table(cursor, conn):
+    """ent#554 — share links for a canvas.
+
+    A separate table rather than a typed row in `agent_public_links`: nothing
+    in that table's read path filters on `type`, so a canvas row there would
+    also be a working public-CHAT token. See the DDL comment in db/schema.py.
+
+    Mirrored by the Alembic revision 0059_agent_canvas_shares.
+    """
+    cursor.execute("PRAGMA table_info(agent_canvas_shares)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_canvas_shares (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'authorized',
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            revoked_at TEXT,
+            last_viewed_at TEXT,
+            view_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_shares_token "
+        "ON agent_canvas_shares(token)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_shares_canvas "
+        "ON agent_canvas_shares(agent_name, canvas_id)"
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_title_source(cursor, conn):
     """ent#473 — which hand wrote a Workspace thread's title.
 
@@ -4273,6 +4311,7 @@ MIGRATIONS = [
     ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
     ("agent_canvases_template", _migrate_agent_canvases_template),
     ("agent_canvases_pinned", _migrate_agent_canvases_pinned),
+    ("agent_canvas_shares_table", _migrate_agent_canvas_shares_table),
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),

@@ -233,6 +233,17 @@ export const routes = [
     // in one click. Standalone (no NavBar / platform chrome), no requiresAuth:
     // the external path must stay reachable without an account. Backend 404s in
     // OSS/unentitled builds; the page shows its sign-in / unavailable state.
+    // ent#554 — a shared canvas at a stable link. No `requiresAuth` for the
+    // same reason the Workspace has none: a `public` share must open with no
+    // account at all. An `authorized` share answers 401 from the API and the
+    // view offers a sign-in — the SERVER decides which, never the router, since
+    // a guard here would turn every public link into a login wall.
+    path: '/canvas/s/:token',
+    name: 'shared-canvas',
+    component: () => import('../views/SharedCanvas.vue'),
+    meta: { title: 'Shared canvas', hideHelpWidget: true }
+  },
+  {
     path: '/workspace',
     name: 'Workspace',
     component: () => import('../views/Portal.vue'),

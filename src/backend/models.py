@@ -815,6 +815,34 @@ class CanvasPinRequest(BaseModel):
     pinned: bool
 
 
+class CanvasShareCreate(BaseModel):
+    """Mint a share link for one canvas (ent#554).
+
+    `scope` defaults to the NARROW one. Sharing must never widen the ent#438
+    audience by accident, so reaching further than "the people who could
+    already see it" is an explicit value a caller has to type.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["authorized", "public"] = "authorized"
+    expires_at: Optional[str] = Field(None, max_length=64)
+
+
+class CanvasShare(BaseModel):
+    """A share link as its owner sees it."""
+    id: str
+    agent_name: str
+    canvas_id: str
+    token: str
+    scope: str
+    url: Optional[str] = None
+    created_at: str
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    last_viewed_at: Optional[str] = None
+    view_count: int = 0
+
+
 class CanvasBulkDelete(BaseModel):
     """Remove several canvases in one action (ent#553).
 

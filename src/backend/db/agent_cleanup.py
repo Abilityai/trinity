@@ -217,6 +217,12 @@ AGENT_REFS: List[AgentRef] = [
     # SECOND canvas under the new name while the old one stayed visible.
     AgentRef("agent_canvases",               "agent_name",        Policy.CASCADE),
 
+    # ent#554 — share links for those canvases. CASCADE for the same reason the
+    # canvas itself does: a rename must carry the links (a shared URL that dies
+    # because the agent was renamed is a broken promise to whoever holds it),
+    # and a purge must not leave a live token addressing a canvas that is gone.
+    AgentRef("agent_canvas_shares",          "agent_name",        Policy.CASCADE),
+
     # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
     # connector KEY is an mcp_api_keys row (scope='connector') already covered
     # by the mcp_api_keys refs below; this is the config row.
