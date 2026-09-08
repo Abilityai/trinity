@@ -188,6 +188,27 @@
              recipients named — a room's upload is a fan-out and the person
              should see who received it. -->
         <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
+        <!-- #2620 — the proactive half. Placed ABOVE the attachments
+             block on purpose: the composer below is a `v-else` chained to that
+             block's `v-if`, and `v-else` binds to the immediately preceding
+             element — so a conditional dropped between them silently steals
+             the chain and the composer vanishes exactly when this banner
+             appears. Pinned by `roomComposerChain.spec.js`.
+
+             The proactive half. The header line is ambient; this is
+             where the person is about to SPEND one, so the last few messages
+             say so in full, once, right above the box. Only at `critical`: a
+             banner that is always there is a banner nobody reads. -->
+        <div
+          v-if="notice && notice.level === 'critical'"
+          class="mb-2 rounded-lg border border-status-danger-200 bg-status-danger-50 px-3 py-2 text-xs text-status-danger-800 dark:border-status-danger-800 dark:bg-status-danger-900/30 dark:text-status-danger-200"
+          data-testid="room-budget-banner"
+          role="status"
+        >
+          <span class="font-medium">{{ notice.headline }}.</span>
+          {{ notice.detail }}
+        </div>
+
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
             v-for="(f, i) in attachments"
@@ -206,20 +227,6 @@
             <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
           </span>
         </div>
-        <!-- #2620 — the proactive half. The header line is ambient; this is
-             where the person is about to SPEND one, so the last few messages
-             say so in full, once, right above the box. Only at `critical`: a
-             banner that is always there is a banner nobody reads. -->
-        <div
-          v-if="notice && notice.level === 'critical'"
-          class="mb-2 rounded-lg border border-status-danger-200 bg-status-danger-50 px-3 py-2 text-xs text-status-danger-800 dark:border-status-danger-800 dark:bg-status-danger-900/30 dark:text-status-danger-200"
-          data-testid="room-budget-banner"
-          role="status"
-        >
-          <span class="font-medium">{{ notice.headline }}.</span>
-          {{ notice.detail }}
-        </div>
-
         <form v-else class="flex items-end gap-2" @submit.prevent="send">
           <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
                wrapper as the 1:1 composer; it must carry the flex sizing the
