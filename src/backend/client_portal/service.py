@@ -587,8 +587,9 @@ async def _runtime_map(names: list[str]) -> dict[str, str]:
     VALIDATED before it is trusted (a stubbed `services.docker_service` yields a
     truthy MagicMock that is neither dict nor None), and it never raises.
 
-    It is a SECOND Docker read per roster load, gathered concurrently with the
-    availability one. Deliberately not folded into `_availability_map`: that
+    It is a SECOND Docker read per roster load, taken SEQUENTIALLY after the
+    availability one — see the call site in `get_roster` for why it is not
+    gathered. Deliberately not folded into `_availability_map`: that
     function's fail-open behaviour is pinned by the #2196 guard suite through
     `docker_service.agent_container_states`, and re-pointing it at a different
     leaf would silently unhook every one of those tests. The cost is O(1) in

@@ -759,3 +759,190 @@ def test_the_idempotency_scope_carries_the_requested_model():
     # …and the validation happens BEFORE the scope is built, so a refused model
     # never consumes the key.
     assert src.index("validate_requested_model") < src.index("scope = f")
+
+
+# ---------------------------------------------------------------------------
+# 7. The runtime read — the leaf and its wrapper
+# ---------------------------------------------------------------------------
+# The capability gate is only as good as the value that drives it. Section 5
+# proves the CARD does the right thing with a runtime; nothing above proves the
+# runtime is ever read correctly, and every way this leaf can fail is silent:
+# it returns `None`, the caller fails open, and every agent — Codex included —
+# gets the Claude control back. A green suite with a permanently-broken read is
+# exactly what these tests exist to prevent.
+
+
+def test_the_runtime_read_uses_the_sparse_attrs_shape(monkeypatch):
+    """The trap this leaf was written around, pinned.
+
+    Under `sparse=True` docker-py's `.labels` **raises** — it reads
+    `attrs["Config"]["Labels"]`, which only a full inspect populates — while the
+    `/containers/json` summary carries the labels at `attrs["Labels"]`. Reading
+    `.labels` here would raise on every container, be swallowed by the leaf's
+    own `except`, and return `None` forever: the control would reappear on every
+    Codex agent and no test would notice.
+
+    Twin of `test_2196_roster_availability.py::test_the_batch_read_uses_the_
+    sparse_attrs_shape`, one key over. Built on a REAL docker-py `Container`
+    seeded with a real summary, because a hand-rolled object with a `.labels`
+    attribute is precisely the shape `sparse=True` does not produce.
+    """
+    import docker.errors
+    from docker.models.containers import Container
+
+    ds = _services_module("docker_service")
+    captured: dict = {}
+
+    sparse = Container(attrs={
+        "Id": "abc123",
+        "Names": ["/agent-scout"],
+        "State": "running",
+        "Image": "trinity-agent-base:latest",
+        "Labels": {"trinity.platform": "agent", "trinity.agent-runtime": "codex"},
+    })
+    assert sparse.name is None, "fixture is not sparse-shaped"
+    with pytest.raises(docker.errors.DockerException):
+        _ = sparse.labels                      # the whole reason for attrs["Labels"]
+
+    def _list(**kwargs):
+        captured.update(kwargs)
+        return [sparse]
+
+    monkeypatch.setattr(
+        ds, "docker_client",
+        types.SimpleNamespace(containers=types.SimpleNamespace(list=_list)),
+    )
+
+    assert ds.agent_container_runtimes() == {"scout": "codex"}
+    assert captured.get("sparse") is True, "the runtime read must pass sparse=True"
+    # Server-side filtering: the cost bound and the tenancy bound are the same
+    # argument. Without it this reads every container on the host.
+    assert captured.get("filters") == {"label": "trinity.platform=agent"}
+    assert captured.get("all") is True, "a stopped agent still has a runtime"
+
+
+def test_a_container_without_the_runtime_label_reads_as_claude_code(monkeypatch):
+    """Agents created before the runtime label existed carry no label at all.
+    Reading that as "unknown runtime" would hide the control from the entire
+    installed base — the #2196 inversion, applied to a capability instead of a
+    roster."""
+    ds = _services_module("docker_service")
+
+    def _list(**kwargs):
+        return [
+            types.SimpleNamespace(attrs={"Names": ["/agent-legacy"], "Labels": {}}),
+            types.SimpleNamespace(attrs={"Names": ["/agent-nolabels"]}),
+            # A non-dict `Labels` is a shape this code does not understand; it
+            # must degrade like an absent one, not take the whole read down.
+            types.SimpleNamespace(attrs={"Names": ["/agent-weird"], "Labels": "codex"}),
+        ]
+
+    monkeypatch.setattr(
+        ds, "docker_client",
+        types.SimpleNamespace(containers=types.SimpleNamespace(list=_list)),
+    )
+
+    assert ds.agent_container_runtimes() == {
+        "legacy": "claude-code", "nolabels": "claude-code", "weird": "claude-code",
+    }
+
+
+def test_the_runtime_read_keys_by_container_name_not_the_label(monkeypatch):
+    """`docker_utils.container_rename` moves the container name; the
+    `trinity.agent-name` label is written once at create and goes stale. Keying
+    on the label would report a renamed agent's runtime under its OLD name — so
+    the roster would find nothing for it and fail open. Same keying rule
+    `agent_container_states` states, for the same reason."""
+    ds = _services_module("docker_service")
+
+    renamed = types.SimpleNamespace(attrs={
+        "Names": ["/agent-new-name"],
+        "Labels": {"trinity.platform": "agent",
+                   "trinity.agent-name": "old-name",
+                   "trinity.agent-runtime": "gemini"},
+    })
+    monkeypatch.setattr(
+        ds, "docker_client",
+        types.SimpleNamespace(containers=types.SimpleNamespace(list=lambda **kw: [renamed])),
+    )
+
+    assert ds.agent_container_runtimes() == {"new-name": "gemini"}
+
+
+def test_the_runtime_read_distinguishes_empty_from_unreadable(monkeypatch):
+    """Tri-state, like every other Docker read here (#2196): `{}` means "asked,
+    no agents", `None` means "could not ask". Collapsing them is what makes a
+    daemon fault look like a fleet-wide fact."""
+    ds = _services_module("docker_service")
+
+    monkeypatch.setattr(ds, "docker_client", None)
+    assert ds.agent_container_runtimes() is None            # could not be asked
+
+    def _boom(**kwargs):
+        raise RuntimeError("docker socket is gone")
+
+    monkeypatch.setattr(
+        ds, "docker_client",
+        types.SimpleNamespace(containers=types.SimpleNamespace(list=_boom)),
+    )
+    assert ds.agent_container_runtimes() is None            # still "could not ask"
+
+    monkeypatch.setattr(
+        ds, "docker_client",
+        types.SimpleNamespace(containers=types.SimpleNamespace(list=lambda **kw: [])),
+    )
+    assert ds.agent_container_runtimes() == {}              # asked; no agents
+
+
+def test_the_runtime_map_narrows_to_the_roster_and_never_raises(svc, monkeypatch):
+    """The wrapper's three guards, the same three `_availability_map` has.
+
+    NARROWED — the leaf sees every agent container on the host, including agents
+    this principal has no access to at all. VALIDATED — a dozen test modules
+    install a MagicMock at `sys.modules["services.docker_service"]`, whose call
+    result is truthy and neither dict nor None. NEVER RAISES — a roster must not
+    500 because Docker hiccuped.
+    """
+    from unittest.mock import MagicMock
+
+    ds = _services_module("docker_service")
+
+    monkeypatch.setattr(ds, "agent_container_runtimes",
+                        lambda: {"scout": "codex", "someone-elses": "gemini"})
+    assert _run(svc._runtime_map(["scout", "ghosted"])) == {"scout": "codex"}
+
+    monkeypatch.setattr(ds, "agent_container_runtimes", MagicMock())
+    assert _run(svc._runtime_map(["scout"])) == {}          # not a dict ⇒ no runtimes
+
+    monkeypatch.setattr(ds, "agent_container_runtimes", lambda: None)
+    assert _run(svc._runtime_map(["scout"])) == {}          # unreadable ⇒ fail open
+
+    def _boom():
+        raise RuntimeError("docker socket is gone")
+
+    monkeypatch.setattr(ds, "agent_container_runtimes", _boom)
+    assert _run(svc._runtime_map(["scout"])) == {}          # and never a 500
+
+
+def test_an_empty_roster_pays_no_docker_call_at_all(svc, monkeypatch):
+    """A client with zero agents is the commonest cold-start shape, and this is
+    a SECOND Docker read on the roster path. Zero rows must cost zero round
+    trips — the same short-circuit `_availability_map` makes."""
+    calls = []
+
+    monkeypatch.setattr(_services_module("docker_service"), "agent_container_runtimes",
+                        lambda: calls.append(1) or {})
+
+    assert _run(svc._runtime_map([])) == {}
+    assert calls == [], "an empty roster must not reach Docker"
+
+
+def test_the_roster_resolves_a_missing_runtime_to_the_claude_default(svc):
+    """The fail-open decision lives at the CALL SITE, not in the leaf, so it is
+    pinned there: an agent absent from the map (unreadable Docker, a name the
+    leaf did not return) reads as `claude-code` and keeps its control."""
+    import inspect
+
+    src = inspect.getsource(svc.get_roster)
+    assert "runtimes.get(r[\"agent_name\"], _DEFAULT_RUNTIME)" in src
+    assert svc._DEFAULT_RUNTIME == "claude-code"
