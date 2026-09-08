@@ -18,10 +18,11 @@
 
     <template v-else>
       <!-- Selector only when there is a choice to make. -->
-      <div v-if="canvases.length > 1" class="mb-3 flex flex-wrap gap-1.5">
+      <div v-if="canvases.length > 1" class="mb-3 flex flex-wrap gap-1.5" data-testid="canvas-select">
         <button
           v-for="c in canvases"
           :key="c.canvas_id"
+          :data-canvas-id="c.canvas_id"
           :class="[
             'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
             c.canvas_id === selectedId
@@ -32,7 +33,11 @@
         >{{ c.title || c.canvas_id }}</button>
       </div>
 
-      <div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
+      <div
+        class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
+        data-testid="canvas-panel"
+        :data-canvas-id="selectedId"
+      >
         <header class="flex flex-wrap items-center gap-2 border-b border-gray-200 dark:border-gray-800 px-4 py-3">
           <h3 class="min-w-0 flex-1 truncate text-sm font-semibold">
             {{ selected?.title || selectedId }}
@@ -59,7 +64,7 @@
              regions; whatever is not slotted follows in the stacked list, so a
              layout never hides a block. -->
         <CanvasKit class="px-4 py-4">
-          <p v-if="detailError" class="text-xs text-status-danger-600 dark:text-status-danger-400">
+          <p v-if="detailError" class="text-xs text-status-danger-600 dark:text-status-danger-400" data-testid="canvas-detail-error">
             {{ detailError }}
           </p>
           <p
@@ -130,14 +135,24 @@ const blocks = computed(() => renderableBlocks(detail.value?.blocks))
 // null → stacked (no template, an unknown one, or nothing slotted).
 const placement = computed(() => placeBlocks(detail.value?.template, blocks.value))
 
+// Guards the fetch against a later selection: the list's own first pick and
+// a reader's click a moment later are two fetches in flight, and without this
+// the SLOWER one used to win — the header named one canvas and the blocks
+// belonged to another (#2583, caught by the gallery on every switch).
+let selectSeq = 0
+
 async function select(id) {
   if (!id) return
+  const seq = ++selectSeq
   selectedId.value = id
   detail.value = null
   detailError.value = ''
   try {
-    detail.value = await props.fetchDetail(id)
+    const next = await props.fetchDetail(id)
+    if (seq !== selectSeq) return // superseded
+    detail.value = next
   } catch (e) {
+    if (seq !== selectSeq) return
     // Keep the header — the metadata row is real and its timestamp is the
     // honest part. Only the blocks are missing, and we say so.
     detailError.value = 'Could not load this canvas.'
