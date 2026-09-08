@@ -186,6 +186,12 @@ label row records it.
   page"), no microphone API, a turn in flight.
 - **New chat**: the thread is created (`store.createSession`) and adopted
   BEFORE the call starts, so the transcript has a home before the first word.
+  Since #2579 the adoption runs through the conversation's one `adoptSession()`
+  seam rather than a hand-written emit — it also raises the `bornHere` flag
+  that keeps the provisional "New chat" tab on screen across the round trip,
+  and this was one of the three sites that would otherwise have been missed
+  (starting a call from a fresh chat would drop the whole strip until the list
+  refreshed).
 - **While on**: `VoiceOverlay` over the thread region; New chat, the picker,
   star, Reset, the tabs (`PortalChatTabs :disabled`), attach, mic, textarea and
   Send inert; the speaker toggle hidden; one status line
