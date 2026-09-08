@@ -160,11 +160,18 @@ def test_the_catch_all_is_included_last():
     )
 
 
-def _logical_lines(path: Path) -> int:
+def _non_blank_lines(path: Path) -> int:
     """Lines that carry text — everything except blank separators.
 
-    Blank lines are excluded and comments are NOT, and the asymmetry is the
-    whole point rather than an oversight.
+    NOT called `_logical_lines`, and the rename is the point. A "logical line"
+    in Python excludes comments, so that name over this body says the opposite
+    of what it does — and reading the phrase "logical lines" in the docstring
+    below is exactly what talked a previous pass into excluding comments and
+    re-baselining this guard. A name that has to be read against its own
+    implementation is the trap, not the fix for it.
+
+    Blank lines are excluded and comments are NOT, and the asymmetry is
+    deliberate.
 
     Restoring a PEP-8 blank line between two defs is not a module growing, so a
     metric that counts blanks makes formatting look like size. But excluding
@@ -183,12 +190,17 @@ def _logical_lines(path: Path) -> int:
 
 
 def test_every_module_is_under_the_critical_threshold():
-    """The size AC. 800 logical lines is the repo's critical class; the point of
-    the split was to leave nothing above it."""
+    """The size AC. 800 non-blank lines is the repo's critical class; the point
+    of the split was to leave nothing above it.
+
+    "Non-blank", stated in the AC's own words rather than left to the helper:
+    the ceiling was calibrated against files counted this way, and the phrase
+    that describes it must not be one a reader can take as licence to measure
+    something narrower."""
     oversized = {
         p.name: n
         for p in _PKG.glob("*.py")
-        if (n := _logical_lines(p)) > 800
+        if (n := _non_blank_lines(p)) > 800
     }
     assert oversized == {}, f"still over the 800-line threshold: {oversized}"
 
