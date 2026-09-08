@@ -427,3 +427,73 @@ def test_delete_and_download_do_not_share_a_counter(portal):
         _download(router)
     _status_of(_download, router)
     _delete(router)     # must still work
+
+
+# --------------------------------------------------------------------------- #
+# Packaging — a tunable nobody can tune is not a tunable
+# --------------------------------------------------------------------------- #
+
+_LIMIT_VARS = (
+    "PORTAL_FILE_BURST_LIMIT",
+    "PORTAL_FILE_HOURLY_LIMIT",
+    "PORTAL_FILE_DELETE_BURST_LIMIT",
+)
+
+_COMPOSES = ("docker-compose.yml", "docker-compose.prod.yml", "docker-compose.hosted.yml")
+
+
+def _backend_env(compose: str) -> dict:
+    import yaml
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    doc = yaml.safe_load((root / compose).read_text())
+    out = {}
+    for item in doc["services"]["backend"]["environment"]:
+        if isinstance(item, str) and "=" in item:
+            k, v = item.split("=", 1)
+            out[k] = v
+    return out
+
+
+@pytest.mark.parametrize("compose", _COMPOSES)
+def test_the_limits_are_forwarded_by_every_compose_that_runs_the_backend(compose):
+    """The #1056 / #2433 packaging-gap class, caught on this feature at the
+    `/validate-pr` gate.
+
+    These three were read by `router.py` and documented in `.env.example` while
+    being forwarded by NONE of the three compose files. `.env.example` advertising
+    a knob that cannot reach the process is worse than an undocumented one: the
+    operator sets it, sees no effect, and has nothing to debug. Prod and hosted
+    launch standalone — no base-compose merge and no `env_file:` — so dev wiring
+    would not have carried over even if it had existed.
+    """
+    env = _backend_env(compose)
+    for var in _LIMIT_VARS:
+        assert var in env, f"{compose}: backend must forward {var}"
+
+
+def test_the_defaults_agree_across_composes_and_with_the_code():
+    """A default that differs by compose file makes the limit depend on how the
+    install was deployed — the least debuggable kind of difference."""
+    from routers import files as _files  # noqa: F401  (import parity with the module under test)
+    from client_portal import router
+
+    envs = {c: _backend_env(c) for c in _COMPOSES}
+    for var in _LIMIT_VARS:
+        rendered = {envs[c][var] for c in _COMPOSES}
+        assert len(rendered) == 1, f"{var} default differs by compose file: {rendered}"
+        # `${VAR:-N}` — the N must equal the module-level default the code applies.
+        default = rendered.pop().split(":-")[1].rstrip("}")
+        assert int(default) == getattr(router, var), (
+            f"{var}: compose default {default} != code default {getattr(router, var)}"
+        )
+
+
+def test_env_example_documents_each_one():
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / ".env.example").read_text()
+    for var in _LIMIT_VARS:
+        assert re.search(rf"^{var}=", text, re.M), f".env.example must document {var}"
