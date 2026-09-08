@@ -56,37 +56,25 @@
           </p>
 
           <!--
-            The action on the card face is the COMMAND, and it is on the face
-            rather than behind the disclosure because of what happened when it
-            was not.
-
-            This card used to carry a primary button reading "Add a domain" that
-            navigated to Settings → General → Public URL. That field is a bare
-            input with a Save button and no guard: setting it changes the name
-            Trinity hands out and reconfigures nothing. So the operator who HAD a
-            domain — the one the button is for — followed it, saved, flipped
-            `install_tls_posture` to `https-domain` by string-parsing their own
-            input, and got a domain serving a certificate error while their old
-            IP link kept working. Worse, the card then advanced to the tunnel
-            stage, and this section (`v-if` on the address stage) vanished with
-            the only instruction that would have fixed it.
-
-            A one-glance action is still the goal; it is now an action that
-            works. There is no navigation button because there is nowhere useful
-            to navigate: the command sets the Public URL itself.
+            ONE action on the card face, and since #2380's on-demand-TLS change
+            it is finally an action that finishes the job. Saving the Public URL
+            used to reconfigure nothing — the operator ended up advertising a
+            name no web server answered to, while the card advanced to step two
+            and hid the only instruction that would have fixed it. Caddy now asks
+            the backend whether a hostname is allowed (`/api/public/tls-allowed`)
+            and obtains the certificate on first request, so the settings field IS
+            the whole step. Do not reintroduce a host command here: a non-engineer
+            following a deploy guide has no root shell in the loop.
           -->
           <div v-if="stage === 'address'" class="mt-3">
-            <p class="text-[12.5px] leading-[1.5] text-gray-600 dark:text-gray-300">
-              Point your domain’s A record at this server, then run this on it:
-            </p>
-            <code
-              data-testid="hardening-guide-command"
-              class="mt-1.5 block select-all overflow-x-auto whitespace-nowrap rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 font-mono text-[12px] text-gray-700 dark:border-gray-750 dark:bg-gray-850 dark:text-gray-300"
-            >sudo /opt/trinity/scripts/deploy/set-domain.sh your-domain.com</code>
-            <p class="mt-1.5 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-              It refuses if DNS is not pointing here yet, and puts everything back if
-              anything fails.
-            </p>
+            <BaseButton
+              variant="primary"
+              size="sm"
+              data-testid="hardening-guide-settings"
+              @click="openSettings"
+            >
+              Add a domain
+            </BaseButton>
           </div>
 
           <!--
@@ -117,34 +105,36 @@
                   Give it a real name
                 </h4>
                 <!--
-                  Trinity does not issue, renew, or install certificates: `public_chat_url`
-                  is a display/webhook-base setting and nothing in the tree reconfigures a
-                  proxy or a listener from it.
+                  Trinity issues no certificates: `public_chat_url` is a display and
+                  webhook-base setting, and nothing in this tree reconfigures a proxy from
+                  it. For a while that made this copy a lie by omission — the operator set
+                  the URL, `install_tls_posture` flipped to `https-domain` by string-parsing
+                  their own input, this card advanced to step two, and the domain served a
+                  certificate error because the web server still answered only to the IP.
+                  The card retired on a state it had helped break.
 
-                  That is precisely why this copy must NOT stop at "set the Public URL".
-                  It used to, and the sequence it produced was: operator sets the URL,
-                  `install_tls_posture` flips to `https-domain` by string-parsing that
-                  setting, this card treats step one as done and advances — while the web
-                  server in front of Trinity still answers only to the IP, so the domain
-                  serves a certificate error. The card retired on a state it had made
-                  worse. So it names the one command that actually does the job
-                  (`set-domain.sh`, which switches the certificate, keeps the old address
-                  redirecting, and sets the Public URL itself), and says why it cannot be
-                  a button on this page.
+                  What changed is the WEB SERVER, not this copy's honesty budget: the
+                  provisioned Caddyfile now carries on-demand TLS with an `ask` gate at
+                  `/api/public/tls-allowed`, so Caddy obtains a certificate for the saved
+                  name on first request and refuses every other name. Saving the field is
+                  genuinely the whole step, which is what this card always claimed.
+
+                  Still no verdict on the live connection: "is configured to obtain one" is
+                  a statement about how the server in front was set up, which this code can
+                  read from its own provisioning, not about a handshake nobody here has
+                  observed.
                 -->
                 <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-                  Trinity does not issue certificates itself — the command above reconfigures
-                  whatever terminates TLS in front of it, so the name gets an ordinary
-                  long-lived certificate instead of a short-lived IP one. It also keeps the old
-                  address redirecting so existing links survive, and sets the
-                  <span class="text-gray-600 dark:text-gray-300">Public URL</span> so Trinity
-                  hands out the name instead of the IP — you do not need to set that by hand,
-                  and setting it by hand is not enough on its own, because nothing here
-                  reconfigures a web server from a settings field. It runs on the server
-                  because Trinity is in a container with no access to the web server in front
-                  of it, which is also why the tunnel step below is instructions rather than a
-                  button.
-                </p>
+                  Point a domain’s A record at this server, then set it as the
+                  <span class="text-gray-600 dark:text-gray-300">Public URL</span>
+                  in Settings → General. Trinity does not issue certificates itself, but
+                  whatever terminates TLS in front of it is configured to obtain one for the
+                  name you save, the first time someone visits it — so the domain gets an
+                  ordinary long-lived certificate instead of a short-lived IP one, and Trinity
+                  hands out the name instead of the IP. Only the name you save is allowed, so
+                  nobody else can point a domain here and have certificates issued. Give DNS
+                  time to settle first: until the record points here, the name has nothing to
+                  answer it.                </p>
               </div>
 
               <div class="min-w-0">
@@ -212,6 +202,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useSessionsStore } from '../../stores/sessions'
 import BaseCard from '../base/BaseCard.vue'
@@ -227,6 +218,7 @@ import {
 
 const store = useSessionsStore()
 const authStore = useAuthStore()
+const router = useRouter()
 
 // Which of the two steps the card is on. `https-domain` means step one landed,
 // so the card advances rather than retiring — see `hardeningGuide.js`.
@@ -260,6 +252,8 @@ const visible = computed(
     // Belt on the predicate, which already excludes the only such value today.
     !!postureCopy(store.installTlsPosture)
 )
+
+const openSettings = () => router.push('/settings?tab=general')
 
 const dismiss = () => {
   // Hidden for this session regardless of whether storage accepted the write —

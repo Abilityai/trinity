@@ -164,48 +164,119 @@ def test_start_sh_is_still_syntactically_valid() -> None:
     subprocess.run([sys.executable and "bash", "-n", str(_START)], check=True)
 
 
-def test_the_card_names_a_command_that_exists() -> None:
-    """The hardening card tells the operator to run a specific path on the
-    server. That is a cross-tree reference from a Vue template to a shell script,
-    which nothing else checks — move or rename the script and the card keeps
-    confidently printing a command that does not exist, on a first login, as the
-    one instruction it gives.
+def test_the_provisioned_caddyfile_gates_on_demand_tls_on_the_backend() -> None:
+    """Adding a domain has to be finishable from the browser (#2380).
 
-    Asserted from the CARD's text rather than a constant, because the card is
-    what the operator copies."""
-    if not _CARD.exists():  # OSS checkout without the frontend tree
-        return
-    card = _CARD.read_text()
-    assert "set-domain.sh" in card, "the card no longer names the domain command"
-    # The path as printed, minus the install prefix the droplet uses.
-    assert "/opt/trinity/scripts/deploy/set-domain.sh" in card
-    assert _SET_DOMAIN.exists(), (
-        "the card tells operators to run scripts/deploy/set-domain.sh and it is not there"
-    )
+    Trinity runs in a container with no way to rewrite a Caddyfile or reload a
+    web server, so for a while the honest instruction was a root shell command —
+    which a non-engineer following a deploy guide does not have in the loop. Caddy
+    asking the backend inverts the direction without moving any privilege.
 
-
-def test_set_domain_puts_the_old_config_back_when_it_fails() -> None:
-    """Every failure path after the rewrite must restore. A half-applied domain
-    switch is strictly worse than not starting: the operator had a working
-    instance on an IP certificate, and would be left with a name that does not
-    resolve to a certificate and an IP that no longer has a site block."""
-    body = _SET_DOMAIN.read_text()
-    assert "restore()" in body, "no restore path"
-    # A backup is taken before the file is written, not after.
-    backup_at = body.index('cp -p /etc/caddy/Caddyfile "$BACKUP"')
-    write_at = body.index("cat > /etc/caddy/Caddyfile")
-    assert backup_at < write_at, "the Caddyfile is rewritten before it is backed up"
-    # Each post-rewrite failure calls restore before dying.
-    for failure in ("caddy validate", "would not reload", "No valid certificate"):
-        assert failure in body
-    assert body.count("restore") >= 4, "a failure path is missing its restore"
+    The `ask` gate is not optional garnish. `on_demand` without it makes the
+    instance obtain a certificate for ANY hostname anyone points at its address,
+    until the Let's Encrypt account is rate-limited and the operator's own
+    renewals start failing."""
+    body = _code(_START)
+    assert "on_demand_tls" in body, "no on-demand TLS — adding a domain needs a host shell again"
+    assert "ask http://127.0.0.1:8000/api/public/tls-allowed" in body, "on-demand TLS has no ask gate"
+    assert "on_demand" in body
+    # The bare-IP site keeps its own short-lived certificate: it is what the
+    # instance answers to before any domain exists.
+    assert "profile shortlived" in body
 
 
-def test_set_domain_refuses_before_it_touches_anything_if_dns_is_wrong() -> None:
-    """The whole point of the preflight: issuance validates over the name, so a
-    stale A record turns a working instance into a broken one. The check has to
-    precede the backup, or 'refuses' is just 'reverts'."""
-    body = _SET_DOMAIN.read_text()
-    dns_at = body.index("getent ahostsv4")
-    backup_at = body.index('cp -p /etc/caddy/Caddyfile "$BACKUP"')
-    assert dns_at < backup_at, "the DNS preflight runs after the config is touched"
+def test_the_ask_endpoint_allows_exactly_the_configured_host() -> None:
+    """The whole security model of on-demand TLS is this allowlist.
+
+    Substring matching is the trap worth naming: `evil-example.com` contains
+    `example.com`, so a naive check hands an attacker a certificate request for
+    their own name from someone else's server."""
+    src = (_ROOT / "src" / "backend" / "routers" / "public.py").read_text()
+    assert "/tls-allowed" in src, "the ask endpoint Caddy calls does not exist"
+    section = src[src.index("async def tls_allowed") : src.index("async def tls_allowed") + 3000]
+    assert "urlparse" in section, "the configured URL must be parsed, not substring-matched"
+    assert "requested != allowed" in section, "the comparison is not an exact match"
+    # Fails closed on every branch that cannot prove the name.
+    assert section.count("404") >= 4, "a refusal path is missing"
+
+
+# ---------------------------------------------------------------------------
+# The ask gate, executed rather than grepped.
+# ---------------------------------------------------------------------------
+# Exec-sliced out of routers/public.py, the pattern test_926/test_2380 already
+# use: importing that router pulls the whole backend graph, and this is a pure
+# function over one settings read. A static check cannot tell an exact match
+# from a substring match, and that difference is the entire security model.
+
+
+def _load_ask_gate(configured: str, raises: bool = False):
+    import asyncio
+    import types
+
+    src = (_ROOT / "src" / "backend" / "routers" / "public.py").read_text()
+    start = src.index("async def tls_allowed")
+    end = src.index("\n\n\n", start)
+    snippet = src[start:end]
+
+    class _HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str = ""):
+            self.status_code = status_code
+            self.detail = detail
+
+    def _get_url():
+        if raises:
+            raise RuntimeError("settings unavailable")
+        return configured
+
+    ns: dict = {
+        "HTTPException": _HTTPException,
+        "settings_service": types.SimpleNamespace(get_public_chat_url=_get_url),
+    }
+    exec(snippet, ns)
+    fn = ns["tls_allowed"]
+
+    def call(domain: str):
+        try:
+            return asyncio.run(fn(domain=domain)), None
+        except _HTTPException as e:
+            return None, e.status_code
+
+    return call
+
+
+def test_ask_gate_authorises_only_the_configured_hostname() -> None:
+    ask = _load_ask_gate("https://trinity.example.com")
+
+    ok, status = ask("trinity.example.com")
+    assert ok and ok["authorized"] is True, status
+
+    for hostile in (
+        "example.com",                      # parent domain
+        "evil-trinity.example.com",         # prefix games
+        "trinity.example.com.attacker.net",  # suffix games
+        "trinity.example.com.evil",
+        "attacker.net",
+        "",
+    ):
+        ok, status = ask(hostile)
+        assert ok is None and status == 404, f"issued for {hostile!r}"
+
+
+def test_ask_gate_is_case_and_trailing_dot_insensitive() -> None:
+    """A DNS name is case-insensitive and may arrive fully qualified with a
+    trailing dot. Refusing those would look like a random failure to issue."""
+    ask = _load_ask_gate("https://Trinity.Example.COM")
+    for spelling in ("trinity.example.com", "TRINITY.example.com", "trinity.example.com."):
+        ok, _ = ask(spelling)
+        assert ok, f"refused {spelling!r}, which is the same name"
+
+
+def test_ask_gate_refuses_when_nothing_is_configured_or_readable() -> None:
+    """Fails CLOSED. An instance with no Public URL set must not be a
+    certificate-issuing service for whoever points DNS at it, and a failed
+    settings read must not authorise a name it could not verify."""
+    unset, _ = _load_ask_gate("")("anything.example.com")
+    assert unset is None
+
+    blew_up, status = _load_ask_gate("https://trinity.example.com", raises=True)("trinity.example.com")
+    assert blew_up is None and status == 404

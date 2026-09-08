@@ -151,6 +151,17 @@ container has no business reading it. Naming what is *inside* rather
 than which interface is outside also covers DigitalOcean's private `eth1` for
 free. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
 
+**Adding a domain is a Settings field.** The provisioned Caddyfile carries
+on-demand TLS with an `ask` gate at `/api/public/tls-allowed`, so Caddy obtains a
+certificate for whatever hostname an admin saves as the Public URL, on first
+request, and refuses every other name. Trinity is containerised and cannot
+rewrite this file or reload Caddy — inverting the direction (Caddy asks, Trinity
+answers) is what removes the root shell from a non-engineer's install path
+without moving any privilege into the container. The gate is not optional:
+`on_demand` without it makes the droplet request certificates for any name
+anyone points at its address, until the ACME account is rate-limited and the
+operator's own renewals fail.
+
 **The agent base image is not a compose service.** The backend creates agent
 containers from the literal local tag `trinity-agent-base:latest`, hardcoded in
 `agent_service/lifecycle.py` and allowlisted by SEC-172, and compose cannot

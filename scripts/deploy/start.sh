@@ -292,9 +292,31 @@ provision_site() {
     # profile (~6-day validity, renewed automatically while the machine runs), so
     # the instance lands on browser-trusted HTTPS with no domain and no input. A
     # domain becomes a post-login upgrade rather than a prerequisite.
+    # Two sites, and the catch-all is the point.
+    #
+    # The bare IP is what the instance answers to on day one, on the
+    # `shortlived` profile that is the only way to get a browser-trusted
+    # certificate without a domain.
+    #
+    # The catch-all takes ANY other hostname and gets a certificate for it on
+    # first request, gated by `ask`: Caddy asks the backend whether the name is
+    # allowed, and the backend answers yes only for the domain an admin actually
+    # saved. That gate is load-bearing in both directions — without it, anyone
+    # who points DNS at this address makes the instance request certificates on
+    # their behalf until Let's Encrypt rate-limits the account.
+    #
+    # This exists so that adding a domain is a Settings field and nothing else.
+    # The alternative was a shell command on the host, because Trinity runs in a
+    # container with no way to rewrite this file or reload Caddy — and a
+    # non-engineer following a deploy guide does not have a root shell in the
+    # loop. Caddy asking Trinity a question inverts that: no privilege moves,
+    # and the operator never leaves the browser.
     cat > /etc/caddy/Caddyfile <<CADDY
 {
     acme_ca https://acme-v02.api.letsencrypt.org/directory
+    on_demand_tls {
+        ask http://127.0.0.1:8000/api/public/tls-allowed
+    }
 }
 
 https://${ip} {
@@ -312,8 +334,18 @@ https://${ip} {
     }
 }
 
-http://${ip} {
-    redir https://${ip}{uri} permanent
+https:// {
+    tls {
+        on_demand
+    }
+    encode gzip
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+}
+
+http:// {
+    redir https://{host}{uri} permanent
 }
 CADDY
     systemctl enable caddy
