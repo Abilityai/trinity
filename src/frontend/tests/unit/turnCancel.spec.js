@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   shouldCancelOnEscape, restoreDraft, cancelOutcome, isTerminalStatus, TERMINAL_STATUSES,
-  isNoopCancel, NOOP_CANCEL_STATUSES,
+  isNoopCancel, NOOP_CANCEL_STATUSES, shouldEndCallOnEscape,
 } from '../../src/utils/turnCancel'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
@@ -61,6 +61,62 @@ describe('Escape cancels a turn — and never hijacks anything else', () => {
   it('ignores every other key, and a missing event', () => {
     expect(shouldCancelOnEscape(esc({ key: 'Enter' }), { inFlight: true })).toBe(false)
     expect(shouldCancelOnEscape(null, { inFlight: true })).toBe(false)
+  })
+})
+
+describe('#2598 — a voice call owns Escape, but not against an overlay that already claimed it', () => {
+  // ent#534 gave the call the first branch of the Workspace's handler, ABOVE
+  // `shouldCancelOnEscape` and reading none of its preconditions. #2582's
+  // overlays (the file preview, the delete confirm) claim Escape in the capture
+  // phase with `preventDefault()` — the protocol every other Escape owner here
+  // honours — so the overlay closed AND the call ended on one keystroke.
+  //
+  // The fix is not a bare `if (event.defaultPrevented) return` in the SFC: the
+  // preconditions are the same three for both branches, so they belong in one
+  // place or they drift again. Hence a sibling predicate, not a guard clause.
+  it('ends the call on a plain Escape while a call is active', () => {
+    expect(shouldEndCallOnEscape(esc(), { callActive: true })).toBe(true)
+  })
+
+  it('does nothing when no call is active', () => {
+    expect(shouldEndCallOnEscape(esc(), { callActive: false })).toBe(false)
+  })
+
+  it('yields to an overlay that already claimed the keystroke', () => {
+    // The reported bug, stated as the rule: the preview/confirm calls
+    // preventDefault() in the capture phase, and this must see it.
+    expect(shouldEndCallOnEscape(esc({ defaultPrevented: true }), { callActive: true })).toBe(false)
+  })
+
+  it('yields to an IME composition, like every other Escape rule here', () => {
+    // Same class as the reported bug, one field over: a composed candidate is
+    // abandoned with Escape, and ending the call instead is the same "a branch
+    // that reads none of the preconditions" defect.
+    expect(shouldEndCallOnEscape(esc({ isComposing: true }), { callActive: true })).toBe(false)
+  })
+
+  it('ignores every other key, and a missing event', () => {
+    expect(shouldEndCallOnEscape(esc({ key: 'Enter' }), { callActive: true })).toBe(false)
+    expect(shouldEndCallOnEscape(null, { callActive: true })).toBe(false)
+    expect(shouldEndCallOnEscape(esc())).toBe(false)
+  })
+
+  it('the Workspace dispatches on the rule instead of re-deciding it in the SFC', () => {
+    // What only source can answer (this file's own convention): that the voice
+    // branch goes THROUGH the module. Without this the predicate can exist,
+    // pass its own tests, and be bypassed by the branch it was written for.
+    expect(workspace).toMatch(
+      /import \{[^}]*shouldEndCallOnEscape[^}]*\} from ['"][^'"]*utils\/turnCancel['"]/
+    )
+    expect(workspace).toContain('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    // and that the old hand-rolled condition is gone, not merely shadowed
+    expect(workspace).not.toMatch(/if \(voiceCallActive\.value && event\.key === 'Escape'\)/)
+  })
+
+  it('the stale comment that described the old ordering is gone', () => {
+    // The issue asks for this explicitly: the comment states an ordering that
+    // the fix changes, and a comment left behind is what the next reader trusts.
+    expect(workspace).not.toContain('takes Escape for itself in the first branch below')
   })
 })
 

@@ -654,7 +654,7 @@ import {
   speechErrorMessage,
   transcriptionErrorMessage,
 } from './portalUtils'
-import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
+import { shouldCancelOnEscape, shouldEndCallOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
 // ent#534: the voice CALL — the platform's real-time orb, in this chat. Its
 // rules live in their own pure module (vitest runs `environment: 'node'` with
 // no mount harness, so a rule kept in here is a rule no test can reach); this
@@ -1488,12 +1488,22 @@ async function deliver(text) {
 // itself is pure and lives in `utils/turnCancel.js`; what belongs here is the
 // list of things on THIS surface that Escape would otherwise be dismissing.
 // (`voiceMode` is a speak-replies TTS toggle, not an overlay. The ent#534 voice
-// call takes Escape for itself in the first branch below, before this rule runs,
-// so it is not on the list either.)
+// call is asked FIRST, below, and it is not on the overlay list because while a
+// call is up there is no turn to cancel.)
 function onEscapeKeydown(event) {
-  // ent#534: while a call is on, Escape ends the call — nothing else on this
-  // surface may own it then (the composer and the picker are inert).
-  if (voiceCallActive.value && event.key === 'Escape') {
+  // ent#534: while a call is on, Escape ends the call — the composer and the
+  // picker are inert, so nothing on this surface competes for it.
+  //
+  // #2598: asked through the shared rule, not re-decided here. This branch used
+  // to test `voiceCallActive.value && event.key === 'Escape'` and nothing else,
+  // so it ran ABOVE `shouldCancelOnEscape` while reading none of its
+  // preconditions — and #2582's overlays (the file preview, the delete confirm)
+  // claim Escape in the capture phase with `preventDefault()` exactly so they
+  // cannot destroy an in-flight turn. That protocol worked for the cancel rule,
+  // which reads `defaultPrevented`, and was invisible to this one: the overlay
+  // closed AND the call ended on a single keystroke. Both branches now start
+  // from the same `ownsEscape` preconditions, so they cannot drift again.
+  if (shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })) {
     event.preventDefault()
     void endVoiceCall()
     return

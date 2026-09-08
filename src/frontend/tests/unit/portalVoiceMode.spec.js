@@ -282,9 +282,18 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceCallActive\.value\) speak\(data\.response\)/)
   })
   it('Escape ends the call before the turn-cancel rule runs', () => {
+    // #2598 changed the SPELLING, not this property: the call is still asked
+    // first. The condition used to be the inline
+    // `voiceCallActive.value && event.key === 'Escape'`, which read none of the
+    // preconditions `shouldCancelOnEscape` reads — so an overlay that claimed
+    // Escape in the capture phase with `preventDefault()` closed AND ended the
+    // call. It now dispatches on the shared `shouldEndCallOnEscape` rule; the
+    // ORDERING assertion below is what ent#534 actually cares about and is
+    // unchanged.
     const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
-    expect(esc.indexOf("voiceCallActive.value && event.key === 'Escape'")).toBeGreaterThan(-1)
-    expect(esc.indexOf("voiceCallActive.value && event.key === 'Escape'")).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
+    const call = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    expect(call).toBeGreaterThan(-1)
+    expect(call).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
     expect(esc).toContain('void endVoiceCall()')
   })
   it('the header line names the state and the way out; End always works', () => {
