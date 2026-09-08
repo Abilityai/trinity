@@ -58,6 +58,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _platform_default(monkeypatch, model_id: str):
+    """Pin `settings_service.get_platform_default_model` — the ladder's LAST rung
+    since the 2026-09-08 review, so a test about the first two must fix it or it
+    reads a real setting."""
+    monkeypatch.setattr(_services_module("settings_service"),
+                        "get_platform_default_model", lambda: model_id, raising=False)
+
+
 @pytest.fixture()
 def svc():
     from client_portal import service as m
@@ -69,14 +77,19 @@ def svc():
 # ---------------------------------------------------------------------------
 
 def test_the_ladder_prefers_the_users_pick_then_the_agents_override(svc, monkeypatch):
-    """requested → `public_channel_model` → None (execute_task's platform default).
+    """requested → `public_channel_model` → the PLATFORM DEFAULT.
 
-    `None` and not the platform default string: `execute_task` already resolves
-    it, and returning it here would make "the user chose the platform default"
-    indistinguishable from "nobody chose anything" one layer up.
+    The last rung resolves to a concrete id rather than stopping at `None`
+    (review, 2026-09-08). `model_used` is written only at row creation and both
+    portal paths pre-create the row, so `execute_task`'s own stamp never runs
+    here — a `None` last rung recorded NULL on the commonest turn there is while
+    the turn ran on the platform default a moment later. Same function
+    (`settings_service.get_platform_default_model`), so the row and the turn
+    agree by construction instead of holding two opinions.
     """
     import database
 
+    _platform_default(monkeypatch, "claude-sonnet-4-6")
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: HAIKU,
                         raising=False)
     assert svc.resolve_turn_model(AGENT, OPUS) == OPUS      # the pick wins
@@ -84,21 +97,41 @@ def test_the_ladder_prefers_the_users_pick_then_the_agents_override(svc, monkeyp
 
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: None,
                         raising=False)
-    assert svc.resolve_turn_model(AGENT, None) is None      # then inherit all the way
+    # …then the platform default, as a CONCRETE id — this is what lands on the row.
+    assert svc.resolve_turn_model(AGENT, None) == "claude-sonnet-4-6"
 
 
 def test_a_failing_override_read_never_fails_the_turn(svc, monkeypatch):
-    """The override is a preference, not a gate — a DB hiccup degrades to the
-    platform default rather than refusing a turn the user is waiting on."""
+    """The override is a preference, not a gate — a DB hiccup falls THROUGH to
+    the platform default rather than refusing a turn the user is waiting on, and
+    rather than short-circuiting the last rung with it."""
     import database
 
     def _boom(agent_name):
         raise RuntimeError("db down")
 
+    _platform_default(monkeypatch, "claude-sonnet-4-6")
     monkeypatch.setattr(database.db, "get_public_channel_model", _boom, raising=False)
-    assert svc.resolve_turn_model(AGENT, None) is None
+    assert svc.resolve_turn_model(AGENT, None) == "claude-sonnet-4-6"
     # …and an explicit pick is not lost to someone else's failure.
     assert svc.resolve_turn_model(AGENT, OPUS) == OPUS
+
+
+def test_an_unreadable_platform_default_degrades_to_none_never_a_failed_turn(svc, monkeypatch):
+    """The last rung is best-effort too. Degrading to `None` is the pre-ent#403
+    behaviour — the row goes back to NULL and `execute_task` resolves the
+    default itself. Worse than a stamped row, better than a refused turn."""
+    import database
+
+    monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: None,
+                        raising=False)
+
+    def _boom():
+        raise RuntimeError("settings down")
+
+    monkeypatch.setattr(_services_module("settings_service"),
+                        "get_platform_default_model", _boom, raising=False)
+    assert svc.resolve_turn_model(AGENT, None) is None
 
 
 def test_a_non_platform_principal_resolves_the_same_ladder(svc, monkeypatch):
@@ -119,6 +152,7 @@ def test_a_non_platform_principal_resolves_the_same_ladder(svc, monkeypatch):
     import inspect
     import database
 
+    _platform_default(monkeypatch, "claude-sonnet-4-6")
     monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: HAIKU,
                         raising=False)
     assert svc.resolve_turn_model(AGENT, None) == HAIKU
@@ -166,6 +200,27 @@ def test_an_uncurated_model_is_refused_422_with_a_string_detail(svc):
     assert exc.value.status_code == 422
     assert isinstance(exc.value.detail, str)
     assert "claude-opus-999-not-a-model" in exc.value.detail
+
+
+def test_the_refused_value_is_bounded_before_it_is_echoed(svc):
+    """The 422 REFLECTS the rejected value, so it must be bounded first.
+
+    `PortalChatRequest.model` is deliberately unvalidated at the payload layer
+    (a length rule there would refuse before the 403 that says this principal
+    has no control at all), and every sibling field on that model IS bounded —
+    `message` is `max_length=8000`. Without the truncation an authenticated
+    caller posts a megabyte-long `model` and has it echoed verbatim into the
+    error body.
+    """
+    from client_portal.service import ClientPortalError
+
+    with pytest.raises(ClientPortalError) as exc:
+        svc.validate_requested_model("x" * 100_000, is_platform=True)
+
+    assert exc.value.status_code == 422
+    # Bounded, and still says WHAT was refused rather than dropping it.
+    assert len(exc.value.detail) < 200
+    assert "xxxx" in exc.value.detail
 
 
 def test_a_public_channel_only_model_is_still_refused_at_the_composer(svc):
@@ -267,10 +322,39 @@ def test_the_sync_pre_creation_stamps_the_model_on_the_row(svc, monkeypatch):
     assert captured[0]["source_channel_chat_id"] == SESSION
 
 
-def test_inherit_stamps_the_row_null_rather_than_a_guessed_default(svc, monkeypatch):
-    """`None` on the row means "whatever `execute_task` resolves", which is what
-    actually happens. Writing the platform default here would record a value
-    this layer did not decide and cannot keep in step with #831."""
+def test_the_inherit_path_stamps_the_platform_default_not_null(svc, monkeypatch):
+    """AC 7 on the COMMONEST turn there is: no explicit pick, no agent override.
+
+    This test asserted the opposite until the 2026-09-08 review. The reasoning
+    for NULL was that writing the platform default "records a value this layer
+    did not decide" — but `resolve_turn_model` reads it from
+    `settings_service.get_platform_default_model()`, the same function
+    `execute_task:1044` calls, so it is that layer's decision either way. What
+    NULL actually bought was a blank audit row: `model_used` is written ONLY at
+    row creation, both portal paths pre-create the row, so `execute_task`'s own
+    `model_used=model` (inside `if not execution_id:`) never runs for a portal
+    turn. The default state of every agent therefore recorded nothing while the
+    turn ran on the platform default — and the execution page AC 7 pairs with
+    would have read blank for most Workspace turns.
+    """
+    import database
+
+    captured = []
+    _fake_core_db(captured, monkeypatch)
+    _platform_default(monkeypatch, "claude-sonnet-4-6")
+    monkeypatch.setattr(database.db, "get_public_channel_model", lambda a: None,
+                        raising=False)
+
+    resolved = svc.resolve_turn_model(AGENT, None)
+    svc._precreate_sync_execution(AGENT, "hello", EMAIL, SESSION, resolved)
+    assert captured[0]["model_used"] == "claude-sonnet-4-6"
+
+
+def test_the_row_still_takes_none_when_the_ladder_could_not_resolve(svc, monkeypatch):
+    """The stamp is whatever the ladder handed over, including `None`. The
+    pre-creation site does not second-guess it — one resolution per turn is the
+    whole #2426 lesson, and a second lookup here could disagree with the row's
+    own turn."""
     captured = []
     _fake_core_db(captured, monkeypatch)
 

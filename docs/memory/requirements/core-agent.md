@@ -1789,7 +1789,8 @@ well, and the agent never touches CSS.
   `public_channel_model`. Without it a retired id is sent on every turn, refused
   every time, forever, with nothing pointing at the stored preference.
 - **AC-6 — honest degradation, and never a lie about billing**: an unselectable
-  model is refused up front — 422 with a **string** detail naming the tier
+  model is refused up front — 422 with a **string** detail naming the rejected
+  value (a refused id has no tier — only curated entries carry one)
   (`deliveryFailureReason` returns `detail` only when it is a string; anything
   else degrades to "error 422"). A model that cannot be *served* is **not**
   reclassified: there is no `model` code in the #2320 error ladder, and the
@@ -1797,8 +1798,15 @@ well, and the agent never touches CSS.
   rewording it whenever a model was chosen would blame the model for an exhausted
   subscription. Only the **generic `agent_error`** branch names the chosen model,
   and it **clears the stored choice**, so the sentence it prints is true and the
-  user is not looped into the same failure on every retry and reload.
-- **AC-7 — the model reaches the row**: `schedule_executions.model_used` is
+  user is not looped into the same failure on every retry. The clear runs on the
+  settle of a turn **this tab actually sent**, and deliberately not on the
+  load/reattach path (review, 2026-09-08): the durable verdict lives 15 minutes,
+  so clearing there re-fired on every reload inside that window and wiped a
+  deliberate re-pick. A re-send is the only way the loop can recur, and a re-send
+  settles through the arm that is kept.
+- **AC-7 — the model reaches the row, on EVERY turn**: the ladder's last rung is
+  the **platform default as a concrete id**, not `None` (review, 2026-09-08).
+  `schedule_executions.model_used` is
   written **only at row creation**, and both portal turn paths pre-create the row
   (`start_portal_turn`, `_precreate_sync_execution`) — so this is a row-creation
   change at two sites, not a kwarg change (the #2426 class, named in
@@ -1807,7 +1815,14 @@ well, and the agent never touches CSS.
   turn; a cold retry (`session_turn_service`) creates a second row and stamps it
   from the same forwarded value, so the two rows agree. **Deferral, stated:**
   `model_used` records the model *requested at dispatch*, not one reconciled with
-  what the agent actually ran — matching `execute_task`'s own semantics.
+  what the agent actually ran — matching `execute_task`'s own semantics. The last
+  rung reads `settings_service.get_platform_default_model()`, the same function
+  `execute_task` calls, so the row and the turn hold one opinion rather than two;
+  stopping at `None` (the shape reviewed out) recorded NULL for the default state
+  of every agent — no pick, no override — which is most Workspace turns, blanking
+  exactly the execution-page display AC 7 pairs with. `None` still reaches the row
+  when the platform default itself is unreadable: worse than a stamped row, better
+  than a refused turn.
 - **AC-8 — the room transition**: an `@mention` diverts the send into
   `escalate-to-room`, and `PortalRoom.vue` has its own composer with no dropdown.
   The select is therefore **disabled with a title while the draft is room-bound**
@@ -1842,9 +1857,12 @@ well, and the agent never touches CSS.
   router — the payload gate is cosmetic. A `model` from a principal without the
   control is refused 403. ent#163 `/auth/exchange` mints a *portal session*, so a
   delegated principal is `is_platform=False` and the gate is not bypassable
-  there. The resolved model joins the streaming route's idempotency scope, so a
-  retry with a different model is a real turn rather than a silent replay of the
-  old snapshot (Invariant #18).
+  there. The **requested** model joins the streaming route's idempotency scope, so
+  a retry with a different model is a real turn rather than a silent replay of the
+  old snapshot (Invariant #18). The requested value and not the resolved one,
+  deliberately: an owner editing `public_channel_model` between two genuine
+  retries of ONE request must not fork the scope and turn a replay into a second
+  billed turn.
 - **Out of scope (stated)**: the operator `ModelSelector.vue` (untouched); a
   capability *probe* asking whether an instance can serve a model;
   **per-instance curation** (narrowing or disabling the control is a code change,

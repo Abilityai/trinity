@@ -546,13 +546,19 @@ documented posture and `availability`'s fail-open direction on this same payload
 
 **The turn's model is resolved once, at a specific line.** `resolve_turn_model` is the ONE
 ladder for both portal turn routes — requested → the agent's #894 `public_channel_model` →
-`None` (`execute_task`'s platform default) — and it takes no principal, which is what makes
+the **platform default as a concrete id** — and it takes no principal, which is what makes
 "the streaming route and the synchronous ent#83 route cannot disagree" true by
 construction. It runs **immediately after the availability gate**, before anything is
 created, because `schedule_executions.model_used` is written ONLY at row creation and both
 portal paths pre-create the row: resolving where the value is *used* would stamp the
 pre-created row `None` and half-fix the requirement on exactly the path #2426 already
-burned. A caller passing `execution_id` must pass the `resolved_model` it stamped —
+burned. **The last rung is a concrete id and not `None` for that same reason** (review,
+2026-09-08): `execute_task` resolves the platform default at `:1044` but stamps it inside
+`if not execution_id:`, so on a portal turn the resolution happens and the stamp does not —
+`None` recorded NULL for the default state of every agent, which is most Workspace turns. It
+reads `settings_service.get_platform_default_model()`, the same function `execute_task`
+calls, so the two hold one opinion and `execute_task`'s lookup becomes a no-op; `None` still
+reaches the row only when that read itself fails. A caller passing `execution_id` must pass the `resolved_model` it stamped —
 `resolved_model or resolve(...)` would let the row and the turn disagree, so that path
 raises. The requested value cannot simply be re-laundered through the composer's allow-list
 either: an inherited `public_channel_model` may legitimately sit outside the curated set.

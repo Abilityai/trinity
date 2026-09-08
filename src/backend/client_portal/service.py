@@ -2058,13 +2058,29 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
     """The ONE model ladder for a portal turn (ent#403).
 
     ``requested`` (the user's explicit pick, already validated at the router)
-    → the agent's #894 ``public_channel_model`` → ``None``, which lets
-    ``execute_task`` resolve the platform default exactly as it does today.
+    → the agent's #894 ``public_channel_model`` → the PLATFORM DEFAULT. The
+    ladder resolves to a concrete id and only degrades to ``None`` when the
+    platform default itself is unreadable.
 
-    Three states, not two: ``None`` means INHERIT all the way down, preserving
-    the shape the #894 plumbing already uses (``routers/agent_config.py`` writes
-    ``None`` for "unset"). Collapsing it would make "the user chose the platform
-    default" indistinguishable from "nobody chose anything".
+    Three states on the WIRE, one value on the row. ``None`` in
+    ``PortalChatRequest.model`` still means INHERIT — the shape the #894
+    plumbing uses (``routers/agent_config.py`` writes ``None`` for "unset") —
+    but the ladder's job is to say what the turn will actually run on, and
+    stopping at ``None`` made that unanswerable exactly where it is recorded.
+
+    **Why the last rung exists (review, 2026-09-08).**
+    ``schedule_executions.model_used`` is written ONLY at row creation, and both
+    portal paths pre-create the row, so ``execute_task``'s own
+    ``model_used=model`` write (inside ``if not execution_id:``) never runs for
+    a portal turn. Returning ``None`` therefore stamped the row NULL for the
+    commonest case there is — no explicit pick, no agent override — while the
+    turn ran on the platform default ``execute_task`` resolved a moment later.
+    AC 7 says the model reaches the row; on the default path it did not, and the
+    execution page AC 7 pairs with would have read blank for most Workspace
+    turns. This is NOT a guessed default: it is
+    ``settings_service.get_platform_default_model()``, the same function
+    ``execute_task`` calls, so the row and the turn agree by construction and
+    ``execute_task``'s resolution becomes a no-op rather than a second opinion.
 
     **The middle rung is a deliberate behaviour change, and it applies to EVERY
     portal turn — not only a platform user's.** ent#403 calls its absence the
@@ -2090,9 +2106,20 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         return requested
     try:
         from database import db as core_db
-        return core_db.get_public_channel_model(agent_name) or None
+        override = core_db.get_public_channel_model(agent_name) or None
     except Exception as e:  # noqa: BLE001 — never fail a turn over the override
         logger.warning("[ent#403] public_channel_model read failed for %s: %s", agent_name, e)
+        override = None
+    if override:
+        return override
+    try:
+        from services import settings_service
+        return settings_service.get_platform_default_model() or None
+    except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
+        # Degrading to None is the pre-ent#403 behaviour: the row goes back to
+        # NULL and `execute_task` resolves the default itself. Worse than a
+        # stamped row, better than a refused turn.
+        logger.warning("[ent#403] platform default read failed for %s: %s", agent_name, e)
         return None
 
 
@@ -2137,9 +2164,18 @@ def validate_requested_model(raw: str | None, *, is_platform: bool) -> str | Non
     from services.model_catalog import WORKSPACE_MODELS
 
     if model not in WORKSPACE_MODELS:
+        # The rejected value is REFLECTED back, so it is bounded before it is
+        # echoed. `PortalChatRequest.model` is deliberately unvalidated at the
+        # payload layer (a length rule there would refuse before the 403 that
+        # this principal has no control at all), and every sibling field on that
+        # model IS bounded — `message` is `max_length=8000`. Without this an
+        # authenticated caller can post a megabyte-long `model` and have it
+        # echoed verbatim into the error body. Truncated rather than dropped:
+        # naming what was refused is the whole point of the message.
+        shown = model if len(model) <= 64 else model[:64] + "\u2026"
         raise ClientPortalError(
             422,
-            f"'{model}' isn't a model you can pick for this chat — choose another.",
+            f"'{shown}' isn't a model you can pick for this chat — choose another.",
             category="invalid_model", retryable=False,
         )
     return model

@@ -192,7 +192,8 @@ like `claude-sonnet-4-6[1m]` are in legitimate circulation, so the resolver is
         │  ④ the requested model joins the idempotency scope
         ▼
   start_portal_turn                        portal_chat  (sync / ent#83)
-        │  resolve ONCE, immediately after the availability gate
+        │  resolve ONCE, immediately after the availability gate:
+        │     requested ─or─ public_channel_model ─or─ THE PLATFORM DEFAULT (concrete)
         ├────────────► create_task_execution(model_used=resolved)
         └────────────► portal_chat(model=<requested>, resolved_model=<trusted>)
                              ├─► _precreate_sync_execution(model_used=resolved)
@@ -207,6 +208,15 @@ like `claude-sonnet-4-6[1m]` are in legitimate circulation, so the resolver is
 persists it inside `if not execution_id:` — and there is **no UPDATE path for that column
 anywhere in the repo**. Both portal turn paths pre-create the row. So the model reaching
 the turn as a kwarg is not enough; it has to reach the two `create_task_execution` calls.
+
+This is also why the ladder's last rung is the **platform default as a concrete id** rather
+than `None` (review, 2026-09-08). `None` meant "let `execute_task` resolve it" — which it
+does, at `task_execution_service.py:1044` — but its paired `model_used=model` write sits
+inside the same `if not execution_id:`, so on a portal turn the resolution happens and the
+stamp never does. The default state of every agent (no pick, no `public_channel_model`) then
+recorded NULL while the turn ran on the platform default. The rung reads
+`settings_service.get_platform_default_model()`, the same function `execute_task` calls, so
+the row and the turn hold one opinion; `execute_task`'s own lookup becomes a no-op.
 
 `_precreate_sync_execution` runs ~200 lines into `portal_chat`, after `_persist_user_turn`,
 the history read, the inbox collection and the system-prompt build. Resolving where the
@@ -319,8 +329,14 @@ works. So only the **generic `agent_error`** branch names the model:
 …under a **ninth** failure category, `invalid_model`. It is a new token rather than a reuse
 because it is the one category the client *branches* on rather than merely renders: it
 clears the stored preference, so the sentence is **true** on the next turn instead of
-looping the person into the same failure on every retry and every reload. The clear runs on
-this tab's own settle **and** on the reattach path, so it survives a reload.
+looping the person into the same failure on every retry. The clear runs on the settle of a
+turn **this tab actually sent**, and deliberately NOT on the load/reattach path (review,
+2026-09-08). `rememberVerdict` fires on load too, off the durable Redis verdict — 15 minutes
+of TTL, cleared only at the next dispatch or on a success — so clearing there re-fired on
+every reload inside that window: a user who re-picked after the failure had the fresh choice
+wiped again on the next refresh, and written through to the server for every device. A
+re-send is the only way the loop can recur, and a re-send settles through the arm that is
+kept.
 
 **The room transition.** `PortalConversation.vue` diverts an `@mention` send into
 `escalate-to-room` and returns before the turn path, and `PortalRoom.vue` has its own
