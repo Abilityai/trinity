@@ -282,6 +282,7 @@ async def pin_canvas(
 async def clear_canvas(
     name: AuthorizedAgent,
     canvas_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """Remove a canvas. Idempotent — clearing an absent canvas is a success.
@@ -303,4 +304,21 @@ async def clear_canvas(
     except CanvasError as e:
         raise _map(e)
     deleted = db.delete_agent_canvas(name, canvas_id)
+
+    # Audited like the bulk route (AC #1). Only a delete that REMOVED something
+    # is logged: this route is idempotent, so a repeat click is a no-op, and
+    # logging those would fill the trail with events where nothing happened.
+    if deleted:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="canvas_delete",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=name,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"canvas_id": canvas_id},
+        )
     return {"canvas_id": canvas_id, "deleted": bool(deleted)}

@@ -192,6 +192,71 @@ def test_bulk_delete_of_nothing_is_a_no_op(canvas_db):
     assert db.delete_agent_canvases("agent-a", []) == []
 
 
+# --- the default canvas (AC 8) ----------------------------------------------
+
+def test_the_default_canvas_can_be_deleted_and_comes_back_empty(canvas_db):
+    """AC 8. `main` is the id both the MCP tools and the voice panel fall back
+    to (ent#536), so it is the one most likely to be deleted by accident — and
+    the one whose deletion must not strand every writer that assumes it.
+
+    Nothing special-cases it: the row goes, and the next write recreates it
+    through the ordinary upsert. There is no dangling reference because the id
+    IS the reference — a canvas is addressed, not pointed at.
+    """
+    from database import db
+    from models import DEFAULT_CANVAS_ID
+
+    _write("agent-a", DEFAULT_CANVAS_ID, title="board")
+    assert db.delete_agent_canvas("agent-a", DEFAULT_CANVAS_ID) is True
+    assert db.get_agent_canvas("agent-a", DEFAULT_CANVAS_ID) is None
+
+    recreated = _write("agent-a", DEFAULT_CANVAS_ID, blocks=[])
+    assert recreated["canvas_id"] == DEFAULT_CANVAS_ID
+    assert recreated["blocks"] == []
+    assert recreated["pinned"] is False
+
+
+def test_deleting_the_default_canvas_frees_a_slot_against_the_cap(canvas_db, monkeypatch):
+    """The remedy the refusal names has to actually work on every canvas,
+    including the default one."""
+    import db.canvas as canvas_mod
+    from db.canvas import CanvasLimitExceeded
+    from database import db
+    from models import DEFAULT_CANVAS_ID
+    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+
+    _write("agent-a", DEFAULT_CANVAS_ID)
+    _write("agent-a", "other")
+    with pytest.raises(CanvasLimitExceeded):
+        _write("agent-a", "third")
+
+    db.delete_agent_canvas("agent-a", DEFAULT_CANVAS_ID)
+    assert _write("agent-a", "third")["canvas_id"] == "third"
+
+
+# NOTE (out of scope, recorded rather than fixed): `canvas_service.empty_canvas`
+# returns `created_at`/`updated_at` as None while `models.Canvas` declares them
+# required `str`, so `Canvas(**empty_canvas(...))` raises. It is LATENT, not
+# live — the only caller is `routers/voice.py::get_voice_panel`, which declares
+# no `response_model`, so FastAPI returns the dict unvalidated. Adding a
+# `response_model=Canvas` there would turn the teardown-window poll into a 500.
+# ent#536's key-subset guard is what keeps the two shapes aligned today.
+
+
+# --- audit ------------------------------------------------------------------
+
+def test_both_delete_routes_are_audited():
+    """AC 1 asks for the deletion to be audited, and the single-canvas route is
+    the one a person actually clicks."""
+    import inspect
+    from routers import canvas as canvas_router
+
+    for handler in (canvas_router.clear_canvas, canvas_router.bulk_delete_canvases):
+        src = inspect.getsource(handler)
+        assert "platform_audit_service.log" in src, f"{handler.__name__} is not audited"
+        assert "canvas_id" in src
+
+
 # --- who may remove ---------------------------------------------------------
 
 def _user(username="alice", role="user", agent_name=None):
