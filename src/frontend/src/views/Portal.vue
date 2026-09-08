@@ -178,9 +178,16 @@
            column takes the orb's share of the stage and the canvas column
            (below) takes the rest — orb left / canvas right, the retired page's
            40/60. Below `sm` the orb has the whole stage. -->
+      <!-- During a call (ent#534) the orb and the canvas split the space
+           BESIDE the sidebar 40 / 60 as flex shares (2 : 3 of a zero basis),
+           not as percentages of the whole row: `w-[40%]` + `w-[60%]` next to
+           an 18rem sidebar summed to 100% + 18rem, and the shell's
+           `overflow-hidden` clipped the canvas column off the right edge with
+           no scrollbar — the #2581 report, measured at 296px on a 1280px
+           viewport by the gallery (#2583). -->
       <main
         class="min-w-0 flex flex-col bg-white dark:bg-gray-900"
-        :class="voiceCall.active ? 'flex-1 sm:flex-none sm:w-[40%]' : 'flex-1'"
+        :class="voiceCall.active ? 'flex-1 sm:flex-[2_1_0%]' : 'flex-1'"
       >
         <!-- ent#361: a room takes the stage when the URL names one. The
              single-agent conversation is untouched below — different
@@ -290,7 +297,6 @@
           @new-chat="newChatWithAgent(activeAgent.name)"
           @session-adopted="onSessionAdopted"
           @sessions-changed="onConversationTurnDone"
-          @open-files="openRailOn('files')"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -298,15 +304,61 @@
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
           @main-reset="onMainReset"
-          @open-details="detailsOpen = true"
           @voice-call="onVoiceCall"
           @voice-panel="(v) => { voicePanelVersion = v }"
         >
-          <!-- ent#523: the agent's numbers, always visible under the header.
-               Mounted by the shell because the shell owns which agent is on
-               screen and which side panel is open. -->
+          <!-- ent#523: the agent's numbers, always visible UNDER the header
+               (operator, 2026-09-06: a band "under the header"). Mounted by the
+               shell because the shell owns which agent is on screen.
+               #2580: the band is keyed on the AGENT, which is the issue's own
+               words for the rule. It stays in this slot rather than being
+               hoisted to a sibling of the conversation, and that is a decision,
+               not an oversight: hoisting is the only way to keep the component
+               INSTANCE across a thread switch, but slot content renders where
+               the child puts it — and the child puts this below its `h-14`
+               header, which is where the operator ruled it goes. Hoisted, the
+               band renders above the agent picker, so you read an agent's
+               numbers before its name.
+               So the remount is left in place and made FREE instead: see
+               `usePortalAgentPage`, which now serves the cached payload
+               synchronously during setup (so `loaded` is true on the first
+               paint — no skeleton, no scanline) and skips the refetch inside a
+               freshness window (no request). Every symptom the issue lists —
+               re-render, refetch, scanline, flicker — is gone; what survives is
+               a cheap instance re-creation nobody can see.
+               Making it literal means lifting the header out of
+               `PortalConversation` so the band can sit between them as a
+               sibling. That is a real refactor (the header reads `currentThread`,
+               `isMainChat`, `resetting`, `sending` and the voice state) and it
+               is the follow-up, not this PR. -->
           <template #band>
-            <PortalAgentBand :agent-name="activeAgent.name" />
+            <PortalAgentBand :key="activeAgent.name" :agent-name="activeAgent.name" />
+          </template>
+          <!-- #2579 AC 3 — the operator's mark on a fallback title. The same
+               `titleGenerationNotice` copy the settings panel renders, raised
+               here because this is where the fallback is being LOOKED at.
+               Admin-only (see `refreshTitleHealth`), so a client never sees it
+               and never even asks for it. Dismissible on purpose rather than as
+               decoration: this line names the agent and says the install has no
+               Anthropic key, on the surface an operator is most likely to be
+               screen-sharing. Semantic status tokens only. -->
+          <template #notice>
+            <div
+              v-if="titleNotice"
+              class="shrink-0 flex items-center gap-2 px-3 sm:px-4 py-1.5 text-xs border-b border-status-warning-200 dark:border-status-warning-500/30 bg-status-warning-50 dark:bg-status-warning-500/10"
+              role="status"
+              aria-live="polite"
+              data-testid="portal-title-notice"
+            >
+              <span class="shrink-0 font-medium text-status-warning-800 dark:text-status-warning-300">{{ titleNotice.title }}</span>
+              <span class="min-w-0 truncate text-status-warning-700 dark:text-status-warning-300" :title="titleNotice.body">{{ titleNotice.body }}</span>
+              <button
+                type="button"
+                class="ml-auto shrink-0 underline hover:no-underline text-status-warning-700 dark:text-status-warning-300"
+                data-testid="portal-title-notice-dismiss"
+                @click="titleNoticeDismissed = true"
+              >Dismiss</button>
+            </div>
           </template>
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
@@ -401,21 +453,14 @@
            comes back untouched when the call ends. -->
       <PortalVoiceCanvas
         v-if="voiceCall.active && voiceCall.voiceSessionId && activeAgent"
-        class="hidden sm:flex sm:w-[60%] sm:flex-none"
+        class="hidden min-w-0 sm:flex sm:flex-[3_1_0%]"
         :agent-name="activeAgent.name"
         :voice-session-id="voiceCall.voiceSessionId || ''"
         :panel-version="voicePanelVersion"
       />
-      <PortalAgentDetails
-        v-else-if="detailsOpen && activeAgent"
-        :agent-name="activeAgent.name"
-        :agent="activeAgent"
-        :threads="threads"
-        @close="detailsOpen = false"
-        @open-thread="(t) => { detailsOpen = false; openThread(t) }"
-        @use-playbook="(text) => { detailsOpen = false; usePlaybook(text) }"
-      />
-
+      <!-- ent#547: `PortalAgentDetails` is no longer a sibling arm here. It is
+           the rail's Info tab, so this chain is back to two: the voice canvas
+           takes the column during a call, the rail has it otherwise. -->
       <PortalRail
         v-else-if="railVisible"
         :tabs="railTabs"
@@ -441,6 +486,20 @@
         </template>
         <template #tab-files="{ participants }">
           <PortalRailFiles :participants="participants" />
+        </template>
+        <!-- ent#547: Info — the one docked tab whose body owns its own reads
+             rather than taking a shell-fed store (see `feedsFor`). Its door is
+             SOLO_AGENT, so `participants` here is always exactly one name and
+             `activeAgent` is that agent. -->
+        <template #tab-info>
+          <PortalAgentDetails
+            v-if="activeAgent"
+            :agent-name="activeAgent.name"
+            :agent="activeAgent"
+            :threads="threads"
+            @open-thread="openThread"
+            @use-playbook="usePlaybook"
+          />
         </template>
       </PortalRail>
     </div>
@@ -472,6 +531,21 @@
       </template>
       <template #tab-files="{ participants }">
         <PortalRailFiles :participants="participants" />
+      </template>
+      <!-- ent#547: the sheet needs its OWN `#tab-info`. A slot supplied to the
+           column mount alone would leave a phone on the registry's generic empty
+           state — and this form is a net GAIN on mobile, because the header
+           button it replaces opened a panel that was `hidden sm:flex`, i.e. did
+           nothing visible there at all. -->
+      <template #tab-info>
+        <PortalAgentDetails
+          v-if="activeAgent"
+          :agent-name="activeAgent.name"
+          :agent="activeAgent"
+          :threads="threads"
+          @open-thread="(t) => { railSheetOpen = false; openThread(t) }"
+          @use-playbook="(text) => { railSheetOpen = false; usePlaybook(text) }"
+        />
       </template>
     </PortalRail>
 
@@ -528,6 +602,8 @@ import { stageZone } from '@/components/portal/portalBriefingState'
 import {
   isNewChatHotkey, resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
   landingThread,
+  agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
+  TITLE_SETTLE_DELAYS_MS,
 } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
@@ -660,11 +736,9 @@ const stage = computed(() => stageZone({
 const railState = ref(loadRailState(safeStorage()))
 watch(railState, (s) => saveRailState(safeStorage(), s), { deep: true })
 const railSheetOpen = ref(false)
-// ent#523 — Agent details, which takes the rail's place while open. A setup ref
-// of this view for the same reason `railState` is one: it must survive the
-// conversation remounting on a chat switch. Closed on every agent change, since
-// a panel about the previous agent is worse than no panel.
-const detailsOpen = ref(false)
+// ent#547: `detailsOpen` is gone. Agent details is the rail's Info tab, so its
+// open/closed state IS `railState` — one ref for "what is the third column
+// showing", where there were two that could disagree.
 
 // ent#534 — the voice call the conversation reports. Owned here because the
 // shell decides what the right column shows and whether a chat may be left:
@@ -695,9 +769,10 @@ const columns = useColumnResize({
 // open, or Agent details, which takes its place at the same width. Not during
 // a voice call (ent#534): the canvas takes that column at a fixed share and
 // would ignore the width the handle drags.
+// ent#547: one term, not two. Agent details used to open a column WITHOUT
+// `railState.open` being true, which is why it needed its own clause here.
 const thirdColumnResizable = computed(() => (
-  !voiceCall.value.active
-  && ((detailsOpen.value && !!activeAgent.value) || (railVisible.value && railState.value.open))
+  !voiceCall.value.active && railVisible.value && railState.value.open
 ))
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
@@ -1029,7 +1104,6 @@ function openAgentPage(name) {
   pendingSession.value = null
   startingNewChat.value = false
   activeRoomId.value = null
-  detailsOpen.value = false
   router.push(`/workspace/a/${encodeURIComponent(name)}`)
 }
 
@@ -1050,29 +1124,84 @@ async function landOnAgent(name) {
   const target = landingThread(threads.value, name)
   if (target) { openThread(target); return }
   try {
-    const { sessions } = await store.fetchSessions(name)
+    // #2579: this branch used to destructure `{ sessions }` off the store's
+    // return value — which is an ARRAY (`data.sessions || []`). `sessions` was
+    // therefore always `undefined`, `landingThread` always missed, and the
+    // repair branch this comment describes never once ran: a first-time
+    // visitor always fell through to a fresh chat, and the Main the call had
+    // just minted server-side never reached the screen. It now goes through
+    // `ensureMainListed`, which does the same per-agent read AND folds the
+    // result into `threads` — one seam for "the list must show this agent's
+    // Main", shared with the watcher below.
+    await ensureMainListed(name)
     // The watcher fires on the route param AND on the thread list arriving, so
     // two landings can be in flight at once on a cold deep link: the first
     // misses (no threads yet) and goes to the network, the second finds the
     // list and navigates. Without this the first one's late resolution
     // navigates too — moving the person off a chat they have since chosen. The
     // route is the authority; if it no longer names this agent, this landing
-    // has been overtaken and has nothing to say.
+    // has been overtaken and has nothing to say. Re-checked HERE, after the
+    // await: the ensure spends two round trips where the old code spent one.
     if (activeAgentPageName.value !== name) return
-    const rows = (sessions || []).map((sn) => ({ ...sn, agent_name: name }))
-    const landed = landingThread(rows, name)
-    if (landed) {
-      await refreshThreads()
-      if (activeAgentPageName.value !== name) return
-      openThread(landed)
-      return
-    }
+    const landed = landingThread(threads.value, name)
+    if (landed) { openThread(landed); return }
   } catch {
     // Fall through: a fresh chat is a better answer than a dead stage.
   }
   if (activeAgentPageName.value !== name) return
   newChatWithAgent(name)
 }
+
+// #2579 — make sure this agent's pinned Main is IN the list on screen.
+//
+// The cross-agent batch deliberately never mints a Main (it would write a row
+// per rostered agent on every sidebar refresh), and the per-agent
+// `list_sessions` is the read that does. So a (user, agent) pair whose chats
+// predate ent#523 has a Main nowhere: not in the list, and not in the database
+// until something calls the per-agent route. This is that something.
+//
+// Two things to be honest about:
+//   * it is a GET that INSERTS. `list_sessions` → `ensure_main_session`, so
+//     visiting N agents creates N empty rows. That is ent#523's stated intent
+//     ("opening an agent is the moment the pinned tab has to be there").
+//   * the retry cap is not defensive tidiness. `fetchAllSessions` NEVER
+//     rejects — on failure it flags `sessionsFailed` and returns the last good
+//     list — so a resolved entry over a still-missing Main would make the miss
+//     permanent for the whole session. Deleting the entry on a miss lets the
+//     next visit try again; the cap stops that becoming a loop, because
+//     `refreshThreads` re-fires the `threads.value.length` watchers that call
+//     back into here.
+const mainEnsured = new Map()   // agent name → in-flight promise
+const mainAttempts = new Map()  // agent name → attempts spent (cap below)
+const MAIN_ENSURE_ATTEMPTS = 2
+
+function ensureMainListed(name) {
+  if (!name) return Promise.resolve()
+  if (agentHasMain(threads.value, name)) return Promise.resolve()
+  const inflight = mainEnsured.get(name)
+  if (inflight) return inflight
+  const spent = mainAttempts.get(name) || 0
+  if (spent >= MAIN_ENSURE_ATTEMPTS) return Promise.resolve()
+  mainAttempts.set(name, spent + 1)
+  const p = store.fetchSessions(name)
+    .then(() => refreshThreads())
+    .then(() => {
+      // Still no Main? Then this attempt bought nothing, and the entry must not
+      // stand as a resolved "already handled" for the rest of the session.
+      if (!agentHasMain(threads.value, name)) mainEnsured.delete(name)
+    })
+    .catch(() => { mainEnsured.delete(name) })
+  mainEnsured.set(name, p)
+  return p
+}
+
+// Guarded exactly like the landing watcher below: signed in, roster resolved,
+// a name to act on. A brand-new agent gets its Main on the first visit rather
+// than on whichever later refresh happened to follow a write.
+watch(activeAgentName, (name) => {
+  if (!name || !store.isClientSignedIn || !store.rosterLoaded) return
+  ensureMainListed(name)
+})
 
 // ent#523 — Reset finished. The shell owns what happens next, since the
 // conversation does not know its own route: land in the fresh Main and refresh
@@ -1199,17 +1328,122 @@ async function refreshThreads() {
 // after the read cursor set at dispatch and badge the chat they are sitting in
 // — a notification for something they are actively reading.
 function onConversationTurnDone(sessionId) {
+  // #2579: this event has four emitters, and one of them (the send's own
+  // `sessions-changed`) can fire with a null id. Everything below needs a
+  // thread to be about.
+  clearTitleSettle()
+  if (!sessionId) return refreshThreads()
   // Only if the user is STILL in that thread. The conversation's send is an
   // async closure that outlives the component, so this fires even when they
   // have navigated away mid-turn — which is the main way a reply legitimately
   // arrives unseen. Marking read unconditionally cleared exactly the badge the
   // feature exists to show, and made it near-unreachable in normal use.
   const open = activeSessionId.value || pendingSession.value
-  return (shouldMarkTurnRead(sessionId, open)
-    ? markRead('thread', sessionId)
-    : Promise.resolve()
-  ).then(refreshThreads)
+  // #2579: the settle cycle asks the SAME question, for the same reason. This
+  // fires for a thread the user has navigated away from — that is the main way
+  // a reply legitimately arrives unseen — and a cycle armed on a background
+  // thread would go on replacing the list for 16s and could raise a notice
+  // above a different conversation. `watch(convKey)` only catches the switch
+  // that happens after arming; this catches the one that happened before.
+  const stillHere = shouldMarkTurnRead(sessionId, open)
+  return (stillHere ? markRead('thread', sessionId) : Promise.resolve())
+    .then(refreshThreads)
+    .then(() => { if (stillHere) armTitleSettle(sessionId) })
 }
+
+// --- Titles settle (#2579) --------------------------------------------------
+//
+// #2579 moved the generator's spawn to run CONCURRENTLY with the turn, so in
+// the ordinary case the generated title is already on the row this refresh
+// reads. This is the belt for the cases that move does not close: a turn faster
+// than the model call, the `retry` attempt (which by construction lands after
+// its own turn), and a slow provider.
+//
+// It re-reads the LIST — no chat-state fetch — on a bounded schedule and stops
+// the moment the title differs from what it saw at turn-done. Deliberately not
+// a mirror of the server's `PORTAL_TITLE_TIMEOUT_SECONDS`, which is
+// operator-tunable: exhausting the schedule is a trigger to ASK the health
+// record, never a verdict of its own (the #2133 class).
+const titleSettleTimers = []
+let titleAtTurnDone = null
+const titleHealth = ref(null)
+const titleNoticeDismissed = ref(false)
+
+function clearTitleSettle() {
+  while (titleSettleTimers.length) clearTimeout(titleSettleTimers.pop())
+  titleAtTurnDone = null
+}
+
+function threadRow(sessionId) {
+  return (threads.value || []).find((t) => !t.is_room && (t.id || t.session_id) === sessionId) || null
+}
+
+function armTitleSettle(sessionId) {
+  // Idempotent. `onConversationTurnDone` clears synchronously but arms after an
+  // await, so two events close together (the voice path emits `sessions-changed`
+  // right after `createSession`, and again when the turn lands) would otherwise
+  // leave the first cycle's timers running beside the second's, against a
+  // baseline the second overwrote.
+  clearTitleSettle()
+  // /review: the "still in this thread" question has to be asked HERE too, not
+  // only at the event. `onConversationTurnDone` decides it synchronously and
+  // then arms after two awaits (`markRead` + `refreshThreads`), so a thread
+  // switch inside that window passes the caller's check, fires `watch(convKey)`
+  // while nothing is armed yet, and lands here anyway — arming a cycle on a
+  // conversation the person has already left, which is the exact thing the
+  // caller's comment says is prevented.
+  if (!shouldMarkTurnRead(sessionId, activeSessionId.value || pendingSession.value)) return
+  const row = threadRow(sessionId)
+  if (!row || !titleSettling(row)) return
+  titleAtTurnDone = row.title || ''
+  TITLE_SETTLE_DELAYS_MS.forEach((ms, i) => {
+    titleSettleTimers.push(setTimeout(() => settleTick(sessionId, i === TITLE_SETTLE_DELAYS_MS.length - 1), ms))
+  })
+}
+
+async function settleTick(sessionId, last) {
+  // List only. `fetchAllSessions` NEVER rejects — it flags `sessionsFailed` and
+  // hands back the last good list — so without asking it, a flaky network reads
+  // as "the title never changed" and would report a working generator broken.
+  const list = await store.fetchAllSessions().catch(() => null)
+  if (list === null || store.sessionsFailed) { clearTitleSettle(); return }
+  threads.value = decorate(list)
+  // /review: this replaces `threads` exactly as `refreshThreads` does, so it
+  // owes the same ent#491 seeding — otherwise an agent this session has not
+  // ranked stays unranked for as long as the cycle keeps overwriting the list.
+  // Fills only MISSING keys, so it cannot walk back a send's bump.
+  store.seedAgentRecency(threads.value)
+  const row = threadRow(sessionId)
+  // Gone (Reset, delete): stop, and leave the health verdict alone. A deleted
+  // row is not evidence that generation works.
+  if (!row) { clearTitleSettle(); return }
+  if ((row.title || '') !== titleAtTurnDone) {
+    // It landed — generation demonstrably works, whoever did it. A person's
+    // rename stops the cycle too, and that is right: `_title_plan` returns None
+    // for `title_source == 'user'`, so there is nothing left to wait for.
+    titleHealth.value = null
+    clearTitleSettle()
+    return
+  }
+  if (last) { clearTitleSettle(); refreshTitleHealth() }
+}
+
+// Only a platform admin, and only after a title demonstrably failed to settle
+// on a SUCCESSFUL read. Never at bootstrap — this is a diagnostic, not a page
+// dependency — and any refusal means no notice rather than an error in a
+// client's face.
+async function refreshTitleHealth() {
+  if (!shouldFetchTitleHealth(store.isPlatformSession, authStore.role)) return
+  try {
+    titleHealth.value = await store.fetchTitleGenerationHealth()
+  } catch {
+    titleHealth.value = null
+  }
+}
+
+const titleNotice = computed(() =>
+  titleNoticeDismissed.value ? null : titleGenerationNotice(titleHealth.value)
+)
 
 // Optimistic: a star is a personal bookmark, and waiting on a round trip to
 // redraw it makes the control feel broken. Reverted in place on failure so the
@@ -1345,11 +1579,14 @@ watch([activeAgentPageName, () => threads.value.length], ([name]) => {
   landOnAgent(name)
 })
 
-// A panel about the PREVIOUS agent is worse than no panel, so details closes on
-// every agent change rather than following the conversation across.
-watch(() => activeAgent.value?.name, (next, prev) => {
-  if (next !== prev) detailsOpen.value = false
-})
+// ent#547: the "close details on every agent change" watcher is retired with
+// `detailsOpen`. Its reason — a panel about the PREVIOUS agent is worse than no
+// panel — is now satisfied by the body rather than by shutting the column:
+// `PortalAgentDetails` watches `agentName` and reloads its reports, and
+// `usePortalAgentPage` watches it for the shared payload, so the tab follows the
+// agent instead of closing. That is the behaviour a TAB should have — the rail's
+// other four follow the conversation too — and it is why the tab form does not
+// need the dismissal the sibling form did.
 
 // ent#492: a sign-in inside this tab changes whose layout this is, and the
 // identity is read from storage at setup — so it has to be re-read once the
@@ -1467,7 +1704,15 @@ onBeforeUnmount(() => {
   stopAsksPoll()          // ent#364 — the poll must not outlive the view
   clearInterval(resendTimer)
   clearTimeout(searchTimer)
+  clearTitleSettle()      // #2579 — nor may the settle cycle
 })
+
+// #2579 — the third clear site, and the one that matters most in practice.
+// `convKey` is the seam that already MEANS "the conversation changed"; neither
+// of the other two fires on a thread switch, so without this a cycle armed in
+// chat A keeps replacing `threads.value` under the user for 16 seconds and can
+// raise a notice above chat B.
+watch(convKey, () => { clearTitleSettle() })
 
 // #2258: true from the click until the credential is gone and the route has
 // moved. Gates the template's first branch so neither principal sees a state
@@ -1487,6 +1732,13 @@ async function onSignOut() {
   try {
     const target = await store.signOutEverywhere()
     threads.value = []; activeAgentName.value = null; pendingSession.value = null
+    // #2579: this handler resets state IN PLACE — the OTP form is a branch of
+    // this same component, so the view is never remounted. Without clearing
+    // these, client B signing in on the same tab inherits client A's resolved
+    // promises and never gets a Main: exactly the defect they exist to fix,
+    // reintroduced for the second principal.
+    mainEnsured.clear(); mainAttempts.clear()
+    clearTitleSettle(); titleHealth.value = null; titleNoticeDismissed.value = false
     step.value = 'email'; email.value = ''; code.value = ''
     if (target === PLATFORM_LOGIN_ROUTE) {
       await router.push(PLATFORM_LOGIN_ROUTE)

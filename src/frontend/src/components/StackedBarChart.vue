@@ -29,7 +29,25 @@ const props = defineProps({
   // what board A3 draws for the Workspace band, where the chart shares one
   // short row with the stat figures and a legend underneath would double the
   // band's height.
+  //
+  // ent#547 adds 'none': no legend at all, series identity carried by the hover
+  // tooltip, which already names every bucket with its swatch and count. Read
+  // the two `v-if`s below as a pair — the second was `legend !== 'side'`, so a
+  // third value would have rendered the BELOW legend rather than no legend, and
+  // "add a value to an enum, then grep the readers" is exactly the class this
+  // repo's ledger keeps recording. Both branches now name their value.
+  //
+  // Why 'side' is a height problem worth a third value rather than a smaller
+  // font: it lays out `flex-col`, one row per bucket, so it grows ~13px per
+  // bucket — ~29px at one bucket and ~133px at nine. In the Workspace band that
+  // made a busy agent's header nearly twice a quiet one's.
   legend: { type: String, default: 'below' },
+  // ent#547: the sparse x-axis day labels under the bars. On by default (every
+  // existing caller). The Workspace band turns them off: at 7 columns they are
+  // four truncated dates, and the hover tooltip carries each bar's full date
+  // already — so they cost height the compact band does not have and say
+  // nothing the chart does not.
+  axis: { type: Boolean, default: true },
   // OPTIONAL x-label formatter (ent#536). Null = the UTC-day formatters every
   // existing caller relies on (`date` is an ISO day); the canvas passes its own
   // so a category column is not parsed as a date.
@@ -157,7 +175,7 @@ function showLabel(i) {
     </div>
 
     <!-- x labels (sparse) -->
-    <div class="flex gap-px mt-1">
+    <div v-if="axis" class="flex gap-px mt-1">
       <div
         v-for="(d, i) in data"
         :key="i"
@@ -169,8 +187,10 @@ function showLabel(i) {
 
     </div>
 
-    <!-- legend with per-bucket window totals -->
-    <div v-if="legend !== 'side'" class="flex flex-wrap gap-x-3 gap-y-1 mt-3">
+    <!-- legend with per-bucket window totals. Gated on the VALUE, not on
+         `!== 'side'`: with the negated test ent#547's new 'none' would have
+         rendered this block, i.e. the one thing it asks to remove. -->
+    <div v-if="legend === 'below'" class="flex flex-wrap gap-x-3 gap-y-1 mt-3">
       <span
         v-for="b in buckets"
         :key="b"

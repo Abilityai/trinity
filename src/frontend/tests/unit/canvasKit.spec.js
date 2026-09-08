@@ -54,12 +54,12 @@ describe('filterInlineStyle', () => {
   })
   it('keeps a bounded width and drops the rest of the declaration list', () => {
     expect(filterInlineStyle('width: 40%; position: fixed; inset: 0; z-index: 9999')).toBe('width: 40%')
-    expect(filterInlineStyle('MAX-WIDTH : 480PX ; color: red')).toBe('max-width: 480px')
+    expect(filterInlineStyle('MAX-WIDTH : 480PX ; color: red')).toBe('max-width: min(480px, 100%)')
   })
   it('clamps magnitudes: percent ≤ 100, pixels ≤ 9999', () => {
     expect(filterInlineStyle('width: 100%')).toBe('width: 100%')
     expect(filterInlineStyle('width: 101%')).toBeNull()
-    expect(filterInlineStyle('width: 9999px')).toBe('width: 9999px')
+    expect(filterInlineStyle('width: 9999px')).toBe('width: min(9999px, 100%)')
     expect(filterInlineStyle('width: 10000px')).toBeNull()
     expect(filterInlineStyle('width: 0%')).toBe('width: 0%')
     expect(filterInlineStyle('width: -5px')).toBeNull()

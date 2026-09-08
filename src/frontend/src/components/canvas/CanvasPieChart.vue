@@ -20,7 +20,10 @@
       <circle v-if="donut" cx="50" cy="50" :r="inner" class="fill-white dark:fill-gray-900" />
     </svg>
 
-    <ul class="min-w-0 flex-1 space-y-1 text-xs">
+    <!-- The legend keeps a readable minimum and wraps UNDER the pie in a
+         narrow figure cell, rather than shrinking beside it until every
+         label is an ellipsis (#2583). -->
+    <ul class="min-w-[9rem] flex-1 space-y-1 text-xs">
       <li v-for="(s, i) in slices" :key="i" class="flex items-center gap-2">
         <span class="inline-block h-2.5 w-2.5 shrink-0 rounded-sm" :style="{ backgroundColor: s.color }"></span>
         <span class="truncate text-gray-700 dark:text-gray-200">{{ s.label }}</span>

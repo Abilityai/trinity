@@ -59,7 +59,7 @@
             moves behind the disclosure below. A first login should be able to
             act on this in one glance without reading two columns of prose.
           -->
-          <div class="mt-3">
+          <div v-if="stage === 'address'" class="mt-3">
             <BaseButton
               variant="primary"
               size="sm"
@@ -93,7 +93,7 @@
                 all — and the second BUILDS ON the first, because a tunnel needs
                 the domain. The wording never offers them as an either/or.
               -->
-              <div class="min-w-0">
+              <div v-if="stage === 'address'" class="min-w-0">
                 <h4 class="text-sm font-[550] text-gray-900 dark:text-gray-100">
                   Give it a real name
                 </h4>
@@ -133,8 +133,8 @@
                   not finish the job.
                 -->
                 <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-                  With that domain on Cloudflare, a tunnel lets this server stop listening on
-                  the public internet altogether:
+                  <template v-if="stage === 'address'">With that domain on Cloudflare, a</template><template v-else>With your domain on Cloudflare, a</template>
+                  tunnel lets this server stop listening on the public internet altogether:
                   <span class="font-mono text-gray-600 dark:text-gray-300">cloudflared</span>
                   connects outward to Cloudflare, and traffic arrives back through that
                   connection. Inbound integrations — Telegram, WhatsApp, VoIP, public agent
@@ -148,7 +148,10 @@
                 </p>
               </div>
 
-              <p class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
+              <p
+                v-if="stage === 'address'"
+                class="text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400"
+              >
                 These two stack. A name settles how the instance is addressed; a tunnel
                 settles who can reach it at all. The tunnel needs the name, so it is the
                 second step rather than a different one.
@@ -183,6 +186,7 @@ import BaseCard from '../base/BaseCard.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import {
+  hardeningStage,
   isHardeningGuideVisible,
   persistHardeningGuideDismissed,
   postureCopy,
@@ -193,9 +197,17 @@ const store = useSessionsStore()
 const authStore = useAuthStore()
 const router = useRouter()
 
+// Which of the two steps the card is on. `https-domain` means step one landed,
+// so the card advances rather than retiring — see `hardeningGuide.js`.
+const stage = computed(() => hardeningStage(store.installTlsPosture))
+
 // Read once at setup, so a dismissal made in another tab this session does not
-// pop the card back mid-render.
-const dismissed = ref(readHardeningGuideDismissed())
+// pop the card back mid-render. Kept PER STAGE: waving away "you are on a bare
+// IP" must not also consume tunnel advice the operator has never been shown.
+const dismissed = ref({
+  address: readHardeningGuideDismissed('address'),
+  tunnel: readHardeningGuideDismissed('tunnel'),
+})
 
 const copy = computed(() => postureCopy(store.installTlsPosture) || {})
 
@@ -211,7 +223,7 @@ const visible = computed(
       isAdmin: authStore.profileVerified && authStore.role === 'admin',
       marketplaceInstall: store.marketplaceInstall,
       installTlsPosture: store.installTlsPosture,
-      dismissed: dismissed.value,
+      dismissed: dismissed.value[stage.value],
     }) &&
     // A posture with no copy is one this card has nothing honest to say about.
     // Belt on the predicate, which already excludes the only such value today.
@@ -221,8 +233,9 @@ const visible = computed(
 const dismiss = () => {
   // Hidden for this session regardless of whether storage accepted the write —
   // the helper warns, and a refused write is not a failed verb to the user.
-  dismissed.value = true
-  persistHardeningGuideDismissed()
+  // Scoped to the stage on screen, so the other step can still have its turn.
+  dismissed.value = { ...dismissed.value, [stage.value]: true }
+  persistHardeningGuideDismissed(stage.value)
 }
 
 const openSettings = () => router.push('/settings?tab=general')
