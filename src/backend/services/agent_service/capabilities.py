@@ -116,6 +116,40 @@ AGENT_TMPFS_MOUNT: dict[str, str] = {
 AGENT_DEFAULT_TMPDIR: str = '/home/developer/.tmp'
 
 
+# Agent container restart policy (#2541)
+# -----------------------------------------------------------------------------
+# Docker's default is `no`: a container created without an explicit policy stays
+# Exited after a host reboot or a daemon restart until somebody starts it by
+# hand. `trinity-system` was the only container Trinity created with a policy, so
+# an unplanned power-off on 2026-09-04 left 8 of 19 agents — `marshal`, the fleet
+# conductor, among them — dead for ~42 hours. The 11 that came back were exactly
+# the cohort a manual `docker update` had patched after the FIRST occurrence
+# (2026-07-23); everything created since was born `no` again.
+#
+# `unless-stopped`, never `always`, and that is a safety property rather than an
+# availability preference: Trinity stops agents through `container.stop()`
+# (docker_utils.container_stop, and the Operating Room fast path in routers/ops),
+# which sets Docker's manual-stop flag. `unless-stopped` honours it, so an agent
+# an operator deliberately quarantined stays down across a reboot; `always` would
+# resurrect it.
+#
+# Defined here — one home, imported by all three create sites — for the same
+# reason as AGENT_TMPFS_MOUNT and AGENT_LOG_CONFIG above: the create path is
+# never one call site (learnings.md, 2026-07-10), and this is the second
+# container property to prove it.
+#
+# Deliberately NOT operator-tunable, unlike both siblings. This is a safety
+# floor, not a policy dial: an env knob's whole point is that it can be set, and
+# the only other reachable values are `always` (breaks the guarantee above) and
+# `on-failure:N` (strictly weaker). A typo must not be able to reach either
+# (#1638 — a default that can be lowered is a default that will be).
+#
+# Creation-time, like log_config: existing agents adopt on RECREATE, not on a
+# plain restart. See docs/migrations/AGENT_RESTART_POLICY_2026-09.md for the
+# one-shot sweep that covers containers created before this landed.
+AGENT_RESTART_POLICY: dict[str, str] = {"Name": "unless-stopped"}
+
+
 # Agent container log rotation (#1871)
 # -----------------------------------------------------------------------------
 # Docker's json-file driver ships with NO max-size and NO max-file, so every
