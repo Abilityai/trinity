@@ -59,6 +59,7 @@ from .capabilities import (
     AGENT_TMPFS_MOUNT,
     AGENT_DEFAULT_TMPDIR,
     AGENT_LOG_CONFIG,
+    AGENT_RESTART_POLICY,
     normalize_cpu,
     normalize_memory,
 )
@@ -2027,6 +2028,10 @@ async def _create_agent_container(
         # unbounded, so without this the log grows until the Docker data root
         # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
         log_config=AGENT_LOG_CONFIG,
+        # #2541: born `unless-stopped` so the agent survives a host reboot or a
+        # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
+        # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
+        restart_policy=AGENT_RESTART_POLICY,
         network='trinity-agent-network',
         # #1197: cpu/memory normalized + validated above (raises 400 on
         # a bad template value), so these are guaranteed Docker-valid.

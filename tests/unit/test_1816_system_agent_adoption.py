@@ -7,6 +7,17 @@
 that made the platform orchestrator the most-stale agent in every fleet —
 indefinitely, and silently.
 
+The restart-policy half of #1816 was a **carry-forward**: the replacement
+inherited the old container's policy. #2541 retired it for an unconditional bake
+in the shared tail — faithful carry-forward carried ``no`` forward forever, and
+the tail's other caller (the #1559 recovery rebuild) passed nothing at all. The
+tests below therefore pin #1816's *intent* (``trinity-system`` never loses
+``unless-stopped`` across a recreate) against the new mechanism, which is a
+fleet-wide guarantee rather than a copy. Note the cost, since #1816 is now the
+cautionary half of its own file: fleet-wide ``unless-stopped`` also means
+involuntary reboots stop being a free cold-start boundary, so base-image
+adoption gets rarer — ``POST /api/ops/fleet/restart`` (#1912) is the remedy.
+
 The three boundaries asserted here:
 
 * **running** → read-only. Report ``base_image_state``, WARN, and alarm on
@@ -625,43 +636,16 @@ def provision_capture(monkeypatch):
     return mod, captured
 
 
-@pytest.mark.parametrize(
-    "policy,forwarded",
-    [
-        ({"Name": "unless-stopped"}, True),
-        ({"Name": "always"}, True),
-        ({"Name": ""}, False),  # Docker's "no policy" — same as omitting it
-        ({}, False),
-        (None, False),
-    ],
-)
-def test_restart_policy_is_forwarded_only_when_it_names_a_policy(
-    provision_capture, policy, forwarded
-):
-    mod, captured = provision_capture
+def test_the_shared_tail_always_bakes_unless_stopped(provision_capture):
+    """#2541 replaced #1816's carry-forward with an unconditional bake.
 
-    _run(
-        mod._provision_folders_and_run_agent_container(
-            "a",
-            image="trinity-agent-base:latest",
-            env_vars={},
-            labels={},
-            base_volumes={},
-            ssh_port=2222,
-            cpu="2",
-            memory="4g",
-            full_capabilities=False,
-            restart_policy=policy,
-        )
-    )
-
-    assert ("restart_policy" in captured) is forwarded
-    if forwarded:
-        assert captured["restart_policy"] == policy
-
-
-def test_restart_policy_defaults_to_absent_for_pre_1816_callers(provision_capture):
-    """`recreate_missing_container` (#1559) passes nothing — byte-identical."""
+    #1816 forwarded the OLD container's policy and omitted the kwarg when there
+    was nothing to carry. Faithful — and therefore sticky: it carried `no`
+    forward forever, which is why the 2026-09-04 power-off left 8 of 19 agents
+    Exited for ~42 hours. There is no longer a `restart_policy` parameter to
+    forward: every caller of this tail gets `unless-stopped`, like every other
+    property it re-bakes (cap_drop, tmpfs, log_config, network, mem_limit...).
+    """
     mod, captured = provision_capture
 
     _run(
@@ -678,25 +662,32 @@ def test_restart_policy_defaults_to_absent_for_pre_1816_callers(provision_captur
         )
     )
 
-    assert "restart_policy" not in captured
+    assert captured["restart_policy"] == {"Name": "unless-stopped"}
 
 
-@pytest.fixture
-def recreate_capture(monkeypatch):
-    """Drive ``recreate_container_with_updated_config`` and capture what it hands
-    to the shared run tail."""
+def test_the_tail_no_longer_accepts_a_caller_supplied_policy():
+    """The carry-forward parameter is gone, not merely ignored (#2541).
+
+    An ignored keyword would let a future caller believe it still controls the
+    policy. Deleting it turns that into a TypeError at the call site.
+    """
+    import inspect
     import services.agent_service.lifecycle as mod
 
-    captured = {}
-
-    async def _fake_provision(agent_name, **kwargs):
-        captured["agent_name"] = agent_name
-        captured.update(kwargs)
-        return _Container()
-
-    monkeypatch.setattr(
-        mod, "_provision_folders_and_run_agent_container", _fake_provision
+    params = inspect.signature(
+        mod._provision_folders_and_run_agent_container
+    ).parameters
+    assert "restart_policy" not in params, (
+        "#2541 deleted the carry-forward keyword; a re-added one would let a "
+        "caller reintroduce `no`."
     )
+
+
+def _stub_recreate_dependencies(mod, monkeypatch):
+    """Everything ``recreate_container_with_updated_config`` reaches for besides
+    the container run itself. Shared by the two fixtures below, which differ only
+    in WHERE they intercept — at the shared tail, or at ``containers_run``.
+    """
     monkeypatch.setattr(mod, "container_stop", AsyncMock())
     monkeypatch.setattr(mod, "container_remove", AsyncMock())
     monkeypatch.setattr(mod, "validate_base_image", MagicMock())
@@ -716,40 +707,106 @@ def recreate_capture(monkeypatch):
     fake_db.get_guardrails_config.return_value = None
     fake_db.get_resource_limits.return_value = None
     fake_db.get_public_mount_path.return_value = "/home/developer/public"
+    # Only reached when the real tail runs (recreate_run_capture).
+    fake_db.get_shared_folder_config.return_value = None
+    fake_db.get_file_sharing_enabled.return_value = False
     monkeypatch.setattr(mod, "db", fake_db)
+    return fake_db
+
+
+@pytest.fixture
+def recreate_capture(monkeypatch):
+    """Drive ``recreate_container_with_updated_config`` and capture what it hands
+    to the shared run tail."""
+    import services.agent_service.lifecycle as mod
+
+    captured = {}
+
+    async def _fake_provision(agent_name, **kwargs):
+        captured["agent_name"] = agent_name
+        captured.update(kwargs)
+        return _Container()
+
+    monkeypatch.setattr(
+        mod, "_provision_folders_and_run_agent_container", _fake_provision
+    )
+    _stub_recreate_dependencies(mod, monkeypatch)
     return mod, captured
 
 
-def test_recreate_carries_the_restart_policy_forward(recreate_capture):
-    """The regression: `old_host_config` was extracted and never read, so
-    `unless-stopped` silently vanished from every recreated agent."""
-    mod, captured = recreate_capture
+@pytest.fixture
+def recreate_run_capture(monkeypatch):
+    """Same, but with the REAL shared tail and ``containers_run`` faked instead.
+
+    #2541 moved the restart policy out of the caller and into the tail, so the
+    property "an old container on `no` yields a new one on `unless-stopped`" is
+    only observable end-to-end — a fixture that intercepts at the tail boundary
+    can no longer see it at all.
+    """
+    import services.agent_service.lifecycle as mod
+
+    captured = {}
+
+    async def _fake_run(image, **kwargs):
+        captured["image"] = image
+        captured.update(kwargs)
+        return _Container()
+
+    monkeypatch.setattr(mod, "containers_run", _fake_run)
+    _stub_recreate_dependencies(mod, monkeypatch)
+    return mod, captured
+
+
+@pytest.mark.parametrize(
+    "old_host_config",
+    [
+        {"RestartPolicy": {"Name": "no"}},        # born pre-#2541 — the fleet
+        {"RestartPolicy": {"Name": "unless-stopped"}},
+        {"RestartPolicy": {"Name": "always"}},    # out-of-band `docker update`
+        {"RestartPolicy": {"Name": ""}},          # Docker's "no policy"
+        {"RestartPolicy": None},                  # Docker does emit an explicit null
+        {},                                       # no policy key at all
+    ],
+    ids=["no", "unless-stopped", "always", "empty-name", "null", "absent"],
+)
+def test_recreate_normalizes_whatever_the_old_container_had(
+    recreate_run_capture, old_host_config
+):
+    """#2541 — a recreate NORMALIZES the restart policy; it does not preserve it.
+
+    #1816's carry-forward is what this replaces, and the parametrization is the
+    argument: the only values worth preserving are `always` (explicitly wrong —
+    RESTART-002: a deliberately stopped agent must stay stopped across a reboot)
+    and a weaker `on-failure`. Everything else is either `no` — the fleet this
+    issue exists to heal, which a faithful carry-forward would carry forever —
+    or drift a recreate exists to normalize.
+
+    The null cases are kept from #1816 for a different reason now: the old
+    HostConfig is no longer read at all, so a container whose policy Docker
+    reports as an explicit `null` can no longer abort a recreate AFTER the old
+    container has been removed.
+    """
+    mod, captured = recreate_run_capture
+    old = _Container(host_config=old_host_config)
+
+    _run(mod.recreate_container_with_updated_config("a", old, "system"))
+
+    assert captured["restart_policy"] == {"Name": "unless-stopped"}
+
+
+def test_system_agent_keeps_unless_stopped_across_a_recreate(recreate_run_capture):
+    """#1816's intent, served by construction rather than by carry-forward.
+
+    The orchestrator must not be downgraded to "stays down after a crash or a
+    host reboot" by a config recreate. It no longer depends on the old
+    container's HostConfig being readable and correct.
+    """
+    mod, captured = recreate_run_capture
     old = _Container(host_config={"RestartPolicy": {"Name": "unless-stopped"}})
 
     _run(mod.recreate_container_with_updated_config("trinity-system", old, "system"))
 
     assert captured["restart_policy"] == {"Name": "unless-stopped"}
-
-
-def test_recreate_is_null_safe_when_restart_policy_is_null(recreate_capture):
-    """`.get("RestartPolicy", {})` returns None when the key exists with a null
-    value, and `.get` on None would abort the recreate — after the old container
-    is already removed, leaving the agent with none at all."""
-    mod, captured = recreate_capture
-    old = _Container(host_config={"RestartPolicy": None})
-
-    _run(mod.recreate_container_with_updated_config("a", old, "system"))
-
-    assert captured["restart_policy"] == {}
-
-
-def test_recreate_is_null_safe_when_host_config_has_no_policy(recreate_capture):
-    mod, captured = recreate_capture
-    old = _Container(host_config={})
-
-    _run(mod.recreate_container_with_updated_config("a", old, "system"))
-
-    assert captured["restart_policy"] == {}
 
 
 def test_recreate_preserves_full_capabilities_for_the_system_agent(recreate_capture):
@@ -1157,9 +1214,10 @@ def test_the_router_surfaces_recreate_deferred():
 def test_recovery_rebuild_refuses_the_system_agent(lifecycle):
     """`recreate_missing_container` reconstructs a REGULAR agent: it deactivates
     the existing **system-scoped** MCP key and mints an *agent-scoped* one in its
-    place (plaintext unrecoverable ⇒ irreversible), drops `trinity.is-system`,
-    the `/template` bind and `unless-stopped`, and arms the scope-403
-    `TRINITY_BACKEND_URL` heartbeat.
+    place (plaintext unrecoverable ⇒ irreversible), drops `trinity.is-system` and
+    the `/template` bind, and arms the scope-403 `TRINITY_BACKEND_URL` heartbeat.
+    (#2541 removed `unless-stopped` from that list — the rebuild shares the tail
+    that now bakes it. Every other reason stands, so the fence does not move.)
 
     #1816 newly exposed it: both `ensure_deployed`'s stopped branch and
     `POST /api/system-agent/restart` now delegate to `start_agent_internal`,
@@ -1173,6 +1231,76 @@ def test_recovery_rebuild_refuses_the_system_agent(lifecycle):
         _run(lifecycle.recreate_missing_container("trinity-system"))
     assert exc.value.status_code == 409
     assert "ensure_deployed" in exc.value.detail
+
+
+def test_recovery_rebuild_gets_unless_stopped_too(monkeypatch):
+    """#2541 — the third broken path, closed for free by the unconditional bake.
+
+    `recreate_missing_container` (#1559 soft-delete recovery) passed NO restart
+    policy to the shared tail, so every recovery rebuild produced `restart=no` —
+    even for an agent that had `unless-stopped`. Nothing pinned that, because
+    #1816 only ever looked at the config-recreate caller.
+    """
+    import services.agent_service.lifecycle as mod
+
+    captured = {}
+
+    async def _fake_run(image, **kwargs):
+        captured["image"] = image
+        captured.update(kwargs)
+        return _Container()
+
+    monkeypatch.setattr(mod, "containers_run", _fake_run)
+    fake_db = MagicMock()
+    fake_db.get_shared_folder_config.return_value = None
+    fake_db.get_file_sharing_enabled.return_value = False
+    monkeypatch.setattr(mod, "db", fake_db)
+
+    _run(
+        mod._provision_folders_and_run_agent_container(
+            "recovered",
+            image="trinity-agent-base:latest",
+            env_vars={},
+            labels={},
+            base_volumes={},
+            ssh_port=2222,
+            cpu="2",
+            memory="4g",
+            full_capabilities=False,
+        )
+    )
+
+    assert captured["restart_policy"] == {"Name": "unless-stopped"}
+
+
+def test_the_recovery_rebuild_passes_no_restart_policy_of_its_own():
+    """...and it must stay that way: the tail owns the policy now (#2541).
+
+    Structural, because the caller-side omission is the point — a re-added
+    `restart_policy=` argument there would be a second authority over the same
+    property, which is the shape #2541 deleted. Checked over the AST rather than
+    the source text so the function's own docstring, which explains what #2541
+    removed from the fence's reason list, cannot trip it.
+    """
+    import ast
+    import inspect
+    import textwrap
+    import services.agent_service.lifecycle as mod
+
+    tree = ast.parse(
+        textwrap.dedent(inspect.getsource(mod.recreate_missing_container))
+    )
+    passed = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "restart_policy"
+    ]
+    assert not passed, (
+        "recreate_missing_container must not pass a restart policy — the shared "
+        f"tail bakes AGENT_RESTART_POLICY for every caller (#2541). Lines: {passed}"
+    )
 
 
 def test_start_of_a_container_less_system_agent_never_downgrades_it(lifecycle, monkeypatch):
