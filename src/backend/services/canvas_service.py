@@ -18,6 +18,7 @@ import logging
 from typing import Dict, List, Optional
 
 from database import db
+from config import PORTAL_SOURCE_CHANNEL
 from db.canvas import AUDIENCE_OPERATOR, AUDIENCE_ROSTER, normalize_audience
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
@@ -118,6 +119,132 @@ _AUDIENCE_WIDTH = {AUDIENCE_OPERATOR: 0, AUDIENCE_ROSTER: 1}
 def audience_within(stored: Optional[str], writer: Optional[str]) -> bool:
     """May a writer with audience ``writer`` write onto a canvas stored at ``stored``?"""
     return _AUDIENCE_WIDTH[normalize_audience(stored)] <= _AUDIENCE_WIDTH[normalize_audience(writer)]
+
+
+# ---------------------------------------------------------------------------
+# Does the chosen audience reach the session that asked? (#2577)
+# ---------------------------------------------------------------------------
+#
+# The reported failure was not a wrong default — it was a SUCCESS
+# indistinguishable from one the requester can see. An agent in a public-link
+# session wrote with the default `operator`, got `success: true` with the whole
+# canvas echoed back, saw it listed by `list_canvases`, and the person who asked
+# saw nothing. Neither side had the audience→surface mapping, because it appears
+# nowhere in the tool contract.
+#
+# So the write answers the question — and answers it ONLY where it can prove
+# one. Two properties decide the shape:
+#
+#   1. IT IS THREE-STATE. Widening to `roster` publishes to everyone the agent
+#      is shared with, so a wrong `False` costs an over-share, and "I could not
+#      tell" must stay distinguishable from "no" (the #2196 rule).
+#   2. THE TRIGGER SETS ARE ALLOW-LISTS. An unrecognised `triggered_by` makes no
+#      claim rather than defaulting to "invisible", so a label invented tomorrow
+#      cannot start nudging agents to publish to the whole roster.
+#
+# WHY A PORTAL TURN GETS NO CLAIM, which is the subtle one. A Workspace turn and
+# a public-link turn share `triggered_by="public"` and are told apart only by
+# `source_channel="portal"`. They are NOT the same audience:
+# `client_portal.agent_page.canvas_audience_for(is_platform=True)` returns
+# `None` — no narrowing — so a signed-in OPERATOR working in the Workspace reads
+# every audience, `operator` included. Claiming `False` for a portal turn would
+# therefore tell an operator their own canvas is invisible and push them to
+# widen it to the whole roster: precisely the over-share property (1) exists to
+# prevent, on the most ordinary Workspace path there is. The execution row
+# records the client's email, not whether that email is a platform principal, so
+# the honest answer is no answer.
+#
+# CHANNEL TURNS ALSO GET NO CLAIM, for a different reason: no canvas surface
+# renders inside Slack/Telegram/WhatsApp/VoIP, so `False` would be true and
+# would advise a widening that still does not put the canvas in front of them.
+
+# The requester came through a door that exposes NO operator surface and is not
+# the Workspace: a public link or an x402 paid call. Both render no canvas at
+# all, and neither can be the platform-principal case above.
+_NO_OPERATOR_SURFACE_TRIGGERS = frozenset({"public", "paid"})
+
+# The requester is the operator, on Agent Detail — whose read is deliberately
+# unfiltered by audience (`routers/canvas.list_canvases`), so BOTH audiences
+# render. Named individually rather than derived by subtraction: subtraction
+# would silently adopt every future label into the confident branch.
+_OPERATOR_SIDE_TRIGGERS = frozenset({
+    "manual", "chat", "session", "schedule", "webhook", "mcp",
+    "loop", "reminder", "event", "retry", "validation", "operator_response",
+})
+
+
+def canvas_visibility(
+    *,
+    audience: Optional[str],
+    triggered_by: Optional[str],
+    source_channel: Optional[str] = None,
+) -> tuple:
+    """Can the session this canvas was written from actually see it? (#2577)
+
+    Returns ``(visible, note)``. ``(None, None)`` means "no claim" — the honest
+    answer for a Workspace turn, a channel turn, an agent-to-agent turn, an
+    unrecognised label, or a write with no resolvable ``execution_id``.
+
+    The audience is normalised FIRST, so the verdict describes the value that
+    will be STORED rather than the one that was asked for: ``normalize_audience``
+    defaults closed, and a verdict about a rejected value would be a claim about
+    a canvas that does not exist.
+    """
+    stored = normalize_audience(audience)
+    trigger = (triggered_by or "").strip()
+
+    if trigger in _OPERATOR_SIDE_TRIGGERS:
+        return True, None
+
+    # A portal turn carries `triggered_by="public"` too, and its reader may be a
+    # platform principal who sees every audience. Excluded BEFORE the branch
+    # below rather than filtered inside it, so the exclusion is impossible to
+    # read as an afterthought.
+    if trigger in _NO_OPERATOR_SURFACE_TRIGGERS and source_channel != PORTAL_SOURCE_CHANNEL:
+        if stored == AUDIENCE_ROSTER:
+            return True, None
+        return False, (
+            "This turn came in through a public link or a paid call, which "
+            "render no canvas at all — and an `operator` canvas renders only on "
+            "Agent Detail, which that caller cannot open. Nothing you just "
+            "wrote is reachable from the session that asked for it. Write the "
+            "same canvas_id again with audience 'roster' to put it on the "
+            "agent's Workspace page, where anyone this agent is shared with can "
+            "reach it. Note that 'roster' means everyone it is shared with, not "
+            "only the person in this conversation."
+        )
+
+    return None, None
+
+
+def visibility_for_canvas(canvas: Dict, agent_name: str) -> tuple:
+    """`canvas_visibility` for a STORED canvas — resolves the turn, then decides.
+
+    Lives here rather than in the router (Invariant #1) and reads the stored row
+    rather than the request body: ``normalize_audience`` defaults closed, so a
+    verdict about a rejected value would describe a canvas that does not exist.
+
+    Fail-quiet in every direction. The write has already succeeded by the time
+    this runs, so an advisory lookup must never turn a stored canvas into a 5xx
+    — and ``resolve_and_validate_execution`` is itself fail-open, so a foreign,
+    unknown or unreadable id arrives here as ``None`` and produces no claim,
+    which is exactly the answer it deserves.
+    """
+    execution_id = (canvas or {}).get("execution_id")
+    if not execution_id:
+        return None, None
+    try:
+        execution = resolve_and_validate_execution(execution_id, agent_name)
+    except Exception:  # noqa: BLE001 — advisory only; never fail a written canvas
+        logger.debug("[canvas] #2577 visibility lookup failed", exc_info=True)
+        return None, None
+    if execution is None:
+        return None, None
+    return canvas_visibility(
+        audience=(canvas or {}).get("audience"),
+        triggered_by=getattr(execution, "triggered_by", None),
+        source_channel=getattr(execution, "source_channel", None),
+    )
 
 
 # ---------------------------------------------------------------------------
