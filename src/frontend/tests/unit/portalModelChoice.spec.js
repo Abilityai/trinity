@@ -294,13 +294,22 @@ describe('the composer is wired to the rules', () => {
     expect(block).not.toMatch(/localStorage|sessionStorage/)
   })
 
-  it('self-heals on THIS tab’s settle AND on the reload path', () => {
-    // Without the reattach arm the stored model survives a refresh and the next
-    // turn re-fails identically, with nothing naming the cause.
-    expect(CODE).toMatch(/function rememberVerdict\(outcome\)[\s\S]{0,1200}clearModelChoiceOnFailure\(outcome\)/)
+  it('self-heals on THIS tab’s settle, and ONLY there', () => {
     expect(CODE).toMatch(/markFailed\(index[\s\S]{0,400}clearModelChoiceOnFailure\(res\)/)
     // The verdict TOKEN has to survive `deliver()` for the rule to see it.
     expect(CODE).toContain('category: data.outcome.category')
+  })
+
+  it('does NOT self-heal from rememberVerdict (review, 2026-09-08)', () => {
+    // `rememberVerdict` also fires on LOAD and on reattach, off the durable
+    // Redis verdict — 15 minutes of TTL, cleared only at the next dispatch or on
+    // a success. Clearing there re-fired on every reload inside that window, so
+    // a user who re-picked a model after the failure had the fresh choice wiped
+    // again on the next refresh and written through to the server for every
+    // device. A re-send is the only way the loop this guards against can happen,
+    // and a re-send settles through `settleDelivery`.
+    const body = CODE.slice(CODE.indexOf('function rememberVerdict(outcome)'))
+    expect(body.slice(0, body.indexOf('\n}\n'))).not.toContain('clearModelChoiceOnFailure')
   })
 
   it('the roster’s option list fails closed in the store', () => {

@@ -1014,11 +1014,15 @@ function rememberVerdict(outcome) {
   const last = messages.value[messages.value.length - 1]
   if (!last || last.role !== 'user') { terminalOutcome.value = null; return }
   terminalOutcome.value = outcome
-  // ent#403: the durable verdict reaches here on load and on reattach too, so
-  // the self-heal runs on the reload path as well as on this tab's own settle.
-  // Without it the stored model survives a refresh and the next turn re-fails
-  // in exactly the same way, with nothing on screen naming the cause.
-  clearModelChoiceOnFailure(outcome)
+  // ent#403: the self-heal is deliberately NOT run here (review, 2026-09-08).
+  // `rememberVerdict` also fires on LOAD and on reattach, off the durable Redis
+  // verdict — which lives 15 minutes (`TURN_OUTCOME_TTL_SECONDS`) and is cleared
+  // only at the next dispatch or on a success. Clearing here therefore re-fired
+  // on every reload inside that window: a user who re-picked a model after the
+  // failure had the fresh choice wiped again on the next refresh, and written
+  // through to the server for every device. The clear belongs on the settle of
+  // a turn this tab actually sent (`settleDelivery`) — and a re-send is the only
+  // way the loop this guards against can happen at all, so nothing is lost.
 }
 
 // "Ask about it": the ruled lesser control — a prefill, never a send.
