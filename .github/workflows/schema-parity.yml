@@ -29,6 +29,40 @@ name: Schema Parity Gate
 # so they don't trip) are documented in that script's module docstring. PR-only
 # (it needs the PR base/head to diff); pure stdlib, no extra deps.
 #
+# POSTGRESQL PYTEST TIER (#2434): `TEST_POSTGRES_URL` appeared NOWHERE in
+# `.github/` before this, so `db_harness.available_backends()` returned
+# `["sqlite"]` in every CI run and every `db_backend`-parametrized test ran
+# SQLite-only. That is fine until a defect is one PostgreSQL enforces and SQLite
+# does not — an `INTEGER` column's 32-bit width, for instance, where SQLite
+# stores an 8-byte int and the same code path just succeeds. Such a test CANNOT
+# FAIL in CI, which is how #2434 shipped and how #2243 hit it in CI without the
+# product fix landing.
+#
+# The tier lives HERE and not in `pg-migrations.yml` for the same reason
+# `check_alembic_heads.py` does (architecture.md): this job is REQUIRED and runs
+# unconditionally, while `pg-migrations` is path-filtered and its own header says
+# "NOT a required check: keep it advisory". This job's change-detection pattern
+# already matches `src/backend/db/` and `src/backend/utils/helpers.py`.
+#
+# SELECTION IS A MARKER, NOT A `-k` PATTERN, AND THAT IS DELIBERATE. The obvious
+# selection is `-k "postgres or dual_backend"` — every `db_backend`-parametrized
+# test, on PostgreSQL. Measured before wiring it: 114 failed / 32 errors / 701
+# passed against a real `postgres:16-alpine`. Those tests have simply never run
+# on PostgreSQL, so making them a REQUIRED gate would brick every schema-touching
+# PR on arrival. `-m requires_postgres` instead: a test whose assertion can only
+# fail on PostgreSQL opts in with one line, and widening the tier is a separate,
+# honest piece of work (follow-up issue) rather than a side effect of this PR.
+# The gap is stated rather than hidden — this tier proves the marked guards, not
+# the whole db layer.
+#
+# SECOND STATED LIMIT: the tier sits behind the same self-skip as the parity
+# pytest, and the change-detection regex names only two test files. So a PR that
+# adds a `requires_postgres` test and NOTHING under `src/backend/db/` would skip
+# this step. That is tolerable rather than invisible: a test that can only fail
+# on PostgreSQL is by construction about db-layer behaviour, so the PR adding one
+# almost always touches a matched path (this one does). Widening the regex to all
+# of `tests/unit/` would run the whole job on every test-only PR in the repo.
+#
 # ALEMBIC SINGLE-HEAD GUARD (#2068): a version-line must resolve to exactly ONE
 # head. Two revisions declaring the same `down_revision` are two heads, and
 # `alembic upgrade head` — singular, which is what both runners call — resolves
@@ -65,6 +99,26 @@ permissions:
 jobs:
   schema-parity:
     runs-on: ubuntu-latest
+
+    # #2434. Started for every run of this job, including the ones that self-skip
+    # — a service container cannot be conditional. That costs an image pull on an
+    # unrelated PR and buys the guarantee that the required check never waits on
+    # a service that was not requested.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trinity
+          POSTGRES_PASSWORD: trinity_ci
+          POSTGRES_DB: trinity_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trinity -d trinity_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v7
         with:
@@ -164,3 +218,22 @@ jobs:
           REDIS_PASSWORD: "test"
           REDIS_BACKEND_PASSWORD: "test"
         run: pytest tests/unit/test_schema_parity.py tests/unit/test_alembic_parity_guard.py -v --tb=short
+
+      # #2434: the PostgreSQL tier. `TEST_POSTGRES_URL` is what makes
+      # `db_harness.db_backend` parametrize onto real PostgreSQL — without it the
+      # marked tests still run, but only on SQLite, where the defects they guard
+      # cannot fail. `-rs` so a skip is visible rather than silently green.
+      #
+      # Fail-loud on an empty selection: `pytest` exits 5 ("no tests collected")
+      # if the marker ever stops matching — a renamed marker or a deleted guard
+      # would otherwise pass this step by collecting nothing, which is the
+      # vacuous-guard failure mode this tier exists to prevent.
+      - name: PostgreSQL tier (marked guards, real postgres)
+        if: steps.changes.outputs.relevant == 'true'
+        env:
+          TEST_POSTGRES_URL: "postgresql://trinity:trinity_ci@localhost:5432/trinity_ci"
+          CREDENTIAL_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          REDIS_URL: "redis://test:test@redis:6379"
+          REDIS_PASSWORD: "test"
+          REDIS_BACKEND_PASSWORD: "test"
+        run: pytest tests/unit -m requires_postgres -v --tb=short -rs

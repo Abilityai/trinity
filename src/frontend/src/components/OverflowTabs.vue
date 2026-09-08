@@ -1,3 +1,10 @@
+<script>
+// The one knob for the fixed-tab width (#2579) — a companion `<script>` block
+// because `<script setup>` cannot carry a named export, and both rows plus the
+// spec have to be provably the same number.
+export const FIXED_TAB_WIDTH = 'w-40'
+</script>
+
 <script setup>
 /**
  * Responsive tab strip with a "More ▾" overflow dropdown (#1114).
@@ -14,6 +21,23 @@
  * shows the computed split. No flicker — defaults to all-inline until the
  * first measurement, so the common fits-everything case is correct on first
  * paint with zero snap.
+ *
+ * `fixedWidth` (#2579) is an OPT-IN for a strip of unbounded labels — the
+ * Workspace's chat tabs, whose labels are user and model text. Under it every
+ * tab is FIXED_TAB_WIDTH wide, its label clamps with an ellipsis, and the full
+ * text rides `title=` on the button and on the menu row. Default `false`, and
+ * EVERY width-related class below is gated on it, so the strips of short fixed
+ * labels (Agent Detail, Library, the portal rail) are byte-identical without it
+ * — including the native tooltip, which would otherwise appear on "Overview".
+ *
+ * The width class lands in BOTH rows for the reason the pinned glyph does: a
+ * visible row that renders wider than the mirror measures is a strip that
+ * overflows one tab too late. The visible button additionally needs `shrink-0`
+ * and the visible nav `overflow-hidden`, which the mirror needs neither of —
+ * `inlineCount` starts at +Infinity, so on first paint every tab is inline; a
+ * truncating label drops the button's min-content to padding, and flex's
+ * default `flex-shrink: 1` would squeeze the whole row to ~50px per tab for a
+ * frame while the `width: max-content` mirror still reports the real 160.
  */
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 
@@ -38,6 +62,11 @@ const props = defineProps({
   // ent#451: a compact strip for a chat's tabs above the thread — smaller
   // pad and type, same measurement, same overflow behaviour.
   dense: { type: Boolean, default: false },
+  // #2579: every tab the same width, labels clamped, full text on hover.
+  // Deliberately its own axis rather than a rider on `dense` — density and
+  // label-boundedness are different questions, and coupling them would clamp
+  // any future dense strip of short fixed labels for nothing.
+  fixedWidth: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -204,14 +233,16 @@ onUnmounted(() => {
 <template>
   <div ref="rootEl" class="relative border-b border-gray-200 dark:border-gray-700">
     <!-- Visible row: inline tabs + right-pushed More trigger -->
-    <nav class="-mb-px flex">
+    <nav class="-mb-px flex" :class="fixedWidth ? 'overflow-hidden' : ''">
       <button
         v-for="tab in inlineTabs"
         :key="tab.id"
         type="button"
+        :title="fixedWidth ? tab.label : undefined"
         @click="select(tab.id)"
         :class="[
           tabPad,
+          fixedWidth ? `${FIXED_TAB_WIDTH} shrink-0` : '',
           'border-b-2 font-medium transition-colors whitespace-nowrap inline-flex items-center',
           modelValue === tab.id
             ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
@@ -219,16 +250,16 @@ onUnmounted(() => {
         ]"
       >
         <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
-        {{ tab.label }}
+        <span class="min-w-0 truncate">{{ tab.label }}</span>
         <span
           v-if="tab.badge"
-          class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
+          class="ml-1.5 shrink-0 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
         >
           {{ tab.badge }}
         </span>
         <span
           v-if="tab.signal"
-          class="ml-1.5 rounded-full bg-action-primary-500"
+          class="ml-1.5 shrink-0 rounded-full bg-action-primary-500"
           :class="tab.signal === 'live'
             ? 'w-2 h-2 ring-[3px] ring-action-primary-500/[.28] motion-safe:animate-pulse'
             : 'w-1.5 h-1.5'"
@@ -292,6 +323,7 @@ onUnmounted(() => {
         :key="tab.id"
         data-menu-item
         type="button"
+        :title="fixedWidth ? tab.label : undefined"
         @click="select(tab.id)"
         :class="[
           'w-full px-4 py-2 text-left text-sm transition-colors flex items-center justify-between gap-2',
@@ -301,7 +333,7 @@ onUnmounted(() => {
         ]"
       >
         <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
-        <span>{{ tab.label }}</span>
+        <span :class="fixedWidth ? 'max-w-[20rem] truncate' : ''">{{ tab.label }}</span>
         <span
           v-if="tab.badge"
           class="px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none"
@@ -327,13 +359,18 @@ onUnmounted(() => {
       style="position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; visibility: hidden;"
     >
       <nav ref="measureNav" class="-mb-px flex" style="width: max-content;">
+        <!-- Under `fixedWidth` the mirror takes the width class and NOTHING
+             else: `getBoundingClientRect()` returns the border box, so a 160px
+             button whose text overflows still measures 160, and this row is
+             `width: max-content` so it never shrinks — it needs neither the
+             label span nor `shrink-0`. -->
         <button
           v-for="tab in tabs"
           :key="`m-${tab.id}`"
           data-measure-tab
           type="button"
           tabindex="-1"
-          :class="tabPad"
+          :class="[tabPad, fixedWidth ? FIXED_TAB_WIDTH : '']"
           class="border-b-2 font-medium whitespace-nowrap inline-flex items-center"
         >
           <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>

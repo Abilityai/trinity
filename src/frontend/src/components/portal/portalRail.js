@@ -41,6 +41,25 @@ export const RAIL_DOORS = Object.freeze({
   AUDIENCE: 'audience',
   /** per-agent scoping — needs at least one participant to have anything to show */
   AGENT: 'agent',
+  /**
+   * ent#547 — EXACTLY ONE participant. For a tab that is about a single agent
+   * and has no meaningful room form yet.
+   *
+   * Deliberately not `AGENT` with a note: `AGENT` means "at least one", so in a
+   * room it passes and the tab renders one arbitrary participant's panel under a
+   * strip that promises all of them. A door is the only place the rail can
+   * refuse, and the refusal has to be the honest one.
+   *
+   * Why Info cannot simply group like the others: `stores/clientPortal.js` holds
+   * report state as a SINGLETON keyed to one agent — `loadAgentReports` calls
+   * `resetAgentReports` whenever the requested agent differs, which bumps
+   * `_reportsGeneration` and invalidates every sibling's in-flight request. N
+   * mounted panels therefore leave N−1 stuck in a permanent loading skeleton,
+   * which is worse than absence: it is a surface that claims to be fetching
+   * something it has already abandoned. Grouping is unblocked by keying that
+   * store per agent, which is a store change, not a rail change.
+   */
+  SOLO_AGENT: 'solo-agent',
 })
 
 /** A tab's participant scoping. v1 has exactly one: the chat's participants. */
@@ -49,6 +68,21 @@ export const RAIL_SCOPE_PARTICIPANTS = 'participants'
 /** The two signal shapes a tab can carry. `live` outranks `updated`. */
 export const RAIL_SIGNAL_LIVE = 'live'
 export const RAIL_SIGNAL_UPDATED = 'updated'
+/**
+ * ent#547 — a STATIC tab: no activity to report, ever.
+ *
+ * A declared third value rather than borrowing `updated`, because the registry's
+ * `signal` field is documentation and a borrowed one would be a lie that reads
+ * as a fact: nothing writes an entry for a static tab, so `signalFor` returns
+ * `emptySignal()` and the dot never lights whatever the field says. Declaring
+ * `updated` would put a tab in the vocabulary the design pass built ("a dot
+ * means something happened") that can never participate in it.
+ *
+ * Needs no read-side special case: `signalFor` already answers `emptySignal()`
+ * for a tab the signals map does not mention, and `signalShape` already answers
+ * `null` for that.
+ */
+export const RAIL_SIGNAL_NONE = null
 
 /** The one persisted key (design pass, "State & honesty"). */
 export const RAIL_STORAGE_KEY = 'trinity-workspace-rail'
@@ -59,7 +93,7 @@ export const RAIL_DEFAULT_TAB = 'work'
  * docks later, per #472. Loops, Canvas and Files are slice 2 — they are named
  * here so the order is a contract and not a side effect of registration order.
  */
-export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files'])
+export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'info'])
 
 /**
  * The registry. Slice 1 (ent#474) docked ONE tab — Work (#457's Activity),
@@ -152,6 +186,33 @@ export const RAIL_TABS = Object.freeze([
       event: 'send-file',
     }),
   }),
+  // ent#547 — Info: the agent's own context (its chats, what it can do, what it
+  // has published), which until 2026-09-07 opened from the header INTO the
+  // rail's place as a sibling. The operator reversed that after testing `dev`:
+  // a header-launched sibling panel "reads as one more top-level thing".
+  //
+  // The 2026-09-05 argument against a tab named two properties, and both are
+  // answered here rather than waved away:
+  //   * "the rail is participant-scoped"    → SOLO_AGENT, so it does not render
+  //     in a room at all (see the door for why grouping is blocked, and by what).
+  //   * "dismissed, not switched away from" → true of a panel that occupies the
+  //     rail's column; false once it IS the column's content. Collapsing the
+  //     rail dismisses it, and the rail already remembers the tab you left.
+  //
+  // A STATIC tab — the third registry shape. No signal (nothing about an agent's
+  // context is an event) and no empty state (an agent always has a name, a
+  // health state and a chat list, so the body always renders and the rail's
+  // generic empty branch is unreachable). Both are declared as absent rather
+  // than filled with a plausible value; see RAIL_SIGNAL_NONE.
+  Object.freeze({
+    id: 'info',
+    label: 'Info',
+    door: RAIL_DOORS.SOLO_AGENT,
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_NONE,
+    icon: 'info',
+    empty: null,
+  }),
 ])
 
 /** "scout" in a 1:1, "an agent in this room" otherwise — one rule for every empty copy. */
@@ -175,6 +236,10 @@ export function tabPassesDoor(tab, session = {}) {
     case RAIL_DOORS.PLATFORM: return session.isPlatform === true
     case RAIL_DOORS.AUDIENCE: return true
     case RAIL_DOORS.AGENT: return participants.length > 0
+    // ent#547 — exactly one, never "at least one": in a room this tab has no
+    // honest form yet, and `> 0` would render one participant's panel under a
+    // strip that promises the rail is about the whole conversation.
+    case RAIL_DOORS.SOLO_AGENT: return participants.length === 1
     default: return false
   }
 }
@@ -475,6 +540,10 @@ export function railVisibleFor({
 export function feedsFor(visible) {
   const ids = new Set((Array.isArray(visible) ? visible : []).map((t) => t && t.id))
   // ent#525: `work` — the executions feed behind the first docked tab.
+  // ent#547: `info` is absent by design, not by oversight. This map drives the
+  // SHELL-owned feeds, and Info's body owns its own two reads (the shared agent
+  // page payload, and reports) — it is the one docked tab that is not fed from
+  // here. Adding a key nothing reads would suggest a feed exists.
   return { work: ids.has('work'), loops: ids.has('loops'), canvas: ids.has('canvas'), files: ids.has('files') }
 }
 
@@ -528,6 +597,46 @@ export function updatedSignal({ itemsByAgent = {}, seen = {}, field, participant
     return mark === null || newest > mark
   })
   return { live: 0, updated: agents.length > 0, agents }
+}
+
+/**
+ * What the Files tab's dot and its seen-marker BOTH read (#2582).
+ *
+ * The signal was keyed on `feeds.documents` and `created_at` alone, so a file
+ * the client had just sent could never light it. Merging uploads INTO
+ * `documents` would break the two-list UI split ("Files you sent" / "Files from
+ * {agent}"), so the collections stay separate and only this projection joins
+ * them: each upload is republished under the `created_at` key the existing
+ * `updatedSignal` / `markSeen` pair already compares.
+ *
+ * One mechanism, tested once — and it must feed BOTH sides, or opening the tab
+ * would mark documents seen while leaving the uploads' dot lit forever.
+ *
+ * Stated limit: `uploads` is populated only on tab-open, a turn ending while
+ * Files is open, or a `noteUpload`. On a fresh page load with Files closed this
+ * sees `{}`, so the dot cannot light for an upload made on another device or in
+ * a previous session. That is also what stops a one-time false-dot burst on
+ * deploy.
+ *
+ * Clock note: `uploaded_at` is a CONTAINER mtime while `created_at` is a backend
+ * `utc_now_iso()`, and one marker covers both — so a badly skewed agent clock
+ * can park the marker ahead and swallow a later real share. Narrow, and stated.
+ */
+export function filesSignalItems(documents = {}, uploads = {}) {
+  const out = {}
+  const agents = new Set([
+    ...Object.keys(documents && typeof documents === 'object' ? documents : {}),
+    ...Object.keys(uploads && typeof uploads === 'object' ? uploads : {}),
+  ])
+  for (const agent of agents) {
+    const docs = Array.isArray(documents?.[agent]) ? documents[agent] : []
+    const ups = Array.isArray(uploads?.[agent]) ? uploads[agent] : []
+    out[agent] = [
+      ...docs,
+      ...ups.map((u) => ({ ...u, created_at: u?.uploaded_at ?? null })),
+    ]
+  }
+  return out
 }
 
 /** The second persisted key (ent#475): per-tab, per-agent "last seen" markers. */

@@ -3,7 +3,19 @@
        primitive, not a skill the agent runs — a user's score is the one score
        that must not pass through the thing being scored, which is why this
        posts to the portal ratings route and never into the conversation. -->
-  <div class="mt-1.5 flex items-center gap-1 text-gray-400 dark:text-gray-500">
+  <!-- #2580: ONE root, and it owns NO margin. Both halves of that mattered.
+       Two roots made this a fragment, so when it was slotted into
+       `PortalAgentBubble`'s action row the comment `<form>` became a second FLEX
+       ITEM and opened to the RIGHT of the thumbs instead of beneath the message.
+       And the old root repeated the row's own `mt-1.5 flex items-center gap-1`,
+       which inside an `items-center` row pushed the thumbs 6px below Copy —
+       the misalignment the issue reports.
+       The margin moves OUT to the call sites, because the two disagree about it:
+       inside the bubble's action row the row already supplies it, while
+       `PortalDeliverables` mounts this outside any row and needs it. A component
+       that hard-codes spacing for one of its two parents is how these drift. -->
+  <div class="flex flex-col">
+  <div class="flex items-center gap-1 text-gray-400 dark:text-gray-500">
     <button
       v-for="choice in ['up', 'down']"
       :key="choice"
@@ -60,6 +72,7 @@
       >Close</button>
     </div>
   </form>
+  </div>
 </template>
 
 <script setup>

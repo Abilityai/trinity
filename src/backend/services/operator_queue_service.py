@@ -130,6 +130,11 @@ _BUDGETED_ALERT_TYPES = frozenset({
     # volume is driven by a person clicking, which is the same
     # not-bound-by-platform-cadence side of the #1677 classification.
     "workspace_problem_report",
+    # #2529: the per-Push `.gitignore` sweep's alert. Budgeted rather than
+    # exempted because `sync_to_github` is reachable from the `git_sync` MCP
+    # tool, which an agent-scoped key may call on itself — so an agent CAN drive
+    # the volume, which is the whole test the #1677 classification applies.
+    "gitignore_untracked",
 })
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
@@ -175,6 +180,12 @@ _RESERVED_ID_PREFIXES = (
     "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
                            # so an agent cannot pre-create the id of a complaint
                            # ABOUT ITSELF and silence it through ON CONFLICT
+    # git_service per-Push sweep alert (#2529). Reserved for the #1632 reason
+    # above, and — since ent#499 keyed `is_platform_minted` on this very tuple —
+    # this listing is ALSO what keeps the alert out of the agent's own
+    # `~/.trinity/operator-queue.json`. Correct: the sweep alarm is a platform
+    # alarm ABOUT the agent, not a loop the agent opened and is waiting on.
+    "gitignore-untracked-",
     ROLE_DRIFT_ALERT_PREFIX,  # role-assignment drift (trinity-enterprise#500) —
                            # the role file lives in the AGENT'S OWN workspace, so
                            # an unreserved prefix would let it pre-create the id

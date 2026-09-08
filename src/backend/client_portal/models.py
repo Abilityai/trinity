@@ -124,6 +124,15 @@ class PortalAgentCard(BaseModel):
     # customer's roster over an infrastructure fault. When Docker is unreadable
     # every card reads `unknown` and the roster renders exactly as it does today.
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
+    # #2582 — is this caller the agent's OWNER, as the roster union resolved it?
+    # The Files tab's "Delete for everyone" affordance is gated on this, and
+    # `service.portal_owns_agent` enforces the same membership server-side, so
+    # the button and the gate cannot disagree. Fails CLOSED (`False`): the bug
+    # to avoid is offering a destructive action the server will refuse. Note it
+    # is session-type dependent by construction — `include_owned` is
+    # `principal.is_platform` (ent#358) — so an owner on a magic-link portal
+    # token reads `False` here, and that is correct rather than a defect.
+    owned: bool = False
 
 
 class PortalBriefing(BaseModel):
@@ -255,6 +264,17 @@ class PortalChatResponse(BaseModel):
     response: str
     cost: Optional[float] = None
     session_id: Optional[str] = None
+    # #2580: the persisted row's id, so the caller can rate the reply it was just
+    # given instead of waiting for a reload to learn what to point at. The
+    # streaming path never needed this — it reads the row back out of history —
+    # but this synchronous route is its fallback, and a defect that only shows up
+    # on the fallback is still the defect.
+    #
+    # Optional, and genuinely so: the history write is best-effort (a hiccup must
+    # not fail an already-billed turn), so a reply can exist with no row behind
+    # it. `None` then, and the client's `v-if="message.id"` correctly withholds
+    # the thumbs rather than offering a control whose POST would 404.
+    message_id: Optional[str] = None
 
 
 class PortalTurnStarted(BaseModel):
@@ -494,6 +514,12 @@ class PortalUploadItem(BaseModel):
     filename: str
     size_bytes: int
     uploaded_at: Optional[str] = None
+    # #2582 — guessed from the extension by `_read_inbox`, because a client
+    # upload has no DB row to carry a detected type. Declaring it here is what
+    # makes it reach the client at all: the route's `response_model` silently
+    # strips undeclared keys, so `PortalRailFiles.vue`'s `<FileIcon :mime>` has
+    # been rendering the generic icon unconditionally since it shipped.
+    mime_type: Optional[str] = None
 
 
 class PortalUploads(BaseModel):

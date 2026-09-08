@@ -269,6 +269,12 @@ const ICONS = {
   refresh: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15',
   template: 'M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z',
   paperclip: 'M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13',
+  // ent#547 — Info. The same glyph the header's Agent-details button carried, so
+  // the control that moved is recognisably the same control. `iconPath` falls
+  // back to `bolt` for an unknown id, which is silent: a tab with no entry here
+  // wears Work's lightning bolt in the collapsed strip AND in its empty state,
+  // and nothing fails.
+  info: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
 }
 const GLYPHS = {
   expand: 'M11 19l-7-7 7-7m8 14l-7-7 7-7',

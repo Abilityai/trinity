@@ -89,7 +89,7 @@
   - `share_file` MCP tool (agent-scoped) — publishes a file and returns a download URL
   - Internal endpoint `POST /api/internal/agent-files/share` (agent-server path, `X-Internal-Secret` auth)
   - MCP-path endpoint `POST /api/agents/{name}/shared-files` (owner/admin or agent-scoped key)
-  - Public download endpoint `GET /api/files/{file_id}?sig={token}` — 192-bit signed token, constant-time compare, streaming, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`
+  - Public download endpoint `GET /api/files/{file_id}?sig={token}` (+ `HEAD`) — 192-bit signed token, constant-time compare, streaming, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`. **Disposition is an allowlist decided by the server** (ent#461): `inline` only for `_INLINE_SAFE_TYPES` (audio/video/image/PDF), `attachment` for everything else — `text/html`, `application/xhtml+xml` and `image/svg+xml` included. A requester may pass **`?download=1`, which is ONE-WAY**: it can only force `attachment` (#2582), never `inline`. Parsed tolerantly (`Optional[str]` + truthy check), so a malformed `?download=` on a link opened from Telegram/iOS is ignored rather than 422'd
   - List / revoke endpoints for the owner (`GET` / `DELETE /api/agents/{name}/shared-files[/{id}]`)
   - UI panel in Agent Detail → Sharing tab (toggle, quota, table, copy URL, revoke)
   - File validation: relative path only, no `..` escapes, 50 MB per file, 500 MB per-agent quota, magic-byte MIME detection with executable blocklist (PE/ELF/Mach-O/shebang)

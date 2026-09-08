@@ -126,18 +126,26 @@
 .canvas-kit .ck-grid-4 > *,
 .canvas-kit .ck-stack > * { margin: 0; min-width: 0; }
 
-/* Narrow container (the rail, a phone): everything becomes one column. */
-@container canvas (max-width: 640px) {
+/* Every block is a container of its own (`CanvasBlock` sets
+   `container-name: block`), and the grids INSIDE a block collapse on the
+   block's width — not the kit's, and never the viewport's: on a 1920px
+   screen the 24rem rail is `lg:` to `ReportKpiTiles`' own classes (four
+   80px tiles), and a `kpi` block in a layout's grid slot is ~160px wide on
+   a kit that is 700px, so a kit-keyed rule left three tiles at 45px with
+   "OPE / N" wrapped inside them (#2583, seen in the voice column). */
+@container block (max-width: 640px) {
   .canvas-kit .ck-grid-2,
   .canvas-kit .ck-grid-3,
-  .canvas-kit .ck-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .canvas-kit .ck-grid-4,
+  .canvas-kit .report-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .canvas-kit .ck-span-2 { grid-column: 1 / -1; }
 }
-@container canvas (max-width: 400px) {
+@container block (max-width: 400px) {
   .canvas-kit .ck-grid,
   .canvas-kit .ck-grid-2,
   .canvas-kit .ck-grid-3,
-  .canvas-kit .ck-grid-4 { grid-template-columns: minmax(0, 1fr); }
+  .canvas-kit .ck-grid-4,
+  .canvas-kit .report-kpi-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ------------------------------------------------------------------ card */
@@ -276,6 +284,24 @@
   text-align: end;
 }
 
+/* A markdown/html table that is NOT the kit's (`| a | b |` in prose, a bare
+   `<table>` from the voice panel) still gets its own scroll viewport, as the
+   kit twin above has: in the 24rem rail a ten-column markdown table ran past
+   the prose box (#2583). `display: block` lets the table element itself be
+   the viewport; the anonymous table box inside keeps its row layout. */
+.canvas-kit .prose table:not(.ck-table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+/* The prose wrappers break long tokens anywhere so an unbroken URL cannot
+   widen the column — but inside a table that rule lets the auto layout
+   squeeze every cell to one character per line ("C / O / L / U / M / N") in a
+   narrow rail. A table has its own scroll viewport (above, and the kit's
+   `ck-table-wrap`), so its cells wrap by word and let the table scroll. */
+.canvas-kit .prose th,
+.canvas-kit .prose td { overflow-wrap: normal; }
+
 /* --------------------------------------------------------------- callout */
 .canvas-kit .ck-callout {
   border-left: 3px solid var(--ck-neutral-line);
@@ -343,6 +369,12 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .canvas-kit .ck-slot { min-width: 0; }
+/* The block container the grid rules above query. `[data-canvas-block]` is
+   the app-emitted attribute on every `CanvasBlock` section. */
+.canvas-kit [data-canvas-block] {
+  container-type: inline-size;
+  container-name: block;
+}
 .canvas-kit .ck-slot > * + * { margin-top: 12px; }
 .canvas-kit .ck-slot-grid {
   display: grid;
