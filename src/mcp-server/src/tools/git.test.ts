@@ -115,6 +115,44 @@ describe("#905 git tools — agent-to-agent permission gate", () => {
   });
 });
 
+describe("#2529 git_sync — the sweep report reaches the MCP surface", () => {
+  it("passes removed_paths / unignored_paths / shadowed_negations through verbatim", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls, {
+      gitSync: async () => ({
+        success: true,
+        files_changed: 5,
+        removed_paths: [".env.example", ".claude/settings.json"],
+        unignored_paths: [".env.production"],
+        shadowed_negations: ["!content/keep.md -> content/"],
+      }),
+    });
+
+    const parsed = JSON.parse(await tools.gitSync.execute({ agent_name: "alpha" }, {}));
+
+    // Invariant #13: the backend router, the agent server and the MCP tool are
+    // three surfaces of one contract. `run()` JSON-stringifies the client result
+    // wholesale, so this is a REGRESSION guard on that passthrough — an agent
+    // reading only `files_changed` cannot tell a 5-file push from a 5-file push
+    // that also silently untracked two committed files.
+    assert.deepEqual(parsed.removed_paths, [".env.example", ".claude/settings.json"]);
+    assert.deepEqual(parsed.unignored_paths, [".env.production"]);
+    assert.deepEqual(parsed.shadowed_negations, ["!content/keep.md -> content/"]);
+  });
+
+  it("names all three fields in the tool description", () => {
+    const calls: Recorded[] = [];
+    const { description } = makeTools(calls).gitSync;
+    for (const field of ["removed_paths", "unignored_paths", "shadowed_negations"]) {
+      assert.ok(
+        description.includes(field),
+        `git_sync description does not mention ${field} — a caller has no reason ` +
+          "to read a field it is never told about",
+      );
+    }
+  });
+});
+
 describe("#905 git tools — conflict surfacing", () => {
   it("turns a 409 ApiError into a structured conflict with a chat_with_agent hint", async () => {
     const calls: Recorded[] = [];

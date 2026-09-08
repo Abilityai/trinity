@@ -48,7 +48,11 @@ export const KIT_CLASSES = Object.freeze(new Set([
  * `z-index`, `transform` and everything else are not admitted because each is
  * a way to reach outside the block (overlay the panel chrome, stretch a
  * customer's page). Percent is clamped to 100 and pixels to 9999 so a value
- * cannot be a layout bomb either.
+ * cannot be a layout bomb either — and a pixel value is emitted as
+ * `min(<px>, 100%)`, because 9999px IS a layout bomb in a 24rem rail column:
+ * the gallery (#2583) measured a `width: 9999px` card scrolling the whole
+ * canvas 10,000px sideways. The wrap is applied to OUR string after the value
+ * matched the bounded shape, so nothing the agent wrote reaches CSS unparsed.
  */
 export const ALLOWED_INLINE_PROPERTIES = Object.freeze(['width', 'max-width'])
 const INLINE_VALUE_RE = /^(?:(?:100|[1-9]?\d)%|\d{1,4}px)$/
@@ -86,7 +90,7 @@ export function filterInlineStyle(value) {
     const val = decl.slice(at + 1).trim().toLowerCase()
     if (!ALLOWED_INLINE_PROPERTIES.includes(prop)) continue
     if (!INLINE_VALUE_RE.test(val)) continue
-    kept.push(`${prop}: ${val}`)
+    kept.push(`${prop}: ${val.endsWith('px') ? `min(${val}, 100%)` : val}`)
   }
   return kept.length ? kept.join('; ') : null
 }
