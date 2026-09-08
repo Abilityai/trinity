@@ -62,21 +62,10 @@ compose_project_name() {
         | sed 's/^[_-]*//'
 }
 
-# Write (or rewrite) one key in `.env`. Rewrites the LINE rather than
-# substituting into it: `sed "s|^k=.*|k=$value|"` is wrong here because the
-# replacement half is user-controlled — `&` expands to the whole match, `\`
-# escapes, and the delimiter ends the expression. The failure is the silent kind
-# (a mangled password in `.env` while the summary says the operator's own is in
-# effect). Rewriting needs no escaping of the value at all. `cat >` rather than
-# `mv` so `.env` keeps its own inode and mode.
-set_env_key() {
-    local key="$1" value="$2" tmp
-    tmp="$(mktemp)"
-    grep -vE "^${key}=" .env > "$tmp" || true
-    printf '%s=%s\n' "$key" "$value" >> "$tmp"
-    cat "$tmp" > .env
-    rm -f "$tmp"
-}
+# `set_env_key` — shared with scripts/deploy/set-domain.sh, which rewrites the
+# same file after the install. One copy, because a `.env` writer that disagrees
+# with itself corrupts credentials silently.
+. ./scripts/deploy/env-file.sh
 # -----------------------------------------------------------------------------
 
 echo "====================================="

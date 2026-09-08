@@ -103,17 +103,32 @@
                 <!--
                   Trinity does not issue, renew, or install certificates: `public_chat_url`
                   is a display/webhook-base setting and nothing in the tree reconfigures a
-                  proxy or a listener from it. So this promises only what setting it does —
-                  change the name Trinity hands out — and attributes the certificate change
-                  to whatever actually terminates TLS.
+                  proxy or a listener from it.
+
+                  That is precisely why this copy must NOT stop at "set the Public URL".
+                  It used to, and the sequence it produced was: operator sets the URL,
+                  `install_tls_posture` flips to `https-domain` by string-parsing that
+                  setting, this card treats step one as done and advances — while the web
+                  server in front of Trinity still answers only to the IP, so the domain
+                  serves a certificate error. The card retired on a state it had made
+                  worse. So it names the one command that actually does the job
+                  (`set-domain.sh`, which switches the certificate, keeps the old address
+                  redirecting, and sets the Public URL itself), and says why it cannot be
+                  a button on this page.
                 -->
                 <p class="mt-1 text-[12.5px] leading-[1.5] text-gray-500 dark:text-gray-400">
-                  Point a domain’s A record at this server, then set it as the
-                  <span class="text-gray-600 dark:text-gray-300">Public URL</span>
-                  in Settings → General so Trinity hands out the name instead of the IP. Trinity
-                  does not issue certificates itself — whatever terminates TLS in front of it
-                  picks up the name and can then use an ordinary long-lived certificate instead
-                  of a short-lived IP one.
+                  Point a domain’s A record at this server, then run
+                  <span class="font-mono text-gray-600 dark:text-gray-300">sudo /opt/trinity/scripts/deploy/set-domain.sh your-domain.com</span>
+                  on the server itself. Trinity does not issue certificates itself — that
+                  command reconfigures whatever terminates TLS in front of it, so the name
+                  gets an ordinary long-lived certificate instead of a short-lived IP one. It
+                  also keeps the old address redirecting so existing links survive, and sets
+                  the <span class="text-gray-600 dark:text-gray-300">Public URL</span> so
+                  Trinity hands out the name instead of the IP. It refuses if DNS is not
+                  pointing here yet, and puts everything back if anything fails. It cannot be
+                  a button on this page: Trinity runs in a container with no access to the web
+                  server in front of it, which is also why the tunnel step below is
+                  instructions rather than a button.
                 </p>
               </div>
 
