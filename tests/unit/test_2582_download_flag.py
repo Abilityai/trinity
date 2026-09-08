@@ -121,14 +121,13 @@ def test_the_filename_still_round_trips_rfc6266():
 # The route — through a real TestClient, both verbs
 # --------------------------------------------------------------------------- #
 
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    """A mounted `/api/files` with one PNG share on disk.
+def _mount(tmp_path, monkeypatch, *, mime, filename, stored):
+    """Mount `/api/files` over exactly one share on disk, of a given type.
 
-    A PNG because `image/png` is IN the ent#461 inline allowlist: it is the type
-    whose bare response is `inline` and whose flagged response must be
-    `attachment`, which is the defect the operator reported (an image "download"
-    opening a tab).
+    Parametrized by type because the flag's contract has two halves that only
+    differ by what `is_inline_safe` says about the row: an allowlisted type is
+    `inline` bare and `attachment` when flagged, a rejected one is `attachment`
+    no matter what anyone asks for.
     """
     import os
     from fastapi import FastAPI
@@ -138,16 +137,16 @@ def client(tmp_path, monkeypatch):
 
     storage = tmp_path / "agent-files"
     storage.mkdir()
-    (storage / "stored.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 1016)
+    (storage / stored).write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 1016)
     monkeypatch.setattr(files_mod, "STORAGE_ROOT", str(storage))
 
     row = {
         "id": "f1",
         "agent_name": "atlas",
-        "filename": "chart.png",
-        "stored_filename": "stored.png",
-        "size_bytes": os.path.getsize(storage / "stored.png"),
-        "mime_type": "image/png",
+        "filename": filename,
+        "stored_filename": stored,
+        "size_bytes": os.path.getsize(storage / stored),
+        "mime_type": mime,
         "download_token": "tok",
         "created_at": "2026-09-01T00:00:00Z",
         "expires_at": "2099-01-01T00:00:00Z",
@@ -183,6 +182,25 @@ def client(tmp_path, monkeypatch):
     return c
 
 
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    """A PNG share — `image/png` is IN the ent#461 inline allowlist, so it is the
+    type whose bare response is `inline` and whose flagged response must be
+    `attachment`: the defect the operator reported (an image "download" opening
+    a tab)."""
+    return _mount(tmp_path, monkeypatch, mime="image/png",
+                  filename="chart.png", stored="stored.png")
+
+
+@pytest.fixture()
+def html_client(tmp_path, monkeypatch):
+    """The other half of the matrix: `text/html` is NOT in the allowlist, and is
+    the type where getting `inline` wrong is a stored-XSS delivery, not a
+    cosmetic annoyance."""
+    return _mount(tmp_path, monkeypatch, mime="text/html",
+                  filename="evil.html", stored="stored.html")
+
+
 def test_an_inline_safe_type_is_inline_bare_and_attachment_with_the_flag(client):
     bare = client.get("/api/files/f1?sig=tok")
     assert bare.status_code == 200
@@ -191,6 +209,34 @@ def test_an_inline_safe_type_is_inline_bare_and_attachment_with_the_flag(client)
     forced = client.get("/api/files/f1?sig=tok&download=1")
     assert forced.status_code == 200
     assert forced.headers["content-disposition"].startswith("attachment;")
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "1", "inline", "yes", "x"])
+def test_a_rejected_type_stays_attachment_through_the_route_whatever_is_asked(html_client, raw):
+    """The one-way property, proven where it is WIRED and not only where it is
+    computed.
+
+    `_apply_download_flag` is a pure function and is exercised directly above,
+    but a pure function cannot tell you the route passed it the right
+    `inline=`. The failure this catches is the plausible one: a handler that
+    derives the disposition from the query parameter instead of from
+    `is_inline_safe(row["mime_type"])`. On `text/html` that ships stored XSS on
+    a public token-gated link, and it would pass every helper-level test in
+    this file.
+    """
+    for verb in (html_client.get, html_client.head):
+        res = verb(f"/api/files/f1?sig=tok&download={raw}")
+        assert res.status_code == 200, f"{verb.__name__} download={raw!r}"
+        assert res.headers["content-disposition"].startswith("attachment;"), \
+            f"{verb.__name__} download={raw!r} -> {res.headers['content-disposition']}"
+
+
+def test_a_rejected_type_is_attachment_with_no_flag_at_all(html_client):
+    """The ent#461 baseline the flag must not regress: absent the parameter,
+    a non-allowlisted type was already `attachment`."""
+    res = html_client.get("/api/files/f1?sig=tok")
+    assert res.headers["content-disposition"].startswith("attachment;")
+    assert res.headers["x-content-type-options"] == "nosniff"
 
 
 def test_head_agrees_with_get(client):
