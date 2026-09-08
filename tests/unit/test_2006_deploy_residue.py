@@ -113,7 +113,11 @@ def _agent_status(name: str) -> AgentStatus:
 
 
 def _body(archive: str, name: str):
-    return SimpleNamespace(archive=archive, name=name, credentials=None)
+    # Mirrors DeployLocalRequest, incl. the #2060 require_manifest field —
+    # deploy.py reads it strictly (body.require_manifest, default False).
+    return SimpleNamespace(
+        archive=archive, name=name, credentials=None, require_manifest=False
+    )
 
 
 async def _deploy(body, user, create_fn=None):

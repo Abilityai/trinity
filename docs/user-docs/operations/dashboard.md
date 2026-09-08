@@ -23,6 +23,7 @@ The Dashboard is also where you create agents: **Create Agent** sits in the head
 Filters live in the Dashboard header and apply to every view mode:
 
 - **Type-to-filter** — Press `/` anywhere on the page and start typing to narrow the fleet by name. Matching is a case-insensitive substring over both the agent slug and its display name. Press `Esc` to clear. This filter is an accelerator, not a saved preference — it is never persisted and clears when you leave the page. It narrows *agents* only: Grid info tiles are fleet-scope readouts and keep reporting on the whole fleet regardless of the query.
+- **View-mode shortcut** — Press `v` to cycle Timeline → Grid → List (the switcher's tooltip names it). The choice is saved exactly as if you had clicked the switcher.
 - **Quick tag filter** — Narrow to one or more tags.
 - **Owner filter** — Narrow to agents owned by a particular user.
 - **Time range** — 1h, 6h, 24h, 7d, or custom (Timeline).

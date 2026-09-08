@@ -288,7 +288,6 @@ async def handle_subscription_failure(
         # not interleave with a concurrent switch for this agent).
         return await _perform_auto_switch(
             agent_name=agent_name,
-            old_subscription_id=current_sub_id,
             old_subscription_name=old_name,
             new_subscription=alternative,
             failure_kind=failure_kind,
@@ -354,7 +353,6 @@ def _destination_clause(why) -> str:
 
 async def _perform_auto_switch(
     agent_name: str,
-    old_subscription_id: str,
     old_subscription_name: str,
     new_subscription,
     failure_kind: str,

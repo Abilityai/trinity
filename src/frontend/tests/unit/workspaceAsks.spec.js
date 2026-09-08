@@ -19,6 +19,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 
 import { expiredLabel, askThreadLink } from '@/components/portal/portalUtils'
+import { buildQueueResponse } from '@/utils/operatorQueue'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 vi.hoisted(() => {
   const mem = new Map()
@@ -279,5 +282,79 @@ describe('the inline-in-chat surface filters by agent NAME', () => {
     expect(src).toContain('store.asksForAgent(props.agent.name)')
     expect(src).not.toContain('store.asksForAgent(props.agent)')
     expect(src).toMatch(/:agent-name="agent\.name"/)
+  })
+})
+
+
+describe('#2375 — the wire shape of an answer', () => {
+  // The component cannot be mounted (vitest is environment:'node' with no
+  // harness), so the rule splits: the PAYLOAD is pinned through the shared
+  // builder the component calls, and the WIRING is source-asserted below.
+  it('a typed answer to a question travels as the DECISION, never as a note', () => {
+    expect(buildQueueResponse({ kind: 'question', answer: '  deploy tuesday  ' }))
+      .toEqual({ response: 'deploy tuesday', response_text: null })
+  })
+
+  it('an approval sends the picked option verbatim, with the note riding beside it', () => {
+    expect(buildQueueResponse({ kind: 'approval', option: 'Approve', note: ' after 6pm ' }))
+      .toEqual({ response: 'Approve', response_text: 'after 6pm' })
+  })
+
+  it('an approval with nothing picked sends NOTHING — Send stays disarmed', () => {
+    expect(buildQueueResponse({ kind: 'approval', option: null, note: 'just a note' }))
+      .toBeNull()
+  })
+
+  it('an alert acknowledges', () => {
+    expect(buildQueueResponse({ kind: 'acknowledge' }))
+      .toEqual({ response: 'acknowledged', response_text: null })
+  })
+
+  it('the store forwards exactly what the builder produced', async () => {
+    portalHttp.get.mockResolvedValueOnce({ data: [ask('a1')] })
+    await store.fetchAsks()
+    portalHttp.post.mockResolvedValueOnce({ data: { ...ask('a1'), status: 'responded' } })
+
+    const body = buildQueueResponse({ kind: 'question', answer: 'deploy tuesday' })
+    await store.answerAsk('a1', { response: body.response, responseText: body.response_text })
+
+    const [, posted] = portalHttp.post.mock.calls[0]
+    expect(posted).toEqual({ response: 'deploy tuesday', response_text: null })
+  })
+})
+
+describe('#2375 — the panel goes through the shared module (source-asserted)', () => {
+  const sfc = readFileSync(
+    fileURLToPath(new URL('../../src/components/portal/PortalAsks.vue', import.meta.url)),
+    'utf8',
+  )
+
+  it('imports the one home of the payload, the controls rule and the labels', () => {
+    expect(sfc).toMatch(
+      /import \{ optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel \} from '@\/utils\/operatorQueue'/,
+    )
+  })
+
+  it('never one-taps an option straight into an answer', () => {
+    // The exact regression: option buttons used to call answer() directly, so a
+    // tap on an irreversible decision had no note and no explicit submit.
+    expect(sfc).not.toMatch(/@click="answer\(/)
+    // A tap only arms Send: the option click writes the pick, nothing else.
+    expect(sfc).toMatch(/@click="picks\[ask\.id\] = /)
+    expect(sfc).toMatch(/:disabled="busyId === ask\.id \|\| !picks\[ask\.id\]"/)
+  })
+
+  it('builds every submission through buildQueueResponse', () => {
+    expect(sfc).toMatch(/const body = buildQueueResponse\(/)
+    expect(sfc).not.toMatch(/responseText: text \|\| null/)
+  })
+
+  it('renders the shared type labels, not a third bespoke set', () => {
+    expect(sfc).toMatch(/queueTypeLabel\(kind\)/)
+    expect(sfc).not.toMatch(/Approval needed/)
+  })
+
+  it('an approval carries an optional note field', () => {
+    expect(sfc).toMatch(/portal-ask-note-\$\{ask\.id\}/)
   })
 })

@@ -86,6 +86,15 @@
 
 ---
 
+### 29.10 Workspace Voice Mode (VOICE-010, trinity-enterprise#534)
+- **Status**: ✅ Implemented (2026-09-07)
+- **Description**: The real-time voice session started from — and written back into — a **Workspace thread**, as a modal call with the orb. Start: `POST /api/enterprise/client-portal/agents/{name}/voice/start` under the portal principal (platform users only; off-roster, a foreign thread and a portal token are one uniform 404; per-(user, agent) rate limit; 503 with a reason when voice is off). The session carries `portal_session_id` + `client_email`, `workspace_mode=True`, `canvas_audience="operator"`, `max_duration=WORKSPACE_VOICE_MAX_DURATION` (default **1800 s**, env, wired through compose). `/stop`, `/ws/voice/{id}` and `/panel` are the shared OSS routes.
+- **Transcript**: written **turn by turn** by the worker holding the live socket (`client_portal/voice.py::persist_voice_turn`) as `enterprise_portal_messages` rows with `source='voice'` + `voice_call_id`; the call closes with one `system` row ("Voice call · N min", plus how it ended); a call with no turns writes nothing; `/stop` never writes for this surface; the Agent Detail save-at-end path is idempotent (in-process flag + Redis SETNX claim). Context for the call = the thread's recent turns (system rows skipped, earlier spoken rows labelled); `_format_history_context` labels spoken rows `(voice)` and budgets them to 12 per call.
+- **Session lifetime**: every session requests context-window compression + session resumption; a `go_away` reconnects with the latest handle (≤ 8 per call) while the browser socket, watchdog and transcript span the call; the cap sends a spoken wrap-up notice at T-30 s (`send_realtime_input(text=…)`) and ends with `end_reason="cap"`; `status{ended, reason, message}` and a final `saved` frame tell the client why and when to reload.
+- **Capability**: `PortalRoster.realtime_voice {available, reason}` — platform principals only, fail-closed, provider-neutral name (ent#354); distinct from the per-agent TTS `voice_available`.
+- **Canvas**: the call's right column reads `/panel` (refetch on panel `tool_result` frames + 3 s poll) through `CanvasPanel`; a platform principal reads every canvas audience in the Workspace (`agent_page.canvas_audience_for`), a portal-token client stays `roster`.
+- **Retired**: the ent#440 hands-free loop (`voiceConversation.js`) — one voice entry point. See `public-access.md` §48.3.
+
 ## 39. VoIP Telephony (VOIP-001)
 
 ### 39.1 Outbound Phone Calls over Gemini Live (#1056 — Phase 1)

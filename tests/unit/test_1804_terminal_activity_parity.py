@@ -99,12 +99,35 @@ ALLOWLIST = {
         "admission-path terminal, no activity yet."
     ),
     (
+        "routers/internal.py",
+        "_fail_execution_row",
+    ): (
+        "ent#498 admission-path terminal: the Workspace delivery target is "
+        "resolved BEFORE execute_task, so a refusal fails a row that step 3 "
+        "never reached and no dispatch activity exists to close. Same lifecycle "
+        "position as the _raise_* admission terminals above, and guarded on a "
+        "non-terminal status so a late refusal cannot overwrite a finished run."
+    ),
+    (
         "services/chat_execution_service.py",
         "_acquire_task_capacity",
     ): (
         "The CapacityFull branch fails the pre-created row when BOTH capacity "
         "and the backlog are full. Admission-path: nothing was admitted, so "
         "execute_task step 3 never opened a dispatch activity."
+    ),
+    (
+        "services/task_execution_service.py",
+        "_admission_gate",
+    ): (
+        "Step 2 of execute_task, extracted in-place by #2314. Its three "
+        "fast-fail terminals (CapacityFull / CircuitOpen / "
+        "EphemeralBudgetExhausted) fire when capacity.acquire refused the "
+        "turn — before execute_task step 3 opens the dispatch activity, so "
+        "there is no activity to close. Identical lifecycle position to the "
+        "chat_execution_service admission-path entries above; before #2314 "
+        "these writes sat inline in execute_task, whose own close calls "
+        "satisfied the function-level scan."
     ),
     (
         "client_portal/service.py",

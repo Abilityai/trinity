@@ -7,7 +7,7 @@ Trinity has a two-tier telemetry model. Tier 1 records anonymous product events 
 | Tier | What it is | Default | Egress |
 |------|-----------|---------|--------|
 | **Tier 1 — Local product events** | A small fixed allow-list of onboarding/setup step events, recorded in Trinity's own database | On (no toggle) | None — stays on your server |
-| **Tier 2 — Fleet sharing** | A periodic share of coarse anonymized aggregates to a hosted benchmark service, for reciprocal fleet benchmarks | Off (admin opt-in) | Only when consented **and** enabled |
+| **Tier 2 — Fleet sharing** | A periodic share of coarse anonymized aggregates to a hosted benchmark service, for reciprocal fleet benchmarks (the enterprise Activation view also reads that service, with the same anonymous share id, to show your benchmarks) | Off (admin opt-in) | Only when consented **and** enabled |
 
 The two tiers are independent: Tier 1 never sends anything, and turning Tier 2 off (or leaving it off) leaves Tier 1 exactly as it was.
 
@@ -40,11 +40,15 @@ If **either** gate is off, nothing leaves the box. An air-gapped or blocked send
 
 **Shared (coarse, anonymized aggregates only):**
 
-- Platform version
-- Platform type
-- Edition
+- Release version (never a commit hash)
+- Platform type and edition
+- How the instance was installed (the install lane, or `unknown`)
 - List of entitled features
 - Counts — agents, executions, and activation-funnel steps
+- An outcome mix — how runs ended, by trigger type and by status, plus counts of provider rate-limit and auth refusals
+- A random **share id**, minted when you turn sharing on and discarded when you turn it off — never your install id
+
+The payload is validated against its documented schema before every send; anything outside it is refused and recorded, never sent. The last five send attempts are kept locally and shown in Settings → Usage sharing → **Recent sends**.
 
 **Never shared:**
 

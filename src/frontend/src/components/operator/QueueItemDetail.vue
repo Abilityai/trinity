@@ -111,7 +111,7 @@
         <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">Respond</h3>
 
         <!-- Approval type: option buttons -->
-        <div v-if="item.type === 'approval' && item.options" class="space-y-3">
+        <div v-if="responseKind === 'approval'" class="space-y-3">
           <div class="flex flex-wrap gap-2">
             <button
               v-for="(option, idx) in item.options"
@@ -150,7 +150,7 @@
         </div>
 
         <!-- Question type: freeform textarea -->
-        <div v-else-if="item.type === 'question'" class="space-y-3">
+        <div v-else-if="responseKind === 'question'" class="space-y-3">
           <textarea
             v-model="responseText"
             rows="4"
@@ -170,7 +170,7 @@
         </div>
 
         <!-- Alert type: acknowledge button -->
-        <div v-else-if="item.type === 'alert'" class="space-y-3">
+        <div v-else class="space-y-3">
           <textarea
             v-model="responseText"
             rows="2"
@@ -195,11 +195,20 @@ import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip } from '../../utils/agentName'
+import { queueResponseKind } from '../../utils/operatorQueue'
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()
 
 const item = computed(() => store.selectedItem)
+
+// ent#499: the controls come from the ONE shared rule, never a local
+// v-if chain. `type` is free TEXT and the platform emits non-protocol
+// types (skill_not_found #1410, workspace_problem_report ent#499); the
+// hardcoded chain rendered NO control for those, so they could not be
+// closed from the queue at all — and a budgeted alert type whose items
+// cannot be closed jams its own pending cap permanently.
+const responseKind = computed(() => queueResponseKind(item.value))
 
 const selectedOption = ref(null)
 const responseText = ref('')

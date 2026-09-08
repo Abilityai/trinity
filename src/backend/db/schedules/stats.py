@@ -398,7 +398,10 @@ class ScheduleStatsMixin:
                     source_mcp_key_id, source_mcp_key_name,
                     model_used, fan_out_id, business_status, validation_execution_id,
                     turn_integrity,
-                    queued_at
+                    queued_at,
+                    -- ent#525: read by the Workspace Work projection; the
+                    -- fleet dashboard's model drops them (see FleetExecutionSummary).
+                    source_channel, source_channel_chat_id, loop_id
                 FROM schedule_executions
                 {where}
                 ORDER BY started_at DESC
@@ -500,6 +503,48 @@ class ScheduleStatsMixin:
                 "deleted_agent_count": row["deleted_agent_count"] or 0,
                 "deleted_agent_cost": round(row["deleted_agent_cost"] or 0.0, 4),
             }
+
+    # ------------------------------------------------------------------
+    # Telemetry outcome readers (ent#437)
+    # ------------------------------------------------------------------
+
+    def count_terminal_executions_by_status(self, hours: int = 24) -> Dict[str, int]:
+        """Terminal rows grouped by raw ``status`` within the window (ent#437).
+
+        Feeds the telemetry aggregate's ``outcomes.by_status``. ``hours=0`` is
+        all-time, matching :meth:`get_fleet_execution_stats`. Counts only — no
+        agent names, no ids. In-flight rows (``running`` / ``queued`` /
+        ``pending_retry``) are excluded: they are not outcomes yet.
+        """
+        bind: Dict = {}
+        where = ["status NOT IN ('running', 'queued', 'pending_retry')"]
+        if hours:
+            where.append("started_at > :cutoff")
+            bind["cutoff"] = iso_cutoff(hours)
+        sql = (
+            "SELECT status, COUNT(*) AS cnt FROM schedule_executions "
+            f"WHERE {' AND '.join(where)} GROUP BY status"
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(sql), bind).mappings().all()
+        return {str(r["status"] or ""): int(r["cnt"] or 0) for r in rows}
+
+    def first_autonomous_success_at(self) -> Optional[str]:
+        """``started_at`` of the earliest SUCCESS with an autonomous trigger
+        (schedule / webhook), or None (ent#437).
+
+        The warm-ask milestone. One ``LIMIT 1`` read; the caller memoises the
+        answer in ``system_settings`` once it exists, so this runs only while
+        the install has never completed an autonomous run.
+        """
+        sql = (
+            "SELECT started_at FROM schedule_executions "
+            "WHERE status = 'success' AND triggered_by IN ('schedule', 'webhook') "
+            "ORDER BY started_at ASC LIMIT 1"
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(text(sql)).first()
+        return str(row[0]) if row and row[0] else None
 
     # ------------------------------------------------------------------
     # Bucketed fleet timeline (ent#326)

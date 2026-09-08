@@ -801,78 +801,69 @@ where they already are.
 - **FR-8 — Sticky client choice**: the speaker toggle persists per client+agent in
   `localStorage`, instead of resetting to off on every page load.
 
-### 48.3 Voice in the Workspace — one conversation, two modalities (trinity-enterprise#440)
+### 48.3 Workspace Voice Mode — the orb takes the conversation (trinity-enterprise#534; supersedes ent#440)
 
-**Description**: A client (or an operator) starts a **hands-free voice
-conversation** with an agent from the Workspace it already works in — no mode
-switch, no second surface, no second product. The mic listens, the utterance
-becomes an **ordinary Workspace turn**, the reply is spoken, and the mic reopens.
-Closes the loop between the two halves the Workspace already had as separate
-manual controls: push-to-talk dictation (§48.2's sibling, #2212) and spoken
-replies (§48.2, #2157). OSS-core — no entitlement gate, no new endpoint, no
-schema change.
+**Description**: An internal user starts a **real-time voice call** with an agent
+from the Workspace chat they are in. Modal, the way ChatGPT's voice mode is: the
+orb (the platform's Gemini Live session — `VoiceOverlay` + `useVoiceSession`,
+reused) takes the conversation column, the chat is visible but inert, the
+agent's canvas takes the right column, and End / Escape returns to the chat with
+the call's transcript kept there as one collapsed **"Voice call · N min"** block.
+Ruled 2026-09-07. OSS-core by the standing ruling, deliberately ungated.
 
-- **FR-1 — Same conversation, by construction**: a spoken utterance is submitted
-  through the SAME path a typed one takes (`submitUserText` → `deliver` →
-  `POST .../chat/stream`), so it lands in the same portal session, resumes the
-  same Claude session, and is persisted as an ordinary `enterprise_portal_messages`
-  pair. There is no parallel transcript to reconcile and no second model
-  answering. The alternative — bridging the platform's Gemini Live session
-  (`routers/voice.py`, VOICE-001) into the Workspace — was **rejected**: it answers
-  with a different model holding a *summarised copy* of the thread, writes its
-  transcript back afterwards, and authenticates over a JWT-only WebSocket a portal
-  client does not hold. That is a parallel conversation wearing the same page.
-- **FR-2 — Turns appear in history like text turns**: nothing marks a turn as
-  spoken. History, unread counts, stars, the sidebar thread list and a later
-  re-read are all unchanged, because the row is the same row.
-- **FR-3 — Permissions and exposure are the text surface's**: no new route, so
-  no new gate. `/stt`, `/tts` and `/chat/stream` are already roster-scoped
-  (uniform 404 off-roster) and rate-limited per (client, agent).
-- **FR-4 — Canvas and deliverables stay reachable**: the loop renders inline in
-  the composer, never modally, so files, reports and the agent page beside it stay
-  operable mid-conversation.
-- **FR-5 — Interruption**: sustained speech over a narrating agent stops playback
-  on the spot and reopens the mic (`barge-in`), and an explicit **Stop** ends the
-  loop. The interrupt threshold is deliberately higher than the listening
-  threshold, and capture requests `echoCancellation` — without both, the mic hears
-  the agent through the speakers and the agent interrupts itself.
-- **FR-6 — Degrade with a named reason, never a dead control**: the control
-  renders only when the loop can run (a reachable microphone on a secure origin
-  **and** platform STT). An agent with no configured voice still converses — the
-  reply arrives as text and the status line says so. Every runtime failure
-  (transcription error, synthesis failure, provider outage, denied microphone)
-  stops the loop with a sentence in the existing voice-error line; the composer
-  keeps working throughout.
-- **FR-7 — The rules are pure and tested**: availability, the transition table,
-  utterance/barge-in detection and the spoken-text rewrite live in
-  `components/portal/voiceConversation.js` (`tests/unit/portalVoiceConversation.spec.js`).
-  The component only performs what the machine decides — the project has no
-  component-mount harness, so a rule kept in a `.vue` file is a rule no test can
-  reach.
-- **FR-8 — What is spoken is not what is rendered**: a reply is cleaned for the
-  ear before synthesis — code fences become one spoken sentence, links read as
-  their text, markdown furniture is dropped, and a long reply is cut at a sentence
-  boundary with "the rest is in the chat". Reading a fenced diff aloud is
-  unlistenable and burns the TTS character cap.
-- **FR-9 — The microphone is given back**: no speech within the idle window ends
-  the conversation with a sentence; a stop, an error, an agent switch and unmount
-  all release the stream, the recorder and the audio context. Transcription is
-  bounded twice — a client-side watchdog spanning the `/stt` call and a transport
-  timeout on it — because an unbounded await there holds the mic open with no
-  timer running at all. A hot mic left open on a client's own device is the
-  failure mode this feature must not ship.
+**Supersedes ent#440.** The hands-free STT → typed-turn → TTS loop (the former
+§48.3) is **retired** — one voice entry point. Two of its three reasons for not
+porting the orb are moot under the rulings since (a "parallel conversation" is
+the modal model wanted; the JWT-only WebSocket is only a problem for *external*
+portal-token clients, and the Workspace's audience is internal users), and the
+third (`run_task` cannot act as the agent) is #535. Hold-to-dictate (#2212) and
+spoken replies (#2157) stay as composer affordances.
 
-  **Two windows this enumeration does NOT cover, stated so the requirement and
-  the code agree** (review, ent#440): (a) while the agent is THINKING the only
-  bound is the agent's own `execution_timeout_seconds`, up to 7200s, and the mic
-  tracks stay live throughout — the loop is waiting for a reply it will speak,
-  so releasing the stream would end the conversation, but 2 hours is not a bound
-  anyone chose; (b) switching to a DIFFERENT THREAD on the SAME agent does not
-  stop the loop — only an agent change does — so a dispatch in flight lands in
-  the thread the user has left. Both are real, both are outside the release
-  triggers above, and neither is fixed in the shipping change.
-- **Known limits (stated, not hidden)**: the ~350 ms of speech that establishes a
-  barge-in is not captured (the recorder starts after the interrupt is confirmed),
-  so an interruption's first word may be lost; utterance boundaries are
-  energy-based, so a very noisy room ends turns early; and narration is per-reply,
-  not streamed, so a long answer is spoken only once the turn completes.
+- **FR-1 — Entry**: a **Voice** control on the conversation header for platform
+  sessions only, driven by the roster's `realtime_voice {available, reason}`
+  (instance-level, fail-closed, named for the capability — ent#354 may add a
+  second provider). Disabled WITH the reason when the instance cannot ("voice is
+  turned off" / "no voice provider key"), never a dead button. Portal-token
+  clients never see it. Distinct from the per-agent `voice_available` (TTS).
+- **FR-2 — Bound to the thread**: `POST /api/enterprise/client-portal/agents/{name}/voice/start`
+  under the portal principal — roster membership and thread ownership evaluated
+  before branching → ONE uniform 404 (off-roster, foreign thread, portal token);
+  per-(user, agent) rate limit; 503 with the reason when voice is off. A
+  brand-new chat gets its thread created and adopted BEFORE the call starts.
+  Context = the thread's recent rows (system rows skipped, earlier spoken rows
+  labelled). `/stop`, `/ws/voice/{id}` and `/panel` are the shared OSS routes.
+- **FR-3 — Transcript, written as it goes**: each completed turn is inserted by
+  the worker holding the live socket as an `enterprise_portal_messages` row
+  with `source='voice'` and `voice_call_id`; the call closes with one `system`
+  label row (+ how it ended) and `touch_portal_session`; a call with no turns
+  writes nothing; `/stop` never writes for this surface. Save-at-end was
+  rejected (two-worker double write, restart loss). The chat folds a call's rows
+  into one block **keyed on the call id**, placed where the call started —
+  robust to the 100-row history window and to typed turns landing mid-call.
+  The Agent Detail chat is untouched.
+- **FR-4 — Modal**: while the call is on, New chat, the picker, star, Reset, the
+  tabs, attach, mic, textarea and Send are inert; the speaker toggle is hidden;
+  one status line names the orb state / the tool at work and the way out;
+  Escape ends the call; the shell refuses sidebar / ⌘J navigation; a
+  route-driven change or an unmount ends the call gracefully with the
+  transcript kept.
+- **FR-5 — Canvas column**: orb 40 / canvas 60 (the retired page's split) at
+  `sm+`; the column reads the voice panel route through `CanvasPanel`,
+  refetching on each panel `tool_result` frame + a 3 s safety poll. The call
+  writes at `operator`; a platform principal reads every canvas audience in the
+  Workspace so the rail shows the same board after the call. Below `sm` the orb
+  has the stage (mobile: trinity#710).
+- **FR-6 — Cap with words**: `WORKSPACE_VOICE_MAX_DURATION` (default 1800 s,
+  env, compose-wired). At T-30 s the model is asked out loud to wrap up; at the
+  cap the call ends with `end_reason="cap"`, carried on the `status` frame and
+  in the label row — never a silent drop. Requires the session to outlive the
+  provider connection: compression + resumption on every session, reconnect on
+  `go_away`.
+- **FR-7 — Barge-in, Mute, End, tool badge**: as on the Agent Detail overlay —
+  the same component.
+- **FR-8 — Degradation, with words**: mic denied, insecure origin, no key,
+  disabled, provider error, connection closed, cap reached → a named reason in
+  the status line (or the failed-start line) and the chat unblocked. A `saved`
+  frame after persistence tells the client when to reload; End always works.
+- **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
+  projection (#285/#446); provider choice (#354, seam kept provider-neutral).

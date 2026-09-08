@@ -192,8 +192,8 @@ def roster_db(tmp_path, monkeypatch):
     # test that reaches portal_chat — register_enterprise() creates them in prod
     # via this same init. (history_db layers seeds on top; this makes the tables
     # unconditionally present, matching production.)
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -253,9 +253,14 @@ def test_roster_empty_for_no_email(roster_db):
     assert _run(service.get_roster("")).agents == []
 
 
-def test_roster_carries_briefing(roster_db, monkeypatch):
-    """#138: the roster ships each agent's description + client-visible playbooks
-    (best-effort enrichment), so the new-chat briefing needs no extra fetch."""
+def test_the_briefing_carries_description_and_playbooks(roster_db, monkeypatch):
+    """#138's content, at its #2163 home.
+
+    This used to assert the same fields on the ROSTER's cards, because #138
+    shipped the briefing there — which is precisely what made the Workspace's
+    first paint bound to the slowest agent in the fleet. The payload is
+    unchanged; only the call that resolves it moved off the critical path.
+    """
     from client_portal import service
     from client_portal.models import PortalPlaybook
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)   # skip the global key check
@@ -269,19 +274,38 @@ def test_roster_carries_briefing(roster_db, monkeypatch):
         return (None, [])
 
     monkeypatch.setattr(service, "_agent_briefing", fake_briefing)
+    briefings = _run(service.get_briefings("bob@example.com", None)).briefings
+    assert briefings["atlas"].description == "Atlas does research."
+    assert len(briefings["atlas"].playbooks) == 1
+    assert briefings["atlas"].playbooks[0].title == "Weekly report"
+    assert briefings["atlas"].playbooks[0].starter_prompt == "/weekly-report "
+    # An agent with nothing exposed still REACHED a verdict — empty, not failed.
+    assert briefings["cornelius"].description is None
+    assert briefings["cornelius"].playbooks == []
+    assert briefings["cornelius"].state == "ready"
+
+
+def test_the_roster_ships_no_briefing_at_all(roster_db, monkeypatch):
+    """#2163: the roster's own payload carries the defaults plus the state that
+    says a hydration call is owed. Without the marker an un-hydrated card is
+    indistinguishable from an agent that genuinely has nothing to offer."""
+    from client_portal import service
+    monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
+
+    async def never(name, availability="ready"):
+        raise AssertionError("the roster must not brief")
+
+    monkeypatch.setattr(service, "_agent_briefing", never)
     cards = {c.name: c for c in _run(service.get_roster("bob@example.com")).agents}
-    assert cards["atlas"].description == "Atlas does research."
-    assert len(cards["atlas"].playbooks) == 1
-    assert cards["atlas"].playbooks[0].title == "Weekly report"
-    assert cards["atlas"].playbooks[0].starter_prompt == "/weekly-report "
-    # An un-enriched (e.g. stopped) agent keeps the fast defaults.
-    assert cards["cornelius"].description is None
-    assert cards["cornelius"].playbooks == []
+
+    assert set(cards) == {"atlas", "cornelius", "defaultpic"}
+    assert all(c.briefing_state == "pending" for c in cards.values())
+    assert all(c.description is None and list(c.playbooks) == [] for c in cards.values())
 
 
-def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
-    """A slow/erroring agent must not break the roster — gather swallows it and
-    that card keeps the (None, []) defaults."""
+def test_briefing_hydration_is_fail_soft(roster_db, monkeypatch):
+    """A slow/erroring agent must not break the hydration call either — it lands
+    as `unavailable` for that agent and the response still carries the rest."""
     from client_portal import service
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
 
@@ -289,9 +313,10 @@ def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
         raise RuntimeError("agent unreachable")
 
     monkeypatch.setattr(service, "_agent_briefing", boom)
-    roster = _run(service.get_roster("bob@example.com"))
-    assert {c.name for c in roster.agents} == {"atlas", "cornelius", "defaultpic"}
-    assert all(c.description is None and c.playbooks == [] for c in roster.agents)
+    briefings = _run(service.get_briefings("bob@example.com", None)).briefings
+    assert set(briefings) == {"atlas", "cornelius", "defaultpic"}
+    assert all(b.state == "unavailable" for b in briefings.values())
+    assert all(b.description is None and b.playbooks == [] for b in briefings.values())
 
 
 def test_playbook_helpers():
@@ -556,8 +581,8 @@ def signin_db(tmp_path, monkeypatch):
     m.create_all(get_engine(), tables=[agent_sharing, agent_ownership, users, email_login_codes])
     # ent#281: sign-in consults the block table, so the module's own schema must
     # exist here exactly as it does in production (`register()` creates it).
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
@@ -888,8 +913,8 @@ def test_image_media_type():
 @pytest.fixture()
 def history_db(roster_db):
     """roster_db + the private enterprise_portal_messages table."""
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
     yield roster_db
 
 
@@ -944,20 +969,28 @@ def test_portal_chat_persists_the_turn(history_db):
 def test_portal_chat_feeds_prior_history_as_context(history_db):
     from unittest.mock import AsyncMock, patch
     from client_portal import service, db as pdb
-    # Seed the prior turns into a session so portal_chat (no explicit session_id)
-    # resumes that latest thread and feeds its history back as context (#78).
+    # Seed the prior turns into a session and NAME it on the turn.
+    #
+    # ent#523: this used to rely on "no session_id resumes the latest thread" to
+    # reach the seeded history. That resolution now lands in the pair's pinned
+    # Main chat instead, which is the point of the feature — so relying on it
+    # here would make this test about WHICH THREAD IS CHOSEN (owned by
+    # `test_ent523_main_chat.py`) rather than about what it is actually for:
+    # that a thread's prior turns are fed back as context. Naming the session
+    # keeps the subject and removes the coupling.
     pdb.create_portal_session("hs", "atlas", "bob@example.com", "2026-07-07T00:00:00Z")
     pdb.add_portal_message("h1", "atlas", "bob@example.com", "user", "the number is 7", None, "2026-07-07T00:00:01Z", session_id="hs")
     pdb.add_portal_message("h2", "atlas", "bob@example.com", "assistant", "noted", None, "2026-07-07T00:00:02Z", session_id="hs")
     cm, svc = _mock_execute(response="it was 7")
     with cm, patch.object(service, "_collect_inbox_for_turn", new=AsyncMock(return_value=([], [], []))):
-        _run(service.portal_chat("atlas", "what number did I say?", "bob@example.com"))
+        _run(service.portal_chat("atlas", "what number did I say?", "bob@example.com",
+                                 session_id="hs"))
     sent = svc.execute_task.call_args.kwargs["message"]
     assert "Conversation so far" in sent           # prior turns fed back as context
     assert "the number is 7" in sent and "noted" in sent
     assert sent.strip().endswith("what number did I say?")
     # the newly-persisted user turn is the ORIGINAL text, not the context-prefixed one
-    msgs = service.get_history("atlas", "bob@example.com")["messages"]
+    msgs = service.get_history("atlas", "bob@example.com", session_id="hs")["messages"]
     assert msgs[-2]["content"] == "what number did I say?"
 
 
@@ -1023,22 +1056,49 @@ def test_title_generation_failure_keeps_the_fallback(history_db):
     assert pdb.get_portal_session(sid, "atlas", "bob@example.com")["title"] == before
 
 
-def test_title_generated_once_and_only_from_the_visible_exchange(history_db):
+def test_title_generated_from_the_visible_exchange_and_retried_once(history_db):
+    """ent#186 titled a thread exactly once, from its opening exchange. ent#473
+    keeps the opening attempt and adds ONE more when that attempt never landed
+    — here the spawn is stubbed, so the thread's title stays the derived
+    fallback (`title_source` NULL) and the second turn earns the retry. A
+    third turn is past the window and earns nothing."""
     from unittest.mock import AsyncMock, patch
     from client_portal import service
     calls = []
     cm, _svc = _mock_execute(response="the visible reply")
     with cm, \
             patch.object(service, "_collect_inbox_for_turn", new=AsyncMock(return_value=([], [], []))), \
-            patch.object(service, "_spawn_title_generation", side_effect=lambda *a: calls.append(a)):
+            patch.object(service, "_spawn_title_generation",
+                         side_effect=lambda *a, **kw: calls.append((a, kw))):
         sid = _run(service.portal_chat("atlas", "opening message", "bob@example.com"))["session_id"]
-        # Second turn on the SAME (now titled) thread must not regenerate.
         _run(service.portal_chat("atlas", "follow-up message", "bob@example.com", session_id=sid))
-    assert len(calls) == 1
+        _run(service.portal_chat("atlas", "third message", "bob@example.com", session_id=sid))
+    assert [kw.get("attempt") for _, kw in calls] == ["first", "retry"]
     # Only the client's message + the agent's visible reply — never the composed
     # execution message (history context / file manifest / platform prompt).
-    # Spawn now carries the agent name first (subscription-token resolution, ent#186 follow-up).
-    assert calls[0] == ("atlas", sid, "opening message", "the visible reply")
+    # Spawn carries the agent name first (subscription-token resolution, ent#186 follow-up).
+    assert calls[0][0] == ("atlas", sid, "opening message", "the visible reply")
+    # The retry feeds THIS exchange — the first one with a topic in it.
+    assert calls[1][0] == ("atlas", sid, "follow-up message", "the visible reply")
+
+
+def test_a_landed_title_is_not_regenerated_on_the_second_turn(history_db):
+    """The ent#186 rule, restated under ent#473: once the generated title has
+    LANDED (`title_source = 'generated'`) and the opener was not a greeting,
+    a later turn on the thread never regenerates."""
+    from unittest.mock import AsyncMock, patch
+    from client_portal import db as pdb
+    from client_portal import service
+    calls = []
+    cm, _svc = _mock_execute(response="the visible reply")
+    with cm, \
+            patch.object(service, "_collect_inbox_for_turn", new=AsyncMock(return_value=([], [], []))), \
+            patch.object(service, "_spawn_title_generation",
+                         side_effect=lambda *a, **kw: calls.append(kw.get("attempt"))):
+        sid = _run(service.portal_chat("atlas", "Where is the Q3 invoice for Acme?", "bob@example.com"))["session_id"]
+        assert pdb.set_portal_session_title(sid, "Q3 invoice for Acme")   # the first attempt landed
+        _run(service.portal_chat("atlas", "follow-up message", "bob@example.com", session_id=sid))
+    assert calls == ["first"]
 
 
 def test_title_prompt_carries_only_the_two_blocks():

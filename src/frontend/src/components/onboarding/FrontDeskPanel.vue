@@ -19,7 +19,7 @@
   <div
     v-if="store.visible"
     data-testid="front-desk"
-    class="mx-4 mt-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-sm"
+    class="mx-4 mt-3 mb-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-sm"
   >
     <div class="flex items-start justify-between px-4 pt-3">
       <div class="min-w-0">

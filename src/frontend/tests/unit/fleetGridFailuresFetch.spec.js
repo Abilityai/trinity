@@ -64,6 +64,7 @@ vi.mock('axios', () => {
 import axios from 'axios'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import { failuresTileState } from '@/utils/executionFailure'
+import { tileState } from '@/utils/executionsTile'
 import { registerWidget, GRID_WIDGETS } from '@/utils/gridWidgets'
 
 // The tile's catalog entry, registered WITHOUT importing catalog.js — that file
@@ -74,18 +75,30 @@ if (!GRID_WIDGETS.some((w) => w.id === 'recent-failures')) {
   registerWidget({ id: 'recent-failures', title: 'Recent failures', component: {}, defaultOn: true })
 }
 
+// Same reason (ent#449): `refreshBatchData` gates the two execution GETs on the
+// Executions tile being enabled, so the latch below is only exercised when the
+// registry knows about it.
+if (!GRID_WIDGETS.some((w) => w.id === 'executions')) {
+  registerWidget({ id: 'executions', title: 'Executions', component: {}, defaultOn: true })
+}
+
 /**
  * Route the mocked axios per URL, and run the store's real batch refresh.
  * Driving `refreshBatchData()` rather than a fetcher directly is deliberate:
  * it also proves the enabled-tile gate actually reaches these two GETs.
  */
-async function refreshWith({ list, stats }) {
+async function refreshWith({ list, stats, timeline }) {
   axios.get.mockImplementation((url) => {
     if (url === '/api/executions') {
       return list instanceof Error ? Promise.reject(list) : Promise.resolve({ data: list, headers: {} })
     }
     if (url === '/api/executions/stats') {
       return stats instanceof Error ? Promise.reject(stats) : Promise.resolve({ data: stats, headers: {} })
+    }
+    if (url === '/api/executions/timeline') {
+      return timeline instanceof Error
+        ? Promise.reject(timeline)
+        : Promise.resolve({ data: timeline, headers: {} })
     }
     return Promise.resolve({ data: {}, headers: {} }) // the three sibling batch fetches
   })
@@ -190,5 +203,91 @@ describe('fetchFailureStats — an unreadable count is UNKNOWN, not zero', () =>
 
     expect(s.failures24h).toBeNull()
     expect(tileOf(s).emptyTitle).not.toContain('✓')
+  })
+})
+
+/**
+ * The latch the Executions tile's loading motion rests on (ent#449).
+ *
+ * The tile shows the scanline while `tileState` is `'loading'`, i.e. while
+ * `execTimelineLoaded` is false. "Loading" means NO DATA YET, never "a request
+ * is in flight" (design-system §6) — so the 60s batch refresh must be unable to
+ * re-raise it, or every tile on the board strobes once a minute (#1927).
+ *
+ * That property lives in the STORE: `execTimelineLoaded` is written `= true` on
+ * the first success and never written false anywhere. A pure test of `tileState`
+ * cannot see a future writer that resets it, which is why this drives the real
+ * `refreshBatchData()` across the two ways a refresh can go wrong.
+ */
+describe('fetchExecutionsTimeline — loaded latches on first success and never releases (ent#449)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  const OK = {
+    buckets: [{ bucket: '2026-08-14T09', total: 4, success: 3, failed: 1, by_trigger: {} }],
+    trigger_order: ['Scheduled'],
+  }
+
+  /** The tile's own reading of whatever the store currently holds. */
+  const execTileState = (s) =>
+    tileState({
+      loaded: s.execTimelineLoaded,
+      error: s.execTimelineError,
+      buckets: s.execTimeline,
+    })
+
+  it('a first success latches loaded and clears the error', async () => {
+    const s = await refreshWith({ list: [], stats: { failed_count: 0 }, timeline: OK })
+
+    expect(s.execTimelineLoaded).toBe(true)
+    expect(s.execTimelineError).toBe(false)
+    expect(execTileState(s)).toBe('ready')
+  })
+
+  it('a rejected refresh keeps the data and never re-enters loading', async () => {
+    await refreshWith({ list: [], stats: { failed_count: 0 }, timeline: OK })
+    const s = await refreshWith({
+      list: [],
+      stats: { failed_count: 0 },
+      timeline: new Error('network down'),
+    })
+
+    expect(s.execTimelineLoaded).toBe(true)
+    expect(s.execTimelineError).toBe(true)
+    // Stale-while-revalidate: the last good chart stays on screen under a
+    // `24h · stale` stamp — it does not blank and it does not beam.
+    expect(s.execTimeline).toEqual(OK.buckets)
+    expect(execTileState(s)).not.toBe('loading')
+  })
+
+  it('a malformed 200 is a fault, and still never re-enters loading', async () => {
+    await refreshWith({ list: [], stats: { failed_count: 0 }, timeline: OK })
+    const s = await refreshWith({
+      list: [],
+      stats: { failed_count: 0 },
+      timeline: { buckets: 'not-an-array' },
+    })
+
+    expect(s.execTimelineLoaded).toBe(true)
+    expect(s.execTimelineError).toBe(true)
+    expect(s.execTimeline).toEqual(OK.buckets)
+    expect(execTileState(s)).not.toBe('loading')
+  })
+
+  it('a first failure is loading-then-error, never a silent empty fleet', async () => {
+    // The other direction: before any success there is nothing to latch, so the
+    // tile must reach the ERROR face (chassis message + Retry) rather than
+    // claiming "No executions in the last 24h" — the ent#100 rule.
+    const s = await refreshWith({
+      list: [],
+      stats: { failed_count: 0 },
+      timeline: new Error('boom'),
+    })
+
+    expect(s.execTimelineLoaded).toBe(false)
+    expect(execTileState(s)).toBe('error')
   })
 })

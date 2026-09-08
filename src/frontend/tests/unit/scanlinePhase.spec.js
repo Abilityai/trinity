@@ -110,5 +110,19 @@ describe('scanlinePhase', () => {
       phase = onRevealEnd(phase)
       expect(phase).toBe(PHASE_LOADED)
     })
+
+    it('a remount after a data-less terminal never plays a late reveal (ent#449)', () => {
+      // The Executions info tile is the consumer that relies on this: the
+      // chassis replaces the slot with its own message on `empty`/`error`, so
+      // the tile's instance is UNMOUNTED there and a fresh one mounts at
+      // `ready` with loading already false. A cache-hit mount must stay loaded
+      // — a `reveal: true` arriving at a phase that never loaded is not a
+      // celebration, it is a stale prop on a new instance.
+      let phase = initialPhase(false)
+      expect(phase).toBe(PHASE_LOADED)
+      phase = onLoadingChange(phase, false, { reveal: true })
+      expect(phase).toBe(PHASE_LOADED)
+      expect(onRevealEnd(phase)).toBe(PHASE_LOADED)
+    })
   })
 })

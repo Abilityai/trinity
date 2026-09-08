@@ -2,6 +2,7 @@
 
 import base64
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -73,9 +74,31 @@ def _should_exclude(rel_path: str) -> bool:
     return False
 
 
+MANIFEST_NAME = ".trinity-manifest.json"
+
+
+def _manifest_entry(full: Path, rel: str) -> dict | None:
+    """One #2060 integrity-manifest entry: symlinks carry link_target (the
+    default `tar.add` stores them as link members), files carry sha256."""
+    import hashlib
+
+    if full.is_symlink():
+        return {"path": rel, "link_target": os.readlink(full)}
+    if full.is_file():
+        return {"path": rel, "sha256": hashlib.sha256(full.read_bytes()).hexdigest()}
+    return None
+
+
 def _create_archive(root: Path) -> bytes:
-    """Create a tar.gz archive of the agent directory."""
+    """Create a tar.gz archive of the agent directory.
+
+    #2060: an integrity manifest is computed over exactly the member set the
+    archive carries and injected in-memory as `.trinity-manifest.json` (the
+    user's source directory is never mutated). The backend verifies the
+    extracted tree against it and refuses drift.
+    """
     buf = io.BytesIO()
+    manifest: list[dict] = []
 
     if _is_git_repo(root):
         # Use git to determine which files to include
@@ -86,28 +109,51 @@ def _create_archive(root: Path) -> bytes:
     else:
         files = None
 
+    def add(tar: tarfile.TarFile, full: Path, rel: str) -> None:
+        if rel == MANIFEST_NAME or Path(rel).name.startswith("._"):
+            return  # backend skips AppleDouble members; a stale committed manifest is superseded
+        entry = _manifest_entry(full, rel)
+        if entry is None:
+            return
+        tar.add(str(full), arcname=rel)
+        manifest.append(entry)
+
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         if files is not None:
             for rel in files:
                 if _should_exclude(rel):
                     continue
                 full = root / rel
-                if full.is_file():
-                    tar.add(str(full), arcname=rel)
+                if full.is_symlink() or full.is_file():
+                    add(tar, full, rel)
         else:
             # Walk directory manually
             for dirpath, dirnames, filenames in os.walk(root):
-                # Prune excluded directories in-place
+                # Prune excluded directories in-place; surface symlinked dirs
+                # as link members instead of descending into them.
                 dirnames[:] = [
                     d for d in dirnames
                     if d not in ALWAYS_EXCLUDE and not d.startswith(".")
                 ]
+                for d in list(dirnames):
+                    full = Path(dirpath) / d
+                    if full.is_symlink():
+                        rel = full.relative_to(root)
+                        if not _should_exclude(str(rel)):
+                            add(tar, full, str(rel))
+                        dirnames.remove(d)
                 for fname in filenames:
                     full = Path(dirpath) / fname
                     rel = full.relative_to(root)
                     if _should_exclude(str(rel)):
                         continue
-                    tar.add(str(full), arcname=str(rel))
+                    add(tar, full, str(rel))
+
+        # Inject the manifest in-memory — never written to the source dir.
+        manifest_bytes = json.dumps(manifest).encode()
+        info = tarfile.TarInfo(MANIFEST_NAME)
+        info.size = len(manifest_bytes)
+        tar.addfile(info, io.BytesIO(manifest_bytes))
 
     return buf.getvalue()
 
@@ -244,6 +290,9 @@ def deploy(ctx, path, name, repo):
         result = client.post("/api/agents/deploy-local", json={
             "archive": archive_b64,
             "name": name,
+            # #2060: the CLI always embeds a manifest, so it always demands
+            # verification — a backend that verified nothing must refuse.
+            "require_manifest": True,
         })
     except TrinityAPIError as e:
         click.echo(f"Deploy failed: {e.detail}", err=True)
@@ -258,6 +307,21 @@ def deploy(ctx, path, name, repo):
     agent_name = agent.get("name", name)
 
     click.echo(f"Agent '{agent_name}' deployed (status: {agent.get('status', 'unknown')})")
+
+    # #2060 evidence
+    if result.get("verified"):
+        evidence = (
+            f"  Verified: {result.get('files_deployed')}/{result.get('files_expected')} files"
+        )
+        if result.get("symlinks_deployed"):
+            evidence += f", {result['symlinks_deployed']} symlink(s)"
+        click.echo(evidence)
+    else:
+        click.echo("  Warning: deploy content was NOT integrity-verified", err=True)
+    if result.get("compatibility_hard_count") is not None:
+        click.echo(f"  Compatibility: {result['compatibility_hard_count']} hard finding(s)")
+    for w in result.get("warnings") or []:
+        click.echo(f"  Warning: {w}", err=True)
 
     if versioning.get("previous_version"):
         click.echo(f"  Previous version: {versioning['previous_version']} (stopped: {versioning.get('previous_version_stopped', False)})")

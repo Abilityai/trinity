@@ -121,6 +121,8 @@ def _get_default_mcp_url(request: Request) -> str:
     if hostname in ("localhost", "127.0.0.1"):
         return "http://localhost:8080/mcp"
     return f"http://{hostname}:8080/mcp"
+
+
 def resolve_mcp_url(request: Request) -> str:
     """Effective MCP URL: the operator-configured override, else auto-detected.
 
@@ -128,6 +130,8 @@ def resolve_mcp_url(request: Request) -> str:
     reach into the private helper above.
     """
     return db.get_setting_value(MCP_URL_SETTING_KEY) or _get_default_mcp_url(request)
+
+
 def _validate_mcp_url(url: str) -> str:
     """Validate and normalize MCP URL. Returns normalized URL or raises HTTPException."""
     url = url.strip().rstrip("/")
@@ -150,6 +154,8 @@ def _validate_mcp_url(url: str) -> str:
         )
 
     return url
+
+
 @router.get("/mcp-url")
 async def get_mcp_url(
     request: Request,
@@ -168,6 +174,8 @@ async def get_mcp_url(
         "url": stored_url,
         "default_url": default_url
     }
+
+
 @router.put("/mcp-url")
 async def update_mcp_url(
     body: McpUrlUpdate,
@@ -188,6 +196,8 @@ async def update_mcp_url(
         "success": True,
         "url": validated_url
     }
+
+
 @router.delete("/mcp-url")
 async def delete_mcp_url(
     request: Request,

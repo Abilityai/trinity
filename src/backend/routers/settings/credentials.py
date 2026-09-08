@@ -118,6 +118,8 @@ def mask_api_key(key: str) -> str:
     if not key or len(key) < 8:
         return "****"
     return f"...{key[-4:]}"
+
+
 @router.get("/api-keys")
 async def get_api_keys_status(
     request: Request,
@@ -157,6 +159,8 @@ async def get_api_keys_status(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get API keys status: {str(e)}")
+
+
 @router.put("/api-keys/anthropic")
 async def update_anthropic_key(
     body: ApiKeyUpdate,
@@ -202,6 +206,8 @@ async def update_anthropic_key(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
+
+
 @router.delete("/api-keys/anthropic")
 async def delete_anthropic_key(
     request: Request,
@@ -240,6 +246,8 @@ async def delete_anthropic_key(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete API key: {str(e)}")
+
+
 @router.post("/api-keys/anthropic/test")
 async def test_anthropic_key(
     body: ApiKeyTest,
@@ -298,6 +306,8 @@ async def test_anthropic_key(
             "valid": False,
             "error": f"Error testing key: {str(e)}"
         }
+
+
 @router.put("/api-keys/github")
 async def update_github_pat(
     body: ApiKeyUpdate,
@@ -355,6 +365,8 @@ async def update_github_pat(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update GitHub PAT: {str(e)}")
+
+
 @router.delete("/api-keys/github")
 async def delete_github_pat(
     request: Request,
@@ -393,6 +405,8 @@ async def delete_github_pat(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete GitHub PAT: {str(e)}")
+
+
 @router.post("/api-keys/github/test")
 async def test_github_pat(
     body: ApiKeyTest,
@@ -491,6 +505,8 @@ async def test_github_pat(
             "valid": False,
             "error": f"Error testing token: {str(e)}"
         }
+
+
 @router.get("/slack")
 async def get_slack_settings_status(
     request: Request,
@@ -539,6 +555,8 @@ async def get_slack_settings_status(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get Slack settings: {str(e)}")
+
+
 @router.put("/slack")
 async def update_slack_settings(
     body: SlackSettingsUpdate,
@@ -573,6 +591,8 @@ async def update_slack_settings(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Slack settings: {str(e)}")
+
+
 @router.delete("/slack")
 async def delete_slack_settings(
     request: Request,
@@ -610,6 +630,8 @@ async def delete_slack_settings(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete Slack settings: {str(e)}")
+
+
 @router.get("/slack/status")
 async def get_slack_transport_status(
     request: Request,
@@ -650,6 +672,8 @@ async def get_slack_transport_status(
         "app_token_masked": mask_api_key(app_token) if app_token else None,
         "workspaces": workspaces,
     }
+
+
 @router.post("/slack/connect")
 async def connect_slack_transport(
     request: Request,
@@ -721,6 +745,8 @@ async def connect_slack_transport(
     except Exception as e:
         logger.error(f"Failed to start Slack transport: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to connect: {str(e)}")
+
+
 @router.post("/slack/install")
 async def install_slack_workspace(
     request: Request,
@@ -752,6 +778,8 @@ async def install_slack_workspace(
         return {"oauth_url": oauth_url}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/slack/disconnect")
 async def disconnect_slack_transport(
     request: Request,

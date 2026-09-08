@@ -128,6 +128,8 @@ async def list_email_whitelist(
     whitelist = db.list_whitelist(limit=1000)
 
     return {"whitelist": whitelist}
+
+
 @router.post("/email-whitelist")
 async def add_email_to_whitelist(
     request: Request,
@@ -166,6 +168,8 @@ async def add_email_to_whitelist(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.delete("/email-whitelist/{email}")
 async def remove_email_from_whitelist(
     email: str,

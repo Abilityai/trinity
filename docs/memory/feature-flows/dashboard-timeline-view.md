@@ -22,7 +22,10 @@ The Dashboard offers two views for monitoring the agent fleet:
 2. **Timeline is the default view** for new users (no localStorage preference)
 3. Toggle buttons in header: `[Timeline] [Grid] [List]` (Grid: trinity-enterprise#47;
    List: trinity-enterprise#260 — the retired Agents page; the legacy Graph mode
-   was decommissioned in #1689)
+   was decommissioned in #1689). `[Timeline] [Grid] [List]` is the LAST control
+   in the header (#2536 — pinned x-position across modes and the history
+   spinner); `v` cycles the three modes (same guard ladder as `/`, same
+   `setViewMode` persistence as a click)
 4. Panes are `v-if`-exclusive — only the active mode's pane is mounted
 5. View preference persisted in localStorage (`trinity-dashboard-view`); a
    `?view=` deep-link applies without persisting (ent#260)

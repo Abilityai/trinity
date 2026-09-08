@@ -10,11 +10,13 @@ Real-time voice conversations with agents via Gemini 2.5 Flash Native Audio mode
 - **Animated Orb** — Canvas-rendered visualization that reflects session state via color and particle movement.
 - **Tool Calling (`run_task`)** — During a voice session, Gemini can delegate complex tasks to the underlying Claude agent. The orb shows an amber badge while the task runs.
 - **Voice System Prompt** — Controls Gemini's persona for the session. Looked up in order: DB setting → `voice-agent-system-prompt.md` in the container → auto-generated from template info → generic fallback.
-- **Workspace Mode** — A full-page voice surface with a live canvas the agent can draw on (diagrams, images, formatted text) while you talk. Admin opt-in, BETA. See [Workspace Mode](#workspace-mode-beta).
+- **Voice mode in the Workspace** — The same call, started from the chat you are in on the Workspace: the orb takes the conversation, the agent's canvas takes the right column, and the transcript lands in that chat. See [Voice mode in the Workspace](#voice-mode-in-the-workspace).
 
 ## How It Works
 
-1. Open an agent's **Chat** tab.
+The Workspace is the front door; the Agent Detail chat panel still carries the same orb.
+
+1. Open an agent's **Chat** tab (or a Workspace chat — see below).
 2. Click the microphone button next to the chat input.
 3. A full-screen voice overlay appears with an animated canvas orb.
 4. Speak — audio is captured as PCM 16 kHz and streamed to the backend WebSocket.
@@ -53,7 +55,8 @@ Click **Mute** to silence your microphone mid-session. Gemini continues speaking
 | `VOICE_ENABLED` | Global toggle | `true` |
 | `WORKSPACE_ENABLED` | Enable the Workspace Mode canvas (BETA, admin opt-in) | `false` |
 | `VOICE_MODEL` | Gemini model ID (leave unset to use the built-in default) | `models/gemini-3.1-flash-live-preview` |
-| `VOICE_MAX_DURATION` | Max session duration in seconds | `300` |
+| `VOICE_MAX_DURATION` | Max session duration in seconds (Agent Detail) | `300` |
+| `WORKSPACE_VOICE_MAX_DURATION` | Max call duration in seconds (Workspace voice mode) | `1800` |
 
 ### Per-Agent Voice Prompt
 
@@ -77,60 +80,54 @@ When Gemini encounters a request that requires complex reasoning, file access, o
 
 All `run_task` invocations are written to the platform audit log.
 
-## Workspace Mode (BETA)
+## Voice mode in the Workspace
 
-Workspace Mode is a full-page voice surface with a **live canvas** beside the orb. While you talk, the agent can paint the canvas with diagrams, images, and formatted text — useful for walkthroughs, design reviews, and any conversation where a picture helps. It is **opt-in and admin-gated**, off by default.
+The Workspace conversation has a **Voice** control in its header. Press it and the call starts in the chat you are in — modal, the way ChatGPT's voice mode is: you are either in the chat or in the call.
 
-### Enabling Workspace Mode
+### What happens
 
-Workspace Mode is hidden unless an admin enables it platform-wide:
+1. The orb takes the conversation column. The header, the chat tabs and the composer stay visible but are inert until the call ends.
+2. The agent's **canvas** takes the right column (orb left, canvas right). When the agent shows something while it talks — a summary, a diagram, an image, a table — it appears there live, and it stays on the rail's **Canvas** tab after the call.
+3. A status line under the tabs says what the orb is doing (**Listening**, **Speaking**, **Working: run task**) and how to leave: **End call**, the orb's End button, or **Esc**.
+4. Ending the call returns you to the chat exactly where it was. The spoken turns are in the chat as one collapsed **Voice call · N min** block, marked as spoken.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `WORKSPACE_ENABLED` | Global toggle for the workspace canvas (BETA) | `false` |
+The call knows the recent turns of the chat it started in, and its transcript belongs to that chat — a call started from **Main** lands in Main like any other message. The Agent Detail chat is untouched.
 
-The button only appears when `workspace_available` is true, which requires **both** voice to be available (`VOICE_ENABLED` + `GEMINI_API_KEY`) **and** `WORKSPACE_ENABLED=true`.
+### When the control is disabled
 
-### How It Works
+The Voice control is shown to signed-in platform users. When the instance cannot run a call, the control is disabled and its tooltip says why: voice is turned off, or no voice provider key is configured. External clients signed in with a portal code do not see the control.
 
-1. On the Agent Detail page (agent must be running), click **Workspace** in the header — it carries an amber **BETA** badge.
-2. The browser opens the full-page workspace at `/agents/{name}/workspace`: the animated orb and controls on the left, the canvas on the right.
-3. Start talking. The voice session behaves exactly like standard mode — same orb states, same `run_task` delegation to Claude.
-4. When the agent decides a visual helps, it calls a **panel tool**. The canvas updates within ~300ms.
+### Limits, and what you hear
 
-### Panel Tools
+- A Workspace call lasts at most **30 minutes** by default (`WORKSPACE_VOICE_MAX_DURATION`). Thirty seconds before the limit the agent is told to wrap up out loud; at the limit the call ends and the chat records "ended at the 30-minute limit".
+- Microphone denied, an insecure (non-https) page, a provider error, a dropped connection — each ends or refuses the call with a sentence in the status line. The chat is never blocked by a failed call.
+- Switching chats, New chat and ⌘J wait until the call ends. Leaving the page ends the call; the transcript is kept.
+- **Mute** silences your microphone; the agent keeps talking. Talking over the agent interrupts it, as on Agent Detail.
 
-The agent drives the canvas with these in-session tools (resolved inside Trinity — they never run in the agent container):
+### Canvas tools
+
+While you talk, the agent can draw on its canvas with these in-session tools (resolved inside Trinity — they never run in the agent container):
 
 | Tool | Effect on the canvas |
 |------|----------------------|
-| `show_markdown` | Render formatted text (headings, lists, tables) |
+| `show_markdown` | Render formatted text (headings, lists, tables, and chart / KPI / table fences) |
 | `show_diagram` | Render a **Mermaid** diagram (flowcharts, sequence diagrams, etc.) |
 | `show_image` | Show an image — a web URL or a file from the agent's workspace |
-| `update_panel` | Replace the canvas with an HTML layout |
-| `append_to_panel` | Add content to the current panel |
-| `clear_panel` | Empty the canvas |
+| `update_panel` | Replace the agent's voice block with an HTML layout |
+| `append_to_panel` | Add content to the current block |
+| `clear_panel` | Remove what the call drew (the agent's own canvas blocks stay) |
 
-### Panel History
-
-The canvas keeps a **40-snapshot history**. Use the **prev/next** controls or the dropdown to step back through what was shown earlier in the conversation. "Live" follows the newest snapshot; navigating back pins the view until a new update arrives.
-
-### Rendering & Safety
-
-All canvas content is sanitized before display (DOMPurify, the same trust model as every other markdown surface on the platform):
-
-- **Markdown** and **Mermaid** diagrams render directly in the page.
-- **Images** from the agent's workspace are fetched over an authenticated channel; web URLs load directly. Paths are confined to the workspace — traversal (`..`), absolute escapes, and non-`http` schemes (`data:`, etc.) are rejected.
-- **HTML** panels render as **static layout only** — `<script>` tags are stripped, so agent-supplied JavaScript (e.g. Chart.js) does **not** execute. Use `show_diagram` for dynamic visuals instead.
+All canvas content is sanitized before display (DOMPurify, the same trust model as every other markdown surface on the platform): scripts never execute, images from the workspace load through an authenticated route, and paths are confined to the workspace.
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/voice/start` | POST | Start a voice session; pass `workspace_mode: true` for canvas mode. Returns `voice_session_id` and WebSocket URL |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`). Platform users only. Returns `voice_session_id` and the WebSocket URL |
+| `/api/agents/{name}/voice/start` | POST | Start an Agent Detail voice session; pass `workspace_mode: true` for canvas tools. Returns `voice_session_id` and WebSocket URL |
 | `/api/agents/{name}/voice/stop` | POST | End session; returns transcript and cost |
 | `/api/agents/{name}/voice/status` | GET | Get current session state |
-| `/api/agents/{name}/voice/{session_id}/panel` | GET | Current workspace canvas state (`type`, `content`, `title`, `updated_at`); polled by the canvas |
+| `/api/agents/{name}/voice/{session_id}/panel` | GET | The agent's canvas as the call draws it (the same shape as the Canvas tab); read by the Workspace call's canvas column |
 | `/api/agents/{name}/voice/prompt` | GET / PUT | Read or set the per-agent voice system prompt |
 | `/api/agents/{name}/voice/name` | GET / PUT | Read (with `available_voices`) or set the persisted per-agent Gemini voice |
 | `/ws/voice/{session_id}` | WebSocket | Bidirectional audio bridge |
@@ -146,19 +143,21 @@ All canvas content is sanitized before display (DOMPurify, the same trust model 
 ```json
 { "type": "audio",      "data": "<base64 PCM 24kHz audio>" }
 { "type": "transcript", "role": "user|assistant", "text": "..." }
-{ "type": "status",     "state": "listening|speaking|processing" }
-{ "type": "tool_call",  "tool_name": "run_task" }
-{ "type": "tool_result","tool_name": "run_task", "result": "..." }
+{ "type": "status",     "state": "connecting|listening|speaking|ended", "reason": "cap|error|provider_closed|null", "message": "..." }
+{ "type": "tool_call",  "tool": "run_task" }
+{ "type": "tool_result","tool": "run_task", "result_preview": "..." }
+{ "type": "saved",      "messages_saved": 12, "duration_seconds": 245.0 }
 ```
 
 ## Limitations
 
 - Voice is available only in authenticated chat (not public links).
 - One voice session per agent at a time.
-- Maximum session duration: 300 seconds (configurable).
+- Maximum duration: 300 seconds on Agent Detail, 30 minutes in the Workspace (both configurable). The call ends with a spoken and written notice.
 - `run_task` tool calls time out after 30 seconds.
 - Incremental transcript display during the session is not yet implemented — transcripts appear in the chat after the session ends.
-- Workspace Mode is BETA, off by default, and HTML panels are static (no JavaScript execution). Exporting canvas content (PDF/markdown) and multi-page canvases are not yet available.
+- In the Workspace, rooms (chats with several agents) have no voice mode, and on a phone the canvas stays behind the Canvas tab rather than beside the orb.
+- HTML canvas blocks are static (no JavaScript execution). Exporting canvas content (PDF/markdown) is not yet available.
 
 ## See Also
 

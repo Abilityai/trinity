@@ -72,18 +72,22 @@ export const routes = [
     meta: { requiresAuth: true, title: (to) => agentTabTitle(to.params.name) }
   },
   {
+    // ent#438 — the per-agent workspace is retired. It was a voice orb beside a
+    // canvas panel, gated behind WORKSPACE_ENABLED && GEMINI_API_KEY, and by the
+    // time this landed it had no capability of its own left: ent#440 put voice
+    // conversation inside the Workspace, and the canvas became a durable
+    // surface rendered on the agent's Workspace page and Agent Detail. Two
+    // things called "workspace" was the confusion this issue opens with.
+    //
+    // Function form so query and hash survive (the ent#381 shape). `?agent=`
+    // is the Workspace's own agent-selection param, so a bookmark to one
+    // agent's workspace still lands on that agent rather than a generic index.
     path: '/agents/:name/workspace',
-    name: 'AgentWorkspace',
-    component: () => import('../views/AgentWorkspace.vue'),
-    meta: { requiresAuth: true, title: (to) => `${agentTabTitle(to.params.name)} · Workspace` },
-    beforeEnter: async (to, from) => {
-      const sessionsStore = useSessionsStore()
-      await sessionsStore.loadFeatureFlags()
-      if (!sessionsStore.workspaceAvailable) {
-        return { name: 'AgentDetail', params: { name: to.params.name } }
-      }
-      return true
-    },
+    redirect: to => ({
+      path: '/workspace',
+      query: { ...to.query, agent: to.params.name },
+      hash: to.hash,
+    }),
   },
   {
     // #58/#60 (trinity-enterprise) — Brain Orb: capability-gated per-agent page.

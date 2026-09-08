@@ -333,7 +333,7 @@ class ResumeLock:
                 raise ResumeLockBusy(self._key)
             await asyncio.sleep(LOCK_POLL_INTERVAL_SECONDS)
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, _exc_type, _exc, _tb) -> None:
         if not self._held or self._redis is None:
             return
         try:
@@ -362,7 +362,7 @@ class InflightSentinel:
         await set_session_inflight(self._session_id, self._ttl)
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, _exc_type, _exc, _tb) -> None:
         await clear_session_inflight(self._session_id)
 
 

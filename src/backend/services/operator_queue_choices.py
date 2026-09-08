@@ -74,11 +74,14 @@ def validate_response_choice(item: dict, response: Optional[str]) -> None:
     on its behalf, and the whole point is that the recorded decision is one the
     agent can compare against its own list.
 
-    An empty or absent `response` is NOT rejected here. Both entry points allow
-    an answer carried entirely by `response_text` (the Workspace asks path has
-    its own `empty_answer` refusal for a truly empty one), and turning a
-    text-only answer into a 422 would break a working path in the name of
-    validating a field that was never filled in.
+    An empty or absent `response` is NOT rejected here — emptiness is each
+    entry point's own contract, not this validator's: the operator route
+    requires `response` at the model (`OperatorResponse.response: str`) and the
+    Workspace asks path refuses a missing/blank decision with its named
+    `empty_answer` 422 (#2375 — it previously accepted note-only bodies and
+    coerced the decision to "", which is how agents received empty answers).
+    This function answers ONE question: when a decision IS present on an
+    approval, was it one the agent offered?
     """
     if not response:
         return

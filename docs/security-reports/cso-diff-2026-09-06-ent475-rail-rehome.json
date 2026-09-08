@@ -1,0 +1,86 @@
+{
+ "version": "1.1",
+ "date": "2026-09-06",
+ "mode": "diff",
+ "scope": "abilityai/trinity-enterprise#475 \u2014 branch feature/475-rail-rehome-tabs vs merge-base 83c0f51e (dev tip); 23 files changed, 1915 insertions(+), 362 deletions(-) (staged, pre-commit)",
+ "phases_run": [
+  "P0 architecture",
+  "P1 attack surface (diff)",
+  "P2 secrets (diff + enterprise-docs guard)",
+  "P3 supply chain (no dependency changes)",
+  "P4 CI/CD (no workflow changes)",
+  "P5 infra (no Docker/compose changes)",
+  "P6 integrations (new /ws consumer, thin trigger)",
+  "P7 LLM/AI (rendering, composer prefill)",
+  "P8 skills (no skill changes)",
+  "P9 OWASP (diff)",
+  "P10 STRIDE (diff)",
+  "P11 data classification",
+  "P12 FP filter + verification",
+  "P13 report",
+  "P14 save"
+ ],
+ "attack_surface": {
+  "new_routes": 0,
+  "changed_routes": 0,
+  "new_ws_consumers": 1,
+  "new_local_storage_keys": [
+   "trinity-workspace-rail-seen"
+  ],
+  "file_upload_points": "existing POST \u2026/documents reused",
+  "external_integrations": 0
+ },
+ "findings": [],
+ "observations": [
+  {
+   "id": "O1",
+   "severity": "INFO",
+   "confidence": 3,
+   "text": "Seen markers are per browser, not per principal (names + timestamps only; rail-key precedent)."
+  },
+  {
+   "id": "O2",
+   "severity": "INFO",
+   "confidence": 2,
+   "text": "Below sm the hidden column and the sheet both mount the active tab body; bodies never fetch."
+  },
+  {
+   "id": "O3",
+   "severity": "INFO",
+   "confidence": 3,
+   "text": "agent_activity consumer acts by participant name only, refetching through access-controlled REST; no new disclosure."
+  }
+ ],
+ "verification": {
+  "secrets_scan": "0 matches (known-prefix scan over staged diff)",
+  "enterprise_docs_guard": "0 hits over changed public docs",
+  "xss_sinks": "none in changed frontend files",
+  "tests": "portalRail.spec 166, portalRailFeeds.spec + owner cases, full frontend unit suite 87 files / 1931 green"
+ },
+ "supply_chain_summary": {
+  "python": "no changes",
+  "node": "no changes",
+  "lockfiles": "unchanged"
+ },
+ "filter_stats": {
+  "raw_candidates": 3,
+  "hard_excluded": 0,
+  "below_gate": 3,
+  "fixed_during_audit": 0,
+  "reported": 0
+ },
+ "totals": {
+  "critical": 0,
+  "high": 0,
+  "medium": 0,
+  "low": 0,
+  "info": 3
+ },
+ "trend": {
+  "prior_report": "cso-diff-2026-09-03-ent437-opt-in-telemetry",
+  "comparable": false,
+  "resolved": 0,
+  "persistent": 0,
+  "new": 0
+ }
+}

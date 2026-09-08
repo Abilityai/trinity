@@ -106,6 +106,16 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
         "would unserialize the other. Registered here so the parity test stays "
         "green and the omission stays a decision."
     ),
+    "agent:deploy_op:": (
+        "Short-lived SETNX per-BASE-NAME deploy lock (#2060) carrying its own "
+        "TTL, serializing concurrent deploy-local calls that would otherwise "
+        "compute the same next-version name and collide on the template dir + "
+        "workspace volume. Keyed by the deploy BASE name, not the versioned "
+        "agent name this module's lifecycle events fire for — and clearing it "
+        "mid-deploy would unserialize the very deploy holding it (the "
+        "agent:bind_op: reasoning). Fail-open on Redis down; the prepop "
+        "attached-volume 409 is the destructive-collision backstop."
+    ),
     "agent:mcp_key_regen:": (
         "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "
         "Same shape as agent:data_op: above, and clearing it would be actively "

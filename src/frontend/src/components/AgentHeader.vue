@@ -222,22 +222,24 @@
               <path stroke-width="1.4" stroke-linecap="round" d="M12 3c3.2 2.4 3.2 15.6 0 18M12 3c-3.2 2.4-3.2 15.6 0 18" opacity="0.7" />
             </svg>
           </button>
-          <!-- Workspace button (voice + canvas, BETA) -->
+          <!-- Open in Workspace (ent#438). Was a voice-orb-plus-canvas page of
+               its own, gated on VOICE_ENABLED && GEMINI_API_KEY; the page is
+               retired and this now opens THE Workspace scoped to this agent.
+               No longer flag-gated and no longer BETA: the Workspace is a
+               first-class surface and needs no Gemini key, so gating this on
+               `workspaceAvailable` would hide a working link on every install
+               without one. Also no longer disabled while the agent is stopped —
+               the Workspace page reports availability itself (#2196), and a
+               dead button is a worse answer than a page that says why. -->
           <button
-            v-if="workspaceAvailable"
             @click="goToWorkspace"
-            :disabled="agent.status !== 'running'"
-            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors"
-            :class="agent.status === 'running'
-              ? 'text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700'
-              : 'text-gray-300 dark:text-gray-600 border border-gray-200 dark:border-gray-700 cursor-not-allowed'"
-            title="Open Workspace — voice + canvas (Beta)"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700"
+            title="Open this agent in the Workspace"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             Workspace
-            <span class="px-1 py-0.5 text-[10px] font-semibold rounded bg-state-autonomous-100 dark:bg-state-autonomous-900/40 text-state-autonomous-700 dark:text-state-autonomous-400 leading-none">BETA</span>
           </button>
           <!-- Running State Toggle -->
           <RunningStateToggle
@@ -656,10 +658,6 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
-  workspaceAvailable: {
-    type: Boolean,
-    default: false
-  },
   // #60 — Brain Orb: platform flag AND the agent's brain-orb capability (resolved
   // in AgentDetail). Gates the header logo that opens the orb page.
   brainAvailable: {
@@ -691,7 +689,10 @@ const emit = defineEmits([
 const router = useRouter()
 
 function goToWorkspace() {
-  router.push(`/agents/${props.agent.name}/workspace`)
+  // ent#438 — one workspace. `?agent=` is the Workspace's own selection param;
+  // the retired per-agent route redirects here too, so an old bookmark and this
+  // button land in the same place.
+  router.push({ path: '/workspace', query: { agent: props.agent.name } })
 }
 
 function goToBrain() {

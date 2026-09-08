@@ -80,6 +80,29 @@ class PortalAgentCard(BaseModel):
     # today's behaviour rather than failing validation.
     searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
     playbooks_total: int = 0
+    # #2163 — has this card's briefing been RESOLVED yet, and did it work?
+    #
+    #   pending      the roster shipped without it; call GET /briefings
+    #   ready        a briefing completed (its fields may still be empty —
+    #                that is a genuinely hint-less agent, not a failure)
+    #   unavailable  the briefing tripped its bound, raised, or was never
+    #                attempted (the agent is not `ready`/`unknown`)
+    #
+    # All three are SERVER-owned. Letting the server say `ready` for a bound
+    # trip would make a wedged agent indistinguishable from one that genuinely
+    # has nothing to offer — the "looks complete" class `playbooks_total`
+    # already exists to prevent one tier over — and would force every headless
+    # ent#83 client to reinvent the third value from empty fields.
+    #
+    # Default `"ready"`, so a payload from a build that predates this field
+    # (or any caller that builds a card inline) reads as "resolved inline,
+    # nothing to hydrate" — today's behaviour. That is the NON-privileged
+    # direction: the field grants nothing and gates no affordance, it only
+    # says whether a fetch is still owed, so an absent field must not leave a
+    # client waiting forever on a hydration call it will never make. It is a
+    # data-state marker, NOT a capability — #2128's rule (the roster payload is
+    # the portal capability channel) is untouched.
+    briefing_state: Literal["pending", "ready", "unavailable"] = "ready"
     # #2196 — whether this agent can currently run. Roster MEMBERSHIP is a DB
     # fact (`agent_ownership` / `agent_sharing`); this is a Docker fact
     # PROJECTED onto the card, and is never a membership filter. A live
@@ -103,15 +126,72 @@ class PortalAgentCard(BaseModel):
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
 
 
+class PortalBriefing(BaseModel):
+    """ONE agent's briefing, hydrated off the roster's critical path (#2163).
+
+    The same four fields `PortalAgentCard` carries, plus the state that says
+    whether they are real. `state` is `"unavailable"` by default because an
+    entry that failed to build must never read as a completed empty briefing.
+    """
+    description: Optional[str] = None
+    playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    playbooks_total: int = 0
+    state: Literal["ready", "unavailable"] = "unavailable"
+
+
+class PortalBriefings(BaseModel):
+    """`GET /briefings` — briefings keyed by agent name (#2163).
+
+    Keys are always a SUBSET of the caller's roster: an unknown or off-roster
+    name in `?agents=` is dropped silently rather than answered, so the route
+    is no existence oracle (Invariant #8) and the caller learns nothing beyond
+    what its own roster already told it.
+    """
+    briefings: dict[str, PortalBriefing] = Field(default_factory=dict)
+
+
 class PortalTtsRequest(BaseModel):
     """A reply to speak in portal voice mode."""
     text: str = Field(min_length=1, max_length=8000)
+
+
+class PortalRealtimeVoice(BaseModel):
+    """Whether THIS principal may start a real-time voice call from the
+    Workspace (ent#534), and — for a platform user on an instance that cannot —
+    why, in words. Named for the capability, not the provider (ent#354 may add
+    a second one behind the same field). Distinct from the per-agent
+    `voice_available`, which means "this agent has a TTS voice to narrate with".
+
+    Fail-closed like `voice_available`: the bug this guards is promising an
+    affordance that cannot work. `reason` is None for a portal-token client —
+    the WebSocket needs a platform JWT they do not hold, so the control is not
+    rendered at all rather than rendered disabled with an explanation that is
+    not theirs to act on.
+    """
+    available: bool = False
+    reason: Optional[str] = None
+
+
+class PortalVoiceStartRequest(BaseModel):
+    """Start a voice call bound to a Workspace thread (ent#534)."""
+    portal_session_id: str = Field(..., min_length=1, max_length=64)
+    voice_name: Optional[str] = None
+
+
+class PortalVoiceStartResponse(BaseModel):
+    voice_session_id: str
+    websocket_url: str
+    portal_session_id: str
+    max_duration_seconds: int
 
 
 class PortalRoster(BaseModel):
     """The client-facing roster: every agent the signed-in email may reach."""
     client_email: Optional[str] = None
     agents: list[PortalAgentCard]
+    # ent#534 — see PortalRealtimeVoice. Resolved once per roster load.
+    realtime_voice: PortalRealtimeVoice = Field(default_factory=PortalRealtimeVoice)
     # #2128 — whether a chat may include MORE THAN ONE agent on this instance.
     # Named for the capability, never the module or the edition: this payload
     # goes to an operator's customer, who can neither buy a missing module nor
@@ -200,6 +280,35 @@ class PortalSessionSummary(BaseModel):
     created_at: Optional[str] = None
     last_message_at: Optional[str] = None
     message_count: int = 0
+    # ent#523 — the pinned Main chat, and the tombstone Reset leaves. Both
+    # default to the pre-#523 reading (an ordinary live chat), so a row from an
+    # install that has not run the migration still validates.
+    is_main: bool = False
+    archived_at: Optional[str] = None
+
+
+class PortalMainReset(BaseModel):
+    """ent#523 — what Reset did, so the client can say it rather than guess.
+
+    `archived_title` is the name the retired chat now carries in the list, which
+    is what the system line in the new Main names too — the client renders the
+    server's word for it instead of composing a second one that could differ.
+
+    `archived_session_id` is **nullable, and that is the no-op signal**:
+    resetting an untouched Main archives nothing, because an untouched Main is
+    already what Reset produces. The client says "this is already a fresh chat"
+    on a null rather than naming an archive that was never created."""
+    main_session_id: str
+    archived_session_id: Optional[str] = None
+    archived_title: Optional[str] = None
+
+
+class PortalSessionRename(BaseModel):
+    """ent#473 — a person's title for their thread. Bounded here only against
+    abuse; the one-line / non-empty / 100-char rules are `services/chat_title`'s,
+    applied in the service so the refusal is a NAMED 400 (`invalid_title`) the
+    person can act on rather than a 422 about a schema."""
+    title: str = Field(max_length=4000)
 
 
 class PortalSessions(BaseModel):
@@ -431,6 +540,11 @@ class PortalHistoryMessage(BaseModel):
     # The caller's OWN rating of this message, if any — never anyone else's.
     # Present so a reload shows the thumb the person already gave.
     my_rating: Optional[str] = None  # 'up' | 'down' | None
+    # ent#534: `'voice'` for a turn spoken in a Workspace voice call (NULL/None
+    # for a typed one), and the call it belongs to — the chat folds one call's
+    # rows into a single collapsed block keyed on this id.
+    source: Optional[str] = None
+    voice_call_id: Optional[str] = None
 
 
 class PortalTurnOutcome(BaseModel):

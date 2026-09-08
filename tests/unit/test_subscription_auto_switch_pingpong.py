@@ -883,7 +883,6 @@ class TestHotReloadSwitch:
 
         result = await auto_switch._perform_auto_switch(
             agent_name="agent-x",
-            old_subscription_id="sub-a",
             old_subscription_name="sub-A",
             new_subscription=new_sub,
             failure_kind="rate_limit",

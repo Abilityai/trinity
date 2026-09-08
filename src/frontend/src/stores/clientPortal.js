@@ -8,7 +8,14 @@
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
-import { normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
+import {
+  collaborationRecency, normalizeRoomRow, WORKSPACE_ROOT } from '@/components/portal/portalUtils'
+import {
+  applyBriefings,
+  briefingHydrationPlan,
+  mergeRosterBriefings,
+  shouldRequestBriefing,
+} from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 // #2162: the page size for a windowed report read. A dependency-free leaf
@@ -199,6 +206,16 @@ function installRotationInterceptor() {
 // only one created by a fresh sign-in in this tab.
 installRotationInterceptor()
 
+// #2163 — in-flight and per-session attempt bookkeeping for briefing
+// hydration. Module-level rather than store state on purpose: nothing renders
+// it, and reactive state that nothing renders is a re-render budget spent on
+// bookkeeping (the store's own precedent). `briefingAttempts` implements the
+// one-retry-per-agent-per-session rule from `shouldRequestBriefing`, so a
+// wedged agent costs one extra bounded call rather than one per chat open.
+const briefingsInFlight = new Set()
+const briefingAttempts = new Map()
+let briefingsBatchInFlight = false
+
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
     clientEmail: null,
@@ -241,6 +258,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // actually says otherwise, and the component never sees an undefined
     // tri-state.
     multiAgentChatAvailable: false,
+    // ent#534 — may THIS principal start a real-time voice call from the
+    // Workspace, and if not, why (words for the disabled control). Fail-closed
+    // like the flag above; `reason: null` for a portal-token client means the
+    // control is not rendered at all. Named for the capability, not the
+    // provider (ent#354).
+    realtimeVoice: { available: false, reason: null },
     // Set once a roster attempt REACHED A VERDICT for this session. The room
     // route needs to tell "still loading" from "loaded, and the answer is no" —
     // without it a hard-loaded /workspace/r/:id would flash a refusal it then
@@ -261,6 +284,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // blip would break Workspace deep-link landing entirely.
     lastSessions: [],
     sessionsFailed: false,
+
+    // ent#491 — the sidebar's agent order, held for the SESSION rather than
+    // recomputed from threads on every refresh.
+    //
+    // The AC has two halves that pull against each other: sending must move an
+    // agent to the top at once, and a reply arriving must NOT re-sort. Derived
+    // order alone cannot do both — a reply moves `last_message_at` exactly like
+    // a send, so a brief landing for another agent would reshuffle the list
+    // under the cursor mid-read.
+    //
+    // So: seeded from thread recency (filling only agents it does not yet know,
+    // so a seed can never undo a bump), and advanced ONLY by the user's own
+    // sends. A reload re-derives from the server and is correct again.
+    agentRecency: {},
 
     // --- Reports tab (#2162) ---
     // Which agent the report state below belongs to, and a monotonic counter
@@ -410,6 +447,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // and `rosterLoaded` must go back to "no verdict yet" or the room route
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
+      this.realtimeVoice = { available: false, reason: null }
       this.rosterLoaded = false
       // #2261: the primitive clears the suppression; `endSession({expired})`
       // re-arms it immediately afterwards. Keeping the clear HERE is what stops
@@ -975,9 +1013,64 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // Open a fresh conversation thread ("New chat"). Returns the empty session.
+    // ent#473 — a person titles their thread. One PATCH per committed rename;
+    // the boundary's named 400 (`invalid_title`) is left on the error for the
+    // editor to render verbatim.
+    async renameThread(agentName, sessionId, title) {
+      const { data } = await portalHttp.patch(
+        `/api/enterprise/client-portal/agents/${agentName}/sessions/${encodeURIComponent(sessionId)}`,
+        { title },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    // ent#473 — the room twin. Membership-scoped server-side; a coded refusal
+    // passes through `_noteRoomsRefusal` untouched (#2128).
+    async renameRoom(roomId, name) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.patch(
+          `/api/rooms/${roomId}`, { name },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
+    // ent#534 — start a real-time voice call bound to a Workspace thread. The
+    // platform-principal route (uniform 404 for anyone else); the audio socket
+    // the response names is the OSS one and takes the platform JWT.
+    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/voice/start`,
+        { portal_session_id: portalSessionId, voice_name: voiceName },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     async createSession(agentName) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/sessions`,
+        {},
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    // ent#523 — Reset Main: archive what is there, start the agent cold.
+    //
+    // The error is rethrown UNTOUCHED so the caller can read the server's named
+    // 409 (`detail.code` of `turn_in_flight` / `reset_raced`) and say which one
+    // happened. Swallowing it into a generic failure is what would make Reset
+    // feel broken while a turn runs — the one moment it is most likely to be
+    // pressed.
+    async resetMainChat(agentName) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/agents/${agentName}/sessions/main/reset`,
         {},
         { headers: this.authHeader }
       )
@@ -1042,6 +1135,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Files a rostered agent has shared (FILES-001), each with a download URL
     // (`?sig=` token is the credential — the download route is public).
+    // ent#438 — the canvases this agent published to the people it works
+    // with. Metadata only; blocks come per canvas on open, the same split the
+    // reports pair uses and for the same reason (a canvas is capped at 512 KiB
+    // and a list of them is not a list view).
+    async fetchAgentCanvases(agentName) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas`,
+        { headers: this.authHeader }
+      )
+      return data.canvases || []
+    },
+
+    async fetchAgentCanvas(agentName, canvasId) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${agentName}/canvas/${encodeURIComponent(canvasId)}`,
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     async fetchDocuments(agentName) {
       const { data } = await portalHttp.get(
         `/api/enterprise/client-portal/agents/${agentName}/documents`,
@@ -1170,6 +1283,37 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Merge threads + rooms into the single recency-sorted list the sidebar
     // renders, and remember it (see `lastSessions`).
+    /**
+     * Fill in recency for agents this session has not ranked yet (ent#491).
+     *
+     * Only fills MISSING keys: a later thread refresh must never walk back a
+     * `noteAgentInteraction` bump, which is what would let an incoming reply
+     * re-sort the list.
+     */
+    seedAgentRecency(threads) {
+      const derived = collaborationRecency(threads)
+      const next = { ...this.agentRecency }
+      let changed = false
+      for (const [name, ms] of derived) {
+        if (next[name] === undefined) { next[name] = ms; changed = true }
+      }
+      if (changed) this.agentRecency = next
+    },
+
+    /**
+     * The user just sent to these agents — move them to the top now, without
+     * waiting for a roster or thread refresh (ent#491). A room send passes every
+     * participating agent, the `unreadByAgent` fan-out rule.
+     */
+    noteAgentInteraction(names) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean)
+      if (!list.length) return
+      const now = Date.now()
+      const next = { ...this.agentRecency }
+      for (const n of list) next[n] = now
+      this.agentRecency = next
+    },
+
     _mergeThreadList(lists, rooms) {
       const merged = lists.flat().concat((rooms || []).map(normalizeRoomRow))
       merged.sort((x, y) => {
@@ -1241,6 +1385,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // ent#525: the chat's work — what its participants are doing now and did
+    // recently — one request for every participant. Platform door only: the
+    // route 404s a portal token, and the rail never feeds the store for one.
+    // Throws (the store reads the failure as "couldn't load", never as empty).
+    async fetchWork(agentNames, chatId = null) {
+      const params = { agents: (agentNames || []).filter(Boolean).join(',') }
+      if (chatId) params.chat_id = chatId
+      const { data } = await portalHttp.get('/api/enterprise/client-portal/work', {
+        headers: this.authHeader,
+        params,
+      })
+      return data
+    },
+
     // Answer one ask. The row is removed from local state on success rather than
     // patched: the server's answer is authoritative, and a client that keeps a
     // stale "pending" copy would offer to answer it twice.
@@ -1257,6 +1415,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchRoster() {
       this.loading = true
       this.error = null
+      // #2163: re-enter loading ONLY when there is no data on screen. A retry
+      // after a failed first load must show the stage's scanline rather than
+      // the "No agents shared with you yet" copy it flashed before (p15:
+      // loading is not empty); a refetch WITH a roster rendered keeps its
+      // verdict, so the standard motion stays invisible on a background
+      // refresh (p13). `loading` above is in-flight and is never the key.
+      if (!this.agents.length) this.rosterLoaded = false
       // Reset with `error`, not just alongside it: a 404 followed by a
       // successful retry would otherwise keep rendering "not available on this
       // instance" over a roster that loaded fine — and the retry button added
@@ -1267,12 +1432,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null
-        // Roster carries per-agent briefing (#138): description + capability
-        // hints as playbooks[]{title,description,starter_prompt} — exposed
-        // playbooks, else the template's "What You Can Ask" use-cases
-        // (ent#380) — shipped at sign-in so the new-chat screen renders with
-        // zero extra fetches.
-        this.agents = data.agents || []
+        // #2163: the roster no longer CARRIES the briefing — every card
+        // arrives `briefing_state: "pending"` and the description + hint
+        // cards (#138 / ent#380) are hydrated by `GET /briefings` below. That
+        // fan-out is what made the first paint wait for the slowest agent in
+        // the fleet, for every user, on every sign-in.
+        //
+        // `mergeRosterBriefings` is what keeps a REFETCH invisible: a card
+        // that is already hydrated keeps its fields instead of dropping back
+        // to `pending` and re-entering the loading phase (p13).
+        this.agents = mergeRosterBriefings(this.agents, data.agents || [])
         // #2128 — a SUCCESSFUL roster is the only thing that may RAISE this
         // flag, and strict `=== true` is what makes an older backend that omits
         // the field (or a proxy that returns the string "false", or an HTML
@@ -1285,7 +1454,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // every background refetch would unmount a live room and flash a
         // refusal at an entitled client before taking it back.
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        // ent#534: same strictness — an older backend without the field reads
+        // as "not available", never as truthy.
+        this.realtimeVoice = {
+          available: data.realtime_voice?.available === true,
+          reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
+        }
         this.rosterLoaded = true
+        // #2163: fired HERE and not from `Portal.vue::bootstrap()`, because
+        // both "Try again" buttons call this action directly — a
+        // failed-then-retried first load would otherwise leave every
+        // non-active card pending for the whole session (design contract
+        // principle 21: loading behaviour lives in the store). Not awaited:
+        // the roster must not wait for it, which is the entire point.
+        if (briefingHydrationPlan(this.agents).batch) void this.hydrateBriefings()
       } catch (err) {
         // Two DIFFERENT failures, kept distinct — neither may swallow the other.
         //
@@ -1323,6 +1505,72 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } finally {
         this.loading = false
       }
+    },
+
+    /**
+     * Hydrate briefings (#2163). `names === null` briefs the whole roster (the
+     * background batch that fills the picker and the composer's `/` typeahead);
+     * a list briefs exactly those agents.
+     *
+     * Never throws and never leaves a card pending: a failure (network, 429, a
+     * backend with no such route) marks the requested names `unavailable`,
+     * which the zone renders as an honest "couldn't load" line rather than an
+     * agent that looks like it has nothing to offer.
+     */
+    async hydrateBriefings(names = null) {
+      // An EMPTY list is "brief nobody", never "brief everybody". Only an
+      // omitted/null argument is the whole-roster batch. The two are opposite
+      // answers to one call and the server separates them the same way
+      // (`agents=` intersects the roster to nothing; no `agents=` fans out to
+      // all of it), so letting `[]` fall through to the batch would make a
+      // future caller that filtered its list down to nothing silently fan out
+      // across the whole fleet — on the one path in this store that costs a
+      // bounded agent request per rostered agent.
+      if (Array.isArray(names) && names.length === 0) return
+      const requested = Array.isArray(names) && names.length ? names : null
+      // One batch at a time. Two "Try again" clicks in a row would otherwise
+      // fire two whole-roster hydrations, each costing one bounded agent call
+      // per rostered agent — and the unfiltered form's limiter budget is
+      // deliberately small (10/min). A SINGLE is never coalesced into it: the
+      // active agent's hints must not inherit the batch's floor.
+      if (!requested) {
+        if (briefingsBatchInFlight) return
+        briefingsBatchInFlight = true
+      }
+      const url = '/api/enterprise/client-portal/briefings'
+      try {
+        const { data } = await portalHttp.get(url, {
+          headers: this.authHeader,
+          params: requested ? { agents: requested.join(',') } : undefined,
+        })
+        this.agents = applyBriefings(this.agents, data && data.briefings, requested)
+      } catch {
+        // Deliberately swallowed: a hydration failure is a degraded briefing,
+        // never a failed Workspace. `store.error` belongs to the roster.
+        this.agents = applyBriefings(this.agents, null, requested, { failed: true })
+      } finally {
+        if (requested) requested.forEach((n) => briefingsInFlight.delete(n))
+        else briefingsBatchInFlight = false
+      }
+    },
+
+    /**
+     * Hydrate ONE agent's briefing — the active chat's, so its hints arrive at
+     * its own speed instead of the background batch's slowest member.
+     *
+     * A single is NEVER coalesced into an in-flight batch: that would hand the
+     * active agent exactly the floor this issue removed. The duplicate bounded
+     * call for that one agent is the accepted cost.
+     */
+    async ensureBriefing(name) {
+      if (!name || briefingsInFlight.has(name)) return
+      const card = this.agents.find((a) => a && a.name === name)
+      if (!card) return
+      const attempts = briefingAttempts.get(name) || 0
+      if (!shouldRequestBriefing(card, attempts)) return
+      briefingsInFlight.add(name)
+      briefingAttempts.set(name, attempts + 1)
+      await this.hydrateBriefings([name])
     },
   },
 })

@@ -1,0 +1,47 @@
+{
+  "version": "cso-1.1",
+  "date": "2026-09-02",
+  "mode": "diff",
+  "scope": "PR #2505 — branch fix/publish-images-prerelease-v-alias vs merge-base 0f4d54db (dev tip); 3 files, +41/-4",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "delta": {
+      "endpoints": 0,
+      "websocket_channels": 0,
+      "schema": 0,
+      "dependencies": 0,
+      "ci_workflows_new": 0,
+      "ci_workflows_modified": 1,
+      "workflow_permissions": 0,
+      "secrets": 0,
+      "credential_paths": 0
+    }
+  },
+  "findings": [],
+  "observations": [
+    "{{raw}} emits the git ref name as the image tag; only a semver-parsable v* tag reaches it, it cannot produce `latest`, and every version rule stays gated on a real push — no new trust or injection channel",
+    "pre-existing, unchanged, write-access-gated: the `latest` guard tests 'starts with v and has no hyphen', not 'parses as semver' — a non-semver tag push such as `vnext` would move `latest` while the semver lines emit nothing; hardening candidate for a follow-up, out of PR scope",
+    "supply chain: the four docker/* actions are SHA-pinned and each pin was resolved against GitHub — every SHA matches the version its comment claims (setup-buildx 4.3.0, login 4.6.0, metadata 6.2.0, build-push 7.3.0); actions/checkout@v7 is the repo-wide first-party convention (28 uses), filtered under hard-exclusion 5",
+    "the only ${{ }} expression inside a run: body is ${{ matrix.image }} in an ::error string — matrix values are workflow-static, not event-controlled; inputs.ref reaches the shell only via env:",
+    "VERSION content is newline-stripped (tr -d '[:space:]') before entering $GITHUB_OUTPUT and reaches build args via env: only — repo content, not request input",
+    "secrets archaeology over the two branch commits: clean; no .env tracked; no docs/seam files touched so the enterprise-disclosure guard is out of scope",
+    "context: no release-tag image (0.9.0 / v0.9.0) exists on GHCR; v0.9.5 will be this workflow's first live release run"
+  ],
+  "supply_chain_summary": "no dependency changes; 4 third-party action SHA pins verified against their version tags",
+  "filter_stats": {
+    "raw_candidates": 2,
+    "gated_out": 2,
+    "verified": 0,
+    "tentative": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "previous": "cso-diff-2026-09-01-2468-headless-tool-audit (0 findings)",
+    "direction": "flat at zero"
+  }
+}

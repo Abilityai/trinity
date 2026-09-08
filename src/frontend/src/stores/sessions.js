@@ -68,6 +68,16 @@ export const useSessionsStore = defineStore('sessions', {
     installSource: 'unknown',
     marketplaceInstall: false,
     installTlsPosture: 'unconfigured',
+    // ent#437: the four booleans the Finish-setup consent card gates on. They
+    // ride the flags document so the card decides from a payload the page
+    // already awaits and never calls the admin status route on a Dashboard load
+    // it will not act on. `dismissed` defaults TRUE (hidden) until the answer
+    // arrives — the safe direction for a nudge, exactly like `marketplaceInstall`
+    // defaulting false for the hardening guide.
+    telemetrySharingEnabled: false,
+    telemetrySharingHardDisabled: false,
+    telemetrySharingDismissed: true,
+    telemetrySharingFirstValue: false,
   }),
 
   getters: {
@@ -123,6 +133,12 @@ export const useSessionsStore = defineStore('sessions', {
         this.installSource = r.data?.install_source || 'unknown'
         this.marketplaceInstall = !!r.data?.marketplace_install
         this.installTlsPosture = r.data?.install_tls_posture || 'unconfigured'
+        // ent#437: an absent field reads as hidden (`dismissed`), never as a
+        // fresh ask — an older backend must not pop the card on every load.
+        this.telemetrySharingEnabled = !!r.data?.telemetry_sharing_enabled
+        this.telemetrySharingHardDisabled = !!r.data?.telemetry_sharing_hard_disabled
+        this.telemetrySharingDismissed = r.data?.telemetry_sharing_dismissed !== false
+        this.telemetrySharingFirstValue = !!r.data?.telemetry_sharing_first_value
         // ent#158: the A2A config tab shows only when the enterprise A2A module
         // is entitled (registered in enterprise_features).
         this.a2aAvailable = Array.isArray(r.data?.enterprise_features)
@@ -144,6 +160,12 @@ export const useSessionsStore = defineStore('sessions', {
         this.installSource = 'unknown'
         this.marketplaceInstall = false
         this.installTlsPosture = 'unconfigured'
+        // ent#437 fails in the HIDDEN direction: a failed flags fetch must not
+        // pop a consent ask, so `dismissed` reads true until a real answer.
+        this.telemetrySharingEnabled = false
+        this.telemetrySharingHardDisabled = false
+        this.telemetrySharingDismissed = true
+        this.telemetrySharingFirstValue = false
       } finally {
         this.featureFlagsLoaded = true
       }

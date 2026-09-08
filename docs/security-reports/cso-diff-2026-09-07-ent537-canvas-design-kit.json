@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "date": "2026-09-07",
+  "mode": "daily",
+  "scope": "--diff (feature/537-canvas-design-kit vs dev @ bd2d2451)",
+  "phases_run": [
+    "P0",
+    "P1",
+    "P2 (diff)",
+    "P3",
+    "P4",
+    "P5",
+    "P6",
+    "P7",
+    "P8",
+    "P9",
+    "P12",
+    "P13",
+    "P14"
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "PUT /api/agents/{name}/canvas/{id} (+template)",
+      "PATCH (slot in blocks)"
+    ],
+    "new_inputs": [
+      "CanvasWrite.template (Literal, 422/400 named)",
+      "CanvasBlock.slot (regex, re-checked on the voice path)",
+      "html/markdown class + style attributes (canvas-mode allowlist)"
+    ],
+    "new_render_paths": [
+      "sanitizeCanvasHtml",
+      "renderCanvasMarkdown",
+      "sanitizeSvg (named exception keeping <style>)"
+    ],
+    "mcp_tools_changed": [
+      "set_canvas (+template)",
+      "patch_canvas (slot)"
+    ],
+    "dependencies_changed": 0,
+    "workflows_changed": 0,
+    "docker_changed": 0
+  },
+  "hardening_shipped": [
+    "FORBID_TAGS ['style'] on every markdown/html sanitise path (pre-existing page-global CSS injection through DOMPurify's default tag list \u2014 found by the engineering review, fixed here, pinned in sanitizeHooks.spec.js and markdownCodeBlocks.spec.js)",
+    "Canvas mode: class allowlist (exact KIT_CLASSES membership), style allowlist (width/max-width, % \u2264 100, px \u2264 9999), id forbidden",
+    "Kit root overflow containment",
+    "mermaid secure keys"
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "phase": "P7",
+      "category": "Layout containment",
+      "title": "Kit root did not contain an admitted inline width; a width up to 9999px could widen the page",
+      "file": "src/frontend/src/components/canvas/CanvasKit.vue",
+      "fingerprint": "87d6d3e273475cba",
+      "exploit": "An agent (or a prompt-injected agent) writes an html block with style=\"width: 9999px\" on a roster canvas; the Workspace page of every rostered customer gains a horizontal scrollbar and the header/rail push off-screen. No data exposure.",
+      "impact": "Product-bar violation (principle 7), not a disclosure \u2014 but it lands on a customer-facing page.",
+      "recommendation": "Applied in this PR: `.canvas-kit { overflow-x: auto }`, pinned by test_ent537_canvas_design_kit.py::test_the_kit_root_contains_its_own_overflow.",
+      "disposition": "fixed"
+    },
+    {
+      "id": 2,
+      "severity": "INFO",
+      "confidence": 9,
+      "status": "REFUTED",
+      "phase": "P7",
+      "category": "CSS injection via mermaid directive",
+      "title": "themeCSS init directive reaching the page through the SVG <style> that sanitizeSvg keeps",
+      "file": "src/frontend/src/components/canvas/CanvasDiagram.vue",
+      "fingerprint": "5d12ebb5fd4a9597",
+      "exploit": "Claimed: %%{init: {\"themeCSS\": \"body{display:none}\"}}%% in diagram source \u2192 global CSS. Refuted by an independent verifier on mermaid 11.16.1: compileCSS namespaces every rule under #<diagram-id> (mermaid.core.mjs:1145-1203), so the selector matches nothing. Residual: @keyframes are left un-namespaced and could redefine an app animation name (visual nuisance only).",
+      "impact": "None for the claim; cosmetic for the residual.",
+      "recommendation": "Applied in this PR as hardening: MERMAID_CONFIG.secure = ['themeCSS','fontFamily','altFontFamily'] so mermaid's sanitize() deletes them from any directive; pinned in canvasUtils.spec.js.",
+      "disposition": "refuted + hardened"
+    }
+  ],
+  "supply_chain_summary": "no dependency, lockfile, Dockerfile or workflow changes on the branch",
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 2,
+    "refuted_by_verifier": 1,
+    "excluded_by_rules": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 1,
+    "info": 1
+  },
+  "trend": {
+    "prior_reports": [
+      "cso-diff-2026-09-07-ent536-canvas-vocabulary.json"
+    ],
+    "note": "diff-mode reports are branch-scoped; no fingerprint overlap with the ent#536 report"
+  }
+}

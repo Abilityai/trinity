@@ -24,6 +24,7 @@ import logging
 from typing import Optional
 
 from database import db
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,12 @@ def persist_outbound_group_message(
             channel, agent_name,
         )
         return
+    # ent#279: scrub the broadcast body before it lands in the durable channel
+    # session (public_chat_messages). Delivery already happened elsewhere; this is
+    # the persisted-history copy.
+    _staged = get_staged_values()
+    if _staged:
+        text = scrub_text(_staged, text)
     try:
         session = db.get_or_create_public_chat_session(
             agent_name, session_identifier, channel

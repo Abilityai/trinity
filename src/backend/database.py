@@ -117,6 +117,8 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.canvas import CanvasOperations
+from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
@@ -964,6 +966,8 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._canvas_ops = CanvasOperations()
+        self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
@@ -1842,6 +1846,10 @@ class DatabaseManager:
     def restamp_execution_dispatch(self, execution_id: str) -> bool:
         return self._schedule_ops.restamp_execution_dispatch(execution_id)
 
+    def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
+        """ent#498 — attach a delivery destination to a pre-created row."""
+        return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -1889,6 +1897,14 @@ class DatabaseManager:
         """Cross-fleet execution list (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_executions(agent_names, **kwargs)
 
+    def get_running_for_chat(self, chat_id: str):
+        """ent#525 — the in-flight rows bound to one Workspace chat (delegated
+        children included; see `ScheduleExecutionsMixin.get_running_for_chat`).
+        Re-exported here because this facade delegates by name, not by
+        `__getattr__` — the ent#277 trap, guarded by
+        `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
+        return self._schedule_ops.get_running_for_chat(chat_id)
+
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
@@ -1913,6 +1929,14 @@ class DatabaseManager:
     def trigger_bucket_order(self):
         """Stack/legend order for trigger buckets (ent#96)."""
         return self._schedule_ops.trigger_bucket_order()
+
+    def count_terminal_executions_by_status(self, hours: int = 24):
+        """ent#437 — terminal execution counts by status for the telemetry aggregate."""
+        return self._schedule_ops.count_terminal_executions_by_status(hours)
+
+    def first_autonomous_success_at(self):
+        """ent#437 — the warm-ask milestone: earliest autonomous SUCCESS, or None."""
+        return self._schedule_ops.first_autonomous_success_at()
 
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
@@ -2171,6 +2195,46 @@ class DatabaseManager:
     def get_report_for_client(self, report_id: str, client_email: str):
         """ent#365 — one report, only if addressed to this person."""
         return self._report_ops.get_report_for_client(report_id, client_email)
+
+    # =========================================================================
+    # Agent canvas (ent#438, delegated to db/canvas.py)
+    # =========================================================================
+
+    def list_agent_canvases(self, agent_name: str, audience: str = None):
+        return self._canvas_ops.list_canvases(agent_name, audience)
+
+    def get_agent_canvas(self, agent_name: str, canvas_id: str, audience: str = None):
+        return self._canvas_ops.get_canvas(agent_name, canvas_id, audience)
+
+    def upsert_agent_canvas(self, agent_name: str, canvas_id: str, **kwargs):
+        return self._canvas_ops.upsert_canvas(agent_name, canvas_id, **kwargs)
+
+    def delete_agent_canvas(self, agent_name: str, canvas_id: str) -> bool:
+        return self._canvas_ops.delete_canvas(agent_name, canvas_id)
+
+    def last_completed_execution_at(self, agent_name: str):
+        return self._canvas_ops.last_completed_execution_at(agent_name)
+
+    # =========================================================================
+    # Per-user UI preferences (trinity-enterprise#413, delegated to db/user_preferences.py)
+    # =========================================================================
+
+    def get_user_preferences(self, user_id: int):
+        return self._user_preference_ops.get_user_preferences(user_id)
+
+    def get_user_preference(self, user_id: int, key: str):
+        return self._user_preference_ops.get_user_preference(user_id, key)
+
+    def set_user_preference(self, user_id: int, key: str, value_json: str, *, base_updated_at):
+        return self._user_preference_ops.set_user_preference(
+            user_id, key, value_json, base_updated_at=base_updated_at
+        )
+
+    def delete_user_preference(self, user_id: int, key: str) -> bool:
+        return self._user_preference_ops.delete_user_preference(user_id, key)
+
+    def delete_user_preferences(self, user_id: int) -> int:
+        return self._user_preference_ops.delete_user_preferences(user_id)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
                               hours: int = None, search: str = None,
@@ -3735,9 +3799,6 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def mark_orphan_loops_interrupted(self) -> int:
-        return self._loop_ops.mark_orphans_interrupted()
-
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
@@ -3746,6 +3807,26 @@ class DatabaseManager:
 
     def list_loop_runs(self, loop_id: str):
         return self._loop_ops.list_runs(loop_id)
+
+    # ---- Terminal-driven advance (#2523) -----------------------------------
+
+    def get_loop_run_by_execution(self, execution_id: str):
+        return self._loop_ops.get_run_by_execution(execution_id)
+
+    def claim_loop_advance(self, loop_id: str, run_number: int) -> bool:
+        return self._loop_ops.claim_loop_advance(loop_id, run_number)
+
+    def request_loop_stop(self, loop_id: str) -> bool:
+        return self._loop_ops.request_loop_stop(loop_id)
+
+    def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
+        return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
+        return self._loop_ops.claim_due_loop(loop_id, next_run_at)
+
+    def list_due_loops(self, now: str, *, limit: int = 100):
+        return self._loop_ops.list_due_loops(now, limit=limit)
 
 
 # Global database manager instance

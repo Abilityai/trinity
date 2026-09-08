@@ -74,10 +74,25 @@ describe('queueResponseKind — controls switch on the item TYPE (desktop parity
     ['question → text answer', { type: 'question', options: null }, 'question'],
     ['question carrying options still gets a text answer (never one-tap)', { type: 'question', options: ['x'] }, 'question'],
     ['alert → acknowledge', { type: 'alert', options: null }, 'acknowledge'],
-    ['unknown type → text answer', { type: 'weird', options: ['x'] }, 'question'],
-    ['missing type → text answer', { options: ['x'] }, 'question'],
+    // ent#499 CHANGED THESE TWO from 'question'. `type` is free TEXT with no
+    // CHECK and the platform already emits non-protocol types
+    // (skill_not_found #1410, workspace_problem_report ent#499). Those are
+    // informational: nothing waits on an answer, a freeform box invites a reply
+    // that goes nowhere, and under ent#329 answering can spend a turn.
+    // Acknowledge is the affordance that always TERMINATES an item — which is
+    // what an unrecognised one needs, because a budgeted alert type whose items
+    // cannot be closed jams its own pending cap permanently.
+    ['unknown type → acknowledge (it is informational, not a question)', { type: 'weird', options: ['x'] }, 'acknowledge'],
+    ['missing type → acknowledge', { options: ['x'] }, 'acknowledge'],
+    ['an unknown type is acknowledgeable even carrying options', { type: 'skill_not_found', options: ['a', 'b'] }, 'acknowledge'],
   ])('%s', (_label, item, kind) => {
     expect(queueResponseKind(item)).toBe(kind)
+  })
+
+  it('still gives an approval without options a text box, not an acknowledge', () => {
+    // The one case that must NOT follow the new default: there the operator has
+    // a real decision to express and acknowledging would discard it.
+    expect(queueResponseKind({ type: 'approval', options: [] })).toBe('question')
   })
 })
 

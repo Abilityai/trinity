@@ -1,0 +1,550 @@
+/**
+ * ent#523 / ent#524 — agents at the centre, and files onto the conversation.
+ *
+ * There is no component-mount harness in this project (vitest runs
+ * `environment: 'node'`), which is why every decidable rule here lives in a
+ * plain `.js` module and is tested directly — the ent#392 precedent. The parts
+ * no unit test can reach (which component mounts what, which prop is passed)
+ * are source-structure guards, comments stripped first so prose about a rule is
+ * not scanned as code.
+ */
+import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+
+import { stripComments } from './helpers/stripComments'
+
+import {
+  agentChatTabs,
+  landingThread,
+  orderRosterAgents,
+  agentPreview,
+  composerAvailabilityNotice,
+  resolveAgentLanding,
+  answerConfirmation,
+  agentRowTime,
+  agentRowMeta,
+  MAIN_TAB_LABEL,
+} from '@/components/portal/portalUtils'
+import {
+  isFileDrag,
+  rejectionFor,
+  uploadFailureReason,
+  rateLimitMessage,
+  attachmentState,
+  MAX_UPLOAD_BYTES,
+} from '@/composables/usePortalFileDrop'
+
+const read = (rel) => stripComments(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8'))
+const CONVERSATION = read('../../src/components/portal/PortalConversation.vue')
+const ROOM = read('../../src/components/portal/PortalRoom.vue')
+const SIDEBAR = read('../../src/components/portal/PortalSidebar.vue')
+const RAIL_FILES = read('../../src/components/portal/PortalRailFiles.vue')
+const PORTAL = read('../../src/views/Portal.vue')
+const BAND = read('../../src/components/portal/PortalAgentBand.vue')
+const DETAILS = read('../../src/components/portal/PortalAgentDetails.vue')
+
+const main = (over = {}) => ({ id: 'main', agent_name: 'a', is_main: true, ...over })
+const chat = (id, over = {}) => ({ id, agent_name: 'a', ...over })
+
+// ---------------------------------------------------------------------------
+// The tab strip
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — Main is pinned, archives stay reachable', () => {
+  it('puts Main first even when it is the least recently active', () => {
+    const tabs = agentChatTabs([
+      chat('c1', { last_message_at: '2026-09-07T12:00:00Z' }),
+      main({ created_at: '2026-01-01T00:00:00Z' }),
+    ], 'a')
+    expect(tabs.map((t) => t.id)).toEqual(['main', 'c1'])
+  })
+
+  it('names Main by its ROLE, never by a title', () => {
+    // Main is the same thread for the life of the pair. A title derived from
+    // whatever was said in it first would make the pinned tab wander.
+    const [tab] = agentChatTabs([main({ title: 'Some old topic' })], 'a')
+    expect(tab.label).toBe(MAIN_TAB_LABEL)
+  })
+
+  it('keeps the archived chat as a tab — the operator ruled it becomes the newest one', () => {
+    // "one system line in Main names the archived chat, which becomes the
+    // newest tab" (operator, 2026-09-06). An archive is an ordinary past chat,
+    // and hiding the thing the system line just pointed at is the one place
+    // the person is most likely to look next. Growth is bounded by
+    // OverflowTabs' counted "N more", not by hiding rows.
+    const tabs = agentChatTabs([
+      main(),
+      chat('old', { archived_at: '2026-09-07T10:00:00Z', last_message_at: '2026-09-07T10:00:00Z' }),
+      chat('older', { last_message_at: '2026-09-01T10:00:00Z' }),
+    ], 'a')
+    expect(tabs.map((t) => t.id)).toEqual(['main', 'old', 'older'])
+  })
+
+  it('still sorts the rest by recency', () => {
+    const tabs = agentChatTabs([
+      chat('old', { last_message_at: '2026-09-01T00:00:00Z' }),
+      chat('new', { last_message_at: '2026-09-07T00:00:00Z' }),
+      main(),
+    ], 'a')
+    expect(tabs.map((t) => t.id)).toEqual(['main', 'new', 'old'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Which chat you land in
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — landing', () => {
+  it('opens the chat you were most recently active in', () => {
+    const landed = landingThread([
+      main(),
+      chat('c1', { last_message_at: '2026-09-07T09:00:00Z' }),
+      chat('c2', { last_message_at: '2026-09-07T12:00:00Z' }),
+    ], 'a')
+    expect(landed.id).toBe('c2')
+  })
+
+  it('falls back to Main for a first-time visitor', () => {
+    // An unused Main has no `last_message_at` and would sort last on recency
+    // alone, so a first visit would otherwise land on nothing.
+    expect(landingThread([main()], 'a').id).toBe('main')
+  })
+
+  it('never lands you in an archived chat', () => {
+    // Deliberately unlike the tab rule above: a tab is somewhere you can GO, a
+    // landing is where you are PUT without asking.
+    const landed = landingThread([
+      main(),
+      chat('old', { archived_at: 'x', last_message_at: '2026-09-07T23:00:00Z' }),
+    ], 'a')
+    expect(landed.id).toBe('main')
+  })
+
+  it('returns null when there is nothing for this agent', () => {
+    expect(landingThread([chat('other', { agent_name: 'b' })], 'a')).toBeNull()
+    expect(landingThread([], 'a')).toBeNull()
+    expect(landingThread([main()], '')).toBeNull()
+  })
+
+  it('is the SAME rule the ?agent= deep link uses', () => {
+    // Two answers to "which chat do I land in" is how a deep link and a
+    // sidebar click put a first-time visitor in different places.
+    const threads = [main()]
+    const agents = [{ name: 'a' }]
+    expect(resolveAgentLanding({ agent: 'a', agents, threads }).sessionId).toBe('main')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The sidebar
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — roster order and preview', () => {
+  it('orders by most recent collaboration, then name', () => {
+    const agents = [{ name: 'zeta' }, { name: 'alpha' }, { name: 'beta' }]
+    const threads = [
+      { agent_name: 'beta', last_message_at: '2026-09-07T12:00:00Z' },
+      { agent_name: 'zeta', last_message_at: '2026-09-01T12:00:00Z' },
+    ]
+    expect(orderRosterAgents(agents, threads).map((a) => a.name))
+      .toEqual(['beta', 'zeta', 'alpha'])
+  })
+
+  it('honours the primary companion first — the ent#491 seam', () => {
+    const agents = [{ name: 'alpha' }, { name: 'beta' }]
+    const threads = [{ agent_name: 'alpha', last_message_at: '2026-09-07T12:00:00Z' }]
+    expect(orderRosterAgents(agents, threads, 'beta').map((a) => a.name))
+      .toEqual(['beta', 'alpha'])
+  })
+
+  it('does not mutate the roster it was handed', () => {
+    const agents = [{ name: 'zeta' }, { name: 'alpha' }]
+    orderRosterAgents(agents, [])
+    expect(agents.map((a) => a.name)).toEqual(['zeta', 'alpha'])
+  })
+
+  it('previews the newest chat, and nothing when there is no history', () => {
+    expect(agentPreview([
+      { agent_name: 'a', title: 'Older', last_message_at: '2026-09-01T00:00:00Z' },
+      { agent_name: 'a', title: 'Newest', last_message_at: '2026-09-07T00:00:00Z' },
+    ], 'a')).toBe('Newest')
+    expect(agentPreview([main()], 'a')).toBeNull()
+    expect(agentPreview([], 'a')).toBeNull()
+  })
+
+  it('shows no preview for an untitled chat rather than the words "New chat"', () => {
+    // A row reading "New chat" under every agent is noise, not a preview.
+    expect(agentPreview([{ agent_name: 'a', last_message_at: '2026-09-07T00:00:00Z' }], 'a'))
+      .toBeNull()
+  })
+
+  it('orders the roster BEFORE the collapse', () => {
+    // Bounding first would sort a slice chosen by the old order — the same bug
+    // one step later.
+    expect(SIDEBAR).toMatch(/const orderedRoster = computed\(\(\) => orderRosterAgents\(/)
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(orderedRoster\.value/)
+  })
+
+  it('does not list an unused Main as a recent chat', () => {
+    // It exists for every pair the moment the agent is opened, so listing it
+    // would put a row under every agent the person never talked to. Filtered
+    // for the SIDEBAR only — the tab strip must show Main from the first visit.
+    expect(PORTAL).toMatch(/const sidebarThreads = computed\(/)
+    expect(PORTAL).toMatch(/t\.is_main && !t\.last_message_at/)
+    expect(PORTAL).toMatch(/:threads="sidebarThreads"/)
+    // The conversation still gets the full list.
+    expect(PORTAL).toMatch(/<PortalConversation[\s\S]{0,600}:threads="threads"/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Honest composer
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — the composer says what will happen', () => {
+  it('speaks up for a stopped or unavailable agent', () => {
+    expect(composerAvailabilityNotice({ availability: 'stopped', owner: 'sam' }).state).toBe('stopped')
+    expect(composerAvailabilityNotice({ availability: 'unavailable' })).toBeTruthy()
+  })
+
+  it('says nothing for ready or unknown', () => {
+    // `unknown` is not evidence of anything — #2196's fail-open direction.
+    expect(composerAvailabilityNotice({ availability: 'ready' })).toBeNull()
+    expect(composerAvailabilityNotice({ availability: 'unknown' })).toBeNull()
+    expect(composerAvailabilityNotice(null)).toBeNull()
+  })
+
+  it('names who to ask', () => {
+    expect(composerAvailabilityNotice({ availability: 'stopped', owner: 'sam' }).message)
+      .toContain('sam')
+  })
+
+  it('labels, never disables', () => {
+    // Disabling relocates the dead state rather than removing it: a client
+    // whose agents are all stopped would get an entirely inert Workspace.
+    const at = CONVERSATION.indexOf('portal-availability-notice')
+    expect(at).toBeGreaterThan(-1)
+    expect(CONVERSATION).not.toMatch(/:disabled="[^"]*availabilityNotice/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ent#524 — drop and batch
+// ---------------------------------------------------------------------------
+
+describe('ent#524 — a drag is only a file drag when it carries files', () => {
+  it('accepts a file drag', () => {
+    expect(isFileDrag({ types: ['Files'] })).toBe(true)
+    // DOMStringList in some browsers, array in others.
+    expect(isFileDrag({ types: { length: 1, 0: 'Files', [Symbol.iterator]: Array.prototype[Symbol.iterator] } })).toBe(true)
+  })
+
+  it('rejects dragged text, links and nothing at all', () => {
+    expect(isFileDrag({ types: ['text/plain'] })).toBe(false)
+    expect(isFileDrag({ types: ['text/uri-list'] })).toBe(false)
+    expect(isFileDrag({})).toBe(false)
+    expect(isFileDrag(null)).toBe(false)
+  })
+})
+
+describe('ent#524 — a refused file names itself and the limit', () => {
+  it('names the size limit', () => {
+    const msg = rejectionFor({ name: 'big.zip', size: MAX_UPLOAD_BYTES + 1 })
+    expect(msg).toMatch(/limit/)
+    expect(msg).toMatch(/MB/)
+  })
+
+  it('refuses an empty file', () => {
+    expect(rejectionFor({ name: 'empty.txt', size: 0 })).toMatch(/empty/i)
+  })
+
+  it('passes a normal file', () => {
+    expect(rejectionFor({ name: 'notes.md', size: 1024 })).toBeNull()
+  })
+})
+
+describe('ent#524 — a failure explains itself', () => {
+  it('renders the server sentence when there is one', () => {
+    expect(uploadFailureReason({ response: { status: 400, data: { detail: 'Unsupported type.' } } }))
+      .toBe('Unsupported type.')
+  })
+
+  it('says when to retry a rate-limited batch', () => {
+    const err = { response: { status: 429, headers: { 'retry-after': '30' } } }
+    expect(uploadFailureReason(err)).toMatch(/30s/)
+    expect(rateLimitMessage({ response: { headers: { 'retry-after': '120' } } })).toMatch(/2 min/)
+  })
+
+  it('degrades to a sentence, never to [object Object]', () => {
+    expect(uploadFailureReason({})).toMatch(/upload/i)
+    expect(uploadFailureReason({ response: { status: 400, data: { detail: { code: 'x', message: 'Named.' } } } }))
+      .toBe('Named.')
+  })
+})
+
+describe('ent#524 — one chip state, three outcomes', () => {
+  it('reads failed before uploading, so a rejected file never spins', () => {
+    expect(attachmentState({ uploading: true, error: 'Too large' })).toBe('failed')
+    expect(attachmentState({ uploading: true, error: '' })).toBe('uploading')
+    expect(attachmentState({ uploading: false, error: '', done: true })).toBe('sent')
+  })
+})
+
+describe('ent#524 — one implementation, three consumers', () => {
+  it('every surface reads the shared module rather than its own copy', () => {
+    for (const [name, src] of [['conversation', CONVERSATION], ['room', ROOM], ['rail files', RAIL_FILES]]) {
+      expect(src, name).toMatch(/from '@\/composables\/usePortalFileDrop'/)
+    }
+  })
+
+  it('no surface reads only the first file any more', () => {
+    // The defect in the issue: both existing paths took `[0]` and reported
+    // success, so four of five dropped files vanished with no notice.
+    for (const [name, src] of [['conversation', CONVERSATION], ['rail files', RAIL_FILES]]) {
+      expect(src, name).not.toMatch(/files\?\.\[0\]/)
+      expect(src, name).not.toMatch(/dataTransfer\?\.files\?\.\[0\]/)
+    }
+  })
+
+  it('both pickers accept several files', () => {
+    expect(CONVERSATION).toMatch(/<input[^>]*type="file"[^>]*multiple/)
+    expect(RAIL_FILES).toMatch(/<input[^>]*type="file"[^>]*multiple/)
+  })
+
+  it('the conversation and the room are drop targets with an affordance', () => {
+    for (const [name, src, testid] of [
+      ['conversation', CONVERSATION, 'portal-drop-overlay'],
+      ['room', ROOM, 'portal-room-drop-overlay'],
+    ]) {
+      expect(src, name).toMatch(/@drop="dropHandlers\.onDrop"/)
+      expect(src, name).toContain(testid)
+      // The overlay must not swallow the drop it announces.
+      expect(src, name).toMatch(new RegExp(`${testid}[\\s\\S]{0,400}`))
+      const at = src.indexOf(testid)
+      expect(src.slice(Math.max(0, at - 400), at), name).toContain('pointer-events-none')
+    }
+  })
+
+  it('a room drop fans out to every participating agent and names them', () => {
+    // Operator decision 13: a room is one conversation, so its files should
+    // match its transcript.
+    expect(ROOM).toMatch(/for \(const name of names\) await store\.uploadDocument\(name, file\)/)
+    expect(ROOM).toMatch(/recipientLabel/)
+  })
+
+  it('uploads sequentially, so a batch does not trip the per-email limiter', () => {
+    const SHARED = read('../../src/composables/usePortalFileDrop.js')
+    expect(SHARED).not.toContain('Promise.all')
+    expect(SHARED).toMatch(/for \(const \{ file, entry, rejection \} of mine\)/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The dismantle — no capability lost
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — the agent page was dismantled, not dropped', () => {
+  it('the stats and the chart are in the always-visible band', () => {
+    expect(BAND).toContain('StackedBarChart')
+    expect(BAND).toMatch(/tasks · last/)
+    expect(BAND).toMatch(/completed/)
+    expect(BAND).toMatch(/first try/)
+  })
+
+  it('chats, what it can do and reports are in Agent details', () => {
+    expect(DETAILS).toMatch(/>Your chats</)
+    expect(DETAILS).toMatch(/>What it can do</)
+    expect(DETAILS).toMatch(/>Reports</)
+  })
+
+  it('Canvas and Files are NOT duplicated into details — they are rail tabs', () => {
+    // Two homes for one capability is what the dismantle removed.
+    expect(DETAILS).not.toContain('CanvasPanel')
+    expect(DETAILS).not.toMatch(/>Files</)
+  })
+
+  it('the "Start a chat" button and its handler are gone', () => {
+    expect(PORTAL).not.toContain('onStartChatFromPage')
+    expect(PORTAL).not.toContain('start-chat')
+  })
+
+  it('Main is not renameable, and says so by rendering a label not an editor', () => {
+    const at = CONVERSATION.indexOf('v-if="isMainChat"')
+    expect(at).toBeGreaterThan(-1)
+    expect(CONVERSATION.slice(at, at + 200)).toContain('MAIN_TAB_LABEL')
+  })
+
+  it('Reset is offered on Main only, with no confirmation dialog', () => {
+    // Operator, 2026-09-06: "we are not losing info". ConfirmDialog is not a
+    // caller here.
+    expect(CONVERSATION).toMatch(/v-if="isMainChat"[\s\S]{0,600}portal-reset-main/)
+    expect(CONVERSATION).not.toContain('ConfirmDialog')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ent#468 — an answered ask says whether work started
+// ---------------------------------------------------------------------------
+
+describe('ent#468 — the answer confirmation', () => {
+  it('says work started on a resume-enabled agent', () => {
+    expect(answerConfirmation({ status: 'answered', resume_requested: true }, 'scribe'))
+      .toBe('Sent — scribe is picking this up.')
+  })
+
+  it('says only that the answer was sent with the opt-in off', () => {
+    expect(answerConfirmation({ status: 'answered', resume_requested: false }, 'scribe'))
+      .toBe('Sent.')
+  })
+
+  it('treats an absent resume_requested as opt-in off, never as on', () => {
+    // `null` is what every pre-ent#430 row and every non-opted-in agent carries.
+    // Reading it as "work started" would be the over-claim ent#430 spent a
+    // blocker removing from this very field.
+    expect(answerConfirmation({ status: 'answered', resume_requested: null }, 'scribe'))
+      .toBe('Sent.')
+    expect(answerConfirmation({ status: 'answered' }, 'scribe')).toBe('Sent.')
+  })
+
+  it('says nothing at all when the row is not `answered`', () => {
+    // `status` is the gate: anything else means the answer did not land the way
+    // this copy would claim, and a confirmation over it would be a false one.
+    expect(answerConfirmation({ status: 'expired', resume_requested: true }, 'scribe')).toBeNull()
+    expect(answerConfirmation({ status: 'pending' }, 'scribe')).toBeNull()
+    expect(answerConfirmation(null)).toBeNull()
+    expect(answerConfirmation(undefined)).toBeNull()
+  })
+
+  it('falls back to the payload agent, then to a neutral noun', () => {
+    expect(answerConfirmation({ status: 'answered', resume_requested: true, agent_name: 'atlas' }))
+      .toBe('Sent — atlas is picking this up.')
+    expect(answerConfirmation({ status: 'answered', resume_requested: true }))
+      .toBe('Sent — the agent is picking this up.')
+  })
+
+  it('consumes BOTH new fields — the AC is either both or neither', () => {
+    const ASKS = read('../../src/components/portal/PortalAsks.vue')
+    const UTILS = read('../../src/components/portal/portalUtils.js')
+    expect(UTILS).toContain('resume_requested')
+    expect(UTILS).toMatch(/status !== 'answered'/)
+    // ...and the component actually reads the response it used to discard.
+    expect(ASKS).toMatch(/const answered = await store\.answerAsk\(/)
+    expect(ASKS).toContain('answerConfirmation(answered')
+  })
+
+  it('survives the ask row it replaces', () => {
+    // Answering removes the row, and `visible` used to gate on `items.length`
+    // alone — so the surface unmounted at the exact instant the confirmation
+    // was created and the message would have rendered for zero frames.
+    const ASKS = read('../../src/components/portal/PortalAsks.vue')
+    expect(ASKS).toMatch(/items\.value\.length > 0 \|\| confirmations\.value\.length > 0/)
+    // And its timer cannot outlive the component — this surface unmounts on
+    // every chat switch.
+    expect(ASKS).toContain('onBeforeUnmount')
+    expect(ASKS).toMatch(/confirmationTimers\.forEach\(clearTimeout\)/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Board A3 alignment (ent#523)
+// ---------------------------------------------------------------------------
+
+describe('ent#523 — the approved design (board A3)', () => {
+  const T0 = Date.parse('2026-09-07T12:00:00Z')
+  const at = (iso) => ({ agent_name: 'a', last_message_at: iso })
+
+  it('the agent row time is tight — no "ago", a month-day past a week', () => {
+    expect(agentRowTime([at('2026-09-07T11:59:30Z')], 'a', T0)).toBe('now')
+    expect(agentRowTime([at('2026-09-07T11:48:00Z')], 'a', T0)).toBe('12m')
+    expect(agentRowTime([at('2026-09-07T09:00:00Z')], 'a', T0)).toBe('3h')
+    expect(agentRowTime([at('2026-09-05T12:00:00Z')], 'a', T0)).toBe('2d')
+    expect(agentRowTime([at('2026-08-21T12:00:00Z')], 'a', T0)).toMatch(/Aug/)
+  })
+
+  it('takes the NEWEST thread, and says nothing with no history', () => {
+    expect(agentRowTime([
+      at('2026-09-01T12:00:00Z'),
+      at('2026-09-07T11:48:00Z'),
+    ], 'a', T0)).toBe('12m')
+    expect(agentRowTime([{ agent_name: 'a' }], 'a', T0)).toBe('')
+    expect(agentRowTime([], 'a', T0)).toBe('')
+    expect(agentRowTime([at('2026-09-07T11:48:00Z')], '', T0)).toBe('')
+  })
+
+  it('is a SECOND format on purpose, not a replacement for relativeTime', () => {
+    // The row is a few characters wide beside a name and a preview; the other
+    // surfaces want the sentence form. Two jobs, two formats.
+    const UTILS = read('../../src/components/portal/portalUtils.js')
+    expect(UTILS).toContain('export function relativeTime')
+    expect(UTILS).toContain('export function agentRowTime')
+  })
+
+  it('Main carries the pin the design draws', () => {
+    const [tab] = agentChatTabs([main()], 'a')
+    expect(tab.pinned).toBe(true)
+    expect(agentChatTabs([chat('c1')], 'a')[0].pinned).toBe(false)
+  })
+
+  it('the pin is drawn in the MIRROR row too, or the strip mis-measures', () => {
+    // A glyph the visible row renders and the hidden measuring row does not is
+    // a tab measured narrower than it draws — the strip then overflows one tab
+    // too late. Three render sites, one prop.
+    const TABS = read('../../src/components/OverflowTabs.vue')
+    expect((TABS.match(/v-if="tab\.pinned"/g) || []).length).toBe(3)
+    // ...and a pin change must invalidate the measurement cache.
+    expect(TABS).toMatch(/t\.pinned \? 'p' : ''/)
+  })
+
+  it('Agent details opens from the header, not from the band', () => {
+    // Board A3 puts it with the per-conversation actions; the band is numbers.
+    const CONV = read('../../src/components/portal/PortalConversation.vue')
+    const BAND_SRC = read('../../src/components/portal/PortalAgentBand.vue')
+    expect(CONV).toContain('data-testid="portal-open-agent-details"')
+    expect(BAND_SRC).not.toContain('portal-open-agent-details')
+  })
+
+  it('the chart is named rather than left a bare plot beside numbers', () => {
+    expect(read('../../src/components/portal/PortalAgentBand.vue')).toMatch(/Activity · last/)
+  })
+})
+
+describe('ent#523 — the sidebar row meta is one pass, not four per row', () => {
+  const T0 = Date.parse('2026-09-07T12:00:00Z')
+
+  it('agrees with the per-agent helpers it replaced', () => {
+    const threads = [
+      { agent_name: 'a', title: 'Older', last_message_at: '2026-09-01T12:00:00Z' },
+      { agent_name: 'a', title: 'Newest', last_message_at: '2026-09-07T11:48:00Z' },
+      { agent_name: 'b', title: 'Solo', last_message_at: '2026-09-05T12:00:00Z' },
+    ]
+    const meta = agentRowMeta(threads, T0)
+    expect(meta.a).toEqual({ preview: 'Newest', time: '12m' })
+    expect(meta.b).toEqual({ preview: 'Solo', time: '2d' })
+    // The rule it must not drift from.
+    expect(meta.a.time).toBe(agentRowTime(threads, 'a', T0))
+    expect(meta.a.preview).toBe(agentPreview(threads, 'a'))
+  })
+
+  it('keeps the untitled-chat rule — no "New chat" under every agent', () => {
+    const meta = agentRowMeta([{ agent_name: 'a', last_message_at: '2026-09-07T11:48:00Z' }], T0)
+    expect(meta.a.preview).toBeNull()
+    expect(meta.a.time).toBe('12m')
+  })
+
+  it('ignores rooms and threads with no history', () => {
+    expect(agentRowMeta([
+      { agent_name: 'a', is_room: true, last_message_at: '2026-09-07T11:00:00Z' },
+      { agent_name: 'b' },
+    ], T0)).toEqual({})
+  })
+
+  it('the sidebar reads the memoized map, not a per-row function', () => {
+    // The template called two whole-list scans twice each, per row, on a
+    // surface that re-renders on every store tick.
+    const SB = read('../../src/components/portal/PortalSidebar.vue')
+    expect(SB).toMatch(/const rowMeta = computed\(\(\) => agentRowMeta\(/)
+    expect(SB).not.toMatch(/previewFor\(a\.name\)/)
+    expect(SB).not.toMatch(/rowTime\(a\.name\)/)
+  })
+})

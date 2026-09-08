@@ -13,6 +13,21 @@
 -->
 <template>
   <div v-if="visible" class="space-y-2" data-testid="portal-asks">
+    <!-- ent#468: what happened to the answer you just gave. It lives HERE and
+         not on the ask row, because answering removes that row — the row is the
+         one place this cannot be. On an opt-in agent the answer sets work in
+         motion and spends the owner's budget, so the person who caused it is
+         told; with the opt-in off it says only that the answer was sent.
+         Clears itself; `aria-live` because it appears without a navigation. -->
+    <p
+      v-for="c in confirmations"
+      :key="c.id"
+      class="rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300"
+      role="status"
+      aria-live="polite"
+      data-testid="portal-ask-confirmation"
+    >{{ c.message }}</p>
+
     <div
       v-for="ask in items"
       :key="ask.id"
@@ -56,22 +71,62 @@
       >Open the conversation</button>
 
       <template v-else>
-        <div v-if="ask.options?.length" class="mt-2 flex flex-wrap gap-2">
-          <button
-            v-for="opt in ask.options"
-            :key="String(opt)"
-            type="button"
-            :disabled="busyId === ask.id"
-            class="rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
-            :data-testid="`portal-ask-option-${ask.id}`"
-            @click="answer(ask, String(opt))"
-          >{{ opt }}</button>
-        </div>
+        <!-- #2375: controls come from the shared kind rule (queueResponseKind),
+             so this surface cannot drift from desktop QueueCard and /m. An
+             approval is select → optional note → explicit Send — never a
+             one-tap irreversible answer; the tapped option only arms Send. -->
+        <template v-if="controlsKind(ask) === 'approval'">
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button
+              v-for="opt in optionsOf(ask)"
+              :key="opt"
+              type="button"
+              :disabled="busyId === ask.id"
+              class="rounded-lg border text-xs font-medium px-2.5 py-1.5 disabled:opacity-50"
+              :class="picks[ask.id] === opt
+                ? 'bg-action-primary-600 border-action-primary-600 text-white'
+                : 'bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:border-action-primary-500'"
+              :aria-pressed="picks[ask.id] === opt"
+              :data-testid="`portal-ask-option-${ask.id}`"
+              @click="picks[ask.id] = picks[ask.id] === opt ? null : opt"
+            >{{ opt }}</button>
+          </div>
+          <form class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
+            <input
+              v-model="notes[ask.id]"
+              type="text"
+              maxlength="4000"
+              :disabled="busyId === ask.id"
+              placeholder="Add a note (optional)…"
+              class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
+              :data-testid="`portal-ask-note-${ask.id}`"
+            />
+            <button
+              type="submit"
+              :disabled="busyId === ask.id || !picks[ask.id]"
+              class="rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
+              :data-testid="`portal-ask-send-${ask.id}`"
+            >{{ busyId === ask.id ? 'Sending…' : 'Send' }}</button>
+          </form>
+        </template>
 
-        <form v-else class="mt-2 flex items-center gap-2" @submit.prevent="answer(ask, null, drafts[ask.id])">
+        <!-- An alert only wants acknowledging; "Got it" mirrors desktop and /m. -->
+        <button
+          v-else-if="controlsKind(ask) === 'acknowledge'"
+          type="button"
+          :disabled="busyId === ask.id"
+          class="mt-2 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 text-white text-xs font-medium px-2.5 py-1.5"
+          :data-testid="`portal-ask-ack-${ask.id}`"
+          @click="submit(ask)"
+        >{{ busyId === ask.id ? 'Sending…' : 'Got it' }}</button>
+
+        <!-- A question (or an approval that offered no options) takes a typed
+             answer — sent as the DECISION (`response`), never as a note (#2375). -->
+        <form v-else class="mt-2 flex items-center gap-2" @submit.prevent="submit(ask)">
           <input
             v-model="drafts[ask.id]"
             type="text"
+            maxlength="500"
             :disabled="busyId === ask.id"
             placeholder="Your answer…"
             class="flex-1 min-w-0 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2.5 py-1.5 text-sm"
@@ -91,14 +146,22 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { expiredLabel, askThreadLink } from './portalUtils'
+import {
+  expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
+} from './portalUtils'
+import { optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/operatorQueue'
 
 const props = defineProps({
   // Omit to render every ask addressed to this user (chat/global); pass a name to
   // render one agent's (the agent page).
   agentName: { type: String, default: null },
+  // ent#525: or several — the rail's Work tab renders the asks of a chat's
+  // PARTICIPANTS ("Waiting on you"), the fourth rendering of the same row. A
+  // computed over `store.asks`, never a narrowed fetch: `fetchAsks(agentName)`
+  // replaces the shared list the sidebar badge reads.
+  agentNames: { type: Array, default: null },
   showAgent: { type: Boolean, default: false },
   // The thread on screen, when there is one. Only used to suppress a link that
   // would go where the reader already is (ent#429).
@@ -109,23 +172,81 @@ const emit = defineEmits(['open-thread'])
 
 const store = useClientPortalStore()
 const busyId = ref(null)
-const drafts = reactive({})
+const drafts = reactive({})   // question: the typed answer (the DECISION)
+const picks = reactive({})    // approval: the selected option
+const notes = reactive({})    // approval: the optional free-text note
 const errors = reactive({})
 
-const items = computed(() =>
-  props.agentName ? store.asksForAgent(props.agentName) : store.asks
-)
-const visible = computed(() => store.asksAvailable && items.value.length > 0)
+const items = computed(() => {
+  if (props.agentName) return store.asksForAgent(props.agentName)
+  if (Array.isArray(props.agentNames)) {
+    const names = new Set(props.agentNames.filter(Boolean))
+    return store.asks.filter((a) => names.has(a.agent_name))
+  }
+  return store.asks
+})
+// ent#468: a confirmation keeps the component mounted after the last ask goes.
+// Gating on `items.length` alone unmounted the whole surface at the instant the
+// row was removed, which is the same instant the confirmation is created — so
+// the message would have been rendered for exactly zero frames.
+const confirmations = ref([])
+const visible = computed(() => (
+  store.asksAvailable && (items.value.length > 0 || confirmations.value.length > 0)
+))
 
-const KINDS = { question: 'Question', approval: 'Approval needed', alert: 'Update' }
-const kindLabel = (kind) => KINDS[kind] || 'Question'
+let confirmationTimers = []
 
-async function answer(ask, response, text = null) {
+function showConfirmation(message) {
+  if (!message) return
+  const id = `ack-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  confirmations.value.push({ id, message })
+  const timer = setTimeout(() => {
+    confirmations.value = confirmations.value.filter((c) => c.id !== id)
+    // Drop the handle too: a fired timer left in the list is dead weight that
+    // grows for the life of the mount, and `onBeforeUnmount` would then clear
+    // a pile of expired ids.
+    confirmationTimers = confirmationTimers.filter((t) => t !== timer)
+  }, ANSWER_CONFIRMATION_MS)
+  confirmationTimers.push(timer)
+}
+
+// A timer that outlives the component would write to a dead ref on a chat
+// switch — the surface unmounts and remounts constantly.
+onBeforeUnmount(() => {
+  confirmationTimers.forEach(clearTimeout)
+  confirmationTimers = []
+})
+
+// #2375: one label set and one controls rule across desktop, /m and the
+// Workspace — both come from utils/operatorQueue, the single home #2370
+// established. An ask's `kind` is the queue row's `type` verbatim.
+const kindLabel = (kind) => queueTypeLabel(kind) || 'Question'
+const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.options })
+
+async function submit(ask) {
+  // The shared builder decides the wire shape: the decision travels as
+  // `response` (the field the agent reads), a note as `response_text`. It
+  // returns null when there is nothing valid to send — no option picked,
+  // blank answer — and the controls stay armed.
+  const body = buildQueueResponse({
+    kind: controlsKind(ask),
+    option: picks[ask.id],
+    note: notes[ask.id] || '',
+    answer: drafts[ask.id] || '',
+  })
+  if (!body) return
   busyId.value = ask.id
   errors[ask.id] = null
   try {
-    await store.answerAsk(ask.id, { response, responseText: text || null })
+    const answered = await store.answerAsk(ask.id, {
+      response: body.response, responseText: body.response_text,
+    })
+    // ent#468: the response was discarded here, so `resume_requested` and the
+    // `answered` status were on the wire and read by nothing.
+    showConfirmation(answerConfirmation(answered, ask.agent_name))
     delete drafts[ask.id]
+    delete picks[ask.id]
+    delete notes[ask.id]
   } catch (err) {
     // The backend's refusals are already written for a human ("This ask expired
     // before it was answered."), so surface them rather than replacing them with

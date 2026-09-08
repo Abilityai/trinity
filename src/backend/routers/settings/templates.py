@@ -167,6 +167,8 @@ async def get_github_templates(
             "source": "defaults",
             "templates": defaults
         }
+
+
 @router.put("/github-templates")
 async def update_github_templates(
     body: GitHubTemplatesUpdate,
@@ -196,6 +198,8 @@ async def update_github_templates(
         "success": True,
         "count": len(templates_data)
     }
+
+
 @router.delete("/github-templates")
 async def delete_github_templates(
     request: Request,
@@ -215,6 +219,8 @@ async def delete_github_templates(
         "deleted": deleted,
         "message": "GitHub templates reset to defaults"
     }
+
+
 @router.get("/template-registry")
 async def get_template_registry(current_user: User = Depends(get_current_user)):
     """Remote template registry configuration + live status. Admin-only.
@@ -254,6 +260,8 @@ async def get_template_registry(current_user: User = Depends(get_current_user)):
         ),
         "status": get_registry_status(),
     }
+
+
 @router.put("/template-registry")
 async def update_template_registry(
     body: TemplateRegistryUpdate,
@@ -340,6 +348,8 @@ async def update_template_registry(
     )
 
     return await get_template_registry(current_user=current_user)
+
+
 @router.delete("/template-registry")
 async def delete_template_registry(
     request: Request,

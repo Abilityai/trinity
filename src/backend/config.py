@@ -330,6 +330,14 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
 VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
+# Workspace voice mode (ent#534): the cap for a call started from the Workspace
+# conversation — 30 min, ruled 2026-09-07 — kept apart from the Agent Detail
+# overlay's VOICE_MAX_DURATION because the two are different surfaces with
+# different expectations, not different providers. The Gemini session itself is
+# made to survive this long by context-window compression + resumption in
+# services/gemini_voice.py; the knob is surface-scoped so a second realtime
+# provider (ent#354) inherits it unchanged.
+WORKSPACE_VOICE_MAX_DURATION = int(os.getenv("WORKSPACE_VOICE_MAX_DURATION", "1800"))  # seconds
 
 # Per-agent voice selection (#28). Canonical set of Gemini Live prebuilt voices
 # offered by Trinity; the single source of truth shared by the persisted-voice
@@ -498,19 +506,22 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # cuts its first tag this seed points at a 404 and `sync_library` reports a
 # failed source (fail-soft by design — it never raises).
 #
-# The tag name must match what ent#296 actually publishes: that issue's plan
-# (vybe, 2026-08-04) cuts **v0.1.0** once the seed content lands, so a `v1.0.0`
-# default would leave every fresh install seeded with a source that can never
-# sync — and the failure is quiet (a failed row in Settings), not loud. Bump
-# this in lockstep with the catalog's releases; the env var is the escape hatch
-# for an instance that wants to pin an older or newer catalog.
+# The tag name must match what ent#296 actually publishes (its first cut was
+# v0.1.0, 2026-08): a default naming a tag that does not exist leaves every
+# fresh install seeded with a source that can never sync — and the failure is
+# quiet (a failed row in Settings), not loud. Bump this in lockstep with the
+# catalog's releases — the seed is fresh-install only, so a bump reaches new
+# installs and nothing else (#2545 moved it to v0.2.0, the release that added
+# the project-management category; `.env.example` documents the same value and
+# `tests/unit/test_2545_skill_source_pin.py` keeps the two in step). The env
+# var is the escape hatch for an instance that wants an older or newer catalog.
 #
 # TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
 # wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
 DEFAULT_SKILL_SOURCE_URL = os.getenv(
     "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
 )
-DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.1.0")
+DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.2.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
 
 # ============================================================================

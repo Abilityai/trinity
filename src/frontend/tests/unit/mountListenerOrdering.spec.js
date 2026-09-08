@@ -62,17 +62,14 @@ const LISTENER = /\b(?:document|window)\.addEventListener\s*\(/
  * being needed — so a fixed file cannot leave a stale exemption behind.
  */
 const ALLOWLIST = [
-  {
-    file: 'views/AgentWorkspace.vue',
-    reason:
-      "window.addEventListener('resize', resizeCanvas) sits after `await fetchAgent()`. " +
-      'A resize handler arriving late is self-correcting on the next resize — no user ' +
-      'input is dropped — and it is registered after the canvas bootstrap (initParticles/ ' +
-      'resizeCanvas/requestAnimationFrame) that gives it something to operate on. ' +
-      'Different risk profile, different fix, tracked separately.',
-  },
+  // ent#438 emptied this list: its only entry was `views/AgentWorkspace.vue`,
+  // whose late `resize` listener was exempted, and that page is retired (the
+  // canvas is a durable surface now, and voice conversation moved into the
+  // Workspace in ent#440). The guard's own stale-exemption test is what caught
+  // it — the entry is dropped rather than left behind, and MAX_ALLOWLIST
+  // ratchets DOWN to 0 accordingly: the direction it pins is "may shrink".
 ]
-const MAX_ALLOWLIST = 1 // may shrink, never grow without a deliberate reviewed edit
+const MAX_ALLOWLIST = 0 // may shrink, never grow without a deliberate reviewed edit
 
 /** Strip line + block comments so prose like "before any await" isn't scanned. */
 function stripComments(code) {

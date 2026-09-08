@@ -371,25 +371,60 @@ def spawn_task_terminal_event(
     duration_ms: Optional[int] = None,
     cost: Optional[float] = None,
 ) -> None:
-    """Fire ``emit_task_terminal_event`` fire-and-forget from a sync-or-async site.
+    """Fan an execution terminal out to everything that reacts to one.
 
     Every CAS-won terminal writer calls this one wrapper — it needs no ``await``
     and no per-module spawner. Requires a running event loop (every caller runs
     inside one: the async terminal writers and the async router handlers that
-    drive the pull sink). Fail-open: if no loop is running the emit is skipped
+    drive the pull sink). Fail-open: if no loop is running the work is skipped
     (logged), never raised.
+
+    Two consumers today, spawned independently so neither can delay or break the
+    other:
+
+    * ``emit_task_terminal_event`` (#1578) — the agent.task.* pub/sub emit.
+    * ``loop_service.advance_loop_on_terminal`` (#2523) — advances the loop this
+      execution belongs to, if any. This is what replaced the in-process ``for``
+      loop in ``LoopService``, and it has to hang HERE rather than inside the
+      emit: the emit returns early when no event subscription matches, which is
+      the common case, so a loop advance nested inside it would almost never
+      run.
     """
-    coro = emit_task_terminal_event(
-        agent_name,
-        execution_id,
-        terminal_status=terminal_status,
-        summary_or_error=summary_or_error,
-        duration_ms=duration_ms,
-        cost=cost,
+    _spawn_named(
+        "#1578",
+        emit_task_terminal_event(
+            agent_name,
+            execution_id,
+            terminal_status=terminal_status,
+            summary_or_error=summary_or_error,
+            duration_ms=duration_ms,
+            cost=cost,
+        ),
     )
+    _spawn_named("#2523", _advance_loop(execution_id))
+
+
+async def _advance_loop(execution_id: Optional[str]) -> None:
+    """Lazy-import shim for the loop advance (#2523).
+
+    ``loop_service`` imports ``database`` and (lazily) ``task_execution_service``;
+    importing it at this module's top level would put the dispatch stack behind
+    the event stack for every consumer of this module. Never raises — the
+    advance is already fail-safe internally, and this is belt-and-braces on the
+    terminal path.
+    """
+    try:
+        from services.loop_service import advance_loop_on_terminal
+
+        await advance_loop_on_terminal(execution_id)
+    except Exception as e:  # noqa: BLE001 — never affect the billed terminal
+        logger.warning("[#2523] loop advance failed for %s: %s", execution_id, e)
+
+
+def _spawn_named(tag: str, coro: "Any") -> None:
     try:
         _spawn_emit_dispatch(coro)
     except RuntimeError as e:
         # No running loop — close the un-awaited coroutine to avoid a warning.
         coro.close()
-        logger.debug("[#1578] spawn_task_terminal_event skipped (no loop): %s", e)
+        logger.debug("%s terminal fan-out skipped (no loop): %s", tag, e)

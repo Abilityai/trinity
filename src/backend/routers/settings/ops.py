@@ -146,6 +146,8 @@ async def get_ops_settings(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get ops settings: {str(e)}")
+
+
 @router.put("/ops/config")
 async def update_ops_settings(
     body: OpsSettingsUpdate,
@@ -232,6 +234,8 @@ async def update_ops_settings(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update ops settings: {str(e)}")
+
+
 @router.post("/ops/reset")
 async def reset_ops_settings(
     request: Request,

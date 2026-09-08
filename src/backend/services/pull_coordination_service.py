@@ -38,6 +38,7 @@ from services.platform_prompt_service import (
     is_execution_context_enabled,
 )
 from services.slot_service import SLOT_TTL_BUFFER
+from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
 
 logger = logging.getLogger(__name__)
@@ -373,6 +374,15 @@ def apply_task_result(
     if execution.status in _AUTHORITATIVE_TERMINALS:
         # Already final and authoritative — idempotent replay, no re-apply.
         return ResultApplyOutcome("replayed", execution.status)
+
+    # ent#279: identity-scrub the worker's RAW text BEFORE sanitize_response /
+    # json.dumps below and before it lands in schedule_executions.response /
+    # error / execution_log. This is the pull sink -- SYNC, which is why the
+    # scrub seam ships a sync API. Empty staged set -> no-op.
+    _staged = get_staged_values()
+    if _staged:
+        content = scrub_text(_staged, content)
+        execution_log = scrub_obj(_staged, execution_log)
 
     # Map the typed reply status → row status (mirror the #1083 3-way map). An
     # auth failure the agent mislabels "cancelled" must NOT become a clean cancel

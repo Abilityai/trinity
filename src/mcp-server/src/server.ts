@@ -18,6 +18,7 @@ import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
 import { createReportTools } from "./tools/reports.js";
+import { createCanvasTools } from "./tools/canvas.js";
 import { createSubscriptionTools } from "./tools/subscriptions.js";
 import { createMonitoringTools } from "./tools/monitoring.js";
 import { createNeverminedTools } from "./tools/nevermined.js";
@@ -38,6 +39,7 @@ import { createAuthTools } from "./tools/auth.js";
 import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
+import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { withAudit } from "./audit.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
@@ -597,6 +599,7 @@ export async function createServer(config: ServerConfig = {}) {
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
     createReportTools(client, requireApiKey),     // Agent Reports (#918)
+    createCanvasTools(client, requireApiKey),     // Agent canvas (ent#438)
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
     createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection
     createSubscriptionTools(client, requireApiKey),
@@ -616,6 +619,7 @@ export async function createServer(config: ServerConfig = {}) {
     createRoomTools(client, requireApiKey),          // Shared sessions / rooms (ent#169)
     createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
+    createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {

@@ -287,6 +287,46 @@ def test_an_empty_answer_is_refused(asks_db, client_email):
     assert (ei.value.status_code, ei.value.code) == (422, "empty_answer")
 
 
+def test_a_note_only_answer_is_refused_as_empty(asks_db, client_email):
+    """#2375: `response` is the decision the agent reads — the write-back copies
+    it to the queue file verbatim and the ent#329 resume frames it as "the
+    answer". The old gate accepted `response_text` alone and coerced the missing
+    decision to "", so the Workspace's typed answers reached agents empty. A
+    note cannot stand alone."""
+    from database import db
+    from client_portal.asks import service
+    item_id = _raise_ask(addressed=client_email)
+
+    with pytest.raises(service.AskError) as ei:
+        service.answer_ask(item_id, client_email, False, None, "my actual answer")
+    assert (ei.value.status_code, ei.value.code) == (422, "empty_answer")
+    # And nothing was written: the ask still waits.
+    assert db.get_operator_queue_item(item_id)["status"] == "pending"
+
+
+def test_a_whitespace_decision_is_refused_as_empty(asks_db, client_email):
+    from client_portal.asks import service
+    item_id = _raise_ask(addressed=client_email)
+
+    with pytest.raises(service.AskError) as ei:
+        service.answer_ask(item_id, client_email, False, "   ", None)
+    assert (ei.value.status_code, ei.value.code) == (422, "empty_answer")
+
+
+def test_the_recorded_decision_is_verbatim_never_a_coerced_empty(asks_db, client_email):
+    """#2375: the row's `response` holds exactly what was sent — and the note
+    rides `response_text` beside it, not instead of it."""
+    from database import db
+    from client_portal.asks import service
+    item_id = _raise_ask(addressed=client_email)
+
+    service.answer_ask(item_id, client_email, False, "yes", "with a caveat")
+
+    row = db.get_operator_queue_item(item_id)
+    assert row["response"] == "yes"
+    assert row["response_text"] == "with a caveat"
+
+
 def test_someone_elses_ask_is_a_uniform_404(asks_db, client_email):
     """Not 403. A distinguishable refusal would let any client enumerate ask ids."""
     from client_portal.asks import service

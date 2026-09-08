@@ -16,14 +16,23 @@ import types
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 
-from models import User, VoiceStartRequest, VoiceStartResponse, VoiceStopRequest, VoiceStopResponse
+from models import (
+    DEFAULT_CANVAS_ID,
+    User,
+    VoiceStartRequest,
+    VoiceStartResponse,
+    VoiceStopRequest,
+    VoiceStopResponse,
+)
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
+from services import canvas_service
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +123,13 @@ async def voice_stop(
     if not session:
         raise HTTPException(status_code=404, detail="Voice session not found")
 
-    # Save transcript as chat messages
-    messages_saved = _save_transcript(session)
+    # Save transcript as chat messages. A Workspace call (ent#534) persists
+    # turn by turn on the worker holding the live socket and is closed there;
+    # this route only ends it — a `/stop` that lands on the OTHER worker holds
+    # a reconstructed session with no transcript and must write nothing.
+    messages_saved = 0
+    if not getattr(session, "portal_session_id", None) and await _claim_save(session.session_id):
+        messages_saved = _save_transcript(session)
 
     # Clean up
     await voice_service.remove_session(request.voice_session_id)
@@ -149,18 +163,23 @@ async def get_voice_panel(
     name: str = Depends(get_authorized_agent),
     current_user: User = Depends(get_current_user),
 ):
-    """Return the current canvas panel state for a workspace voice session.
+    """Return the canvas a workspace voice session draws on (ent#536).
 
-    Returns empty state (not 404) when session has ended so the frontend
-    poll loop doesn't raise errors during the teardown window.
+    The voice panel IS the agent's default canvas, so this is the canvas row —
+    the same blocks the Canvas tab renders — not an in-memory copy. Returns an
+    empty canvas shape (not 404) when the session has ended or nothing has been
+    drawn yet, so the poll loop never raises during the teardown window.
     """
     session = await voice_service.get_session(session_id)
     if not session:
-        return {"type": "empty", "content": "", "title": None, "updated_at": None}
+        return canvas_service.empty_canvas(name)
     if session.agent_name != name:
         raise HTTPException(status_code=403, detail="Session does not belong to this agent")
     assert_owns_or_admin(current_user, session.user_id, detail="Not authorized for this voice session")
-    return session.panel_state
+    canvas = db.get_agent_canvas(name, DEFAULT_CANVAS_ID)
+    if not canvas:
+        return canvas_service.empty_canvas(name)
+    return canvas_service.decorate([canvas], name)[0]
 
 
 @router.get("/api/agents/{name}/voice/prompt")
@@ -243,11 +262,9 @@ async def voice_websocket(
         await websocket.close(code=4001, reason="Authentication required")
         return
 
-    session = await voice_service.get_session(voice_session_id)
-    if not session:
-        await websocket.close(code=4004, reason="Voice session not found")
-        return
-
+    # ent#534 review: the token is verified BEFORE the session is looked up, so
+    # an unauthenticated caller cannot use 4004-vs-4001 to learn whether a
+    # session id exists.
     from jose import jwt, JWTError
     from config import SECRET_KEY, ALGORITHM
     try:
@@ -264,6 +281,11 @@ async def voice_websocket(
     user = db.get_user_by_username(username)
     if not user:
         await websocket.close(code=4001, reason="Unknown user")
+        return
+
+    session = await voice_service.get_session(voice_session_id)
+    if not session:
+        await websocket.close(code=4004, reason="Voice session not found")
         return
 
     # Ownership gate (#600): JWT user must own the voice session, or be admin.
@@ -301,13 +323,26 @@ async def voice_websocket(
             pass
 
     async def on_status(state: str):
+        frame = {"type": "status", "state": state}
+        if state == "ended":
+            # ent#534: never a silent drop — the surface is told WHY the call
+            # ended (cap / error / provider_closed; absent when the person did).
+            frame["reason"] = getattr(session, "end_reason", None)
+            frame["message"] = getattr(session, "end_message", None)
         try:
-            await websocket.send_json({
-                "type": "status",
-                "state": state,
-            })
+            await websocket.send_json(frame)
         except Exception:
             pass
+
+    # ent#534: a Workspace call writes each spoken turn into its thread as it
+    # completes, on THIS worker (the one holding the live provider socket).
+    portal_session_id = getattr(session, "portal_session_id", None)
+    on_turn = None
+    if portal_session_id:
+        from client_portal.voice import persist_voice_turn
+
+        async def on_turn(role: str, text: str):
+            persist_voice_turn(session, role, text)
 
     async def on_tool_call(tool_name: str, args: dict):
         try:
@@ -347,6 +382,7 @@ async def voice_websocket(
             on_status=on_status,
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
+            on_turn=on_turn,
         )
     )
 
@@ -367,10 +403,19 @@ async def voice_websocket(
     except WebSocketDisconnect:
         logger.info(f"Voice WebSocket disconnected: {voice_session_id}")
     finally:
-        # End the session and save transcript
-        session = await voice_service.end_session(voice_session_id)
-        if session:
-            _save_transcript(session)
+        # End the session and persist the transcript
+        ended = await voice_service.end_session(voice_session_id)
+        messages_saved = 0
+        if ended:
+            if getattr(ended, "portal_session_id", None):
+                # Workspace (ent#534): turns are already in the thread; close
+                # the call with its one summary row.
+                from client_portal.voice import persist_voice_call_end
+                messages_saved = persist_voice_call_end(
+                    ended, ended._duration_seconds, ended.end_reason, ended.end_message,
+                )
+            elif await _claim_save(voice_session_id):
+                messages_saved = _save_transcript(ended)
             await voice_service.remove_session(voice_session_id)
 
         # Cancel Gemini task
@@ -381,6 +426,20 @@ async def voice_websocket(
             except (asyncio.CancelledError, Exception):
                 pass
 
+        # ent#534: the `ended` status frame precedes this write, so a client that
+        # reloads its thread on `ended` races the DB. `saved` is the frame to
+        # reload on; it is sent after the rows exist and before the close.
+        try:
+            await websocket.send_json({
+                "type": "saved",
+                "messages_saved": messages_saved,
+                "duration_seconds": ended._duration_seconds if ended else 0.0,
+                "reason": getattr(ended, "end_reason", None) if ended else None,
+                "message": getattr(ended, "end_message", None) if ended else None,
+            })
+        except Exception:
+            pass
+
         try:
             await websocket.close()
         except Exception:
@@ -390,57 +449,14 @@ async def voice_websocket(
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
 async def _get_voice_system_prompt(agent_name: str) -> str:
-    """Get the voice system prompt.
+    """The agent's voice system prompt — see `services/voice_prompt_service.py`.
 
-    Priority:
-    1. Per-agent voice_system_prompt from DB (set via API)
-    2. voice-agent-system-prompt.md from agent container's working directory
-    3. Auto-generated from agent template info (description + voice behaviour hints)
+    Kept as a name on this module (tests and the Agent Detail path call it here);
+    the resolver itself moved to a service for ent#534 so the Workspace's start
+    route in `client_portal/` can share it without importing a router.
     """
-    # 1. Check DB override
-    prompt = db.get_voice_system_prompt(agent_name)
-    if prompt:
-        return prompt
-
-    # 2. Read from agent container file
-    container = get_agent_container(agent_name)
-    if container:
-        try:
-            from services.docker_utils import container_exec_run
-            result = await container_exec_run(
-                container,
-                "cat /home/developer/voice-agent-system-prompt.md",
-                user="developer",
-            )
-            output = result.output.decode("utf-8").strip() if hasattr(result, 'output') else str(result).strip()
-            if output and "No such file" not in output and len(output) > 10:
-                return output
-        except Exception as e:
-            logger.debug(f"Could not read voice-agent-system-prompt.md from {agent_name}: {e}")
-
-    # 3. Auto-generate from template info
-    description = None
-    if container:
-        try:
-            async with agent_httpx_client(agent_name, timeout=5.0) as client:
-                resp = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
-                if resp.status_code == 200:
-                    info = resp.json()
-                    description = info.get("description") or info.get("summary")
-        except Exception:
-            pass
-
-    display_name = agent_name.replace("-", " ").title()
-    lines = [f"You are {display_name}, an AI agent."]
-    if description:
-        lines.append(f"\n{description}")
-    lines.append(
-        "\n## Voice Behaviour\n"
-        "You are in a voice conversation. Keep responses concise and natural for speech. "
-        "No bullet points, markdown formatting, or code blocks — speak as you would in conversation. "
-        "One idea at a time. Use the run_task tool when you need to look something up or take an action."
-    )
-    return "\n".join(lines)
+    from services.voice_prompt_service import get_voice_system_prompt
+    return await get_voice_system_prompt(agent_name)
 
 
 def _get_voice_name(agent_name: str) -> str:
@@ -478,9 +494,39 @@ def _build_context_summary(chat_session_id: str) -> str:
     return "\n".join(lines)
 
 
+async def _claim_save(voice_session_id: str) -> bool:
+    """Cross-worker "who writes the transcript" claim (ent#534 review).
+
+    `voice_service.claim_transcript_save` is a Redis SETNX; a service stub
+    without it (the unit harness) claims trivially, as does a Redis error.
+    """
+    claim = getattr(voice_service, "claim_transcript_save", None)
+    if claim is None:
+        return True
+    try:
+        return bool(await claim(voice_session_id))
+    except Exception:  # noqa: BLE001 — never lose a transcript to the guard
+        return True
+
+
 def _save_transcript(session) -> int:
-    """Save voice transcript entries as ChatMessage rows."""
+    """Save voice transcript entries as ChatMessage rows (the Agent Detail path).
+
+    Once per call (ent#534 review): both the WebSocket `finally` and `/stop`
+    reach this, on the same worker or on two. An empty transcript writes
+    nothing (a reconstructed cross-worker session is always empty); the
+    in-process flag covers the same-worker double call; the Redis claim covers
+    the cross-worker one.
+    """
     saved = 0
+    if not getattr(session, "transcript", None):
+        return 0
+    if getattr(session, "_transcript_saved", False) is True:
+        return 0
+    session._transcript_saved = True
+    # ent#279: one staged-set read for the whole transcript; scrub each entry's
+    # text before it lands in chat_messages.content.
+    _staged = get_staged_values()
     for entry in session.transcript:
         try:
             db.add_chat_message(
@@ -489,7 +535,7 @@ def _save_transcript(session) -> int:
                 user_id=session.user_id,
                 user_email=session.user_email,
                 role=entry.role,
-                content=entry.text,
+                content=scrub_text(_staged, entry.text),
                 source="voice",
             )
             saved += 1

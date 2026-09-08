@@ -7,7 +7,8 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 ## Concepts
 
 - **dashboard.yaml** -- A YAML file in the agent's workspace defining custom widgets. The agent writes and updates this file to control what appears on its Dashboard tab.
-- **Widget Types** -- There are 11 supported types: `metric`, `status`, `progress`, `table`, `list`, `chart`, `text`, `badge`, `countdown`, `link`, `image`.
+- **Widget Types** -- There are 11 supported types: `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`.
+- **No chart widget** -- Trinity has never had a chart, badge, or countdown widget. Trend lines come from the platform: give a metric or progress widget a stable `id` and its history is drawn as a sparkline automatically.
 - **Historical Tracking** -- Widget values are stored in the `agent_dashboard_values` table over time, enabling trend analysis.
 - **Sparklines** -- Small inline charts rendered next to metrics showing value trends over time.
 - **Trend Indicators** -- Up, down, or stable arrows with percentage change calculated from historical data.

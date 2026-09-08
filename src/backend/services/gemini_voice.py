@@ -12,16 +12,17 @@ Architecture:
 import asyncio
 import json
 import logging
-import posixpath
 import secrets
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable
 
 from google import genai
 from google.genai import types as genai_types
 
 from config import GEMINI_API_KEY, VOICE_MODEL, VOICE_MAX_DURATION, REDIS_URL
+from models import DEFAULT_CANVAS_ID
+from services.canvas_blocks import WORKSPACE_ROOT, classify_image_src, map_panel_tool
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,35 @@ logger = logging.getLogger(__name__)
 INPUT_SAMPLE_RATE = 16000   # 16kHz PCM input to Gemini
 OUTPUT_SAMPLE_RATE = 24000  # 24kHz PCM output from Gemini
 
+# ent#534 — a session must outlive the provider's connection.
+#
+# Gemini Live ends an audio-only session at ~15 minutes unless context-window
+# compression is on, and recycles the underlying connection at ~10 minutes,
+# announcing it with a `go_away` message first. The 300 s Agent Detail cap hid
+# both; the Workspace's 30-minute cap does not. Every session therefore asks
+# for compression (lifts the 15-minute wall) and session resumption (a handle
+# the server refreshes as the call goes), and `connect_and_stream` reconnects
+# with the latest handle when a `go_away` arrives — the browser WebSocket, the
+# watchdog and the transcript all span the whole call; only the provider leg
+# is swapped.
+MAX_RECONNECTS_PER_SESSION = 8
+# How far before the cap the model is asked to wrap up, out loud (ent#534).
+CAP_WARNING_LEAD_SECONDS = 30
+_CAP_WARNING_TEXT = (
+    "[System notice: this call reaches its time limit in about thirty seconds. "
+    "Tell the person the call is about to end and wrap up in one short sentence.]"
+)
+
 # Max chars for tool call prompts (prevent injection via very long args)
 _TOOL_PROMPT_MAX = 2000
-# Max bytes stored in panel_state["content"] to bound memory per session
-_PANEL_CONTENT_MAX = 524_288  # 512 KB
 
-# Agent workspace root inside the container; show_image file paths must resolve under it.
-_WORKSPACE_ROOT = "/home/developer"
+# ent#536 — the voice panel IS the agent's default canvas. The panel tools are
+# thin verbs over the canvas block rules (`services/canvas_blocks.py`): the
+# same image confinement gate, the same block ids, the same write path the
+# agent's own `set_canvas` uses. Re-exported names keep the #979 tests and any
+# external importer working.
+_WORKSPACE_ROOT = WORKSPACE_ROOT
+_classify_image_src = classify_image_src
 
 _PANEL_TOOL_NAMES = {
     "show_markdown", "update_panel", "append_to_panel", "clear_panel",
@@ -132,66 +155,32 @@ _PANEL_TOOLS = genai_types.Tool(
 WORKSPACE_PANEL_INSTRUCTIONS = """
 ## Visual Canvas
 
-You have a visual canvas panel visible to the user on the right side of the screen. Use it proactively alongside your voice responses.
+You have a visual canvas visible to the user beside the conversation. It is the agent's own canvas — the same one you keep with `set_canvas` in text chat — so what you draw here persists after the call, on the Canvas tab. Use it proactively alongside your voice responses.
 
-Panel tools:
-- `show_markdown(content, title?)` — Render markdown. Use most often for notes, summaries, action items, analysis.
+Panel tools (each draws a block on the canvas):
+- `show_markdown(content, title?)` — Render markdown. Use most often for notes, summaries, action items, analysis. It may embed ```chart / ```kpi / ```table fences (JSON inside) and ```mermaid fences, which render as figures.
 - `show_diagram(diagram, title?)` — Render a Mermaid diagram. Use for flowcharts, sequence diagrams, mindmaps, timelines, state/class/ER diagrams — anytime structure or flow is easier shown than spoken.
-- `show_image(src, title?, caption?)` — Display an image by web URL or workspace file path.
-- `update_panel(html, title?)` — Replace panel with HTML for richer layouts.
-- `append_to_panel(html)` — Add to existing panel without clearing.
-- `clear_panel()` — Clear when shifting to a new topic.
+- `show_image(src, title?, caption?)` — Display an image by https URL or a file path in your workspace.
+- `update_panel(html, title?)` — Replace your panel block with static HTML for richer layouts.
+- `append_to_panel(html)` — Add to your panel block without clearing it.
+- `clear_panel()` — Remove what you drew when shifting to a new topic. Blocks written earlier with `set_canvas` are left alone.
 
 Guidelines:
-- The panel is a persistent whiteboard — voice is transient, the panel is the artefact. Each update is kept in history, so the user can scroll back through what you drew.
+- Voice is transient, the canvas is the artefact — it stays after the call.
 - Use `show_markdown` by default. Reach for `show_diagram` when a picture of the structure helps, `update_panel` only when custom layout genuinely adds value.
-- Don't mirror every voice response in the panel — use it when structured content helps.
+- Don't mirror every voice response on the canvas — use it when structured content helps.
 - Clear when the topic changes significantly.
 
 Mermaid rule (for `show_diagram`):
 - Pass raw Mermaid source only (no ```mermaid fences). Example: `graph TD; Start-->Stop`.
-- Keep diagrams focused; invalid syntax shows a contained error in the panel.
+- Keep diagrams focused; invalid syntax shows a contained error on the canvas.
 
 HTML rule (for `update_panel`):
-- Panel HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, styled `<div>`s, inline `style=` attributes, images.
+- HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, `<div>`s, images.
+- Style with the canvas kit classes only: `ck-card` (+ `ck-card-title`), `ck-grid-2/3/4`, `ck-section`, `ck-callout ck-info|ck-success|ck-warning|ck-danger`, `ck-chip`, `ck-kpi`, `ck-table`, `ck-figure` + `ck-caption`, `ck-muted`. Other classes, inline styles and `<style>` are dropped.
 - Do NOT use `<script>`, `<canvas>` + JS charting, or any JS-driven rendering — it will be stripped and show nothing.
-- For data visualisation, prefer `show_diagram` (Mermaid: fl/pie/quadrant/xychart) or `show_image` (a chart image by URL or workspace path). Reserve `update_panel` for rich static layouts that markdown can't express.
+- For data visualisation, put a ```chart fence in `show_markdown` (Trinity draws it from the data), or use `show_diagram` / `show_image`.
 """
-
-def _classify_image_src(src: str) -> Optional[tuple[str, str]]:
-    """Classify a show_image src as a web URL or a workspace-confined file path.
-
-    Returns (value, kind) where kind is "url" or "path", or None if the src is
-    neither an allowed web URL nor a path that resolves inside the agent
-    workspace. The frontend renders "url" directly and fetches "path" through the
-    authenticated /files/preview endpoint, so this is the only confinement gate
-    on the panel side — and it is stricter than the agent-server's prefix check,
-    rejecting sibling escapes like /home/developer-evil and any '..' traversal.
-    """
-    if not src:
-        return None
-    low = src.lower()
-    if low.startswith("http://") or low.startswith("https://"):
-        return (src, "url")
-    if low.startswith("data:") or "://" in low:
-        # data: URIs (unbounded inline bytes) and other schemes (file:, ftp:, …)
-        # are not allowed.
-        return None
-
-    # Treat as a workspace file path. Accept absolute (/home/developer/...) or
-    # relative (resolved against the workspace root). '~/' is workspace-relative.
-    path = src[2:] if src.startswith("~/") else src
-    # A ':' in the first path segment is a URI scheme (javascript:, mailto:, …),
-    # not a real path segment — reject before resolving.
-    if ":" in path.split("/", 1)[0]:
-        return None
-    if path.startswith("/"):
-        candidate = posixpath.normpath(path)
-    else:
-        candidate = posixpath.normpath(posixpath.join(_WORKSPACE_ROOT, path))
-    if candidate != _WORKSPACE_ROOT and not candidate.startswith(_WORKSPACE_ROOT + "/"):
-        return None
-    return (candidate, "path")
 
 
 # Single tool declaration for all voice sessions
@@ -250,22 +239,41 @@ class VoiceTranscriptEntry:
 
 @dataclass
 class VoiceSession:
-    """Tracks state for an active voice session."""
+    """Tracks state for an active voice session.
+
+    Two front doors share it (ent#534): the Agent Detail overlay binds the
+    session to a `chat_session_id` (transcript → `chat_messages` at the end),
+    the Workspace binds it to a `portal_session_id` + `client_email`
+    (transcript → `enterprise_portal_messages`, turn by turn). Exactly one of
+    the two is set.
+    """
     session_id: str
     agent_name: str
-    chat_session_id: str
+    chat_session_id: Optional[str]
     user_id: int
     user_email: str
     system_prompt: str
     voice_name: str = "Kore"
     workspace_mode: bool = False
+    portal_session_id: Optional[str] = None
+    client_email: Optional[str] = None
+    # How the call ended, for the words the surface shows and the row the chat
+    # keeps: None while live or ended by the person; "cap" at the time limit;
+    # "error" when the provider leg failed; "provider_closed" when it closed
+    # without a go_away and no reconnect was possible.
+    end_reason: Optional[str] = None
+    end_message: Optional[str] = None
     # Max session length (seconds) before the watchdog auto-ends it. Browser voice
     # sessions use VOICE_MAX_DURATION; phone calls pass VOIP_MAX_CALL_DURATION.
     max_duration: int = VOICE_MAX_DURATION
     transcript: list = field(default_factory=list)
-    panel_state: dict = field(default_factory=lambda: {
-        "type": "empty", "content": "", "title": None, "updated_at": None
-    })
+    # ent#536 — the audience this session may WRITE at. `operator` for both
+    # front doors: an Agent Detail call is an operator surface, and so is a
+    # Workspace call (ent#534) — an internal user's call, whose drawings the
+    # Workspace shows them because a platform principal reads every audience
+    # there, not because the call published wider. A voice write never lands on
+    # a canvas WIDER than this.
+    canvas_audience: str = "operator"
     _gemini_session: object = field(default=None, repr=False)
     _send_task: object = field(default=None, repr=False)
     _receive_task: object = field(default=None, repr=False)
@@ -274,12 +282,26 @@ class VoiceSession:
     _pending_tool_tasks: dict = field(default_factory=dict)  # call_id → asyncio.Task
     _active: bool = False
     _duration_seconds: float = 0.0
+    _started_monotonic: float = 0.0
+    # ent#534 — provider-connection lifetime (see MAX_RECONNECTS_PER_SESSION)
+    _resumption_handle: Optional[str] = field(default=None, repr=False)
+    _go_away: bool = False
+    _reconnects: int = 0
+    # ent#534 — the turn in progress, mirrored from the receive loop so that an
+    # End pressed before the provider's `turn_complete` (the common case: the
+    # person hangs up the moment the answer lands) still records what was said.
+    _partial_user_text: str = field(default="", repr=False)
+    _partial_assistant_text: str = field(default="", repr=False)
+    # ent#534 — the Agent Detail save-at-end path must run once per call even
+    # when the WebSocket `finally` and `/stop` both reach it.
+    _transcript_saved: bool = False
     # Callbacks
     _on_audio_out: Optional[Callable] = field(default=None, repr=False)
     _on_transcript: Optional[Callable] = field(default=None, repr=False)
     _on_status: Optional[Callable] = field(default=None, repr=False)
     _on_tool_call: Optional[Callable] = field(default=None, repr=False)    # (name, args) → None
     _on_tool_result: Optional[Callable] = field(default=None, repr=False)  # (name, result) → None
+    _on_turn: Optional[Callable] = field(default=None, repr=False)         # (role, text) → None, per completed turn
 
 
 class GeminiVoiceService:
@@ -311,19 +333,27 @@ class GeminiVoiceService:
     async def create_session(
         self,
         agent_name: str,
-        chat_session_id: str,
+        chat_session_id: Optional[str],
         user_id: int,
         user_email: str,
         system_prompt: str,
         voice_name: str = "Kore",
         workspace_mode: bool = False,
         max_duration: Optional[int] = None,
+        portal_session_id: Optional[str] = None,
+        client_email: Optional[str] = None,
+        canvas_audience: str = "operator",
     ) -> VoiceSession:
         """Create a new voice session (does not connect yet).
 
         `max_duration` overrides the watchdog's auto-end timeout (seconds). The
         browser voice path leaves it None (→ VOICE_MAX_DURATION); the phone path
-        passes VOIP_MAX_CALL_DURATION so calls aren't cut at the 5-min voice cap.
+        passes VOIP_MAX_CALL_DURATION so calls aren't cut at the 5-min voice cap;
+        the Workspace (ent#534) passes WORKSPACE_VOICE_MAX_DURATION.
+
+        `portal_session_id` + `client_email` bind the call to a Workspace thread
+        instead of a chat session (ent#534). `canvas_audience` is the widest
+        audience the call may draw at (ent#536).
         """
         session_id = f"vs_{secrets.token_urlsafe(16)}"
         effective_max_duration = max_duration if max_duration is not None else VOICE_MAX_DURATION
@@ -337,11 +367,18 @@ class GeminiVoiceService:
             voice_name=voice_name,
             workspace_mode=workspace_mode,
             max_duration=effective_max_duration,
+            portal_session_id=portal_session_id,
+            client_email=client_email,
+            canvas_audience=canvas_audience,
         )
         self._sessions[session_id] = session
 
         # Persist metadata to Redis so any Uvicorn worker can validate the session.
         # The active streaming state (Gemini connection, asyncio tasks) stays in-process.
+        # EVERY field a reconstructed session decides on must be here — a
+        # worker that rebuilds the session from this blob and then streams the
+        # call would otherwise draw at the default audience or save the
+        # transcript to the wrong place (ent#534 review).
         metadata = {
             "session_id": session_id,
             "agent_name": agent_name,
@@ -352,6 +389,9 @@ class GeminiVoiceService:
             "workspace_mode": workspace_mode,
             "system_prompt": system_prompt,
             "max_duration": effective_max_duration,
+            "portal_session_id": portal_session_id,
+            "client_email": client_email,
+            "canvas_audience": canvas_audience,
         }
         try:
             r = await self._get_redis()
@@ -377,6 +417,7 @@ class GeminiVoiceService:
         on_status: Callable[[str], Awaitable[None]],           # status string
         on_tool_call: Optional[Callable] = None,               # (name, args) → None
         on_tool_result: Optional[Callable] = None,             # (name, result) → None
+        on_turn: Optional[Callable] = None,                    # (role, text) → None, per completed turn
     ):
         """
         Connect to Gemini Live API and begin streaming.
@@ -384,6 +425,12 @@ class GeminiVoiceService:
         This is the main loop that runs for the lifetime of the voice session.
         It spawns send/receive tasks and waits until the session ends.
         Tool calls are executed asynchronously against the agent container.
+
+        ent#534: the provider CONNECTION may be replaced during the session. A
+        `go_away` from the server ends the current leg; the loop reconnects with
+        the latest resumption handle (bounded by MAX_RECONNECTS_PER_SESSION) and
+        the call continues — the watchdog, the browser socket and the transcript
+        are all session-scoped, not connection-scoped.
         """
         session = self._sessions.get(session_id)
         if not session:
@@ -394,15 +441,93 @@ class GeminiVoiceService:
         session._on_status = on_status
         session._on_tool_call = on_tool_call
         session._on_tool_result = on_tool_result
+        session._on_turn = on_turn
         session._active = True
+        session._started_monotonic = time.monotonic()
 
         client = self._get_client()
 
+        # The watchdog spans the CALL, so it lives outside the per-connection
+        # TaskGroup below.
+        session._timeout_task = asyncio.create_task(self._timeout_watchdog(session))
+
+        try:
+            await on_status("connecting")
+
+            while session._active:
+                session._go_away = False
+                config = self._build_live_config(session)
+                async with client.aio.live.connect(
+                    model=VOICE_MODEL,
+                    config=config,
+                ) as gemini_session:
+                    session._gemini_session = gemini_session
+                    await on_status("listening")
+
+                    # Run send and receive concurrently for this connection leg.
+                    async with asyncio.TaskGroup() as tg:
+                        session._send_task = tg.create_task(
+                            self._send_audio_loop(session)
+                        )
+                        session._receive_task = tg.create_task(
+                            self._receive_audio_loop(session)
+                        )
+                session._gemini_session = None
+
+                if not session._active:
+                    break
+                if (session._go_away and session._resumption_handle
+                        and session._reconnects < MAX_RECONNECTS_PER_SESSION):
+                    session._reconnects += 1
+                    logger.info(
+                        "Voice session %s: provider go_away, reconnecting (%d/%d)",
+                        session_id, session._reconnects, MAX_RECONNECTS_PER_SESSION,
+                    )
+                    await on_status("connecting")
+                    continue
+                # The provider leg ended and we cannot (or may not) reconnect:
+                # the call is over, and the surface is told why.
+                if session.end_reason is None:
+                    session.end_reason = "provider_closed"
+                    session.end_message = (
+                        "The voice connection closed."
+                        if not session._go_away
+                        else "The voice connection could not be resumed."
+                    )
+                break
+
+        except* asyncio.CancelledError:
+            logger.info(f"Voice session {session_id} cancelled")
+        except* Exception as eg:
+            for exc in eg.exceptions:
+                logger.error(f"Voice session {session_id} error: {exc}")
+            if session.end_reason is None:
+                session.end_reason = "error"
+                session.end_message = "The voice provider returned an error."
+        finally:
+            session._active = False
+            session._duration_seconds = max(
+                session._duration_seconds,
+                time.monotonic() - session._started_monotonic if session._started_monotonic else 0.0,
+            )
+            if session._timeout_task and not session._timeout_task.done():
+                session._timeout_task.cancel()
+            await on_status("ended")
+            logger.info(f"Voice session {session_id} ended, transcript entries: {len(session.transcript)}")
+
+    def _build_live_config(self, session: VoiceSession):
+        """The LiveConnectConfig for one connection leg of `session` (ent#534).
+
+        Compression + resumption are requested through `getattr` so a stubbed
+        or older SDK without those types still connects — the call then simply
+        has the provider's default lifetime, which is the pre-ent#534 behaviour
+        rather than a crash at connect time.
+        """
         tools = [_RUN_TASK_TOOL]
         if session.workspace_mode:
             tools.append(_PANEL_TOOLS)
 
-        config = genai_types.LiveConnectConfig(
+        kwargs = dict(
             response_modalities=["AUDIO"],
             system_instruction=session.system_prompt + _TOOL_ETIQUETTE_INSTRUCTION,
             speech_config=genai_types.SpeechConfig(
@@ -414,42 +539,18 @@ class GeminiVoiceService:
             ),
             tools=tools,
         )
-
-        try:
-            await on_status("connecting")
-
-            async with client.aio.live.connect(
-                model=VOICE_MODEL,
-                config=config,
-            ) as gemini_session:
-                session._gemini_session = gemini_session
-                await on_status("listening")
-
-                # Run send and receive concurrently with a timeout
-                async with asyncio.TaskGroup() as tg:
-                    session._send_task = tg.create_task(
-                        self._send_audio_loop(session)
-                    )
-                    session._receive_task = tg.create_task(
-                        self._receive_audio_loop(session)
-                    )
-                    session._timeout_task = tg.create_task(
-                        self._timeout_watchdog(session)
-                    )
-
-        except* asyncio.CancelledError:
-            logger.info(f"Voice session {session_id} cancelled")
-        except* Exception as eg:
-            for exc in eg.exceptions:
-                logger.error(f"Voice session {session_id} error: {exc}")
-        finally:
-            session._active = False
-            await on_status("ended")
-            logger.info(f"Voice session {session_id} ended, transcript entries: {len(session.transcript)}")
+        compression_cls = getattr(genai_types, "ContextWindowCompressionConfig", None)
+        window_cls = getattr(genai_types, "SlidingWindow", None)
+        if compression_cls and window_cls:
+            kwargs["context_window_compression"] = compression_cls(sliding_window=window_cls())
+        resumption_cls = getattr(genai_types, "SessionResumptionConfig", None)
+        if resumption_cls:
+            kwargs["session_resumption"] = resumption_cls(handle=session._resumption_handle)
+        return genai_types.LiveConnectConfig(**kwargs)
 
     async def _send_audio_loop(self, session: VoiceSession):
-        """Forward audio from the input queue to Gemini."""
-        while session._active:
+        """Forward audio from the input queue to Gemini (one connection leg)."""
+        while session._active and not session._go_away:
             try:
                 chunk = await asyncio.wait_for(
                     session._audio_in_queue.get(), timeout=1.0
@@ -468,14 +569,35 @@ class GeminiVoiceService:
 
     async def _receive_audio_loop(self, session: VoiceSession):
         """Receive audio, transcriptions, and tool calls from Gemini."""
-        current_user_text = ""
-        current_assistant_text = ""
+        # ent#534 review (I1): a connection leg that starts after a mid-turn
+        # `go_away` resumes the turn in progress rather than overwriting the
+        # mirrored partial text with an empty string on the first new chunk.
+        current_user_text = session._partial_user_text
+        current_assistant_text = session._partial_assistant_text
 
         while session._active:
             try:
                 turn = session._gemini_session.receive()
                 async for response in turn:
                     if not session._active:
+                        return
+
+                    # ent#534 — provider-connection lifetime signals. The
+                    # resumption handle is refreshed by the server as the call
+                    # goes; a go_away means THIS connection is about to close,
+                    # and connect_and_stream reconnects with the latest handle.
+                    update = getattr(response, 'session_resumption_update', None)
+                    if update is not None:
+                        handle = getattr(update, 'new_handle', None)
+                        if handle and getattr(update, 'resumable', True):
+                            session._resumption_handle = handle
+                        continue
+                    if getattr(response, 'go_away', None) is not None:
+                        logger.info(
+                            "Voice session %s: go_away (time_left=%s)",
+                            session.session_id, getattr(response.go_away, 'time_left', None),
+                        )
+                        session._go_away = True
                         return
 
                     # Tool calls — spawn async task per call, keyed by call_id
@@ -507,6 +629,7 @@ class GeminiVoiceService:
                         text = content.input_transcription.text
                         if text and text.strip():
                             current_user_text += text
+                            session._partial_user_text = current_user_text
                             if session._on_transcript:
                                 await session._on_transcript("user", text)
 
@@ -515,6 +638,7 @@ class GeminiVoiceService:
                         text = content.output_transcription.text
                         if text and text.strip():
                             current_assistant_text += text
+                            session._partial_assistant_text = current_assistant_text
                             if session._on_transcript:
                                 await session._on_transcript("assistant", text)
 
@@ -524,15 +648,13 @@ class GeminiVoiceService:
                             await session._on_status("listening")
 
                         if current_user_text.strip():
-                            session.transcript.append(
-                                VoiceTranscriptEntry(role="user", text=current_user_text.strip())
-                            )
+                            await self._record_turn(session, "user", current_user_text.strip())
                             current_user_text = ""
                         if current_assistant_text.strip():
-                            session.transcript.append(
-                                VoiceTranscriptEntry(role="assistant", text=current_assistant_text.strip())
-                            )
+                            await self._record_turn(session, "assistant", current_assistant_text.strip())
                             current_assistant_text = ""
+                        session._partial_user_text = ""
+                        session._partial_assistant_text = ""
 
             except asyncio.CancelledError:
                 raise
@@ -541,75 +663,104 @@ class GeminiVoiceService:
                     logger.error(f"Receive audio error: {e}")
                 break
 
-        # Flush any remaining text
-        if current_user_text.strip():
-            session.transcript.append(
-                VoiceTranscriptEntry(role="user", text=current_user_text.strip())
-            )
-        if current_assistant_text.strip():
-            session.transcript.append(
-                VoiceTranscriptEntry(role="assistant", text=current_assistant_text.strip())
-            )
+        # Flush any remaining text — but NOT on a go_away: the turn continues
+        # on the next connection leg and would otherwise be split in two.
+        if not session._go_away:
+            await self._flush_partial_turn(session)
+
+    async def _flush_partial_turn(self, session: VoiceSession):
+        """Record the turn in progress, if any (ent#534).
+
+        Reached from the receive loop's own exit and from `end_session`: an End
+        pressed a second after the answer landed is BEFORE the provider's
+        `turn_complete`, and without this the call's last exchange — the one the
+        person just heard — would be the one row missing from the chat.
+        """
+        user_text = session._partial_user_text.strip()
+        assistant_text = session._partial_assistant_text.strip()
+        session._partial_user_text = ""
+        session._partial_assistant_text = ""
+        if user_text:
+            await self._record_turn(session, "user", user_text)
+        if assistant_text:
+            await self._record_turn(session, "assistant", assistant_text)
+
+    async def _record_turn(self, session: VoiceSession, role: str, text: str):
+        """Append a completed turn to the transcript and tell the front door.
+
+        The transcript list is what the Agent Detail path saves at the end;
+        `_on_turn` is how the Workspace path persists as it goes (ent#534). A
+        failing callback must never take the audio loop down with it.
+        """
+        session.transcript.append(VoiceTranscriptEntry(role=role, text=text))
+        if session._on_turn:
+            try:
+                await session._on_turn(role, text)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Voice session %s: on_turn callback failed: %s", session.session_id, e)
+
+    # ent#536 — the voice panel IS the agent's default canvas.
+    #
+    # There is no in-session copy of the panel any more: the canvas row is the
+    # state, the live poll reads the row, and the Canvas tab shows the same
+    # blocks after the call. Each panel verb is mapped onto a block edit by
+    # `canvas_blocks.map_panel_tool` — `show_*` replaces the `voice` block,
+    # `append_to_panel` grows it, `clear_panel` removes the voice blocks and
+    # nothing else — and written through the SAME `canvas_service.write_canvas`
+    # the agent's `set_canvas` uses, so caps and per-kind rules cannot diverge.
+    #
+    # Audience is a property of the WRITE, not the canvas: the session carries
+    # the widest audience it may publish at (`canvas_audience`, default
+    # `operator`). A canvas stored WIDER than that is refused with a reason the
+    # model can voice — an operator's call must never land on a customer's
+    # Workspace because the agent had published its board there — and a canvas
+    # stored narrower keeps its stored audience, so a call never widens either.
+    _CANVAS_ID = DEFAULT_CANVAS_ID
 
     def _execute_panel_tool(self, session: VoiceSession, tool_name: str, args: dict) -> str:
-        """Handle panel tools in-process (no agent container call)."""
-        now = datetime.now(timezone.utc).isoformat()
-        if tool_name == "show_markdown":
-            session.panel_state = {
-                "type": "markdown",
-                "content": args.get("content", ""),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "show_diagram":
-            session.panel_state = {
-                "type": "mermaid",
-                "content": args.get("diagram", ""),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "show_image":
-            src = str(args.get("src", "")).strip()
-            if not src:
-                return "No image source provided."
-            kind = _classify_image_src(src)
-            if kind is None:
-                # Not a web URL and not a workspace-confined file path — reject.
+        """Handle panel tools in-process (no agent container call).
+
+        Fail-soft on the store: the voice turn is the thing the person is
+        watching, and a canvas write that fails must not break the tool result
+        the model is waiting on. The result SAYS the canvas could not be saved
+        rather than claiming success, so the model does not describe a drawing
+        nobody can see.
+        """
+        try:
+            from database import db
+            from services import canvas_service
+
+            current = db.get_agent_canvas(session.agent_name, self._CANVAS_ID)
+            stored_audience = (current or {}).get("audience") or session.canvas_audience
+            if not canvas_service.audience_within(stored_audience, session.canvas_audience):
                 return (
-                    "Image rejected: src must be an https:// URL or a path inside "
-                    "your workspace (/home/developer). Path traversal is not allowed."
+                    f"Canvas not updated: your '{self._CANVAS_ID}' canvas is published to "
+                    f"'{stored_audience}' readers and this call may only write for "
+                    f"'{session.canvas_audience}'. Drawing here would show this conversation "
+                    "to them, so nothing was drawn."
                 )
-            value, image_kind = kind
-            session.panel_state = {
-                "type": "image",
-                "content": value,
-                "image_kind": image_kind,   # "url" | "path"
-                "caption": args.get("caption"),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "update_panel":
-            session.panel_state = {
-                "type": "html",
-                "content": args.get("html", ""),
-                "title": args.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "append_to_panel":
-            combined = session.panel_state.get("content", "") + args.get("html", "")
-            if len(combined) > _PANEL_CONTENT_MAX:
-                combined = combined[-_PANEL_CONTENT_MAX:]
-            session.panel_state = {
-                "type": session.panel_state.get("type", "html"),
-                "content": combined,
-                "title": session.panel_state.get("title"),
-                "updated_at": now,
-            }
-        elif tool_name == "clear_panel":
-            session.panel_state = {
-                "type": "empty", "content": "", "title": None, "updated_at": now,
-            }
-        return "Panel updated."
+            blocks, message = map_panel_tool(
+                tool_name, args, (current or {}).get("blocks") or []
+            )
+            if blocks is None:
+                return message
+            canvas_service.write_canvas(
+                session.agent_name,
+                self._CANVAS_ID,
+                blocks,
+                title=(current or {}).get("title"),
+                audience=stored_audience,
+                execution_id=None,
+                # ent#537 — a voice edit keeps the board's layout; every writer
+                # of the row carries the same fields (the 2026-08-24 rule).
+                template=(current or {}).get("template"),
+            )
+            return message
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "voice panel: canvas write failed for %s: %s", session.agent_name, e
+            )
+            return f"Canvas could not be saved: {str(e)[:200]}"
 
     async def _execute_and_respond(self, session: VoiceSession, call_id: str, fc):
         """Execute a Gemini tool call and send the response back. Runs as a background task."""
@@ -681,11 +832,46 @@ class GeminiVoiceService:
 
     async def _timeout_watchdog(self, session: VoiceSession):
         """Auto-end session after its max duration (per-session; phone calls
-        use VOIP_MAX_CALL_DURATION, browser voice uses VOICE_MAX_DURATION)."""
-        await asyncio.sleep(session.max_duration)
+        use VOIP_MAX_CALL_DURATION, browser voice uses VOICE_MAX_DURATION, the
+        Workspace uses WORKSPACE_VOICE_MAX_DURATION).
+
+        ent#534 — never a silent drop: CAP_WARNING_LEAD_SECONDS before the cap
+        the model is asked, as a text turn on the realtime channel, to say the
+        call is ending and wrap up; at the cap `end_reason` is set BEFORE
+        `end_session` (which cancels this very task), so the surface and the
+        transcript both learn why.
+        """
+        lead = min(CAP_WARNING_LEAD_SECONDS, session.max_duration)
+        await asyncio.sleep(max(0, session.max_duration - lead))
+        if not session._active:
+            return
+        if session._gemini_session is not None and lead > 0:
+            try:
+                await session._gemini_session.send_realtime_input(text=_CAP_WARNING_TEXT)
+            except Exception as e:  # noqa: BLE001 — the written notice still lands
+                logger.warning("Voice session %s: cap warning not delivered: %s", session.session_id, e)
+        await asyncio.sleep(lead)
         if session._active:
             logger.info(f"Voice session {session.session_id} hit max duration ({session.max_duration}s)")
+            session.end_reason = "cap"
+            session.end_message = f"The call reached its {max(1, round(session.max_duration / 60))}-minute limit."
             await self.end_session(session.session_id)
+
+    async def claim_transcript_save(self, session_id: str) -> bool:
+        """One save per call across workers (ent#534).
+
+        The Agent Detail path saves its transcript at the end, and both the
+        WebSocket `finally` and `/stop` reach that code — possibly on different
+        uvicorn workers. A Redis SETNX decides who writes. Fail-OPEN on a Redis
+        error: losing a transcript is worse than a duplicate, and the in-process
+        `_transcript_saved` flag still covers the same-worker case.
+        """
+        try:
+            r = await self._get_redis()
+            return bool(await r.set(f"voice_session:{session_id}:saved", "1", nx=True, ex=600))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("voice transcript save-claim failed for %s: %s", session_id, e)
+            return True
 
     async def send_audio(self, session_id: str, audio_data: bytes):
         """Queue audio data for sending to Gemini."""
@@ -700,6 +886,16 @@ class GeminiVoiceService:
             return None
 
         session._active = False
+        if session._started_monotonic:
+            session._duration_seconds = max(
+                session._duration_seconds, time.monotonic() - session._started_monotonic
+            )
+        # ent#534: the turn in progress is recorded BEFORE the receive task is
+        # cancelled — cancellation skips its own exit flush.
+        try:
+            await self._flush_partial_turn(session)
+        except Exception as e:  # noqa: BLE001 — never block the end on bookkeeping
+            logger.warning("Voice session %s: partial-turn flush failed: %s", session_id, e)
 
         # Send poison pill to unblock send loop
         await session._audio_in_queue.put(None)
@@ -743,13 +939,16 @@ class GeminiVoiceService:
         session = VoiceSession(
             session_id=meta["session_id"],
             agent_name=meta["agent_name"],
-            chat_session_id=meta["chat_session_id"],
+            chat_session_id=meta.get("chat_session_id"),
             user_id=meta["user_id"],
             user_email=meta["user_email"],
             system_prompt=meta["system_prompt"],
             voice_name=meta.get("voice_name", "Kore"),
             workspace_mode=meta.get("workspace_mode", False),
             max_duration=meta.get("max_duration", VOICE_MAX_DURATION),
+            portal_session_id=meta.get("portal_session_id"),
+            client_email=meta.get("client_email"),
+            canvas_audience=meta.get("canvas_audience") or "operator",
         )
         self._sessions[session_id] = session
         logger.info(f"Voice session {session_id} reconstructed from Redis on worker")

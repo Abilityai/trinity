@@ -70,14 +70,42 @@ def _sig(route):
     return (route.path, tuple(sorted(route.methods)), route.name)
 
 
+# Routes that landed on `dev` AFTER the fork point this guard compares against,
+# and are therefore legitimately absent from the pre-split blob. Each entry is
+# an explicit, reviewed statement that a route is NEW — not that the comparison
+# is noisy. An unlisted addition still fails, which is the property that makes
+# the guard worth keeping; the alternative (moving the pinned blob forward on
+# every merge) silently re-baselines whatever drifted in with it.
+_ADDED_SINCE_SPLIT = {
+    # ent#437 — "don't ask again" marker for the Finish-setup consent card.
+    ("/api/settings/telemetry-sharing/ask/dismiss", ("POST",),
+     "dismiss_telemetry_ask"),
+}
+
+
 def test_the_mounted_route_set_is_unchanged(monkeypatch):
     """The API a caller sees is identical — no route lost, none invented."""
     import routers.settings as new
 
     before = {_sig(r) for r in _pre_split_router(monkeypatch).routes}
     after = {_sig(r) for r in new.router.routes}
-    assert after - before == set(), f"routes invented by the split: {sorted(after - before)}"
+    invented = after - before - _ADDED_SINCE_SPLIT
+    assert invented == set(), f"routes invented by the split: {sorted(invented)}"
     assert before - after == set(), f"routes lost by the split: {sorted(before - after)}"
+
+
+def test_the_post_split_allowlist_is_not_stale():
+    """An allowlist entry that no longer names a mounted route is a lie the next
+    reader inherits — it would silently excuse a *different* route with the same
+    signature later. Fail while the fix is one line."""
+    import routers.settings as new
+
+    mounted = {_sig(r) for r in new.router.routes}
+    stale = _ADDED_SINCE_SPLIT - mounted
+    assert stale == set(), (
+        "these _ADDED_SINCE_SPLIT entries no longer name a mounted route — "
+        f"drop them: {sorted(stale)}"
+    )
 
 
 def _concrete(path: str) -> str:
@@ -132,13 +160,23 @@ def test_the_catch_all_is_included_last():
     )
 
 
+def _logical_lines(path: Path) -> int:
+    """Lines that carry code. Blank separators and whole-line comments are not
+    what the 800-line class measures — counting them would make restoring a
+    PEP-8 blank line between two defs read as the module growing."""
+    return sum(
+        1 for line in path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
 def test_every_module_is_under_the_critical_threshold():
     """The size AC. 800 logical lines is the repo's critical class; the point of
     the split was to leave nothing above it."""
     oversized = {
-        p.name: len(p.read_text().splitlines())
+        p.name: n
         for p in _PKG.glob("*.py")
-        if len(p.read_text().splitlines()) > 800
+        if (n := _logical_lines(p)) > 800
     }
     assert oversized == {}, f"still over the 800-line threshold: {oversized}"
 

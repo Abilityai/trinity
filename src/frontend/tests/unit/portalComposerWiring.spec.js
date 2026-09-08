@@ -68,12 +68,17 @@ describe.each(FILES)('#2211 wiring — %s', (name) => {
     expect(body.split('\n}\n')[0]).toMatch(/autoGrow/)
   })
 
-  it('defines the prose-portal rules it applies', () => {
+  it('does not define prose-portal locally — PortalMarkdown is the one home', () => {
+    // This assertion used to require the OPPOSITE: each transcript had to carry
+    // its own copy of the stylesheet, because the class was applied in both and
+    // defined in one, so a room transcript silently got no rules at all. Two
+    // copies "kept byte-identical so they cannot drift" is the tell that they
+    // wanted to be one thing — #2515 made them one (PortalMarkdown.vue), and
+    // the guard now protects the merge instead of the duplication.
     const text = src(name)
-    if (!text.includes('prose-portal')) return
-    expect(text, `${name} applies prose-portal but defines no rules for it`)
-      .toMatch(/\.prose-portal :deep\(p\) \{ margin: 0\.5rem 0; \}/)
-    // The overflow guard is the one whose absence corrupts layout rather than rhythm.
-    expect(text).toMatch(/\.prose-portal :deep\(pre\) \{ overflow-x: auto;/)
+    expect(text, `${name} defines prose-portal rules again`)
+      .not.toMatch(/\.prose-portal :deep\(/)
+    expect(code(name), `${name} should render the shared bubble`)
+      .toMatch(/PortalAgentBubble/)
   })
 })

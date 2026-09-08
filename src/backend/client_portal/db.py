@@ -158,16 +158,22 @@ def get_owned_roster(email: str) -> list[dict]:
 
 def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        role: str, content: str, cost, now: str,
-                       session_id: Optional[str] = None) -> None:
+                       session_id: Optional[str] = None,
+                       source: Optional[str] = None,
+                       voice_call_id: Optional[str] = None) -> None:
+    # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
+    # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
-        "(id, agent_name, client_email, session_id, role, content, cost, created_at) "
-        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now)"
+        "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
+        " source, voice_call_id) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
+            "source": source, "call": voice_call_id,
         })
 
 
@@ -186,7 +192,10 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
         # had nothing to point at.
-        f"SELECT id, role, content, cost, created_at FROM enterprise_portal_messages "
+        # ent#534: `source` / `voice_call_id` ride along so the chat can fold a
+        # voice call's rows into one block and the context formatter can label them.
+        f"SELECT id, role, content, cost, created_at, source, voice_call_id "
+        f"FROM enterprise_portal_messages "
         f"WHERE {where} ORDER BY created_at DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
@@ -214,27 +223,92 @@ def get_portal_message(message_id: str) -> Optional[dict]:
 # --- Portal chat sessions (#78): one conversation thread per row --------------
 
 def create_portal_session(session_id: str, agent_name: str, client_email: str,
-                          now: str, title: Optional[str] = None) -> None:
+                          now: str, title: Optional[str] = None,
+                          is_main: bool = False) -> None:
+    """Open an empty thread. ``is_main`` (ent#523) marks it as the pair's pinned
+    Main chat and is guarded by ``idx_portal_sessions_main`` — a second live Main
+    raises ``IntegrityError`` rather than existing, which is what makes
+    ``ensure_main_session`` safe to race."""
     stmt = text(
         "INSERT INTO enterprise_portal_sessions "
-        "(id, agent_name, client_email, title, created_at, last_message_at, message_count) "
-        "VALUES (:id, :agent, :email, :title, :now, NULL, 0)"
+        "(id, agent_name, client_email, title, created_at, last_message_at, "
+        " message_count, is_main) "
+        "VALUES (:id, :agent, :email, :title, :now, NULL, 0, :is_main)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": session_id, "agent": agent_name, "email": (client_email or "").lower(),
-            "title": title, "now": now,
+            "title": title, "now": now, "is_main": 1 if is_main else 0,
         })
+
+
+def get_main_portal_session_id(agent_name: str, client_email: str) -> Optional[str]:
+    """The pair's LIVE Main chat id, or None if it has never been created (ent#523).
+
+    ``is_main = 1`` alone is the predicate: the flag is cleared in the same
+    statement that sets ``archived_at``, so a retired Main can never answer here.
+    """
+    stmt = text(
+        "SELECT id FROM enterprise_portal_sessions "
+        "WHERE agent_name = :agent AND client_email = :email AND is_main = 1 "
+        "LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "agent": agent_name, "email": (client_email or "").lower(),
+        }).first()
+        return row[0] if row else None
+
+
+def archive_main_and_mint(agent_name: str, client_email: str, *, main_id: str,
+                          new_id: str, now: str,
+                          archive_title: Optional[str] = None) -> bool:
+    """Reset (ent#523): retire ``main_id`` and mint ``new_id`` as the pair's Main,
+    in ONE transaction. Returns False if ``main_id`` was not the live Main when
+    the UPDATE ran — a concurrent Reset won, and the caller must not then insert
+    a second Main.
+
+    The order matters and is not stylistic: the archive's ``is_main`` must be
+    cleared BEFORE the insert, or ``idx_portal_sessions_main`` refuses the new
+    row. Both statements share the transaction, so a failure leaves the old Main
+    exactly as it was — Reset is all-or-nothing.
+
+    ``archive_title`` is applied only when the retired row has no title at all;
+    a person's title (``title_source = 'user'``) and a generated one are left
+    alone, so the archive appears in the chat list under the name it already had.
+    """
+    email = (client_email or "").lower()
+    with get_engine().begin() as conn:
+        updated = conn.execute(text(
+            "UPDATE enterprise_portal_sessions "
+            "SET is_main = 0, archived_at = :now, "
+            "    title = COALESCE(title, :archive_title) "
+            "WHERE id = :main AND agent_name = :agent AND client_email = :email "
+            "  AND is_main = 1"
+        ), {
+            "main": main_id, "agent": agent_name, "email": email,
+            "now": now, "archive_title": archive_title,
+        }).rowcount
+        if not updated:
+            return False
+        conn.execute(text(
+            "INSERT INTO enterprise_portal_sessions "
+            "(id, agent_name, client_email, title, created_at, last_message_at, "
+            " message_count, is_main) "
+            "VALUES (:id, :agent, :email, NULL, :now, NULL, 0, 1)"
+        ), {"id": new_id, "agent": agent_name, "email": email, "now": now})
+        return True
 
 
 def list_portal_sessions(agent_name: str, client_email: str) -> list[dict]:
     """A client's conversation threads with one agent, most-recently-active first.
     Sessions with no messages yet sort by ``created_at`` (``last_message_at`` NULL)."""
     stmt = text(
-        "SELECT id, title, created_at, last_message_at, message_count "
+        "SELECT id, title, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE agent_name = :agent AND client_email = :email "
-        "ORDER BY COALESCE(last_message_at, created_at) DESC"
+        "ORDER BY is_main DESC, COALESCE(last_message_at, created_at) DESC"
     )
     with get_engine().connect() as conn:
         return [dict(r) for r in conn.execute(stmt, {
@@ -276,7 +350,8 @@ def list_portal_sessions_for_agents(client_email: str, agent_names: list[str]) -
         # ask anyway. Same guard as `search_portal_sessions`.
         return []
     stmt = text(
-        "SELECT id, agent_name, title, created_at, last_message_at, message_count "
+        "SELECT id, agent_name, title, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE client_email = :email AND agent_name IN :agents "
         "ORDER BY COALESCE(last_message_at, created_at) DESC, id DESC"
@@ -311,7 +386,8 @@ def get_portal_session(session_id: str, agent_name: str, client_email: str) -> O
     """One session row, scoped to (agent, client) so a client can't read another's
     thread by id. Returns None on miss."""
     stmt = text(
-        "SELECT id, title, created_at, last_message_at, message_count "
+        "SELECT id, title, title_source, created_at, last_message_at, message_count, "
+        "       is_main, archived_at "
         "FROM enterprise_portal_sessions "
         "WHERE id = :id AND agent_name = :agent AND client_email = :email"
     )
@@ -390,14 +466,46 @@ def search_portal_sessions(client_email: str, like_pattern: str,
         }).mappings()]
 
 
-def set_portal_session_title(session_id: str, title: str) -> None:
-    """Overwrite a thread's title (ent#186 — the generated title replacing the
-    derived fallback ``touch_portal_session`` already stored). Unconditional by
-    design: the caller decides *whether* to generate (first exchange only), this
-    just lands the result."""
-    stmt = text("UPDATE enterprise_portal_sessions SET title = :title WHERE id = :id")
+def set_portal_session_title(session_id: str, title: str) -> bool:
+    """Land a GENERATED title (ent#186) over the derived fallback
+    ``touch_portal_session`` already stored — unless a person got there first.
+
+    ent#473: this used to be unconditional ("the caller decides whether to
+    generate, this just lands the result"), and that was right while only two
+    hands wrote the column. A third hand — a person renaming the chat — races
+    the generator by construction: generation runs off the reply path, so a
+    rename typed during the first turn's 15 s window would be overwritten by a
+    model's guess seconds later. The guard is in the UPDATE itself (not a
+    read-then-write in the caller) so there is no window between the check and
+    the write. Returns whether the title landed; ``False`` means a person's
+    title stood and the caller should say so in the log, not retry.
+    """
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET title = :title, title_source = 'generated' "
+        "WHERE id = :id AND (title_source IS NULL OR title_source != 'user')"
+    )
     with get_engine().begin() as conn:
-        conn.execute(stmt, {"title": title, "id": session_id})
+        return (conn.execute(stmt, {"title": title, "id": session_id}).rowcount or 0) > 0
+
+
+def rename_portal_session(session_id: str, agent_name: str, client_email: str,
+                          title: str) -> bool:
+    """A person renames their thread (ent#473). Scoped to (agent, client) in
+    the UPDATE itself — the same shape as `get_portal_session` — so a caller
+    can never rename another client's thread by id; a miss is ``False`` and
+    the router turns it into the uniform 404 (Invariant #8). Marks the hand as
+    ``'user'``, which is what makes `set_portal_session_title` stand down."""
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET title = :title, title_source = 'user' "
+        "WHERE id = :id AND agent_name = :agent AND client_email = :email"
+    )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {
+            "title": title, "id": session_id, "agent": agent_name,
+            "email": (client_email or "").lower(),
+        }).rowcount or 0) > 0
 
 
 def touch_portal_session(session_id: str, now: str, added: int = 2,

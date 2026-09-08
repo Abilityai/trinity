@@ -197,6 +197,8 @@ async def acknowledge_retention_prune(
         current_user.username, body.key, effective,
     )
     return {"success": True, "key": body.key, "window_days": effective}
+
+
 @router.get("/retention")
 async def get_retention_status(
     current_user: User = Depends(get_current_user),
@@ -368,6 +370,8 @@ async def get_retention_status(
         # boundary statement (protects against corruption/slips, not disk loss).
         "backup": await _backup_block(),
     }
+
+
 async def _backup_block():
     """Backup status for GET /retention — fail-soft: a broken block must not
     take down the whole retention panel."""

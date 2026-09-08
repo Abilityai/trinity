@@ -677,3 +677,101 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_schedule_execution(row) if row else None
+
+    # ent#525 — the in-flight rows a Workspace chat is waiting on.
+    _CHAT_INFLIGHT_STATUSES = ("running", "queued")
+
+    def get_running_for_chat(self, chat_id: str) -> List[Dict]:
+        """Every RUNNING / QUEUED execution bound to one chat, newest first.
+
+        The Work tab's agent filter cannot find a delegated child: the child's
+        ``agent_name`` is the DELEGATE, not the participant (A asks B → the row
+        says B). What the child does carry is the chat it was started from —
+        ``source_channel_chat_id`` is copied from the parent at creation
+        (ent#265 D0, #2386) — so the card under a message finds its steps by
+        the chat, not by the agent.
+
+        Only in-flight statuses, by design: the selector has no index of its
+        own, and ``idx_executions_status`` makes ``status IN (running, queued)``
+        the driving predicate — a handful of rows on any install — so this
+        needs no migration. History stays on the agent-keyed read.
+
+        Summary columns only (never ``response`` / ``execution_log``).
+        """
+        if not chat_id:
+            return []
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.status,
+                schedule_executions.c.started_at,
+                schedule_executions.c.completed_at,
+                schedule_executions.c.duration_ms,
+                schedule_executions.c.message,
+                schedule_executions.c.triggered_by,
+                schedule_executions.c.source_user_email,
+                schedule_executions.c.source_agent_name,
+                schedule_executions.c.source_channel,
+                schedule_executions.c.source_channel_chat_id,
+                schedule_executions.c.loop_id,
+            )
+            .where(and_(
+                schedule_executions.c.status.in_(self._CHAT_INFLIGHT_STATUSES),
+                schedule_executions.c.source_channel_chat_id == chat_id,
+            ))
+            .order_by(schedule_executions.c.started_at.desc())
+            .limit(50)
+        )
+        with get_engine().connect() as conn:
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
+
+    def stamp_execution_channel_context(
+        self,
+        execution_id: str,
+        *,
+        source_channel: str,
+        source_channel_chat_id: str,
+        source_channel_client: Optional[str] = None,
+        source_channel_thread: Optional[str] = None,
+        source_channel_agent: Optional[str] = None,
+    ) -> bool:
+        """Attach a delivery destination to an execution row created elsewhere.
+
+        ent#498. Every other writer of these columns sets them at INSERT, which
+        is why no updater existed. A cron fire cannot: the standalone scheduler
+        creates the row itself and always sends `execution_id`, so
+        `execute_task`'s channel-persisting branch (`if not execution_id:`)
+        never runs and the kwargs would be silently inert (#2426). The address
+        rides the dispatch payload and the backend stamps the row here, BEFORE
+        the turn starts, so the terminal appliers find a destination already on
+        the row without any of them changing.
+
+        Guarded on `source_channel IS NULL` — this only ever ADDS a destination
+        to a row that has none. A row that already carries one belongs to an
+        inbound channel turn whose reply the adapter is waiting to send, and
+        repointing it would deliver that answer to the wrong place. Returns
+        whether the stamp landed, so a caller can refuse rather than assume.
+        """
+        stmt = (
+            update(schedule_executions)
+            .where(and_(
+                schedule_executions.c.id == execution_id,
+                schedule_executions.c.source_channel.is_(None),
+            ))
+            .values(
+                source_channel=source_channel,
+                source_channel_chat_id=source_channel_chat_id,
+                source_channel_client=source_channel_client,
+                source_channel_thread=source_channel_thread,
+                source_channel_agent=source_channel_agent,
+            )
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0

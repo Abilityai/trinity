@@ -61,8 +61,6 @@ As an operator, I want a single inbox where I can see and respond to all agent r
 | `src/frontend/src/components/operator/QueueCard.vue` | 1-253 | Expandable card -- `AgentAvatar` component (with real avatar images from agents store), markdown body, inline response controls |
 | `src/frontend/src/components/operator/ResolvedCard.vue` | 1-82 | Compact resolved item -- `AgentAvatar` component (with real avatar images), checkmark + response text for responded/acknowledged items; for response-less terminal items (cancelled/expired, #1017) renders a gray X badge "Cancelled"/"Expired" instead (`isTerminalWithoutResponse`, lines 17-40, 59-61) |
 | `src/frontend/src/components/operator/NotificationsPanel.vue` | 1-541 | Notification list with agent/type/priority/status filters, bulk actions (acknowledge/dismiss), stats row, expandable messages, empty state |
-| `src/frontend/src/components/operator/QueueList.vue` | 1-195 | Filterable list view (type, priority, agent, status) with priority indicators |
-| `src/frontend/src/components/operator/QueueStats.vue` | 1-88 | Stats sidebar -- pending by priority, today's total, avg response time, by agent |
 | `src/frontend/src/components/operator/QueueItemDetail.vue` | 1-286 | Detail panel -- full item view with response controls (approval/question/alert) |
 | `src/frontend/src/components/NavBar.vue` | -- | Single "Operations" nav link with combined badge count (queue + notifications); imports operatorQueue and notifications stores only |
 
@@ -844,8 +842,6 @@ Clear All on **Resolved** instead calls `clearResolved()` -> `POST /api/operator
 | `src/frontend/src/components/operator/QueueCard.vue` | 257 | Expandable card with response controls |
 | `src/frontend/src/components/operator/ResolvedCard.vue` | 82 | Compact resolved card (incl. #1017 Cancelled/Expired badge) |
 | `src/frontend/src/components/operator/NotificationsPanel.vue` | 541 | Notifications tab -- filters, bulk actions, stats, notification list with expand/dismiss/acknowledge |
-| `src/frontend/src/components/operator/QueueList.vue` | 195 | Filterable list view |
-| `src/frontend/src/components/operator/QueueStats.vue` | 88 | Stats sidebar |
 | `src/frontend/src/components/operator/QueueItemDetail.vue` | 286 | Full item detail panel |
 | `src/frontend/src/components/NavBar.vue` | -- | Single "Operations" link + combined badge (2 stores), starts notification polling (#1109: replaced separate Health/Ops/Executions links + Executions running badge) |
 | `src/frontend/src/router/index.js` | -- | `/operations` route registration + legacy redirects (`/operating-room`, `/monitoring`, `/executions`, `/events`) (#1109) |

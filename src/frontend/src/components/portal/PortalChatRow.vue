@@ -39,7 +39,20 @@
       >+{{ avatars.overflow }}</span>
     </span>
 
-    <span class="text-sm truncate flex-1" :class="unread ? 'font-semibold' : ''">{{ title }}</span>
+    <!-- ent#473: the title is renameable in place. The editor stops its own
+         clicks and keys, so the row's open handlers never fire from inside it;
+         without a `rename` function (search results, a read-only caller) it
+         is a plain span. -->
+    <PortalEditableTitle
+      v-if="rename"
+      dense
+      :value="rawTitle"
+      placeholder="New chat"
+      :rename="(t) => rename(thread, t)"
+      :text-class="unread ? 'text-sm font-semibold' : 'text-sm'"
+      label="Rename this chat"
+    />
+    <span v-else class="text-sm truncate flex-1" :class="unread ? 'font-semibold' : ''">{{ title }}</span>
 
     <span
       v-if="unread"
@@ -66,12 +79,15 @@
 import { computed } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
+import PortalEditableTitle from './PortalEditableTitle.vue'
 import { rowAgents, threadTitle } from './portalUtils'
 
 const props = defineProps({
   thread: { type: Object, required: true },
   active: { type: Boolean, default: false },
   avatarFor: { type: Function, default: () => null },
+  // ent#473: async (thread, title) => void, or null for a read-only row.
+  rename: { type: Function, default: null },
 })
 defineEmits(['open', 'toggle-star'])
 
@@ -79,4 +95,7 @@ const avatars = computed(() => rowAgents(props.thread))
 const allAgentNames = computed(() => (props.thread.agent_names || []).join(', '))
 const unread = computed(() => Number(props.thread.unread) || 0)
 const title = computed(() => threadTitle(props.thread))
+// The stored title itself — the editor pre-fills from it and shows the
+// placeholder when it is empty, never the fallback word as a draft.
+const rawTitle = computed(() => (props.thread.title || '').trim())
 </script>

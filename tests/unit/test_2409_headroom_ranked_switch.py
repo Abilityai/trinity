@@ -879,7 +879,7 @@ class TestPerformAutoSwitchSurfacesWhy:
                "seven_day_resets_at": "2026-09-01T00:00:00Z", "five_hour_resets_at": None,
                "reading_age_seconds": 12, "candidates": 3, "auto_refresh_enabled": True}
         result = await auto_switch._perform_auto_switch(
-            agent_name="agent-x", old_subscription_id="a", old_subscription_name="sub-a",
+            agent_name="agent-x", old_subscription_name="sub-a",
             new_subscription=_sub("b", name="sub-b"), failure_kind="rate_limit", event_count=1,
             destination_headroom=why,
         )
@@ -897,7 +897,7 @@ class TestPerformAutoSwitchSurfacesWhy:
                "seven_day_resets_at": None, "five_hour_resets_at": None,
                "reading_age_seconds": None, "candidates": 2, "auto_refresh_enabled": False}
         await auto_switch._perform_auto_switch(
-            agent_name="agent-x", old_subscription_id="a", old_subscription_name="sub-a",
+            agent_name="agent-x", old_subscription_name="sub-a",
             new_subscription=_sub("b", name="sub-b"), failure_kind="auth", event_count=1,
             destination_headroom=why,
         )
@@ -910,7 +910,7 @@ class TestPerformAutoSwitchSurfacesWhy:
         """Callers that pass nothing (and the fail-open path) get the pre-#2409 text."""
         auto_switch, db, activity = perform_env
         result = await auto_switch._perform_auto_switch(
-            agent_name="agent-x", old_subscription_id="a", old_subscription_name="sub-a",
+            agent_name="agent-x", old_subscription_name="sub-a",
             new_subscription=_sub("b", name="sub-b"), failure_kind="rate_limit", event_count=1,
         )
         msg = _notification(db).message
@@ -934,7 +934,7 @@ class TestPerformAutoSwitchSurfacesWhy:
     async def test_a_broken_reason_never_breaks_the_switch(self, perform_env):
         auto_switch, db, activity = perform_env
         result = await auto_switch._perform_auto_switch(
-            agent_name="agent-x", old_subscription_id="a", old_subscription_name="sub-a",
+            agent_name="agent-x", old_subscription_name="sub-a",
             new_subscription=_sub("b", name="sub-b"), failure_kind="rate_limit", event_count=1,
             destination_headroom={"tier": "measured", "seven_day_pct": "garbage"},
         )

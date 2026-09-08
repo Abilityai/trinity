@@ -1,0 +1,66 @@
+#!/bin/bash
+# Trinity 1-Click login banner.
+#
+# This is where a 1-Click user gets the admin password, because DigitalOcean
+# offers no deploy-time input form. They do NOT need an SSH client to read it:
+# the DigitalOcean control panel has a browser Console (Droplet -> Console),
+# which is one click and shows this text.
+STATE_DIR=/etc/trinity
+IP="$(cat ${STATE_DIR}/public-ip 2>/dev/null)"
+TAG="$(cat ${STATE_DIR}/baked-image-tag 2>/dev/null)"
+
+echo
+echo "  Trinity ${TAG:-} — the sovereign AI agents platform"
+echo "  ---------------------------------------------------------------"
+
+if [ -f "${STATE_DIR}/firstboot-failed" ]; then
+    echo "  ⚠  First boot did NOT complete."
+    echo "     Log:   /var/log/trinity-firstboot.log"
+    echo "     Retry: sudo /opt/trinity-firstboot/firstboot.sh"
+    echo
+    exit 0
+fi
+
+# The scheme comes from what first boot actually VERIFIED, not from what the
+# Caddyfile intended. Printing `https://` after a failed issuance sends the
+# user to a browser warning and tells them the box is fine.
+TLS="$(cat ${STATE_DIR}/tls-status 2>/dev/null)"
+if [ "$TLS" = "ok" ]; then
+    SCHEME="https"
+else
+    SCHEME="http"
+fi
+
+if [ -n "$IP" ]; then
+    echo "  Web UI:  ${SCHEME}://${IP}"
+else
+    echo "  Web UI:  ${SCHEME}://<this droplet's IP>"
+fi
+
+if [ "$TLS" != "ok" ] && [ "$TLS" != "unknown" ]; then
+    echo
+    echo "  ⚠  HTTPS is NOT active — no certificate was issued for this IP."
+    echo "     Traffic is unencrypted. Check: journalctl -u caddy -n 100"
+fi
+
+if [ -r "${STATE_DIR}/admin-credentials" ]; then
+    SOURCE="$(sed -n 's/^source=//p' ${STATE_DIR}/admin-credentials)"
+    PASSWORD="$(sed -n 's/^password=//p' ${STATE_DIR}/admin-credentials)"
+    if [ "$SOURCE" = "user-data" ]; then
+        echo "  Login:   admin / the password you supplied in user-data"
+    else
+        echo "  Login:   admin / ${PASSWORD}"
+        echo
+        echo "  ⚠  Change this password after your first login."
+    fi
+else
+    echo "  Login:   admin / see /etc/trinity/admin-credentials (root only)"
+fi
+
+echo
+echo "  Next:    open the Web UI, sign in, and follow the hardening guide"
+echo "           (add a domain, then serve it through a Cloudflare Tunnel)."
+echo "  Docs:    https://docs.ability.ai"
+echo "  Support: https://github.com/abilityai/trinity/issues  (label: do-marketplace)"
+echo "  DigitalOcean does not build or support Trinity."
+echo

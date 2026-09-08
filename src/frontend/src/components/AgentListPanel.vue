@@ -214,19 +214,48 @@
       </div>
     </div>
 
-    <!-- Agents List -->
-    <div class="flex flex-col gap-1.5">
-      <!-- Column Header (lg+ only) -->
-      <div class="hidden lg:grid lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto] lg:gap-x-4 items-center pl-8 pr-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-        <div class="w-4"></div>
-        <div class="w-3"></div>
+    <!-- Agents List.
+
+         #2358 — ONE column sizing context at lg. The header and every row used
+         to be INDEPENDENT grids sharing a copy of the same template string, so
+         each resolved its own `auto` tracks against its own content and the
+         `1fr` name track absorbed the difference: a row reading `14/16` put
+         Controls/Success at a different x than a row reading `0`, and neither
+         matched the header. The template is declared HERE, once; the header and
+         each row are `grid-cols-subgrid` items of it, so every track resolves
+         across all of them together.
+
+         Ten tracks: chk · status dot · sync dot · NAME (1fr) · activity ·
+         toggles · success · stats · arrow · CapacityMeter. The meter is track
+         10 rather than a sibling outside the grid — without it the row grid was
+         10px narrower than the header, so the two had different right edges and
+         a different `1fr`, misaligning every track between them even with
+         identical content.
+
+         Edge insets are ordinary item MARGINS (`lg:ml-8` on the first cell,
+         `lg:mr-4` on the last), identical on the header and every row — NOT
+         padding on a subgrid item, which is laid out inside its first/last
+         tracks (CSS Grid L2 §7.1) and would make alignment depend on a spec
+         corner. Do not re-add horizontal padding to the header or a row. -->
+    <div class="flex flex-col gap-y-1.5 lg:grid lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto_auto] lg:gap-x-4">
+      <!-- Column Header (lg+ only). The spacer widths no longer DECIDE
+           alignment (the shared `auto` tracks size to the row cells), but they
+           are kept equal to the cells they sit above so a spacer can never be
+           the widest contribution. -->
+      <div
+        data-testid="list-header"
+        class="hidden lg:grid lg:grid-cols-subgrid lg:col-span-full items-center py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider"
+      >
+        <div class="w-4 lg:ml-8"></div>
+        <div class="w-2.5"></div>
         <div class="w-2"></div>
-        <div>Name</div>
-        <div>Status</div>
-        <div>Controls</div>
-        <div>Success</div>
-        <div>Exec / Sched</div>
-        <div class="w-6"></div>
+        <div data-col="name">Name</div>
+        <div data-col="status">Status</div>
+        <div data-col="controls">Controls</div>
+        <div data-col="success">Success</div>
+        <div data-col="stats">Exec / Sched</div>
+        <div class="w-4"></div>
+        <div class="w-1.5 lg:mr-4"></div>
       </div>
 
       <!-- Agent Rows -->
@@ -236,6 +265,12 @@
         :data-agent="agent.name"
         :class="[
           'relative overflow-visible bg-white dark:bg-gray-800 rounded-lg',
+          // #2358: at lg the row IS a subgrid item — still the visual box
+          // (background, radius, hover, the system border-l, and the
+          // positioning parent of the half-out avatar), now resolving its
+          // columns from the list container. Vertical padding is lg-only: the
+          // md/base layouts below carry their own.
+          'lg:grid lg:grid-cols-subgrid lg:col-span-full lg:items-center lg:gap-y-1 lg:py-3',
           'transition-colors duration-150 hover:bg-gray-50 dark:hover:bg-gray-750',
           agent.is_system
             ? 'border-l-3 border-l-purple-500'
@@ -253,18 +288,17 @@
           </div>
         </div>
 
-        <!-- Desktop layout (lg+) -->
-        <div class="hidden lg:flex pl-8 pr-4 py-3">
-          <!-- Two-row content block -->
-          <div class="flex flex-col flex-1 min-w-0">
-          <!-- Main grid (Row 1) -->
-          <div class="grid grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto] gap-x-4 items-center">
-            <!-- Checkbox -->
+        <!-- Desktop layout (lg+). `contents` rather than a box: these eleven
+             children ARE the row's grid items, so one breakpoint switch stands
+             in for eleven `hidden lg:…` cells and no extra box sits between the
+             row and its tracks. -->
+        <div class="hidden lg:contents">
+            <!-- Checkbox (track 1 — carries the row's left inset) -->
             <input
               type="checkbox"
               :checked="selectedAgents.includes(agent.name)"
               @change="toggleSelection(agent.name)"
-              class="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer flex-shrink-0"
+              class="w-4 h-4 lg:ml-8 text-blue-600 bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 rounded focus:ring-blue-500 cursor-pointer flex-shrink-0"
             />
 
             <!-- Status dot -->
@@ -282,14 +316,19 @@
               :title="syncHealthEntry(agent.name) ? syncHealthLabel(agent.name) : ''"
             ></div>
 
-            <!-- Name + badges -->
-            <div class="flex items-center min-w-0 gap-2">
+            <!-- Name + EXCEPTION markers only (#2358). What a row shows here
+                 is the label when there is one; the slug follows on the
+                 secondary line below, as real text. Badges that appear on
+                 nearly every row (the runtime pill, the #471 pressure badge)
+                 have left this cell — a marker that never varies is texture,
+                 and it was pushing the name into truncation. -->
+            <div data-col="name" class="flex items-center min-w-0 gap-2">
               <router-link
                 :to="`/agents/${agent.name}`"
                 class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 :title="agentNameTooltip(agent)"
               >
-                {{ agentDisplayName(agent) }}
+                {{ agentNameParts(agent).primary }}
               </router-link>
               <span
                 v-if="agent.is_system"
@@ -304,7 +343,6 @@
               >
                 GHOST
               </span>
-              <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
               <span
                 v-if="agent.is_shared"
                 class="px-1.5 py-0.5 text-[10px] font-medium bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 rounded flex-shrink-0"
@@ -312,21 +350,11 @@
               >
                 Shared
               </span>
-              <!-- #471: subscription-pressure badge (shared predicate) -->
-              <span
-                v-if="pressureBadgeFor(agent.name)"
-                class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
-                :class="pressureBadgeFor(agent.name).level === 'crit'
-                  ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
-                  : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
-                :title="pressureBadgeFor(agent.name).title"
-              >
-                {{ pressureBadgeFor(agent.name).text }}
-              </span>
             </div>
 
             <!-- Activity label -->
             <div
+              data-col="status"
               :class="[
                 'text-xs font-medium capitalize whitespace-nowrap',
                 getActivityLabelClass(agent.name)
@@ -338,7 +366,7 @@
             <!-- Toggles. System rows: the Run toggle is hidden (grid-tile
                  guard adopted, ent#260 item B) — stopping the system agent
                  stays on its Agent Detail page. -->
-            <div class="flex items-center gap-1">
+            <div data-col="controls" class="flex items-center gap-1">
               <div class="w-[7rem] flex-shrink-0 flex justify-end" :class="{ 'invisible': agent.is_system }">
                 <RunningStateToggle
                   :model-value="agent.status === 'running'"
@@ -366,7 +394,7 @@
             </div>
 
             <!-- Success rate bar -->
-            <div class="flex items-center gap-2">
+            <div data-col="success" class="flex items-center gap-2">
               <template v-if="hasSuccessData(agent.name)">
                 <div class="w-20 flex-shrink-0 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
                   <div
@@ -398,7 +426,7 @@
             </div>
 
             <!-- Stats: executions + schedules -->
-            <div class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-2 whitespace-nowrap">
+            <div data-col="stats" class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-2 whitespace-nowrap">
               <!-- Executions count -->
               <div class="flex items-center gap-1">
                 <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -424,37 +452,82 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
               </svg>
             </router-link>
-          </div>
 
-          <!-- Bottom row: tags (always rendered for uniform height) -->
-          <div class="flex items-center gap-1 pl-[5.125rem] min-h-[1.375rem] pt-1">
-            <template v-if="getAgentTags(agent).length > 0">
+            <!-- Secondary line (grid row 2, under the name column through the
+                 arrow). Definite placement in BOTH axes is load-bearing, here and
+                 on the meter below: with sparse auto-placement this item's
+                 definite column would bump the cursor to row 2, and the meter's
+                 2-row span would then land in rows 2–3 — an implicit third row
+                 hanging below every line. Always rendered, so a row is the same
+                 height with or without content on it. `pl-[5.125rem]` is gone:
+                 `col-start-4` puts it under the name column by construction. -->
+            <div
+              data-testid="row-secondary-lg"
+              class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] text-gray-500 dark:text-gray-400 lg:row-start-2 lg:col-start-4 lg:col-end-10"
+            >
+              <!-- Fixed order: slug · pressure · runtime · tags · +N. The line is
+                   the row's one meta strip and it stays legible only while it has
+                   an order and a shrink policy — a future badge goes here, in
+                   this order, or it does not go in the row at all. The slug is
+                   the only shrinkable item, so the identity ellipsizes rather
+                   than the chips being crushed, and it is `select-all` because a
+                   double-click under plain text selection takes one hyphenated
+                   segment, not the slug. Meta ink sits on this container so the
+                   slug inherits it. -->
+              <code
+                v-if="agentNameParts(agent).secondary"
+                data-testid="agent-slug-lg"
+                class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
+              >{{ agentNameParts(agent).secondary }}</code>
+              <!-- #471: subscription-pressure badge (shared predicate, unchanged
+                   — only its home moved off the name cell). First in the line: a
+                   problem signal escalates to the front, as on the grid tile. -->
               <span
-                v-for="tag in getAgentTags(agent).slice(0, 3)"
-                :key="tag"
-                class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20"
-                :title="'#' + tag"
+                v-if="pressureBadgeFor(agent.name)"
+                class="px-1.5 py-0.5 text-[10px] font-semibold rounded flex-shrink-0"
+                :class="pressureBadgeFor(agent.name).level === 'crit'
+                  ? 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300'
+                  : 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300'"
+                :title="pressureBadgeFor(agent.name).title"
               >
-                #{{ tag }}
+                {{ pressureBadgeFor(agent.name).text }}
               </span>
-              <span
-                v-if="getAgentTags(agent).length > 3"
-                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap"
-              >
-                +{{ getAgentTags(agent).length - 3 }}
-              </span>
-            </template>
-          </div>
-          </div><!-- end flex-col wrapper -->
+              <RuntimeBadge
+                v-if="showsRuntimeBadgeInList(agent)"
+                data-testid="runtime-badge"
+                :runtime="agent.runtime"
+                :show-label="false"
+                class="flex-shrink-0"
+              />
+              <template v-if="getAgentTags(agent).length > 0">
+                <span
+                  v-for="tag in getAgentTags(agent).slice(0, 3)"
+                  :key="tag"
+                  class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20 flex-shrink-0"
+                  :title="'#' + tag"
+                >
+                  #{{ tag }}
+                </span>
+                <span
+                  v-if="getAgentTags(agent).length > 3"
+                  class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
+                >
+                  +{{ getAgentTags(agent).length - 3 }}
+                </span>
+              </template>
+            </div>
 
-          <!-- Capacity meter — full tile height -->
-          <CapacityMeter
-            :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
-            :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
-            :height="48"
-            :width="6"
-            class="ml-1 flex-shrink-0 self-stretch"
-          />
+            <!-- Capacity meter (track 10 — carries the row's right inset). Its
+                 `ml-1` is gone: the container's `gap-x-4` supplies the spacing,
+                 and the header's matching spacer is the meter's own 6px. -->
+            <CapacityMeter
+              data-testid="capacity-meter-lg"
+              :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
+              :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
+              :height="48"
+              :width="6"
+              class="flex-shrink-0 lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:self-stretch lg:mr-4"
+            />
         </div>
 
         <!-- Tablet layout (md, < lg) -->
@@ -478,7 +551,7 @@
               class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
               :title="agentNameTooltip(agent)"
             >
-              {{ agentDisplayName(agent) }}
+              {{ agentNameParts(agent).primary }}
             </router-link>
             <span
               v-if="agent.is_system"
@@ -486,7 +559,6 @@
             >
               SYSTEM
             </span>
-            <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
             <span
               v-if="agent.is_shared"
               class="px-1.5 py-0.5 text-[10px] font-medium bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 rounded flex-shrink-0"
@@ -514,28 +586,38 @@
             </div>
           </div>
           <div class="flex items-center gap-3 pl-[3.125rem]">
+            <!-- #2358: there is no header at md/base to line up against, so
+                 row-to-row parity is all a reader has. A toggle a row is not
+                 allowed to use is RESERVED rather than dropped (`invisible`
+                 keeps the box and takes no clicks) — dropping it shifted the
+                 success bar, the meter and the task counts on exactly the
+                 system and shared rows. The width comes from the toggle
+                 itself, so it cannot drift from a hand-written rem. -->
             <div class="flex items-center gap-2">
-              <RunningStateToggle
-                v-if="!agent.is_system"
-                :model-value="agent.status === 'running'"
-                :loading="networkStore.isTogglingRunning(agent.name)"
-                size="sm"
-                @toggle="handleRunningToggle(agent)"
-              />
-              <ReadOnlyToggle
-                v-if="!agent.is_system && !agent.is_shared"
-                :model-value="!!agent.read_only_enabled"
-                :loading="readOnlyLoading === agent.name"
-                size="sm"
-                @toggle="handleReadOnlyToggle(agent)"
-              />
-              <AutonomyToggle
-                v-if="!agent.is_system"
-                :model-value="agent.autonomy_enabled"
-                :loading="autonomyLoading === agent.name"
-                size="sm"
-                @toggle="handleAutonomyToggle(agent)"
-              />
+              <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system }">
+                <RunningStateToggle
+                  :model-value="agent.status === 'running'"
+                  :loading="networkStore.isTogglingRunning(agent.name)"
+                  size="sm"
+                  @toggle="handleRunningToggle(agent)"
+                />
+              </div>
+              <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system || agent.is_shared }">
+                <ReadOnlyToggle
+                  :model-value="!!agent.read_only_enabled"
+                  :loading="readOnlyLoading === agent.name"
+                  size="sm"
+                  @toggle="handleReadOnlyToggle(agent)"
+                />
+              </div>
+              <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system }">
+                <AutonomyToggle
+                  :model-value="agent.autonomy_enabled"
+                  :loading="autonomyLoading === agent.name"
+                  size="sm"
+                  @toggle="handleAutonomyToggle(agent)"
+                />
+              </div>
             </div>
             <div class="flex items-center gap-2 flex-1 min-w-0">
               <template v-if="hasSuccessData(agent.name)">
@@ -563,12 +645,15 @@
                 <span class="text-[10px] text-gray-400 dark:text-gray-500">&mdash;</span>
               </template>
             </div>
+            <!-- Always rendered (the lg contract): a `v-if` here moved the
+                 tasks/cost column by the meter's width on every row whose slot
+                 stats had not arrived yet. -->
             <CapacityMeter
-              v-if="getSlotStats(agent.name)"
-              :active="getSlotStats(agent.name).active"
-              :max="getSlotStats(agent.name).max"
+              :active="getSlotStats(agent.name) ? getSlotStats(agent.name).active : 0"
+              :max="getSlotStats(agent.name) ? getSlotStats(agent.name).max : 3"
               :height="28"
               :width="10"
+              class="flex-shrink-0"
             />
             <div class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-1.5 whitespace-nowrap">
               <template v-if="hasExecutionStats(agent.name)">
@@ -581,22 +666,44 @@
               <span v-else class="text-gray-400 dark:text-gray-500">--</span>
             </div>
           </div>
-          <!-- Tags row (tablet) -->
-          <div v-if="getAgentTags(agent).length > 0" class="flex items-center gap-1 pl-[3.125rem]">
-            <span
-              v-for="tag in getAgentTags(agent).slice(0, 3)"
-              :key="tag"
-              class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20"
-              :title="'#' + tag"
-            >
-              #{{ tag }}
-            </span>
-            <span
-              v-if="getAgentTags(agent).length > 3"
-              class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap"
-            >
-              +{{ getAgentTags(agent).length - 3 }}
-            </span>
+          <!-- Secondary line (tablet) — same contract as lg: always rendered,
+               so md rows are one height whether or not they carry tags (they
+               were not: a tagged row used to be ~30px taller). That uniformity
+               is what makes it a safe home for the slug. Tagless md rows grow
+               by this line's height — an intended density trade, release-noted
+               in the flow doc. -->
+          <div
+            data-testid="row-secondary-md"
+            class="flex flex-nowrap items-center gap-1 min-w-0 overflow-hidden min-h-[1.375rem] pl-[3.125rem] text-gray-500 dark:text-gray-400"
+          >
+            <code
+              v-if="agentNameParts(agent).secondary"
+              data-testid="agent-slug-md"
+              class="font-mono text-[11px] min-w-0 max-w-[50%] truncate select-all"
+            >{{ agentNameParts(agent).secondary }}</code>
+            <RuntimeBadge
+              v-if="showsRuntimeBadgeInList(agent)"
+              data-testid="runtime-badge"
+              :runtime="agent.runtime"
+              :show-label="false"
+              class="flex-shrink-0"
+            />
+            <template v-if="getAgentTags(agent).length > 0">
+              <span
+                v-for="tag in getAgentTags(agent).slice(0, 3)"
+                :key="tag"
+                class="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 truncate max-w-20 flex-shrink-0"
+                :title="'#' + tag"
+              >
+                #{{ tag }}
+              </span>
+              <span
+                v-if="getAgentTags(agent).length > 3"
+                class="text-[10px] text-gray-400 dark:text-gray-500 whitespace-nowrap flex-shrink-0"
+              >
+                +{{ getAgentTags(agent).length - 3 }}
+              </span>
+            </template>
           </div>
         </div>
 
@@ -621,7 +728,7 @@
               class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400 flex-1 min-w-0"
               :title="agentNameTooltip(agent)"
             >
-              {{ agentDisplayName(agent) }}
+              {{ agentNameParts(agent).primary }}
             </router-link>
             <span
               v-if="agent.is_system"
@@ -629,8 +736,23 @@
             >
               SYS
             </span>
-            <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
+            <!-- No runtime badge at base: a <=767px name line has no room for
+                 a marker that is identical on every row of a single-runtime
+                 fleet. The runtime is on the grid tile and Agent Detail. -->
             <div class="flex items-center gap-2 flex-shrink-0">
+              <!-- DROPPED, not reserved — deliberately the opposite of the md
+                   rule one breakpoint up. This group is `flex-shrink-0` behind
+                   a `flex-1` name, so it is ALREADY flush to the row's right
+                   edge on every row: measured at 390px the chevron sits at the
+                   same x whether the toggle is present, absent or reserved.
+                   A reservation would therefore align nothing, and would take
+                   the toggle's ~94px (label + switch) off the one row that has
+                   no toggle — enough to truncate a labelled `trinity-system`
+                   at the narrowest supported width (name 221px -> 119px,
+                   measured). At md the toggles sit BEFORE the `flex-1` success
+                   bar, so there dropping one really does move a column (the
+                   bar starts ~298px further left) and the reservation earns
+                   its space. -->
               <RunningStateToggle
                 v-if="!agent.is_system"
                 :model-value="agent.status === 'running'"
@@ -648,10 +770,21 @@
               </router-link>
             </div>
           </div>
-          <div class="flex items-center gap-3 pl-[3.25rem] text-[11px] text-gray-500 dark:text-gray-400">
+          <!-- Meta line — already always rendered, so the slug rides it here
+               too and a labelled row stays exactly as tall as an unlabelled
+               one. The separator carries no ink of its own: it inherits this
+               line's meta gray. -->
+          <div class="flex items-center gap-3 min-w-0 overflow-hidden pl-[3.25rem] text-[11px] text-gray-500 dark:text-gray-400">
+            <template v-if="agentNameParts(agent).secondary">
+              <code
+                data-testid="agent-slug-base"
+                class="font-mono min-w-0 truncate select-all"
+              >{{ agentNameParts(agent).secondary }}</code>
+              <span class="flex-shrink-0">·</span>
+            </template>
             <div
               :class="[
-                'font-medium capitalize',
+                'font-medium capitalize flex-shrink-0',
                 getActivityLabelClass(agent.name)
               ]"
             >
@@ -701,7 +834,8 @@ import { formatCostCompact } from '../composables/useFormatters'
 import { useNotification } from '../composables/useNotification'
 import { useAgentsStore } from '../stores/agents'
 import { useNetworkStore } from '../stores/network'
-import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import { agentDisplayName, agentNameParts, agentNameTooltip } from '../utils/agentName'
+import { showsRuntimeBadgeInList } from '../utils/agentRuntime'
 import { isOrgTag } from '../utils/gridOrg'
 import { sortAgents } from '../utils/agentSort'
 import AgentAvatar from './AgentAvatar.vue'

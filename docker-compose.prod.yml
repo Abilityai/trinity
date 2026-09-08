@@ -9,6 +9,29 @@
 #   - 4317: OTel Collector gRPC (OTLP)
 #   - 4318: OTel Collector HTTP (OTLP)
 #   - 8889: OTel Prometheus metrics
+#
+# THIS IS A COMPLETE, STANDALONE FILE — NOT an overlay on docker-compose.yml (#2528).
+# Run it on its own:
+#
+#     docker compose -f docker-compose.prod.yml up -d
+#
+# The only file that layers ON TOP of it is docker-compose.prod.enterprise.yml
+# (and, on Docker Desktop, docker-compose.override.example.yml for the Vector
+# log source, which start.sh appends by name). Never stack it on the dev file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml   # WRONG
+#
+# `security_opt`, `group_add`, `cap_drop` and the rest are not duplicates of
+# the dev file's — they ARE the production hardening, restated because this
+# file stands alone. Compose merges list-type keys by CONCATENATION, so that
+# stack either fails validation on the exact-duplicate items (Compose ≥ 2.24:
+# "services.backend.group_add array items[0,1] must be unique") or, on an
+# older Compose, silently doubles the frontend's `ports` — the dev file maps
+# host→80 (Vite) and this one host→8080 (unprivileged nginx, #874) — and a
+# container with two host mappings for one published port never joins its
+# network, so nginx crash-loops on "host not found in upstream". Every
+# supported file set is rendered in CI (container-security.yml →
+# verify-compose-file-sets) and listed in docs/DEPLOYMENT.md.
 
 # #1871: bound every container's json-file log. Docker's json-file driver has
 # NO max-size and NO max-file by default, so each container's log under
@@ -96,6 +119,7 @@ services:
       # knobs are inert — the #1039 packaging-gap class).
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Default-OFF means
       # the master switch MUST reach the container or voip_available stays false;

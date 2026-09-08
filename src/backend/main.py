@@ -86,6 +86,7 @@ from routers.tags import router as tags_router, set_websocket_manager as set_tag
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
+from routers.canvas import router as canvas_router  # Agent canvas (ent#438)
 from routers.product_events import router as product_events_router
 from routers.onboarding import router as onboarding_router
 from routers.evaluations import router as evaluations_router  # ent#206 behavioral-eval referee surface
@@ -127,6 +128,7 @@ from services.ws_identity_service import accessible_agents_for, resolve_ws_ident
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
 from client_portal.asks.router import router as portal_asks_router
+from client_portal.work.router import router as portal_work_router
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -711,6 +713,31 @@ async def _start_capacity_and_canary() -> None:
     except Exception as e:
         logger.error(f"Error wiring CapacityManager: {e}")
 
+    # #2523: due-loop sweep. A loop's inter-run pause used to be an
+    # `asyncio.sleep` inside the runner coroutine; the runner is gone, so the
+    # pause is `agent_loops.next_run_at` and this brings the loop back when it
+    # comes due. Short period because `delay_seconds` is a user-visible pacing
+    # knob — a 60s tick would round every small delay up to a minute. The claim
+    # is a CAS, so every worker can run this safely; the read is an index scan
+    # of `idx_loops_next_run` and returns nothing at all when no loop is parked.
+    try:
+        from services.loop_service import get_loop_service
+
+        async def _loop_due_sweep():
+            await asyncio.sleep(8 + random.uniform(0, 2))
+            service = get_loop_service()
+            while True:
+                try:
+                    await service.dispatch_due_loops()
+                except Exception as exc:
+                    logger.warning(f"[Loop] due sweep tick failed: {exc}")
+                await asyncio.sleep(5 + random.uniform(0, 1))
+
+        asyncio.create_task(_loop_due_sweep())
+        logger.info("Loop due-run sweep running (5s)")
+    except Exception as e:
+        logger.error(f"Error wiring the loop due-run sweep: {e}")
+
 
 async def _schedule_watch_loops() -> None:
     """Heartbeat watch (#307) and the lifespan-resumed monitoring loop (#1121).
@@ -1276,6 +1303,10 @@ app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(reports_router)  # Agent Reports (#918)
+# ent#438 — the agent canvas. Mounted on the same /api/agents prefix as
+# agent_config et al.; its routes are all `/{name}/canvas...`, which is
+# below the static collection routes registered earlier (Invariant #4).
+app.include_router(canvas_router)  # Agent canvas (ent#438)
 app.include_router(product_events_router)  # Local product-event capture (ent#184)
 app.include_router(onboarding_router)  # First-run front desk state (ent#319)
 app.include_router(evaluations_router)  # Behavioral evaluations (ent#206)
@@ -1323,6 +1354,10 @@ app.include_router(room_budget_router)
 # on an install whose submodule still registers the old gated module, the
 # ungated OSS routes win the match order (the ent#443 transition rule).
 app.include_router(portal_asks_router)
+# Workspace work — the live execution card + the rail's Work tab
+# (trinity-enterprise#525, the visual half of ent#457). Same prefix, same
+# transition rule as the asks router above; platform-door only inside.
+app.include_router(portal_work_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule

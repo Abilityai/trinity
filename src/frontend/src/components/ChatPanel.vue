@@ -222,7 +222,12 @@ const checkVoiceAvailability = async () => {
 }
 
 const startVoice = () => {
-  voice.start(currentSessionId.value)
+  // ent#438 — canvas tools ON. They used to be reachable only from the retired
+  // per-agent workspace page, which is why deleting that page would otherwise
+  // have removed the capability rather than moved it. The panel now writes the
+  // agent's durable `voice` canvas (operator audience), so what the agent draws
+  // while you talk to it is still there tomorrow, on the Canvas tab.
+  voice.start(currentSessionId.value, null, true)
 }
 
 const endVoice = async () => {

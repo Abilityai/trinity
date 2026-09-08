@@ -24,7 +24,7 @@ from dependencies import get_current_user, reject_agent_principal, assert_agent_
 from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
 from services import channel_history, rate_limiter
 from services.slack_service import slack_service
-from db_models import SlackConnectionStatus, SlackOAuthInitResponse
+from db_models import SlackConnectionStatus
 from services.settings_service import get_slack_signing_secret, get_proactive_rate_limit
 from services.platform_audit_service import platform_audit_service, AuditEventType
 

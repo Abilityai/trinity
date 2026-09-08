@@ -1,5 +1,7 @@
 # Agent Custom Metrics - Feature Flow
 
+> **Status (#2492)**: the frontend half is GONE — `MetricsPanel.vue` was deleted as unreferenced (it had zero importers; the metrics API below remains live and MCP/agent-side declarations still work). Re-adding a renderer is a feature decision, not a revert.
+
 > **Updated**: 2026-01-23 - Verified line numbers and added Dashboard Widget system documentation (dashboard.yaml).
 
 **Feature ID**: 9.9

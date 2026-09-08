@@ -1519,6 +1519,75 @@ export class TrinityClient {
     );
   }
 
+  // =========================================================================
+  // Agent canvas (ent#438)
+  // =========================================================================
+
+  /**
+   * Write (create or replace) one canvas. PUT, because the operation is
+   * idempotent on (agent, canvas_id) — that is the surface's whole contract.
+   */
+  async writeCanvas(
+    agentName: string,
+    canvasId: string,
+    data: {
+      title?: string;
+      blocks: Array<{ kind: string; title?: string; slot?: string; payload?: unknown }>;
+      audience?: "operator" | "roster";
+      template?: string;
+      execution_id?: string;
+    }
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "PUT",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`,
+      data
+    );
+  }
+
+  /**
+   * Replace only the named blocks of an existing canvas (ent#536). PATCH:
+   * order is kept, unknown ids are refused by name, title/audience untouched.
+   */
+  async patchCanvas(
+    agentName: string,
+    canvasId: string,
+    data: {
+      blocks: Array<{ id: string; kind: string; title?: string; payload?: unknown }>;
+      execution_id?: string;
+    }
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "PATCH",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`,
+      data
+    );
+  }
+
+  /** One canvas with its blocks. */
+  async getCanvas(agentName: string, canvasId: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`
+    );
+  }
+
+  /** Canvas metadata for one agent, newest-updated first (no blocks). */
+  async listCanvases(agentName: string): Promise<Array<Record<string, unknown>>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas`
+    );
+  }
+
+  /** Remove a canvas. Idempotent — clearing an absent canvas succeeds. */
+  async clearCanvas(agentName: string, canvasId: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "DELETE",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/${encodeURIComponent(canvasId)}`
+    );
+  }
+
   /**
    * List reports across accessible agents — METADATA only, no payload (#1538).
    * The backend scopes to the caller's accessible agents; an agent-scoped key is
@@ -2814,5 +2883,25 @@ export class TrinityClient {
     body: { endpoint: string; task_id: string },
   ): Promise<unknown> {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
+  }
+
+  // --- Credential vault (trinity-enterprise#279) ----------------------------
+  // Agent-facing discovery + fetch. Both are agent-scoped-key-only on the
+  // backend; `request()` throws a typed `ApiError` on any non-2xx so the tool
+  // can branch on the status + detail shape.
+
+  /** List the credentials granted to the calling key's agent (never values). */
+  async getAvailableCredentials(): Promise<
+    Array<{ name: string; description?: string | null; kind: string }>
+  > {
+    return this.request("GET", "/api/enterprise/credential-vault/available");
+  }
+
+  /** Fetch a granted credential's plaintext value by name (#279). */
+  async fetchCredential(body: {
+    name: string;
+    execution_id?: string;
+  }): Promise<{ name: string; kind: string; value: string }> {
+    return this.request("POST", "/api/enterprise/credential-vault/fetch", body);
   }
 }

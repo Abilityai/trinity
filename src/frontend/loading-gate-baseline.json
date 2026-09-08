@@ -1,6 +1,6 @@
 {
-  "generated": "2026-08-24",
-  "commit": "b7bac09da08d293b2d8e50f588ad66ffbf1bc37c",
+  "generated": "2026-09-07",
+  "commit": null,
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
@@ -18,7 +18,6 @@
     "src/frontend/src/components/CredentialsPanel.vue": 2,
     "src/frontend/src/components/FilesPanel.vue": 1,
     "src/frontend/src/components/FoldersPanel.vue": 1,
-    "src/frontend/src/components/GitPanel.vue": 1,
     "src/frontend/src/components/GuardrailsPanel.vue": 1,
     "src/frontend/src/components/HelpChatWidget.vue": 1,
     "src/frontend/src/components/McpExposedPanel.vue": 1,
@@ -36,17 +35,13 @@
     "src/frontend/src/components/SlackChannelPanel.vue": 1,
     "src/frontend/src/components/TasksPanel.vue": 2,
     "src/frontend/src/components/TelegramChannelPanel.vue": 1,
-    "src/frontend/src/components/UnifiedActivityPanel.vue": 1,
     "src/frontend/src/components/VoipChannelPanel.vue": 1,
     "src/frontend/src/components/WhatsAppChannelPanel.vue": 1,
     "src/frontend/src/components/base/BaseButton.vue": 1,
     "src/frontend/src/components/chat/ChatHistoryDropdown.vue": 1,
     "src/frontend/src/components/chat/ChatMessages.vue": 1,
     "src/frontend/src/components/file-manager/FilePreview.vue": 1,
-    "src/frontend/src/components/portal/PortalConversation.vue": 2,
-    "src/frontend/src/components/portal/PortalFilesPanel.vue": 1,
     "src/frontend/src/components/portal/PortalRoom.vue": 1,
-    "src/frontend/src/components/process/TemplateSelector.vue": 1,
     "src/frontend/src/components/settings/ActivationFunnelPanel.vue": 1,
     "src/frontend/src/components/settings/McpKeysTab.vue": 1,
     "src/frontend/src/components/settings/PortalSessionPolicyPanel.vue": 1,
@@ -57,7 +52,6 @@
     "src/frontend/src/views/AgentDetail.vue": 1,
     "src/frontend/src/views/Dashboard.vue": 1,
     "src/frontend/src/views/ExecutionDetail.vue": 1,
-    "src/frontend/src/views/FileManager.vue": 1,
     "src/frontend/src/views/Login.vue": 1,
     "src/frontend/src/views/PublicChat.vue": 4,
     "src/frontend/src/views/Settings.vue": 7,
@@ -65,7 +59,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 77,
-    "files_with_gates": 60
+    "bare_loading_gates": 70,
+    "files_with_gates": 54
   }
 }

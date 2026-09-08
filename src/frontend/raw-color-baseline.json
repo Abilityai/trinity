@@ -113,11 +113,6 @@
       "raw_gray": 101,
       "hardcoded_colors": 0
     },
-    "src/frontend/src/components/EditorHelpPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 47,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/components/ExecutionsPanel.vue": {
       "raw_nongray": 28,
       "raw_gray": 127,
@@ -198,11 +193,6 @@
       "raw_gray": 58,
       "hardcoded_colors": 3
     },
-    "src/frontend/src/components/MetricsPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 63,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/components/ModelSelector.vue": {
       "raw_nongray": 0,
       "raw_gray": 17,
@@ -221,11 +211,6 @@
     "src/frontend/src/components/NeverminedPanel.vue": {
       "raw_nongray": 4,
       "raw_gray": 109,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/ObservabilityPanel.vue": {
-      "raw_nongray": 1,
-      "raw_gray": 80,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/OnboardingWizard.vue": {
@@ -353,11 +338,6 @@
       "raw_gray": 13,
       "hardcoded_colors": 1
     },
-    "src/frontend/src/components/StatusIndicator.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 2,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/components/SystemViewEditor.vue": {
       "raw_nongray": 21,
       "raw_gray": 67,
@@ -388,11 +368,6 @@
       "raw_gray": 15,
       "hardcoded_colors": 0
     },
-    "src/frontend/src/components/UnifiedActivityPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 70,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/components/VoiceChannelToggle.vue": {
       "raw_nongray": 0,
       "raw_gray": 9,
@@ -411,11 +386,6 @@
     "src/frontend/src/components/WhatsAppChannelPanel.vue": {
       "raw_nongray": 0,
       "raw_gray": 59,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/YamlEditor.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 16,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/chat/ChatBubble.vue": {
@@ -476,16 +446,6 @@
     "src/frontend/src/components/operator/QueueItemDetail.vue": {
       "raw_nongray": 26,
       "raw_gray": 55,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/operator/QueueList.vue": {
-      "raw_nongray": 13,
-      "raw_gray": 33,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/operator/QueueStats.vue": {
-      "raw_nongray": 2,
-      "raw_gray": 34,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/operator/ResolvedCard.vue": {
@@ -561,16 +521,6 @@
     "src/frontend/src/components/rooms/ParticipantsRail.vue": {
       "raw_nongray": 0,
       "raw_gray": 25,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/rooms/RoomComposer.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 13,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/rooms/RoomTranscript.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 23,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/rooms/RoomsRail.vue": {
@@ -653,11 +603,6 @@
       "raw_gray": 107,
       "hardcoded_colors": 0
     },
-    "src/frontend/src/views/FileManager.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 83,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/views/Login.vue": {
       "raw_nongray": 32,
       "raw_gray": 123,
@@ -710,10 +655,10 @@
     }
   },
   "totals": {
-    "raw_nongray": 753,
-    "raw_gray": 7423,
+    "raw_nongray": 737,
+    "raw_gray": 6959,
     "hardcoded_colors": 383,
     "semantic_tokens": 3459,
-    "files_with_violations": 141
+    "files_with_violations": 130
   }
 }

@@ -159,6 +159,8 @@ async def get_skills_library_automation_setting(
         "last_sync_error": db.get_setting_value(SKILLS_LAST_ERROR_KEY, None) or None,
         "last_fleet_reinject": last_run,
     }
+
+
 @router.put("/skills-library")
 async def update_skills_library_automation_setting(
     body: SkillsLibraryAutomationUpdate,
@@ -255,6 +257,8 @@ async def update_skills_library_automation_setting(
         "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
         "changed": changed,
     }
+
+
 @router.get("/proactive-rate-limits")
 async def get_proactive_rate_limits_setting(
     request: Request,
@@ -278,6 +282,8 @@ async def get_proactive_rate_limits_setting(
         for key, default in PROACTIVE_RATE_LIMIT_DEFAULTS.items()
     }
     return {"limits": limits, "max": PROACTIVE_RATE_LIMIT_MAX, "window_hours": 1}
+
+
 @router.put("/proactive-rate-limits")
 async def update_proactive_rate_limits_setting(
     body: ProactiveRateLimitsUpdate,
@@ -332,6 +338,8 @@ async def update_proactive_rate_limits_setting(
         "warnings": warnings,
         "limits": {key: get_proactive_rate_limit(key) for key in PROACTIVE_RATE_LIMIT_DEFAULTS},
     }
+
+
 def _brain_orb_flag_state() -> Dict[str, Any]:
     """Per-flag effective value + source for the admin panel.
 
@@ -355,6 +363,8 @@ def _brain_orb_flag_state() -> Dict[str, Any]:
             source = "env" if env_on else "default"
         state[field] = {"value": value, "source": source}
     return state
+
+
 @router.get("/brain-orb")
 async def get_brain_orb_settings(
     request: Request,
@@ -375,6 +385,8 @@ async def get_brain_orb_settings(
         "flags": _brain_orb_flag_state(),
         "gemini_key_configured": bool(GEMINI_API_KEY),
     }
+
+
 @router.put("/brain-orb")
 async def update_brain_orb_settings(
     body: BrainOrbSettingsUpdate,
@@ -456,6 +468,8 @@ async def update_brain_orb_settings(
         "flags": after,
         "gemini_key_configured": bool(GEMINI_API_KEY),
     }
+
+
 def _elevenlabs_settings_state() -> dict:
     """Admin-panel view: key presence + source + default voice (never the key)."""
     return {
@@ -463,6 +477,8 @@ def _elevenlabs_settings_state() -> dict:
         "key_source": settings_service.elevenlabs_key_source(),
         "default_voice_id": settings_service.get_default_voice_id(),
     }
+
+
 @router.get("/elevenlabs")
 async def get_elevenlabs_settings(
     request: Request,
@@ -475,6 +491,8 @@ async def get_elevenlabs_settings(
     """
     assert_admin(current_user)
     return _elevenlabs_settings_state()
+
+
 @router.put("/elevenlabs")
 async def update_elevenlabs_settings(
     body: ElevenLabsSettingsUpdate,
@@ -546,6 +564,8 @@ async def update_elevenlabs_settings(
 
     after = _elevenlabs_settings_state()
     return {"success": True, **after}
+
+
 @router.get("/a2a-endpoints")
 async def list_a2a_outbound_endpoints(
     current_user: User = Depends(get_current_user)
@@ -571,6 +591,8 @@ async def list_a2a_outbound_endpoints(
         "endpoints": a2a_outbound.list_oss_endpoints(),
         "enabled": a2a_outbound_service.is_outbound_enabled(),
     }
+
+
 @router.put("/a2a-endpoints")
 async def upsert_a2a_outbound_endpoint(
     body: A2AOutboundEndpointUpsert,
@@ -624,6 +646,8 @@ async def upsert_a2a_outbound_endpoint(
         },
     )
     return {"success": True, "endpoint": record}
+
+
 @router.delete("/a2a-endpoints/{ref}")
 async def remove_a2a_outbound_endpoint(
     ref: str,

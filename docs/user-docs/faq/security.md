@@ -68,7 +68,7 @@ Nothing leaves your server without an explicit, admin-level opt-in — and never
 
 ## What does Trinity record about my usage, and does any of it leave my server?
 
-By default Trinity records only anonymous local product events — a small fixed allow-list of onboarding and setup step events, stored in its own database — and they never leave your server; there is no toggle and nothing to configure. Separately, an admin can opt in to share coarse anonymized aggregates (platform version, edition, and counts of agents, executions, and funnel steps) with a hosted benchmark service in exchange for fleet benchmarks; this is off by default. The shared aggregates never include PII, message content or prompts, emails, or agent names, and they can't be used to reconstruct individual activity. See [Product Telemetry](../operations/telemetry.md).
+By default Trinity records only anonymous local product events — a small fixed allow-list of onboarding and setup step events, stored in its own database — and they never leave your server; there is no toggle and nothing to configure. Separately, an admin can opt in to share coarse anonymized aggregates (release version, edition, install lane, counts of agents, executions and funnel steps, and an outcome mix of how runs ended) with a hosted benchmark service in exchange for fleet benchmarks; this is off by default, keyed by a random share id that is never your install id, and validated against a documented schema before every send. The shared aggregates never include PII, message content or prompts, emails, or agent names, and they can't be used to reconstruct individual activity. See [Product Telemetry](../operations/telemetry.md).
 
 ## How do I turn usage-data sharing on or off?
 

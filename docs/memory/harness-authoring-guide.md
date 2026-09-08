@@ -169,5 +169,5 @@ runtime's 502 shape and a generic failure never sets `error_code=AUTH`.
 - E2E (`/verify-local`): a real `AGENT_RUNTIME=<name>` agent, one `/api/chat` +
   one `/api/task` turn → non-empty response, cost/tokens populated, cold-start
   auth works.
-- Update `requirements.md`, `architecture.md` (the [Agent Runtimes](architecture.md#agent-runtimes--multi-runtime--harness--runtime-1187)
+- Update `requirements.md`, `architecture.md` (the [Agent Runtimes](architecture/agent-runtime.md#agent-runtimes--multi-runtime--harness--runtime-1187)
   subsystem block), and a `feature-flows/` entry.

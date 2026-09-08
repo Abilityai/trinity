@@ -110,7 +110,6 @@
             :has-avatar-prompt="!!avatarIdentityPrompt"
             :emotion-avatar-url="emotionAvatarUrl"
             :voice-available="sessionsStore.voiceAvailable"
-            :workspace-available="sessionsStore.workspaceAvailable"
             :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
@@ -152,8 +151,14 @@
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   Stateless chat — each message starts fresh.
                 </span>
+                <!-- ent#456: opens a new tab, so the agent page you were on is
+                     still here when you come back. The ?tab=session REDIRECT
+                     below deliberately stays same-tab — it rewrites a navigation
+                     already in flight rather than starting one. -->
                 <router-link
                   :to="{ path: '/workspace', query: { agent: agent.name } }"
+                  target="_blank"
+                  rel="noopener"
                   class="text-xs font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
                   title="The Workspace keeps one continuous conversation — memory, tool results and reasoning carry across turns."
                 >
@@ -230,6 +235,11 @@
             <!-- Reports Tab Content (#918) -->
             <div v-if="activeTab === 'reports'">
               <ReportsPanel :agent-name="agent.name" :can-delete="agent.can_share" />
+            </div>
+
+            <!-- Canvas Tab Content (ent#438) -->
+            <div v-if="activeTab === 'canvas'">
+              <AgentCanvasTab :agent-name="agent.name" />
             </div>
 
             <!-- Loops Tab Content (#1106 / #740 Phase 2) -->
@@ -351,6 +361,7 @@ import OverviewPanel from '../components/OverviewPanel.vue'
 import SchedulesPanel from '../components/SchedulesPanel.vue'
 import LoopsPanel from '../components/LoopsPanel.vue'
 import ReportsPanel from '../components/ReportsPanel.vue'
+import AgentCanvasTab from '../components/canvas/AgentCanvasTab.vue'
 import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
@@ -894,6 +905,10 @@ function buildTabs({
 
   tabs.push(
     { id: 'reports', label: 'Reports' },  // #918 agent-published reports
+    // ent#438 — the canvas is Reports' living sibling: same agent output,
+    // one surface kept current instead of a record that accumulates. Next
+    // to it deliberately, so the choice is visible where it is made.
+    { id: 'canvas', label: 'Canvas' },
     { id: 'schedules', label: 'Schedules' },
     { id: 'loops', label: 'Loops' },
     { id: 'playbooks', label: 'Playbooks' },

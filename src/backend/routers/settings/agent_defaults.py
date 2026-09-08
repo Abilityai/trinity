@@ -150,6 +150,8 @@ async def get_agent_quotas(
         "admin_unlimited": True,
         "legacy_setting": legacy_value
     }
+
+
 @router.put("/agent-quotas")
 async def update_agent_quotas(
     body: AgentQuotaUpdate,
@@ -181,6 +183,8 @@ async def update_agent_quotas(
         "success": True,
         "updated": updated
     }
+
+
 @router.get("/agent-defaults/resources")
 async def get_agent_default_resources(
     request: Request,
@@ -205,6 +209,8 @@ async def get_agent_default_resources(
         "valid_memory_values": VALID_MEMORY_VALUES,
         "note": "Changes apply to new agent containers only. Restart existing agents to pick up new defaults."
     }
+
+
 @router.put("/agent-defaults/resources")
 async def update_agent_default_resources(
     body: AgentDefaultResourcesUpdate,
@@ -250,6 +256,8 @@ async def update_agent_default_resources(
         "memory": memory,
         "restart_required": True
     }
+
+
 @router.get("/agent-defaults/access-policy")
 async def get_agent_default_access_policy(
     request: Request,
@@ -270,6 +278,8 @@ async def get_agent_default_access_policy(
                 "current per-agent value; owners can override per agent via the "
                 "agent's access policy.",
     }
+
+
 @router.put("/agent-defaults/access-policy")
 async def update_agent_default_access_policy(
     body: AgentDefaultAccessPolicyUpdate,
@@ -313,6 +323,8 @@ async def update_agent_default_access_policy(
         "updated": updated,
         "require_email": get_agent_default_require_email(),
     }
+
+
 @router.get("/max-parallel-tasks-ceiling")
 async def get_max_parallel_tasks_ceiling_setting(
     request: Request,
@@ -332,6 +344,8 @@ async def get_max_parallel_tasks_ceiling_setting(
         "min": MAX_PARALLEL_TASKS_CEILING_MIN,
         "max": MAX_PARALLEL_TASKS_CEILING_MAX,
     }
+
+
 @router.put("/max-parallel-tasks-ceiling")
 async def update_max_parallel_tasks_ceiling_setting(
     body: MaxParallelTasksCeilingUpdate,

@@ -139,7 +139,7 @@ def _install_perform_spy(mod, db):
     (mutates the stub's current sub) and records each switch."""
     calls: list[str] = []
 
-    async def spy(*, agent_name, old_subscription_id, old_subscription_name,
+    async def spy(*, agent_name, old_subscription_name,
                   new_subscription, failure_kind, event_count,
                   destination_headroom=None):
         calls.append(new_subscription.id)

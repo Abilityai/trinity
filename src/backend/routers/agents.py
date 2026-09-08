@@ -597,15 +597,79 @@ async def create_agent_endpoint(
 async def deploy_local_agent(
     body: DeployLocalRequest,
     request: Request,
-    current_user: User = Depends(require_role("creator"))
+    current_user: User = Depends(require_role("creator")),
+    idempotency_key: Optional[str] = Header(None),
 ):
-    """Deploy a Trinity-compatible local agent. Requires creator role or above."""
-    return await deploy_local_agent_logic(
-        body=body,
-        current_user=current_user,
-        request=request,
-        create_agent_fn=create_agent_internal
-    )
+    """Deploy a Trinity-compatible local agent. Requires creator role or above.
+
+    Invariant #18 (#2060): accepts an optional ``Idempotency-Key`` so a
+    transport retry of a slow deploy (versioning mints a NEW name per call, so
+    a retried deploy previously forked twice: my-agent-2 AND my-agent-3)
+    replays the original response instead of dispatching a second deploy.
+    Mirrors the create endpoint above, including the #2040-F3 staleness
+    branch. The scope folds the caller (another user's identical key must
+    never replay a foreign deploy response).
+    """
+    idem = None
+    if idempotency_key:
+        scope = f"agent_deploy:{current_user.id}"
+        idem = idempotency_service.begin(scope, idempotency_key)
+        if idem.replay:
+            if idem.in_flight:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "A deploy with this Idempotency-Key is still "
+                            "being processed."
+                        ),
+                        "code": "DEPLOY_IN_FLIGHT",
+                    },
+                )
+            # #2040-F3: a completed replay is only truthful while the version
+            # it reports still exists — delete-then-identical-redeploy within
+            # 24h must run a genuinely fresh deploy, not replay a 200 naming
+            # an agent that is gone.
+            recorded_name = ((idem.snapshot or {}).get("versioning") or {}).get(
+                "new_version"
+            )
+            if recorded_name and db.is_agent_live(recorded_name):
+                return JSONResponse(
+                    content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+                )
+            idempotency_service.discard_stale_replay(idem.scope, idem.key)
+            idem = idempotency_service.begin(scope, idempotency_key)
+            if idem.replay:
+                # Lost the re-claim race to a concurrent identical retry.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "A deploy with this Idempotency-Key is being "
+                            "retried concurrently."
+                        ),
+                        "code": "DEPLOY_IN_FLIGHT",
+                    },
+                )
+
+    try:
+        result = await deploy_local_agent_logic(
+            body=body,
+            current_user=current_user,
+            request=request,
+            create_agent_fn=create_agent_internal
+        )
+    except Exception:
+        # Release the fresh claim so a corrected retry can proceed (fail-open;
+        # never converts the underlying error).
+        if idem is not None:
+            idempotency_service.fail(idem)
+        raise
+
+    if idem is not None:
+        new_version = result.versioning.new_version if result.versioning else None
+        idempotency_service.complete(idem, new_version, jsonable_encoder(result))
+    return result
 
 
 @router.delete("/{agent_name}")

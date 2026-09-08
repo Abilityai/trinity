@@ -840,3 +840,27 @@ def stubbed_modules(mapping):
             "They are resolved lazily by services/compatibility/spec.py, so this "
             "breaks claude_only filtering in whatever test runs next — see #2140."
         )
+
+
+def ensure_schema_tables(*names: str) -> None:
+    """Create the named `db/schema.py` tables + their indexes on the engine.
+
+    Idempotent. Replaces the deleted `client_portal/schema.py` and
+    `shared_sessions/schema.py` shims (#2493): a test that needs tables present
+    without running the full migration chain applies the canonical DDL directly
+    (Invariant #3 — the DDL's single home is `db/schema.py`). Index statements
+    are matched by table name rather than a hand-kept list, so an index added
+    to the schema cannot be silently missed here.
+    """
+    from sqlalchemy import text
+
+    from db.engine import get_engine
+    from db.schema import INDEXES, TABLES
+
+    markers = tuple(f"{name}(" for name in names)
+    with get_engine().begin() as conn:
+        for name in names:
+            conn.execute(text(TABLES[name]))
+        for stmt in INDEXES:
+            if any(marker in stmt for marker in markers):
+                conn.execute(text(stmt))

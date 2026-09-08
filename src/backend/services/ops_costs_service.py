@@ -1,6 +1,8 @@
 """The ops cost rollup (#1028) — `GET /api/ops/costs` behind its router gate.
 
 Split from `fleet_ops_service` so neither service sits in the critical size
+
+
 class the #1028 refactor exists to empty: this is the read-side Prometheus
 scrape + formatting, with no fleet mutation in reach.
 """

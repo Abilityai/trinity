@@ -1,0 +1,23 @@
+[Unit]
+# Re-applies the DOCKER-USER DROP rules on every boot.
+#
+# This replaces iptables-persistent, which cannot be used here: `ufw` declares
+# `Breaks: iptables-persistent, netfilter-persistent` (unversioned), so apt
+# removes ufw to install it — and DigitalOcean's own img_check.sh calls
+# `ufw status` unconditionally on Ubuntu and warns "No firewall is configured"
+# when it is absent.
+#
+# It is also the more correct mechanism regardless of the conflict:
+# netfilter-persistent restores at boot with no ordering against docker.service,
+# and DOCKER-USER does not exist until Docker creates it.
+Description=Trinity: drop internet access to Docker-published container ports
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/trinity-firstboot/docker-firewall.sh
+
+[Install]
+WantedBy=multi-user.target

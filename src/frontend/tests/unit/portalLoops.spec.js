@@ -257,23 +257,37 @@ describe('ent#458 — the panel is the platform door only', () => {
   })
 })
 
-describe('ent#458 — auth and lifecycle races (caught in review)', () => {
+describe('ent#458 — auth and lifecycle races (caught in review; re-homed by ent#475)', () => {
+  // The strip used to own `stores/portalLoops.js` from inside TWO mount points
+  // and guard three races (a late `isPlatformSession`, the incoming/outgoing
+  // panels clearing each other, a re-fire resetting the chosen agent). ent#475
+  // moved ownership to ONE place — `composables/usePortalRailFeeds.js` — so the
+  // guards now pin that owner, and the body is pinned to NOT own anything.
+  const owner = SRC('composables/usePortalRailFeeds.js')
   const sfc = SRC('components/portal/PortalLoops.vue')
 
-  it('watches the derived auth flag instead of only reading it', () => {
-    // `isPlatformSession` derives from authStore.isAuthenticated + the portal
-    // token, both settled asynchronously. A participants-only watch guarded on
-    // it returns at mount and never re-runs — the strip renders permanently
-    // empty. Same class as AdminEmailNudge's `profileVerified`.
-    expect(sfc).toMatch(/watch\(\[participantsKey, visible\]/)
-    expect(sfc).not.toMatch(/watch\(participants,\s*\(names\)/)
+  it('the owner watches the derived door set, so a late auth confirmation re-fires it', () => {
+    // `isPlatformSession` settles asynchronously; `loops` then APPEARS in the
+    // visible set. Keyed on the feed set + the joined participant key, never
+    // on array identity.
+    expect(owner).toMatch(/watch\(\[visible, participantsKey, wantsKey\]/)
+    expect(owner).toContain("const participantsKey = computed(() => participants.value.join(' '))")
+    expect(owner).toContain('if (w.loops) {')
+    expect(owner).toContain('loops.setParticipants(names)')
+    expect(owner).toContain('loops.fetchLoops()')
   })
 
-  it('does not let one mount point clear the other\'s list', () => {
-    // PortalConversation and PortalRoom share one store singleton, and a
-    // room -> 1:1 switch can mount the new panel before the old unmounts.
-    expect(sfc).toMatch(/ownedKey/)
-    expect(sfc).toMatch(/store\.stopPolling\(\)/)
+  it('the body owns no participants and no fetch — there is nothing left to race', () => {
+    expect(sfc).not.toContain('setParticipants')
+    expect(sfc).not.toContain('ownedKey')
+    // The only fetch left is the failed-state Retry in the template.
+    expect(sfc.slice(sfc.indexOf('<script'))).not.toContain('fetchLoops')
+  })
+
+  it('a chat switch re-scopes the store through its participant set; leaving the rail clears it', () => {
+    expect(owner).toContain('loops.setParticipants(names)')
+    expect(owner).toContain('if (!isVisible) { reset(); return }')
+    expect(owner).toMatch(/function reset\(\) \{\s*loops\.clear\(\)/)
   })
 })
 
@@ -310,35 +324,29 @@ describe('ent#458 — review findings', () => {
   })
 
   it('watches what changed, not a new array identity every render', () => {
-    // Both parents build the array fresh per render (`[agent.name]` inline;
-    // a computed re-derived from `room.value`, which a 3s poll reassigns), and
-    // a non-deep watch compares with `Object.is` — so typing a 40-character
-    // message issued 40 `GET /loops` per participant, and a room polled
-    // unconditionally every 3s with nothing running.
-    expect(SFC).toContain("const participantsKey = computed(() => participants.value.join('\\u0000'))")
-    expect(SFC).toMatch(/watch\(\[participantsKey, visible\]/)
+    // The shell passes a fresh array per render; a non-deep watch compares with
+    // `Object.is`, so the form's agent must follow the JOINED key — otherwise a
+    // poll tick would silently discard the agent the user picked.
+    expect(SFC).toContain("const participantsKey = computed(() => participants.value.join(' '))")
+    expect(SFC).toMatch(/watch\(participantsKey,/)
   })
 
-  it('does not reset the chosen agent on a re-fire', () => {
-    // The same re-fire set `form.agent = names[0]` mid-selection, so a Start
+  it('does not reset the chosen agent unless it left the chat', () => {
+    // The re-fire used to set `form.agent = names[0]` mid-selection, so a Start
     // clicked in that window ran the loop on the wrong agent.
-    expect(SFC).toMatch(/keyChanged[\s\S]{0,200}form\.agent = names\[0\]/)
+    expect(SFC).toMatch(/if \(!names\.includes\(form\.agent\)\) form\.agent = names\[0\]/)
   })
 
-  it('never stops the incoming panel’s backstop poll', () => {
-    // That else-branch is reached exactly when the store belongs to the NEW
-    // panel; `_ensurePolling()` only runs from `fetchLoops`'s finally, so
-    // clearing the timer there left the new panel on WS alone — the failure the
-    // backstop exists to cover.
-    expect(SFC).not.toMatch(/\} else \{\s*store\.stopPolling\(\)/)
+  it('never stops the backstop poll from the body', () => {
+    // The 12s backstop is armed from `fetchLoops`'s finally and cleared only by
+    // the shell's reset; a body that touched it would leave the rail on WS
+    // alone — the failure the backstop exists to cover.
+    expect(SFC).not.toMatch(/store\.stopPolling\(\)/)
   })
 
-  it('can actually auto-expand when something is running', () => {
-    // Read in `onMounted` it was always false: the immediate watcher only
-    // STARTS the async fetch, and the matching-key unmount branch calls
-    // `store.clear()`, so nothing survives a previous mount either.
-    expect(SFC).toMatch(/watch\(\(\) => store\.hasActive[\s\S]{0,200}expanded\.value = true/)
-    expect(SFC).toContain('autoExpanded')
+  it('has no collapse of its own — the rail owns it (ent#475)', () => {
+    expect(SFC).not.toContain('autoExpanded')
+    expect(SFC).not.toContain('portal-loops-toggle')
   })
 
   it('sends every bound the form shows', () => {

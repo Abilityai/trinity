@@ -363,11 +363,27 @@ name for `'<agent>'`.
 
 ### Pre-flight — pick a viable pilot, then capture a baseline
 
-**First, check the candidate can be piloted at all.** Only `agent` and `event`
-traffic can reach the durable queue (#2048) — a cron-driven agent will read ~0
-`pulled` on M1 no matter how the flag is set. Run the pull-eligible-volume query
-under M1 below and pick from its `pull_eligible` column *before* flipping
-anything; a week of soak on a cron-only agent measures nothing.
+**First, check the candidate can be piloted at all.** Six triggers reach the
+durable queue — `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` —
+and three do not (`fan_out`, `a2a`, `operator_response`). Run the
+pull-eligible-volume query under M1 below and pick from its `pull_eligible`
+column *before* flipping anything; a week of soak on an agent whose traffic is
+all fan-out measures nothing.
+
+> **Changed by #2391, widened again by #2523.** Before #2391,
+> `task_execution_service` dispatched with `overflow_policy="reject"`
+> unconditionally, so **no** cron, webhook or reminder row could ever be claimed —
+> the pilot flag was inert for the fleet's dominant traffic class, and a
+> cron-driven agent was explicitly not a viable pilot. It now dispatches with
+> `"queue_persistent"` when `pull_owns_dispatch` says a pilot owns the trigger,
+> and with `"reject"` otherwise. **A cron-driven agent is a viable pilot now** —
+> see "Choosing a pilot" below.
+>
+> #2523 added `loop`. That one was not a policy change: `loop_service` was an
+> in-process `for` loop that `await`ed each iteration's `TaskExecutionResult`, so
+> no policy could have helped it. It is now advanced by execution terminals, its
+> state lives on `agent_loops` / `agent_loop_runs`, and a loop **survives a
+> backend restart** instead of being flipped `interrupted`.
 
 Then run M4 + M6 + M7 + M9 on the pilot for the 7 days *preceding* the flip and
 keep the output. Without a baseline, a 4% success-rate dip during the soak is
@@ -435,8 +451,9 @@ WHERE agent_name = '<agent>'
   AND started_at::timestamptz > now() - interval '24 hours';
 ```
 
-Expected after the #1766 gate: **`agent` and `event` rows ~100% `pulled`; every
-other trigger 100% `pushed`.** That second half is correct behaviour, not a
+Expected after the #1766 gate + #2391 + #2523: **`agent`, `event`, `schedule`,
+`webhook`, `reminder` and `loop` rows ~100% `pulled`; `fan_out`, `a2a` and
+`operator_response` 100% `pushed`.** That second half is correct behaviour, not a
 fault — read the reach table below before concluding anything from it. Confirm
 the split per trigger with:
 
@@ -450,65 +467,155 @@ WHERE agent_name = '<agent>'
 GROUP BY 1 ORDER BY 1;
 ```
 
-#### Which triggers can be pulled at all (#2048)
+#### Which triggers can be pulled at all (#2048, widened by #2391 and #2523)
 
-`PULL_MODE_PILOT_AGENTS` routes **agent-to-agent work only**. `capacity_manager`
-offers a row to the durable queue solely when its producer passed
-`overflow_policy="queue_persistent"`, and one of the three producers does:
+`capacity_manager` offers a row to the durable queue solely when its producer
+passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 
 | Producer | Carries | `overflow_policy` | Pullable? |
 |---|---|---|---|
-| `task_execution_service` | scheduler — **all cron** — + fan-out | `reject` | **No** |
+| `task_execution_service` | scheduler — **all cron** — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for `schedule` / `webhook` / `reminder` / `loop` |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
-| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes** |
+| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
 
 `POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
-event}`; intersect with `_AUTONOMOUS_TRIGGERS` and the pullable set is exactly
-**`{agent, event}`** (`pull_pilot.PULL_REACHABLE_TRIGGERS`). `schedule`,
-`webhook`, `loop`, `fan_out` and `reminder` are declared autonomous but reach
-dispatch through the `reject` producer, so **they are pushed no matter what the
-flag says.**
+event}`, contributing `agent` + `event`. `task_execution_service` contributes the
+autonomous triggers with **no synchronous result consumer**: `schedule`,
+`webhook` and `reminder`, all three of which reach it from the scheduler, which
+dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
+since #2523 made its driver terminal-driven. The pullable set is therefore
+**`{agent, event, schedule, webhook, reminder, loop}`**
+(`pull_pilot.PULL_REACHABLE_TRIGGERS`).
+
+The three that stay pushed are stranded on their **caller**, not on the
+producer's policy — a queued row is claimed and run later and returns nothing for
+any of them to read. Two are structural: `fan_out` (builds each
+`FanOutTaskResult` from the returned result, and `POST /fan-out` blocks on the
+aggregate — the async join + sync edge adapter is **#2524**) and `a2a` (turns the
+result into the JSON-RPC artifact it hands a remote caller; falls out of #2524's
+adapter). `operator_response` is out by **choice**: it dispatches through the
+same producer #2391 widened, but the respond endpoint records `result.status` as
+the dispatch receipt (the `operator_resume_dispatch` audit row + the #525
+idempotency completion) for a turn that spends money on a person's answer
+(ent#329). Widening it is a follow-up, not a blocker.
 
 **Reading a pushed autonomous row.** Two different situations, previously
 indistinguishable:
 
-- `triggered_by` ∈ `{schedule, webhook, loop, fan_out, reminder}` → **expected.**
+- `triggered_by` ∈ `{fan_out, a2a, operator_response}` → **expected.**
   The flag is applied and correct; the dispatch topology is the limit. The
   backend logs this once per (agent, trigger) — grep `[#2048]` to confirm:
   ```bash
   docker logs trinity-backend 2>&1 | grep '\[#2048\]'
   ```
-- `triggered_by` ∈ `{agent, event}` → **a real fault.** This is the only case
-  where the old advice applies: check the backend actually has
-  `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose must forward
-  it).
+- `triggered_by` ∈ `{agent, event, schedule, webhook, reminder, loop}` → **a real
+  fault.** This is the case where the old advice applies: check the backend
+  actually has `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose
+  must forward it).
 
-#### Choosing a pilot: a cron-only agent cannot be piloted
+#### Choosing a pilot: cron-driven agents are viable since #2391
 
-Because cron cannot reach the queue, **an agent whose traffic is mostly
-`schedule` will read ~0 `pulled` on M1 no matter how the flag is set, and the
-soak measures nothing.** Verify pull-eligible volume *before* selecting a pilot,
-not after a week of soak:
+Verify pull-eligible volume *before* selecting a pilot, not after a week of soak:
 
 ```sql
 SELECT agent_name,
        COUNT(*)                                          AS total,
        COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
-       COUNT(*) FILTER (WHERE triggered_by IN ('agent','event')) AS pull_eligible
+       COUNT(*) FILTER (WHERE triggered_by IN
+         ('agent','event','schedule','webhook','reminder','loop')) AS pull_eligible,
+       COUNT(*) FILTER (WHERE triggered_by IN
+         ('fan_out','a2a','operator_response'))                    AS not_pullable
 FROM schedule_executions
 WHERE started_at::timestamptz > now() - interval '7 days'
 GROUP BY 1 ORDER BY pull_eligible DESC;
 ```
 
-Pick from the `pull_eligible` column. In practice that means a **fan-in hub fed
-by parallel `chat_with_agent`** — on `eu2` exactly one agent
-(`cornelius-oracle`, 329/329) had the volume, while the cron-driven oracles sat
-at 2–5 and `brier-hq` at 0.
+Pick from the `pull_eligible` column. **The advice this replaces was the
+opposite**: before #2391 cron could not reach the queue, so a cron-driven agent
+read ~0 `pulled` on M1 no matter how the flag was set, and the only viable pilot
+was a **fan-in hub fed by parallel `chat_with_agent`** — on `eu2` exactly one
+agent (`cornelius-oracle`, 329/329) qualified, while the cron-driven oracles sat
+at 2–5 and `brier-hq` at 0. Under the same query today those cron-driven oracles
+score ~128 each. Prefer one of them for the next soak arm: they exercise the
+traffic class the fleet actually runs, which `cornelius-oracle` never did.
 
-Extending pull to cron is the issue's deferred Option 2 (give
-`task_execution_service` a `queue_persistent` policy under the pilot flag); it is
-**not** implemented. `tests/unit/test_2048_pull_pilot_reach.py` fails if that
-producer's policy changes, so this section cannot go stale silently.
+`tests/unit/test_2048_pull_pilot_reach.py` pins both this producer's policies
+*and* that the wider one is gated on `pull_owns_dispatch`, so this section
+cannot go stale silently.
+
+#### What #2391 changed under capacity pressure — and what it did not
+
+The gate is `pull_owns_dispatch` and nothing else, so:
+
+- **Flag OFF (every agent, by default): unchanged, byte-for-byte.** The policy
+  stays `reject`; a scheduled fire arriving at capacity still fails fast with
+  `Agent at capacity (N/N parallel tasks running)` and a FAILED row. Giving this
+  producer an *unconditional* persistent queue would have changed that for the
+  whole fleet whether or not pull was enabled — the reliability-spine change
+  #2048 declined to bundle.
+- **Flag ON: rejection stops existing for that agent's pullable triggers.** The
+  row is never offered a slot (`acquire`'s `pull_exclusive` branch skips the
+  ZADD), so "at capacity" is not a state that can reject it. Capacity becomes
+  physical — the agent's worker pool. Backpressure moves to
+  `agent_ownership.max_backlog_depth`: a full backlog still raises
+  `CapacityFull`, at a deeper threshold, and the row's error names the backlog
+  rather than parallel slots. **Watch `max_backlog_depth` on a cron-driven
+  pilot**: cron fires on a fixed cadence regardless of whether the agent is
+  keeping up, so a slow agent accumulates queue depth that a `reject` policy
+  used to discard. M8 (queue starvation) is the query to sample for it.
+- **#1083 fire-and-forget does not stack.** `schedule` and `webhook` are eligible
+  for both, but a pull-queued row is never dispatched, so no 202 ACK can arrive
+  and `async_result` is never sent. Pull wins by construction, not precedence.
+  On a non-pilot agent #1083 behaves exactly as before. The two share the
+  machinery that matters anyway — the eid-keyed slot lease, the lease reaper, and
+  the `claim_token`-gated CAS terminal write.
+- **The scheduler polls through `queued`.** `_poll_execution_completion` treated
+  anything but `running` as an outcome, so a queued row would have been published
+  as `schedule_execution_completed(status=queued)`, classified a failure, and
+  handed to `_maybe_schedule_retry` — duplicating work that was queued and about
+  to run. `queued` is now in `_NON_TERMINAL_POLL_STATES`. If the poll deadline
+  (task timeout + buffer) expires while a row is still queued, the scheduler logs
+  it and stops; recovery belongs to the lease reaper and the backlog
+  maintenance sweep, not to `cleanup_service`'s stale-`running` sweep.
+- **#2392 becomes load-bearing.** This moves the fleet's dominant traffic class
+  onto a mechanism built on re-running the same execution, and `effect_guard`
+  still fails open when the agent omits the execution id. Do not run a
+  side-effect-bearing cron pilot before reading it.
+
+#### What #2523 changed for loops
+
+- **A loop survives a backend restart.** `cleanup_service`'s startup hook used to
+  call `db.mark_orphan_loops_interrupted()`, flipping every in-flight loop to
+  `interrupted` because its runner coroutine died with the process. It now calls
+  `LoopService.reconcile_after_restart()`: a loop with an execution still in
+  flight is left alone (that execution's terminal advances it), one whose
+  execution already went terminal is advanced from it, and only a loop with
+  nothing in flight is re-armed. **Expect zero new `interrupted` loops after a
+  restart; a run of them means the reconcile is not running.**
+- **`delay_seconds` is a park, not a sleep.** The inter-run pause is
+  `agent_loops.next_run_at` and a 5s backend sweep brings the loop back, so a
+  delayed loop holds no coroutine. Granularity is the sweep period plus jitter,
+  i.e. a `delay_seconds=5` pause can land at ~6s. It is a pacing knob, not a
+  precision timer.
+- **Watch `agent_loops` rows stuck `running` with no in-flight execution.** That
+  is the shape of a lost advance, and it is the one failure mode a `for` loop
+  could not have. Query:
+  ```sql
+  SELECT l.id, l.agent_name, l.runs_completed, l.next_run_at
+  FROM agent_loops l
+  LEFT JOIN agent_loop_runs r ON r.loop_id = l.id AND r.status = 'running'
+  LEFT JOIN schedule_executions e ON e.id = r.execution_id
+  WHERE l.status IN ('queued','running')
+    AND l.next_run_at IS NULL
+    AND (e.id IS NULL OR e.status NOT IN ('queued','running','pending_retry'));
+  ```
+  A restart heals this on its own (the reconcile re-arms exactly these rows); a
+  row that persists across one is a real defect.
+- **The advance is idempotent by CAS**, not by luck: `claim_loop_advance` moves
+  `runs_completed` from N-1 to N and the loser does nothing, so a re-delivered
+  pull terminal cannot double-fire an iteration. If you ever see
+  `runs_completed` exceed the number of `agent_loop_runs` rows, that CAS has
+  been bypassed.
 
 **M2 — split over time.** Confirms the flip took effect at the moment you think
 it did, and shows drift.

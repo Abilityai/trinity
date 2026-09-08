@@ -1,7 +1,7 @@
 # Feature: Workspace session identity — two ways in, one way out
 
 > **Issues**: ent#357 (implicit platform entry), trinity#2258 (sign-out) · **Status**: shipped
-> **Related**: [workspace-absorbs-session.md](workspace-absorbs-session.md) (the turn engine), [workspace-sidebar-ia.md](workspace-sidebar-ia.md) (the sidebar the button lives in), [architecture.md → Workspace / Client Portal](../architecture.md#workspace--client-portal-epic-ent78-oss-core-since-ent356)
+> **Related**: [workspace-absorbs-session.md](workspace-absorbs-session.md) (the turn engine), [workspace-sidebar-ia.md](workspace-sidebar-ia.md) (the sidebar the button lives in), [architecture.md → Workspace / Client Portal](../architecture/workspace.md#workspace--client-portal-epic-ent78-oss-core-since-ent356)
 
 ## The model
 

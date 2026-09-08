@@ -225,6 +225,13 @@ TABLES = {
             -- default off — a plain token-in-URL webhook is unchanged.
             webhook_secret_encrypted TEXT,
             webhook_auth_enabled INTEGER DEFAULT 0,
+            -- ent#498: deliver this schedule's output into one person's
+            -- Workspace conversation with the agent. NULL — every existing row,
+            -- no backfill — is today's behaviour: the run terminates in an
+            -- execution row and nothing is delivered. The resolver fails CLOSED
+            -- on NULL, and an address that can no longer reach the agent is a
+            -- refused dispatch rather than a silent drop.
+            deliver_to_workspace_email TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
@@ -315,7 +322,9 @@ TABLES = {
             source_mcp_key_name TEXT,
             created_at TEXT NOT NULL,
             started_at TEXT,
-            completed_at TEXT
+            completed_at TEXT,
+            next_run_at TEXT,
+            stop_requested_at TEXT
         )
     """,
 
@@ -490,6 +499,58 @@ TABLES = {
     # -------------------------------------------------------------------------
     # Agent Reports (#918) — agent-published structured telemetry/domain reports
     # -------------------------------------------------------------------------
+    # ent#438 — the agent canvas. One ROW per (agent, canvas_id), so "update it
+    # over time" is an upsert and the surface is addressable by construction.
+    # Deliberately not modelled on `agent_reports`: a report is an immutable
+    # thing published once and accumulated; a canvas is one living surface the
+    # agent keeps current. No retention window — the table is bounded by that
+    # composite key rather than growing per publish.
+    "agent_canvases": """
+        CREATE TABLE IF NOT EXISTS agent_canvases (
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            title TEXT,
+            -- Ordered JSON array of {kind, title?, payload} blocks. Agent-
+            -- authored and free-form INSIDE a block's payload, which is why
+            -- `audience` below is a sibling column and never a key in here
+            -- (the ent#364 rule).
+            blocks TEXT NOT NULL,
+            -- 'operator' (default) | 'roster'. An explicit agent act is what
+            -- puts a canvas in front of a client; the default is fail-closed.
+            audience TEXT NOT NULL DEFAULT 'operator',
+            schema_version INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            -- Which execution last wrote it. Provenance, and the thing that
+            -- makes the derived staleness claim checkable rather than a guess.
+            updated_by_execution_id TEXT,
+            -- ent#537: starter layout by name ('dashboard' | 'report' |
+            -- 'brief' | 'status-board'); NULL = stacked blocks. A property of
+            -- the surface, like `audience`; a block's `slot` lives in `blocks`.
+            template TEXT,
+            PRIMARY KEY (agent_name, canvas_id)
+        )
+    """,
+
+    # ent#413 — per-user UI preferences (OSS-core by explicit decision). A
+    # generic (user_id, key) → JSON-object record, NOT a grid-only table: the
+    # Dashboard Grid's three blobs (`grid_layout` / `grid_widgets` / `grid_org`)
+    # are the first keys, and the next per-user UI state (view mode, list
+    # filters) is a new allowlisted key in services/user_preferences_service.py,
+    # never a new table. `updated_at` is per KEY on purpose — it is the
+    # compare-and-set base the PUT contract needs, which one JSON column on
+    # `users` could not express. Values are size-capped at the service (413).
+    "user_ui_preferences": """
+        CREATE TABLE IF NOT EXISTS user_ui_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """,
+
     "agent_reports": """
         CREATE TABLE IF NOT EXISTS agent_reports (
             id TEXT PRIMARY KEY,
@@ -549,7 +610,25 @@ TABLES = {
             message_count INTEGER NOT NULL DEFAULT 0,
             cached_claude_session_id TEXT,
             last_resume_at TEXT,
-            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0
+            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            -- ent#473: which hand wrote `title`. NULL = the derived fallback
+            -- (or a pre-#473 row), 'generated' = the ent#186 model title,
+            -- 'user' = a person renamed it — and a person's title is never
+            -- overwritten by generation.
+            title_source TEXT,
+            -- ent#523: the pinned Main chat. Exactly one LIVE row per
+            -- (agent_name, client_email) carries is_main = 1 — enforced by the
+            -- partial unique index below, which is also what makes
+            -- `ensure_main_session` safe to race. Main is the place the agent
+            -- reaches you: an agent-initiated message, an ask raised outside a
+            -- chat (ent#364/#429) and a scheduled brief (ent#498) land here
+            -- unless the row names another session.
+            is_main INTEGER NOT NULL DEFAULT 0,
+            -- ent#523: set by Reset, which retires the current Main and mints a
+            -- fresh one. An archived row is an ordinary past chat — still
+            -- readable, still resumable, still renameable — it has simply
+            -- stopped being the one the agent reaches you in. NULL = live.
+            archived_at TEXT
         )
     """,
 
@@ -562,7 +641,14 @@ TABLES = {
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             cost REAL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            -- ent#534: NULL for a typed turn; 'voice' for a turn spoken in a
+            -- Workspace voice call. `voice_call_id` groups one call's rows so
+            -- the chat can fold them into one "Voice call · N min" block no
+            -- matter how many rows the history window returns or what typed
+            -- rows landed between them.
+            source TEXT,
+            voice_call_id TEXT
         )
     """,
 
@@ -1667,6 +1753,8 @@ INDEXES = [
 
     # Agent report indexes (#918)
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
+    # ent#438 — the agent-page read is "this agent's canvases, newest first".
+    "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     # ent#366 — one rating per person per thing. The UNIQUE is what makes
@@ -1877,7 +1965,13 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_loops_agent ON agent_loops(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_loops_status ON agent_loops(status)",
     "CREATE INDEX IF NOT EXISTS idx_loops_user ON agent_loops(started_by_user_id)",
+    # #2523: the due-loop sweep runs every few seconds; without this it is a
+    # full scan of every loop ever created.
+    "CREATE INDEX IF NOT EXISTS idx_loops_next_run ON agent_loops(next_run_at)",
     "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number)",
+    # #2523: every execution terminal looks up "is this a loop run?" here, so
+    # it must be an indexed point read, not a scan of every loop run ever.
+    "CREATE INDEX IF NOT EXISTS idx_loop_runs_execution ON agent_loop_runs(execution_id)",
     "CREATE INDEX IF NOT EXISTS idx_executions_loop ON schedule_executions(loop_id) "
     "WHERE loop_id IS NOT NULL",
 
@@ -1898,6 +1992,16 @@ INDEXES = [
     # migration to a pre-existing table and this index had to wait for it.
     "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
     "ON enterprise_portal_messages(session_id, created_at)",
+    # ent#523 — ONE live Main per (agent, client). This is not a performance
+    # index: it is the invariant. `ensure_main_session` is reachable from two
+    # request paths and runs in every uvicorn worker, so a check-then-insert
+    # would race two Mains into existence for the same pair — after which
+    # "the pinned first tab" has no single answer. The partial predicate is
+    # what makes it work: an ARCHIVED row keeps its (agent, client) pair
+    # forever (is_main flips to 0), so an unconditional unique index would
+    # refuse the second Reset. Supported by both backends.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_sessions_main "
+    "ON enterprise_portal_sessions(agent_name, client_email) WHERE is_main = 1",
     # Multi-agent rooms (ent#169, OSS since ent#443). Same rule as the portal
     # indexes above: names unchanged from the enterprise runner that created
     # them, so an install that already has rooms re-runs these as no-ops.

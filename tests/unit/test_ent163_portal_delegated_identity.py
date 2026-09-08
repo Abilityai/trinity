@@ -41,8 +41,8 @@ def delegate_db(tmp_path, monkeypatch):
     ])
     # ent#281: sign-in consults the block table, so the module's own schema must
     # exist here exactly as it does in production (`register()` creates it).
-    from client_portal.schema import init_client_portal_schema
-    init_client_portal_schema()
+    from conftest import ensure_schema_tables
+    ensure_schema_tables("enterprise_portal_sessions", "enterprise_portal_messages", "enterprise_client_blocks")
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:

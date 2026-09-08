@@ -592,3 +592,170 @@ resources:
 
         finally:
             cleanup_test_agent(api_client, agent_name)
+
+
+# =============================================================================
+# #2060 — Deploy-local integrity contract (embedded manifest + symlinks)
+# =============================================================================
+
+def create_integrity_archive(
+    agent_name: str,
+    files: dict,
+    links: dict = None,
+    manifest: str = "auto",
+    manifest_extra: list = None,
+) -> str:
+    """Archive with an embedded .trinity-manifest.json (#2060).
+
+    ``files`` = {relpath: content}; ``links`` = {relpath: link_target};
+    ``manifest="auto"`` computes entries from files+links, ``None`` omits it,
+    ``manifest_extra`` appends entries (to fake a pruned archive).
+    """
+    import hashlib
+
+    links = links or {}
+    entries = None
+    if manifest == "auto":
+        entries = [
+            {"path": rel, "sha256": hashlib.sha256(content.encode()).hexdigest()}
+            for rel, content in sorted(files.items())
+        ] + [
+            {"path": rel, "link_target": target}
+            for rel, target in sorted(links.items())
+        ]
+        if manifest_extra:
+            entries += list(manifest_extra)
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        def add(rel, content: bytes):
+            info = tarfile.TarInfo(name=rel)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+
+        for rel, content in files.items():
+            add(rel, content.encode())
+        for rel, target in links.items():
+            info = tarfile.TarInfo(name=rel)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            tar.addfile(info)
+        if entries is not None:
+            add(".trinity-manifest.json", json.dumps(entries).encode())
+    buffer.seek(0)
+    return base64.b64encode(buffer.read()).decode()
+
+
+class TestDeployLocalIntegrity2060:
+    """#2060 — the deploy must prove what landed and refuse silent drift."""
+
+    def _template(self, agent_name: str) -> str:
+        return (
+            f"name: {agent_name}\n"
+            "display_name: Integrity Test Agent\n"
+            "resources:\n  cpu: \"1\"\n  memory: \"2g\"\n"
+        )
+
+    def test_pruned_archive_with_manifest_refused_e2e(
+        self, api_client: TrinityApiClient
+    ):
+        """The crux end to end: a manifest claiming a file the tar lacks is a
+        400 MANIFEST_DRIFT naming the path — and nothing is created."""
+        agent_name = f"test-prune-{uuid.uuid4().hex[:6]}"
+        archive = create_integrity_archive(
+            agent_name,
+            files={
+                "template.yaml": self._template(agent_name),
+                "CLAUDE.md": "# Integrity agent\n",
+            },
+            manifest_extra=[
+                {"path": "skills/deploy/SKILL.md",
+                 "sha256": "0" * 64}
+            ],
+        )
+
+        response = api_client.post(
+            "/api/agents/deploy-local",
+            json={"archive": archive, "name": agent_name},
+        )
+        assert_status(response, 400)
+        detail = response.json().get("detail", {})
+        assert detail.get("code") == "MANIFEST_DRIFT"
+        assert "skills/deploy/SKILL.md" in detail.get("missing", [])
+
+        # Refused before any persist — no agent, no local: template.
+        check = api_client.get(f"/api/agents/{agent_name}")
+        assert check.status_code == 404
+
+    def test_manifest_required_flag_e2e(self, api_client: TrinityApiClient):
+        """require_manifest (what the MCP tool always sends) + no manifest
+        member = 400 MANIFEST_REQUIRED carrying the generation snippet."""
+        agent_name = f"test-reqman-{uuid.uuid4().hex[:6]}"
+        archive = create_integrity_archive(
+            agent_name,
+            files={
+                "template.yaml": self._template(agent_name),
+                "CLAUDE.md": "# Integrity agent\n",
+            },
+            manifest=None,
+        )
+        response = api_client.post(
+            "/api/agents/deploy-local",
+            json={"archive": archive, "name": agent_name, "require_manifest": True},
+        )
+        assert_status(response, 400)
+        detail = response.json().get("detail", {})
+        assert detail.get("code") == "MANIFEST_REQUIRED"
+        assert ".trinity-manifest.json" in str(detail)
+
+    @pytest.mark.slow
+    @pytest.mark.requires_agent
+    @pytest.mark.timeout(180)
+    def test_symlinked_agent_deploys_verified_and_boots(
+        self, api_client: TrinityApiClient, request
+    ):
+        """A manifest-verified archive carrying an in-root symlink deploys
+        with evidence (verified/counts incl. the symlink) and the booted
+        agent's workspace holds the template files (#950 net kept green
+        through the #2060 copy/prepop changes)."""
+        agent_name = f"test-symlink-{uuid.uuid4().hex[:6]}"
+        files = {
+            "template.yaml": self._template(agent_name),
+            "CLAUDE.md": "# Integrity agent\n",
+            "skills/shared/SKILL.md": "# shared skill\n",
+        }
+        archive = create_integrity_archive(
+            agent_name,
+            files=files,
+            links={"skills/alias": "shared"},
+        )
+
+        try:
+            response = api_client.post(
+                "/api/agents/deploy-local",
+                json={"archive": archive, "name": agent_name,
+                      "require_manifest": True},
+            )
+            assert_status(response, 200)
+            data = response.json()
+            assert data["status"] == "success"
+            # #2060 evidence fields
+            assert data["verified"] is True
+            assert data["files_expected"] == len(files)
+            assert data["files_deployed"] == len(files)
+            assert data["symlinks_deployed"] == 1
+
+            # Boot and confirm the workspace is populated (the #950 net).
+            start_resp = api_client.post(f"/api/agents/{agent_name}/start")
+            assert_status_in(start_resp, [200, 202])
+            deadline = time.time() + 60
+            seen = False
+            while time.time() < deadline:
+                files_resp = api_client.get(f"/api/agents/{agent_name}/files")
+                if files_resp.status_code == 200 and "SKILL.md" in files_resp.text:
+                    seen = True
+                    break
+                time.sleep(2)
+            assert seen, "deployed skills tree not visible in booted workspace"
+        finally:
+            cleanup_test_agent(api_client, agent_name)

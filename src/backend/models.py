@@ -632,6 +632,155 @@ def _validate_iso8601(value: Optional[str]) -> Optional[str]:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Agent canvas (ent#438)
+# ---------------------------------------------------------------------------
+
+# A canvas id lands in a URL and is half a primary key, so it is
+# charset-validated the way #919's pipeline ids are, not merely length-capped.
+CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# Serialized blocks ceiling. An order of magnitude under the report cap by
+# intent: a report is an archive that may legitimately carry a large table,
+# whereas a canvas is a surface re-sent in full on every update and re-read on
+# every page load.
+CANVAS_BLOCKS_MAX_BYTES = 512 * 1024  # 512 KiB
+CANVAS_MAX_BLOCKS = 50
+
+CANVAS_RATE_LIMIT = int(os.getenv("CANVAS_RATE_LIMIT", "60"))
+CANVAS_RATE_WINDOW = int(os.getenv("CANVAS_RATE_WINDOW", "60"))
+
+# ent#536 — the ONE default canvas an agent and its voice mode both write to.
+# Named canvases remain for everything else; this is the id the MCP tools and
+# the voice panel tools fall back to, so both writers land on the same surface.
+DEFAULT_CANVAS_ID = "main"
+
+# Per-kind ceilings (ent#536), stated to the agent in the MCP description and the
+# platform prompt. The 512 KiB block cap alone is too loose for two inputs whose
+# cost is not proportional to their size: an inline image is bytes the browser
+# must decode on every read, and Mermaid parse time is superlinear on hostile
+# source.
+CANVAS_IMAGE_INLINE_MAX_BYTES = 64 * 1024   # data: URI length cap
+CANVAS_IMAGE_SRC_MAX_CHARS = 2048           # any other image src
+CANVAS_DIAGRAM_MAX_CHARS = 20_000           # Mermaid source
+
+# A block id shares the canvas id charset: it is addressed by `patch_canvas`
+# and lands in a named error, so it carries the same guard.
+CANVAS_BLOCK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+# ent#537 — starter layouts. A canvas may declare ONE template by name; each
+# names the slots its blocks may fill. A layout never hides a block: an
+# unslotted block, or one naming a slot the layout does not know, renders
+# after the layout — so an unknown SLOT is not refused (losing content to a
+# typo is the worse failure), while an unknown TEMPLATE is (there is nothing
+# to fall back to but stacked, and silently stacking teaches the wrong name).
+# Keep in step with `CANVAS_TEMPLATES` in `canvas.ts` and `LAYOUTS` in the
+# frontend `canvasLayouts.js`; `test_ent537_canvas_design_kit.py` pins them.
+CANVAS_LAYOUT_SLOTS: Dict[str, List[str]] = {
+    "dashboard": ["header", "kpis", "main", "side", "footer"],
+    "report": ["header", "summary", "body", "figures", "appendix"],
+    "brief": ["header", "key-points", "body"],
+    "status-board": ["header", "status", "issues", "next", "log"],
+}
+CANVAS_TEMPLATES = tuple(CANVAS_LAYOUT_SLOTS)
+CanvasTemplate = Literal["dashboard", "report", "brief", "status-board"]
+# A slot name is a short lowercase token: it lands in a CSS grid-area name.
+CANVAS_SLOT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+# Block kinds. The first five delegate to the shared `components/reports/`
+# dispatch — reused, never forked, because those renderer keys are CI-pinned as
+# the canonical contract (`test_1535_report_prompt_guidance.py`). `chart`,
+# `html`, `image` and `diagram` are the canvas's own (ent#438, widened by
+# ent#536); the report `display_hint` enum is deliberately NOT widened, because
+# a canvas is a superset of a report's rendering rather than a change to what a
+# report is.
+CanvasBlockKind = Literal[
+    "table", "kpi", "markdown", "timeline", "json", "chart", "html", "image", "diagram",
+]
+
+# `operator` (default) is fail-closed: a canvas reaches a Workspace client only
+# because the agent explicitly said `roster`.
+CanvasAudience = Literal["operator", "roster"]
+
+
+class CanvasBlock(BaseModel):
+    """One rendered block on a canvas (ent#438)."""
+    kind: CanvasBlockKind
+    # Optional on a full write — `set_canvas` assigns `b1..bN` to id-less
+    # blocks so every stored block is addressable by `patch_canvas` (ent#536).
+    id: Optional[str] = Field(None, pattern=CANVAS_BLOCK_ID_RE.pattern)
+    title: Optional[str] = Field(None, max_length=300)
+    # ent#537 — which slot of the canvas's `template` this block fills. A
+    # rendering hint that travels with the block (so `patch_canvas` keeps it),
+    # never a capability — which is why it may live inside the block while
+    # `audience` may not.
+    slot: Optional[str] = Field(None, pattern=CANVAS_SLOT_RE.pattern)
+    # Free-form per kind, byte-capped as a whole at the router. A dict OR a
+    # list, because `table` rows and `kpi` tiles are naturally arrays and
+    # forcing a wrapper object on the agent buys nothing.
+    payload: Union[Dict, List] = Field(default_factory=dict)
+
+
+class CanvasPatchBlock(CanvasBlock):
+    """A block in a `patch_canvas` write — the id is what names the target (ent#536)."""
+    id: str = Field(..., pattern=CANVAS_BLOCK_ID_RE.pattern)
+
+
+class CanvasPatch(BaseModel):
+    """Request body for replacing only the named blocks of a canvas (ent#536).
+
+    Order is kept and unknown ids are refused by name: the agent says what
+    changes, and the surface never silently gains or loses a block (the #438
+    rule that there is no append — restated for a partial write).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    blocks: List[CanvasPatchBlock] = Field(..., min_length=1, max_length=CANVAS_MAX_BLOCKS)
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+
+class CanvasWrite(BaseModel):
+    """Request body for an agent writing its canvas (ent#438).
+
+    The agent is resolved server-side from the auth context, never from this
+    body, and `audience` is a validated field rather than a key inside a block
+    — `blocks` is agent-authored free-form content, so an audience buried there
+    would let a prompt-injected agent choose who reads it (the ent#364 rule).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = Field(None, max_length=300)
+    blocks: List[CanvasBlock] = Field(default_factory=list, max_length=CANVAS_MAX_BLOCKS)
+    audience: CanvasAudience = "operator"
+    # ent#537 — a starter layout by name; None keeps the stacked default.
+    template: Optional[CanvasTemplate] = None
+    # The turn this write came from. Validated against the agent
+    # (`resolve_and_validate_execution`, the MEM-001 rule) — provenance, and
+    # what makes the derived staleness claim checkable.
+    execution_id: Optional[str] = Field(None, max_length=128)
+
+
+class CanvasSummary(BaseModel):
+    """List-response model — metadata only, never carries ``blocks`` (ent#438)."""
+    agent_name: str
+    canvas_id: str
+    title: Optional[str] = None
+    audience: str
+    schema_version: Optional[int] = 1
+    created_at: str
+    updated_at: str
+    updated_by_execution_id: Optional[str] = None
+    # ent#537 — the starter layout, or None for stacked blocks.
+    template: Optional[str] = None
+    # Derived, never stored: the agent has run since this canvas was written.
+    stale: bool = False
+
+
+class Canvas(CanvasSummary):
+    """Detail-response model — summary plus the blocks (ent#438)."""
+    blocks: List[Dict] = Field(default_factory=list)
+
+
 class ReportCreate(BaseModel):
     """Request body for an agent publishing a structured report (#918).
 
@@ -1091,11 +1240,33 @@ class VersioningInfo(BaseModel):
     new_version: str
 
 
+class DeployManifestEntry(BaseModel):
+    """One entry of the embedded deploy integrity manifest (#2060).
+
+    The caller computes `.trinity-manifest.json` from the disk tree and ships
+    it INSIDE the archive; the backend verifies the extracted tree against it
+    (post-extract AND post-copy). Regular files carry `sha256`, symlinks carry
+    `link_target` (exactly one of the two — enforced at parse in
+    `deploy._load_manifest`, not here, so the parse error is a named 400
+    `MANIFEST_INVALID` rather than a generic validation shape). Directories
+    are omitted. Paths are relative to the agent root.
+    """
+    path: str
+    sha256: Optional[str] = None
+    link_target: Optional[str] = None
+
+
 class DeployLocalRequest(BaseModel):
     """Request to deploy a local agent."""
     archive: str  # Base64-encoded tar.gz
     name: Optional[str] = None  # Override name from template.yaml
     credentials: Optional[Dict[str, str]] = None  # Optional credentials to inject {KEY: value}
+    # #2060: when true, an archive without an embedded .trinity-manifest.json
+    # is refused (400 MANIFEST_REQUIRED). The MCP tool sets this in tool CODE
+    # (not a model-controlled parameter); the raw HTTP default stays False so
+    # manifest-less legacy deploys (shipped CLI, abilities plugin) keep working
+    # with `verified: false` + a warning.
+    require_manifest: Optional[bool] = False
 
 
 # Maximum credentials allowed per deploy-local request
@@ -1112,6 +1283,12 @@ class DeployLocalResponse(BaseModel):
     warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
+    # #2060 evidence fields — a deploy must prove what landed.
+    verified: bool = False  # True only when a manifest was present AND both verification points passed
+    files_expected: Optional[int] = None   # manifest regular-file entries (None = no manifest)
+    files_deployed: Optional[int] = None   # regular files at the deployed template (manifest member excluded)
+    symlinks_deployed: Optional[int] = None
+    compatibility_hard_count: Optional[int] = None  # post-deploy #668 STATIC report; None = unavailable (fail-open)
 
 
 # ============================================================================
@@ -1500,6 +1677,12 @@ class FleetExecutionSummary(BaseModel):
     # Turn-integrity flags (#2467) — small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
     queued_at: Optional[datetime] = None
+    # ent#525: `get_fleet_executions` also selects `source_channel`,
+    # `source_channel_chat_id` and `loop_id` for the Workspace Work read
+    # (`client_portal/work/`), which projects the raw rows itself. They are
+    # deliberately NOT fields here — pydantic drops the extra keys — so the
+    # operator dashboard's payload gains no channel destination ids
+    # (`test_ent525_portal_work.py` pins it).
 
     class Config:
         from_attributes = True
@@ -2784,6 +2967,13 @@ class InternalTaskExecutionRequest(BaseModel):
     schedule_cron: Optional[str] = None
     schedule_next_run: Optional[str] = None
     attempt: Optional[int] = None
+    # ent#498: deliver this run's output into the named person's Main Workspace
+    # chat with the agent. The scheduler carries only the ADDRESS — it cannot
+    # import the portal package to resolve a session, and it always sends
+    # `execution_id`, so channel columns passed as kwargs would be inert
+    # (#2426). `execute_task_internal` resolves and stamps the pre-created row
+    # before dispatch.
+    deliver_to_workspace_email: Optional[str] = None
 
 
 class ValidateExecutionRequest(BaseModel):
@@ -3243,6 +3433,26 @@ class ScheduleUpdateRequest(BaseModel):
     validation_enabled: Optional[bool] = None
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: Optional[int] = None
+    # ent#498. The handler uses `exclude_unset=True`, so omitting the field
+    # leaves it alone while an explicit `null` CLEARS the delivery target — the
+    # only way to turn delivery off, and the reason this is not `= Field(...)`.
+    deliver_to_workspace_email: Optional[str] = None
+
+    @field_validator("deliver_to_workspace_email")
+    @classmethod
+    def _normalize_delivery_email(cls, v: Optional[str]) -> Optional[str]:
+        """Same normalisation as `ScheduleCreate` — see `db_models.py` for why.
+
+        Deliberately re-stated rather than imported: `models.py` is the API
+        contract layer and `db_models.py` the persistence layer, and the one
+        import between them today runs the other way. Pinned equal by
+        `tests/unit/test_ent498_workspace_delivery.py`, which drives BOTH models
+        over one table of inputs, so a divergence fails rather than shipping an
+        update path laxer than the create path.
+        """
+        from db_models import ScheduleCreate
+
+        return ScheduleCreate._normalize_delivery_email(v)
 
 
 class ScheduleResponse(BaseModel):
@@ -3267,6 +3477,10 @@ class ScheduleResponse(BaseModel):
     validation_enabled: bool = False
     validation_prompt: Optional[str] = None
     validation_timeout_seconds: int = 120
+    # ent#498: surfaced so an API/MCP caller can read back what it set. Without
+    # it the field is silently dropped from every response — `ScheduleResponse`
+    # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
+    deliver_to_workspace_email: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -3648,6 +3862,34 @@ class UserRoleUpdate(BaseModel):
 
 class UpdateMyEmailRequest(BaseModel):
     email: str
+
+
+class UserPreferenceWrite(BaseModel):
+    """Request body for `PUT /api/users/me/preferences/{key}` (trinity-enterprise#413).
+
+    `base_updated_at` is REQUIRED and tri-state by omission being an error:
+    `null` = "insert only — I believe no row exists" (409 if one does), a
+    string = "replace only if the row still carries this `updated_at`" (409
+    otherwise). There is no unconditional client write: every save states what
+    it believes the server holds, so an older tab cannot silently overwrite a
+    newer save. The 409 detail carries the live record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    value: Dict[str, Any]
+    base_updated_at: Optional[str] = Field(..., max_length=64)
+
+
+class UserPreferenceRecord(BaseModel):
+    """One stored preference (trinity-enterprise#413)."""
+    key: str
+    value: Dict[str, Any]
+    updated_at: str
+
+
+class UserPreferencesResponse(BaseModel):
+    """`GET /api/users/me/preferences` — every stored key of the caller."""
+    preferences: Dict[str, UserPreferenceRecord]
 
 
 # =============================================================================

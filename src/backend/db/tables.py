@@ -17,7 +17,7 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import Column, Float, Index, MetaData, Table, Text, text
+from sqlalchemy import Column, Float, ForeignKey, Index, MetaData, Table, Text, text
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
 
@@ -223,6 +223,8 @@ agent_schedules = Table(
     Column("webhook_enabled", Integer),
     Column("webhook_secret_encrypted", Text),  # ent#77: AES-256-GCM HMAC secret
     Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
+    # ent#498 — nullable, no backfill; see db/schema.py for the contract.
+    Column("deliver_to_workspace_email", Text),
     Column("deleted_at", Text),
 )
 
@@ -316,6 +318,11 @@ agent_loops = Table(
     Column("created_at", Text),
     Column("started_at", Text),
     Column("completed_at", Text),
+    # #2523 — the two pieces of runner-local state that had no durable home once
+    # the in-process `for` loop was deleted. Everything else the runner held is
+    # already persisted here or derivable from `agent_loop_runs`.
+    Column("next_run_at", Text),        # ISO-Z; NULL = not waiting on a delay
+    Column("stop_requested_at", Text),  # ISO-Z; replaces the in-memory should_stop
 )
 
 agent_loop_runs = Table(
@@ -485,6 +492,13 @@ enterprise_portal_sessions = Table(
     Column("cached_claude_session_id", Text),
     Column("last_resume_at", Text),
     Column("consecutive_resume_failures", Integer),
+    # ent#473 — NULL (derived fallback / pre-#473) | 'generated' | 'user'.
+    Column("title_source", Text),
+    # ent#523 — the pinned Main chat (exactly one live row per pair; the
+    # partial unique index in schema.py is the enforcement) and the Reset
+    # tombstone that retires one. NULL `archived_at` = live.
+    Column("is_main", Integer),
+    Column("archived_at", Text),
 )
 
 enterprise_portal_messages = Table(
@@ -498,6 +512,8 @@ enterprise_portal_messages = Table(
     Column("content", Text),
     Column("cost", Float),
     Column("created_at", Text),
+    Column("source", Text),         # ent#534: NULL typed | 'voice'
+    Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -574,6 +590,38 @@ enterprise_room_messages = Table(
     Column("created_at", Text),
 )
 
+
+agent_canvases = Table(
+    # ent#438 — a durable, addressable surface an agent renders onto and
+    # UPDATES. Composite PK (agent_name, canvas_id): the write is an upsert,
+    # not an append, which is the whole difference from `agent_reports`.
+    "agent_canvases",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("canvas_id", Text, primary_key=True),
+    Column("title", Text),
+    Column("blocks", Text),
+    # 'operator' (default) | 'roster' — a validated column, never a key inside
+    # `blocks`, so a prompt-injected agent cannot decide who reads it.
+    Column("audience", Text),
+    Column("schema_version", Integer),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+    Column("updated_by_execution_id", Text),
+    # ent#537 — starter layout by name; NULL = stacked.
+    Column("template", Text),
+)
+
+user_ui_preferences = Table(
+    # ent#413 — generic per-user UI preference record; (user_id, key) → JSON
+    # object. Per-key `updated_at` is the compare-and-set base for PUT.
+    "user_ui_preferences",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("key", Text, primary_key=True),
+    Column("value_json", Text),
+    Column("updated_at", Text),
+)
 
 agent_reports = Table(
     "agent_reports",

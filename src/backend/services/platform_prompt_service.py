@@ -13,7 +13,13 @@ from typing import List, Optional
 import httpx
 
 from database import db
-from models import REPORT_PAYLOAD_MAX_BYTES
+from models import (
+    CANVAS_BLOCKS_MAX_BYTES,
+    CANVAS_DIAGRAM_MAX_CHARS,
+    CANVAS_IMAGE_INLINE_MAX_BYTES,
+    CANVAS_MAX_BLOCKS,
+    REPORT_PAYLOAD_MAX_BYTES,
+)
 from services.prompt_tier import PromptTier, resolve_prompt_tier
 
 logger = logging.getLogger(__name__)
@@ -81,6 +87,32 @@ Match the payload to the `display_hint` or it renders as raw JSON:
 Aggregate before publishing: the 20 rows that matter, not 5,000 raw ones. Oversized payloads are rejected and reports are rate-limited.
 
 Before filing a recurring report, read back what you already filed — `mcp__trinity__list_reports` (metadata; filter by `report_type`) then `mcp__trinity__get_report(report_id)` for a payload. That is how you continue a series instead of duplicating or contradicting last period's numbers.
+
+### Your Canvas
+
+A **canvas** is a surface you keep *current* — a status board, a running tally, the latest version of an analysis, the chart someone just asked for. A report is published once and accumulates; a canvas is rewritten in place and lives on your Canvas tab (and, with `audience="roster"`, on the Workspace of the people you work with). When someone asks you to "put X on your canvas", "show me a chart of X", or wants something they will come back to, write the canvas instead of pasting it into chat.
+
+```
+mcp__trinity__set_canvas(blocks=[...])                    # full state of your default canvas "main"
+mcp__trinity__patch_canvas(blocks=[{"id": "b2", ...}])    # replace only the named blocks
+mcp__trinity__get_canvas()                                # read back first; ids are assigned b1..bN
+```
+
+A block is `{"id"?, "kind", "title"?, "payload"}`. Kinds and their payloads:
+
+- `chart` — `{"type": "bar"|"stacked_bar"|"line"|"area"|"pie"|"donut", "series": [{"label": "Leads", "unit": "new", "points": [{"ts": "2026-09-01", "value": 14}]}]}` — one series per line, stack segment or slice; `ts` is a date/time, or a category name for a bar per series
+- `kpi` — `{"tiles": [{"label": "Leads", "value": 14, "unit": "new"}]}`
+- `table` — `{"columns": ["Name","Status"], "rows": [["Acme","qualified"]]}`
+- `timeline` — `{"events": [{"ts": "2026-09-01T09:00:00Z", "label": "Deal closed", "detail": "..."}]}`
+- `markdown` — `{"markdown": "## Findings\\n..."}`; it may embed ```chart, ```kpi and ```table fences (JSON inside) and ```mermaid fences — they render as figures, so one block can be a page with charts in it
+- `diagram` — `{"mermaid": "graph TD; A-->B"}` (max __CANVAS_DIAGRAM_MAX__ chars)
+- `image` — `{"src": "https://..." or "content/chart.png" (a file in your workspace) or "data:image/png;base64,..." (max __CANVAS_IMAGE_INLINE_MAX__), "caption": "..."}`
+- `html` — `{"html": "..."}` static markup, sanitised; scripts never run
+- `json` — anything else
+
+Layouts: `template` ∈ dashboard(header, kpis, main, side, footer) · report(header, summary, body, figures, appendix) · brief(header, key-points, body) · status-board(header, status, issues, next, log); each block names its `"slot"`. Unslotted blocks render after the layout; no template = stacked. Example: `set_canvas(template="dashboard", blocks=[{"slot":"header","kind":"markdown","payload":{"markdown":"## Pipeline · W36"}},{"slot":"kpis","kind":"kpi","payload":{"tiles":[{"label":"Open","value":42},{"label":"Won","value":7}]}},{"slot":"side","kind":"html","payload":{"html":"<div class=\"ck-card\"><div class=\"ck-card-title\">Next</div><span class=\"ck-chip ck-warning\">2 stalled</span></div>"}}])`
+Kit classes for `html`/`markdown` (only these survive): ck-card / ck-card-title / ck-card-meta · ck-grid-2 / ck-grid-3 / ck-grid-4 + ck-span-2 · ck-section / ck-section-title / ck-section-sub · ck-callout + ck-info | ck-success | ck-warning | ck-danger · ck-chip (same tones, ck-neutral) · ck-kpi / ck-kpi-label / ck-kpi-value / ck-kpi-unit / ck-kpi-delta ck-up | ck-down · ck-table + ck-num · ck-figure / ck-caption · ck-muted · ck-mono. Other classes, `<style>` and inline styles (except width/max-width) are dropped. Prefer the kpi/table/chart kinds for data; the kit dresses the page around them. The `canvas` skill has full worked examples.
+Limits: __CANVAS_MAX_BLOCKS__ blocks, __CANVAS_BLOCKS_MAX__ serialized — aggregate first. Never put JavaScript in a block: you provide the data, Trinity draws it.
 
 ### Operator Communication
 
@@ -224,6 +256,15 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
 )
+# The canvas ceilings the same way (ent#536): four numbers the platform already
+# owns, none of them typed twice.
+for _marker, _value in (
+    ("__CANVAS_MAX_BLOCKS__", str(CANVAS_MAX_BLOCKS)),
+    ("__CANVAS_BLOCKS_MAX__", f"{CANVAS_BLOCKS_MAX_BYTES // 1024} KB"),
+    ("__CANVAS_DIAGRAM_MAX__", f"{CANVAS_DIAGRAM_MAX_CHARS:,}"),
+    ("__CANVAS_IMAGE_INLINE_MAX__", f"{CANVAS_IMAGE_INLINE_MAX_BYTES // 1024} KB"),
+):
+    PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(_marker, _value)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +291,7 @@ _MINIMAL_DROP_SECTIONS = frozenset({
     "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
+    "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
 })
 
 # Every top-level section, CI-pinned (tests/unit/test_ent243_prompt_tier.py).
@@ -261,6 +303,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Agent Collaboration",
     "Sharing Files with Users",
     "Publishing Reports",
+    "Your Canvas",
     "Operator Communication",
     "Repeating Work and Deferred Ticks",
     "Nothing survives the end of your turn",
@@ -352,7 +395,8 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory`, "
+    "`share_file`, `report`, `list_reports`, `get_report`, `set_canvas`, "
+    "`patch_canvas`, `get_canvas`, `write_user_memory`, "
     "`set_reminder`, `run_agent_loop` — "
     "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
@@ -943,6 +987,56 @@ def build_narrated_surface_prompt(agent_name: str) -> Optional[str]:
         "- If a client asks to be spoken to, point them at the speaker control in this "
         "conversation. Never tell them this surface is text-only, and never send them "
         "to another channel to be heard."
+    )
+
+
+def build_user_facing_room_prompt() -> str:
+    """Tell an agent that a PERSON outside the fleet is reading this room
+    (trinity-enterprise#363).
+
+    Full transcript visibility is the deliberate choice for Workspace rooms —
+    watching the team work is the differentiator over a summary — and that choice
+    is only safe while the agents know they are being watched. Without this an
+    agent-to-agent exchange in front of a customer discusses internals, other
+    customers, costs and platform mechanics, because nothing in its context says
+    anyone is there.
+
+    Takes NO arguments, and that is deliberate twice over:
+
+    * it states **that** a person is reading, never **who**. The block is
+      composed into a prompt handed to every woken agent in the room, so a
+      participant's address would be disclosed sideways to agents the person
+      never addressed, and it buys nothing — the behaviour change is the same
+      whoever is reading. ent#362's per-line ``(human)`` label already answers
+      "who said this"; this answers "who is in the room".
+    * the fact is derived by the caller from room MEMBERSHIP
+      (``shared_sessions.service._wake_agent``), never asserted by a participant.
+      Keeping the derivation out of here is what makes that guarantee checkable
+      in one place.
+
+    Pure and constant — no DB read, so nothing to fail and no ``Optional``. The
+    caller decides whether to include it at all; see the sibling
+    ``build_narrated_surface_prompt`` for the shape.
+    """
+    return (
+        "## A person is reading this room\n"
+        "This room includes at least one human participant from outside the agent "
+        "fleet — a client or an operator — and they can read **every** message in "
+        "it, including the ones you address to other agents. There is no private "
+        "side channel here.\n\n"
+        "So, for this turn:\n"
+        "- Write every message as if it will be read by that person, because it "
+        "will be. Address other agents normally; just do not say anything to them "
+        "you would not say in front of the reader.\n"
+        "- Keep platform mechanics out of it — infrastructure, container and model "
+        "internals, costs and token spend, queue and scheduling plumbing — unless "
+        "the person asked about them.\n"
+        "- Never mention another client, another customer's data, or work done for "
+        "anyone who is not in this room.\n"
+        "- Say what you are doing and what you need in plain language. Half a "
+        "sentence of shorthand to a peer reads as evasion to someone watching.\n"
+        "- If you need to raise something the reader should not see, do it outside "
+        "this room."
     )
 
 

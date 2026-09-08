@@ -10,7 +10,7 @@
 
 ## Overview
 
-**DEPRECATED**: The standalone File Manager page at `/files` has been replaced by per-agent Files tabs in Agent Detail (Issue #51, 2026-03-03). The `FileManager.vue` component is preserved but the route has been removed. The shared sub-components (`file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`) are now used by the per-agent `FilesPanel.vue`.
+**DEPRECATED**: The standalone File Manager page at `/files` has been replaced by per-agent Files tabs in Agent Detail (Issue #51, 2026-03-03). `FileManager.vue` was kept route-less for a while and finally **deleted in #2492** (zero importers). The shared sub-components (`file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`) remain live under the per-agent `FilesPanel.vue`; the rest of this document is a historical record of the standalone page.
 
 ## User Story
 

@@ -59,11 +59,15 @@ def test_payload_has_no_pii(tss):
 def test_payload_is_coarse_and_keyed(tss):
     mod, _ = tss
     pl = mod.build_aggregate_payload(window_days=30, backfill=True)
-    assert pl["installation_id"]
+    # ent#437: keyed by the SHARE id (the preview placeholder before consent),
+    # never the install id — that one travels with the operator's email.
+    assert pl["sharing_id"] and "installation_id" not in pl
     assert pl["counts"]["agents"] == 3
     assert pl["counts"]["executions_total"] == 22
     assert "activation_funnel" in pl
-    assert set(pl["instance"]) == {"trinity_version", "edition", "platform", "python_version"}
+    assert set(pl["instance"]) == {
+        "trinity_version", "edition", "platform", "python_version", "install_source",
+    }
 
 
 def test_no_egress_when_consent_off(tss):

@@ -124,7 +124,13 @@ OPERATOR_ALERT_MAX_PENDING_PER_TYPE = int(
 # unregistered `item["type"]` is refused fail-closed: a caller-trusted string
 # would mint a fresh budget per distinct value (unbounded cap keyspace), so
 # registration is a one-line reviewed act here, never a call-site decision.
-_BUDGETED_ALERT_TYPES = frozenset({"skill_not_found"})
+_BUDGETED_ALERT_TYPES = frozenset({
+    "skill_not_found",
+    # ent#499: a Workspace client's thumbs-down. No agent authors it, but the
+    # volume is driven by a person clicking, which is the same
+    # not-bound-by-platform-cadence side of the #1677 classification.
+    "workspace_problem_report",
+})
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
 # platform trigger enum only — NEVER agent-controlled free text (G-04: the
@@ -156,6 +162,9 @@ _RESERVED_ID_PREFIXES = (
     "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
     "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
     "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
+    "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
+                           # so an agent cannot pre-create the id of a complaint
+                           # ABOUT ITSELF and silence it through ON CONFLICT
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
@@ -187,6 +196,36 @@ def _valid_execution_id(value) -> Optional[str]:
     ):
         return value
     return None
+
+
+def is_platform_minted(item) -> bool:
+    """Was this queue item raised by the PLATFORM rather than by the agent?
+
+    ent#499. The two agent-facing return paths — the responded write-back into
+    ``~/.trinity/operator-queue.json`` and the ent#329 respond→resume dispatch —
+    both exist to close a loop the AGENT opened: it parked a question, a human
+    answered, the answer goes back. A platform alarm opened no such loop. The
+    agent never asked, is not waiting, and in ent#499's case is the SUBJECT of
+    the complaint rather than its author.
+
+    Feeding those back is not merely useless, it is a disclosure: ent#499's body
+    carries a client's email and their verbatim words, which ent#366 deliberately
+    withholds from the rated agent (``comment_withheld``). Without this predicate
+    an operator clicking "Got it" hands both to that agent within one 5s sync
+    cycle, and — with ``operator_resume_enabled`` — spends one of its turns doing
+    it.
+
+    Keyed on the reserved id prefixes, which are already the platform's marker
+    for "an agent may not mint this id" (#1632). One predicate, both sinks, so
+    they cannot drift.
+    """
+    if isinstance(item, str):
+        candidate = item
+    elif isinstance(item, dict):
+        candidate = item.get("request_id") or item.get("id") or ""
+    else:
+        candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
+    return str(candidate).strip().lower().startswith(_RESERVED_ID_PREFIXES)
 
 
 def _truncate_with_marker(text: str, max_len: int) -> str:
@@ -1032,6 +1071,10 @@ class OperatorQueueSyncService:
         # sync cycle's exists() check — keyed on request_id — matches instead of
         # creating a duplicate.
         for resp in responded_items:
+            # ent#499: a platform alarm was never in this agent's file and must
+            # not be written into it — see `is_platform_minted`.
+            if is_platform_minted(resp):
+                continue
             if resp["request_id"] not in seen_ids:
                 requests.append({
                     "id": resp["request_id"],

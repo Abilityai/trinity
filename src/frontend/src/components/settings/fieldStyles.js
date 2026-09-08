@@ -52,3 +52,13 @@ export const SETTINGS_TEXT_INPUT_CLASS =
   'bg-white dark:bg-gray-700 dark:text-white placeholder-gray-400 ' +
   'focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 ' +
   'disabled:opacity-60 disabled:cursor-not-allowed'
+
+/**
+ * The label above a Settings field (#2464).
+ *
+ * Same argument as the input constants: "the labels on this tab look alike" is
+ * a property, not a coincidence. Shape only — a caller that needs a trailing
+ * "(optional)" hint styles that span itself.
+ */
+export const SETTINGS_FIELD_LABEL_CLASS =
+  'block text-sm font-medium text-gray-700 dark:text-gray-300'

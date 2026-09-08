@@ -17,7 +17,7 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 | Deploy yourself (or another agent) to a Trinity instance | [Deploy an agent](#deploy-an-agent-to-trinity) | `trinity agents list` (or `GET /api/agents`) shows the agent `running` |
 | Stand up a new Trinity instance | [Stand up an instance](#stand-up-a-trinity-instance) | `curl /health` → `{"status": "healthy"}` |
 | Operate an existing instance (chat, schedules, fleet ops) | [Operate over MCP](#operate-a-trinity-instance-over-mcp) | an MCP tool call (e.g. `list_agents`) returns results over your API key |
-| Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) | you can state what Trinity is, how to run it, and its license |
+| Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) (+ [docs/memory/architecture/](docs/memory/architecture/) for area detail) | you can state what Trinity is, how to run it, and its license |
 | Contribute to Trinity's codebase | [Work on this repository](#work-on-this-repository) — Claude Code also auto-loads [CLAUDE.md](CLAUDE.md) | tests pass and a PR is open against `dev` |
 
 ## Key facts
@@ -140,7 +140,8 @@ Caveats that matter to agents:
 | Resource | What's in it |
 |----------|--------------|
 | [docs/user-docs/README.md](docs/user-docs/README.md) | **The detailed docs index** — guides, agents, credentials, collaboration, automation, operations, sharing, integrations, CLI, abilities plugins, API reference |
-| [docs/memory/architecture.md](docs/memory/architecture.md) | Current system design: components, cross-cutting subsystems, DB schema, invariants |
+| [docs/memory/architecture.md](docs/memory/architecture.md) | Always-loaded core: system shape, all invariants, network topology, and the Architecture Map |
+| [docs/memory/architecture/](docs/memory/architecture/) | Per-area detail read on demand: component/API catalogs, execution, reliability, agent lifecycle + runtime, integrations, observability, workspace, frontend, MCP server, DB schema, security |
 | [docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md) | Agent template structure in depth |
 | [docs/MULTI_AGENT_SYSTEM_GUIDE.md](docs/MULTI_AGENT_SYSTEM_GUIDE.md) | Multi-agent YAML manifests and coordination patterns |
 | [docs/CLI.md](docs/CLI.md) | Full `trinity` CLI reference and multi-instance profiles |

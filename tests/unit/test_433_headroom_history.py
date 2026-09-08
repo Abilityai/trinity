@@ -436,8 +436,8 @@ class TestRetention:
         assert ops.count_headroom_history_candidates(30, 100) == 5
 
     def test_both_keys_are_registered_retention_windows(self):
+        from config import NON_ROW_RETENTION_OPS_KEYS
         from services.settings_service import (
-            NON_ROW_RETENTION_OPS_KEYS,
             OPS_SETTINGS_DEFAULTS,
             RETENTION_OPS_KEYS,
         )

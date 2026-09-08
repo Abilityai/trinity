@@ -51,6 +51,23 @@ wheels/
 !src/frontend/src/components/tiles/parts/
 !src/frontend/src/components/tiles/parts/**
 
+# Same class, worse: the packer bundle under `packer/digitalocean/files/` mirrors
+# a target filesystem, so its path segments collide with the BARE setuptools
+# patterns above by construction — `var/` AND `lib/` both swallow
+# `files/var/lib/cloud/scripts/per-instance/001-trinity`, and any future
+# `files/usr/lib/...` would go the same way. The whole payload tree is
+# re-included here rather than one path, because the next collision is a matter
+# of which directory the image needs next. The directory is re-included first
+# for the reason stated above; `**` then beats both bare patterns for
+# everything below it, including the intermediate `var/lib` directory.
+# Placed inside this block deliberately: the later `.env` / `*.log` rules still
+# apply underneath, so a stray secret in the bundle stays ignored.
+# Symptom if this is ever removed: `packer build` dies at
+# `install: cannot stat /tmp/trinity-files/...` — or ships a snapshot with no
+# boot hook — from a file that is present locally and absent from the commit.
+!packer/digitalocean/files/
+!packer/digitalocean/files/**
+
 # uv lockfile (repo uses pyproject.toml for pytest only; empty lockfile is noise)
 uv.lock
 

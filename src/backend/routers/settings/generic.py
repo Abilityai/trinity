@@ -166,6 +166,8 @@ async def get_setting(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get setting: {str(e)}")
+
+
 @router.put("/{key}", response_model=SystemSetting)
 async def update_setting(
     key: str,
@@ -483,6 +485,8 @@ async def update_setting(
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
+
+
 async def _backfill_telegram_webhooks(public_url: str) -> None:
     """Re-register Telegram webhooks for all bindings after public_chat_url changes.
 
@@ -505,6 +509,8 @@ async def _backfill_telegram_webhooks(public_url: str) -> None:
             logger.warning(
                 f"Telegram webhook back-fill failed for agent={agent_name}: {e}"
             )
+
+
 @router.delete("/{key}")
 async def delete_setting(
     key: str,

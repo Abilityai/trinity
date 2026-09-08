@@ -58,6 +58,17 @@ def _stub_genai():
     class _FunctionResponse:
         def __init__(self, **kw): self.__dict__.update(kw)
 
+    # ent#534 — session-lifetime config the real SDK carries; the service reads
+    # them through getattr so their absence is also a supported shape.
+    class _ContextWindowCompressionConfig:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    class _SlidingWindow:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
+    class _SessionResumptionConfig:
+        def __init__(self, **kw): self.__dict__.update(kw)
+
     gtypes.FunctionDeclaration = _FunctionDeclaration
     gtypes.Schema = _Schema
     gtypes.Type = _Type
@@ -67,6 +78,9 @@ def _stub_genai():
     gtypes.PrebuiltVoiceConfig = _PrebuiltVoiceConfig
     gtypes.LiveConnectConfig = _LiveConnectConfig
     gtypes.FunctionResponse = _FunctionResponse
+    gtypes.ContextWindowCompressionConfig = _ContextWindowCompressionConfig
+    gtypes.SlidingWindow = _SlidingWindow
+    gtypes.SessionResumptionConfig = _SessionResumptionConfig
 
     class _Client:
         def __init__(self, api_key=None): pass
@@ -86,6 +100,7 @@ def _stub_config():
     config_mod.GEMINI_API_KEY = "test-key"
     config_mod.VOICE_MODEL = "test-model"
     config_mod.VOICE_MAX_DURATION = 300
+    config_mod.WORKSPACE_VOICE_MAX_DURATION = 1800  # ent#534
     config_mod.REDIS_URL = "redis://user:pass@localhost:6379"
     config_mod.DEFAULT_GITHUB_TEMPLATE_REPOS = []
     config_mod.GITHUB_PAT_CREDENTIAL_ID = "github-pat-templates"
@@ -143,7 +158,7 @@ sys.modules.pop("services.gemini_voice", None)
 
 # Now we can import the service
 from services.gemini_voice import (  # noqa: E402
-    GeminiVoiceService, VoiceSession, _TOOL_PROMPT_MAX, _PANEL_CONTENT_MAX,
+    GeminiVoiceService, VoiceSession, _TOOL_PROMPT_MAX,
     _PANEL_TOOL_NAMES, _classify_image_src, _WORKSPACE_ROOT,
 )
 
@@ -396,63 +411,133 @@ class TestToolDeclaration:
         assert "prompt" in (fd.parameters.required or [])
 
 
-# ── Tests: _execute_panel_tool ────────────────────────────────────────────────
+# ── Tests: _execute_panel_tool (ent#536 — the panel IS the default canvas) ───
+
+class _CanvasHarness:
+    """Fake the canvas read + the one write path, so the tests see exactly what
+    the voice verbs would store — and nothing touches a database."""
+
+    def __init__(self, monkeypatch, current=None):
+        from database import db
+        from services import canvas_service
+
+        self.current = current
+        self.writes = []
+        monkeypatch.setattr(db, "get_agent_canvas",
+                            lambda agent, canvas_id, audience=None: self.current)
+
+        def _write(agent, canvas_id, blocks, *, title, audience, execution_id, template=None):
+            self.writes.append({"agent": agent, "canvas_id": canvas_id, "blocks": blocks,
+                                "title": title, "audience": audience,
+                                "execution_id": execution_id, "template": template})
+            return {"blocks": blocks}
+
+        monkeypatch.setattr(canvas_service, "write_canvas", _write)
+
+    @property
+    def last(self):
+        return self.writes[-1]
+
+
+def _existing(*blocks, audience="operator", title="Board"):
+    return {"agent_name": "test-agent", "canvas_id": "main", "title": title,
+            "audience": audience, "blocks": list(blocks)}
+
 
 class TestExecutePanelTool:
-    """Tests for in-process panel tool execution (workspace mode canvas)."""
+    """Panel verbs are block edits on the agent's default canvas, written
+    through the same path as set_canvas — never a separate panel_state."""
 
-    def test_show_markdown_sets_state(self, svc):
-        session = _make_session()
-        result = svc._execute_panel_tool(session, "show_markdown", {"content": "# Hello"})
+    def test_show_markdown_writes_a_voice_block_on_main(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        result = svc._execute_panel_tool(_make_session(), "show_markdown", {"content": "# Hello"})
         assert result == "Panel updated."
-        assert session.panel_state["type"] == "markdown"
-        assert session.panel_state["content"] == "# Hello"
-        assert session.panel_state["title"] is None
-        assert session.panel_state["updated_at"] is not None
+        assert h.last["canvas_id"] == "main"
+        assert h.last["blocks"] == [
+            {"id": "voice", "kind": "markdown", "title": None, "payload": {"markdown": "# Hello"}}
+        ]
 
-    def test_show_markdown_with_title(self, svc):
+    def test_title_is_the_block_title_never_the_canvas_title(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch, _existing(title="Agent's board"))
+        svc._execute_panel_tool(_make_session(), "show_markdown", {"content": "body", "title": "My Title"})
+        assert h.last["title"] == "Agent's board"
+        assert h.last["blocks"][-1]["title"] == "My Title"
+
+    def test_blocks_the_agent_wrote_with_set_canvas_survive_a_call(self, svc, monkeypatch):
+        board = {"id": "b1", "kind": "kpi", "payload": {"tiles": []}}
+        h = _CanvasHarness(monkeypatch, _existing(board, {"id": "voice", "kind": "html", "payload": {"html": "old"}}))
+        svc._execute_panel_tool(_make_session(), "show_diagram", {"diagram": "graph TD; A-->B", "title": "Flow"})
+        assert h.last["blocks"][0] == board
+        assert h.last["blocks"][1] == {"id": "voice", "kind": "diagram", "title": "Flow",
+                                       "payload": {"mermaid": "graph TD; A-->B"}}
+
+    def test_update_panel_is_an_html_block(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        svc._execute_panel_tool(_make_session(), "update_panel", {"html": "<b>bold</b>", "title": "Report"})
+        assert h.last["blocks"] == [{"id": "voice", "kind": "html", "title": "Report", "payload": {"html": "<b>bold</b>"}}]
+
+    def test_append_to_panel_grows_the_trailing_voice_html_block(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch, _existing({"id": "voice", "kind": "html", "title": None, "payload": {"html": "A"}}))
+        svc._execute_panel_tool(_make_session(), "append_to_panel", {"html": "B"})
+        assert h.last["blocks"] == [{"id": "voice", "kind": "html", "title": None, "payload": {"html": "AB"}}]
+
+    def test_append_after_a_markdown_panel_starts_a_new_voice_html_block(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch, _existing({"id": "voice", "kind": "markdown", "payload": {"markdown": "m"}}))
+        svc._execute_panel_tool(_make_session(), "append_to_panel", {"html": "B"})
+        assert [b["id"] for b in h.last["blocks"]] == ["voice", "voice-2"]
+        assert h.last["blocks"][1]["kind"] == "html"
+
+    def test_clear_panel_removes_only_the_voice_blocks(self, svc, monkeypatch):
+        board = {"id": "b1", "kind": "kpi", "payload": {"tiles": []}}
+        h = _CanvasHarness(monkeypatch, _existing({"id": "voice", "kind": "html", "payload": {"html": "x"}},
+                                                  board,
+                                                  {"id": "voice-2", "kind": "html", "payload": {"html": "y"}}))
+        result = svc._execute_panel_tool(_make_session(), "clear_panel", {})
+        assert result == "Panel cleared."
+        assert h.last["blocks"] == [board]
+
+    def test_a_write_onto_a_wider_audience_canvas_is_refused(self, svc, monkeypatch):
+        """An operator call must never land on a customer-visible board."""
+        h = _CanvasHarness(monkeypatch, _existing(audience="roster"))
+        result = svc._execute_panel_tool(_make_session(), "show_markdown", {"content": "private"})
+        assert "not updated" in result and "roster" in result
+        assert h.writes == []
+
+    def test_a_roster_session_may_write_a_roster_canvas_and_keeps_the_stored_audience(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch, _existing(audience="roster"))
         session = _make_session()
-        svc._execute_panel_tool(session, "show_markdown", {"content": "body", "title": "My Title"})
-        assert session.panel_state["title"] == "My Title"
+        session.canvas_audience = "roster"
+        svc._execute_panel_tool(session, "show_markdown", {"content": "shared"})
+        assert h.last["audience"] == "roster"
 
-    def test_update_panel_sets_html(self, svc):
+    def test_a_roster_session_never_widens_an_operator_canvas(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch, _existing(audience="operator"))
         session = _make_session()
-        svc._execute_panel_tool(session, "update_panel", {"html": "<b>bold</b>", "title": "Report"})
-        assert session.panel_state["type"] == "html"
-        assert session.panel_state["content"] == "<b>bold</b>"
-        assert session.panel_state["title"] == "Report"
+        session.canvas_audience = "roster"
+        svc._execute_panel_tool(session, "show_markdown", {"content": "x"})
+        assert h.last["audience"] == "operator"
 
-    def test_append_to_panel_concatenates(self, svc):
-        session = _make_session()
-        session.panel_state = {"type": "html", "content": "A", "title": None, "updated_at": None}
-        svc._execute_panel_tool(session, "append_to_panel", {"html": "B"})
-        assert session.panel_state["content"] == "AB"
-        assert session.panel_state["type"] == "html"
+    def test_a_new_canvas_takes_the_session_audience(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch, None)
+        svc._execute_panel_tool(_make_session(), "show_markdown", {"content": "x"})
+        assert h.last["audience"] == "operator"
+        assert h.last["title"] is None
+        assert h.last["execution_id"] is None
 
-    def test_append_to_panel_caps_at_max(self, svc):
-        session = _make_session()
-        # Pre-fill content just under the limit, then append enough to exceed it
-        session.panel_state = {
-            "type": "html",
-            "content": "x" * (_PANEL_CONTENT_MAX - 10),
-            "title": None,
-            "updated_at": None,
-        }
-        svc._execute_panel_tool(session, "append_to_panel", {"html": "y" * 100})
-        assert len(session.panel_state["content"]) == _PANEL_CONTENT_MAX
-        # The tail of the content should end with the appended "y"s
-        assert session.panel_state["content"].endswith("y" * 10)
+    def test_a_canvas_write_failure_never_raises_into_the_voice_turn(self, svc, monkeypatch):
+        from services import canvas_service
+        _CanvasHarness(monkeypatch)
 
-    def test_clear_panel_resets_state(self, svc):
-        session = _make_session()
-        session.panel_state = {"type": "html", "content": "old", "title": "t", "updated_at": "ts"}
-        svc._execute_panel_tool(session, "clear_panel", {})
-        assert session.panel_state["type"] == "empty"
-        assert session.panel_state["content"] == ""
-        assert session.panel_state["title"] is None
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
 
-    def test_panel_tool_routed_not_forwarded_to_agent(self, svc):
+        monkeypatch.setattr(canvas_service, "write_canvas", _boom)
+        result = svc._execute_panel_tool(_make_session(), "show_markdown", {"content": "x"})
+        assert "could not be saved" in result
+
+    def test_panel_tool_routed_not_forwarded_to_agent(self, svc, monkeypatch):
         """Panel tools must not reach _execute_tool (no agent container call)."""
+        h = _CanvasHarness(monkeypatch)
         session = _make_session()
         session._active = True
         gemini_session = MagicMock()
@@ -470,88 +555,83 @@ class TestExecutePanelTool:
             _run(svc._execute_and_respond(session, "fc_panel", fc))
             mock_exec.assert_not_awaited()
 
-        assert session.panel_state["type"] == "markdown"
+        assert h.last["blocks"][0]["kind"] == "markdown"
         gemini_session.send_tool_response.assert_awaited_once()
 
     # ── #979: show_diagram (Mermaid) ─────────────────────────────────────────
 
-    def test_show_diagram_sets_mermaid_state(self, svc):
-        session = _make_session()
+    def test_show_diagram_is_a_diagram_block(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
         result = svc._execute_panel_tool(
-            session, "show_diagram", {"diagram": "graph TD; A-->B", "title": "Flow"}
+            _make_session(), "show_diagram", {"diagram": "graph TD; A-->B", "title": "Flow"}
         )
         assert result == "Panel updated."
-        assert session.panel_state["type"] == "mermaid"
-        assert session.panel_state["content"] == "graph TD; A-->B"
-        assert session.panel_state["title"] == "Flow"
-        assert session.panel_state["updated_at"] is not None
+        assert h.last["blocks"] == [{"id": "voice", "kind": "diagram", "title": "Flow",
+                                     "payload": {"mermaid": "graph TD; A-->B"}}]
 
-    def test_show_diagram_missing_arg_defaults_empty(self, svc):
-        session = _make_session()
-        svc._execute_panel_tool(session, "show_diagram", {})
-        assert session.panel_state["type"] == "mermaid"
-        assert session.panel_state["content"] == ""
+    def test_show_diagram_missing_arg_is_refused_and_writes_nothing(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        result = svc._execute_panel_tool(_make_session(), "show_diagram", {})
+        assert "No diagram source" in result
+        assert h.writes == []
 
     # ── #979: show_image (web URL + workspace path) ──────────────────────────
 
-    def test_show_image_web_url(self, svc):
-        session = _make_session()
+    def test_show_image_web_url(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
         result = svc._execute_panel_tool(
-            session, "show_image",
+            _make_session(), "show_image",
             {"src": "https://example.com/chart.png", "caption": "A chart"},
         )
         assert result == "Panel updated."
-        assert session.panel_state["type"] == "image"
-        assert session.panel_state["image_kind"] == "url"
-        assert session.panel_state["content"] == "https://example.com/chart.png"
-        assert session.panel_state["caption"] == "A chart"
+        assert h.last["blocks"] == [{"id": "voice", "kind": "image", "title": None, "payload": {
+            "src": "https://example.com/chart.png", "src_kind": "url", "caption": "A chart"}}]
 
-    def test_show_image_relative_workspace_path_normalized(self, svc):
-        session = _make_session()
-        svc._execute_panel_tool(session, "show_image", {"src": "content/chart.png"})
-        assert session.panel_state["type"] == "image"
-        assert session.panel_state["image_kind"] == "path"
-        # Relative path resolved under the workspace root.
-        assert session.panel_state["content"] == f"{_WORKSPACE_ROOT}/content/chart.png"
+    def test_show_image_relative_workspace_path_normalized(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        svc._execute_panel_tool(_make_session(), "show_image", {"src": "content/chart.png"})
+        payload = h.last["blocks"][0]["payload"]
+        assert payload["src_kind"] == "path"
+        assert payload["src"] == f"{_WORKSPACE_ROOT}/content/chart.png"
 
-    def test_show_image_absolute_workspace_path(self, svc):
-        session = _make_session()
-        svc._execute_panel_tool(
-            session, "show_image", {"src": "/home/developer/content/a.png"}
-        )
-        assert session.panel_state["image_kind"] == "path"
-        assert session.panel_state["content"] == "/home/developer/content/a.png"
+    def test_show_image_absolute_workspace_path(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        svc._execute_panel_tool(_make_session(), "show_image", {"src": "/home/developer/content/a.png"})
+        assert h.last["blocks"][0]["payload"]["src"] == "/home/developer/content/a.png"
 
-    def test_show_image_tilde_is_workspace_relative(self, svc):
-        session = _make_session()
-        svc._execute_panel_tool(session, "show_image", {"src": "~/content/a.png"})
-        assert session.panel_state["image_kind"] == "path"
-        assert session.panel_state["content"] == f"{_WORKSPACE_ROOT}/content/a.png"
+    def test_show_image_tilde_is_workspace_relative(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        svc._execute_panel_tool(_make_session(), "show_image", {"src": "~/content/a.png"})
+        assert h.last["blocks"][0]["payload"]["src"] == f"{_WORKSPACE_ROOT}/content/a.png"
 
-    def test_show_image_empty_src_rejected(self, svc):
-        session = _make_session()
-        before = dict(session.panel_state)
-        result = svc._execute_panel_tool(session, "show_image", {"src": "   "})
+    def test_show_image_inline_data_uri_under_the_cap_is_allowed(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        svc._execute_panel_tool(_make_session(), "show_image", {"src": "data:image/png;base64,AAAA"})
+        assert h.last["blocks"][0]["payload"]["src_kind"] == "data"
+
+    def test_show_image_empty_src_rejected(self, svc, monkeypatch):
+        h = _CanvasHarness(monkeypatch)
+        result = svc._execute_panel_tool(_make_session(), "show_image", {"src": "   "})
         assert "No image source" in result
-        # Panel unchanged on rejection.
-        assert session.panel_state == before
+        assert h.writes == []
 
     @pytest.mark.parametrize("bad_src", [
         "../../etc/passwd",                       # relative traversal escapes root
         "/home/developer/../etc/passwd",          # absolute traversal escapes root
         "/etc/passwd",                            # outside the workspace entirely
         "/home/developer-evil/secret",            # sibling-prefix escape (the startswith bug)
-        "data:image/png;base64,AAAA",             # inline data URI not allowed
+        "data:image/svg+xml;base64,AAAA",         # an SVG is a document, not a raster
+        "data:text/html,<script>alert(1)</script>",
         "file:///etc/passwd",                     # non-http scheme not allowed
         "ftp://host/x.png",                        # non-http scheme not allowed
+        "//evil.example/x.png",                   # protocol-relative
     ])
-    def test_show_image_rejects_unsafe_src(self, svc, bad_src):
-        session = _make_session()
-        before = dict(session.panel_state)
-        result = svc._execute_panel_tool(session, "show_image", {"src": bad_src})
-        assert "rejected" in result.lower() or "no image source" in result.lower()
-        # Panel state must NOT be updated for a rejected source.
-        assert session.panel_state == before
+    def test_show_image_rejects_unsafe_src(self, svc, monkeypatch, bad_src):
+        h = _CanvasHarness(monkeypatch)
+        result = svc._execute_panel_tool(_make_session(), "show_image", {"src": bad_src})
+        assert "rejected" in result.lower()
+        # Nothing is written for a rejected source.
+        assert h.writes == []
 
 
 # ── #979: _classify_image_src path-confinement unit tests ────────────────────
@@ -560,7 +640,6 @@ class TestClassifyImageSrc:
     """Direct tests of the show_image src classifier / confinement gate."""
 
     @pytest.mark.parametrize("url", [
-        "http://example.com/a.png",
         "https://example.com/a.png",
         "HTTPS://EXAMPLE.COM/A.PNG",  # scheme match is case-insensitive
     ])
@@ -584,11 +663,16 @@ class TestClassifyImageSrc:
         "/etc/passwd",
         "/home/developer-evil/x.png",  # the sibling-prefix bug this gate fixes
         "data:text/html,<script>alert(1)</script>",
+        "data:image/svg+xml;base64,AAAA",
+        "http://example.com/a.png",    # plaintext — refused at write, not left to the CSP (ent#536)
         "file:///etc/passwd",
         "javascript:alert(1)",         # has no scheme://, treated as path, escapes → rejected
     ])
     def test_unsafe_inputs_rejected(self, bad):
         assert _classify_image_src(bad) is None
+
+    def test_inline_raster_under_the_cap_is_data(self):
+        assert _classify_image_src("data:image/png;base64,AAAA") == ("data:image/png;base64,AAAA", "data")
 
 
 # ── #979: new panel tools are registered + declared ──────────────────────────
@@ -615,8 +699,9 @@ class TestNewPanelToolRegistration:
         fd = next(f for f in _PANEL_TOOLS.function_declarations if f.name == "show_image")
         assert "src" in (fd.parameters.required or [])
 
-    def test_show_diagram_routed_not_forwarded_to_agent(self, svc):
+    def test_show_diagram_routed_not_forwarded_to_agent(self, svc, monkeypatch):
         """show_diagram executes in-process, never reaching the agent container."""
+        h = _CanvasHarness(monkeypatch)
         session = _make_session()
         session._active = True
         gemini_session = MagicMock()
@@ -634,7 +719,7 @@ class TestNewPanelToolRegistration:
             _run(svc._execute_and_respond(session, "fc_diag", fc))
             mock_exec.assert_not_awaited()
 
-        assert session.panel_state["type"] == "mermaid"
+        assert h.last["blocks"][0]["kind"] == "diagram"
         gemini_session.send_tool_response.assert_awaited_once()
 
 

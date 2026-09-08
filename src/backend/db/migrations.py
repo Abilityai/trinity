@@ -2857,6 +2857,53 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_loops_terminal_driven(cursor, conn):
+    """#2523 — the two columns that let a loop live without an in-process runner.
+
+    `LoopService._run` used to hold the whole loop in one `asyncio.Task`: a
+    `for` loop over iterations, with the stop flag on an in-memory `_LoopHandle`
+    and the inter-run pause as `asyncio.sleep`. Neither survives a restart, so
+    startup recovery flipped every in-flight loop to `interrupted`. The loop is
+    now driven by execution terminals instead, which needs those two pieces of
+    state on the row:
+
+      * `next_run_at`       — when the next iteration is due (the `delay_seconds`
+                              pause). NULL means "not waiting"; a due-loop sweep
+                              dispatches rows whose time has come.
+      * `stop_requested_at` — replaces `_LoopHandle.should_stop`, so `stop_loop`
+                              works on a loop this process never started.
+
+    Everything else the runner kept locally was already persisted
+    (`last_response`, `runs_completed`, `failed_runs`) or is derivable from
+    `agent_loop_runs` (accumulated cost, consecutive failures, the #1157
+    no-progress fingerprints), which is why only two columns are needed.
+
+    Mirrored by the Alembic revision 0051_agent_loops_terminal_driven.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "next_run_at",
+        "ALTER TABLE agent_loops ADD COLUMN next_run_at TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "stop_requested_at",
+        "ALTER TABLE agent_loops ADD COLUMN stop_requested_at TEXT",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loops_next_run ON agent_loops(next_run_at)"
+    )
+    # Every execution terminal asks "is this a loop run?" — an indexed point
+    # read, not a scan of every loop run ever recorded.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_runs_execution "
+        "ON agent_loop_runs(execution_id)"
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_mcp_exposed(cursor, conn):
     """#846 — per-agent MCP exposure toggle.
 
@@ -3877,6 +3924,205 @@ def _migrate_execution_turn_integrity(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_canvases_table(cursor, conn):
+    """Create agent_canvases (ent#438).
+
+    The durable agent canvas — one row per (agent_name, canvas_id), so a write
+    is an upsert and the surface is addressable. Schema is also in
+    db/schema.py for fresh installs; this handles existing ones. Idempotent.
+    Mirrored by Alembic revision 0050_agent_canvases for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_canvases)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_canvases (
+            agent_name TEXT NOT NULL,
+            canvas_id TEXT NOT NULL,
+            title TEXT,
+            blocks TEXT NOT NULL,
+            audience TEXT NOT NULL DEFAULT 'operator',
+            schema_version INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by_execution_id TEXT,
+            PRIMARY KEY (agent_name, canvas_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_canvases_agent "
+        "ON agent_canvases(agent_name, updated_at DESC)"
+    )
+    conn.commit()
+
+
+def _migrate_agent_canvases_template(cursor, conn):
+    """ent#537 — a canvas may declare a starter layout by name.
+
+    `agent_canvases.template` holds 'dashboard' | 'report' | 'brief' |
+    'status-board', or NULL for the stacked default every pre-#537 row keeps.
+    A property of the SURFACE (like `audience`), so a column rather than a key
+    inside `blocks`; the per-block `slot` that fills a layout lives in the
+    blocks JSON because it travels with the block through `patch_canvas`.
+    No backfill: NULL is the honest reading of a row nobody laid out.
+
+    Mirrored by the Alembic revision 0054_agent_canvases_template.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_canvases",
+        "template",
+        "ALTER TABLE agent_canvases ADD COLUMN template TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_portal_session_title_source(cursor, conn):
+    """ent#473 — which hand wrote a Workspace thread's title.
+
+    `enterprise_portal_sessions.title` is written by three hands: the derived
+    fallback (`touch_portal_session`, first message prefix), the ent#186
+    generated title, and — from ent#473 — a person renaming the chat. The
+    generator must never overwrite a person's title, and the ent#473 second
+    pass has to know whether the first attempt landed at all, so the hand is
+    recorded beside the value: NULL = derived fallback (or any row that
+    predates this column), 'generated', 'user'.
+
+    No backfill, deliberately: a pre-#473 title keeps working exactly as
+    before (AC "existing threads keep their titles; no migration"), and NULL is
+    the honest reading of a row nobody can attribute.
+
+    Mirrored by the Alembic revision 0052_portal_session_title_source.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "title_source",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN title_source TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_user_ui_preferences_table(cursor, conn):
+    """Create user_ui_preferences (trinity-enterprise#413, OSS-core).
+
+    Per-user UI state that used to live in browser-global localStorage — the
+    Dashboard Grid layout, tile prefs and org toggles first. One row per
+    (user_id, key); the value is an opaque JSON object, size-capped at the
+    service. Schema is also in db/schema.py for fresh installs; this handles
+    existing ones. Idempotent. Mirrored by Alembic revision
+    0053_user_ui_preferences for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(user_ui_preferences)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_ui_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+def _migrate_portal_messages_voice_source(cursor, conn):
+    """ent#534 — a Workspace voice call's turns land in the chat, marked spoken.
+
+    Two nullable columns on `enterprise_portal_messages`: `source` (NULL for a
+    typed turn, 'voice' for one spoken in a call) and `voice_call_id` (the voice
+    session id, so one call's rows group into a single collapsed block). Both
+    are written by the platform only — no client request carries them.
+
+    A per-row call id rather than a header row, deliberately: `get_portal_messages`
+    reads the newest 100 rows, and a 30-minute call is ~180, so anything keyed on
+    an opener row falls apart exactly when the call was long enough to matter.
+
+    Additive, no backfill: every existing row is a typed turn (`source IS NULL`).
+    Mirrored by the Alembic revision 0057_portal_messages_voice_source.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "source",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN source TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "voice_call_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN voice_call_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_portal_session_main_chat(cursor, conn):
+    """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
+
+    Every (user, agent) pair has one **Main** chat: the place the agent reaches
+    you when no conversation named itself. `is_main` marks it; `archived_at`
+    marks the one Reset retired, which stays an ordinary past chat — readable,
+    resumable, renameable — and simply stops being that place.
+
+    The partial unique index is the point of the migration, not an
+    afterthought. `ensure_main_session` is reachable from two request paths and
+    runs in every uvicorn worker, so a check-then-insert races two Mains into
+    existence for one pair, after which "the pinned first tab" has no single
+    answer. The predicate `WHERE is_main = 1` is load-bearing: an archived row
+    keeps its (agent, client) pair forever, so an unconditional unique index
+    would refuse the SECOND Reset.
+
+    No backfill, deliberately. Every existing row reads `is_main = 0` and Main
+    is created lazily on the next visit — the same shape as ent#473's
+    `title_source`. Backfilling would have to pick one existing thread as Main
+    for every pair on the instance, and "the chat that happened to be most
+    recent when we migrated" is not a fact anyone asked for.
+
+    Mirrored by the Alembic revision 0055_portal_session_main_chat.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "is_main",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_sessions",
+        "archived_at",
+        "ALTER TABLE enterprise_portal_sessions ADD COLUMN archived_at TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_sessions_main "
+        "ON enterprise_portal_sessions(agent_name, client_email) WHERE is_main = 1"
+    )
+    conn.commit()
+
+
+
+def _migrate_schedule_workspace_delivery(cursor, conn):
+    """Let a schedule deliver its output into a Workspace conversation (ent#498).
+
+    One nullable column, no backfill and no index. NULL — every existing row —
+    is today's behaviour, and the resolver fails CLOSED on it, so an install that
+    never sets the field cannot notice this ran.
+
+    No index deliberately: the column is read only through the schedule row the
+    scheduler already loaded by id, never selected on.
+
+    Postgres counterpart: `0056_schedule_workspace_delivery`.
+    """
+    _safe_add_column(
+        cursor, "agent_schedules", "deliver_to_workspace_email",
+        "ALTER TABLE agent_schedules ADD COLUMN deliver_to_workspace_email TEXT",
+        log_msg=("Adding deliver_to_workspace_email to agent_schedules for "
+                 "Workspace brief delivery (ent#498)..."),
+    )
+    conn.commit()
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3971,6 +4217,7 @@ MIGRATIONS = [
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
+    ("agent_loops_terminal_driven", _migrate_agent_loops_terminal_driven),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
     ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
@@ -3997,4 +4244,11 @@ MIGRATIONS = [
     ("channel_report_client", _migrate_channel_report_client),
     ("workspace_ratings", _migrate_workspace_ratings),
     ("execution_turn_integrity", _migrate_execution_turn_integrity),
+    ("agent_canvases_table", _migrate_agent_canvases_table),
+    ("portal_session_title_source", _migrate_portal_session_title_source),
+    ("user_ui_preferences_table", _migrate_user_ui_preferences_table),
+    ("agent_canvases_template", _migrate_agent_canvases_template),
+    ("portal_session_main_chat", _migrate_portal_session_main_chat),
+    ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
+    ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
 ]

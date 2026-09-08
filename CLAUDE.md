@@ -133,7 +133,7 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 ### 4. Tiered Documentation Updates
 Documentation requirements scale with change type (change history is tracked via git commits):
 - **Bug fix**: Descriptive commit message only
-- **Feature / API change**: `architecture.md` or `feature-flows/` as needed
+- **Feature / API change**: the owning area file under `docs/memory/architecture/` (mapped by the Architecture Map in `architecture.md`) or `feature-flows/` as needed
 - **New capability**: `docs/memory/requirements/<area>.md` (index: `requirements.md`) + `feature-flows/`
 
 ### 5. Security First (PUBLIC REPO)
@@ -154,7 +154,7 @@ Non-negotiables regardless of tooling (core team: methodology guides in the `.cl
 - **Code review**: verify feedback technically before implementing
 
 ### 7. Architectural Invariants
-Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift. For decisions about new capabilities or significant design choices, also consult `docs/planning/TARGET_ARCHITECTURE.md` — prefer changes that move toward the target, reject changes that move away from it.
+Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md — the always-loaded core, which also carries the Architecture Map naming the on-demand area file that owns each part of the tree (read that file before changing behaviour it documents; a `PreToolUse` hook will point you at it). Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift. For decisions about new capabilities or significant design choices, also consult `docs/planning/TARGET_ARCHITECTURE.md` — prefer changes that move toward the target, reject changes that move away from it.
 
 ### 8. Agent-Defined Pipelines (Trinity ≠ DAG engine)
 Long-running multi-stage work inside agents (perception → synthesis → publish → measure, etc.) is **owned by the agent**, not by Trinity. The agent runs a heartbeat skill that advances stages, retries failures, and escalates via the operator queue. Trinity's only contribution is a standardized **read surface** — agents publish `~/.trinity/pipelines/<id>.yaml` (definition) and `~/.trinity/pipeline-state/<id>/<instance>.json` (state); Trinity exposes these via thin MCP tools (`list_agent_pipelines`, `get_agent_pipeline_state`) that wrap the existing `agent_files` router. **Do not** add a DAG executor, pipeline state tables, or backend transition logic — those belong in the agent. See `docs/memory/requirements/scheduling.md` (Agent-Defined Pipelines, formerly §34) and issue #919.
@@ -177,7 +177,8 @@ Before writing or changing **any** code under `src/frontend/`, read `docs/memory
 | File | Purpose |
 |------|---------|
 | `docs/memory/requirements.md` | **SINGLE SOURCE OF TRUTH** — index over per-area files in `docs/memory/requirements/` (split from the former monolith, #1406). All features |
-| @docs/memory/architecture.md | **Current system design** — describes what is built today (~1000 lines max) |
+| @docs/memory/architecture.md | **Always-loaded core** — system shape, all Architectural Invariants, network topology, and the Architecture Map (area → owned code paths → the regression reading it prevents). Budget: ≤500 lines (#2306) |
+| `docs/memory/architecture/` | **Per-area detail, read on demand** — never `@`-imported. 14 files: backend/API catalogs, execution, reliability, agent lifecycle, agent runtime, integrations, observability, workspace, frontend, MCP server, database, security, background services. Architecture updates land here, not in the core |
 | `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design + active orchestration direction** — pull / work-stealing coordination (Epic #1045, umbrella #1081). **v2 (2026-07-01):** side-effect handling reframed to **retry-with-prior-trace recovery** + **deterministic tool-side gates on capability-confined irreversible rails** (Direction B); pull default-on now gates per-effect not per-agent (#1401 recovery trace + injection, #1402 async operator-queue human-gate). v1 archived at `docs/archive/plans/TARGET_ARCHITECTURE_v1_2026-06-06.md`. Use when evaluating tradeoffs and prioritizing work; consult before touching `task_execution_service`, `capacity_manager`, `slot_service`, `backlog_service`, `dispatch_breaker`, or `cleanup_service`. |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
 | `docs/memory/design-system.md` | **Frontend design system — system of record** (#1430): tokens, both-theme rules + dark ink ladder, primitives catalog, data-loading motion standard, 28 UI Construction Principles. Binding contract: `design-system-contract.md` (read before any `src/frontend/` change); approved visual spec: `design-system-reference.html` |
@@ -364,7 +365,7 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 
 - **SDLC & Development Workflow**: `.claude/DEVELOPMENT_WORKFLOW.md` ← Start here for dev process (core team; external contributors: `dev-methodology` plugin, see Development Skills above)
 - **Orchestration Reliability Plan (archived)**: `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` ← Sprint A–D′ historical record; superseded by `docs/planning/TARGET_ARCHITECTURE.md` (pull coordination) as the active execution-stack direction
-- **Full Architecture**: @docs/memory/architecture.md
+- **Full Architecture**: @docs/memory/architecture.md (core) → `docs/memory/architecture/` (per-area detail, on demand)
 - **All Requirements**: `docs/memory/requirements.md` (index) → per-area files in `docs/memory/requirements/`
 - **Current Roadmap**: https://github.com/abilityai/trinity/issues
 - **Recent Changes**: `git log --oneline --since="2 weeks ago"`

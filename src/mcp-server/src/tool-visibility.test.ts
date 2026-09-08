@@ -345,3 +345,61 @@ describe("#736 outbound A2A tools are operator-scope only", () => {
     assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createA2ACallTools/);
   });
 });
+
+describe("#279 credential-vault tools are operator-scope only", () => {
+  // list_available_credentials / fetch_credential deliver a granted secret to
+  // the calling key's agent. A connector key is consumption-only and bound to
+  // one agent; an anonymous session holds no credential at all. Neither may ever
+  // see these tools — and because the allow-list is what decides, that holds for
+  // any scope added later. The backend fetch route is agent-scoped-key-only, so
+  // even a user/system operator key gets a named 403; the tool is nonetheless
+  // advertised to the operator tier (it is license-blind and reports honestly).
+  const operatorOnly = makeOperatorOnly(true);
+
+  it("advertises to user, agent and system scopes", () => {
+    for (const scope of ["user", "agent", "system"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        true,
+        `${scope} should see the credential-vault tools`,
+      );
+    }
+  });
+
+  it("hides them from connector and anonymous sessions", () => {
+    for (const scope of ["connector", "anonymous"]) {
+      assert.equal(
+        operatorOnly({ scope }),
+        false,
+        `${scope} must not see the credential-vault tools`,
+      );
+    }
+  });
+
+  it("hides them from a scope nobody has thought of yet (fails CLOSED)", () => {
+    assert.equal(operatorOnly({ scope: "portal_delegate" }), false);
+    assert.equal(operatorOnly({ scope: "some_future_tier" }), false);
+  });
+
+  it("registers the vault tools in the operator group, not the connector one", async () => {
+    const { createCredentialVaultTools } = await import(
+      "./tools/credential_vault.js"
+    );
+    const tools = createCredentialVaultTools(
+      { getBaseUrl: () => "http://x" } as any,
+      false,
+    );
+    assert.deepEqual(Object.keys(tools).sort(), [
+      "fetch_credential",
+      "list_available_credentials",
+    ]);
+    const serverSrc = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
+    );
+    assert.match(serverSrc, /createCredentialVaultTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(
+      serverSrc,
+      /connectorGroup\s*=\s*createCredentialVaultTools/,
+    );
+  });
+});
