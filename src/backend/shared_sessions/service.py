@@ -25,6 +25,18 @@ from . import db
 
 logger = logging.getLogger(__name__)
 
+# RETIRED as a gate (#2620). ent#443 moved rooms into OSS core: `main.py`
+# mounts both routers unconditionally, the routes dropped
+# `requires_entitlement`, and nothing registers this id any more — so
+# `isEntitled("shared_sessions")` is False on every build, OSS and enterprise
+# alike. A frontend gate on it therefore hides a working capability, which is
+# exactly what happened to the Room budget defaults panel for the whole life of
+# the OSS move.
+#
+# Kept rather than deleted only because the private enterprise submodule is not
+# visible from here and may still import the name; it is NOT an entitlement id.
+# Do not gate on it. Guarded by
+# `src/frontend/tests/unit/retiredEntitlementGates.spec.js`.
 FEATURE_ID = "shared_sessions"
 
 # Budgets — bounded by construction (the epic's measured reason: broadcast rooms

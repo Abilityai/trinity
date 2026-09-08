@@ -10,12 +10,24 @@
   enforces the same line — a workspace client's supplied budget is ignored, and
   these defaults apply instead.
 
-  Enterprise-gated as a whole (rooms are an enterprise module), unlike the ent#375
-  session panel whose mechanism is OSS: there is nothing here for a community
-  install to look at.
+  UNGATED (#2620). This used to carry `v-if="entitled"` on
+  `isEntitled('shared_sessions')`, correct while rooms were an enterprise
+  module. ent#443 moved multi-agent rooms into OSS core — `main.py` mounts both
+  routers unconditionally, `shared_sessions/router.py` records that its routes
+  "used to carry requires_entitlement", and nothing registers that feature id
+  any more — so the predicate was false on EVERY build and the only UI that
+  writes these defaults never rendered. Rooms worked; the dial for them did not.
+
+  Exactly the shape ent#356 left in `NavBar.vue`'s Workspace link, fixed there
+  for the same reason and worth reading beside this: an OSS move has to carry
+  the frontend gate with it, or the capability ships without its controls.
+
+  Authorization is unchanged and is the SERVER's: `budget_router` is
+  `require_admin` (plus `reject_agent_principal` on the write), and this panel
+  only renders on Settings' Retention tab, which is `adminOnly` itself.
 -->
 <template>
-  <div v-if="entitled" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+  <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
     <div class="px-6 py-5">
       <div>
         <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100">Room budgets</h3>
@@ -114,12 +126,8 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import api from '../../api'
-import { useEnterpriseStore } from '../../stores/enterprise'
 import { SETTINGS_NUMBER_INPUT_CLASS } from './fieldStyles'
 import { buildBudgetUpdate, isBudgetDirty } from '../../utils/roomBudgets'
-
-const enterpriseStore = useEnterpriseStore()
-const entitled = computed(() => enterpriseStore.isEntitled('shared_sessions'))
 
 const state = ref(null)
 const loading = ref(false)
@@ -145,7 +153,6 @@ function adopt(data) {
 const dirty = computed(() => isBudgetDirty(form, state.value))
 
 async function load() {
-  if (!entitled.value) return
   loading.value = true
   loadError.value = null
   try {
