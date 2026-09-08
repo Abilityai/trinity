@@ -214,10 +214,7 @@ describe('visibility', () => {
     expect(GUIDE_SFC).toContain("persistHardeningGuideDismissed(stage.value)")
     // Step one's action cannot render once the domain exists — there is nothing
     // left to collect in-app, and a button that leads nowhere is the defect.
-    // The address stage's action is the command, gated on the same stage. It
-    // used to be an "Add a domain" button; see the card's own docblock for why
-    // that button was the failure rather than the fix.
-    expect(GUIDE_SFC).toMatch(/v-if="stage === 'address'"[\s\S]{0,600}set-domain\.sh/)
+    expect(GUIDE_SFC).toMatch(/v-if="stage === 'address'"[\s\S]{0,600}Add a domain/)
   })
 
   it('advances in-session on the save that configures the domain', () => {
@@ -418,11 +415,7 @@ describe('the two paths are complementary, not alternatives', () => {
     expect(GUIDE_SFC).toMatch(/Serve it without exposing it/)
     expect(GUIDE_SFC).toMatch(/A record/)
     // Deep-links at the field that actually writes `public_chat_url`.
-    // Was: asserts the card links to Settings → General. It no longer does, and
-    // must not — that field reconfigures nothing, and sending an operator with a
-    // domain there is precisely what left them advertising a name no web server
-    // answered to. The address step is the command instead.
-    expect(GUIDE_SFC).toContain('set-domain.sh')
+    expect(GUIDE_SFC).toContain("/settings?tab=general")
   })
 
   it('offers a Cloudflare Tunnel, not a VPN (#2380, decided 2026-09-01)', () => {
@@ -454,13 +447,13 @@ describe('the two paths are complementary, not alternatives', () => {
     // internet; it must be actionable at a glance, not two columns of prose.
     expect(GUIDE_SFC).toContain('<details')
     expect(GUIDE_SFC).toContain('data-testid="hardening-guide-why"')
-    // One action on the face, and it is the one that WORKS. It is a command
-    // rather than a button because the step cannot be performed from this page —
-    // Trinity has no host privileges. The only BaseButton left is the dismiss.
-    expect(GUIDE_SFC).toMatch(/data-testid="hardening-guide-command"/)
-    expect(GUIDE_SFC).toMatch(/select-all/) // one click selects the whole command
+    // Exactly one non-dismiss button, and it is the one collectable-in-app step.
+    expect(GUIDE_SFC).toMatch(/variant="primary"[\s\S]{0,200}Add a domain/)
     const buttons = GUIDE_SFC.match(/<BaseButton/g) || []
-    expect(buttons.length, 'dismiss only — the action is a command, not a button').toBe(1)
+    expect(buttons.length, 'one action + one dismiss').toBe(2)
+    // No host command on this card. Saving the field is the whole step; a shell
+    // instruction reappearing here means that stopped being true.
+    expect(GUIDE_SFC).not.toMatch(/sudo /)
   })
 
   it('does not promise a certificate change Trinity does not perform', () => {
@@ -504,30 +497,30 @@ describe('the two paths are complementary, not alternatives', () => {
   })
 })
 
-describe('step one names the command that actually completes it', () => {
-  it('tells the operator to run set-domain.sh on the server', () => {
-    // The copy used to stop at "set the Public URL in Settings", which is a
-    // display setting: nothing in the tree reconfigures the proxy from it. The
-    // operator would set it, `install_tls_posture` would flip to `https-domain`
-    // by string-parsing that setting, this card would treat step one as done and
-    // advance — and the domain would serve a certificate error, because the web
-    // server in front of Trinity still answered only to the IP. The card retired
-    // on a state it had helped break.
-    expect(GUIDE_SFC).toContain('scripts/deploy/set-domain.sh')
-    expect(GUIDE_SFC).toMatch(/sudo/)
+describe('step one is finishable from the browser (#2380, on-demand TLS)', () => {
+  it('sends the operator to the settings field and nowhere else', () => {
+    // Saving the Public URL completes step one only because Caddy obtains the
+    // certificate on demand, asking the backend whether the name is allowed.
+    // Before that, saving reconfigured nothing: the domain served a certificate
+    // error, this card advanced to step two on the strength of the operator's
+    // own input, and the address section that would have explained the fix was
+    // `v-if`'d away with it.
+    expect(GUIDE_SFC).toContain('/settings?tab=general')
+    expect(GUIDE_SFC).not.toMatch(/sudo /)
+    expect(GUIDE_SFC).not.toMatch(/set-domain\.sh/)
   })
 
-  it('does not claim the proxy picks up the name on its own', () => {
-    // Template copy wraps across lines, so match on collapsed whitespace.
+  it('says the certificate is obtained for the saved name, without claiming to do it', () => {
     const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
-    expect(prose).not.toMatch(/picks up the name/i)
-  })
-
-  it('says why it cannot be a button', () => {
-    // Not an apology — the constraint is real (no host privileges from a
-    // container) and it is the same one that keeps the tunnel step to prose.
-    const prose = withoutComments(GUIDE_SFC).replace(/\s+/g, ' ')
-    expect(prose).toMatch(/container with no access to the web server/i)
+    expect(prose).toContain('Trinity does not issue certificates itself')
+    expect(prose).toMatch(/obtain one for the name you save/)
+    // The allowlist IS the security model, and it answers the question an
+    // operator would otherwise have to ask: can somebody else point a domain
+    // here and have this server request certificates for it?
+    expect(prose).toMatch(/Only the name you save is allowed/)
+    // DNS first: on-demand issuance fails until the record resolves here, and it
+    // fails on somebody's page load rather than announcing itself.
+    expect(prose).toMatch(/until the record points here/)
   })
 })
 
