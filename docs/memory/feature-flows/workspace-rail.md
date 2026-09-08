@@ -33,6 +33,57 @@ Portal.vue (shell)
 └─ <PortalRail sheet sm:hidden>   the bottom sheet, when the strip is tapped
 ```
 
+## ent#547 — Info docks, and the contract grows a third shape
+
+The rail is **Work · Loops · Canvas · Files · Info** (State when #439 lands). Agent
+details was a SIBLING of the rail until 2026-09-07 (ruled 2026-09-05, on the grounds
+that the rail is participant-scoped with a fixed tab set and that details is dismissed
+rather than switched away from). The operator reversed that after testing `dev` — a
+header-launched sibling panel "reads as one more top-level thing" — and both original
+grounds are answered rather than dropped:
+
+| The 2026-09-05 objection | How the tab form answers it |
+|---|---|
+| "the rail is participant-scoped" | `RAIL_DOORS.SOLO_AGENT` — the tab renders only when the conversation has exactly ONE participant |
+| "dismissed, not switched away from" | true of a panel occupying the rail's column; false once it IS the column's content. Collapsing the rail dismisses it, and the rail already remembers the tab you left |
+
+**`SOLO_AGENT` is `=== 1`, not `> 0`.** With "at least one" the tab passes in a room and
+renders one arbitrary participant's panel under a strip that promises the whole
+conversation. It also must not be `PLATFORM`: the header control it replaces carried no
+gate at all, so it rendered for external clients, and a platform door would be a silent
+capability removal for exactly the audience the Workspace exists for (#2128).
+
+**Info does not group by agent in a room, and that is a recorded deviation from the
+issue's AC.** `stores/clientPortal.js` keeps report state as a singleton keyed to one
+agent: `loadAgentReports` calls `resetAgentReports` whenever the requested agent differs,
+which bumps `_reportsGeneration` and invalidates every sibling's in-flight request. N
+mounted panels therefore leave N−1 stuck in a **permanent loading skeleton** — worse than
+absence, because it claims to be fetching something it has already abandoned. Keying that
+store per agent unblocks the grouping; it is a store change, not a rail change.
+
+**The third registry shape: a STATIC tab.** Info declares `signal: RAIL_SIGNAL_NONE` and
+`empty: null`. Both absences are declared rather than filled, because an agent always has
+a name, a health state and a chat list — the body always renders, so the rail's generic
+empty branch is unreachable — and nothing ever writes an `info` signal, so a borrowed
+`updated` would light no dot while documenting a rule that does not exist, diluting the
+"a dot means something happened" vocabulary. No read-side special case was needed:
+`signalFor` already answers `emptySignal()` for a tab the signals map does not mention,
+and `signalShape` already answers `null` for that. `stripSegments` consequently omits Info
+from its signalled branch and names it in the "nothing to say" branch, which is correct.
+
+**Info is absent from `feedsFor` by design.** That map drives the SHELL-owned feeds, and
+Info's body owns its own two reads (the shared agent-page payload, and reports) — the one
+docked tab not fed from the shell. A key nothing reads would suggest a feed exists.
+
+**Both mounts get the body.** `PortalRail` is mounted twice — the column and the mobile
+sheet — and `#tab-info` is supplied to each. One alone leaves a phone on the registry's
+generic empty state. Mobile is a **gain** here: `PortalAgentDetails` was `hidden sm:flex`,
+so the header button it replaces did nothing visible on a phone at all.
+
+**The icon needs its own entry.** `PortalRail.vue`'s `iconPath` falls back to `ICONS.bolt`
+for an unknown id, silently — a tab with no entry wears Work's lightning bolt in the
+collapsed strip and in its empty state, and nothing fails.
+
 ## Design decisions
 
 ### `visibleTabs` is the one gate — for render AND for mount

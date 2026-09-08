@@ -1902,3 +1902,59 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
   if (!newest) return ''
   return compactAge(newest, now)
 }
+
+// ---------------------------------------------------------------------------
+// #2580 — one shape for a message row, built in three places.
+//
+// `PortalConversation` constructs a thread row from history (`loadThread`), from
+// a completed turn (`deliver`) and from a reattached turn (`reattach`). The
+// defect the issue reports is that two of those three dropped the persisted
+// `id`, so a reply the user had just watched arrive carried no id and
+// `<PortalRating v-if="item.message.id">` hid the thumbs until the next page
+// load — arbitrary, from the reader's side, since an older reply two lines up
+// had them.
+//
+// A shared mapper rather than three corrected object literals: this is exactly
+// the #2211 shape (a fix landing in one twin and not the other), and it is also
+// the only form the rule can be TESTED in — `vitest.config.js` pins
+// `environment: 'node'` with no mount harness, so a rule living inside an SFC
+// is a rule no test can execute.
+//
+// `id` defaults to `null`, never `undefined`: the consumer's gate is a
+// truthiness test either way, but a row whose id is explicitly null says "this
+// was built without one" where a missing key says nothing at all.
+export function assistantRow({ content = '', id = null, my_rating = null,
+                               source = null, voice_call_id = null } = {}) {
+  return {
+    role: 'assistant',
+    content,
+    id: id || null,
+    myRating: my_rating || null,
+    source: source || null,
+    voiceCallId: voice_call_id || null,
+  }
+}
+
+// The reply a just-finished turn produced, read out of the history payload the
+// client polls anyway (`awaitPersistedReply`).
+//
+// `baselineAssistants` is the count taken BEFORE dispatch: the newest assistant
+// row is only this turn's reply if the count has grown, otherwise it is the
+// PREVIOUS turn's and would be shown twice. Returns null while that is the
+// case, which is the caller's "keep waiting".
+//
+// This is where the id was being lost. The persisted row was already in hand —
+// it is what the count is derived from — and only its content and cost were
+// carried out of the function.
+export function replyFromHistory(messages, baselineAssistants) {
+  const assistants = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'assistant')
+  if (assistants.length <= (Number(baselineAssistants) || 0)) return null
+  const last = assistants[assistants.length - 1]
+  return {
+    response: last.content,
+    cost: last.cost ?? null,
+    id: last.id || null,
+    myRating: last.my_rating || null,
+  }
+}

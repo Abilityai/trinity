@@ -127,8 +127,25 @@ same problem, and the free text was the valuable part anyway.
 
 ## Known limits
 
-- A reply composed locally during a live turn has no row id yet, so it becomes
-  rateable on the next load rather than immediately.
+- ~~A reply composed locally during a live turn has no row id yet, so it becomes
+  rateable on the next load rather than immediately.~~ **Fixed by #2580.** This was
+  recorded as a constraint and was in fact a dropped field: `awaitPersistedReply`
+  polls the history endpoint (that is how it knows the turn ended), so the row the
+  server had just written was already in hand — and only its content and cost were
+  returned. All three sites that build an assistant row now share one mapper
+  (`portalUtils.js::assistantRow`), the synchronous fallback carries `message_id`
+  from the server, and a reply is rateable as it lands.
+- **What is still deliberately unrateable**, and why each one is not the bug above:
+  - a reply the server could not persist — the history write is best-effort so it
+    must never fail an already-billed turn, and there is genuinely no row to point
+    at. The `v-if="item.message.id"` gate is what withholds the thumbs, and a
+    client-invented id would 404 against the ratings route.
+  - **system lines** (ent#523's Reset notice) — the platform speaking about the
+    thread, not the agent speaking in it. Its own template branch, no rating control.
+  - a **voice call's spoken turns** (ent#534) — folded into one collapsed block
+    keyed on the call id, visibly spoken, no thumbs.
+  - the **live execution card** while a turn runs (ent#525) — progress, not an answer.
+  - **your own messages** — only the agent's are rateable.
 - There is no un-rate: clicking the rating you already gave is a no-op, because
   clearing locally would show a state the server does not have.
 - The tally is fleet-wide per agent, not per-reader — "how did this land with
