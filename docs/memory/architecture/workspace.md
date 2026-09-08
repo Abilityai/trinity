@@ -637,11 +637,11 @@ is lost, and `ConfirmDialog` is not a caller here.
 **One page.** `PortalAgentBand.vue` carries the stats strip and the Activity chart under
 the header, always visible (operator, 2026-09-06), and is the **only** surface on this
 page entitled to the scanline (#2540 — it is the chart-loading motion). `PortalAgentDetails.vue`
-carries chats, what it can do, and reports, and opens **into the rail's place** as a
-SIBLING of the rail, never a rail tab (ruled 2026-09-05): the rail is participant-scoped
-with a fixed five-tab set, while this is about one agent and is dismissed rather than
-switched away from; the rail's state is a setup ref, so closing details returns it on the
-tab it was showing. Both read one payload through `composables/usePortalAgentPage.js`.
+carries chats, what it can do, and reports. It opened **into the rail's place** as a
+SIBLING of the rail, never a rail tab (ruled 2026-09-05); **ent#547 reversed that on
+2026-09-07** and it is the rail's **Info** tab — see "The compact header" below for the
+door, the room restriction and why the 2026-09-05 objections are answered rather than
+dropped. Both read one payload through `composables/usePortalAgentPage.js`.
 Canvas, Files and recent work are **not** duplicated here — they have been rail tabs since
 ent#475/#525. `portalUtils.js::landingThread` is the one rule for which chat you land in,
 and the `?agent=` deep link's `resolveAgentLanding` defers to it so the two entry points
@@ -662,8 +662,87 @@ participating agent's inbox and the chip names the recipients (operator decision
 destination is the caller's `upload`, so the ent#484/#486 working folder can take it over
 without the gesture changing.
 
+## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
+
+The band is **compact**, and the three controls that were not about the conversation have
+left the header. Ruled by the operator on 2026-09-07 after testing `dev`.
+
+**What sets the band's height is the stats strip, not the chart.** This is the fact to keep:
+once the legend is gone, a stat block (39px: an 18px figure over an 11px caption) plus the
+band's 8px padding is a hard floor of 56px, and the chart column is budgeted at exactly one
+stat block — title 10 + `mb-1.5` 6 + a 23px row. Inside that budget the chart is free; over
+it, every pixel is one the band grows. Measured in Chromium at 1440px: **99px → 56px**,
+against the issue's ≤60% target, and pinned by `e2e/workspace-compact-header.spec.js`
+because vitest runs `environment: 'node'` and cannot measure anything.
+The real height was the **legend**, not the bars — `legend="side"` lays out `flex-col`, so
+it grew ~13px per bucket (~29px at one, ~133px at nine) and a busy agent's band ran to
+~153px. `StackedBarChart` gains `legend="none"` and `:axis="false"`; the `legend !== 'side'`
+guard became `legend === 'below'`, or the new value would have rendered the very legend it
+removes. Within the 39px the chart keeps its **title** OR its x-axis labels, not both; the
+title stays (board A3: "without it the bars read as another statistic") and the axis goes,
+since the tooltip carries each bar's full date.
+
+**Info is a rail tab, with a door that is the whole design.** `RAIL_DOORS.SOLO_AGENT` —
+exactly ONE participant, never "at least one". Two properties are load-bearing:
+- **Not `PLATFORM`.** The header button it replaces carried no gate, so it rendered for
+  external portal clients; a platform door would have silently removed a panel they have
+  today — the #2128 class, on the surface this file already warns about.
+- **Not `AGENT`** (`> 0`), because in a room that renders one arbitrary participant's panel
+  under a strip promising the whole conversation. Info **does not group by agent in a room**,
+  which is a recorded deviation from ent#547's AC: `stores/clientPortal.js` holds report
+  state as a singleton keyed to one agent (`loadAgentReports` → `resetAgentReports` bumps
+  `_reportsGeneration` and invalidates siblings' in-flight requests), so N mounted panels
+  leave N−1 in a **permanent loading skeleton**. Grouping is unblocked by keying that store
+  per agent — a store change, not a rail change.
+
+Info is the registry's first **static** tab: `signal: RAIL_SIGNAL_NONE` and `empty: null`,
+declared rather than filled, because an agent always has a name, a health state and a chat
+list (no empty state to teach) and nothing writes an `info` signal (no dot that can light).
+`signalFor` already answers `emptySignal()` for an unmentioned tab, so the static form needs
+no read-side special case. It is also absent from `feedsFor` by design — its body owns its
+own two reads, the one docked tab not fed by the shell. Both `<PortalRail>` mounts (the
+column and the mobile sheet) receive `#tab-info`; one alone leaves the phone on the generic
+empty state. Mobile is a **gain**: the old panel was `hidden sm:flex`, so the header button
+did nothing visible there at all.
+
+**The composer owns attach and voice.** One paperclip (the header's opened the Files tab
+with the *attach* glyph); the composer row is voice-call · attach · dictate · send, every
+button a 44px box (#2259). **The call toggle sits OUTSIDE the composer's inert region** —
+the form goes `pointer-events-none` for the call's duration, so the button that ENDS the
+call would have rendered pressed and refused the click. The inert class moved onto a
+wrapper around everything else; that wrapper is a real flex row and **not** `display:
+contents`, which generates no box and would have silently dropped the dimming while
+`pointer-events` (which inherits) still applied.
+
+**The band's remount is fixed at its source, not by moving it.** `PortalConversation` is
+keyed on `convKey`, whose `convGen` half bumps on every thread switch, and the band renders
+through that component's `#band` slot — so slot content inside a keyed subtree was torn down
+per switch, refetching numbers that had not moved. The band stays in the slot, because the
+operator ruled a band **under the header** and the header lives inside the conversation;
+hoisting it to a sibling renders an agent's numbers above its name (built, looked at,
+reverted). Instead `usePortalAgentPage` seeds from its cache **during setup** rather than in
+`onMounted` (which runs after the first paint, which is exactly why a warm remount still
+flashed its skeleton and scanline) and skips the refetch inside `PAGE_FRESH_MS`. The
+decision is the exported pure `shouldRefetchPage`, which fails **stale** on an unusable
+timestamp — a wasted request beats a band that never updates again. Verified live: 6
+same-agent tab switches → 0 `/page` requests and 0 placeholder frames, with a control
+proving the probe could see a request at all. Making it literal means lifting the header out
+of `PortalConversation`; that is the follow-up, and the conversation root's `h-full` must
+become `flex-1 min-h-0` in the same change or the composer is pushed out of an
+`overflow-hidden` shell.
+
+**A reply is rateable as it lands.** `awaitPersistedReply` polls history — that is how it
+knows the turn ended — and was returning only the row's content and cost, discarding the
+`id` and `my_rating` that were already in hand; both live-turn paths then pushed an id-less
+message and the rating control correctly hid itself until a reload. One shared mapper
+(`portalUtils.js::assistantRow` / `replyFromHistory`) now feeds all three construction
+sites. The synchronous fallback genuinely had no id — `portal_chat` minted one inline and
+threw it away — so it returns `message_id`, **declared on `PortalChatResponse`** because the
+response model strips undeclared keys in silence. The `v-if="item.message.id"` gate stays:
+carry the identifier with the flag and let the consumer still refuse an empty one.
+
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
-**Requirements**: `requirements/core-agent.md` §5.23
+**Requirements**: `requirements/core-agent.md` §5.23, §5.30
 
 ## The Tandem layer — a brief lands in Main, a room says who is reading, a complaint reaches the operator (ent#498, ent#363, ent#499)
 

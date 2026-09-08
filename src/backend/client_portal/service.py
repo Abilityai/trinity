@@ -2269,9 +2269,24 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # The user's half was written BEFORE the turn ran (see `_persist_user_turn`),
     # so a reload mid-turn shows what was sent instead of an empty thread.
     # Best-effort — a persistence hiccup must never fail an already-billed turn.
+    #
+    # #2580: the row id is RETURNED now. It was minted here and discarded, so the
+    # synchronous caller was handed a reply it could not rate — the client has to
+    # name a row to post a thumb against, and the only id in existence was this
+    # local. The streaming path never had the problem: it reads the persisted row
+    # back out of history.
+    #
+    # Assigned only AFTER the insert returns, and stays None if it raises. The
+    # persist is best-effort by design, so "there is a reply" and "there is a row
+    # to rate" are genuinely different facts here, and reporting an id for a row
+    # that was never written would hand the client a target the ratings route
+    # will 404 on.
+    message_id = None
     try:
         now = utc_now_iso()
-        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "assistant", reply, cost, now, session_id=session_id)
+        new_message_id = uuid.uuid4().hex
+        db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now, session_id=session_id)
+        message_id = new_message_id
         db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
         logger.warning("portal chat history persist failed for %s/%s: %s", agent_name, email, e)
@@ -2281,7 +2296,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # `_persist_user_turn` — see the comment there for why, and for the two
     # behaviour changes that buys.
 
-    return {"response": reply, "cost": cost, "session_id": session_id}
+    # NOTE (#2580, the ent#2320 lesson restated): `message_id` reaches the client
+    # only because `PortalChatResponse` DECLARES it. The route's `response_model`
+    # strips undeclared keys in silence, so adding a key here alone is a no-op
+    # that every service-layer test would still pass.
+    return {"response": reply, "cost": cost, "session_id": session_id,
+            "message_id": message_id}
 
 
 def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str) -> None:
