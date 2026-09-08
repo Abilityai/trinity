@@ -1572,6 +1572,23 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Which canvas the user has open for this turn (ent#555).
+   *
+   * Called when a canvas tool was given no `canvas_id`, so "add a column to
+   * this" lands on the surface the person is looking at rather than on `main`.
+   */
+  async getCanvasContext(
+    agentName: string,
+    executionId?: string
+  ): Promise<Record<string, unknown>> {
+    const qs = executionId ? `?execution_id=${encodeURIComponent(executionId)}` : "";
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/canvas/context${qs}`
+    );
+  }
+
   /** Canvas metadata for one agent, newest-updated first (no blocks). */
   async listCanvases(agentName: string): Promise<Array<Record<string, unknown>>> {
     return this.request(

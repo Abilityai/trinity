@@ -286,6 +286,11 @@ TABLES = {
             source_channel_thread TEXT,
             source_channel_agent TEXT,
             source_channel_client TEXT,
+            -- ent#555: which canvas the user had OPEN when they sent this turn.
+            -- Context, never authority — it says what is being discussed and
+            -- never widens what the agent may read or write. Validated against
+            -- the agent's own canvases at the boundary that stamps it.
+            open_canvas_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

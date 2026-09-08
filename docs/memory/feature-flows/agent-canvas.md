@@ -106,6 +106,64 @@ CREATE INDEX idx_agent_canvases_agent ON agent_canvases(agent_name, updated_at D
   direction; the table therefore stays deliberately absent from
   `RETENTION_OPS_KEYS`, now for a stated reason rather than a mistaken one.
 
+## The open canvas is shared context (ent#555)
+
+When a user with a canvas on screen says *"add a column to this"*, the agent
+acts on that canvas. Before this the turn carried the message and nothing about
+the surface around it, so the agent asked, guessed, or minted a new canvas
+beside the one being looked at.
+
+**The mechanism is a per-turn context field**, the same shape as the
+`source_channel*` columns beside it: `schedule_executions.open_canvas_id`,
+stamped at dispatch (dual-track: `execution_open_canvas` + Alembic `0060`).
+
+**It is CONTEXT, never AUTHORITY** — the boundary the whole design rests on.
+Two independent halves keep it there:
+
+| half | question it answers | what it cannot do |
+|---|---|---|
+| `client_portal.service.validated_open_canvas` | what may be *stamped* on a turn | grant anything — it only ever narrows a client-supplied id |
+| `canvas_service.effective_canvas_id` | what a tool *acts on* | widen reach — every read/write still passes the ownership and audience gates |
+
+The id is client-supplied, so it is validated at the boundary against the
+agent's **own** canvases and against what that caller can see: an operator-only
+canvas is invisible to an external client (otherwise the field is an existence
+oracle for canvases the agent keeps privately), and another agent's canvas is
+refused outright. Every failure degrades to "nothing open" — never an error,
+never a wider reach.
+
+**Precedence, stated once so all three tools agree:**
+
+    explicit canvas_id  >  the canvas the user has open  >  the default canvas
+
+`effective_canvas_id` returns *why* as well as *which*, because with nothing
+named the agent has to be able to say which canvas it wrote to — "I updated the
+canvas" is not good enough when there are eight and the user is looking at one
+(AC #7).
+
+**Two delivery paths, both required.** The MCP tools resolve a missing
+`canvas_id` through `GET /api/agents/{name}/canvas/context` (declared above
+`/{canvas_id}` — Invariant #4, since "context" is a valid id shape), and the
+turn prompt *names* the open canvas. Both are needed: the tool default handles
+a call that omits an id, but an agent must READ a canvas before editing it and
+cannot read what it cannot name. The prompt line rides the same prefix as the
+file manifest, so it is present on a **resumed** turn too — the open canvas
+changes between turns while the session's memory of it does not.
+
+**A canvas deleted mid-conversation resolves to nothing**, re-checked at read
+time rather than trusted from the stamp: ent#553 made deleting one click, and
+a surviving id would have the agent's next write CREATE a canvas under it,
+silently resurrecting something a person deleted.
+
+**Voice inherits it, by construction not by wiring.** The ent#440 conversation
+loop submits a spoken utterance through `submitUserText` → `deliver` — the same
+function a typed message takes — so the stamp is already on it; a second voice
+path would be a second thing to keep in sync. The `canvas` tools in
+`services/gemini_voice.py` are deliberately untouched: that is VOICE-001's
+ephemeral display panel, a different surface with no persisted id, and nothing
+about it is addressable by `canvas_id`.
+
+
 ## Sharing and export (ent#554)
 
 A canvas can leave the Workspace two ways: a **share link** and a **PDF**.

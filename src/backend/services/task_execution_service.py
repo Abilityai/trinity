@@ -1009,6 +1009,8 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
+        # ent#555 — which canvas the user had open when they sent this turn.
+        open_canvas_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1089,6 +1091,7 @@ class TaskExecutionService:
                 fan_out_id=fan_out_id,
                 loop_id=loop_id,
                 subscription_id=_exec_sub_id,
+                open_canvas_id=open_canvas_id,
                 source_channel=source_channel,
                 source_channel_chat_id=source_channel_chat_id,
                 source_channel_thread=source_channel_thread,

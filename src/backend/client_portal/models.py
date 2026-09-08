@@ -257,6 +257,13 @@ class PortalChatRequest(BaseModel):
     # conversation. Ignored when `session_id` names a thread: the id is a fact,
     # this is an intent. Defaults False so no existing caller changes behaviour.
     new_thread: bool = False
+    # ent#555 — which canvas the client has open on screen, so "add a column to
+    # this" resolves without asking. Client-supplied and therefore VALIDATED
+    # server-side against the agent's own visible canvases; an unrecognised
+    # value degrades to "nothing open" rather than erroring. Optional, so every
+    # existing caller (and the headless integration surface ent#83 documents)
+    # is unaffected.
+    open_canvas_id: Optional[str] = Field(None, max_length=64)
 
 
 class PortalChatResponse(BaseModel):

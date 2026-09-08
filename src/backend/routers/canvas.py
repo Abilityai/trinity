@@ -26,6 +26,7 @@ from database import db
 from dependencies import AuthorizedAgent, assert_agent_owner, get_current_user
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
+    DEFAULT_CANVAS_ID,
     CANVAS_RATE_LIMIT,
     CANVAS_RATE_WINDOW,
     Canvas,
@@ -182,6 +183,33 @@ async def bulk_delete_canvases(
     return CanvasBulkDeleteResult(
         agent_name=name, requested=len(body.canvas_ids), deleted=deleted
     )
+
+
+@router.get("/{name}/canvas/context")
+async def canvas_context(name: AuthorizedAgent, execution_id: str | None = None):
+    """Which canvas the user has open for this turn (ent#555).
+
+    Declared ABOVE `/{name}/canvas/{canvas_id}` (Invariant #4) — "context" is a
+    valid canvas id shape, so this would otherwise be captured by it.
+
+    The agent's tools call this when no `canvas_id` was given, so a request like
+    "add a column to this" lands on the surface the person is looking at rather
+    than on `main`. `source` says WHY, so the agent can tell the user which
+    canvas it acted on when nobody named one (AC #7).
+
+    Context, never authority: the id was validated against this agent's own
+    canvases when the turn was stamped, and this route adds no reach — it is
+    `AuthorizedAgent` like every other read here, and returns only an id the
+    caller could already have listed.
+    """
+    canvas_id, source = canvas_service.effective_canvas_id(None, execution_id, name)
+    return {
+        "agent_name": name,
+        "canvas_id": canvas_id,
+        "source": source,
+        "open_canvas_id": canvas_id if source == "open" else None,
+        "default_canvas_id": DEFAULT_CANVAS_ID,
+    }
 
 
 @router.get("/{name}/canvas/shares", response_model=List[CanvasShare])

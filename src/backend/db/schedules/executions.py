@@ -91,6 +91,7 @@ class ScheduleExecutionsMixin:
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
+            open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -116,6 +117,7 @@ class ScheduleExecutionsMixin:
         source_channel_thread: str = None,
         source_channel_agent: str = None,
         source_channel_client: str = None,
+        open_canvas_id: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -167,6 +169,7 @@ class ScheduleExecutionsMixin:
                     source_channel_thread=source_channel_thread,
                     source_channel_agent=source_channel_agent,
                     source_channel_client=source_channel_client,
+                    open_canvas_id=open_canvas_id,
                 )
             )
 
@@ -192,6 +195,7 @@ class ScheduleExecutionsMixin:
                 source_channel_thread=source_channel_thread,
                 source_channel_agent=source_channel_agent,
                 source_channel_client=source_channel_client,
+                open_canvas_id=open_canvas_id,
             )
 
     def create_schedule_execution(

@@ -938,7 +938,15 @@ async def portal_chat(
     try:
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
-                                          new_thread=body.new_thread)
+                                          new_thread=body.new_thread,
+                                          # ent#555 — validated HERE, before it is
+                                          # stamped anywhere: the id is
+                                          # client-supplied, and an unrecognised
+                                          # one means "nothing open", never an error.
+                                          open_canvas_id=service.validated_open_canvas(
+                                              agent_name,
+                                              getattr(body, "open_canvas_id", None),
+                                              is_platform=principal.is_platform))
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1430,6 +1438,11 @@ async def portal_chat_stream(
             # one above is its fallback. A flag honoured by only one brings the
             # bug back exactly when streaming fails.
             new_thread=body.new_thread,
+            # ent#555 — the streaming path carries it too, for the reason
+            # stated directly above about a flag honoured by only one path.
+            open_canvas_id=service.validated_open_canvas(
+                agent_name, getattr(body, "open_canvas_id", None),
+                is_platform=principal.is_platform),
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)

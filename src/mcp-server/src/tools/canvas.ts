@@ -24,6 +24,35 @@ import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
+ * Which canvas a call acts on (ent#555).
+ *
+ * Precedence: an explicit id wins, then the canvas the user has OPEN, then the
+ * agent's default. The middle step is the point — a user saying "add a column
+ * to this" names no id, and before this the tools silently used `main`, which
+ * is usually not what is on screen.
+ *
+ * Fails back to the default on any error: a context lookup that cannot answer
+ * must not cost the agent its write. The backend decides — this never guesses
+ * at which canvas the user may see.
+ */
+async function resolveCanvasId(
+  apiClient: { getCanvasContext: (a: string, e?: string) => Promise<Record<string, unknown>> },
+  agentName: string,
+  canvasId: string | undefined,
+  executionId: string | undefined,
+): Promise<string> {
+  if (canvasId) return canvasId;
+  try {
+    const ctx = await apiClient.getCanvasContext(agentName, executionId);
+    const resolved = ctx?.canvas_id;
+    return typeof resolved === "string" && resolved ? resolved : DEFAULT_CANVAS_ID;
+  } catch {
+    return DEFAULT_CANVAS_ID;
+  }
+}
+
+
+/**
  * Keep only canvases whose agent is in the allowed set — the {self} ∪ permitted
  * narrowing an agent-scoped key gets on the READ path (the #1104 rule, mirrored
  * from reports.ts). Exported so a unit test can pin it without a backend.
@@ -136,6 +165,9 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "Render structured output onto your canvas — a durable surface the people you work with can open, " +
         "SHARE as a link with people outside Trinity, or save as a PDF — so give it a `title` worth showing " +
         "someone, not an internal id. " +
+        "If the user has a canvas OPEN, omitting canvas_id writes to that one — read it first " +
+        "(get_canvas with no id) so you extend what they can see rather than replacing it, and say " +
+        "which canvas you changed when they did not name one. " +
         "which you UPDATE over time rather than re-publish. Use it for the thing that has a current state: " +
         "a live status board, a running tally, the latest version of an analysis, the chart someone just " +
         "asked for. Use `report` instead for a thing that happened once and should accumulate as a record " +
@@ -190,7 +222,8 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
           return fail(error);
         }
         try {
-          const result = await apiClient.writeCanvas(agentName, params.canvas_id || DEFAULT_CANVAS_ID, {
+          const targetId = await resolveCanvasId(apiClient, agentName, params.canvas_id, params.execution_id);
+          const result = await apiClient.writeCanvas(agentName, targetId, {
             title: params.title,
             blocks: params.blocks,
             audience: params.audience,
@@ -220,7 +253,9 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "you name what changes. Each block you send replaces the stored block WHOLE (kind, title and " +
         "payload), so resend the title you want kept. Last write wins if two turns patch at once.",
       parameters: z.object({
-        canvas_id: z.string().optional().describe("The canvas to patch. Omit for your default canvas 'main'."),
+        canvas_id: z.string().optional().describe(
+          "The canvas to patch. Omit to patch the canvas the user has OPEN (what they mean " +
+          "by \"this\"), falling back to your default 'main'."),
         blocks: z.array(blockSchema.extend({
           id: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).describe("The id of the block to replace."),
         })).min(1).max(50).describe("The replacement blocks, each carrying the id it replaces."),
@@ -245,7 +280,8 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
           return fail(error);
         }
         try {
-          const result = await apiClient.patchCanvas(agentName, params.canvas_id || DEFAULT_CANVAS_ID, {
+          const targetId = await resolveCanvasId(apiClient, agentName, params.canvas_id, params.execution_id);
+          const result = await apiClient.patchCanvas(agentName, targetId, {
             blocks: params.blocks,
             execution_id: params.execution_id,
           });
@@ -267,10 +303,15 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "and `patch_canvas` replaces the blocks you name; there is no append tool by design: read, " +
         "change, write is the only sequence that leaves the surface in a state you chose.",
       parameters: z.object({
-        canvas_id: z.string().optional().describe("The canvas to read. Omit for your default canvas 'main'."),
+        canvas_id: z.string().optional().describe(
+          "The canvas to read. Omit to read the canvas the user currently has OPEN — " +
+          "that is what they mean by \"this\" — falling back to your default 'main'."),
+        execution_id: z.string().optional().describe(
+          "Optional. The execution_id of the turn you are reading from. Supply it and " +
+          "omitting canvas_id reads whatever canvas the user is looking at."),
       }),
       execute: async (
-        params: { canvas_id?: string },
+        params: { canvas_id?: string; execution_id?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
@@ -283,7 +324,10 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         }
         try {
           return JSON.stringify(
-            { success: true, canvas: await apiClient.getCanvas(agentName, params.canvas_id || DEFAULT_CANVAS_ID) },
+            { success: true, canvas: await apiClient.getCanvas(
+              agentName,
+              await resolveCanvasId(apiClient, agentName, params.canvas_id, params.execution_id),
+            ) },
             null, 2,
           );
         } catch (error) {

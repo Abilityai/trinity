@@ -781,6 +781,8 @@ const store = useClientPortalStore()
 const agentAsks = computed(() => store.asksForAgent(props.agent.name))
 const messages = ref([])
 const currentSessionId = ref(props.sessionId)
+// ent#555 — the canvas the rail has open for THIS agent, or null.
+const openCanvasId = computed(() => store.openCanvasByAgent?.[props.agent?.name] || null)
 
 // #2579 — "this thread was born in THIS mounted conversation, and the list may
 // not know it yet". It bridges a real gap rather than duplicating
@@ -1474,7 +1476,9 @@ async function deliver(text) {
     const baseline = await persistedAssistantCount(currentSessionId.value)
     try {
       started = await store.startPortalChat(props.agent.name, text, currentSessionId.value,
-                                            { newThread: props.newChat && !currentSessionId.value })
+                                            { newThread: props.newChat && !currentSessionId.value,
+                                              // ent#555 — what the user is looking at.
+                                              openCanvasId: openCanvasId.value })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -1489,7 +1493,10 @@ async function deliver(text) {
       // eslint-disable-next-line no-console
       console.debug('[workspace] streaming route unavailable, using sync send', dispatchErr)
       data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value,
-                                        { newThread: props.newChat && !currentSessionId.value })
+                                        { newThread: props.newChat && !currentSessionId.value,
+                                          // ent#555 — the fallback carries it too, or the
+                                          // context silently depends on streaming working.
+                                          openCanvasId: openCanvasId.value })
     }
 
     if (started) {
