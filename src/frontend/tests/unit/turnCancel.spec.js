@@ -11,6 +11,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { stripComments } from './helpers/stripComments'
 import {
   shouldCancelOnEscape, restoreDraft, cancelOutcome, isTerminalStatus, TERMINAL_STATUSES,
   isNoopCancel, NOOP_CANCEL_STATUSES, shouldEndCallOnEscape,
@@ -24,6 +25,15 @@ const chatInput = read('../../src/components/chat/ChatInput.vue')
 const portalStore = read('../../src/stores/clientPortal.js')
 
 const esc = (over = {}) => ({ key: 'Escape', isComposing: false, defaultPrevented: false, ...over })
+
+// #2598: this file reads sources RAW — every guard above predates the helper
+// and none of them would change meaning. The #2598 guards do: they assert both
+// that the new call is present and that the old condition is GONE, over a
+// region whose comments now quote the old condition verbatim to explain the
+// fix. Raw, the negative would be one explanatory sentence away from failing
+// spuriously, and the positive would pass on a comment alone if the call were
+// deleted — a vacuous guard. Stripped, both ask about code.
+const workspaceCode = stripComments(workspace)
 
 describe('Escape cancels a turn — and never hijacks anything else', () => {
   it('cancels while a turn is in flight', () => {
@@ -105,17 +115,19 @@ describe('#2598 — a voice call owns Escape, but not against an overlay that al
     // What only source can answer (this file's own convention): that the voice
     // branch goes THROUGH the module. Without this the predicate can exist,
     // pass its own tests, and be bypassed by the branch it was written for.
-    expect(workspace).toMatch(
+    expect(workspaceCode).toMatch(
       /import \{[^}]*shouldEndCallOnEscape[^}]*\} from ['"][^'"]*utils\/turnCancel['"]/
     )
-    expect(workspace).toContain('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    expect(workspaceCode).toContain('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
     // and that the old hand-rolled condition is gone, not merely shadowed
-    expect(workspace).not.toMatch(/if \(voiceCallActive\.value && event\.key === 'Escape'\)/)
+    expect(workspaceCode).not.toMatch(/voiceCallActive\.value && event\.key === 'Escape'/)
   })
 
   it('the stale comment that described the old ordering is gone', () => {
     // The issue asks for this explicitly: the comment states an ordering that
     // the fix changes, and a comment left behind is what the next reader trusts.
+    // The comment is the thing under test here, so this one reads the RAW
+    // source on purpose — stripping comments would make it vacuous.
     expect(workspace).not.toContain('takes Escape for itself in the first branch below')
   })
 })
