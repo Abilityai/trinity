@@ -41,7 +41,7 @@ export const FIELD_GHOST_CLASS =
   // icon buttons (#2259) — a 30px select beside 44px buttons is a 30px tap
   // target on a phone. The native select centres its text in a fixed height.
   'h-11 w-auto max-w-full rounded-lg border border-transparent bg-transparent ' +
-  'pl-2 py-1 text-[13px] text-gray-600 dark:text-gray-300 ' +
+  'pl-2 py-1 text-[13.5px] text-gray-600 dark:text-gray-300 ' +
   // Hover tints the GROUND only, matching the Workspace agent picker exactly.
   // Deliberately no hover ink change: the sibling "New chat" button spends two
   // more raw-gray classes on one, and the raw-colour ratchet (#2605) is a
