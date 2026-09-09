@@ -766,22 +766,29 @@ def get_chat_state(client_email: str) -> list[dict]:
 
     Unbounded read, bounded set: the write path caps how many rows a user can
     create (``MAX_CHAT_STATE_ROWS``), so there is nothing here to paginate."""
+    # ent#557: the account baseline lives in this table under a reserved kind
+    # and is not a chat. Excluded here so it never reaches the sidebar payload
+    # as a phantom row, and below so it cannot consume a user's row budget.
     stmt = text(
         "SELECT chat_kind, chat_id, starred_at, last_read_at "
-        "FROM enterprise_portal_chat_state WHERE client_email = :email"
+        "FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind != :bkind"
     )
     with get_engine().connect() as conn:
         return [dict(r) for r in conn.execute(
-            stmt, {"email": (client_email or "").lower()}
+            stmt, {"email": (client_email or "").lower(), "bkind": BASELINE_KIND}
         ).mappings()]
 
 
 def count_chat_state_rows(client_email: str) -> int:
     stmt = text(
-        "SELECT COUNT(*) FROM enterprise_portal_chat_state WHERE client_email = :email"
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind != :bkind"
     )
     with get_engine().connect() as conn:
-        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
+        return int(conn.execute(stmt, {
+            "email": (client_email or "").lower(), "bkind": BASELINE_KIND,
+        }).scalar() or 0)
 
 
 def chat_state_row_exists(client_email: str, chat_kind: str, chat_id: str) -> bool:
@@ -877,8 +884,53 @@ def count_starred_rows(client_email: str) -> int:
         return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
 
 
+# ent#557 — the viewer's account baseline: the instant from which a chat they
+# have NEVER OPENED starts counting as unread.
+#
+# It is a row in this same table under a reserved kind, and it is written ONCE,
+# the first time the viewer reads anything. Every read path filters it out, so
+# it is invisible to the sidebar and to both caps.
+#
+# A derived baseline was tried first and is wrong in a way worth recording,
+# because both obvious derivations fail the same test:
+#
+#   * MAX(last_read_at) — "since you were last here" — moves forward every time
+#     the viewer reads anything, so a reply sitting unread in a chat they have
+#     not opened is silently cleared by reading a DIFFERENT chat.
+#   * MIN(last_read_at) — "since the first time you read anything" — looks
+#     stable and is not: `mark_chat_read` UPDATES the row it advances, so a
+#     viewer with one chat has MIN == MAX and inherits exactly the same bug.
+#
+# Only a value nothing updates is stable, so the baseline is stored rather than
+# derived. `tests/unit/test_ent557_unread_never_opened_chat.py::
+# test_reading_one_chat_does_not_silently_clear_another` is the case that
+# rejects both derivations; it failed against MIN before this row existed.
+BASELINE_KIND = "account"
+BASELINE_ID = "baseline"
+
+
+def _ensure_unread_baseline(client_email: str, now: str) -> None:
+    """Write the baseline row if the viewer does not have one yet.
+
+    Idempotent by construction — `_upsert_chat_state` would happily move it, so
+    the existence check is what makes this write-once. A viewer who already has
+    a baseline keeps the one they have, forever; that is the whole property.
+    """
+    if _has_read_cursor(client_email, BASELINE_KIND, BASELINE_ID):
+        return
+    _upsert_chat_state(client_email, BASELINE_KIND, BASELINE_ID, now,
+                       last_read_at=now)
+
+
 def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
-    """Advance one chat's read cursor for one user."""
+    """Advance one chat's read cursor for one user.
+
+    Also establishes the account baseline on the viewer's FIRST ever read
+    (ent#557). Here rather than at sign-in because this is the first moment we
+    know the viewer has actually looked at something: a baseline written at
+    sign-in would start counting from a session someone opened and abandoned.
+    """
+    _ensure_unread_baseline(client_email, now)
     _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
 
 
@@ -944,30 +996,76 @@ def dismissed_file_ids(client_email: str) -> set[str]:
 
 
 def count_unread_by_session(client_email: str) -> dict[str, int]:
-    """Per-thread count of agent messages newer than that thread's read cursor.
+    """Per-thread count of agent messages the viewer has not seen.
 
-    A thread with NO cursor reports nothing rather than reporting its whole
-    history as unread. "Unread" is defined relative to a cursor; inventing one at
-    the beginning of time would light up every historical chat the first time
-    this shipped, which is noise, not information. A cursor is written the first
-    time the user opens or sends in a thread, so any live conversation acquires
-    one immediately. (Rooms keep their own seq cursor and are not counted here —
-    see the feature flow's Known Limitations.)
+    Two cases, and the second one is ent#557:
+
+    * **The thread has a read cursor** — count agent messages newer than it.
+      Unchanged since ent#359.
+
+    * **The thread has NO cursor** — count agent messages newer than the
+      viewer's ACCOUNT BASELINE, which is the earliest read cursor they hold
+      anywhere. Before ent#557 these threads reported nothing at all.
+
+    Why the null-cursor case existed, and why it had to change. "Unread" is
+    defined relative to a cursor, and inventing one at the beginning of time
+    would have lit up every historical chat the first time ent#359 shipped —
+    noise, not information. A cursor is written the first time the viewer opens
+    or sends in a thread, so any conversation THEY start acquires one
+    immediately. What was not foreseen is that ent#523 made Main the landing
+    place for everything an AGENT starts — agent-initiated messages, asks raised
+    outside a chat, scheduled briefs all resolve to it — and a freshly minted
+    Main has never been read by anyone. So the one case the feature exists for
+    produced no badge anywhere.
+
+    The baseline is a STORED, write-once row (`BASELINE_KIND` /
+    `BASELINE_ID`), not a value derived from the cursors that happen to exist.
+    Both obvious derivations were tried and both are wrong for the same reason —
+    they move:
+
+    * **MAX** — "since you were last here" — advances every time the viewer
+      reads anything, so a reply sitting unread in a chat they have not opened
+      is silently cleared by reading a DIFFERENT chat.
+    * **MIN** — "since the first time you read anything" — looks stable and is
+      not: `mark_chat_read` UPDATES the row it advances, so a viewer with one
+      chat has MIN == MAX and inherits the identical bug.
+
+    A viewer with no baseline row (a first-ever sign-in) has no baseline, the
+    subquery is NULL, the comparison is NULL, and nothing counts — byte-for-byte
+    the property the original rule was written for, preserved rather than traded
+    away, and it falls out of SQL's NULL semantics rather than a second branch.
+
+    Read as: *anything an agent has said to you since the first time you read
+    anything here, in a chat you have never opened.* A chat created before that
+    instant and never opened still reports nothing, which is the conservative
+    direction.
+
+    (Rooms keep their own seq cursor and are not counted here — see the feature
+    flow's Known Limitations.)
     """
     stmt = text(
         "SELECT m.session_id AS session_id, COUNT(*) AS n "
         "FROM enterprise_portal_messages m "
-        "JOIN enterprise_portal_chat_state st "
+        "LEFT JOIN enterprise_portal_chat_state st "
         "  ON st.client_email = :email AND st.chat_kind = 'thread' "
         " AND st.chat_id = m.session_id "
         "WHERE m.client_email = :email "
         "  AND m.role = 'assistant' "
-        "  AND st.last_read_at IS NOT NULL "
-        "  AND m.created_at > st.last_read_at "
+        "  AND ("
+        "        (st.last_read_at IS NOT NULL AND m.created_at > st.last_read_at)"
+        "     OR (st.last_read_at IS NULL AND m.created_at > ("
+        "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
+        "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
+        "             AND b.chat_id = :bid"
+        "         ))"
+        "      ) "
         "GROUP BY m.session_id"
     )
     with get_engine().connect() as conn:
-        rows = conn.execute(stmt, {"email": (client_email or "").lower()}).mappings()
+        rows = conn.execute(stmt, {
+            "email": (client_email or "").lower(),
+            "bkind": BASELINE_KIND, "bid": BASELINE_ID,
+        }).mappings()
         return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
 
 

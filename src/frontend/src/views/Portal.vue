@@ -564,7 +564,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
@@ -605,7 +605,13 @@ import {
   landingThread,
   agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
   TITLE_SETTLE_DELAYS_MS,
+  // ent#557: the SAME sum the sidebar renders, so the tab and the rows cannot
+  // disagree about the number.
+  totalUnread,
 } from '@/components/portal/portalUtils'
+// ent#557: the tab title's unread half. The router owns the label; this pushes
+// the count. See `utils/tabTitle.js` for why neither writes `document.title`.
+import { setUnreadCount, clearUnreadCount } from '@/utils/tabTitle'
 import {
   VOICE_QUERY_KEY, voiceAutoStart, voiceAutoStartArmed, disarmVoiceAutoStart,
 } from '@/components/portal/portalVoiceMode'
@@ -1680,6 +1686,21 @@ function resolveAgentQuery() {
   return true
 }
 
+// ent#557 — the tab says how many replies are waiting.
+//
+// Computed from the SAME `threads` the sidebar renders, through the same pure
+// helper, so the tab and the rows cannot disagree about the number. "Honest
+// counts" (AC 6) is a property of that sharing, not of a second sum: every unit
+// in this total is a thread in the list the user can click.
+const unreadTotal = computed(() => totalUnread(threads.value))
+watch(unreadTotal, (n) => setUnreadCount(n), { immediate: true })
+
+// Leaving the Workspace clears it: the count would otherwise outlive the only
+// surface that can explain it, leaving a tab reading `(3)` on a page with
+// nothing to click. `onUnmounted` rather than a route guard — the marker
+// belongs to this component's lifetime, not to a URL.
+onUnmounted(() => clearUnreadCount())
+
 // ent#364 — one poll feeds all three ask renderings.
 //
 // The Workspace has no WebSocket (`operator_queue_new` is broadcast on the platform
@@ -1697,7 +1718,22 @@ function startAsksPoll() {
     // Visibility-aware: a backgrounded tab polls nothing. The next foreground
     // tick catches up, and an ask that arrived meanwhile is not lost — it is a
     // row, not an event.
-    if (document.visibilityState === 'visible') store.fetchAsks()
+    if (document.visibilityState !== 'visible') return
+    store.fetchAsks()
+    // ent#557: the SAME tick refreshes threads and their read state, which is
+    // what makes an unread reply appear while the user is elsewhere in the
+    // Workspace. `refreshThreads` was event-driven only — a send, a navigation,
+    // a turn finishing — so a message an AGENT started (the ent#523 Main case
+    // this feature is about) reached the sidebar on the user's next action and
+    // not before.
+    //
+    // Folded into the existing timer rather than given its own: the Workspace
+    // has no WebSocket (`operator_queue_new` is broadcast on the platform `/ws`,
+    // which a portal client is not on), and a second timer would be a second
+    // cadence to reason about for one badge. Since #2198 the thread half is ONE
+    // request for every agent, not one per agent, which is what makes it cheap
+    // enough to ride here.
+    refreshThreads()
   }, ASKS_POLL_MS)
 }
 
