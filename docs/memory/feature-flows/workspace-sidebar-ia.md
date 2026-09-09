@@ -169,7 +169,27 @@ Three decisions worth keeping:
   start and stop; the design system's layout-stability rule forbids that, and the
   top-5 fold is #2159's design.
 * **Reserve the chip's footprint**, so a row does not reflow when an agent's
-  state changes between refreshes.
+  state changes between refreshes — but **for the list, not for every row**
+  (#2641). `availabilityChip()` answers null for everything except `stopped` and
+  `unavailable`, so on a fleet where everything is running — the normal case —
+  the 72px strip rendered empty on *every* row. That produced two visible
+  defects from one fact: the dates stopped 72px short of the row's right edge,
+  and 72px per row came out of the only element that wanted it, so names
+  truncated (`Chief ...`) beside a blank strip. `reservesAvailabilitySlot(rows)`
+  now decides it once per render, over the rows actually **rendered** — a
+  stopped agent hidden by search or the collapse limit must not reserve width on
+  a list that shows no chip. The whole `<span>` goes when nothing reserves it,
+  not just its width: a zero-width flex child still sits between the date and
+  the edge, and the row's `gap-2.5` would keep paying 10px for it.
+
+  Two properties survive the change and one cost is accepted. Uniform down the
+  list, so #2580's identical truncation point holds (a per-row reservation would
+  give a stopped row a different name width from its neighbours). Nothing moves
+  within a populated list — a second agent stopping, or one restarting while
+  another is still stopped, changes only that row's chip. The cost is the 0→1
+  transition: the first agent in view stopping reflows the list once, where
+  before it reflowed nothing. That is the honest price of not charging every row
+  for the empty case.
 
 `agentRowTitle()` carries the same reason in the row's `title`, so the state is
 reachable without relying on colour.
@@ -321,6 +341,7 @@ can actually see.
 | Test | Pins |
 |---|---|
 | `tests/unit/test_ent359_portal_chat_state.py` | cross-viewer isolation; kind/id key separation; email-case normalisation; no-cursor ⇒ nothing unread; only agent messages after the cursor count; re-reading clears; star and read don't overwrite each other; unstar keeps the cursor; validation; unknown ids don't 404; the cap bounds new rows but never freezes owned ones; mark-read at the cap is a no-op |
+| `src/frontend/tests/unit/portalSidebarDateFlushRight.spec.js` | #2641: the list-level reservation as a pure table (all-running reserves nothing; one stopped agent reserves for all; derived from `availabilityChip` rather than re-listing the states), that the template removes the ELEMENT rather than its width and computes over the rendered rows, and that #2580's date column is still fixed, right-aligned, `tabular-nums` and unconditional |
 | `src/frontend/tests/unit/portalSidebarIA.spec.js` | starred lifted out of every date group and appearing once; per-agent sums; a room crediting every participant; wordmark total; row-avatar cap and overflow |
 | `src/frontend/tests/unit/portalUndefinedCalls.spec.js` | (existing guard) the two new SFCs call nothing undefined |
 
