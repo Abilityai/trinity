@@ -1737,10 +1737,17 @@ class TaskExecutionService:
             pre_switch = await ensure_serviceable_subscription(agent_name)
             if pre_switch:
                 state.subscription_switch = pre_switch
+                # The DESTINATION is deliberately not interpolated here.
+                # `_perform_auto_switch` already logs "Auto-switching agent 'X'
+                # from 'A' to 'B'" one frame down, so repeating it buys nothing —
+                # and reading a name off the switch dict makes this a sink for a
+                # value CodeQL taints from `subscription_credentials` (the row
+                # carries an encrypted token, so the whole record reads as a
+                # credential). Not worth a standing false positive on the hot
+                # path for a line that duplicates the one above it.
                 logger.warning(
                     f"[TaskExecService] #2638 pre-dispatch switch for "
-                    f"'{agent_name}' -> '{pre_switch.get('new_subscription')}' "
-                    f"before the first attempt"
+                    f"'{agent_name}' before the first attempt"
                 )
         except Exception as pre_err:  # noqa: BLE001 — never fail a turn from here
             logger.error(
