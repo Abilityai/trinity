@@ -29,13 +29,65 @@ const SRC = readFileSync(
   fileURLToPath(new URL('../../src/components/base/BaseSelect.vue', import.meta.url)),
   'utf8'
 )
-// HTML comments, block comments and line comments — the prose must not be able
-// to satisfy any assertion below.
-const CODE = SRC.replace(/<!--[\s\S]*?-->/g, '')
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/^\s*\/\/.*$/gm, '')
+/**
+ * Strip HTML comments, block comments and own-line `//` comments so the prose
+ * cannot satisfy any assertion below.
+ *
+ * A single linear scan rather than a chain of `String.replace` regexes. The
+ * regex version was flagged by CodeQL as `js/incomplete-multi-character-
+ * sanitization` (high) and the rule was right about the shape: a non-greedy
+ * `<!--[\s\S]*?-->` leaves residue on malformed or overlapping delimiters, so
+ * it is exactly the "sanitiser that does not reach a fixed point" pattern. A
+ * scan has no such failure mode — every byte is either inside a comment run or
+ * copied out, once.
+ *
+ * `//` is honoured only at the start of a line so a `https://` inside a class
+ * string or attribute can never truncate the code being asserted on.
+ */
+function stripComments(src) {
+  let out = ''
+  let i = 0
+  let lineHasContent = false
+  while (i < src.length) {
+    if (src.startsWith('<!--', i)) {
+      const end = src.indexOf('-->', i + 4)
+      i = end === -1 ? src.length : end + 3
+      continue
+    }
+    if (src.startsWith('/*', i)) {
+      const end = src.indexOf('*/', i + 2)
+      i = end === -1 ? src.length : end + 2
+      continue
+    }
+    if (!lineHasContent && src.startsWith('//', i)) {
+      const end = src.indexOf('\n', i)
+      i = end === -1 ? src.length : end
+      continue
+    }
+    const ch = src[i]
+    if (ch === '\n') lineHasContent = false
+    else if (ch !== ' ' && ch !== '\t') lineHasContent = true
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+const CODE = stripComments(SRC)
 
 describe('#2662 BaseSelect open-state chevron', () => {
+  it('strips the prose it claims to strip', () => {
+    // Without this, a stripper that returned its input unchanged would pass
+    // every assertion below — the whole point is that the block comment names
+    // `:open`, `ghost` and `field` in the exact shapes being asserted on.
+    const proseOnly = 'Deliberately NOT on `field`'
+    expect(SRC).toContain(proseOnly)
+    expect(CODE).not.toContain(proseOnly)
+    // ...while the code itself survives the scan intact.
+    expect(CODE).toContain('FIELD_GHOST_CLASS')
+    expect(CODE).toContain('const recipe = computed')
+  })
+
   it('flips the chevron while the native picker is open', () => {
     expect(CODE).toContain('[&:open~svg]:rotate-180')
     // Resolved through the recipe, never hard-coded on the shared <select>.
