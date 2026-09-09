@@ -7,8 +7,11 @@
          the agents block now occupies the top of the scroll region and would
          otherwise scroll a fleet-wide signal out of view. -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
-      <svg class="w-6 h-6 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-      <span class="font-semibold">Workspace</span>
+      <!-- ent#556: Trinity's mark and the product's name, replacing a
+           hand-drawn outline icon and the bare word "Workspace". Linked to the
+           Workspace root — true for both principals, and the only destination a
+           client session can actually open. -->
+      <PortalBrand :to="WORKSPACE_ROOT" />
       <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
            on you to decide, the other on you to read — so it gets its own badge
            rather than being summed into that one. Before the unread count,
@@ -316,6 +319,8 @@
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
+import PortalBrand from './PortalBrand.vue'
+import { WORKSPACE_ROOT } from './portalBrand'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
