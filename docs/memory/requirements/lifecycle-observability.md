@@ -549,10 +549,16 @@ transport); only the **reciprocity benchmark view** is entitlement-gated
   emails, no agent names.** The exact payload is **inspectable before send** via
   `GET /api/settings/telemetry-sharing` → `payload_preview` (the Settings panel).
 - **FR-3 — Periodic heartbeat + reversibility**: `TelemetrySharingService` is a
-  sleeps-first background loop (default 24h, jittered) that shares when consent is
-  on; opt-out stops egress at the next heartbeat. Fail-open (a blocked/failed/
-  air-gapped POST never affects the platform). Reuses the operator-intake httpx
-  fire-and-forget transport.
+  sleeps-first background loop that shares on the configured cadence (default
+  24h) when consent is on; opt-out stops egress at the next wake. Since #2618 the
+  loop wakes every 10 minutes (+ ≤10 min jitter) and decides from the persisted
+  `last_shared_at` whether a send is due — empty, unparseable, in the future, or
+  older than the interval — so a backend restart never resets the cadence (an
+  install that restarted daily used to share its consent-time backfill and never
+  again). Fail-open (a blocked/failed/air-gapped POST never affects the platform;
+  after five consecutive failures attempts fall to one per half-interval, measured
+  from the persisted send log). Reuses the operator-intake httpx fire-and-forget
+  transport.
 - **FR-4 — Retroactive backfill at consent**: on the off→on transition the router
   schedules an immediate fire-and-forget backfill share over a disclosed window
   (`backfill_days`, default 30) sourced from Tier-1 `product_events`, so late
@@ -652,14 +658,18 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   receiver has been live since 2026-09-04, ent#190, so that is an anomaly to look
   at); from an overridden `TELEMETRY_SHARING_URL` as that receiver answering 404.
 - **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
-  is retried by the 24h heartbeat until the first 2xx
+  is retried at every due wake until the first 2xx
   (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
-  `last_shared_at`; a Redis tick marker (`telemetry_share:tick`, TTL half the
-  interval, never released, fail-open) makes one worker send per interval.
+  `last_shared_at` in whole days; a Redis tick marker (`telemetry_share:tick`,
+  TTL half the interval, a fresh lock per claim, released only when the receiver
+  did not acknowledge, fail-open) makes one worker send per interval, and an
+  acknowledged send counts as delivered even if the local stamp write fails
+  (#2618).
 - **FR-7 — Reset paths**: every consent-family key sits under the
   `telemetry_sharing_` prefix the generic `PUT /api/settings/{key}` already
   refuses; the generic `DELETE` stays open for it by design — deleting a key
-  only moves toward off / ask again / re-mint. The builder runs off the event
+  only moves toward off / ask again / re-mint, or, for `last_shared_at`, one
+  re-share at the next wake (#2618; consent still gates). The builder runs off the event
   loop (`asyncio.to_thread`) and every reader is fenced so a stubbed or failing
   source degrades a field, never the payload.
 
