@@ -170,8 +170,15 @@ def test_an_oss_only_deploy_fails_the_run(workflow):
 
 
 def test_the_escape_hatch_is_opt_in_and_not_the_default(workflow):
-    """A VM with no enterprise access can demote it — but must say so explicitly."""
-    assert 'vars.DEPLOY_ALLOW_OSS_ONLY }}" = "true"' in workflow
+    """A VM with no enterprise access can demote it — but must say so explicitly.
+
+    The repo variable is resolved in the step ``env:`` and forwarded through
+    ssh-action ``envs:`` (trinity#2626 — the script itself carries no workflow
+    expression), so the opt-in is two lines: the mapping, and the ``= "true"``
+    comparison on the VM side. An unset variable renders empty and takes the
+    loud branch."""
+    assert "ALLOW_OSS_ONLY: ${{ vars.DEPLOY_ALLOW_OSS_ONLY }}" in workflow
+    assert '"${ALLOW_OSS_ONLY:-}" = "true"' in workflow
     # Being a repo variable rather than an edit keeps the default loud.
     assert workflow.count("DEPLOY_ALLOW_OSS_ONLY") >= 2
 
