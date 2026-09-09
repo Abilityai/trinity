@@ -624,7 +624,7 @@
                     v-if="modelControl.render"
                     v-model="selectedModel"
                     variant="ghost"
-                    class="min-w-0 max-w-[16rem]"
+                    class="min-w-0 max-w-[17rem]"
                     :disabled="voiceCallActive || !modelControl.enabled"
                     :title="modelControl.reason || 'Which model this chat runs on'"
                     aria-label="Model for this chat"

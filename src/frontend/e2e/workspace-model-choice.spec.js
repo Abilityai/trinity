@@ -108,7 +108,7 @@ for (const width of [375, 768, 1280]) {
     const invisible = (c) => c === 'rgba(0, 0, 0, 0)' || c === 'transparent'
     expect(invisible(chrome.border)).toBe(true)
     expect(invisible(chrome.background)).toBe(true)
-    expect(picker.width).toBeLessThanOrEqual(256)          // the ghost `max-w-[16rem]` ceiling
+    expect(picker.width).toBeLessThanOrEqual(272)          // the ghost `max-w-[17rem]` ceiling — fits the longest label at 13.5px
     expect(send.width).toBe(44)
 
     // 2. The field spans the shell. Stacked, it competes with nothing for width,
