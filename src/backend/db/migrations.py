@@ -4025,7 +4025,7 @@ def _migrate_agent_canvases_pinned(cursor, conn):
     NOT NULL DEFAULT 0 so every pre-#553 row reads as unpinned without a
     backfill pass.
 
-    Mirrored by the Alembic revision 0058_agent_canvases_pinned.
+    Mirrored by the Alembic revision 0059_agent_canvases_pinned.
     """
     _safe_add_column(
         cursor,

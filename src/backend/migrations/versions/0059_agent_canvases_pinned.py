@@ -9,14 +9,14 @@ NOT NULL DEFAULT 0, so every pre-#553 row reads as unpinned with no backfill.
 
 Mirrors the SQLite ``agent_canvases_pinned`` migration.
 
-Revision ID: 0058_agent_canvases_pinned
-Revises: 0057_portal_messages_voice_source
+Revision ID: 0059_agent_canvases_pinned
+Revises: 0058_portal_file_dismissals
 """
 from alembic import op
 
 
-revision = "0058_agent_canvases_pinned"
-down_revision = "0057_portal_messages_voice_source"
+revision = "0059_agent_canvases_pinned"
+down_revision = "0058_portal_file_dismissals"
 branch_labels = None
 depends_on = None
 

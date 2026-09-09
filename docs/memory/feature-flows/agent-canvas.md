@@ -134,7 +134,7 @@ permitted-but-unreliable and this one is not optional. It reports the ids that
 Declared above the parameterized routes on both routers (Invariant #4).
 
 **Pinning** is `pinned` on `agent_canvases` (dual-track: `agent_canvases_pinned`
-+ Alembic `0058_agent_canvases_pinned`, NOT NULL DEFAULT 0, no backfill). It is
++ Alembic `0059_agent_canvases_pinned`, NOT NULL DEFAULT 0, no backfill). It is
 written *only* by the human-facing pin route and is deliberately absent from
 every agent-facing tool: `audience` is the agent's decision about who may read
 a canvas, `pinned` is the reader's decision about what they want to see first,

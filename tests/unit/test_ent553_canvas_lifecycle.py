@@ -384,7 +384,7 @@ def test_the_pinned_column_ships_on_both_migration_tracks():
     assert "agent_canvases_pinned" in sqlite_src
     assert "ADD COLUMN pinned" in sqlite_src
 
-    alembic = backend / "migrations" / "versions" / "0058_agent_canvases_pinned.py"
+    alembic = backend / "migrations" / "versions" / "0059_agent_canvases_pinned.py"
     assert alembic.exists(), "no Alembic revision for the pinned column"
     assert "IF NOT EXISTS pinned" in alembic.read_text()
 
