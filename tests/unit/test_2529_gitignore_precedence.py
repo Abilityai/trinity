@@ -58,6 +58,20 @@ def _gs():
     return gs
 
 
+def _sweep():
+    """#1028: the sweep half of #2529 lives in `gitignore_sweep`, its own module.
+
+    Same rule as `_gs()` — name the module that OWNS the symbol, so a
+    monkeypatch has exactly one target.
+    """
+    try:
+        import services.git_service.gitignore_sweep as sw
+    except Exception:  # pragma: no cover - backend venv required
+        pytest.skip("backend venv required")
+    return sw
+
+
+
 def _git(cwd: Path, *args: str) -> str:
     env = dict(_ENV, HOME=str(cwd))
     out = subprocess.run(
@@ -105,12 +119,13 @@ def _push_sweep(home: Path):
     commands the backend runs — not by a second, test-only code path.
     """
     gs = _gs()
+    sw = _sweep()
     outs = []
     for build in (gs._build_gitignore_merge_command, gs._build_rm_cached_ignored_command):
         out = _run(build(str(home)), home)
         assert out.returncode == 0, f"command failed: {out.stderr[:400]}"
         outs.append(out.stdout)
-    return gs._parse_gitignore_sweep(*outs)
+    return sw._parse_gitignore_sweep(*outs)
 
 
 def _gitignore_lines(home: Path) -> list[str]:
@@ -528,7 +543,7 @@ def test_check_ignore_verdict_comes_from_the_pattern_not_the_exit_code(tmp_path)
     )
     assert ":!.env.example\t" in verbose.stdout
     # And the parser gets it right.
-    assert _gs()._shadowed_negations([verbose.stdout.strip()]) == ()
+    assert _sweep()._shadowed_negations([verbose.stdout.strip()]) == ()
 
 
 @pytest.mark.parametrize(
@@ -620,6 +635,7 @@ def test_marker_parse_survives_interleaved_stderr():
     arrive as ONE blob. A begin/end region parser would swallow a stray
     `grep: ...` line as a payload path; a per-line tag cannot."""
     gs = _gs()
+    sw = _sweep()
     merge = (
         "TRINITY-2529-untracked-before: draft.md\n"
         "grep: .gitignore: Permission denied\n"
@@ -633,7 +649,7 @@ def test_marker_parse_survives_interleaved_stderr():
         "TRINITY-2529-shadow: .gitignore:13:content/\tcontent/keep.md\n"
         "warning: yet more noise\n"
     )
-    sweep = gs._parse_gitignore_sweep(merge, sweep_out)
+    sweep = sw._parse_gitignore_sweep(merge, sweep_out)
     assert sweep.removed == ("errors.log",)
     assert sweep.unignored == ("new-thing.txt",)
     assert sweep.shadowed == ("!content/keep.md -> content/",)
@@ -647,22 +663,24 @@ def test_coerce_sweep_accepts_a_magicmock():
     from unittest.mock import MagicMock
 
     gs = _gs()
-    assert gs._coerce_sweep(MagicMock()) == gs.GitignoreSweep()
-    assert gs._coerce_sweep(None) == gs.GitignoreSweep()
-    real = gs.GitignoreSweep(removed=("a",))
-    assert gs._coerce_sweep(real) is real
+    sw = _sweep()
+    assert sw._coerce_sweep(MagicMock()) == sw.GitignoreSweep()
+    assert sw._coerce_sweep(None) == sw.GitignoreSweep()
+    real = sw.GitignoreSweep(removed=("a",))
+    assert sw._coerce_sweep(real) is real
 
 
 def test_summary_line_and_commit_message():
     """AC-4's commit-message half. Best-effort by construction — `git rm
     --cached` only STAGES — so the shape is asserted, not the delivery."""
     gs = _gs()
-    empty = gs.GitignoreSweep()
+    sw = _sweep()
+    empty = sw.GitignoreSweep()
     assert empty.summary_line() == ""
-    assert gs._augment_commit_message("my message", empty) == "my message"
+    assert sw._augment_commit_message("my message", empty) == "my message"
 
-    sweep = gs.GitignoreSweep(removed=tuple(f"f{i}" for i in range(25)))
-    augmented = gs._augment_commit_message("my message", sweep)
+    sweep = sw.GitignoreSweep(removed=tuple(f"f{i}" for i in range(25)))
+    augmented = sw._augment_commit_message("my message", sweep)
     assert augmented.startswith("my message\n\n")
     assert "untracked 25 file(s)" in augmented
     assert "- f0" in augmented and "- f19" in augmented
@@ -671,7 +689,7 @@ def test_summary_line_and_commit_message():
 
     # No caller message: the agent server's own `Trinity sync: <ts>` default is
     # reproduced, because supplying a message at all suppresses it.
-    assert gs._augment_commit_message(None, sweep).startswith("Trinity sync: ")
+    assert sw._augment_commit_message(None, sweep).startswith("Trinity sync: ")
 
 
 def test_with_sweep_makes_the_failure_path_honest():
@@ -679,10 +697,11 @@ def test_with_sweep_makes_the_failure_path_honest():
     and keeps NOTHING else, so a structured field alone is dead on exactly the
     paths where the index mutation already happened."""
     gs = _gs()
+    sw = _sweep()
     from database import GitSyncResult
 
-    sweep = gs.GitignoreSweep(removed=("a", "b"), unignored=("c",), shadowed=("d",))
-    out = gs._with_sweep(GitSyncResult(success=False, message="Sync conflict"), sweep)
+    sweep = sw.GitignoreSweep(removed=("a", "b"), unignored=("c",), shadowed=("d",))
+    out = sw._with_sweep(GitSyncResult(success=False, message="Sync conflict"), sweep)
     assert out.removed_paths == ["a", "b"]
     assert out.unignored_paths == ["c"]
     assert out.shadowed_negations == ["d"]
@@ -690,7 +709,7 @@ def test_with_sweep_makes_the_failure_path_honest():
     assert out.message.startswith("Sync conflict")
 
     # An empty sweep leaves the message exactly as it was.
-    clean = gs._with_sweep(GitSyncResult(success=True, message="Synced"), gs.GitignoreSweep())
+    clean = sw._with_sweep(GitSyncResult(success=True, message="Synced"), sw.GitignoreSweep())
     assert clean.message == "Synced"
     assert clean.removed_paths == []
 
@@ -749,14 +768,15 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
     from unittest.mock import AsyncMock, patch
 
     gs = _gs()
-    sweep = gs.GitignoreSweep(
+    sw = _sweep()
+    sweep = sw.GitignoreSweep(
         removed=tuple(f"f{i}" for i in range(25)),
         shadowed=("!content/keep.md -> content/",),
     )
     with patch(
         "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
     ) as create:
-        await gs._emit_gitignore_untracked_alert("alpha", sweep)
+        await sw._emit_gitignore_untracked_alert("alpha", sweep)
     assert create.await_count == 1
     agent_name, item = create.await_args.args
     assert agent_name == "alpha"
@@ -771,7 +791,7 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
     with patch(
         "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
     ) as create:
-        await gs._emit_gitignore_untracked_alert("alpha", gs.GitignoreSweep())
+        await sw._emit_gitignore_untracked_alert("alpha", sw.GitignoreSweep())
     assert create.await_count == 0
 
     # And an alerting failure never reaches the Push.
@@ -779,7 +799,7 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
         "services.operator_queue_service.create_bounded_alert",
         new=AsyncMock(side_effect=RuntimeError("db down")),
     ):
-        await gs._emit_gitignore_untracked_alert("alpha", sweep)
+        await sw._emit_gitignore_untracked_alert("alpha", sweep)
 
 
 @pytest.mark.asyncio
@@ -796,9 +816,10 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
     from unittest.mock import AsyncMock, patch
 
     gs = _gs()
+    sw = _sweep()
     from database import GitSyncResult
 
-    sweep = gs.GitignoreSweep(unignored=(".ssh/id_rsa", ".ssh/authorized_keys"))
+    sweep = sw.GitignoreSweep(unignored=(".ssh/id_rsa", ".ssh/authorized_keys"))
     assert sweep.changed_tracking is True
     assert not sweep.removed  # the point: nothing was untracked
 
@@ -807,11 +828,11 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
     assert "untracked" not in sweep.summary_line()
 
     # 2. the commit message that CARRIES the addition
-    msg = gs._augment_commit_message("my message", sweep)
+    msg = sw._augment_commit_message("my message", sweep)
     assert "+ .ssh/id_rsa" in msg and "newly un-ignored 2 path(s)" in msg
 
     # 3. the structured response fields
-    out = gs._with_sweep(GitSyncResult(success=True, message="Synced"), sweep)
+    out = sw._with_sweep(GitSyncResult(success=True, message="Synced"), sweep)
     assert out.unignored_paths == [".ssh/id_rsa", ".ssh/authorized_keys"]
     assert "newly un-ignored" in out.message
 
@@ -819,7 +840,7 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
     with patch(
         "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
     ) as create:
-        await gs._emit_gitignore_untracked_alert("alpha", sweep)
+        await sw._emit_gitignore_untracked_alert("alpha", sweep)
     assert create.await_count == 1
     _, item = create.await_args.args
     assert item["context"]["unignored_paths"] == [".ssh/id_rsa", ".ssh/authorized_keys"]
@@ -834,13 +855,13 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
 
     # `shadowed` alone is NOT a change this Push made — standing advice about the
     # file, not an event. It must not file an alert on every single Push.
-    advice_only = gs.GitignoreSweep(shadowed=("!content/keep.md -> content/",))
+    advice_only = sw.GitignoreSweep(shadowed=("!content/keep.md -> content/",))
     assert advice_only.changed_tracking is False
     assert advice_only.summary_line() == ""
     with patch(
         "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
     ) as create:
-        await gs._emit_gitignore_untracked_alert("alpha", advice_only)
+        await sw._emit_gitignore_untracked_alert("alpha", advice_only)
     assert create.await_count == 0
 
 
@@ -898,16 +919,17 @@ def _fake_user():
 
 
 def _sweep_written_fields(gs, GitSyncResult):
+    sw = _sweep()
     """The `GitSyncResult` fields `_with_sweep` actually writes, derived by
     BEHAVIOUR (baseline vs populated), never by a hardcoded list — a hardcoded
     list is the same "someone must remember" mechanism that lost the field in
     the first place. `message` is excluded because it is a pre-#2529 field the
     sweep only augments; it was already in the response dict."""
     base = GitSyncResult(success=True, message="Synced")
-    full = gs.GitignoreSweep(
+    full = sw.GitignoreSweep(
         removed=("r.txt",), unignored=("u.txt",), shadowed=("!s -> s/",)
     )
-    populated = gs._with_sweep(GitSyncResult(success=True, message="Synced"), full)
+    populated = sw._with_sweep(GitSyncResult(success=True, message="Synced"), full)
     return {
         name
         for name in type(base).model_fields
@@ -929,16 +951,17 @@ async def test_the_sync_response_dict_carries_every_field_the_sweep_writes():
     from unittest.mock import AsyncMock, patch
 
     gs = _gs()
+    sw = _sweep()
     from database import GitSyncResult
 
     git_router = _git_router()
 
-    sweep = gs.GitignoreSweep(
+    sweep = sw.GitignoreSweep(
         removed=("data/report.csv",),
         unignored=(".ssh/id_rsa",),
         shadowed=("!content/keep.md -> content/",),
     )
-    result = gs._with_sweep(GitSyncResult(success=True, message="Synced"), sweep)
+    result = sw._with_sweep(GitSyncResult(success=True, message="Synced"), sweep)
 
     with patch.object(
         git_router.git_service, "sync_to_github", new=AsyncMock(return_value=result)
@@ -977,14 +1000,15 @@ async def test_a_failed_push_still_reports_the_sweep_it_already_performed():
     from unittest.mock import AsyncMock, patch
 
     gs = _gs()
+    sw = _sweep()
     from fastapi import HTTPException
 
     from database import GitSyncResult
 
     git_router = _git_router()
 
-    sweep = gs.GitignoreSweep(removed=("a.txt", "b.txt"))
-    result = gs._with_sweep(
+    sweep = sw.GitignoreSweep(removed=("a.txt", "b.txt"))
+    result = sw._with_sweep(
         GitSyncResult(
             success=False, message="Sync conflict", conflict_type="push_rejected"
         ),
@@ -1104,16 +1128,17 @@ def test_removed_is_reported_only_after_the_rm_actually_ran():
     it after means a failed rm aborts the `&&` chain and reports nothing, which
     is what this code did before #2529 anyway."""
     gs = _gs()
+    sw = _sweep()
     script = shlex.split(gs._build_rm_cached_ignored_command("/home/developer"))[2]
     rm_at = script.index("git rm --cached")
-    report_at = script.index(gs._SWEEP_TAG_REMOVED)
+    report_at = script.index(sw._SWEEP_TAG_REMOVED)
     assert rm_at < report_at, (
         "the removed-paths report is emitted BEFORE the git rm — a failed sweep "
         "would then be reported as a successful one"
     )
     # And both probes that describe the POST-sweep world come after it too.
-    assert rm_at < script.index(gs._SWEEP_TAG_AFTER)
-    assert rm_at < script.index(gs._SWEEP_TAG_SHADOW)
+    assert rm_at < script.index(sw._SWEEP_TAG_AFTER)
+    assert rm_at < script.index(sw._SWEEP_TAG_SHADOW)
 
 
 # ---------------------------------------------------------------------------
@@ -1127,7 +1152,8 @@ def test_probe_lists_are_line_capped_in_container():
     `$ignored` is five figures on the #1596 population — an agent with a
     committed `node_modules/`, the 44 GB repos that motivated those patterns."""
     gs = _gs()
-    cap = gs._SWEEP_PROBE_LINE_CAP
+    sw = _sweep()
+    cap = sw._SWEEP_PROBE_LINE_CAP
     merge = shlex.split(gs._build_gitignore_merge_command("/home/developer"))[2]
     sweep = shlex.split(gs._build_rm_cached_ignored_command("/home/developer"))[2]
     # cap+1 on the two set-difference operands: a full cap+1 lines is how
@@ -1137,7 +1163,7 @@ def test_probe_lists_are_line_capped_in_container():
     # The removed list is capped at the cap itself, and its exact count is
     # emitted separately so the report is never an undercount.
     assert f"head -n {cap}" in sweep
-    assert gs._SWEEP_TAG_REMOVED_COUNT in sweep
+    assert sw._SWEEP_TAG_REMOVED_COUNT in sweep
 
 
 def test_truncated_probe_suppresses_unignored_rather_than_inventing_it():
@@ -1145,14 +1171,15 @@ def test_truncated_probe_suppresses_unignored_rather_than_inventing_it():
     entries that are only "new" because the other side was cut off. Drop the
     field instead — it is advisory, and a fiction is worse than a gap."""
     gs = _gs()
-    cap = gs._SWEEP_PROBE_LINE_CAP
-    merge = "".join(f"{gs._SWEEP_TAG_BEFORE}b{i}\n" for i in range(cap + 1))
-    sweep = "".join(f"{gs._SWEEP_TAG_AFTER}a{i}\n" for i in range(10))
-    assert gs._parse_gitignore_sweep(merge, sweep).unignored == ()
+    sw = _sweep()
+    cap = sw._SWEEP_PROBE_LINE_CAP
+    merge = "".join(f"{sw._SWEEP_TAG_BEFORE}b{i}\n" for i in range(cap + 1))
+    sweep = "".join(f"{sw._SWEEP_TAG_AFTER}a{i}\n" for i in range(10))
+    assert sw._parse_gitignore_sweep(merge, sweep).unignored == ()
 
     # Just under the cap, it is computed normally.
-    merge = "".join(f"{gs._SWEEP_TAG_BEFORE}b{i}\n" for i in range(cap))
-    assert gs._parse_gitignore_sweep(merge, sweep).unignored == tuple(
+    merge = "".join(f"{sw._SWEEP_TAG_BEFORE}b{i}\n" for i in range(cap))
+    assert sw._parse_gitignore_sweep(merge, sweep).unignored == tuple(
         sorted(f"a{i}" for i in range(10))
     )
 
@@ -1161,20 +1188,21 @@ def test_removed_count_is_exact_even_when_the_list_is_capped():
     """A capped list must never become an undercounted claim about how many
     files a Push untracked — the number is what an operator acts on."""
     gs = _gs()
+    sw = _sweep()
     sweep_out = (
-        f"{gs._SWEEP_TAG_REMOVED_COUNT}41234\n"
-        + "".join(f"{gs._SWEEP_TAG_REMOVED}p{i}\n" for i in range(2000))
+        f"{sw._SWEEP_TAG_REMOVED_COUNT}41234\n"
+        + "".join(f"{sw._SWEEP_TAG_REMOVED}p{i}\n" for i in range(2000))
     )
-    sweep = gs._parse_gitignore_sweep("", sweep_out)
+    sweep = sw._parse_gitignore_sweep("", sweep_out)
     assert len(sweep.removed) == 2000
     assert sweep.removed_total == 41234
     assert "untracked 41234 file(s)" in sweep.summary_line()
-    assert "and 41214 more" in gs._augment_commit_message("m", sweep)
+    assert "and 41214 more" in sw._augment_commit_message("m", sweep)
 
     # A missing or unparseable count falls back to the list length — a wrong
     # count is worse than a conservative one.
-    fallback = gs._parse_gitignore_sweep(
-        "", f"{gs._SWEEP_TAG_REMOVED_COUNT}not-a-number\n{gs._SWEEP_TAG_REMOVED}p1\n"
+    fallback = sw._parse_gitignore_sweep(
+        "", f"{sw._SWEEP_TAG_REMOVED_COUNT}not-a-number\n{sw._SWEEP_TAG_REMOVED}p1\n"
     )
     assert fallback.removed_total == 1
 
@@ -1184,9 +1212,10 @@ def test_probe_tags_are_prefix_distinct():
     of another silently absorbs its lines. `removed` vs `removed-count` is one
     character away from exactly that."""
     gs = _gs()
+    sw = _sweep()
     tags = [
-        gs._SWEEP_TAG_BEFORE, gs._SWEEP_TAG_AFTER,
-        gs._SWEEP_TAG_REMOVED, gs._SWEEP_TAG_REMOVED_COUNT, gs._SWEEP_TAG_SHADOW,
+        sw._SWEEP_TAG_BEFORE, sw._SWEEP_TAG_AFTER,
+        sw._SWEEP_TAG_REMOVED, sw._SWEEP_TAG_REMOVED_COUNT, sw._SWEEP_TAG_SHADOW,
     ]
     assert len(set(tags)) == len(tags)
     for a in tags:

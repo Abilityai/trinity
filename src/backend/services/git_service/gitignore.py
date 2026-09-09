@@ -31,6 +31,10 @@ from utils.safe_yaml import (  # ent#314
     load_hardened_yaml as _load_hardened_yaml,
 )
 
+# #1028/#2529: the sweep REPORT lives next door; reached through the module
+# object so a test patching it reaches every caller here.
+from . import gitignore_sweep
+
 logger = logging.getLogger(__name__)
 
 
@@ -187,22 +191,6 @@ _GITIGNORE_SUPERSEDED_LINES: Tuple[str, ...] = (
 AGENT_HOME_DIR = "/home/developer"
 
 LEGACY_WORKSPACE_DIR = "/home/developer/workspace"
-
-_MERGE_READY_TIMEOUT_SECONDS = int(
-    os.getenv("TRINITY_GITIGNORE_MERGE_TIMEOUT_SECONDS", "1800")
-)
-
-_MERGE_READY_INTERVAL_SECONDS = int(
-    os.getenv("TRINITY_GITIGNORE_MERGE_INTERVAL_SECONDS", "5")
-)
-
-_MERGE_EXEC_TIMEOUT_SECONDS = 30
-
-_MERGE_POLLER_CONCURRENCY = int(os.getenv("TRINITY_GITIGNORE_MERGE_CONCURRENCY", "6"))
-
-_gitignore_merge_semaphore = asyncio.Semaphore(_MERGE_POLLER_CONCURRENCY)
-
-_inflight_gitignore_merge_tasks: "set[asyncio.Task]" = set()
 
 def _build_gitignore_append_command(git_dir: str, patterns) -> str:
     """Build a bash command that appends any missing ``patterns`` to
@@ -368,111 +356,8 @@ for _managed_line in _GITIGNORE_MANAGED_LINES:
 del _managed_line
 
 
-# Per-line output tags for the sweep probes (#2529). `container_exec_run` does
-# NOT pass `demux=True` (docker_utils.py), so stdout and stderr arrive
-# interleaved in ONE blob — a begin/end region parser would happily swallow a
-# stray `grep: ...` line as a payload path. A per-line prefix cannot: anything
-# without the tag is not ours, wherever it lands.
-_SWEEP_TAG = "TRINITY-2529"
-_SWEEP_TAG_BEFORE = f"{_SWEEP_TAG}-untracked-before: "
-_SWEEP_TAG_AFTER = f"{_SWEEP_TAG}-untracked-after: "
-_SWEEP_TAG_REMOVED = f"{_SWEEP_TAG}-removed: "
-_SWEEP_TAG_REMOVED_COUNT = f"{_SWEEP_TAG}-removed-count: "
-_SWEEP_TAG_SHADOW = f"{_SWEEP_TAG}-shadow: "
-
-# Every probe list is line-capped in-container. `container_exec_run` reads the
-# whole exec output into memory as one blob, and both probed sets are unbounded
-# in exactly the cases this code exists for:
-#
-#   * the untracked probe runs BEFORE the canonical block is written on a
-#     pre-canonical agent, so nothing is ignored yet and `$HOME` answers with
-#     every file under `.local/lib/python3.13/site-packages`, `.npm`, `.cache`;
-#   * `$ignored` is tens of thousands of paths on the #1596 population — an
-#     agent with a committed `node_modules/` (44 GB repos were observed) — which
-#     is precisely the fleet this migration was written for.
-#
-# So the cap is not paranoia. `head -n CAP+1` makes truncation self-announcing
-# (a full CAP+1 lines means "there were more"), and the REMOVED count is emitted
-# separately and exactly, so a capped list never turns into an undercounted
-# claim about how many files a Push untracked.
-_SWEEP_PROBE_LINE_CAP = 2000
-
-# `git check-ignore -v` prints `<source>:<line>:<pattern>\t<pathname>`. The
-# source is a filename and the pattern may itself contain a colon, so the split
-# is anchored on the LAST `:<digits>:` rather than on the first colon.
-_CHECK_IGNORE_RE = re.compile(r"^(?P<source>.*):(?P<line>\d+):(?P<pattern>.*)\t(?P<path>.*)$")
 
 
-@dataclass(frozen=True)
-class GitignoreSweep:
-    """What a Push's `.gitignore` migration actually did (#2529).
-
-    Every field is ADVISORY reporting — a failure to compute any of them returns
-    the empty sweep and never breaks the Push.
-
-    removed:   paths this Push untracked (`git rm --cached`). The honest answer
-               to "5 files pushed" vs "5 files pushed, 4 deletions".
-    unignored: paths that became newly un-ignored and are still untracked — the
-               inverted-duplicate case (a user's `!.env.production` above their
-               own `.env.*`), which the SAME Push then stages via `git add -A`.
-               KNOWN CONTAMINATION: this is `after - before` across two execs
-               against a LIVE container, so a file the agent's own session
-               creates in that window is reported here too. Folding both probes
-               into the two execs the Push already ran narrows the window; it
-               does not close it.
-    shadowed:  `"!rule -> deciding managed pattern"` for every agent negation a
-               managed line defeats. Two residuals live here: a negation under a
-               dir-form canonical pattern (git does not descend into an excluded
-               directory, so it is inert at ANY position) and a negation the
-               protected floor deliberately refuses.
-    """
-
-    removed: Tuple[str, ...] = ()
-    unignored: Tuple[str, ...] = ()
-    shadowed: Tuple[str, ...] = ()
-    #: How many paths were ACTUALLY untracked. Equals ``len(removed)`` unless
-    #: the in-container list hit ``_SWEEP_PROBE_LINE_CAP``, in which case the
-    #: list is a prefix and this is still exact — an undercounted "untracked N
-    #: file(s)" would be a false claim on the #1596 population, where N is
-    #: routinely five figures.
-    removed_total: int = 0
-
-    @property
-    def removed_count(self) -> int:
-        """Exact number untracked — the list may be a `_SWEEP_PROBE_LINE_CAP` prefix."""
-        return max(self.removed_total, len(self.removed))
-
-    @property
-    def changed_tracking(self) -> bool:
-        """Did this Push change WHAT IS IN THE REPO, in either direction?
-
-        The gate for every reporting surface. It is deliberately not
-        ``bool(self.removed)``: review reproduced the mirror image of the bug
-        #2529 fixes — hoisting the defaults block above the user region can
-        newly UN-ignore a path an agent had negated, and the same Push's
-        `git add -A` then COMMITS it. `removed`-only gates made that addition
-        exactly as silent as the deletions this issue exists to end.
-        `shadowed` is NOT in the gate: it is standing advice about the file,
-        not a change this Push made.
-        """
-        return bool(self.removed or self.unignored)
-
-    def summary_line(self) -> str:
-        """One line for a commit message / an HTTP error detail, or ``""``."""
-        clauses = []
-        if self.removed:
-            clauses.append(
-                f"untracked {self.removed_count} file(s) that now match "
-                ".gitignore (working tree untouched)"
-            )
-        if self.unignored:
-            clauses.append(
-                f"newly un-ignored {len(self.unignored)} path(s), now committed "
-                "by this same sync"
-            )
-        if not clauses:
-            return ""
-        return "Trinity: " + "; ".join(clauses)
 
 
 def _build_gitignore_merge_command(git_dir: str) -> str:
@@ -526,7 +411,7 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
     is not yet in the file — one-time and milliseconds wide.
 
     The leading probe records the untracked-and-not-ignored set BEFORE the
-    rebuild, so ``GitignoreSweep.unignored`` can be computed without a fifth
+    rebuild, so ``gitignore_sweep.GitignoreSweep.unignored`` can be computed without a fifth
     ``docker exec``. It is wrapped in a group ending in ``:`` so a repo-less
     directory (the init path calls this builder too) reports nothing instead of
     aborting the merge.
@@ -546,8 +431,8 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
     script = (
         f"cd {q(git_dir)} && "
         "{ git ls-files --others --exclude-standard 2>/dev/null | "
-        f"head -n {_SWEEP_PROBE_LINE_CAP + 1} | "
-        f"sed 's#^#{_SWEEP_TAG_BEFORE}#'; :; }} && "
+        f"head -n {gitignore_sweep._SWEEP_PROBE_LINE_CAP + 1} | "
+        f"sed 's#^#{gitignore_sweep._SWEEP_TAG_BEFORE}#'; :; }} && "
         "{ [ -e .gitignore ] || : > .gitignore; } && "
         f"printf '%s\\n' {top_args} > .gitignore.tmp && "
         "{ LC_ALL=C grep -a -vxF -f "
@@ -627,124 +512,28 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
         # would be a false alarm on the one surface whose whole job is to be
         # trusted.
         '{ [ -z "$ignored" ] || { printf \'%s\\n\' "$ignored" | wc -l | tr -d " " | '
-        f"sed 's#^#{_SWEEP_TAG_REMOVED_COUNT}#'; "
+        f"sed 's#^#{gitignore_sweep._SWEEP_TAG_REMOVED_COUNT}#'; "
         'printf \'%s\\n\' "$ignored" | '
-        f"head -n {_SWEEP_PROBE_LINE_CAP} | "
-        f"sed 's#^#{_SWEEP_TAG_REMOVED}#'; }}; }} && "
+        f"head -n {gitignore_sweep._SWEEP_PROBE_LINE_CAP} | "
+        f"sed 's#^#{gitignore_sweep._SWEEP_TAG_REMOVED}#'; }}; }} && "
         "{ git ls-files --others --exclude-standard | "
-        f"head -n {_SWEEP_PROBE_LINE_CAP + 1} | "
-        f"sed 's#^#{_SWEEP_TAG_AFTER}#'; :; }} && "
+        f"head -n {gitignore_sweep._SWEEP_PROBE_LINE_CAP + 1} | "
+        f"sed 's#^#{gitignore_sweep._SWEEP_TAG_AFTER}#'; :; }} && "
         # `^!.` (not `^!`) — a bare `!` line would reach check-ignore as an
         # empty pathspec and make it fatal.
         "{ LC_ALL=C grep -a -h '^!.' .gitignore | sed 's/^!//' | "
         "git check-ignore -v --no-index --stdin | "
-        f"sed 's#^#{_SWEEP_TAG_SHADOW}#'; :; }}"
+        f"sed 's#^#{gitignore_sweep._SWEEP_TAG_SHADOW}#'; :; }}"
     )
     return f"bash -c {shlex.quote(script)}"
 
 
-def _tagged_output_lines(output: Any, tag: str) -> List[str]:
-    """Every line of a probe blob carrying ``tag``, with the tag stripped.
-
-    Anything without the tag — an interleaved stderr line, git's own chatter —
-    is simply not ours. `container_exec_run` does not demux, so this is the
-    whole defence against a stray `grep: ...` being read as a path.
-    """
-    if not isinstance(output, str):
-        return []
-    return [
-        line[len(tag):].rstrip("\r")
-        for line in output.splitlines()
-        if line.startswith(tag)
-    ]
 
 
-def _shadowed_negations(check_ignore_lines: List[str]) -> Tuple[str, ...]:
-    """Turn ``git check-ignore -v`` output into ``"!rule -> deciding pattern"``.
-
-    THE TRAP: ``git check-ignore -v`` exits **0 even when the deciding rule is
-    itself a negation** — i.e. even when the path is NOT ignored. (Verified:
-    `.env.example` gives plain_rc=1 but verbose_rc=0.) So the verdict must come
-    from the deciding PATTERN TEXT — a leading ``!`` means the negation won —
-    never from the exit code.
-
-    Only rules THIS PLATFORM wrote are reported. An agent whose own broad rule
-    defeats its own negation is its own business; a managed line defeating it is
-    ours to explain, and covers both residuals #2529 knowingly leaves: a
-    negation under a dir-form canonical pattern (inert at any position, because
-    git does not descend into an excluded directory) and a negation the
-    protected floor deliberately refuses.
-    """
-    managed = set(_GITIGNORE_MANAGED_LINES)
-    out: List[str] = []
-    for line in check_ignore_lines:
-        match = _CHECK_IGNORE_RE.match(line)
-        if not match:
-            continue
-        pattern = match.group("pattern")
-        if pattern.startswith("!"):
-            continue  # the negation WON — nothing to report
-        if pattern not in managed:
-            continue  # the agent's own rule, not ours
-        entry = f"!{match.group('path')} -> {pattern}"
-        if entry not in out:
-            out.append(entry)
-    return tuple(out)
 
 
-def _parse_gitignore_sweep(merge_output: Any, sweep_output: Any) -> GitignoreSweep:
-    """Assemble a :class:`GitignoreSweep` from the two execs' interleaved blobs."""
-    before = _tagged_output_lines(merge_output, _SWEEP_TAG_BEFORE)
-    after = _tagged_output_lines(sweep_output, _SWEEP_TAG_AFTER)
-    removed = tuple(
-        dict.fromkeys(_tagged_output_lines(sweep_output, _SWEEP_TAG_REMOVED))
-    )
-
-    # The exact count is emitted separately (`wc -l` on the full list), so a
-    # capped list never becomes an undercounted claim about how many files this
-    # Push untracked. Fall back to the list length when the count line is
-    # missing or unparseable — a wrong count is worse than a conservative one.
-    total = len(removed)
-    for raw in _tagged_output_lines(sweep_output, _SWEEP_TAG_REMOVED_COUNT):
-        try:
-            total = max(total, int(raw.strip()))
-        except ValueError:
-            logger.warning("unparseable sweep removed-count %r — using the list length", raw)
-
-    # `unignored` is a SET DIFFERENCE, so a truncated operand would manufacture
-    # entries that are only "new" because the other side was cut off. Both
-    # probes announce truncation by returning the full cap+1 lines; when either
-    # does, drop the field rather than report a fiction. It is advisory anyway.
-    if len(before) > _SWEEP_PROBE_LINE_CAP or len(after) > _SWEEP_PROBE_LINE_CAP:
-        logger.warning(
-            "gitignore sweep: the untracked probe hit its %s-line cap "
-            "(before=%s, after=%s) — unignored_paths suppressed rather than "
-            "computed from a truncated set",
-            _SWEEP_PROBE_LINE_CAP, len(before), len(after),
-        )
-        unignored: Tuple[str, ...] = ()
-    else:
-        unignored = tuple(sorted(set(after) - set(before)))
-
-    return GitignoreSweep(
-        removed=removed,
-        removed_total=total,
-        unignored=unignored,
-        shadowed=_shadowed_negations(
-            _tagged_output_lines(sweep_output, _SWEEP_TAG_SHADOW)
-        ),
-    )
 
 
-def _coerce_sweep(value: Any) -> GitignoreSweep:
-    """Anything that is not a real :class:`GitignoreSweep` becomes the empty one.
-
-    Required, not defensive noise: `tests/unit/test_ent123_tokenless_clone.py`
-    patches `_migrate_workspace_gitignore` with a bare `AsyncMock()`, and a
-    `MagicMock` landing in a `List[str]` response field fails Pydantic
-    validation at the very return the test is asserting on.
-    """
-    return value if isinstance(value, GitignoreSweep) else GitignoreSweep()
 
 
 async def _git_toplevel(container_name: str) -> Optional[str]:
@@ -840,7 +629,7 @@ async def _detect_git_dir(container_name: str) -> str:
     return await _detect_git_dir_fallback(container_name)
 
 
-async def _migrate_workspace_gitignore(agent_name: str) -> GitignoreSweep:
+async def _migrate_workspace_gitignore(agent_name: str) -> gitignore_sweep.GitignoreSweep:
     """Idempotently rebuild an existing agent's `.gitignore` around the current
     `_GITIGNORE_PATTERNS` and untrack any files that NOW match a rule.
 
@@ -873,7 +662,7 @@ async def _migrate_workspace_gitignore(agent_name: str) -> GitignoreSweep:
             timeout=5,
         )
         if check_git.get("exit_code") != 0:
-            return GitignoreSweep()
+            return gitignore_sweep.GitignoreSweep()
         # 1. Rebuild the file around the canonical regions (idempotent), and
         #    carry the untracked-BEFORE probe.
         merge = await execute_command_in_container(
@@ -888,418 +677,10 @@ async def _migrate_workspace_gitignore(agent_name: str) -> GitignoreSweep:
             command=_build_rm_cached_ignored_command(git_dir),
             timeout=30,
         )
-        return _parse_gitignore_sweep(merge.get("output"), sweep.get("output"))
+        return gitignore_sweep._parse_gitignore_sweep(merge.get("output"), sweep.get("output"))
     except Exception as exc:
         logger.warning(
             f"_migrate_workspace_gitignore failed for {agent_name}: {exc}. "
             "Push will proceed against the existing .gitignore."
         )
-        return GitignoreSweep()
-
-
-async def _emit_gitignore_untracked_alert(
-    agent_name: str, sweep: GitignoreSweep
-) -> None:
-    """File an operator-queue entry naming the paths a Push untracked (#2529).
-
-    THE surface that outlives the session. Every other one — the API response,
-    the MCP result, the toast, the commit message — is read by whoever ran the
-    Push, and BOTH confirmed field incidents were unattended 15-minute auto-sync
-    cycles whose damage surfaced two months later. `sync_health_service`'s
-    `git_bloat` entry (#1595) is the precedent for exactly this reasoning.
-
-    Routed through the #1677 BUDGET seam, not `db.create_operator_queue_item`.
-    The sibling `git_bloat`/`sync_failing` emitters are direct creates because
-    their cadence is the 60-second platform poller's; this one fires from
-    `sync_to_github`, which an AGENT can drive — `git_sync` is an MCP tool an
-    agent-scoped key may call on itself. A repeated `git add -f <ignored>` +
-    sync loop yields a fresh `removed` set every time, and the id is timestamped
-    rather than idempotent, so nothing upstream bounds the volume. That is the
-    `_alert_skill_not_found` shape (#1410) the budget seam exists for, and
-    `gitignore-untracked-` joins `_RESERVED_ID_PREFIXES` so an agent cannot
-    pre-create the id and silently suppress its own alert via the sink's
-    `on_conflict_do_nothing` (the C2 class).
-
-    Best-effort by construction: `create_bounded_alert` never raises and returns
-    False when refused, and this still swallows, because an alerting failure
-    must not fail a Push either.
-    """
-    if not sweep.changed_tracking:
-        return
-    try:
-        from services.operator_queue_service import create_bounded_alert
-        from utils.helpers import utc_now_iso
-
-        now = utc_now_iso()
-        shown = list(sweep.removed[:20])
-        gained = list(sweep.unignored[:20])
-
-        # Both directions, named separately, because the operator response
-        # differs: a removal is recoverable from disk, an addition is already
-        # in the remote's history and may need a credential rotated.
-        parts = []
-        if sweep.removed:
-            parts.append(
-                f"removed {sweep.removed_count} file(s) from the index because "
-                "they match an ignore rule (the working tree is untouched, but "
-                "the deletion is committed and pushed) — if one was meant to "
-                "stay, negate it in the agent's own `.gitignore`, below the "
-                "managed defaults block, and re-add it with `git add -f`"
-            )
-        if sweep.unignored:
-            parts.append(
-                f"newly UN-ignored {len(sweep.unignored)} path(s) that this same "
-                "sync then committed — an agent rule now beats a managed default "
-                "that previously hid them; if any is a secret, ROTATE it and "
-                "remove the rule, because it is already in the remote's history"
-            )
-        if sweep.removed and sweep.unignored:
-            title = "Push changed which files are tracked (.gitignore sweep)"
-        elif sweep.removed:
-            title = "Push untracked files that now match .gitignore"
-        else:
-            title = "Push committed files that were previously gitignored"
-
-        # An unignored-ONLY entry drops to `medium`, and the reason is the
-        # contamination `GitignoreSweep.unignored` documents: it is
-        # `after - before` across two execs against a LIVE container, so a file
-        # the agent's own session happens to create in that window is reported
-        # here too. A removal is a confirmed destructive act and keeps `high`;
-        # an addition is "look at this" and can be a false positive, and a band
-        # that cries wolf stops being read. Volume is bounded either way by the
-        # #1677 budget seam.
-        priority = "high" if sweep.removed else "medium"
-
-        await create_bounded_alert(
-            agent_name,
-            {
-                "id": f"gitignore-untracked-{agent_name}-{now}",
-                "agent_name": agent_name,
-                "type": "gitignore_untracked",
-                "status": "pending",
-                "priority": priority,
-                "title": title,
-                "question": f"{agent_name}: this Push " + "; and it ".join(parts) + ".",
-                "context": {
-                    "removed_paths": shown,
-                    "removed_count": sweep.removed_count,
-                    "shadowed_negations": list(sweep.shadowed[:20]),
-                    "unignored_paths": gained,
-                    "unignored_count": len(sweep.unignored),
-                },
-                "created_at": now,
-            },
-        )
-        logger.warning(
-            "gitignore_untracked emitted for %s: %s untracked (%s); "
-            "%s newly un-ignored (%s)",
-            agent_name, sweep.removed_count, ", ".join(shown) or "-",
-            len(sweep.unignored), ", ".join(gained) or "-",
-        )
-    except Exception:
-        logger.exception("failed to emit gitignore_untracked alert")
-
-
-def _augment_commit_message(message: Optional[str], sweep: GitignoreSweep) -> Optional[str]:
-    """Name the untracked paths in the commit that carries their deletion.
-
-    BEST-EFFORT, and the honest reason is worth stating: `git rm --cached` only
-    STAGES. If this Push does not reach its own commit — or if the in-container
-    auto-sync loop commits first, since the backend's `docker exec` runs outside
-    the agent server's `_REPO_LOCK` — the deletions ride in someone else's commit
-    with someone else's message. That is exactly what `47efd80` was. The
-    operator-queue entry, not this, is the surface that does not depend on who
-    commits.
-
-    When the caller supplied no message we reproduce the agent server's own
-    default (`Trinity sync: <ts>`, `agent_server/routers/git.py`) rather than
-    dropping it, because supplying a message at all suppresses that default.
-    """
-    if not sweep.changed_tracking:
-        return message
-    subject = message or f"Trinity sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    body = ["", ""]
-
-    if sweep.removed:
-        total = sweep.removed_count
-        shown = list(sweep.removed[:20])
-        body.append(
-            f"Trinity: untracked {total} file(s) that now match "
-            ".gitignore (working tree untouched):"
-        )
-        body += [f"- {path}" for path in shown]
-        if total > len(shown):
-            body.append(f"- ... and {total - len(shown)} more")
-
-    if sweep.unignored:
-        # The commit that ADDS them is this one, so naming them here is the
-        # only place the addition is visible in the repo's own history.
-        gained = list(sweep.unignored[:20])
-        if sweep.removed:
-            body.append("")
-        body.append(
-            f"Trinity: newly un-ignored {len(sweep.unignored)} path(s), "
-            "committed by this sync:"
-        )
-        body += [f"+ {path}" for path in gained]
-        if len(sweep.unignored) > len(gained):
-            body.append(f"+ ... and {len(sweep.unignored) - len(gained)} more")
-
-    return subject + "\n".join(body)
-
-
-def _with_sweep(result: GitSyncResult, sweep: GitignoreSweep) -> GitSyncResult:
-    """Attach the sweep to a `GitSyncResult`, on the failure paths too.
-
-    The router raises `HTTPException(detail=result.message)` for 409/400 and
-    keeps NOTHING else, so a structured field alone is dead on exactly the paths
-    where the index mutation has already happened. Folding the one-line summary
-    into `message` here makes all four returns honest with one edit instead of
-    per-status-code special-casing in the router.
-    """
-    summary = sweep.summary_line()
-    message = result.message
-    if summary and summary not in (message or ""):
-        message = f"{message} — {summary}" if message else summary
-    return result.model_copy(
-        update={
-            "message": message,
-            "removed_paths": list(sweep.removed),
-            "unignored_paths": list(sweep.unignored),
-            "shadowed_negations": list(sweep.shadowed),
-        }
-    )
-
-
-def _git_auto_sync_baked(
-    config,
-    github_repo: Optional[str],
-    github_pat: Optional[str],
-    fork_upstream: Optional[str],
-) -> bool:
-    """Does this agent bake ``GIT_SYNC_AUTO='true'`` at creation? — the single
-    owner of that predicate (the ent#109 `_apply_git_env_from_db` "single owner
-    of the env gate" discipline; used at both `crud.py::_apply_github_env` and
-    the #2069 merge spawn).
-
-    Mirrors `_apply_github_env` verbatim: the flag is set inside `if
-    github_repo:` when `(not source_mode or fork_upstream) and github_pat`. The
-    in-container auto-sync loop gates purely on this env var, so this predicate —
-    NOT the `_materialize_agent_files` DB-flag block, which additionally excludes
-    ephemeral ghosts (`and not config.ephemeral`) — is exactly the population
-    whose loop auto-commits, and therefore exactly what the #2069 merge must
-    cover: an ephemeral non-source `github:`+PAT ghost bakes the env, auto-commits
-    from birth, and is never operator-Pushed, so the DB-flag-gated path would
-    leave it leaking unremediated.
-    """
-    return (
-        bool(github_repo)
-        and bool(github_pat)
-        and (not config.source_mode or bool(fork_upstream))
-    )
-
-
-async def _probe_agent_server_ready(agent_name: str) -> bool:
-    """One DIRECT agent-server `/health` probe (#2069 / #1159).
-
-    Direct (`agent_httpx_client` → `http://agent-{name}:8000/health`), NEVER the
-    backend proxy route, which masks a mid-startup `httpx.ConnectError` as an
-    HTTP 200 fallback body carrying a `message` key (ent#15 / learnings
-    2026-08-04). Until the server is up the connect raises and we return False;
-    a real 200 returns True. `/health` is the ONE path the agent-server auth
-    middleware exempts, so the probe needs nothing beyond what the client stamps.
-    """
-    try:
-        async with agent_httpx_client(
-            agent_name, timeout=_MERGE_READY_INTERVAL_SECONDS
-        ) as client:
-            resp = await client.get(f"http://agent-{agent_name}:8000/health")
-            return resp.status_code == 200
-    except Exception:
-        return False
-
-
-async def _container_has_git_dir(container_name: str) -> bool:
-    """True iff `/home/developer/.git` exists (one exec)."""
-    result = await execute_command_in_container(
-        container_name=container_name,
-        command='bash -c "[ -d /home/developer/.git ]"',
-        timeout=5,
-    )
-    return result.get("exit_code") == 0
-
-
-async def merge_gitignore_after_clone(agent_name: str) -> None:
-    """Readiness-gated fire-and-forget merge of `_GITIGNORE_PATTERNS` into a
-    fresh `github:` agent's `.gitignore`, so the first in-container auto-sync
-    cycle stages none of the ignored runtime/credential paths (#2069).
-
-    Two-tier safety property:
-      * **Creation-time = PREVENT** — merge-only (NO `_build_rm_cached_ignored_
-        command`). The generated `.env`/`.mcp.json` are written post-clone as
-        UNTRACKED files, so a merge-installed `.gitignore` stops `git add -A`
-        from ever staging them (the common case). Untracking the template's own
-        committed content just because it matches a broad pattern would be
-        surprising; a template that COMMITTED a credential file (unusual
-        subclass) is remediated on the first Push (`_migrate_workspace_gitignore`)
-        + retired by #1703.
-      * **Push = REMEDIATE** — `_migrate_workspace_gitignore` still does
-        merge + untrack, unchanged (AC#5: no behaviour change on `sync_to_github`).
-
-    Merge point — the central correctness question. The merge must run AFTER
-    startup.sh finishes ALL of its git setup and BEFORE the first auto-sync
-    cycle, WITHOUT relying on the 900s pre-first-cycle sleep for correctness. The
-    gate is **agent-server /health readiness ∧ /home/developer/.git present**:
-      * The agent server is launched ONCE, at startup.sh:517 — strictly after the
-        entire git block (clone → tar-merge → `git checkout` of the source/working
-        branch → remote-config). A filesystem gate like `.git ∧ ¬.trinity-clone-
-        tmp` fires mid-git-setup, where a later `git checkout` can REVERT the
-        merged `.gitignore` (target branch ships a different one) or FAIL on the
-        uncommitted change — and because the poll fires the merge once and exits,
-        a reverted merge is not retried (Codex #1). `/health` responding proves
-        startup.sh is past ALL working-tree mutation, and is still ~900s before
-        the auto-sync loop (which lives inside that same server) runs its first
-        cycle. The readiness gate is therefore STRONGER than the filesystem check.
-      * The probe is DIRECT — the backend proxy masks a mid-startup ConnectError
-        as a 200 fallback body (ent#15).
-      * `.git` present handles the failed-clone case: the server still launches
-        (startup.sh has no `set -e`), so `/health` comes up, but `.git` is absent
-        → skip (nothing to pollute; the Push migration is the backstop).
-
-    Bounded & non-fatal: a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`,
-    sized to clone + startup, NOT the 900s cycle), a module-level Semaphore cap on
-    the DOCKER-EXEC section only (batch creation must not starve the shared 4-thread
-    Docker pool), and `asyncio.wait_for` around every exec/HTTP. wait_for frees the
-    TASK, not the pinned pool thread. The readiness poll runs OUTSIDE the Semaphore
-    — it is pure agent-`/health` HTTP and touches no pool thread, so capping it
-    would let slow-booting agents head-of-line-block a healthy agent's merge past
-    its own first cycle. Any failure logs and returns; on deadline the Push
-    migration remains the backstop.
-
-    Known limitation: a backend restart within the readiness-wait window loses
-    this in-memory task. Acceptable for a P2 — the Push migration remediates and
-    #1703 is the structural fix.
-    """
-    container_name = f"agent-{agent_name}"
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _MERGE_READY_TIMEOUT_SECONDS
-    ready = False
-    try:
-        # Readiness poll — pure agent-`/health` HTTP, NOT a Docker exec, so it runs
-        # OUTSIDE `_gitignore_merge_semaphore` (which bounds only the Docker-pool
-        # exec section below). Holding the pool cap across a <=1800s readiness wait
-        # would let slow-booting agents head-of-line-block a healthy agent's merge
-        # past its own first auto-sync cycle — re-opening the leak this fix closes.
-        while loop.time() < deadline:
-            try:
-                ready = await asyncio.wait_for(
-                    _probe_agent_server_ready(agent_name),
-                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                ready = False
-            if ready:
-                break
-            await asyncio.sleep(_MERGE_READY_INTERVAL_SECONDS)
-
-        if not ready:
-            logger.warning(
-                "[#2069] agent-server for %s never became ready within %ss; "
-                "skipping the creation .gitignore merge — the Push migration "
-                "remains the backstop.",
-                agent_name,
-                _MERGE_READY_TIMEOUT_SECONDS,
-            )
-            return
-
-        # Docker-exec section (`.git` check / `_git_toplevel` / merge) — bound the
-        # shared 4-thread pool HERE. Each exec is short, so the cap drains fast even
-        # under batch creation; a queued agent's exec still lands well inside its
-        # ~900s pre-first-cycle window because it is no longer stuck behind other
-        # agents' readiness waits.
-        async with _gitignore_merge_semaphore:
-            # Server is up ⟹ startup.sh is past ALL git mutation (single launch
-            # point, sequential) — no more `git checkout` can revert the merge.
-            try:
-                has_git = await asyncio.wait_for(
-                    _container_has_git_dir(container_name),
-                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                has_git = False
-            if not has_git:
-                logger.info(
-                    "[#2069] %s is ready but has no .git (failed clone / not "
-                    "git-bound); skipping the creation .gitignore merge.",
-                    agent_name,
-                )
-                return
-
-            # The gate already proved a repo exists, so resolve the toplevel with
-            # `_git_toplevel` (None → skip) rather than `_detect_git_dir`'s
-            # heuristic fallback — safer to skip on unresolved than merge against
-            # a guessed path.
-            try:
-                git_dir = await asyncio.wait_for(
-                    _git_toplevel(container_name),
-                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                git_dir = None
-            if git_dir is None:
-                logger.info(
-                    "[#2069] could not resolve the git toplevel for %s; "
-                    "skipping the creation .gitignore merge.",
-                    agent_name,
-                )
-                return
-
-            await asyncio.wait_for(
-                execute_command_in_container(
-                    container_name=container_name,
-                    command=_build_gitignore_merge_command(git_dir),
-                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
-                ),
-                timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
-            )
-            logger.info(
-                "[#2069] seeded the canonical .gitignore for %s at %s before "
-                "its first auto-sync cycle.",
-                agent_name,
-                git_dir,
-            )
-    except Exception as exc:
-        logger.warning(
-            "[#2069] creation .gitignore merge failed for %s: %s. "
-            "The Push migration remains the backstop.",
-            agent_name,
-            exc,
-        )
-
-
-def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
-    """Fire ``merge_gitignore_after_clone`` fire-and-forget (mirrors
-    `activity_service.spawn_close_execution_activity`): zero creation latency;
-    the merge lands within one poll interval of agent-server readiness.
-
-    The Docker-exec section is bounded INSIDE the coro by
-    `_gitignore_merge_semaphore`, so an excess spawn's merge exec queues rather
-    than piling another concurrent exec onto the shared Docker pool; the readiness
-    poll runs OUTSIDE the cap (pure agent-`/health` HTTP, no pool thread). A strong
-    ref in `_inflight_gitignore_merge_tasks` defeats the
-    asyncio `create_task` GC footgun. With no running loop the coro is closed and
-    the spawn is skipped (logged), never raised — the Push migration is the
-    backstop.
-    """
-    coro = merge_gitignore_after_clone(agent_name)
-    try:
-        task = asyncio.create_task(coro)
-        _inflight_gitignore_merge_tasks.add(task)
-        task.add_done_callback(_inflight_gitignore_merge_tasks.discard)
-    except RuntimeError as e:
-        coro.close()
-        logger.debug(
-            "[#2069] spawn_gitignore_merge_after_clone skipped (no loop): %s", e
-        )
-
-
+        return gitignore_sweep.GitignoreSweep()

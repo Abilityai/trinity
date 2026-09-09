@@ -28,6 +28,11 @@ from .conflicts import (  # noqa: F401
 # its owning module can be monkeypatched on the wrong one and silently detach
 # — which is exactly how test_2069's readiness probes went dark during this
 # split — so the collaborator-shaped ones are deliberately not mirrored.
+from .gitignore_clone import (  # noqa: F401
+    _git_auto_sync_baked,
+    merge_gitignore_after_clone,
+    spawn_gitignore_merge_after_clone,
+)
 from .gitignore import (  # noqa: F401
     _GITIGNORE_PATTERNS,
     # #2529 split the constant into a top region and a protected floor written
@@ -42,9 +47,6 @@ from .gitignore import (  # noqa: F401
     _GITIGNORE_FLOOR_END,
     _TRINITY_AUTHORED_PATHS,
     _detect_git_dir,
-    _git_auto_sync_baked,
-    merge_gitignore_after_clone,
-    spawn_gitignore_merge_after_clone,
 )
 from .provisioning import (  # noqa: F401
     GitInitResult,
