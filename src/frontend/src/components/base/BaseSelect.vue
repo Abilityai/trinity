@@ -5,6 +5,16 @@
     (tertiary ink, pointer-events none), padding-right 32px so text never
     collides. Options come through the default slot as native <option>s.
 
+    The chevron points up while the picker is open, which is the chevron idiom
+    the rest of the app already follows (ChatHistoryDropdown, OverflowTabs,
+    InfoPanel, the disclosure rows). Those all own their open state in JS; a
+    NATIVE select's picker is drawn by the platform and reports nothing, so
+    `:open` is the only hook there is — Baseline newly-available 2026-05 (Chrome
+    133, Firefox 136, Safari 26.5). It degrades to today's static chevron on an
+    older engine, so no behaviour depends on it. The rule is a sibling selector
+    rather than `:has()` on the wrapper: the chevron is the select's next
+    sibling, so no group class is needed on the parent.
+
     `variant="ghost"` (#2662) swaps the field recipe for the borderless,
     content-width one — the same control where a select is a lightweight
     preference beside a conversation rather than a field in a form. The native
@@ -22,13 +32,13 @@
         :disabled="disabled"
         :aria-invalid="error ? 'true' : undefined"
         :aria-describedby="describedBy"
-        :class="[recipe.field, error ? FIELD_INVALID_CLASS : recipe.valid, 'appearance-none', recipe.pad]"
+        :class="[recipe.field, error ? FIELD_INVALID_CLASS : recipe.valid, 'appearance-none', recipe.pad, '[&:open~svg]:rotate-180']"
         @change="$emit('update:modelValue', $event.target.value)"
       >
         <slot />
       </select>
       <svg
-        :class="['pointer-events-none absolute top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400', recipe.chevron]"
+        :class="['pointer-events-none absolute top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400 transition-transform duration-150 motion-reduce:transition-none', recipe.chevron]"
         fill="none"
         viewBox="0 0 24 24"
         stroke="currentColor"
