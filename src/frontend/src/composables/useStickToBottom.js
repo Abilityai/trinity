@@ -1,4 +1,4 @@
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 
 /**
  * Stick-to-bottom for a chat transcript (#2624).
@@ -84,25 +84,69 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = 
     unread.value = 0
   }
 
+  /**
+   * Pin to the bottom once the pending patch is in the DOM.
+   *
+   * `nextTick` covers this component's own patch. It deliberately does NOT try
+   * to cover LATER growth by chasing frames — that was tried twice and is the
+   * wrong primitive. A fixed two passes fixed a 40-message thread locally and
+   * left CI exactly 20px short; a settle loop that stopped when the height
+   * repeated ALSO stopped short, because the transcript grew again after the
+   * loop had already watched it hold still for a frame. There is no window
+   * that is both short enough to be free and long enough to be right.
+   *
+   * The observer below is what covers late growth, for any cause and at any
+   * delay, with nothing to tune.
+   */
   async function scrollToBottomNow() {
     await nextTick()
-    pin()
-    // A SECOND pass one frame later. `nextTick` covers this component's own
-    // patch; a child that patches on a later tick — the loading skeleton
-    // swapping out, markdown rendering a long thread — grows the transcript
-    // after the first measurement, and the browser clamps the assignment to the
-    // height it had THEN. Measured in a real browser: a 40-message thread
-    // opened 20px above its newest message, every time, stably.
-    await afterFrame()
     pin()
   }
 
   function pin() {
     const el = scrollEl.value
     // The element can go away between the arrival and the tick (a thread
-    // switch, an unmount) — that is a normal race, not a failure.
+    // switch, an unmount) — a normal race, not a failure.
     if (el) el.scrollTop = el.scrollHeight
   }
+
+  /**
+   * Re-pin whenever the transcript changes size AND the reader is following.
+   *
+   * This is the load-bearing half of "opens at the bottom". Growth arrives
+   * after the pin from several directions and on nobody's schedule — the
+   * loading skeleton swapping out, markdown rendering, a web font re-flowing
+   * every bubble, an image settling, the composer growing — and each one leaves
+   * the reader a fraction of a screen above the newest message, silently.
+   *
+   * It is also what makes a STREAMING reply follow: the bubble grows, the
+   * observer fires, and a reader at the bottom stays there. A detached reader
+   * is untouched, because the pin is gated on `following` — the same gate as
+   * every other arrival path, so there is one rule and not two.
+   *
+   * Setting `scrollTop` does not change any box's size, so this cannot feed
+   * itself.
+   */
+  let observer = null
+
+  function disconnectObserver() {
+    observer?.disconnect()
+    observer = null
+  }
+
+  function observe(el) {
+    disconnectObserver()
+    if (!el || typeof ResizeObserver === 'undefined') return
+    observer = new ResizeObserver(() => { if (following.value) pin() })
+    // The CONTAINER reports a viewport change (a resized window, a dragged
+    // column); its first child is the content wrapper and reports the
+    // transcript growing. Both matter and they are different events.
+    observer.observe(el)
+    if (el.firstElementChild) observer.observe(el.firstElementChild)
+  }
+
+  watch(scrollEl, (el) => observe(el), { immediate: true, flush: 'post' })
+  onScopeDispose(disconnectObserver)
 
   // Detached ALONE is not worth an affordance: a reader scrolled up with
   // nothing new below them has missed nothing, and a control saying otherwise
@@ -120,20 +164,6 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = 
     scrollToLatest,
     reset,
   }
-}
-
-/**
- * Resolve after the browser has laid out whatever was just patched in.
- *
- * `requestAnimationFrame` where there is one; a macrotask otherwise, which is
- * what the node test environment gets. Either way this yields AFTER the
- * microtask queue `nextTick` drains, which is the point.
- */
-function afterFrame() {
-  return new Promise((resolve) => {
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve())
-    else setTimeout(resolve, 0)
-  })
 }
 
 /**

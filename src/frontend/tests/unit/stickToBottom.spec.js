@@ -14,7 +14,7 @@
  * actually reads — which is also the honest scope of the decision.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { nextTick, ref } from 'vue'
+import { markRaw, nextTick, ref } from 'vue'
 import {
   STICK_THRESHOLD_PX,
   distanceFromBottom,
@@ -182,23 +182,6 @@ describe('#2624 following, detaching and re-arming', () => {
     expect(node.scrollTop).toBe(1400)
   })
 
-  it('re-pins after a LATE patch, one frame on', async () => {
-    // Measured in a real browser (the #2624 e2e): a 40-message thread opened
-    // 20px above its newest message and STAYED there. One `nextTick` covers the
-    // component's own patch; a child patching on a later tick — the loading
-    // skeleton swapping out, markdown rendering a long thread — grows the
-    // transcript after the first measurement, and the browser clamps the
-    // assignment to the height it had then.
-    const s = setup()
-    const node = s.node
-    let ticks = 0
-    Object.defineProperty(node, 'scrollHeight', {
-      get: () => (ticks++ === 0 ? 1380 : 1400),   // the late 20px
-    })
-    await s.onArrive(1)
-    expect(node.scrollTop).toBe(1400)
-  })
-
   it('survives an element that has gone away mid-flight', async () => {
     // A thread switch or an unmount between the arrival and the tick.
     const s = setup()
@@ -212,6 +195,83 @@ describe('#2624 following, detaching and re-arming', () => {
     const { following, onScroll } = useStickToBottom(scrollEl)
     onScroll()
     expect(following.value).toBe(true)
+  })
+})
+
+describe('#2624 late growth is covered by an observer, not by chasing frames', () => {
+  /**
+   * The reason this is a ResizeObserver. Two frame-chasing shapes were tried
+   * and both shipped a reader 20px above the newest message: a fixed two
+   * passes, and a loop that stopped when the height repeated. Measured in a
+   * real browser — the transcript grew AFTER the loop had watched it hold
+   * still for a frame. There is no window that is both free and correct.
+   */
+  function withFakeObserver(fn) {
+    const instances = []
+    const original = globalThis.ResizeObserver
+    globalThis.ResizeObserver = class {
+      constructor(cb) { this.cb = cb; this.targets = []; instances.push(this) }
+      observe(t) { this.targets.push(t) }
+      disconnect() { this.targets = [] }
+      fire() { this.cb([]) }
+    }
+    try { return fn(instances) } finally { globalThis.ResizeObserver = original }
+  }
+
+  it('re-pins when the transcript grows after the pin', async () => {
+    await withFakeObserver(async (instances) => {
+      const content = markRaw({})
+      const node = markRaw({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600, firstElementChild: content })
+      const scrollEl = ref(node)
+      const s = useStickToBottom(scrollEl)
+      await nextTick()
+      await s.onArrive(1)
+      expect(instances.length).toBe(1)
+
+      // Growth that lands after everything has settled — the case both frame
+      // loops missed.
+      node.scrollHeight = 1420
+      instances[0].fire()
+      expect(node.scrollTop).toBe(1420)
+    })
+  })
+
+  it('watches the container AND its content wrapper', async () => {
+    await withFakeObserver(async (instances) => {
+      const content = markRaw({})
+      const node = markRaw({ scrollHeight: 1000, clientHeight: 400, scrollTop: 600, firstElementChild: content })
+      useStickToBottom(ref(node))
+      await nextTick()
+      // The container reports a viewport change (a resized window, a dragged
+      // column); the child reports the transcript growing. Different events.
+      expect(instances[0].targets).toContain(node)
+      expect(instances[0].targets).toContain(content)
+    })
+  })
+
+  it('leaves a detached reader alone when the transcript grows', async () => {
+    await withFakeObserver(async (instances) => {
+      const node = markRaw({ scrollHeight: 1000, clientHeight: 400, scrollTop: 100, firstElementChild: markRaw({}) })
+      const scrollEl = ref(node)
+      const s = useStickToBottom(scrollEl)
+      await nextTick()
+      s.onScroll()
+      expect(s.following.value).toBe(false)
+
+      node.scrollHeight = 1420
+      instances[0].fire()
+      expect(node.scrollTop).toBe(100)   // a streaming reply must not drag them
+    })
+  })
+
+  it('works where there is no ResizeObserver at all', async () => {
+    // The node test environment, and any browser old enough to lack it: the
+    // pin still happens, only the late-growth cover is absent.
+    const node = { scrollHeight: 1000, clientHeight: 400, scrollTop: 600 }
+    const s = useStickToBottom(ref(node))
+    node.scrollHeight = 1400
+    await s.onArrive(1)
+    expect(node.scrollTop).toBe(1400)
   })
 })
 

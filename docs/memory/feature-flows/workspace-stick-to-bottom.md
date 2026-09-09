@@ -66,13 +66,29 @@ would be the dishonest kind. It says *what* was missed ("3 new messages"), not
 just that something was — a bare arrow cannot tell a reader whether it is worth
 going.
 
-**Pinning takes TWO passes, one frame apart.** This is the one thing the unit
-tests could not have found. `nextTick` covers the component's own patch, but a
-child patching on a later tick — the loading skeleton swapping out, markdown
-rendering a long thread — grows the transcript *after* the first measurement,
-and the browser clamps the assignment to the height it had then. Measured in a
-real browser: a 40-message thread opened **20px above** its newest message and
-stayed there, stably, every time. The e2e found it; the second pass fixes it.
+**Late growth is covered by a `ResizeObserver`, not by chasing frames.** This
+is the one thing the unit tests could not have found, and it took three
+attempts. `nextTick` covers the component's own patch; growth arrives after it
+from several directions and on nobody's schedule — the loading skeleton
+swapping out, markdown rendering, a web font re-flowing every bubble — and the
+browser clamps `scrollTop` to the height it had at the assignment, leaving a
+40-message thread **20px above** its newest message, stably, every time.
+
+Two frame-chasing shapes were tried and both shipped that same 20px:
+
+1. a fixed second pass one frame later — fixed it on a fast local machine, and
+   CI still opened the thread 20px short;
+2. a settle loop that re-pinned until the height stopped changing — *also*
+   short, because the transcript grew again after the loop had already watched
+   it hold still for a frame.
+
+There is no window that is both short enough to be free and long enough to be
+right. The observer watches the container (a resized window, a dragged column)
+and its content wrapper (the transcript growing), re-pinning whenever the
+reader is following. It is also what makes a **streaming** reply follow, and it
+is gated on the same `following` flag as every other arrival path, so there is
+one rule and not two. Setting `scrollTop` changes no box's size, so it cannot
+feed itself.
 
 ## Call-site map
 
@@ -88,8 +104,10 @@ stayed there, stably, every time. The e2e found it; the second pass fixes it.
 | `PortalConversation.vue` | `send()` | intent → `pinToBottom` |
 | `PortalConversation.vue` | the agent/session watcher | `reset()` (no DOM) |
 
-A **streaming** reply needs nothing of its own: nothing moves the viewport while
-the reply grows, and the settle above is the only scroll it can cause.
+A **streaming** reply needs no call site of its own: while the reader is
+following, the observer keeps the growing bubble in view; while they are
+detached, nothing moves. The settle at the end of the turn is an ordinary
+arrival.
 
 ## Coverage
 
