@@ -274,8 +274,9 @@ the ruling must never be inferred later from the mere fact that it merged.** See
 
 **Voice mode — the orb takes the conversation (ent#534; supersedes ent#440).** The
 Workspace's voice is the platform's **real-time voice session** (`routers/voice.py` +
-`services/gemini_voice.py`, the Agent Detail orb `VoiceOverlay` + `useVoiceSession`,
-reused not forked), run as a **modal call** inside the conversation: the orb covers the
+`services/gemini_voice.py`, the platform orb `VoiceOverlay` + `useVoiceSession`,
+reused not forked — and **since #2559 the Workspace is its only consumer**), run as a
+**modal call** inside the conversation: the orb covers the
 thread, the header controls / tabs / composer are visible but inert, the shell swaps the
 rail for the agent's canvas (`PortalVoiceCanvas`, 40/60), and End / Escape returns to the
 chat. It is bound to the **Workspace thread**: `POST
@@ -518,6 +519,55 @@ stub degrades to `unknown` rather than silently inverting the default inside the
 meant to prove it; `_availability_map` also narrows its result to the requested names,
 because the underlying call sees **every** agent container on the host.
 
+**`model_options` + `model_default` — the composer's model choice (ent#403).** The curated
+option list rides the **roster**, not the card: it is identical for every agent (the
+`realtime_voice` / `multi_agent_chat_available` precedent), so putting it per-card would
+ship N copies of it on exactly the path #2159/#2163 exist to keep small. Only the resolved
+default varies per agent, so only that is a card field — which also means `get_agent_card`
+needs no payload change. Both **fail closed**: `model_default is None` renders no control,
+and that is the value for every non-platform principal and for a **non-Claude runtime**
+(the platform passes no `--model` to the Codex runtime at all, so a Claude-model list
+there promises something and changes nothing). Three things are resolved **once per roster
+load** beside `tts_ready` and the default voice — the option list, the platform default,
+and its label — and threaded into `_row_to_card` as `model_context`; `is_platform`,
+`runtime` and `model_context` are **keyword-only with no default**, because a default
+would let the agent-page call site keep compiling while silently serving the wrong card.
+The runtime comes from `docker_service.agent_container_runtimes()`, a **second** sparse
+`containers.list()` — O(1) in fleet size, not the N+1 #2160 forbids, and a separate leaf
+rather than a widening of `agent_container_states()` so #2196's guard suite keeps pinning
+what it pins. Read **sequentially**, not with `asyncio.gather`: #2163's guard pins that
+`get_roster` contains no fan-out at all, and that blanket shape is the point — two fixed
+O(1) reads are not the N-agent fan-out it closed, but loosening a guard to admit one's own
+change is how the property stops being true. The trade is ~50-200ms once per roster load. Note the
+sparse trap in its other form: under `sparse=True` docker-py's `.labels` **raises** (it
+reads `attrs["Config"]["Labels"]`, which only a full inspect populates), so the runtime is
+read from `attrs["Labels"]` — the key the `/containers/json` summary actually carries.
+An unreadable runtime falls back to `claude-code`, matching `get_agent_runtime`'s own
+documented posture and `availability`'s fail-open direction on this same payload.
+
+**The turn's model is resolved once, at a specific line.** `resolve_turn_model` is the ONE
+ladder for both portal turn routes — requested → the agent's #894 `public_channel_model` →
+the **platform default as a concrete id** — and it takes no principal, which is what makes
+"the streaming route and the synchronous ent#83 route cannot disagree" true by
+construction. It runs **immediately after the availability gate**, before anything is
+created, because `schedule_executions.model_used` is written ONLY at row creation and both
+portal paths pre-create the row: resolving where the value is *used* would stamp the
+pre-created row `None` and half-fix the requirement on exactly the path #2426 already
+burned. **The last rung is a concrete id and not `None` for that same reason** (review,
+2026-09-08): `execute_task` resolves the platform default at `:1044` but stamps it inside
+`if not execution_id:`, so on a portal turn the resolution happens and the stamp does not —
+`None` recorded NULL for the default state of every agent, which is most Workspace turns. It
+reads `settings_service.get_platform_default_model()`, the same function `execute_task`
+calls, so the two hold one opinion and `execute_task`'s lookup becomes a no-op; `None` still
+reaches the row only when that read itself fails. A caller passing `execution_id` must pass the `resolved_model` it stamped —
+`resolved_model or resolve(...)` would let the row and the turn disagree, so that path
+raises. The requested value cannot simply be re-laundered through the composer's allow-list
+either: an inherited `public_channel_model` may legitimately sit outside the curated set.
+The router owns normalise-then-authorise-then-allow-list (blank → `None` **before**
+validation, or the control's own `""` default 422s every default turn), and the closed
+`WORKSPACE_MODELS` set is the security control, since the value reaches the agent as a
+`--model` argv element.
+
 ### Multi-Agent Rooms (ent#169; OSS core since ent#443)
 
 `src/backend/shared_sessions/` — the substrate behind a Workspace chat that holds
@@ -659,7 +709,41 @@ and when to retry. Uploads run **sequentially** — twenty parallel requests is 
 way to trip the per-email limiter (ent#287). A room's drop fans out to every
 participating agent's inbox and the chip names the recipients (operator decision 13). The
 destination is the caller's `upload`, so the ent#484/#486 working folder can take it over
-without the gesture changing.
+without the gesture changing. **Since #2582 the upload also announces itself to the rail
+owner**: `stores/clientPortal.js::uploadDocument` — the single funnel all three surfaces
+already call — adds the agent to a pending SET that `usePortalRailFeeds` drains into a
+targeted inbox re-read. A set and not a scalar, because the two real gestures both defeat
+a scalar: a multi-file batch uploads sequentially without awaiting the re-read (a listing
+snapshotted before file 2 landed), and a room's fan-out mutates the signal once per agent
+inside one Vue flush window (only the last survives). The drain coalesces leading AND
+trailing and is ordered against `refresh()` by a **per-agent inbox epoch** the refresh
+snapshots before its awaits, so a refresh issued before the upload but resolving after it
+cannot clobber the fresh listing. Per agent and not one shared token, because a room's drop
+runs three of these concurrently for three different agents and a shared counter lets each
+invalidate the last.
+
+**The Files tab's own verbs (#2582 + ent#548).** Rows render from ONE flat projection
+(`components/portal/portalFiles.js::flattenFiles`) that owns both the render order and the
+preview index — two orderings would drift and the modal would silently open the wrong
+file. Download on either list; a preview modal for images and displayable text with
+next/previous over the *previewable* subset; and a delete whose affordance depends on the
+case:
+
+| Case | Affordance | Mechanism |
+|---|---|---|
+| My own upload | **Delete** (real) | `rm -f --` in the container inbox |
+| Agent-shared, I am a viewer | **Remove from my list** | a `portal_file_dismissals` row; the share is untouched |
+| Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
+
+**The matrix is session-type dependent and the UI copy says so.** `PortalPrincipal` is
+`(email, is_platform)` and carries no role, so `include_owned` is `principal.is_platform`
+at every call site (ent#358). Therefore a **non-owner admin is a viewer here** — stricter
+than the platform surface, and correct — and an **owner signed in with a magic-link portal
+token also gets the viewer affordance**. `portal_owns_agent` is the same membership the
+roster card renders, so the UI and the enforcement cannot disagree: the affordance is
+simply not offered rather than offered-and-refused. `portal_file_dismissals` is per-viewer
+storage because `agent_shared_files` has no audience column and `user_ui_preferences` is
+FK'd to `users.id`, which a portal principal has no row in.
 
 ## The compact header — Info as a rail tab, one paperclip, voice at the composer (ent#547, #2580)
 

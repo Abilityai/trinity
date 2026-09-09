@@ -58,10 +58,14 @@ Two knock-on edits, both of which would otherwise leave dead behaviour:
   gated on `workspaceAvailable`, and is no longer disabled while the agent is
   stopped. The Workspace reports availability itself (#2196), and a dead button
   is a worse answer than a page that says why.
-- `ChatPanel`'s voice overlay starts its session with `workspaceMode: true`.
-  **This is load-bearing, not a bonus**: the retired page was the only caller
-  that passed it, so bridging the voice panel to the canvas while leaving it
-  unreachable would have been dead code wearing a fix's name.
+- The voice call starts its session with `workspace_mode` on. **This is
+  load-bearing, not a bonus**: the retired page was the only caller that passed
+  it, so bridging the voice panel to the canvas while leaving it unreachable
+  would have been dead code wearing a fix's name. Since #2559 the caller is the
+  **Workspace** call (`client_portal/voice.py::start_workspace_voice`,
+  `workspace_mode=True` + `canvas_audience="operator"`), not `ChatPanel`'s
+  retired overlay — so a call reached through Agent Detail's Talk door still
+  draws on the same durable canvas this tab renders.
 
 ## Storage
 
@@ -373,6 +377,64 @@ writer carries the widest audience it may publish at; `write_canvas` takes
 `audience` as a REQUIRED parameter and `canvas_service.audience_within(stored,
 writer)` answers whether a writer may land on a stored canvas: `operator` ⊂
 `roster`, never the other way. See the voice section for where that bites.
+
+### The write says whether the requester can see it (#2577)
+
+The default is not the bug. The bug was **a success indistinguishable from one
+the user can see**: an agent in a public-link session wrote with the default
+`operator`, got `success: true` with the canvas echoed back, saw it listed by
+`list_canvases`, and the person who asked saw nothing — that reader is on the
+Workspace page and `operator` renders on Agent Detail. Neither side had the
+audience→surface mapping, because it appeared nowhere in the tool contract.
+
+So the write answers the question. `PUT /{name}/canvas/{id}` returns
+`CanvasWriteResult` — `Canvas` plus `visible_to_requester` and
+`visibility_note`, resolved by `canvas_service.visibility_for_canvas` off the
+**stored** row (`normalize_audience` defaults closed, so a verdict about the
+requested value could describe a canvas that does not exist). `list`/`get` keep
+the narrower `Canvas`: they answer about a canvas, not about a requester.
+
+Two properties are load-bearing:
+
+1. **Three-state, not a boolean.** Widening to `roster` publishes to everyone
+   the agent is shared with, so a wrong `False` costs an over-share and "could
+   not tell" has to stay distinguishable from "no" (#2196). A write with no
+   `execution_id`, or one whose stamp does not resolve to this agent, answers
+   `None` and says nothing — `resolve_and_validate_execution` is already
+   fail-open, so an unverified stamp arrives as "no claim" for free.
+2. **The reader sets are allow-lists.** `_ROSTER_SIDE_TRIGGERS` (`public`,
+   `paid`) and `_OPERATOR_SIDE_TRIGGERS` are named individually rather than
+   derived by subtraction, so a trigger label invented tomorrow makes **no**
+   claim instead of being adopted into the confident branch.
+
+**A Workspace turn gets no claim either, and that is the subtle one.** A portal
+turn carries `triggered_by="public"` as well; the two are told apart only by
+`source_channel="portal"`. They are not the same audience —
+`client_portal/agent_page.py::canvas_audience_for(is_platform=True)` returns
+`None`, no narrowing, so a signed-in **operator** working in the Workspace reads
+every audience including `operator`. Claiming `False` there would tell an
+operator their own canvas is invisible and push them to publish it to the whole
+roster: the exact over-share property (1) exists to prevent, on the most
+ordinary Workspace path there is. The execution row records the client's email,
+never whether that email is a platform principal, so the honest answer is no
+answer. The confident branch is therefore public-link and paid turns only —
+doors that render no canvas at all and cannot be the platform-principal case.
+
+**Channel turns are deliberately silent, for a different reason.** No canvas
+surface renders inside Slack/Telegram/WhatsApp/VoIP, so neither audience reaches
+that reader where they are. Answering `False` would be *true* and would advise a
+widening that still does not put the canvas in front of them — a hint that
+nudges a pointless over-share is worse than no hint. Reaching a channel reader
+needs a different mechanism (a link to the Workspace page), not a wider
+audience.
+
+Deliberately **not** done: the issue's option (2), defaulting the audience from
+the session type. In a public-link session the requester is one anonymous
+visitor while `roster` is everyone the agent is shared with, so defaulting there
+would publish to the whole roster because one visitor asked. The issue says the
+same thing about the blanket case; this is the same objection surviving the
+narrowing. The agent widens explicitly, told exactly why — which keeps a real
+visibility change a decision someone makes rather than a default that happens.
 
 ## Staleness — derived, not a clock (ent#438 AC 7)
 
