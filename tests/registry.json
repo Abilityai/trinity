@@ -2855,6 +2855,18 @@
         "unit"
       ],
       "description": "The sharing heartbeat's dueness comes from the persisted last-share stamp, not from process age (#2618). Pre-fix the loop slept the whole 24h interval from process start and then sent unconditionally, so an install that restarted inside every window shared its consent-time backfill once and never again (a dev instance sat 45h past its last share with five reloads a day while Settings reported sharing as on). Pure dueness matrix over empty / unparseable / future / exact / offset / naive stamps and a 1h interval (due unless the stamp is provably inside the interval); one wake on a store without sleeping (the consent and hard-disable gates run before any stamp read or Redis touch, with a positive control); three boots over one store driven through _loop with a fake clock the sleep stub advances (nothing sends inside the window, exactly one send lands past it, a further restart stays silent); sleep-first pinned on an ordered sleep/send timeline with the jitter fixed; the tick marker on fakeredis (TTL keyed to the send cadence at both 1h and 24h, a fresh SETNX per claim, released on the STORE after a failed send so a sibling retries at the next wake, kept after an acknowledged send even when the stamp write raises \u2014 share_now True means the receiver acknowledged \u2014 release touching only this tick's lock, fail-open, released on a cancellation mid-send); retry at the next wake with a 2xx-only stamp; an unreadable store never sends while a stamp read that alone raises reads as due; the persisted retry cap (the rule, honoured before the claim, and ten wakes against a dead receiver costing five attempts then one per half-interval); a tick that raises does not end the loop; a raise ahead of the POST is recorded in the send log and throttled like any failed attempt while a raise after an acknowledgement neither duplicates the entry nor turns True into False; _days_since pinned across every stamp shape the column has held; and a guard that the module never again says the marker is never released. Harness mirrors test_ent437 (real write-once settings store, fake httpx, asyncio.run under the unit island's strict asyncio mode)."
+    },
+    {
+      "file": "unit/test_operator_intake.py",
+      "feature": "ent#38 / #1593 / ent#545",
+      "added": "2026-06-23",
+      "categories": [
+        "backend",
+        "telemetry",
+        "security",
+        "unit"
+      ],
+      "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
     }
   ]
 }
