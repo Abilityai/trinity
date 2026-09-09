@@ -5,15 +5,21 @@
     (tertiary ink, pointer-events none), padding-right 32px so text never
     collides. Options come through the default slot as native <option>s.
 
-    The chevron points up while the picker is open, which is the chevron idiom
-    the rest of the app already follows (ChatHistoryDropdown, OverflowTabs,
-    InfoPanel, the disclosure rows). Those all own their open state in JS; a
-    NATIVE select's picker is drawn by the platform and reports nothing, so
-    `:open` is the only hook there is — Baseline newly-available 2026-05 (Chrome
-    133, Firefox 136, Safari 26.5). It degrades to today's static chevron on an
-    older engine, so no behaviour depends on it. The rule is a sibling selector
-    rather than `:has()` on the wrapper: the chevron is the select's next
-    sibling, so no group class is needed on the parent.
+    On `ghost` ONLY, the chevron points up while the picker is open — the
+    chevron idiom the rest of the app already follows (ChatHistoryDropdown,
+    OverflowTabs, InfoPanel, the disclosure rows). Those all own their open
+    state in JS; a NATIVE select's picker is drawn by the platform and reports
+    nothing, so `:open` is the only hook there is — Baseline newly-available
+    2026-05 (Chrome 133, Firefox 136, Safari 26.5). It degrades to a static
+    chevron on an older engine, so no behaviour depends on it. The rule is a
+    sibling selector rather than `:has()` on the wrapper: the chevron is the
+    select's next sibling, so no group class is needed on the parent.
+
+    Deliberately NOT on `field`: #2662 is a Workspace composer bug, and `field`
+    is what Settings and ResourceModal render. Bringing every select into the
+    idiom is the right end state but it is a change to surfaces this issue does
+    not own, so it belongs in its own issue with its own review — not smuggled
+    in behind a composer fix.
 
     `variant="ghost"` (#2662) swaps the field recipe for the borderless,
     content-width one — the same control where a select is a lightweight
@@ -32,13 +38,13 @@
         :disabled="disabled"
         :aria-invalid="error ? 'true' : undefined"
         :aria-describedby="describedBy"
-        :class="[recipe.field, error ? FIELD_INVALID_CLASS : recipe.valid, 'appearance-none', recipe.pad, '[&:open~svg]:rotate-180']"
+        :class="[recipe.field, error ? FIELD_INVALID_CLASS : recipe.valid, 'appearance-none', recipe.pad, recipe.flip]"
         @change="$emit('update:modelValue', $event.target.value)"
       >
         <slot />
       </select>
       <svg
-        :class="['pointer-events-none absolute top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400 transition-transform duration-150 motion-reduce:transition-none', recipe.chevron]"
+        :class="['pointer-events-none absolute top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400', recipe.chevron]"
         fill="none"
         viewBox="0 0 24 24"
         stroke="currentColor"
@@ -130,13 +136,15 @@ const recipe = computed(() =>
         field: FIELD_GHOST_CLASS,
         valid: FIELD_GHOST_VALID_CLASS,
         pad: 'pr-7',
-        chevron: 'right-2 h-3 w-3',
+        chevron: 'right-2 h-3 w-3 transition-transform duration-150 motion-reduce:transition-none',
+        flip: '[&:open~svg]:rotate-180',
       }
     : {
         field: FIELD_CLASS,
         valid: FIELD_VALID_CLASS,
         pad: 'pr-8',
         chevron: 'right-[10px] h-3.5 w-3.5',
+        flip: '',
       }
 )
 const describedBy = computed(() => {

@@ -8,6 +8,13 @@
  * platform and reports nothing to the page, so `:open` is the only hook there
  * is — which is why selects were the one control excluded from the idiom.
  *
+ * Scoped to the `ghost` recipe ONLY. #2662 is a Workspace composer bug and
+ * `field` is what Settings and ResourceModal render, so widening the idiom to
+ * every select in the app is a separate issue with its own review. The last
+ * test pins that boundary in the direction it can actually drift — someone
+ * "tidying" the flip onto the shared <select> would silently change surfaces
+ * this PR does not own.
+ *
  * Vitest runs `environment: 'node'` here with no mount harness, so these are
  * source-structure assertions like their siblings. Comments are STRIPPED before
  * matching: this PR already shipped a guard that passed on the prose above the
@@ -31,6 +38,8 @@ const CODE = SRC.replace(/<!--[\s\S]*?-->/g, '')
 describe('#2662 BaseSelect open-state chevron', () => {
   it('flips the chevron while the native picker is open', () => {
     expect(CODE).toContain('[&:open~svg]:rotate-180')
+    // Resolved through the recipe, never hard-coded on the shared <select>.
+    expect(CODE).toMatch(/:class="\[recipe\.field,[^"]*recipe\.flip\]"/)
   })
 
   it('keeps the chevron as the select\'s immediate next sibling', () => {
@@ -46,11 +55,15 @@ describe('#2662 BaseSelect open-state chevron', () => {
     expect(CODE).toContain('motion-reduce:transition-none')
   })
 
-  it('applies to both recipes, so no variant is left out of the idiom', () => {
-    // The flip rides on the shared <select>, not on `recipe`, so `field` and
-    // `ghost` behave identically. A per-variant chevron rule would be the
-    // "third variant half-added" failure the recipe computed exists to prevent.
+  it('stays scoped to ghost — `field` is untouched by this issue', () => {
     const recipeBlock = CODE.slice(CODE.indexOf('const recipe = computed'))
-    expect(recipeBlock).not.toContain('rotate-180')
+    const [ghostArm, fieldArm] = recipeBlock.split('FIELD_CLASS')
+    // The flip and its transition are resolved in the one `recipe` computed, on
+    // the ghost arm. Anything on the shared <select> would reach `field` too.
+    expect(ghostArm).toContain('[&:open~svg]:rotate-180')
+    expect(ghostArm).toContain('transition-transform')
+    expect(fieldArm).not.toContain('rotate-180')
+    expect(fieldArm).not.toContain('transition-transform')
+    expect(fieldArm).toContain("flip: ''")
   })
 })
