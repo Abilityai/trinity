@@ -120,7 +120,7 @@ const recipe = computed(() =>
         field: FIELD_GHOST_CLASS,
         valid: FIELD_GHOST_VALID_CLASS,
         pad: 'pr-7',
-        chevron: 'right-[6px] h-3 w-3',
+        chevron: 'right-2 h-3 w-3',
       }
     : {
         field: FIELD_CLASS,

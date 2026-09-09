@@ -561,7 +561,7 @@
                 rows="1"
                 :placeholder="composerPlaceholder"
                 :disabled="voiceCallActive"
-                class="block w-full resize-none border-0 bg-transparent text-sm text-gray-900 dark:text-gray-100 px-2 py-1.5 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                class="block w-full resize-none border-0 bg-transparent text-sm text-gray-900 dark:text-gray-100 px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
                 @input="onComposerInput"
                 @keydown="onComposerKeydown"
                 @click="onComposerCaret"

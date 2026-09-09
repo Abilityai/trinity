@@ -263,7 +263,7 @@
                 v-model="input"
                 rows="1"
                 :placeholder="placeholder"
-                class="block w-full resize-none border-0 bg-transparent text-sm px-2 py-1.5 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                class="block w-full resize-none border-0 bg-transparent text-sm px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
                 @keydown="onComposerKeydown"
                 @input="onComposerInput"
                 @click="onComposerCaret"
@@ -272,14 +272,14 @@
             </div>
             <div class="mt-1 flex items-center gap-1">
               <div class="ml-auto flex items-center gap-1 min-w-0">
-              <button
-                type="submit"
-                class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-                :disabled="!input.trim() || sending"
-                title="Send"
-              >
-                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
-              </button>
+                <button
+                  type="submit"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
+                  :disabled="!input.trim() || sending"
+                  title="Send"
+                  >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </button>
               </div>
             </div>
           </div>
