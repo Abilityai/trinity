@@ -24,9 +24,9 @@
         <div
           v-if="store.sessionExpired"
           data-testid="workspace-session-expired"
-          class="mb-5 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/25 px-3 py-2"
+          class="mb-5 rounded-md border border-status-warning-200 dark:border-status-warning-500/30 bg-status-warning-50 dark:bg-status-warning-500/10 px-3 py-2"
         >
-          <p class="text-sm text-amber-800 dark:text-amber-200">
+          <p class="text-sm text-status-warning-800 dark:text-status-warning-300">
             Your session timed out. Sign in again to pick up where you left off.
           </p>
         </div>
