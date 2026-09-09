@@ -19,13 +19,3 @@
  * call; one constant with one reader is what keeps that call cheap.
  */
 export const WORKSPACE_BRAND_NAME = 'Trinity Workspace'
-
-/**
- * Where the mark goes when it is a link.
- *
- * The Workspace root, and nowhere else. A client session holds no `users` row,
- * so a platform route would be a door that 404s or bounces to `/login` for
- * exactly the audience this surface exists for — a dead affordance is one of
- * the two failures this must not have (the other being an unlabelled one).
- */
-export const WORKSPACE_ROOT = '/workspace'

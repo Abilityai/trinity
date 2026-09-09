@@ -320,7 +320,6 @@ import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
-import { WORKSPACE_ROOT } from './portalBrand'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
@@ -331,6 +330,7 @@ import {
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
+  WORKSPACE_ROOT,
 } from './portalUtils'
 
 const props = defineProps({

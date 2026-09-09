@@ -18,7 +18,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { stripComments } from './helpers/stripComments'
-import { WORKSPACE_BRAND_NAME, WORKSPACE_ROOT } from '@/components/portal/portalBrand'
+import { WORKSPACE_BRAND_NAME } from '@/components/portal/portalBrand'
+// The route lives in `portalUtils`, which owns it for the stage guard and the
+// sign-out target; the mark is a third consumer, not a second definition.
+import { WORKSPACE_ROOT } from '@/components/portal/portalUtils'
 
 const read = (rel) => stripComments(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8'))
 
