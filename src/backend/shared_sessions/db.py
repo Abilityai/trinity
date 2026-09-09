@@ -306,6 +306,49 @@ def clear_cached_session(room_id: str, identity: str) -> None:
         conn.execute(stmt, {"room": room_id, "identity": identity})
 
 
+def list_active_claude_session_ids(agent_name: str) -> list[str]:
+    """Every Claude session id a room of this agent can still resume (#2610).
+
+    The JSONL reaper unions this with the `agent_sessions` and Workspace-thread
+    keep sets. Without it every room handle is an orphan by construction: rooms
+    are the third surface to store a `--resume` id, and the sweep deleted their
+    files an hour after they were written. The next mention of any agent in the
+    room then failed with `No conversation found with session ID: <uuid>` —
+    seen in production on a room left overnight, each participant failing on
+    its own id, while single-agent chats on the same agents were fine because
+    THEIR ids were in the keep set. Same class as ent#358, one surface over.
+
+    The predicate deliberately mirrors `service._wake_agent`'s early returns
+    rather than returning every stored handle, and the two must move together:
+
+    * `left_at IS NULL` — a departed participant is never woken, and nothing
+      clears `left_at` (`add_participant` is an idempotent no-op on conflict).
+    * `status = 'open'` — a closed room is never woken, and `close_room` is a
+      one-way CAS.
+
+    Both are permanent, so those handles can never be resumed and keeping them
+    would trade #2610 for an unbounded disk leak: rooms expire, so every room
+    eventually closes, and a status-blind keep set would pin every JSONL they
+    ever wrote. Widening this is only correct alongside a wake path that can
+    actually use the extra rows.
+
+    `kind = 'agent'` is load-bearing, not decoration: `identity` is polymorphic
+    (agent name / user id / verified email, per the sibling `kind`), so without
+    it a human participant whose username equals an agent name would inject a
+    handle into that agent's keep set.
+    """
+    stmt = text(
+        "SELECT DISTINCT p.cached_session_id "
+        "FROM enterprise_room_participants p "
+        "JOIN enterprise_rooms r ON r.id = p.room_id "
+        "WHERE p.kind = 'agent' AND p.identity = :agent "
+        "  AND p.left_at IS NULL AND r.status = 'open' "
+        "  AND p.cached_session_id IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return [row[0] for row in conn.execute(stmt, {"agent": agent_name}).all() if row[0]]
+
+
 # --- messages ----------------------------------------------------------------
 
 def append_message(msg_id: str, room_id: str, sender_kind: str,

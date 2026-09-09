@@ -3724,6 +3724,40 @@ def _migrate_portal_chat_state(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_file_dismissals_table(cursor, conn):
+    """Per-viewer dismissal of an agent-shared file (#2582 / ent#548).
+
+    ``agent_shared_files`` has no audience column, so ``portal_documents`` lists
+    every active share of an agent to every rostered client. "Remove it from MY
+    list" therefore needs its own storage — and the one generic per-user
+    preference store (``user_ui_preferences``) is FK'd to ``users.id``, which a
+    Workspace client has no row in.
+
+    Keyed by the caller's own email, which makes the row itself the per-viewer
+    scope; ``file_id`` is deliberately never validated on write (a 404 for an
+    unknown id would be an existence oracle over every share in the install —
+    OSS invariant #8, the same fork ``set_chat_star`` resolved), and a row cap
+    bounds the write instead. ``agent_name`` is what makes the row follow the
+    agent's lifecycle through ``AGENT_REFS``.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portal_file_dismissals (
+            client_email TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            dismissed_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, file_id)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portal_file_dismissals_file "
+        "ON portal_file_dismissals(file_id)"
+    )
+    conn.commit()
+
+
 def _migrate_secret_settings_encryption(cursor, conn):
     """Encrypt the cleartext credential rows in ``system_settings`` (ent#435).
 
@@ -4276,4 +4310,5 @@ MIGRATIONS = [
     ("portal_session_main_chat", _migrate_portal_session_main_chat),
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
+    ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
 ]

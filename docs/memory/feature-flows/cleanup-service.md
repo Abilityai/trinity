@@ -1,5 +1,7 @@
 # Feature: Cleanup Service (CLEANUP-001)
 
+> **Updated 2026-09-07 (#2434):** Every sweep that **fabricates** a close now writes `duration_ms = NULL`, not `now − started_at`. Past 24.855 days that fabricated value overflowed the PostgreSQL `int4` column, and because each sweep batches its SELECT and its whole per-row UPDATE loop in ONE transaction, the first overflow **rolled back the entire batch** — so a single >24.8-day row froze every stale execution and activity on the instance, forever, while `run_cleanup` logged "Cycle complete". See [Wedged pre-upgrade instance](#wedged-pre-upgrade-instance-2434) and the four `duration_ms = NULL` sweeps below.
+
 > **Updated 2026-08-28 (#2433):** Proof-of-life is now **two-sided** — an admitted row is an orphan only when the agent does not know it **and** no live backend dispatcher owns it. The agent-known set (`_extract_agent_known_ids`) gains `pending_ids`; the dispatcher half is read tri-state (`alive` / `absent` / `unknown`) from `agent_call_limiter.inflight_verdicts` with ONE `MGET` per sweep and applied at the periodic watchdog, the Phase-3 slot re-verify and the startup recovery. Withheld rows are counted in `CleanupReport.dispatch_inflight_skipped` (in `to_dict()`, deliberately NOT in `total`); the orphan error string states what was observed (`_orphan_error_message`). The marker `execution:inflight:{execution_id}` is only READ here — the limiter's refresher writes it. See [Watchdog Reconciliation](#watchdog-reconciliation-issue-129), [Phase 3](#phase-3-slot-reclaim-re-verification-issue-378), [Startup Recovery](#startup-recovery-recover_orphaned_executions) and [Redis Operations](#redis-operations).
 
 > **Updated 2026-07-17 (#1449):** `_sweep_retention_772` gained an **unconditional** `backlog_metadata` PII scrub sub-sweep (`db.scrub_terminal_backlog_metadata`) — NULLs the drain-replay blob (`user_message`/`user_email`/`system_prompt`) on authoritative-terminal rows (`success`/`cancelled`/`skipped`). It is a **security invariant, not age-gated** (no ops-config window — a fixed default avoids the #1638 floor-by-seed trap) and runs every cycle even when all #772 windows are `0`. **FAILED is excluded** (resurrectable to SUCCESS via a late token-gated CAS). Count feeds `CleanupReport.backlog_metadata_scrubbed` + the WAL-checkpoint sum; the blob itself is never logged (count-only). See the extended Retention-sweeps step below.
@@ -391,7 +393,7 @@ AND started_at < ?  -- Python: (utcnow - 120 min).strftime('%Y-%m-%dT%H:%M:%S')
 UPDATE schedule_executions
 SET status = 'failed',
     completed_at = ?,
-    duration_ms = ?,
+    duration_ms = NULL,  -- #2434: fabricated, not measured
     error = 'Marked as failed by cleanup: exceeded 120-minute timeout'
 WHERE id = ?
 ```
@@ -426,7 +428,7 @@ AND started_at < ?  -- Python: (utcnow - 60 sec).strftime('%Y-%m-%dT%H:%M:%S')
 UPDATE schedule_executions
 SET status = 'failed',
     completed_at = ?,
-    duration_ms = ?,
+    duration_ms = NULL,  -- #2434: fabricated, not measured
     error = 'Silent launch failure: no Claude session created within 60 seconds'
 WHERE id = ?
 ```
@@ -446,7 +448,7 @@ SELECT started_at FROM schedule_executions WHERE id = ? AND status = 'running'
 UPDATE schedule_executions
 SET status = 'failed',
     completed_at = ?,
-    duration_ms = ?,
+    duration_ms = NULL,  -- #2434: fabricated, not measured
     error = ?
 WHERE id = ? AND status = 'running'
 ```
@@ -484,7 +486,7 @@ AND started_at < ?  -- Python: (utcnow - timeout_min).strftime('%Y-%m-%dT%H:%M:%
 UPDATE agent_activities
 SET activity_state = 'failed',
     completed_at = ?,
-    duration_ms = ?,
+    duration_ms = NULL,  -- #2434: fabricated, not measured
     error = 'Marked as failed by cleanup: exceeded 30-minute timeout'
 WHERE id = ?
 ```
@@ -546,6 +548,7 @@ WHERE id = ?
 | Watchdog DB race (already completed) | Returns False, no side effects | Correct behavior |
 | Stale execution marking fails | Logged, continues to activities/slots | Partial cleanup |
 | Stale activity marking fails | Logged, continues to slots | Partial cleanup |
+| A row's fabricated `duration_ms` exceeds the `int4` ceiling (pre-#2434) | The `UPDATE` raises inside the sweep's SHARED transaction; every later `conn.execute` raises `InFailedSqlTransaction` and `begin()` rolls back rows already updated | **The whole batch, not the row.** No stale execution or activity anywhere on the instance is ever closed again — every cycle, forever — while the cycle logs “complete” (`recovered=0 … errors=1`). PostgreSQL only; SQLite stores an 8-byte int and never raises. Fixed by writing NULL |
 | Redis slot cleanup fails | Logged, cycle ends | Partial cleanup |
 | Entire cleanup cycle crashes | Logged, next cycle still runs | Temporary gap |
 | Service start fails | Logged in lifespan, backend starts normally | No auto-cleanup |
@@ -555,6 +558,30 @@ WHERE id = ?
 |----------------|-------------|---------|
 | Not admin | 403 | Access forbidden |
 | Not authenticated | 401 | Not authenticated |
+
+### Wedged pre-upgrade instance (#2434)
+
+An instance running a pre-#2434 image with any `running` execution or `started` activity older than **24.855 days** is wedged: every cleanup cycle raises, closes nothing, and reports itself complete. Two ways to recognise it in the logs:
+
+```
+[Recovery] Error recovering execution <id>: (psycopg2.errors.NumericValueOutOfRange) integer out of range
+[Recovery] Task execution recovery complete: recovered=0, still_running=0, skipped_grace=0, cas_lost=0, errors=1, activities_closed=0
+[Cleanup] Error marking stale executions: … integer out of range
+[Cleanup] Error marking stale activities: … integer out of range
+```
+
+`recovered=0 … errors=1` is the tell. Symptoms: rows counted in-flight by every status reader, canary **E-01** pinned `critical` with no way to clear it, the Dashboard Timeline rendering agents as still working, and leaked capacity — `_recover_execution` writes the terminal *before* releasing capacity, so the raise skips the release, and `_reconcile_orphaned_slots` only reclaims rows whose SQL row is terminal or missing, which a wedged row is not. **#2216's restore path leads straight here**: an instance restored from a backup older than 24.8 days lands wedged on first boot.
+
+**The remedy is the upgrade restart — no manual SQL.** Boot recovery closes the rows (`recover_orphaned_executions` → `_recover_execution` now succeeds), capacity is released, `_reconcile_orphaned_slots` reclaims the slot, and E-01 goes green on the next canary cycle.
+
+For an instance that cannot be upgraded yet, the rows can be closed by hand — this is the **pre-upgrade workaround**, not a post-upgrade step:
+
+```sql
+UPDATE schedule_executions SET status='failed', completed_at=started_at, duration_ms=NULL,
+       error='closed manually' WHERE status='running' AND started_at < now() - interval '25 days';
+UPDATE agent_activities SET activity_state='failed', completed_at=started_at, duration_ms=NULL
+ WHERE activity_state='started' AND started_at < now() - interval '25 days';
+```
 
 ## Architecture Notes
 

@@ -492,6 +492,37 @@ CREATE INDEX idx_agent_files_token ON agent_shared_files(download_token);
 CREATE INDEX idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL;
 ```
 
+**portal_file_dismissals** (#2582 / ent#548 — a Workspace viewer removes an agent-shared
+file from *their* list without revoking the share):
+```sql
+CREATE TABLE portal_file_dismissals (
+    client_email TEXT NOT NULL,           -- lowercased; the row IS the per-viewer scope
+    file_id TEXT NOT NULL,                -- agent_shared_files.id — deliberately NOT validated on write
+    agent_name TEXT NOT NULL,             -- load-bearing, see below
+    dismissed_at TEXT NOT NULL,
+    PRIMARY KEY (client_email, file_id)
+);
+CREATE INDEX idx_portal_file_dismissals_file ON portal_file_dismissals(file_id);
+```
+Both tracks (Invariant #9): SQLite `portal_file_dismissals_table` in `db/migrations.py`,
+PostgreSQL Alembic `0058_portal_file_dismissals`. **No `enterprise_` prefix** — that prefix
+on the portal tables is retained history, not a convention to extend.
+
+Three properties are deliberate. **`agent_name` is not decoration**: `agent_shared_files`
+is registered `AgentRef(..., Policy.CASCADE)`, so deleting an agent hard-deletes its share
+rows *without going through the revoke sweeper* and would orphan every dismissal keyed on
+those ids forever; worse, a table with no agent column would sidestep the very guard that
+exists to catch this (`tests/unit/test_agent_cleanup_parity.py`). It is therefore
+registered as `AgentRef("portal_file_dismissals", "agent_name", Policy.CASCADE)`. **The PK
+leads with `client_email`** because the read path is `dismissed_file_ids(email)` →
+`WHERE client_email = ?`, called per participant per turn end; the secondary index on
+`file_id` serves the sweeper, which is the only reader that asks the other question. And
+the write **does not check that `file_id` exists** — a 404 for an unknown id would be an
+existence oracle over every share in the install (Invariant #8), the same fork
+`set_chat_star` already resolved the same way; a row cap bounds the write instead. Both
+purge paths in `db/agent_shared_files.py` (`delete_expired_and_revoked` and
+`delete_for_agent`) delete the matching dismissals in the same transaction.
+
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
 CREATE TABLE agent_event_subscriptions (

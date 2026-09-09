@@ -134,6 +134,15 @@ class PortalAgentCard(BaseModel):
     # customer's roster over an infrastructure fault. When Docker is unreadable
     # every card reads `unknown` and the roster renders exactly as it does today.
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
+    # #2582 — is this caller the agent's OWNER, as the roster union resolved it?
+    # The Files tab's "Delete for everyone" affordance is gated on this, and
+    # `service.portal_owns_agent` enforces the same membership server-side, so
+    # the button and the gate cannot disagree. Fails CLOSED (`False`): the bug
+    # to avoid is offering a destructive action the server will refuse. Note it
+    # is session-type dependent by construction — `include_owned` is
+    # `principal.is_platform` (ent#358) — so an owner on a magic-link portal
+    # token reads `False` here, and that is correct rather than a defect.
+    owned: bool = False
 
 
 class PortalBriefing(BaseModel):
@@ -515,6 +524,12 @@ class PortalUploadItem(BaseModel):
     filename: str
     size_bytes: int
     uploaded_at: Optional[str] = None
+    # #2582 — guessed from the extension by `_read_inbox`, because a client
+    # upload has no DB row to carry a detected type. Declaring it here is what
+    # makes it reach the client at all: the route's `response_model` silently
+    # strips undeclared keys, so `PortalRailFiles.vue`'s `<FileIcon :mime>` has
+    # been rendering the generic icon unconditionally since it shipped.
+    mime_type: Optional[str] = None
 
 
 class PortalUploads(BaseModel):

@@ -289,6 +289,14 @@ def start_tool_execution(tool_id: str, tool: str, input_data: Dict[str, Any]):
 ```
 
 **complete_tool_execution** (lines 54-84):
+
+> **Deliberately NOT covered by #2434** (reviewed, not overlooked): this duration
+> lives in `agent_state.session_activity`, an in-process dict on the agent, never
+> in a database column. There is no `int4` to overflow and no shared transaction
+> to abort, so the unguarded subtraction below is correct here. The #2434 rule
+> applies to the `duration_ms` COLUMNS — `db/schedules/cleanup.py`,
+> `db/activities.py`, `db/schedules/executions.py`, `src/scheduler/database.py`.
+
 ```python
 def complete_tool_execution(tool_id: str, success: bool, output: str = None):
     """Record completion of a tool execution"""
