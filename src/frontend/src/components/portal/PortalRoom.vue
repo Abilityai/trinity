@@ -56,11 +56,19 @@
            room that closes at a cap with no prior warning reads as the agents
            going quiet. Shown from ~80% so there is time to react, not as a
            permanent gauge nobody asked for. -->
-      <div v-if="budgetWarning" class="ml-auto mr-2 text-xs text-status-warning-600 dark:text-status-warning-400 truncate" :title="budgetWarning">
-        {{ budgetWarning }}
+      <div
+        v-if="notice"
+        class="ml-auto mr-2 truncate text-xs"
+        :class="notice.level === 'critical'
+          ? 'text-status-danger-600 dark:text-status-danger-400 font-medium'
+          : 'text-status-warning-600 dark:text-status-warning-400'"
+        :title="`${notice.headline}. ${notice.detail}`"
+        data-testid="room-budget-headline"
+      >
+        {{ notice.headline }}
       </div>
 
-      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !budgetWarning }">
+      <div class="flex items-center gap-1 shrink-0" :class="{ 'ml-auto': !notice }">
         <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
         <PortalStarButton
           :starred="starred"
@@ -180,6 +188,27 @@
              recipients named — a room's upload is a fan-out and the person
              should see who received it. -->
         <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
+        <!-- #2620 — the proactive half. Placed ABOVE the attachments
+             block on purpose: the composer below is a `v-else` chained to that
+             block's `v-if`, and `v-else` binds to the immediately preceding
+             element — so a conditional dropped between them silently steals
+             the chain and the composer vanishes exactly when this banner
+             appears. Pinned by `roomComposerChain.spec.js`.
+
+             The header line is ambient; this is
+             where the person is about to SPEND one, so the last few messages
+             say so in full, once, right above the box. Only at `critical`: a
+             banner that is always there is a banner nobody reads. -->
+        <div
+          v-if="notice && notice.level === 'critical'"
+          class="mb-2 rounded-lg border border-status-danger-200 bg-status-danger-50 px-3 py-2 text-xs text-status-danger-800 dark:border-status-danger-800 dark:bg-status-danger-900/30 dark:text-status-danger-200"
+          data-testid="room-budget-banner"
+          role="status"
+        >
+          <span class="font-medium">{{ notice.headline }}.</span>
+          {{ notice.detail }}
+        </div>
+
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
             v-for="(f, i) in attachments"
@@ -269,6 +298,7 @@
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { budgetNotice } from '@/utils/roomBudgets'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
@@ -407,26 +437,10 @@ function elapsedOf(it) { return liveElapsedSeconds(it, { fetchedAtMs: workStore.
 watch(agentParticipants, (list) => emit('participants-changed', list), { immediate: true, deep: true })
 watch(workingAgents, (list) => emit('work-state', workSignalFromRoom(list)), { immediate: true, deep: true })
 
-// ent#381: the near-limit signal the Sessions page used to own. Same 80%
-// threshold, same two budgets — messages and cost — so a client sees a room
-// approaching its end rather than discovering it after the fact.
-const BUDGET_WARN_AT = 0.8
-
-const budgetWarning = computed(() => {
-  const r = room.value
-  if (!r || r.status !== 'open') return null
-  const used = r.message_count ?? 0
-  const maxMsgs = r.max_messages ?? 0
-  if (maxMsgs && used / maxMsgs >= BUDGET_WARN_AT) {
-    return `${used}/${maxMsgs} messages`
-  }
-  const cost = r.cost ?? 0
-  const maxCost = r.max_cost_usd ?? 0
-  if (maxCost && cost / maxCost >= BUDGET_WARN_AT) {
-    return `$${cost.toFixed(2)}/$${maxCost.toFixed(2)}`
-  }
-  return null
-})
+// #2620 — the notice now names the CONSEQUENCE, not just the ratio. The rule
+// is pure and lives in `utils/roomBudgets.js`, where a node-env test can reach
+// it; this component only decides where it appears.
+const notice = computed(() => budgetNotice(room.value))
 
 const closedReason = computed(() => ({
   max_messages: 'message limit reached',

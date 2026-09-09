@@ -2904,4 +2904,25 @@ export class TrinityClient {
   }): Promise<{ name: string; kind: string; value: string }> {
     return this.request("POST", "/api/enterprise/credential-vault/fetch", body);
   }
+
+  // --- Role assignments (trinity-enterprise#500) ----------------------------
+
+  /**
+   * Read the role assignments recorded for one agent — who its primary human
+   * is and which stakeholders fill which role.
+   *
+   * The response SHAPE depends on the caller: an agent reading its own roster
+   * or an owner/admin gets the full list, any other permitted human gets their
+   * own row plus the primary. An agent calling for a DIFFERENT agent gets the
+   * same uniform 404 as a non-existent one — the backend self-scopes agent
+   * principals, because an agent-scoped key resolves to its owner carrying the
+   * owner's role and would otherwise read the whole fleet on an admin-owned
+   * install.
+   */
+  async getAgentAssignments(name: string): Promise<unknown> {
+    return this.request(
+      "GET",
+      `/api/enterprise/assignments/agents/${encodeURIComponent(name)}`,
+    );
+  }
 }

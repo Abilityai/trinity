@@ -272,7 +272,22 @@ EXTRA_AGENT_REFS: List[tuple] = []  # list[(table_name, agent_name_column)]
 
 def register_agent_owned_table(table: str, column: str = "agent_name") -> None:
     """Idempotently register an entitled-module agent-scoped table so the OSS
-    delete + rename paths sweep/re-key it with its agent."""
+    delete + rename paths sweep/re-key it with its agent.
+
+    Both paths, and that is the contract rather than an implementation detail:
+    this docstring promised both while ``cascade_rename`` iterated
+    ``AGENT_REFS`` only (fixed in trinity-enterprise#500). It was survivable
+    because the one production caller — ``db/agent_settings/metadata.py::
+    rename_agent`` — carried its own copy of the sweep, which is what made it
+    long-lived AND what made it dangerous: the behaviour lived in a caller, so a
+    cross-repo module author reading this contract would have believed the
+    shared function, and any second caller would have silently dropped it. A
+    registered table left on the OLD name is not merely orphaned — the freed
+    name can be taken by a new agent, which then INHERITS those rows, the
+    recycled-name cross-wire ``delete_reports_to_refs`` exists to prevent one
+    function below. The caller's duplicate loop was deleted when this one
+    landed: one question, one place (the #1819 lesson).
+    """
     if (table, column) not in EXTRA_AGENT_REFS:
         EXTRA_AGENT_REFS.append((table, column))
 
@@ -425,6 +440,11 @@ def cascade_rename(conn, old_name: str, new_name: str) -> Dict[str, int]:
     a column-value update; the delete policy doesn't apply. Chained-link
     tables don't carry `agent_name` so no rename pass needed for them.
 
+    `EXTRA_AGENT_REFS` (entitled-module agent-scoped tables, ent#46) is swept
+    too, by NAME via raw `text()` for the same reason the delete path does: a
+    private table is absent from the OSS metadata, so `_table()` cannot build a
+    statement for it.
+
     Caller is responsible for renaming `agent_ownership` itself and
     handling the uniqueness check on the destination name.
     """
@@ -447,6 +467,20 @@ def cascade_rename(conn, old_name: str, new_name: str) -> Dict[str, int]:
         if result.rowcount > 0:
             key = f"{ref.table}:{ref.column}" if _multi_column(ref.table) else ref.table
             updated[key] = updated.get(key, 0) + result.rowcount
+
+    # Entitled-module agent-scoped tables (ent#46) — same NAME-keyed raw text()
+    # the delete path uses, for the same reason (not in the OSS metadata). Table
+    # and column come from code; both agent names are bound. Absent tables
+    # (OSS-only / partial installs) are skipped.
+    for table, column in EXTRA_AGENT_REFS:
+        if not _table_exists(conn, table):
+            continue
+        result = conn.execute(
+            sa_text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),
+            {"new": new_name, "old": old_name},
+        )
+        if result.rowcount and result.rowcount > 0:
+            updated[table] = updated.get(table, 0) + result.rowcount
 
     return updated
 
