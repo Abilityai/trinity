@@ -29,11 +29,22 @@ const SRC = path.resolve(HERE, '../../src')
 /** Feature ids that are OSS core now — gating on them is always false. */
 const RETIRED_ENTITLEMENTS = ['client_portal', 'shared_sessions']
 
+// Applied to fixed point, not once. A single pass over `<!--…-->` can leave a
+// fresh `<!--` behind (`<!-<!---->->` strips to `<!-->`), which is both what
+// CodeQL's incomplete-multi-character-sanitization rule flags and a real way to
+// hide a live gate from this guard inside a comment-shaped string. Nothing here
+// is rendered — the output is only regex-matched — so this is about the guard
+// not being fooled, not about XSS.
 function stripComments(code) {
-  return code
-    .replace(/<!--[\s\S]*?-->/g, '')      // template comments
-    .replace(/\/\*[\s\S]*?\*\//g, '')     // block comments
-    .replace(/^[ \t]*\/\/.*$/gm, '')      // whole-line // comments
+  let out = code
+  for (;;) {
+    const next = out
+      .replace(/<!--[\s\S]*?-->/g, '')      // template comments
+      .replace(/\/\*[\s\S]*?\*\//g, '')     // block comments
+      .replace(/^[ \t]*\/\/.*$/gm, '')      // whole-line // comments
+    if (next === out) return out
+    out = next
+  }
 }
 
 function walk(dir) {
