@@ -37,7 +37,10 @@ export const FIELD_INVALID_CLASS =
 // No `w-full`: a ghost select is as wide as the option it is showing. That is
 // the property that keeps it out of the composer's width budget.
 export const FIELD_GHOST_CLASS =
-  'w-auto max-w-full rounded-lg border border-transparent bg-transparent ' +
+  // `h-11`: the ghost select is a 44px box, the same box as the composer row's
+  // icon buttons (#2259) — a 30px select beside 44px buttons is a 30px tap
+  // target on a phone. The native select centres its text in a fixed height.
+  'h-11 w-auto max-w-full rounded-lg border border-transparent bg-transparent ' +
   'pl-2 py-1 text-[13px] text-gray-600 dark:text-gray-300 ' +
   // Hover tints the GROUND only, matching the Workspace agent picker exactly.
   // Deliberately no hover ink change: the sibling "New chat" button spends two
