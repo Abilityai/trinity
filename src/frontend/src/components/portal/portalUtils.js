@@ -628,7 +628,7 @@ export function collapseSelection(selected, { multi = false } = {}) {
 // the previous session's agent name, surfaced to someone who never asked for
 // it. That is the same class the path guard exists to close, so it belongs in
 // the same predicate rather than in a second one somebody has to remember.
-export const STAGE_QUERY_KEYS = ['agent', 'new']
+export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 
 export const WORKSPACE_ROOT = '/workspace'
 

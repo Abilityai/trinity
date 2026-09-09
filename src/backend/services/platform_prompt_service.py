@@ -32,6 +32,12 @@ MAX_FIELD_LEN = 80
 MAX_COLLAB_NAME_LEN = 60
 MAX_TIMESTAMP_LEN = 40
 MAX_PLATFORM_URL_LEN = 200
+# Assignment fields (trinity-enterprise#500). A person's display name and a
+# stakeholder entry ("approver: A. Smith") both run longer than the generic
+# MAX_FIELD_LEN = 80, which would truncate mid-name; a role id is an id.
+MAX_DISPLAY_NAME_LEN = 120
+MAX_ROLE_ID_LEN = 64
+MAX_STAKEHOLDER_LEN = 140
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -649,6 +655,16 @@ class ExecutionContext:
     platform_url: Optional[str] = None
     timestamp: Optional[str] = None
     execution_id: Optional[str] = None                  # MEM-001: for write_user_memory tool
+    # Role assignments (trinity-enterprise#500). Auto-filled from the assignment
+    # seam alongside collaborators/platform_url; all None in a build with no
+    # provider registered, so the block renders exactly as before.
+    # `primary_user_display` is a DISPLAY NAME, never an email address — this
+    # block reaches anonymous public-link and paid-chat turns, so a third
+    # party's address must never enter it.
+    primary_user_display: Optional[str] = None
+    role_id: Optional[str] = None
+    stakeholders: Optional[List[str]] = None
+    proactive_consent: Optional[bool] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -723,6 +739,51 @@ def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
     return ", ".join(cleaned)
 
 
+def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
+    """Render the `Primary human` line body (trinity-enterprise#500).
+
+    Requires a display name: a role id with nobody in it is not a *primary
+    human*, and rendering the role alone would state a relationship that does
+    not exist. Consent is appended as an explicit qualifier rather than left
+    blank — the agent must not infer permission to reach out from the mere
+    presence of a name (the assignment is a RECORD of who fills the role, not a
+    grant of contact permission, which lives on the separate sharing consent
+    bit).
+    """
+    display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
+    if not display:
+        return None
+    line = display
+    role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
+    if role:
+        line = f"{line} (role: {role})"
+    if ctx.proactive_consent is not None:
+        line = (
+            f"{line} — proactive contact permitted"
+            if ctx.proactive_consent
+            else f"{line} — proactive contact NOT yet permitted; do not message "
+                 "them unprompted"
+        )
+    return line
+
+
+def _render_stakeholders(ctx: ExecutionContext) -> Optional[str]:
+    """Render the stakeholder list, capped like collaborators."""
+    if not ctx.stakeholders:
+        return None
+    cleaned: List[str] = []
+    for entry in ctx.stakeholders:
+        safe = _sanitize_field(entry, max_len=MAX_STAKEHOLDER_LEN)
+        if safe:
+            cleaned.append(safe)
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_COLLABORATORS:
+        shown = cleaned[:MAX_COLLABORATORS]
+        return ", ".join(shown) + f", … ({len(cleaned) - MAX_COLLABORATORS} more)"
+    return ", ".join(cleaned)
+
+
 def _mode_guidance(mode: str) -> str:
     # The task-mode carve-out below is the #1402 async human-gate contract:
     # without it, "execute to completion — do not ask questions" directly
@@ -779,6 +840,14 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if ctx.execution_id:
             lines.append(f"- **Execution ID**: {ctx.execution_id}")
 
+        assignment = _render_assignment(ctx)
+        if assignment:
+            lines.append(f"- **Primary human**: {assignment}")
+
+        stakeholders = _render_stakeholders(ctx)
+        if stakeholders:
+            lines.append(f"- **Stakeholders**: {stakeholders}")
+
         collaborators = _render_collaborators(ctx)
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
@@ -809,6 +878,23 @@ def _resolve_collaborators(agent_name: Optional[str]) -> List[str]:
     except Exception as e:
         logger.debug(f"_resolve_collaborators({agent_name}) failed: {e}")
         return []
+
+
+def _resolve_assignment(
+    agent_name: Optional[str], triggered_by: Optional[str]
+) -> dict:
+    """Resolve role-assignment facts through the OSS seam. ``{}`` on any miss.
+
+    The seam owns the try/except and the shape validation — this is a thin
+    adapter that normalises "nothing to render" to an empty dict so the caller
+    can `.get()` without a None check.
+    """
+    # Imported at call time, not module scope: the name is then re-resolved on
+    # every call, so a test that patches `services.assignment_provider` takes
+    # effect here without also having to patch this module's binding.
+    from services.assignment_provider import resolve_assignment
+
+    return resolve_assignment(agent_name, triggered_by) or {}
 
 
 def _resolve_platform_url() -> Optional[str]:
@@ -852,10 +938,29 @@ def compose_system_prompt(
     ]
 
     if include_execution_context and execution_context is not None:
-        # Auto-fill collaborators and platform URL without mutating the caller's
-        # object — construct a shallow copy with the resolved fields filled in.
+        # Auto-fill collaborators, platform URL and role assignments without
+        # mutating the caller's object — construct a shallow copy with the
+        # resolved fields filled in.
         ctx = execution_context
-        if ctx.collaborators is None or ctx.platform_url is None:
+        # The assignment fields are auto-filled as ONE unit: they come from a
+        # single provider answer, so they are resolved once and spread across
+        # the four fields (a per-field `_resolve_assignment(...)` would call the
+        # provider four times for one line of output).
+        needs_assignment = (
+            ctx.primary_user_display is None
+            and ctx.role_id is None
+            and ctx.stakeholders is None
+        )
+        # `needs_assignment` is part of the guard, not just of the value: a
+        # caller that pre-fills BOTH collaborators and platform_url would
+        # otherwise skip the whole replace block, and the assignment fields
+        # would silently never render.
+        if ctx.collaborators is None or ctx.platform_url is None or needs_assignment:
+            assignment = (
+                _resolve_assignment(ctx.agent_name, ctx.triggered_by)
+                if needs_assignment
+                else {}
+            )
             ctx = replace(
                 ctx,
                 collaborators=(
@@ -867,6 +972,26 @@ def compose_system_prompt(
                     ctx.platform_url
                     if ctx.platform_url is not None
                     else _resolve_platform_url()
+                ),
+                primary_user_display=(
+                    ctx.primary_user_display
+                    if ctx.primary_user_display is not None
+                    else assignment.get("primary_user_display")
+                ),
+                role_id=(
+                    ctx.role_id
+                    if ctx.role_id is not None
+                    else assignment.get("role_id")
+                ),
+                stakeholders=(
+                    ctx.stakeholders
+                    if ctx.stakeholders is not None
+                    else assignment.get("stakeholders")
+                ),
+                proactive_consent=(
+                    ctx.proactive_consent
+                    if ctx.proactive_consent is not None
+                    else assignment.get("proactive_consent")
                 ),
             )
         block = build_execution_context(ctx)

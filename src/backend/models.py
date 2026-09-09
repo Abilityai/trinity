@@ -802,6 +802,27 @@ class Canvas(CanvasSummary):
     blocks: List[Dict] = Field(default_factory=list)
 
 
+class CanvasWriteResult(Canvas):
+    """Write-response model — the canvas, plus whether the writer can be seen (#2577).
+
+    A SUBCLASS rather than a wrapper: the MCP tool echoes this object back as
+    `canvas`, and nesting it under a new key would change that shape for every
+    existing caller to no benefit. `list`/`get` keep the narrower `Canvas` —
+    they answer about a canvas, not about a requester, so a verdict there would
+    be a claim with no session to make it about.
+
+    Both fields are three-state, and default to "no claim". Widening a canvas to
+    `roster` publishes it to everyone the agent is shared with, so a wrong
+    `False` costs an over-share — "could not tell" must stay distinguishable
+    from "no" (#2196). A write with no resolvable `execution_id` therefore
+    answers `None` and says nothing.
+    """
+    #: True / False when the writing session's reader is known, else None.
+    visible_to_requester: Optional[bool] = None
+    #: Present only when there is something actionable to say.
+    visibility_note: Optional[str] = None
+
+
 class CanvasPinRequest(BaseModel):
     """Pin or unpin one canvas (ent#553).
 

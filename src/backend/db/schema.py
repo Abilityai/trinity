@@ -709,6 +709,12 @@ TABLES = {
             created_by TEXT,
             status TEXT NOT NULL DEFAULT 'open',      -- open | closed
             stop_reason TEXT,                          -- user_closed|max_messages|max_cost|expired
+            -- The effective default is `service.DEFAULT_MAX_MESSAGES` (200
+            -- since #2620); every insert supplies this column explicitly, so
+            -- this DDL value only ever applies to a row written around the
+            -- accessor. Left at 60 because the applied Alembic revision
+            -- (0044) carries the same literal and rewriting an applied
+            -- migration is worse than a fallback nobody reaches.
             max_messages INTEGER NOT NULL DEFAULT 60,
             max_cost_usd REAL,                         -- NULL = uncapped
             expires_at TEXT,                           -- ISO-Z; NULL = no TTL

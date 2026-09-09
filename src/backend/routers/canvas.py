@@ -33,6 +33,7 @@ from models import (
     CanvasBulkDeleteResult,
     CanvasPatch,
     CanvasPinRequest,
+    CanvasWriteResult,
     CanvasSummary,
     CanvasWrite,
     User,
@@ -185,7 +186,7 @@ async def get_canvas(name: AuthorizedAgent, canvas_id: str):
     return canvas_service.decorate([canvas], name)[0]
 
 
-@router.put("/{name}/canvas/{canvas_id}", response_model=Canvas)
+@router.put("/{name}/canvas/{canvas_id}", response_model=CanvasWriteResult)
 async def write_canvas(
     name: AuthorizedAgent,
     canvas_id: str,
@@ -216,7 +217,12 @@ async def write_canvas(
         )
     except CanvasError as e:
         raise _map(e)
-    return canvas_service.decorate([canvas], name)[0]
+    decorated = canvas_service.decorate([canvas], name)[0]
+    # #2577: say whether the audience just chosen reaches the session that
+    # asked. Resolved in the service (Invariant #1) off the STORED row, so the
+    # verdict describes the canvas that exists rather than the value requested.
+    visible, note = canvas_service.visibility_for_canvas(canvas, name)
+    return {**decorated, "visible_to_requester": visible, "visibility_note": note}
 
 
 @router.patch("/{name}/canvas/{canvas_id}", response_model=Canvas)

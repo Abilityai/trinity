@@ -654,7 +654,7 @@ degrade quietly). #2086 centralizes it.
   `MODEL_CATALOG` (ordered `ModelEntry` list: `id`, `label`, `note`, and the
   policy flags). It is a **stdlib-only leaf** (imports nothing from
   `settings_service`/`database`) so codegen and the parity test load it DB-free.
-- **FR-2 — Two policy dimensions + a display marker**:
+- **FR-2 — Policy dimensions + a display marker**:
   - `public_channel` — selectable as the #894 per-agent public-channel override
     (`settings_service.PUBLIC_CHANNEL_MODELS` **re-exports** the derived set).
   - `admin_default_selectable` — offered in the admin fleet-default dropdown.
@@ -664,6 +664,20 @@ degrade quietly). #2086 centralizes it.
   - `recommended` — drives the admin dropdown's "(recommended)" marker; exactly
     one entry, **pinned to `PLATFORM_DEFAULT_MODEL_VALUE`** (#831, out of scope to
     change) rather than the loaded value.
+  - `workspace` + `workspace_tier` (ent#403) — offered in the **Workspace
+    composer's** client-facing dropdown, with the plain-language primary text the
+    option renders (`"Most capable"`, `"Balanced — fast and smart"`, `"Fastest"`).
+    A separate dimension rather than a reuse of `note`, which is copy written for
+    the operator picker: joining `label — note` yields two options both leading
+    with "Most capable" and one em-dash nested inside another. The derived set
+    `WORKSPACE_MODELS` is the Workspace turn route's closed allowlist.
+    **Subset rule, asserted at import: `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`**
+    — the Workspace must never accept a model the #894 operator route would 422,
+    or the two sources genuinely disagree. A second assertion refuses a workspace
+    entry with no tier (the option would render blank). Both fields are appended
+    **last** to the frozen dataclass and set by keyword: every entry passes its
+    booleans positionally, so a field inserted anywhere else silently reassigns
+    `public_channel` / `admin_default_selectable` / `recommended` with no error.
 - **FR-3 — Generated frontend mirror**: `scripts/gen_model_catalog.py` emits the
   checked-in, do-not-edit `src/frontend/src/constants/modelCatalog.js` (Vite-bundled,
   CSP-clean `'self'` asset). `ModelSelector.vue` derives its picker and `Settings.vue`
@@ -825,6 +839,18 @@ spoken replies (#2157) stay as composer affordances.
   second provider). Disabled WITH the reason when the instance cannot ("voice is
   turned off" / "no voice provider key"), never a dead button. Portal-token
   clients never see it. Distinct from the per-agent `voice_available` (TTS).
+- **FR-1b — The Talk door (#2559)**: `/workspace?agent=<name>&voice=1` starts the
+  call on landing. The param alone is **not** authority: it is honoured only when
+  the intent was **armed in the app** (`armVoiceAutoStart()` in
+  `portalVoiceMode.js`, called by `AgentHeader`'s Talk button before the
+  `router.push`), the agent actually landed, and the principal is a platform
+  session. The armed flag is a module-scoped `let`, so it lives exactly as long
+  as the document — a pasted, bookmarked or mailed link arrives on a fresh
+  document and can never be armed, including the signed-out case where the
+  sign-in click re-runs `bootstrap()` on the same document. `bootstrap()` strips
+  the key once, in its `finally`, keyed on the key's **presence** (so `?voice=0`
+  does not linger either) and disarms; the intent is consumed once. A
+  portal-token principal is refused and shown nothing, mirroring FR-1.
 - **FR-2 — Bound to the thread**: `POST /api/enterprise/client-portal/agents/{name}/voice/start`
   under the portal principal — roster membership and thread ownership evaluated
   before branching → ONE uniform 404 (off-roster, foreign thread, portal token);
@@ -859,8 +885,9 @@ spoken replies (#2157) stay as composer affordances.
   in the label row — never a silent drop. Requires the session to outlive the
   provider connection: compression + resumption on every session, reconnect on
   `go_away`.
-- **FR-7 — Barge-in, Mute, End, tool badge**: as on the Agent Detail overlay —
-  the same component.
+- **FR-7 — Barge-in, Mute, End, tool badge**: the shared orb component
+  (`components/chat/VoiceOverlay.vue`), whose **only** front door is this one
+  since #2559 — Agent Detail's chat-panel mount of it is retired.
 - **FR-8 — Degradation, with words**: mic denied, insecure origin, no key,
   disabled, provider error, connection closed, cap reached → a named reason in
   the status line (or the failed-start line) and the chat unblocked. A `saved`

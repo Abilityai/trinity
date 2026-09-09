@@ -118,7 +118,7 @@
 
 ## Advanced
 
-- [Voice Chat](advanced/voice-chat.md) — Real-time voice via Gemini Live API
+- [Voice Chat](advanced/voice-chat.md) — Real-time voice via Gemini Live API, in the Workspace
 - [Voice Replies](advanced/voice-replies.md) — Agents speak individual channel replies as voice notes (ElevenLabs TTS)
 - [VoIP Telephony](advanced/voip-telephony.md) — Agents place outbound phone calls via Twilio + Gemini Live
 - [Image Generation](advanced/image-generation.md) — Gemini two-step image pipeline
