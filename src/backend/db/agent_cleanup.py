@@ -181,6 +181,12 @@ AGENT_REFS: List[AgentRef] = [
     # --- Files / shared folders --------------------------------------------
     AgentRef("agent_shared_folder_config",   "agent_name",        Policy.CASCADE),
     AgentRef("agent_shared_files",           "agent_name",        Policy.CASCADE),
+    # #2582 / ent#548 — per-viewer dismissals of this agent's shares. The
+    # column exists FOR this registration: the line above hard-deletes the
+    # share rows without going through the revoke sweeper, so a dismissal
+    # keyed on a purged share id would be orphaned forever with nothing left
+    # to join it back to.
+    AgentRef("portal_file_dismissals",       "agent_name",        Policy.CASCADE),
 
     # --- Public links and chained tables -----------------------------------
     # Order: chained tables before agent_public_links so the link rows
