@@ -4,7 +4,7 @@
   "commit": "4f71c502ccef83426db123646e5e2cd39cebd7fb",
   "refrozen": {
     "issue": "#2605",
-    "why": "The ratchet was documented as enforced and nothing ran it, so the tree drifted past the 2026-07-31 freeze. This re-freeze is the deliberate disposition the issue asks for, in its own PR with the increases named — NOT a silent absorption into a feature diff. From here the guard (tests/unit/rawColorRatchet.spec.js) bites.",
+    "why": "The ratchet was documented as enforced and nothing ran it, so the tree drifted past the 2026-07-31 freeze. This re-freeze is the deliberate disposition the issue asks for, in its own PR with the increases named \u2014 NOT a silent absorption into a feature diff. From here the guard (tests/unit/rawColorRatchet.spec.js) bites.",
     "previous_freeze": "2026-07-31",
     "named_increases": {
       "raw_nongray": "737 -> 815 (+78). Grew in 4 baselined files (ReliabilityPanel +4, ReportsPanelFleet +4, Dashboard +5, enterprise/Audit +4) and arrived in 10 files created after the freeze, led by settings/PortalSessionPolicyPanel (30) and AgentListPanel (28). views/Portal.vue is NOT among them: its 6 amber-* classes from #2261 were paid down to semantic status-warning tokens in this PR, since the issue named them as the exact thing the ratchet exists to catch.",
@@ -13,7 +13,8 @@
       "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR."
     },
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
-    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony — regenerate and the guard keeps biting at the new level."
+    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level.",
+    "2638": "SubscriptionsPanel.vue raw_gray 165 -> 173 (+8): the API-key fallback toggle row. Not paid down because there is nothing to pay it down TO \u2014 `gray` is the sanctioned chrome family and tailwind.config.js defines no semantic neutral to replace it with (status-*/state-*/brand-*/accent-*/action-* are all meaning-carrying). The 8 classes are the label, the help text and the toggle's off-state, copied verbatim from the three identical toggles immediately above it; inventing a one-off semantic token for the fourth would make it the odd one out and leave the other three unconverted. Re-frozen in its own commit as the guard's own message prescribes, and scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it."
   },
   "files": {
     "src/frontend/src/App.vue": {
@@ -853,7 +854,7 @@
     },
     "src/frontend/src/components/settings/SubscriptionsPanel.vue": {
       "raw_nongray": 4,
-      "raw_gray": 165,
+      "raw_gray": 173,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/TelemetrySharingPanel.vue": {
