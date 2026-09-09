@@ -112,7 +112,7 @@ const controlAttrs = computed(() => {
  * One place decides every variant-dependent class, so a third variant cannot be
  * half-added. `pad` is separate from `field` because the chevron's gutter and
  * its offset have to agree: 32px + right-10px for the field box, 28px +
- * right-6px for the smaller ghost chevron.
+ * right-8px for the smaller ghost chevron.
  */
 const recipe = computed(() =>
   props.variant === 'ghost'
