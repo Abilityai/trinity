@@ -518,6 +518,55 @@ stub degrades to `unknown` rather than silently inverting the default inside the
 meant to prove it; `_availability_map` also narrows its result to the requested names,
 because the underlying call sees **every** agent container on the host.
 
+**`model_options` + `model_default` — the composer's model choice (ent#403).** The curated
+option list rides the **roster**, not the card: it is identical for every agent (the
+`realtime_voice` / `multi_agent_chat_available` precedent), so putting it per-card would
+ship N copies of it on exactly the path #2159/#2163 exist to keep small. Only the resolved
+default varies per agent, so only that is a card field — which also means `get_agent_card`
+needs no payload change. Both **fail closed**: `model_default is None` renders no control,
+and that is the value for every non-platform principal and for a **non-Claude runtime**
+(the platform passes no `--model` to the Codex runtime at all, so a Claude-model list
+there promises something and changes nothing). Three things are resolved **once per roster
+load** beside `tts_ready` and the default voice — the option list, the platform default,
+and its label — and threaded into `_row_to_card` as `model_context`; `is_platform`,
+`runtime` and `model_context` are **keyword-only with no default**, because a default
+would let the agent-page call site keep compiling while silently serving the wrong card.
+The runtime comes from `docker_service.agent_container_runtimes()`, a **second** sparse
+`containers.list()` — O(1) in fleet size, not the N+1 #2160 forbids, and a separate leaf
+rather than a widening of `agent_container_states()` so #2196's guard suite keeps pinning
+what it pins. Read **sequentially**, not with `asyncio.gather`: #2163's guard pins that
+`get_roster` contains no fan-out at all, and that blanket shape is the point — two fixed
+O(1) reads are not the N-agent fan-out it closed, but loosening a guard to admit one's own
+change is how the property stops being true. The trade is ~50-200ms once per roster load. Note the
+sparse trap in its other form: under `sparse=True` docker-py's `.labels` **raises** (it
+reads `attrs["Config"]["Labels"]`, which only a full inspect populates), so the runtime is
+read from `attrs["Labels"]` — the key the `/containers/json` summary actually carries.
+An unreadable runtime falls back to `claude-code`, matching `get_agent_runtime`'s own
+documented posture and `availability`'s fail-open direction on this same payload.
+
+**The turn's model is resolved once, at a specific line.** `resolve_turn_model` is the ONE
+ladder for both portal turn routes — requested → the agent's #894 `public_channel_model` →
+the **platform default as a concrete id** — and it takes no principal, which is what makes
+"the streaming route and the synchronous ent#83 route cannot disagree" true by
+construction. It runs **immediately after the availability gate**, before anything is
+created, because `schedule_executions.model_used` is written ONLY at row creation and both
+portal paths pre-create the row: resolving where the value is *used* would stamp the
+pre-created row `None` and half-fix the requirement on exactly the path #2426 already
+burned. **The last rung is a concrete id and not `None` for that same reason** (review,
+2026-09-08): `execute_task` resolves the platform default at `:1044` but stamps it inside
+`if not execution_id:`, so on a portal turn the resolution happens and the stamp does not —
+`None` recorded NULL for the default state of every agent, which is most Workspace turns. It
+reads `settings_service.get_platform_default_model()`, the same function `execute_task`
+calls, so the two hold one opinion and `execute_task`'s lookup becomes a no-op; `None` still
+reaches the row only when that read itself fails. A caller passing `execution_id` must pass the `resolved_model` it stamped —
+`resolved_model or resolve(...)` would let the row and the turn disagree, so that path
+raises. The requested value cannot simply be re-laundered through the composer's allow-list
+either: an inherited `public_channel_model` may legitimately sit outside the curated set.
+The router owns normalise-then-authorise-then-allow-list (blank → `None` **before**
+validation, or the control's own `""` default 422s every default turn), and the closed
+`WORKSPACE_MODELS` set is the security control, since the value reaches the agent as a
+`--model` argv element.
+
 ### Multi-Agent Rooms (ent#169; OSS core since ent#443)
 
 `src/backend/shared_sessions/` — the substrate behind a Workspace chat that holds

@@ -654,7 +654,7 @@ degrade quietly). #2086 centralizes it.
   `MODEL_CATALOG` (ordered `ModelEntry` list: `id`, `label`, `note`, and the
   policy flags). It is a **stdlib-only leaf** (imports nothing from
   `settings_service`/`database`) so codegen and the parity test load it DB-free.
-- **FR-2 — Two policy dimensions + a display marker**:
+- **FR-2 — Policy dimensions + a display marker**:
   - `public_channel` — selectable as the #894 per-agent public-channel override
     (`settings_service.PUBLIC_CHANNEL_MODELS` **re-exports** the derived set).
   - `admin_default_selectable` — offered in the admin fleet-default dropdown.
@@ -664,6 +664,20 @@ degrade quietly). #2086 centralizes it.
   - `recommended` — drives the admin dropdown's "(recommended)" marker; exactly
     one entry, **pinned to `PLATFORM_DEFAULT_MODEL_VALUE`** (#831, out of scope to
     change) rather than the loaded value.
+  - `workspace` + `workspace_tier` (ent#403) — offered in the **Workspace
+    composer's** client-facing dropdown, with the plain-language primary text the
+    option renders (`"Most capable"`, `"Balanced — fast and smart"`, `"Fastest"`).
+    A separate dimension rather than a reuse of `note`, which is copy written for
+    the operator picker: joining `label — note` yields two options both leading
+    with "Most capable" and one em-dash nested inside another. The derived set
+    `WORKSPACE_MODELS` is the Workspace turn route's closed allowlist.
+    **Subset rule, asserted at import: `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`**
+    — the Workspace must never accept a model the #894 operator route would 422,
+    or the two sources genuinely disagree. A second assertion refuses a workspace
+    entry with no tier (the option would render blank). Both fields are appended
+    **last** to the frozen dataclass and set by keyword: every entry passes its
+    booleans positionally, so a field inserted anywhere else silently reassigns
+    `public_channel` / `admin_default_selectable` / `recommended` with no error.
 - **FR-3 — Generated frontend mirror**: `scripts/gen_model_catalog.py` emits the
   checked-in, do-not-edit `src/frontend/src/constants/modelCatalog.js` (Vite-bundled,
   CSP-clean `'self'` asset). `ModelSelector.vue` derives its picker and `Settings.vue`

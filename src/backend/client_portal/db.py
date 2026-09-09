@@ -81,6 +81,11 @@ def get_shared_roster(email: str) -> list[dict]:
             # than resolved per agent — `get_display_label` is one query each,
             # which would add an N+1 to fix a row that renders the wrong title.
             agent_ownership.c.display_label,
+            # ent#403: the #894 per-agent model override, selected HERE for the
+            # same reason `display_label` is — this query already joins
+            # `agent_ownership`, so it is one column rather than a per-card read,
+            # and the roster's model control needs it for every row.
+            agent_ownership.c.public_channel_model,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -134,6 +139,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.tts_voice_id,
             agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
+            agent_ownership.c.public_channel_model,  # ent#403, same rationale
             users.c.username.label("owner"),
         )
         .select_from(

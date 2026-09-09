@@ -338,9 +338,13 @@ def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, m
 
     seen = {}
 
+    # `**kw` like the other stand-ins in this suite: `start_portal_turn` grew
+    # `model` / `resolved_model` (ent#403), and a stub that refuses an unknown
+    # kwarg raises inside the background task, where the failure surfaces as a
+    # missing key rather than a TypeError anyone can read.
     async def _slow_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         turn_timeout_seconds=None, availability=None):
+                         turn_timeout_seconds=None, availability=None, **kw):
         seen["during"] = svc.get_turn_inflight(session_id)
         return {"response": "done", "cost": 0.0, "session_id": session_id}
 
