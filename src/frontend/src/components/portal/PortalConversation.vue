@@ -537,7 +537,7 @@
                and hence this issue). Stacked, the field takes the full shell at
                every width and the controls have a row of their own to spend. -->
           <div
-            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition focus-within:border-action-primary-500 focus-within:ring-2 focus-within:ring-action-primary-500/40"
+            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
           >
             <!-- ent#392's anchor, unchanged in job and in ref name (the
                  outside-click close reads `composerWrap`). It sheds `flex-1

@@ -241,7 +241,7 @@
                beside. The room has no model picker — that is per-agent and a
                room has several — so its control row holds Send alone. -->
           <div
-            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition focus-within:border-action-primary-500 focus-within:ring-2 focus-within:ring-action-primary-500/40"
+            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
           >
             <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
                  wrapper as the 1:1 composer, same ref name, and the same

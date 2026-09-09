@@ -119,7 +119,11 @@ describe('#2259 workspace composer alignment', () => {
       // background nests a second field inside the first.
       const form = composerForm(src)
       expect(form, 'composer <form> not found — the scope anchor is stale').not.toBe('')
-      expect(form).toMatch(/<div\s+class="rounded-2xl border[^"]*focus-within:ring-2/)
+      // The ring is scoped to the FIELD (`has-[textarea:focus]`), not to any
+      // descendant: `focus-within` lit the shell when an icon button was tabbed
+      // onto and doubled the picker's own ring. 3px, like the field primitive.
+      expect(form).toMatch(/<div\s+class="rounded-2xl border[^"]*has-\[textarea:focus\]:ring-\[3px\]/)
+      expect(form).not.toMatch(/<div\s+class="rounded-2xl border[^"]*focus-within:/)
       expect(textareaTag(src)).toMatch(/class="[^"]*\bbg-transparent\b/)
       expect(textareaTag(src)).toMatch(/class="[^"]*\bborder-0\b/)
       expect(textareaTag(src)).not.toMatch(/class="[^"]*\brounded-2xl\b/)
