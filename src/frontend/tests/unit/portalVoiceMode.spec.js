@@ -288,12 +288,19 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     // but the toggle must stay live, because it is the control that ENDS the
     // call. Inside the inert region it would render pressed and refuse the
     // click, a dead affordance manufactured by the move itself.
-    expect(CODE).toMatch(/<div\s+class="flex-1 min-w-0 flex items-end gap-2"\s+:class="voiceCallActive \? 'opacity-60 pointer-events-none' : ''"/)
-    // The toggle is a SIBLING of that wrapper, not a descendant. Positional, so
-    // it fails if a later edit moves the button inside.
+    // #2662 stacked the composer, so "everything except the toggle" is now TWO
+    // regions on two rows — the field's wrapper and the control row's wrapper —
+    // and `opacity` needs a real box on each. Both must carry the inert pair;
+    // one without the other leaves half the composer live during a call.
+    const INERT = ":class=\"voiceCallActive \\? 'opacity-60 pointer-events-none' : ''\""
+    expect(CODE).toMatch(new RegExp('<div ref="composerWrap" class="relative" ' + INERT))
+    expect(CODE).toMatch(new RegExp('<div class="flex-1 min-w-0 flex items-center gap-1" ' + INERT))
+    // The toggle is a SIBLING of the control row's wrapper, not a descendant.
+    // Positional, so it fails if a later edit moves the button inside.
     const formStart = CODE.indexOf('<form')
-    const inertAt = CODE.indexOf('flex-1 min-w-0 flex items-end gap-2', formStart)
+    const inertAt = CODE.indexOf('flex-1 min-w-0 flex items-center gap-1', formStart)
     const callAt = CODE.indexOf('data-testid="portal-voice-call"', formStart)
+    expect(inertAt).toBeGreaterThan(-1)
     expect(callAt).toBeGreaterThan(-1)
     expect(callAt, 'the call toggle must precede the inert wrapper').toBeLessThan(inertAt)
     expect(CODE).toContain(':disabled="transcribing || voiceCallActive"')

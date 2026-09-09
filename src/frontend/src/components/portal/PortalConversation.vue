@@ -513,167 +513,158 @@
              pressable and is not is worse than no button.
              So: the toggle stays live, and the fields it sits beside go inert
              around it. -->
-        <!-- The model gets its own row: fixed-width action buttons plus a
-             select leave only 34px for typing on phones and narrow columns.
-             Keep the native primitive and server capability gate, while the
-             textarea retains the available width beside the 44px actions. -->
-        <BaseSelect
-          v-if="modelControl.render"
-          v-model="selectedModel"
-          class="mb-2 w-full max-w-sm"
-          :disabled="voiceCallActive || !modelControl.enabled"
-          :title="modelControl.reason || 'Which model this chat runs on'"
-          aria-label="Model for this chat"
-          data-testid="portal-model-picker"
-        >
-          <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
-          <option
-            v-for="opt in modelControl.options"
-            :key="opt.id"
-            :value="opt.id"
-            :title="optionTitle(opt)"
-          >{{ optionText(opt) }}</option>
-        </BaseSelect>
         <form
-          class="flex items-end gap-2"
           :aria-disabled="voiceCallActive ? 'true' : undefined"
           @submit.prevent="send"
         >
           <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFile" />
-          <!-- ent#534's control, at ent#547's address: the composer row, LEFT of
-               attach. Rendered for platform sessions only (the audio socket
-               takes the platform JWT); when the instance cannot do it the
-               control is disabled WITH the reason as its title, never a dead
-               button. Pressing it opens the orb over the thread; End (or
-               Escape) returns here and the call's transcript is in the chat.
-               Sized `h-11 w-11` like its neighbours rather than kept at the
-               header's `p-2`: the composer's boxes are 44px on the 4px grid
-               (#2259), and `portalComposerAlignment.spec.js` holds every button
-               in this form to that. -->
-          <button
-            v-if="voiceEntry.render"
-            type="button"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
-            :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
-            :disabled="!voiceEntry.enabled || voiceStarting"
-            :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-            :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-            :aria-pressed="voiceCallActive"
-            data-testid="portal-voice-call"
-            @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
-          >
-            <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
-            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
-          </button>
-          <!-- Everything the orb takes over while a call runs. A real flex row,
-               NOT `display: contents`: an element with `display: contents`
-               generates no box, and `opacity` needs one — so the dimming would
-               silently do nothing while `pointer-events` (which inherits) still
-               worked, leaving the composer fully bright and completely
-               unclickable. It re-declares `items-end gap-2` because it is now
-               the row the buttons and the field are items of, and `flex-1
-               min-w-0` so the textarea still takes the slack the form used to
-               give it directly. -->
-          <div
-            class="flex-1 min-w-0 flex items-end gap-2"
-            :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''"
-          >
-          <!-- #2259: the composer's action buttons are `h-11 w-11` (44px, on the
-               4px grid) rather than `p-2.5` around a 20px icon (40px, off it).
-               `items-end` pins them to the bottom so they stay beside the LAST
-               line as the field grows, and at 44px against the 46px single-line
-               composer the icon's centre lands within 1px of the text line in
-               both states. Sizing the box explicitly (instead of padding an
-               icon) also keeps the three buttons identical when one of them
-               swaps its glyph. -->
-          <button
-            type="button"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-            title="Attach a file for the agent"
-            :disabled="voiceCallActive"
-            @click="fileInput?.click()"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-          </button>
-          <button
-            v-if="sttSupported"
-            type="button"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-50"
-            :class="listening ? 'text-status-danger-600 dark:text-status-danger-400 animate-pulse' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
-            :title="micTitle"
-            :aria-label="micTitle"
-            :aria-pressed="listening"
-            :disabled="transcribing || voiceCallActive"
-            @click="toggleMic"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
-          </button>
-          <!-- ent#392: this is the composer's FIRST anchored overlay, so the
-               wrapper is new. It must inherit the flex sizing the textarea used
-               to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
-               field to content width — and it deliberately carries no z-index,
-               so it creates no stacking context of its own.
+          <!-- #2662: ONE composer shell — the field on top, the controls in a
+               row inside it, the model picker right-aligned beside Send.
 
-               #2259: it must ALSO not be taller than the textarea it wraps. A
-               `<textarea>` is inline-block, so inside this block wrapper it sat
-               on the baseline and the line box reserved 6px of descender space
-               below it. `items-end` aligns the flex ITEM — this wrapper — so the
-               buttons bottom-aligned to that dead space and Send hung 6px below
-               the visible input edge. The `block` on the textarea removes the
-               line box entirely; it also re-anchors the typeahead's
-               `absolute bottom-full` to the real field. Do not drop it. -->
-          <div ref="composerWrap" class="relative flex-1 min-w-0">
-            <PortalTypeahead
-              v-if="typeaheadOpen"
-              :kind="typeaheadKind"
-              :rows="typeaheadRows"
-              :active-index="activeIndex"
-              :overflow="typeaheadBound.overflow"
-              :hidden-count="typeaheadHidden"
-              :empty-message="typeaheadEmpty || ''"
-              @pick="acceptActive"
-              @hover="activeIndex = $event"
-            />
-            <textarea
-              ref="textarea"
-              v-model="input"
-              rows="1"
-              :placeholder="composerPlaceholder"
-              :disabled="voiceCallActive"
-              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-              @input="onComposerInput"
-              @keydown="onComposerKeydown"
-              @click="onComposerCaret"
-              @select="onComposerCaret"
-            ></textarea>
-          </div>
-          <!-- ent#155: Send becomes Stop while a turn is live. Send is disabled
-               for that whole period anyway, so this is the same control doing
-               the only thing it usefully can. -->
-          <button
-            v-if="canCancelTurn"
-            type="button"
-            @click="cancelTurn"
-            :disabled="cancelling"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-status-danger-600 hover:bg-status-danger-700 text-white disabled:opacity-40 transition"
-            :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
-            aria-label="Stop this turn"
+               The border, fill and focus ring move OFF the textarea and onto
+               this shell (`focus-within:`), which is what makes the controls
+               read as being inside the field rather than parked around it. The
+               textarea keeps `block w-full` (#2259 — an inline-block textarea
+               reserves a descender line box its wrapper then inherits) and goes
+               transparent and borderless; it must never regain `rounded-2xl`
+               or a background, or there are two nested boxes.
+
+               This shape is also what finally fixes the narrow composer. In the
+               single-row layout every 44px button came out of the field's
+               width: at 375px the textarea measured 143px and wrapped a
+               placeholder over four lines, and adding the model picker to that
+               row was what left 34px in ent#403 (hence its own-row placement,
+               and hence this issue). Stacked, the field takes the full shell at
+               every width and the controls have a row of their own to spend. -->
+          <div
+            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition focus-within:border-action-primary-500 focus-within:ring-2 focus-within:ring-action-primary-500/40"
           >
-            <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-            </svg>
-            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" /></svg>
-          </button>
-          <button
-            v-else
-            type="submit"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
-            :disabled="sending || !input.trim() || voiceCallActive"
-            title="Send"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
-          </button>
+            <!-- ent#392's anchor, unchanged in job and in ref name (the
+                 outside-click close reads `composerWrap`). It sheds `flex-1
+                 min-w-0` because it is no longer a flex item competing with
+                 buttons — it is the shell's first row and simply full width. -->
+            <div ref="composerWrap" class="relative" :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''">
+              <PortalTypeahead
+                v-if="typeaheadOpen"
+                :kind="typeaheadKind"
+                :rows="typeaheadRows"
+                :active-index="activeIndex"
+                :overflow="typeaheadBound.overflow"
+                :hidden-count="typeaheadHidden"
+                :empty-message="typeaheadEmpty || ''"
+                @pick="acceptActive"
+                @hover="activeIndex = $event"
+              />
+              <textarea
+                ref="textarea"
+                v-model="input"
+                rows="1"
+                :placeholder="composerPlaceholder"
+                :disabled="voiceCallActive"
+                class="block w-full resize-none border-0 bg-transparent text-sm text-gray-900 dark:text-gray-100 px-2 py-1.5 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                @input="onComposerInput"
+                @keydown="onComposerKeydown"
+                @click="onComposerCaret"
+                @select="onComposerCaret"
+              ></textarea>
+            </div>
+            <!-- ent#547: the call toggle stays LIVE while everything else goes
+                 inert, and the split is the point rather than a tidy-up. The
+                 same button starts and ends the call; inside a region carrying
+                 `pointer-events-none` it would render pressed for the whole
+                 call and refuse the click that ends it — a control that looks
+                 live and does nothing. Two inert regions now, because the
+                 stacked layout puts the field and the other controls on
+                 different rows and `opacity` needs a real box on each. -->
+            <div class="mt-1 flex items-center gap-1">
+              <button
+                v-if="voiceEntry.render"
+                type="button"
+                class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
+                :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
+                :disabled="!voiceEntry.enabled || voiceStarting"
+                :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+                :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+                :aria-pressed="voiceCallActive"
+                data-testid="portal-voice-call"
+                @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
+              >
+                <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+                <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
+              </button>
+              <div class="flex-1 min-w-0 flex items-center gap-1" :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''">
+                <button
+                  type="button"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+                  title="Attach a file for the agent"
+                  :disabled="voiceCallActive"
+                  @click="fileInput?.click()"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                </button>
+                <button
+                  v-if="sttSupported"
+                  type="button"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-50"
+                  :class="listening ? 'text-status-danger-600 dark:text-status-danger-400 animate-pulse' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
+                  :title="micTitle"
+                  :aria-label="micTitle"
+                  :aria-pressed="listening"
+                  :disabled="transcribing || voiceCallActive"
+                  @click="toggleMic"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
+                </button>
+                    <!-- Right cluster: the model picker, then Send. `ml-auto`
+                         rather than a spacer element, and `min-w-0` so the picker
+                         is the thing that truncates when the row runs out — never
+                         Send, which is `shrink-0`. -->
+                <div class="ml-auto flex items-center gap-1 min-w-0">
+                  <BaseSelect
+                    v-if="modelControl.render"
+                    v-model="selectedModel"
+                    variant="ghost"
+                    class="min-w-0 max-w-[16rem]"
+                    :disabled="voiceCallActive || !modelControl.enabled"
+                    :title="modelControl.reason || 'Which model this chat runs on'"
+                    aria-label="Model for this chat"
+                    data-testid="portal-model-picker"
+                  >
+                    <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
+                    <option
+                      v-for="opt in modelControl.options"
+                      :key="opt.id"
+                      :value="opt.id"
+                      :title="optionTitle(opt)"
+                    >{{ optionText(opt) }}</option>
+                  </BaseSelect>
+                  <button
+                    v-if="canCancelTurn"
+                    type="button"
+                    @click="cancelTurn"
+                    :disabled="cancelling"
+                    class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-status-danger-600 hover:bg-status-danger-700 text-white disabled:opacity-40 transition"
+                    :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
+                    aria-label="Stop this turn"
+                  >
+                    <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                    <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" /></svg>
+                  </button>
+                  <button
+                    v-else
+                    type="submit"
+                    class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
+                    :disabled="sending || !input.trim() || voiceCallActive"
+                    title="Send"
+                  >
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </form>
       </div>

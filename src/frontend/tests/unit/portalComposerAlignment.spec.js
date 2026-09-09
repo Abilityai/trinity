@@ -1,4 +1,17 @@
 /**
+ * #2662 — the composer is ONE shell: the field on top, the controls in a row
+ * inside it. The shell carries the border, fill and focus ring; the textarea is
+ * transparent and borderless. Both portal composers share the shape, which is
+ * why every assertion below runs over both files (the #2211 lesson: the same
+ * markup lives in two places and a fix in one silently leaves the twin broken).
+ *
+ * What #2259 left behind, still enforced: `block` on the textarea, `w-full`, and
+ * 44px action boxes. What #2662 retired: `items-end` on the form. It mattered
+ * only while the buttons shared a row with a growing field — and that sharing
+ * is exactly what cost the field its width (143px at 375px, a placeholder over
+ * four lines) and what left 34px when ent#403 tried to add a model picker to it.
+ *
+ * ---- the original #2259 note, kept because `block` is still load-bearing ----
  * #2259 — the composer's buttons must align to the INPUT, not to its wrapper.
  *
  * ent#392 wrapped the textarea in a `relative` div so the typeahead popup had
@@ -37,7 +50,7 @@ const read = (name) =>
  * with it.
  */
 function composerForm(src) {
-  const start = src.search(/<form[^>]*class="[^"]*\bitems-end\b/)
+  const start = src.search(/<form[^>]*@submit\.prevent="send"/)
   if (start === -1) return ''
   const end = src.indexOf('</form>', start)
   if (end === -1) return ''
@@ -93,12 +106,33 @@ describe('#2259 workspace composer alignment', () => {
       // `block` must be ADDITIVE — a textarea that stopped being `w-full` would
       // collapse to its `cols` width, trading one layout bug for another.
       expect(textareaTag(src)).toMatch(/class="[^"]*\bw-full\b/)
-      expect(src).toContain('relative flex-1 min-w-0')
+      // #2662: the anchor wrapper is the shell's first ROW now, not a flex item
+      // competing with buttons, so it is `relative` and full width. The ref name
+      // is unchanged — the typeahead's outside-click close reads `composerWrap`.
+      expect(src).toMatch(/<div ref="composerWrap" class="relative"/)
     })
 
-    it('keeps the row bottom-aligned so the buttons follow the last line as it grows', () => {
-      // Centring would drift the buttons upward with every added line.
-      expect(src).toMatch(/<form[^>]*class="[^"]*\bitems-end\b/)
+    it('puts the field and the controls in ONE shell that carries the chrome', () => {
+      // #2662. The border, fill and focus ring moved off the textarea onto the
+      // shell, which is what makes the controls read as inside the field. Two
+      // boxes is the failure mode: a textarea that regains `rounded-2xl` or a
+      // background nests a second field inside the first.
+      const form = composerForm(src)
+      expect(form, 'composer <form> not found — the scope anchor is stale').not.toBe('')
+      expect(form).toMatch(/<div\s+class="rounded-2xl border[^"]*focus-within:ring-2/)
+      expect(textareaTag(src)).toMatch(/class="[^"]*\bbg-transparent\b/)
+      expect(textareaTag(src)).toMatch(/class="[^"]*\bborder-0\b/)
+      expect(textareaTag(src)).not.toMatch(/class="[^"]*\brounded-2xl\b/)
+    })
+
+    it('bottom-aligns nothing, because the row no longer sits beside the field', () => {
+      // The `items-end` this file was written for (#2259) was load-bearing only
+      // while the buttons shared a row with a growing textarea. Stacked, the
+      // control row is its own line and centres. Asserted rather than deleted:
+      // reintroducing `items-end` here would be a silent revert to the layout
+      // that cost the field its width — 143px at 375px, four wrapped lines.
+      expect(composerForm(src)).not.toMatch(/<form[^>]*class="[^"]*\bitems-end\b/)
+      expect(composerForm(src)).toMatch(/<div class="mt-1 flex items-center gap-1">/)
     })
 
     it('sizes every action button as a 44px box rather than padding around an icon', () => {
