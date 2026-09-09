@@ -141,7 +141,7 @@
       <ColumnResizeHandle
         :value="columns.sidebar.value"
         :min="columns.limits.sidebar.min"
-        :max="columns.limits.sidebar.max"
+        :max="columns.sidebarMax.value"
         label="Resize the sidebar"
         side="left"
         testid="ws-handle-sidebar"
@@ -436,7 +436,7 @@
         v-if="thirdColumnResizable"
         :value="columns.railOpenWidth.value"
         :min="columns.limits.rail.min"
-        :max="columns.limits.rail.max"
+        :max="columns.railMax.value"
         label="Resize the side panel"
         side="right"
         testid="ws-handle-rail"
