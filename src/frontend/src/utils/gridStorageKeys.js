@@ -54,11 +54,23 @@ export const ORG_KEY = 'trinity-grid-org-v1'
  */
 export const LEGACY_ADOPTED_KEY = 'trinity-grid-legacy-adopted-by'
 
-/** Server preference keys (`user_ui_preferences.key`) for the three blobs. */
+/**
+ * EVERY server preference key (`user_ui_preferences.key`) this frontend writes.
+ *
+ * Not grid-only despite the file it lives in — this map IS the frontend half of
+ * the allowlist, and `tests/unit/test_ent413_user_ui_preferences.py::
+ * test_frontend_pref_keys_match_the_backend_allowlist` asserts it EQUALS
+ * `user_preferences_service.PREFERENCE_KEYS`. A key added on one side only is a
+ * silent 404 on every save (the #2199 hand-copy class, across the tree
+ * boundary), so a new consumer adds its key here rather than inlining a
+ * literal — which is why the Workspace's key sits beside the Grid's three.
+ */
 export const PREF_KEYS = Object.freeze({
   layout: 'grid_layout',
   widgets: 'grid_widgets',
   org: 'grid_org',
+  // ent#403 — the Workspace composer's model choice, `{agentName: modelId}`.
+  workspaceModel: 'workspace_model',
 })
 
 /**
