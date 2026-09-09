@@ -241,6 +241,37 @@
             </svg>
             Workspace
           </button>
+          <!-- Talk (#2559). A DOOR, not a surface: the voice call lives in the
+               Workspace conversation, and this opens it there with the call
+               starting. The chat-panel overlay that used to run a parallel call
+               from this page — its own start route, its own transcript home —
+               is retired; the mic glyph moved here with the affordance.
+
+               Same tab, deliberately: the navigation is same-document, which is
+               what lets `armVoiceAutoStart()`'s module-scoped one-shot survive
+               to the Workspace (a new tab is a fresh document, where it is
+               false by construction) and what keeps the Workspace's
+               `AudioContext` resumable from the click that started the call.
+
+               NOT gated, on purpose. The instance-wide voice flag this page
+               could gate on is the same boolean the Workspace itself checks, so
+               a gate here would buy nothing and cost two defects: the flag
+               arrives after first paint (a button that pops in a beat late) and
+               a failed flags fetch sets it false with no retry (a working
+               feature hidden, indistinguishable from an instance without
+               voice). The Workspace reports availability in words instead —
+               ent#438's ruling, applied consistently. -->
+          <button
+            @click="goToTalk"
+            data-testid="agent-talk"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700"
+            title="Talk to this agent by voice. The call opens in the Workspace, and the conversation lives there — not in this chat."
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+            </svg>
+            Talk
+          </button>
           <!-- Running State Toggle -->
           <RunningStateToggle
             :model-value="agent.status === 'running'"
@@ -533,6 +564,7 @@ import AutonomyToggle from './AutonomyToggle.vue'
 import ReadOnlyToggle from './ReadOnlyToggle.vue'
 import TagsEditor from './TagsEditor.vue'
 import { useFormatters } from '../composables'
+import { armVoiceAutoStart } from './portal/portalVoiceMode'
 
 // Name editing state
 const isEditingName = ref(false)
@@ -654,10 +686,6 @@ const props = defineProps({
     type: Object,
     default: null
   },
-  voiceAvailable: {
-    type: Boolean,
-    default: false
-  },
   // #60 — Brain Orb: platform flag AND the agent's brain-orb capability (resolved
   // in AgentDetail). Gates the header logo that opens the orb page.
   brainAvailable: {
@@ -693,6 +721,14 @@ function goToWorkspace() {
   // the retired per-agent route redirects here too, so an old bookmark and this
   // button land in the same place.
   router.push({ path: '/workspace', query: { agent: props.agent.name } })
+}
+
+function goToTalk() {
+  // The intent is armed IN THE APP, never by the URL alone (#2559). A pasted,
+  // bookmarked or mailed `?voice=1` arrives on a fresh document where `armed`
+  // is false, so it opens the conversation and starts nothing.
+  armVoiceAutoStart()
+  router.push({ path: '/workspace', query: { agent: props.agent.name, voice: '1' } })
 }
 
 function goToBrain() {

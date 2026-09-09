@@ -150,7 +150,11 @@ describe('#2579 — the fresh chat is visible and focused', () => {
     const src = codeOnly(CONV())
     expect(src).toMatch(/if \(props\.newChat\) nextTick\(focusComposer\)/)
     expect(src).toMatch(/function focusComposer\(\) \{ textarea\.value\?\.focus\(\) \}/)
-    expect(src).toMatch(/defineExpose\(\{ focusComposer \}\)/)
+    // Membership, not the exact shape: #2559 adds `startVoiceCall` beside it for
+    // the Talk door. What this case needs is that the parent can still reach
+    // `focusComposer` — pinning the one-token form would fail any sibling PR
+    // that legitimately exposes a second thing.
+    expect(src).toMatch(/defineExpose\(\{[^}]*\bfocusComposer\b[^}]*\}\)/)
   })
 
   it('the notice is a SLOT, not a prop plus markup in the conversation', () => {

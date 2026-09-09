@@ -410,10 +410,22 @@ def test_the_voice_panel_never_widens_who_can_see_a_canvas():
 def test_the_voice_panel_capability_still_has_a_caller():
     """Deleting the per-agent workspace removed the only caller that passed
     `workspace_mode: true`. Bridging the panel to the canvas while leaving it
-    unreachable would be dead code wearing a fix's name — the chat voice
-    overlay now enables it."""
+    unreachable would be dead code wearing a fix's name.
+
+    #2559 moved that caller, so this test moved with it: the chat-panel voice
+    overlay is retired and the **Workspace** call is what enables the capability
+    now (`client_portal/voice.py::start_workspace_voice`). The property under
+    test is unchanged — some live caller must still pass it — which is why this
+    is re-pointed rather than deleted, and why the ChatPanel arm is inverted
+    instead of dropped: the retired front door must not quietly come back.
+    """
+    workspace_start = (_BACKEND / "client_portal" / "voice.py").read_text()
+    body = workspace_start[workspace_start.index("def start_workspace_voice"):]
+    assert "workspace_mode=True" in body
+    assert 'canvas_audience="operator"' in body
+
     chat = (_FRONTEND / "components" / "ChatPanel.vue").read_text()
-    assert "voice.start(currentSessionId.value, null, true)" in chat
+    assert "voice.start(" not in chat, "the Agent Detail voice overlay is retired (#2559)"
 
 
 def test_a_canvas_write_failure_never_breaks_the_voice_turn():

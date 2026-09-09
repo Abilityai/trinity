@@ -119,6 +119,13 @@ export const useSessionsStore = defineStore('sessions', {
           { force }
         )
         this.sessionTabEnabled = !!r.data?.session_tab_enabled
+        // #2559: no reader in `src/` since the Agent Detail voice overlay was
+        // retired — the Talk door is ungated and the Workspace asks the roster
+        // for its own capability. Kept because this is a free parse of a payload
+        // already fetched for six other flags, and the backend key is
+        // load-bearing server-side (`settings.py` derives `workspace_available`
+        // from it). Registered on the same follow-up as the now caller-less
+        // `/api/agents/{name}/voice/*` routes.
         this.voiceAvailable = !!r.data?.voice_available
         this.workspaceAvailable = !!r.data?.workspace_available
         this.voipAvailable = !!r.data?.voip_available

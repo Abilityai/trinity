@@ -146,9 +146,13 @@ canvas under the new name while the old one stayed visible.
   Workspace needs no Gemini key, so gating would hide a working link on every
   install without one) and its stopped-agent disable (#2196 — the page reports
   availability itself, and a dead button is a worse answer than a page that says
-  why); and `ChatPanel`'s voice overlay now passes `workspaceMode: true`, because
-  the retired page was the ONLY caller that did — bridging the voice panel to the
-  canvas while leaving it unreachable would be dead code wearing a fix's name.
+  why); and the voice call passes `workspace_mode`, because the retired page was
+  the ONLY caller that did — bridging the voice panel to the canvas while leaving
+  it unreachable would be dead code wearing a fix's name. Since #2559 that caller
+  is the **Workspace** call (`client_portal/voice.py::start_workspace_voice`,
+  `workspace_mode=True` + `canvas_audience="operator"`), not `ChatPanel`'s
+  retired overlay — so a call started through Agent Detail's Talk door still
+  draws on the same durable canvas the Canvas tab renders.
 - **Audience is how "never widens" is made structural.** `audience` ∈ `operator`
   (default) | `roster`, a validated COLUMN and never a key inside `blocks` (the
   ent#364 rule — `blocks` is agent-authored, so an audience buried there lets a

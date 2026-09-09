@@ -839,6 +839,18 @@ spoken replies (#2157) stay as composer affordances.
   second provider). Disabled WITH the reason when the instance cannot ("voice is
   turned off" / "no voice provider key"), never a dead button. Portal-token
   clients never see it. Distinct from the per-agent `voice_available` (TTS).
+- **FR-1b — The Talk door (#2559)**: `/workspace?agent=<name>&voice=1` starts the
+  call on landing. The param alone is **not** authority: it is honoured only when
+  the intent was **armed in the app** (`armVoiceAutoStart()` in
+  `portalVoiceMode.js`, called by `AgentHeader`'s Talk button before the
+  `router.push`), the agent actually landed, and the principal is a platform
+  session. The armed flag is a module-scoped `let`, so it lives exactly as long
+  as the document — a pasted, bookmarked or mailed link arrives on a fresh
+  document and can never be armed, including the signed-out case where the
+  sign-in click re-runs `bootstrap()` on the same document. `bootstrap()` strips
+  the key once, in its `finally`, keyed on the key's **presence** (so `?voice=0`
+  does not linger either) and disarms; the intent is consumed once. A
+  portal-token principal is refused and shown nothing, mirroring FR-1.
 - **FR-2 — Bound to the thread**: `POST /api/enterprise/client-portal/agents/{name}/voice/start`
   under the portal principal — roster membership and thread ownership evaluated
   before branching → ONE uniform 404 (off-roster, foreign thread, portal token);
@@ -873,8 +885,9 @@ spoken replies (#2157) stay as composer affordances.
   in the label row — never a silent drop. Requires the session to outlive the
   provider connection: compression + resumption on every session, reconnect on
   `go_away`.
-- **FR-7 — Barge-in, Mute, End, tool badge**: as on the Agent Detail overlay —
-  the same component.
+- **FR-7 — Barge-in, Mute, End, tool badge**: the shared orb component
+  (`components/chat/VoiceOverlay.vue`), whose **only** front door is this one
+  since #2559 — Agent Detail's chat-panel mount of it is retired.
 - **FR-8 — Degradation, with words**: mic denied, insecure origin, no key,
   disabled, provider error, connection closed, cap reached → a named reason in
   the status line (or the failed-start line) and the chat unblocked. A `saved`

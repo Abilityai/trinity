@@ -58,10 +58,14 @@ Two knock-on edits, both of which would otherwise leave dead behaviour:
   gated on `workspaceAvailable`, and is no longer disabled while the agent is
   stopped. The Workspace reports availability itself (#2196), and a dead button
   is a worse answer than a page that says why.
-- `ChatPanel`'s voice overlay starts its session with `workspaceMode: true`.
-  **This is load-bearing, not a bonus**: the retired page was the only caller
-  that passed it, so bridging the voice panel to the canvas while leaving it
-  unreachable would have been dead code wearing a fix's name.
+- The voice call starts its session with `workspace_mode` on. **This is
+  load-bearing, not a bonus**: the retired page was the only caller that passed
+  it, so bridging the voice panel to the canvas while leaving it unreachable
+  would have been dead code wearing a fix's name. Since #2559 the caller is the
+  **Workspace** call (`client_portal/voice.py::start_workspace_voice`,
+  `workspace_mode=True` + `canvas_audience="operator"`), not `ChatPanel`'s
+  retired overlay — so a call reached through Agent Detail's Talk door still
+  draws on the same durable canvas this tab renders.
 
 ## Storage
 

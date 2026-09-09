@@ -12,7 +12,7 @@ Workspace lives at `/workspace`. It ships in **every** build; the older `/portal
 - **Agent page** — A per-agent summary at `/workspace/a/{agent}`: what it's been doing, what it's waiting on you for, and what you can ask it.
 - **Briefing** — The panel on an empty chat listing things you can ask, drawn from the agent's exposed playbooks or its template.
 
-> **Not to be confused with Workspace Mode**, the voice canvas at `/agents/{name}/workspace`. Different feature, different flag — see [Voice Chat](../advanced/voice-chat.md).
+> **The Workspace is also where voice lives.** The separate voice-canvas page at `/agents/{name}/workspace` is retired; a voice call now runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the **Voice** control in the conversation header, or from **Talk** on the agent's page — see [Voice Chat](../advanced/voice-chat.md#voice-mode-in-the-workspace).
 
 ## How It Works
 

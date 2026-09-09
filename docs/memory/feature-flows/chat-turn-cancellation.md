@@ -236,9 +236,9 @@ caller's declared overlays is open. Escape with nothing in flight is a no-op
 that never touches the input.
 
 **The overlay list is per surface, and it is declared generously.** The rule is
-shared; what owns Escape is not. ChatPanel declares `[voice.isActive,
-showSessionDropdown]`; the Workspace declares `[typeaheadOpen, pickerOpen,
-listening]` — the composer typeahead, the agent picker (which closes on
+shared; what owns Escape is not. ChatPanel declares `[showSessionDropdown]`
+(its voice overlay was retired by #2559, and the list shrank with it); the
+Workspace declares `[typeaheadOpen, pickerOpen, listening]` — the composer typeahead, the agent picker (which closes on
 outside-click only, so Escape is how a user dismisses it) and dictation (the mic
 is disabled only while *transcribing*, so it can be live during a turn). The
 Workspace list originally carried the typeahead alone, which made pressing

@@ -109,7 +109,6 @@
             @change-subscription="changeSubscription"
             :has-avatar-prompt="!!avatarIdentityPrompt"
             :emotion-avatar-url="emotionAvatarUrl"
-            :voice-available="sessionsStore.voiceAvailable"
             :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
