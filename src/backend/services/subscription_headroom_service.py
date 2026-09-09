@@ -49,7 +49,7 @@ import httpx
 from database import db
 from db_models import HeadroomWindow, SubscriptionHeadroom, SubscriptionUsage
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
-from utils.helpers import utc_now_iso
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -938,6 +938,107 @@ def rank_subscriptions(candidates, readings: Dict[str, Optional[HeadroomReading]
         if selection_verdict(readings.get(c.id))[0] != SELECTION_REFUSED
     ]
     return sorted(kept, key=lambda c: selection_sort_key(c, readings.get(c.id)))
+
+
+# ---------------------------------------------------------------------------
+# #2638 — readmitting a subscription the 2h skip-list excluded
+# ---------------------------------------------------------------------------
+#
+# The skip-list (`db.has_recent_subscription_failures`, kind-blind, 2h) is the
+# ONLY guard against #444's ping-pong, so it is not merely relaxed here. It is
+# overridden per candidate, and only on POSITIVE evidence — never on the
+# absence of evidence, which is the direction that reintroduces the bug.
+#
+# Two forms of evidence, in strength order:
+#
+#   serving_now  — a FRESH reading says the provider is not refusing this token.
+#                  This is ground truth about now (the #447 rule: a probe beats
+#                  an inference from past failures), and it is the same evidence
+#                  `rank_subscriptions` already trusts in the other direction
+#                  when it DROPS a refusing candidate.
+#
+#   window_reset — no fresh reading, but the provider's own reset instant for a
+#                  blocked window has passed AND the failure predates it. The
+#                  window the subscription failed in has rolled over, so the
+#                  event is about a quota that no longer exists.
+#
+# The instant is read from an AGED snapshot on purpose, and the asymmetry is
+# this file's own established rule (#447/#2396): a utilisation *number* decays,
+# an *instant* does not. A reset time recorded six hours ago is exactly as true
+# now as it was then.
+#
+# The failure instant must PREDATE the reset for `window_reset` to hold. Without
+# that ordering a subscription that 429'd one minute AFTER its window rolled
+# over — i.e. one that is genuinely exhausted again — would be readmitted on the
+# strength of a reset it had already consumed.
+RECOVERY_SERVING_NOW = "serving_now"
+RECOVERY_WINDOW_RESET = "window_reset"
+
+# How old a snapshot may be and still have its RESET INSTANTS believed. Bounded
+# by the snapshot's own 7-day Redis TTL rather than left unbounded: past that
+# the key is gone, so a larger number would describe nothing.
+RECOVERY_INSTANT_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+
+def _instant_has_passed(instant: Optional[str], now: datetime) -> bool:
+    """Has an ISO-Z provider instant elapsed? Unparseable/absent → False.
+
+    Fail-CLOSED: this answers "may the skip-list be overridden", so anything
+    unreadable must leave the skip-list standing.
+    """
+    if not instant:
+        return False
+    try:
+        return parse_iso_timestamp(instant) <= now
+    except Exception:  # noqa: BLE001 — a provider string we cannot read proves nothing
+        return False
+
+
+def recovery_verdict(
+    fresh: Optional[HeadroomReading],
+    aged: Optional[HeadroomReading],
+    last_failure_at: Optional[str],
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """May a skip-listed subscription be READMITTED as a switch candidate?
+
+    Returns the evidence name (`RECOVERY_SERVING_NOW` / `RECOVERY_WINDOW_RESET`)
+    or `None` for "leave the skip-list standing". Pure — every input is already
+    resolved by the caller, so this is testable without Redis or a clock.
+
+    `fresh` is a reading inside the selection bound; `aged` is the same snapshot
+    read with only its instants believed (see the block comment above). A caller
+    with no aged reading passes the fresh one for both.
+    """
+    now = now or datetime.now(timezone.utc)
+    if fresh is not None and not fresh.refusing:
+        return RECOVERY_SERVING_NOW
+    if fresh is not None and fresh.refusing:
+        # A fresh reading that says "still refusing" is the strongest evidence
+        # available and it points the other way. Do not fall through to the
+        # instant arm and readmit on an older, weaker signal.
+        return None
+    if aged is None or not last_failure_at:
+        return None
+    try:
+        failed_at = parse_iso_timestamp(last_failure_at)
+    except Exception:  # noqa: BLE001
+        return None
+    for window in (aged.five_hour, aged.seven_day):
+        if window is None or not window.blocked:
+            continue
+        if not _instant_has_passed(window.resets_at, now):
+            continue
+        try:
+            if parse_iso_timestamp(window.resets_at) <= failed_at:
+                # The failure happened at or after the rollover, so the reset is
+                # already spent — this is a fresh exhaustion, not a stale one.
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        return RECOVERY_WINDOW_RESET
+    return None
 
 
 def describe_reading(reading: Optional[HeadroomReading]) -> Dict[str, Any]:

@@ -102,6 +102,57 @@ def _pct_or_na(value) -> str:
     return f"{value:.0f}%" if isinstance(value, (int, float)) else "n/a"
 
 
+def _readmit_recovered(headroom, current_subscription_id: str) -> tuple:
+    """The skip-list override (#2638). Returns `(readmitted, why_by_id)`.
+
+    `db.list_viable_alternative_subscriptions` excludes every subscription with
+    ANY failure event in a flat 2-hour window. That window is a proxy for "the
+    provider is still refusing it", and on a two-subscription install one stale
+    event is the difference between a turn that completes on the other
+    subscription and a turn the user watches fail: #2320's own evidence was
+    exactly this — "no viable alternative", with an alternative sitting there.
+
+    So the exclusion is overridden PER CANDIDATE, on positive evidence only —
+    `subscription_headroom_service.recovery_verdict`, which either has a fresh
+    provider reading saying the token is being served or the provider's own
+    reset instant for the blocked window, elapsed and predating the failure.
+    Absence of evidence readmits nothing, which is what keeps #444's ping-pong
+    closed: the loop there was caused by FORGETTING a failure, and nothing here
+    forgets one.
+
+    Raises rather than swallows: the caller's `except` already degrades the
+    whole ranking half to the pre-#2409 load-balance pick, and that degradation
+    is the correct answer to "the evidence could not be read" — a local
+    try/except here would readmit nobody while reporting success, which is the
+    same silent-inertness this module warns about one function down.
+    """
+    skipped = db.list_recently_failed_alternatives(current_subscription_id)
+    if not skipped:
+        return [], {}
+    ids = [c.id for c in skipped]
+    fresh = headroom.cached_headroom_readings(ids)
+    aged = headroom.cached_headroom_readings(
+        ids, max_age_seconds=headroom.RECOVERY_INSTANT_MAX_AGE_SECONDS
+    )
+    last_failed = db.last_failure_at_by_subscription(ids)
+    readmitted, why = [], {}
+    for c in skipped:
+        verdict = headroom.recovery_verdict(
+            fresh.get(c.id), aged.get(c.id), last_failed.get(c.id)
+        )
+        if verdict:
+            readmitted.append(c)
+            why[c.id] = verdict
+    if readmitted:
+        logger.info(
+            "[#2638] readmitting %d skip-listed alternative(s) to subscription "
+            "%s on provider evidence: %s",
+            len(readmitted), current_subscription_id,
+            ", ".join(f"'{c.name}' ({why[c.id]})" for c in readmitted),
+        )
+    return readmitted, why
+
+
 def select_best_alternative_subscription(current_subscription_id: str) -> Optional[tuple]:
     """Filter (db) → rank (cached headroom) → first. Returns `(subscription,
     why)` or None (#2409). Synchronous by design — call it via
@@ -131,12 +182,28 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
     the ranking cannot change the pick, and the explanation IS the value.
     """
     survivors = db.list_viable_alternative_subscriptions(current_subscription_id)
-    if not survivors:
-        return None
     try:
         headroom = importlib.import_module("services.subscription_headroom_service")
-        readings = headroom.cached_headroom_readings([c.id for c in survivors])
-        ranked = headroom.rank_subscriptions(survivors, readings)
+        readmitted, readmit_why = _readmit_recovered(headroom, current_subscription_id)
+        candidates = survivors + readmitted
+        if not candidates:
+            return None
+        readings = headroom.cached_headroom_readings([c.id for c in candidates])
+        # A candidate readmitted because its WINDOW RESET carries a reading
+        # whose `blocked` flag describes the window that just rolled over —
+        # and `rank_subscriptions` drops a blocked candidate as REFUSED. Left
+        # as-is the readmission would be inert in exactly the case it exists
+        # for: the ranker would throw the recovered subscription straight back
+        # out. The number is stale and the flag is about a quota that no longer
+        # exists, so the honest tier is UNKNOWN — it still ranks, after any
+        # measured candidate, in load-balance order.
+        #
+        # `serving_now` readmissions are untouched: their reading is fresh and
+        # says the provider is serving, so the ranker keeps them on its own.
+        for sid, verdict in readmit_why.items():
+            if verdict == headroom.RECOVERY_WINDOW_RESET:
+                readings[sid] = None
+        ranked = headroom.rank_subscriptions(candidates, readings)
         auto_refresh = bool(headroom.is_auto_refresh_enabled())
     except Exception as e:  # noqa: BLE001 — the ranking may fail; the switch may not
         logger.warning(
@@ -144,6 +211,12 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
             "alternative for subscription %s by load-balance order",
             type(e).__name__, e, current_subscription_id,
         )
+        # Readmission is deliberately NOT available here. It exists only as an
+        # override backed by fresh provider evidence, and this branch is
+        # precisely the one where that evidence could not be read — so the 2h
+        # skip-list stands and the pick is the pre-#2409, pre-#2638 one.
+        if not survivors:
+            return None
         chosen = survivors[0]
         return chosen, {
             "tier": SELECTION_UNRANKED,
@@ -157,19 +230,22 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
             "[#2409] every alternative to subscription %s (%d candidate(s)) is "
             "currently refused by the provider (probe 429, blocking window or "
             "rejected token) — not switching onto a subscription that cannot serve",
-            current_subscription_id, len(survivors),
+            current_subscription_id, len(candidates),
         )
         return None
     chosen = ranked[0]
     why = headroom.describe_reading(readings.get(chosen.id))
-    why["candidates"] = len(survivors)
+    why["candidates"] = len(candidates)
     why["auto_refresh_enabled"] = auto_refresh
-    if all(readings.get(c.id) is None for c in survivors):
+    # #2638: name the override on the pick that used it, so an operator reading
+    # the notification can tell a never-failed candidate from a readmitted one.
+    why["readmitted"] = readmit_why.get(chosen.id)
+    if all(readings.get(c.id) is None for c in candidates):
         if auto_refresh:
             logger.info(
                 "[#2409] no fresh headroom reading for any of %d alternative(s) to "
                 "subscription %s — chosen by load-balance order",
-                len(survivors), current_subscription_id,
+                len(candidates), current_subscription_id,
             )
         else:
             logger.warning(
@@ -177,14 +253,14 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
                 "subscription %s and ambient headroom refresh is OFF, so none "
                 "will ever exist — headroom ranking is inert; chosen by "
                 "load-balance order",
-                len(survivors), current_subscription_id,
+                len(candidates), current_subscription_id,
             )
     logger.info(
         "[#2409] alternative to subscription %s: '%s' (%s; 7d %s, 5h %s) "
         "out of %d candidate(s)",
         current_subscription_id, chosen.name, why["tier"],
         _pct_or_na(why["seven_day_pct"]), _pct_or_na(why["five_hour_pct"]),
-        len(survivors),
+        len(candidates),
     )
     return chosen, why
 
@@ -296,6 +372,306 @@ async def handle_subscription_failure(
         )
 
 
+def _assigned_subscription_is_refused(subscription_id: str) -> Optional[str]:
+    """Is the agent's OWN subscription known to be unable to serve, right now?
+
+    Returns the evidence name (`"provider_refusing"` / `"recent_rate_limit"`) or
+    `None`. Synchronous — both reads are blocking; call it via `asyncio.to_thread`.
+
+    The two signals answer different questions and both are needed. The cached
+    provider reading is ground truth but only exists where the sampler has been;
+    the 2h `rate_limit` event is the platform's own record and exists even with
+    ambient refresh off. Either alone leaves a real case uncovered.
+
+    Deliberately the DISPLAY predicate `is_subscription_rate_limited` (429 only,
+    #2352) and not the kind-blind candidate-skip one: this decides whether to
+    move an agent OFF its subscription pre-emptively, and an auth failure is a
+    credential problem that a different subscription may share (a `.env` shadow
+    is per-agent, not per-subscription). Quota exhaustion is the case a switch
+    actually fixes.
+
+    Fail-CLOSED to `None` on every error: "we could not tell" must dispatch
+    normally, because the alternative is refusing to run a turn that would very
+    likely have worked. The post-failure switch (#792) is still behind it.
+    """
+    try:
+        headroom = importlib.import_module("services.subscription_headroom_service")
+        reading = headroom.cached_headroom_readings([subscription_id]).get(subscription_id)
+        if reading is not None and reading.refusing:
+            return "provider_refusing"
+    except Exception as e:  # noqa: BLE001 — unreadable evidence proves nothing
+        logger.warning(
+            "[#2638] could not read the headroom snapshot for subscription %s "
+            "(%s) — dispatching without a pre-emptive switch",
+            subscription_id, type(e).__name__,
+        )
+    try:
+        if db.is_subscription_rate_limited(subscription_id):
+            return "recent_rate_limit"
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[#2638] could not read failure events for subscription %s (%s)",
+            subscription_id, type(e).__name__,
+        )
+    return None
+
+
+async def ensure_serviceable_subscription(agent_name: str) -> Optional[dict]:
+    """#2638 AC#3 — switch BEFORE the first dispatch when the assigned
+    subscription is already known not to serve and an alternative exists.
+
+    SUB-003 has always been reactive: the turn is dispatched, the provider
+    refuses it, and #792 re-issues once on the new subscription. That works, but
+    the first message after a subscription hits its wall always burns a failed
+    attempt — and on the Workspace it is a person watching their message fail.
+    Everything needed to avoid it is already known at dispatch time; nothing was
+    reading it.
+
+    Returns the same dict `handle_subscription_failure` returns, or `None` for
+    "changed nothing" — which covers no subscription, no evidence, auto-switch
+    disabled, and no viable alternative. It NEVER raises: a pre-flight
+    optimisation must not be able to fail a turn that would otherwise run, and
+    the reactive path remains the backstop for everything this declines to do.
+
+    Records NO failure event. Nothing failed — that is the whole point — and a
+    synthetic event would poison the very skip-list that decides where the agent
+    may move next.
+    """
+    try:
+        if db.get_setting_value("auto_switch_subscriptions", default="true") != "true":
+            return None
+        sub_at_entry = db.get_agent_subscription_id(agent_name)
+        if not sub_at_entry:
+            return None
+        evidence = await asyncio.to_thread(_assigned_subscription_is_refused, sub_at_entry)
+        if not evidence:
+            return None
+
+        async with await agent_switch_lock(agent_name):
+            # Same stale-check as the reactive path: another coroutine may have
+            # moved the agent while we waited for the lock, and its pick was
+            # made on the same evidence ours was.
+            current_sub_id = db.get_agent_subscription_id(agent_name)
+            if current_sub_id != sub_at_entry:
+                return None
+            picked = await asyncio.to_thread(
+                select_best_alternative_subscription, current_sub_id
+            )
+            if not picked:
+                logger.info(
+                    "[#2638] agent '%s' is on a subscription that cannot serve "
+                    "(%s) and no alternative is available — dispatching anyway, "
+                    "so the failure is the provider's answer rather than ours",
+                    agent_name, evidence,
+                )
+                return None
+            alternative, destination_headroom = picked
+            current_sub = db.get_subscription(current_sub_id)
+            old_name = current_sub.name if current_sub else current_sub_id
+            logger.info(
+                "[#2638] pre-dispatch switch for '%s': '%s' is refused (%s) -> '%s'",
+                agent_name, old_name, evidence, alternative.name,
+            )
+            # The SAME switch the reactive path performs (AC#6): one activity,
+            # one notification, one hot-reload, so the Settings usage cards and
+            # the Dashboard pressure badges keep counting whichever path fired.
+            result = await _perform_auto_switch(
+                agent_name=agent_name,
+                old_subscription_name=old_name,
+                new_subscription=alternative,
+                failure_kind="rate_limit",
+                event_count=0,
+                destination_headroom=destination_headroom,
+                pre_dispatch=True,
+            )
+            result["evidence"] = evidence
+            return result
+    except Exception as e:  # noqa: BLE001 — never fail a turn from the pre-flight
+        logger.error(
+            "[#2638] pre-dispatch subscription check failed for '%s': %s",
+            agent_name, e,
+        )
+        return None
+
+
+API_KEY_FALLBACK_SETTING = "subscription_api_key_fallback"
+
+
+def is_api_key_fallback_enabled() -> bool:
+    """Default ON (#2638 AC#4), read at call time.
+
+    A setting rather than `.env`: the operator who needs to turn this off is the
+    one who registered subscriptions precisely so that spend goes through them,
+    and that decision must be reachable from Settings → Subscriptions rather
+    than from a redeploy. Fail-OPEN (enabled) on a read error — the failure this
+    guards is a user's turn dying with a usable key sitting in settings.
+    """
+    try:
+        return db.get_setting_value(API_KEY_FALLBACK_SETTING, default="true") == "true"
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[#2638] could not read %s (%s) — treating the fallback as enabled",
+            API_KEY_FALLBACK_SETTING, type(e).__name__,
+        )
+        return True
+
+
+def earliest_known_reset(subscription_ids) -> Optional[str]:
+    """The soonest provider reset instant across a set of subscriptions.
+
+    Read from AGED snapshots on purpose — the #447/#2396 asymmetry this codebase
+    already states: a utilisation *number* decays, an *instant* does not. When a
+    turn cannot run at all, "try again after 19:10" is the only useful thing the
+    platform can say, and the sampler already knows it.
+
+    Returns `None` when nothing is known, and the caller must then say nothing
+    rather than guess — a fabricated time is worse than an unqualified "later".
+    """
+    try:
+        headroom = importlib.import_module("services.subscription_headroom_service")
+        readings = headroom.cached_headroom_readings(
+            list(subscription_ids),
+            max_age_seconds=headroom.RECOVERY_INSTANT_MAX_AGE_SECONDS,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#2638] earliest-reset lookup failed (%s)", type(e).__name__)
+        return None
+    instants = []
+    for reading in readings.values():
+        if reading is None:
+            continue
+        for window in (reading.five_hour, reading.seven_day):
+            if window is not None and window.blocked and window.resets_at:
+                instants.append(window.resets_at)
+    if not instants:
+        return None
+    # ISO-Z strings sort lexicographically, which is why every timestamp in this
+    # platform is written that way (Invariant #16). Sorting parsed datetimes
+    # would mean parsing values a provider controls, on a path whose whole job
+    # is to still answer when things are going wrong.
+    return min(instants)
+
+
+async def fallback_to_api_key(agent_name: str) -> Optional[dict]:
+    """#2638 AC#4 — when NO subscription can serve, run the turn on the platform
+    API key instead of failing it.
+
+    This is the last resort and it is deliberately narrow. It fires only when
+    the switcher has already declined to find an alternative, only for a
+    Claude-runtime agent, only when a platform key is actually configured, and
+    only when the operator has left the setting on. It clears the subscription
+    assignment and turns `use_platform_api_key` on, then RESTARTS rather than
+    hot-reloading: the reload endpoint pushes an OAuth token, and the change
+    needed here is the opposite one — set `ANTHROPIC_API_KEY`, drop
+    `CLAUDE_CODE_OAUTH_TOKEN` — which `lifecycle`'s own auth block already does
+    correctly from DB state on a recreate (#2114's guard lives there too, so
+    nothing here has to reason about the shadowing rules).
+
+    The subscription is CLEARED, not remembered-and-restored. A hidden "go back
+    when the window resets" would be a second, invisible scheduler competing
+    with the operator's own assignment; the notification says what happened and
+    reassignment is a deliberate act.
+
+    Returns a result dict shaped like the switch's, or `None` for "did nothing".
+    Never raises.
+    """
+    try:
+        if not is_api_key_fallback_enabled():
+            return None
+        from services.agent_service.helpers import is_claude_runtime
+        from services.docker_service import get_agent_container
+
+        container = get_agent_container(agent_name)
+        runtime = "claude-code"
+        if container is not None:
+            runtime = (container.labels or {}).get("trinity.agent-runtime") or runtime
+        if not is_claude_runtime(runtime):
+            return None
+
+        from services.settings_service import get_anthropic_api_key
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            return None
+
+        async with await agent_switch_lock(agent_name):
+            old_sub_id = db.get_agent_subscription_id(agent_name)
+            if not old_sub_id:
+                # Already off subscriptions — nothing to fall back FROM, and the
+                # agent is presumably failing for another reason entirely.
+                return None
+            old_sub = db.get_subscription(old_sub_id)
+            old_name = old_sub.name if old_sub else old_sub_id
+            db.clear_agent_subscription(agent_name)
+            db.set_use_platform_api_key(agent_name, True)
+            restart_result = await _restart_agent(agent_name)
+
+            from services.activity_service import activity_service
+            from models import ActivityType, ActivityState
+
+            activity_id = await activity_service.track_activity(
+                agent_name=agent_name,
+                activity_type=ActivityType.SCHEDULE_END,
+                triggered_by="system",
+                details={
+                    "action": "subscription_api_key_fallback",
+                    "old_subscription": old_name,
+                    "restart_result": restart_result,
+                },
+            )
+            await activity_service.complete_activity(
+                activity_id=activity_id,
+                status=ActivityState.COMPLETED,
+                details={
+                    "message": (
+                        f"Fell back to the platform API key after '{old_name}' "
+                        "and every alternative were unable to serve"
+                    )
+                },
+            )
+            try:
+                db.create_notification(
+                    agent_name=agent_name,
+                    data=NotificationCreate(
+                        notification_type="alert",
+                        title="Switched to the platform API key",
+                        message=(
+                            f"Agent '{agent_name}' could not be served by subscription "
+                            f"'{old_name}' or any alternative, so it was moved onto the "
+                            "platform API key to keep working. Spend now goes through "
+                            "that key until you reassign a subscription."
+                        ),
+                        priority="high",
+                        category="subscription",
+                        metadata={
+                            "old_subscription": old_name,
+                            "restart_result": restart_result,
+                            "fallback": "api_key",
+                        },
+                    )
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "[#2638] failed to notify about the API-key fallback for '%s': %s",
+                    agent_name, e,
+                )
+            logger.warning(
+                "[#2638] agent '%s' fell back from subscription '%s' to the "
+                "platform API key (restart=%s)",
+                agent_name, old_name, restart_result,
+            )
+            return {
+                "switched": True,
+                "fallback": "api_key",
+                "agent_name": agent_name,
+                "old_subscription": old_name,
+                "new_subscription": None,
+                "restart_result": restart_result,
+            }
+    except Exception as e:  # noqa: BLE001 — a last resort must not become the failure
+        logger.error("[#2638] API-key fallback failed for '%s': %s", agent_name, e)
+        return None
+
+
 async def handle_rate_limit_error(
     agent_name: str,
     error_message: str = "",
@@ -311,8 +687,16 @@ async def handle_rate_limit_error(
     )
 
 
-def _failure_phrase(failure_kind: str) -> str:
-    """Notification + log wording per failure kind."""
+def _failure_phrase(failure_kind: str, *, pre_dispatch: bool = False) -> str:
+    """Notification + log wording per failure kind.
+
+    #2638: a PRE-DISPATCH switch has no failure behind it — that is its whole
+    point — so it must not be described as one. An operator reading "switched
+    after a rate-limit error" for a turn that never ran would go looking for a
+    failed execution that does not exist.
+    """
+    if pre_dispatch:
+        return "its subscription was found unable to serve, before the turn ran"
     if failure_kind == "auth":
         return "an authentication failure"
     return "a rate-limit error"
@@ -358,6 +742,7 @@ async def _perform_auto_switch(
     failure_kind: str,
     event_count: int,
     destination_headroom: Optional[dict] = None,
+    pre_dispatch: bool = False,
 ) -> dict:
     """
     Execute the subscription switch: DB update, container restart, log, notify.
@@ -367,7 +752,7 @@ async def _perform_auto_switch(
     full the destination was when it was chosen. Optional: the fail-open
     selector and older callers pass nothing and get the pre-#2409 wording.
     """
-    phrase = _failure_phrase(failure_kind)
+    phrase = _failure_phrase(failure_kind, pre_dispatch=pre_dispatch)
     logger.info(
         f"[SUB-003] Auto-switching agent '{agent_name}' from '{old_subscription_name}' "
         f"to '{new_subscription.name}' after {phrase}"
@@ -409,6 +794,7 @@ async def _perform_auto_switch(
             "event_count": event_count,
             "restart_result": restart_result,
             "destination_headroom": destination_headroom,
+            "pre_dispatch": pre_dispatch,
         },
     )
     await activity_service.complete_activity(
@@ -437,6 +823,7 @@ async def _perform_auto_switch(
                     "failure_kind": failure_kind,
                     "event_count": event_count,
                     "destination_headroom": destination_headroom,
+                    "pre_dispatch": pre_dispatch,
                 },
             )
         )
@@ -452,6 +839,7 @@ async def _perform_auto_switch(
         "event_count": event_count,
         "restart_result": restart_result,
         "destination_headroom": destination_headroom,
+        "pre_dispatch": pre_dispatch,
     }
 
     logger.info(f"[SUB-003] Auto-switch complete: {result}")

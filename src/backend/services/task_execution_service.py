@@ -963,6 +963,26 @@ class _AttemptState:
     previous_attempt_cost: float = 0.0
     subscription_switch_attempted: bool = False
     execution_time_ms: int = 0
+    # #2638: the switch that actually happened during this turn — pre-dispatch
+    # or post-failure — carried onto `TaskExecutionResult` so a caller can say
+    # "moved to <sub>, try again" instead of "not retryable". None = none.
+    subscription_switch: Optional[dict] = None
+
+
+def _with_switch(
+    result: TaskExecutionResult, state: "_AttemptState"
+) -> TaskExecutionResult:
+    """Carry the turn's SUB-003 switch (if any) onto its result (#2638).
+
+    Applied at `execute_task`'s return sites rather than inside each terminal
+    builder, because the builders are also called from the #1083 callback path
+    where there is no attempt state — one place that knows both, instead of a
+    parameter threaded through five constructors that would be `None` on half
+    of them.
+    """
+    if state.subscription_switch:
+        result.subscription_switch = state.subscription_switch
+    return result
 
 
 class TaskExecutionService:
@@ -1244,15 +1264,15 @@ class TaskExecutionService:
                     f"[TaskExecService] Agent {agent_name} ACK'd async dispatch (202) "
                     f"for execution {execution_id}; handing slot lease to result callback"
                 )
-                return TaskExecutionResult(
+                return _with_switch(TaskExecutionResult(
                     execution_id=execution_id or "",
                     status=TaskExecutionStatus.RUNNING,
                     response="",
                     dispatched_async=True,
-                )
+                ), state)
 
             # ---- 5/6/7. Finalize the synchronous response -----------------
-            return await self._finalize_sync_response(
+            return _with_switch(await self._finalize_sync_response(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
@@ -1261,16 +1281,16 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 response=response,
                 state=state,
-            )
+            ), state)
 
         except httpx.TimeoutException:
-            return await self._handle_timeout(
+            return _with_switch(await self._handle_timeout(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 timeout_seconds=timeout_seconds,
                 state=state,
-            )
+            ), state)
 
         except BackendAgentCallBudgetExhausted as e:
             return await self._handle_budget_exhausted(
@@ -1281,14 +1301,14 @@ class TaskExecutionService:
             )
 
         except httpx.HTTPError as e:
-            return await self._handle_http_error(
+            return _with_switch(await self._handle_http_error(
                 e,
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 breaker_enabled=breaker_enabled,
                 state=state,
-            )
+            ), state)
 
         except Exception as e:
             error_msg = str(e)
@@ -1699,6 +1719,35 @@ class TaskExecutionService:
         those handlers exactly as they did inline.
         """
         effective_timeout = float(timeout_seconds or 600) + 10
+
+        # #2638 AC#3: SUB-003 has always been reactive — dispatch, get refused,
+        # switch, re-issue once (#792). Everything needed to skip that first
+        # doomed attempt is already known here: the sampler's cached provider
+        # reading and the platform's own 2h 429 events both say whether the
+        # assigned subscription can serve. On the Workspace the wasted attempt
+        # is not an internal retry, it is a person watching their message fail.
+        #
+        # Best-effort by construction: `ensure_serviceable_subscription` never
+        # raises and returns None for every "cannot tell" case, so a turn that
+        # would have run still runs and #792 remains the backstop.
+        try:
+            from services.subscription_auto_switch import (
+                ensure_serviceable_subscription,
+            )
+            pre_switch = await ensure_serviceable_subscription(agent_name)
+            if pre_switch:
+                state.subscription_switch = pre_switch
+                logger.warning(
+                    f"[TaskExecService] #2638 pre-dispatch switch for "
+                    f"'{agent_name}' -> '{pre_switch.get('new_subscription')}' "
+                    f"before the first attempt"
+                )
+        except Exception as pre_err:  # noqa: BLE001 — never fail a turn from here
+            logger.error(
+                f"[TaskExecService] #2638 pre-dispatch check raised for "
+                f"'{agent_name}': {pre_err}"
+            )
+
         logger.info(f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={payload['allowed_tools']}, msg_len={len(payload['message'])})")
 
         response = await agent_post_with_retry(
@@ -1836,7 +1885,27 @@ class TaskExecutionService:
                         f"[SUB-003] Auto-switch failed for '{agent_name}': {switch_err}"
                     )
 
+                # #2638 AC#4: the switcher declined — every subscription is
+                # exhausted, refused, or skip-listed. Before giving the user a
+                # dead end, fall back to the platform API key if one is
+                # configured and the operator has left the setting on. Same
+                # one-shot budget: this rides the `subscription_switch_attempted`
+                # flag already set above, so a turn gets at most one remediation.
+                if not (switch_result and switch_result.get("switched")):
+                    try:
+                        from services.subscription_auto_switch import fallback_to_api_key
+                        switch_result = await fallback_to_api_key(agent_name)
+                    except Exception as fb_err:  # noqa: BLE001
+                        logger.error(
+                            f"[#2638] API-key fallback raised for '{agent_name}': {fb_err}"
+                        )
+
                 if switch_result and switch_result.get("switched"):
+                    # #2638 AC#5: remember it. If the one retry below also
+                    # fails, the caller has to be able to say "we moved you to
+                    # <sub>, try again" — the portal was reporting these as
+                    # not-retryable while the agent sat on a fresh subscription.
+                    state.subscription_switch = switch_result
                     state.retry_count += 1
                     # #678 R2 rollup: accumulate the failed attempt's cost so it
                     # isn't absorbed by the retry's success replacement.
