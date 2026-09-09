@@ -174,7 +174,13 @@ for _name, _orig in _voice_tools_pre_stub.items():
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-def _make_session(agent_name="test-agent") -> VoiceSession:
+def _make_session(agent_name="test-agent", workspace_mode=False) -> VoiceSession:
+    # ent#535: `workspace_mode` now decides whether the canvas tools are in the
+    # session's manifest at all, and the dispatcher refuses anything outside it.
+    # A test that drives a PANEL tool through `_execute_and_respond` therefore
+    # has to be a workspace session — which is the only kind that could ever
+    # have been offered one (`_build_live_config` has always gated them the same
+    # way); a panel call on a phone session was never reachable from the model.
     return VoiceSession(
         session_id="vs_test",
         agent_name=agent_name,
@@ -182,6 +188,7 @@ def _make_session(agent_name="test-agent") -> VoiceSession:
         user_id=1,
         user_email="user@example.com",
         system_prompt="You are a test agent.",
+        workspace_mode=workspace_mode,
     )
 
 
@@ -326,7 +333,7 @@ class TestExecuteAndRespond:
         return fc
 
     def test_sends_tool_response_on_success(self, svc):
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session._active = True
         gemini_session = MagicMock()
         gemini_session.send_tool_response = AsyncMock()
@@ -350,7 +357,7 @@ class TestExecuteAndRespond:
         assert "fc_1" not in session._pending_tool_tasks
 
     def test_timeout_sends_error_response(self, svc):
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session._active = True
         gemini_session = MagicMock()
         gemini_session.send_tool_response = AsyncMock()
@@ -377,7 +384,7 @@ class TestExecuteAndRespond:
             assert "timed out" in str(getattr(resp, "response", {}).get("output", "")).lower()
 
     def test_inactive_session_skips_gemini_send(self, svc):
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session._active = False
         gemini_session = MagicMock()
         gemini_session.send_tool_response = AsyncMock()
@@ -505,14 +512,14 @@ class TestExecutePanelTool:
 
     def test_a_roster_session_may_write_a_roster_canvas_and_keeps_the_stored_audience(self, svc, monkeypatch):
         h = _CanvasHarness(monkeypatch, _existing(audience="roster"))
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session.canvas_audience = "roster"
         svc._execute_panel_tool(session, "show_markdown", {"content": "shared"})
         assert h.last["audience"] == "roster"
 
     def test_a_roster_session_never_widens_an_operator_canvas(self, svc, monkeypatch):
         h = _CanvasHarness(monkeypatch, _existing(audience="operator"))
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session.canvas_audience = "roster"
         svc._execute_panel_tool(session, "show_markdown", {"content": "x"})
         assert h.last["audience"] == "operator"
@@ -538,7 +545,7 @@ class TestExecutePanelTool:
     def test_panel_tool_routed_not_forwarded_to_agent(self, svc, monkeypatch):
         """Panel tools must not reach _execute_tool (no agent container call)."""
         h = _CanvasHarness(monkeypatch)
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session._active = True
         gemini_session = MagicMock()
         gemini_session.send_tool_response = AsyncMock()
@@ -702,7 +709,7 @@ class TestNewPanelToolRegistration:
     def test_show_diagram_routed_not_forwarded_to_agent(self, svc, monkeypatch):
         """show_diagram executes in-process, never reaching the agent container."""
         h = _CanvasHarness(monkeypatch)
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session._active = True
         gemini_session = MagicMock()
         gemini_session.send_tool_response = AsyncMock()
@@ -728,7 +735,7 @@ class TestNewPanelToolRegistration:
 class TestEndSession:
 
     def test_cancels_pending_tool_tasks(self, svc):
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         session._active = True
         session._audio_in_queue = asyncio.Queue()
         session._gemini_session = None
@@ -773,7 +780,7 @@ class TestRedisSessionFallback:
 
     def test_get_session_returns_in_memory_first(self, svc):
         """In-memory session is returned directly without a Redis call."""
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         svc._sessions[session.session_id] = session
 
         redis_mock = self._make_redis_mock(return_value=None)
@@ -826,7 +833,7 @@ class TestRedisSessionFallback:
 
     def test_remove_session_deletes_redis_key(self, svc):
         """remove_session() deletes the Redis key in addition to clearing in-memory state."""
-        session = _make_session()
+        session = _make_session(workspace_mode=True)
         svc._sessions[session.session_id] = session
 
         redis_mock = self._make_redis_mock()
