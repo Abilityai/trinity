@@ -103,8 +103,11 @@
       <p v-if="addError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ addError }}</p>
     </div>
 
-    <!-- Transcript -->
-    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
+    <!-- Transcript. The wrapper is the jump-to-latest control's positioned box
+         (#2624) — it floats over the transcript rather than taking layout, so
+         appearing and disappearing never reflows what is being read. -->
+    <div class="relative flex-1 min-h-0 flex flex-col">
+    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5" @scroll.passive="onTranscriptScroll">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
 
@@ -170,6 +173,8 @@
           </span>
         </div>
       </div>
+    </div>
+    <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
     <!-- ent#474: the rail's mobile collapsed form — see PortalConversation. -->
@@ -307,8 +312,10 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { useStickToBottom } from '@/composables/useStickToBottom'
 import {
   applyTypeaheadInsert,
   boundCandidates,
@@ -358,6 +365,19 @@ const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
 const scrollEl = ref(null)
+// #2624: an arriving message must not move a transcript the reader is holding.
+// The 3s poll below is the worst offender on this surface — several agents can
+// be replying at once, so reading anything but the tail used to be impossible.
+// The rule lives in the composable, shared with `PortalConversation`.
+const {
+  unread: unreadBelow,
+  showJumpToLatest,
+  onScroll: onTranscriptScroll,
+  onArrive: onMessagesArrived,
+  pinToBottom,
+  scrollToLatest,
+  reset: resetFollowing,
+} = useStickToBottom(scrollEl)
 const addOpen = ref(false)
 const adding = ref(false)
 const addError = ref(null)
@@ -669,7 +689,12 @@ async function load({ full = false } = {}) {
     const incoming = data.messages || []
     if (full) messages.value = incoming
     else if (incoming.length) messages.value = messages.value.concat(incoming)
-    if (incoming.length) await scrollDown()
+    // #2624: a FULL load is opening the room — an intent, so it pins. An
+    // incremental load is the poll, i.e. somebody else's message arriving:
+    // it follows only if the reader was already at the bottom, and otherwise
+    // counts toward the jump-to-latest control.
+    if (full) await pinToBottom()
+    else if (incoming.length) await onMessagesArrived(incoming.length)
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {
@@ -699,7 +724,10 @@ async function send() {
     resetTypeahead()
   } finally {
     sending.value = false
-    await scrollDown()
+    // Sending is an explicit intent to follow the bottom — it pins and re-arms
+    // whatever the prior position, so a reader who was scrolled up is not
+    // handed an unread badge for their own message.
+    await pinToBottom()
   }
 }
 
@@ -719,11 +747,6 @@ async function addAgent(name) {
   }
 }
 
-async function scrollDown() {
-  await nextTick()
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
-}
-
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
@@ -740,6 +763,9 @@ watch(() => props.roomId, async () => {
   messages.value = []
   loading.value = true
   resetTypeahead()
+  // #2624: the outgoing room's element is about to be replaced, so re-arm
+  // WITHOUT scrolling it; the incoming room's full load pins.
+  resetFollowing()
   await load({ full: true })
   // Same reason as on mount: switching rooms can swap a closed room for an open
   // one, which mounts a fresh textarea that has never been measured.
