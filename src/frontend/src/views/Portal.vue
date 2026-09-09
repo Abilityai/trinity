@@ -284,6 +284,7 @@
 
         <PortalConversation
           v-else-if="activeAgent"
+          ref="conversationRef"
           :key="convKey"
           :agent="activeAgent"
           :roster="store.agents"
@@ -605,6 +606,9 @@ import {
   agentHasMain, titleSettling, shouldFetchTitleHealth, titleGenerationNotice,
   TITLE_SETTLE_DELAYS_MS,
 } from '@/components/portal/portalUtils'
+import {
+  VOICE_QUERY_KEY, voiceAutoStart, voiceAutoStartArmed, disarmVoiceAutoStart,
+} from '@/components/portal/portalVoiceMode'
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
@@ -747,6 +751,28 @@ const railSheetOpen = ref(false)
 // changes end the call gracefully inside the conversation instead.
 const voiceCall = ref({ active: false, agentName: null, voiceSessionId: null })
 const voicePanelVersion = ref(0)
+
+// #2559 — the Talk door. `?voice=1` asks for the call to start on landing, and
+// the ask is honoured only when it was armed IN THE APP (see `portalVoiceMode`).
+// The ref is the FIRST consumer of `PortalConversation`'s `defineExpose`, and it
+// exists for this hand-off — not for focus.
+const conversationRef = ref(null)
+let pendingVoiceStart = false
+// `resolveAgentQuery()` ends with a bare-PATH `router.replace` that drops the
+// WHOLE query — `voice` included — so on that branch the strip below would be a
+// second navigation started in the same tick, which vue-router cancels the first
+// for (NAVIGATION_CANCELLED). The door then lands on `/workspace?agent=X`
+// instead of the thread URL. `route` updates asynchronously, so the strip cannot
+// see that a replace is already in flight; this flag is how it is told.
+let landingReplaced = false
+
+// Drop `voice` from the CURRENT route (not a captured one), so this composes
+// with `resolveAgentQuery()`'s own landing replace rather than racing it.
+function stripVoiceQuery() {
+  const query = { ...route.query }
+  delete query[VOICE_QUERY_KEY]
+  router.replace({ path: route.path, query })
+}
 function onVoiceCall(sig) {
   voiceCall.value = sig?.active
     ? { active: true, agentName: sig.agentName || null, voiceSessionId: sig.voiceSessionId || null }
@@ -1626,6 +1652,17 @@ function resolveAgentQuery() {
     }
     return false
   }
+  // #2559 — record the intent; strip NOTHING here. `bootstrap()`'s `finally`
+  // owns the strip, once, for every exit. Read before this function's own
+  // trailing `router.replace`, which is async and mutates `route.query` when it
+  // lands.
+  pendingVoiceStart = voiceAutoStart({
+    query: route.query,
+    landed: !!landing,
+    isPlatform: store.isPlatformSession,
+    armed: voiceAutoStartArmed(),
+  }).start
+
   unreachableAgent.value = null
 
   activeAgentName.value = landing.agentName
@@ -1637,7 +1674,9 @@ function resolveAgentQuery() {
   // with the landing so a `?new=1` that still resolved a thread (it cannot
   // today, but the two are independent functions) never claims a fresh start.
   startingNewChat.value = forceNew && !landing.sessionId
-  if (landing.sessionId) router.replace(`/workspace/c/${landing.sessionId}`)
+  // The bare path drops the query, so this replace is ALSO the strip on this
+  // branch — recorded so the `finally` does not start a competing navigation.
+  if (landing.sessionId) { landingReplaced = true; router.replace(`/workspace/c/${landing.sessionId}`) }
   return true
 }
 
@@ -1676,6 +1715,16 @@ async function bootstrap() {
   // hydrate". The `finally` is load-bearing: the deep-link branch returns
   // early, and a throw must not strand the stage in loading forever.
   bootstrapResolved.value = false
+  // #2559 — never carry an intent across a throw. This function is try/finally
+  // with no `catch`, so a throw runs the `finally`, propagates, and skips
+  // everything after it; a stale `true` here would make the NEXT bootstrap
+  // (`continueAsOperator`, `onVerify`) start a billed call nobody asked for,
+  // with the URL already stripped so there is nothing left to explain it.
+  pendingVoiceStart = false
+  landingReplaced = false
+  // Read BEFORE the first await: `resolveAgentQuery()`'s landing replace and the
+  // strip below both rewrite `route.query`.
+  const voiceKeyPresent = route.query[VOICE_QUERY_KEY] !== undefined
   try {
     await store.fetchRoster()
     await refreshThreads()
@@ -1692,6 +1741,22 @@ async function bootstrap() {
     resolveAgentQuery()
   } finally {
     bootstrapResolved.value = true
+    // ONE strip, EVERY exit — the `/workspace/c/:sid` early return, the
+    // no-`?agent=` fall-through, a rejected value like `?voice=0`, and a throw.
+    // Keyed on the key's PRESENCE, not on its value: a rejected value is still
+    // present, and a residual `voice` in the query would also make
+    // `shouldEscapeStage` navigate spuriously now that it is a stage key.
+    // ...unless `resolveAgentQuery()` already replaced to the thread URL, whose
+    // bare path carries no query at all: stripping on top of an in-flight
+    // navigation cancels it, and the door loses `/workspace/c/<sid>`.
+    if (voiceKeyPresent) { if (!landingReplaced) stripVoiceQuery(); disarmVoiceAutoStart() }
+  }
+  if (pendingVoiceStart) {
+    pendingVoiceStart = false
+    // The ref is assigned in the same patch as `bootstrapResolved`, so one tick
+    // is enough for the conversation to exist.
+    await nextTick()
+    void conversationRef.value?.startVoiceCall?.()
   }
 }
 

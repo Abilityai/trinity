@@ -3,7 +3,7 @@
 > **Status**: ✅ Implemented (2026-09-07)
 > **Issue**: abilityai/trinity-enterprise#534 (supersedes ent#440)
 > **Requirement**: `docs/memory/requirements/runtimes.md` §29.10 · `docs/memory/requirements/public-access.md` §48.3
-> **Related**: [voice-chat.md](voice-chat.md) (the real-time session itself — orb, tools, canvas verbs, session lifetime), [agent-canvas.md](agent-canvas.md) (the canvas the call draws on, and who reads it), [workspace-chat-tabs-and-titles.md](workspace-chat-tabs-and-titles.md) (the thread the call binds to), `trinity#2559` (retires the Agent Detail front door once this ships), ent#354 (a second realtime provider behind the same seam)
+> **Related**: [voice-chat.md](voice-chat.md) (the real-time session itself — orb, tools, canvas verbs, session lifetime), [agent-canvas.md](agent-canvas.md) (the canvas the call draws on, and who reads it), [workspace-chat-tabs-and-titles.md](workspace-chat-tabs-and-titles.md) (the thread the call binds to), [voice-chat.md § Front doors](voice-chat.md) and `trinity#2559` (which retired the Agent Detail front door and turned it into a door into this one), ent#354 (a second realtime provider behind the same seam)
 
 ## Overview
 
@@ -197,6 +197,24 @@ label row records it.
   key). A portal-token client sees nothing — the socket needs a JWT they do not
   hold, and a disabled control explaining a limitation that is not theirs would
   be a dead affordance with a footnote.
+- **The Talk door** (`?voice=1`, #2559): `/workspace?agent=<name>&voice=1` starts
+  the call on landing, but the param alone is **never** the authority. The intent
+  is armed IN THE APP — `AgentHeader`'s Talk button calls
+  `portalVoiceMode.js::armVoiceAutoStart()` before `router.push` — and
+  `voiceAutoStart()` honours it only when armed **and** an agent actually landed
+  **and** the principal is a platform session. The armed flag is a module-scoped
+  `let`, so it lives exactly as long as the document: a pasted, bookmarked or
+  mailed link always arrives on a fresh document and is never honoured. That
+  rules out the signed-out attack a browser activation heuristic cannot —
+  `bootstrap()` does not run while signed out, so such a link would survive
+  unconsumed until exactly the sign-in click that satisfies the heuristic.
+  `bootstrap()` owns the strip: **once**, in the `finally`, keyed on the key's
+  **presence** (so `?voice=0` is cleaned too), covering the `/workspace/c/:sid`
+  early return, the no-`?agent=` fall-through and a throw. Then, after a
+  `nextTick`, the shell calls the conversation's exposed `startVoiceCall()`
+  through a template ref — the first consumer of that `defineExpose`. A
+  `?voice=1` link clicked from *inside* the Workspace is a no-op: nothing watches
+  `route.query`, exactly as with `?agent=`.
 - **Pre-flight** before any request: insecure origin ("voice needs a secure
   page"), no microphone API, a turn in flight.
 - **New chat**: the thread is created (`store.createSession`) and adopted

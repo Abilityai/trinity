@@ -1,9 +1,15 @@
 /**
- * Voice session composable for Trinity (VOICE-001, ent#534).
+ * Voice session composable for Trinity (VOICE-001, ent#534, #2559).
+ *
+ * ONE consumer: the Workspace conversation (`portal/PortalConversation.vue`).
+ * The Agent-Detail-shaped `start(sessionId, voiceName, workspaceMode)` was
+ * removed with its only caller in #2559 — it hardcoded the OSS route, and
+ * keeping it would have left a second start implementation to hold in step
+ * behind a docstring naming a front door that no longer exists.
  *
  * Manages the full lifecycle of a real-time voice call:
- * 1. A start request (Agent Detail: POST /api/agents/{name}/voice/start;
- *    Workspace: the portal route, passed in by the caller) → voice_session_id + websocket_url
+ * 1. A start request supplied by the caller (the Workspace's portal route)
+ *    → voice_session_id + websocket_url
  * 2. Open WebSocket → stream audio bidirectionally
  * 3. Handle tool_call / tool_result events → update orb state (and bump `panelVersion`
  *    when a canvas verb finished, so a canvas column can refetch)
@@ -67,23 +73,6 @@ export function useVoiceSession(agentName) {
   const isSpeaking = computed(() => status.value === 'speaking')
   const isListening = computed(() => status.value === 'listening')
   const isToolCalling = computed(() => status.value === 'tool_calling')
-
-  /**
-   * Start a voice session through the Agent Detail route.
-   * @param {string|null} sessionId - Existing chat session to continue
-   * @param {string|null} voiceName - provider voice name override
-   * @param {boolean} workspaceMode - Enable canvas panel tools
-   */
-  async function start(sessionId = null, voiceName = null, workspaceMode = false) {
-    return startWith(async () => {
-      const response = await axios.post(
-        `/api/agents/${agentName}/voice/start`,
-        { session_id: sessionId, voice_name: voiceName, workspace_mode: workspaceMode },
-        { headers: authStore.authHeader }
-      )
-      return response.data
-    })
-  }
 
   /**
    * Start a voice session with a caller-supplied start request (ent#534: the
@@ -320,6 +309,6 @@ export function useVoiceSession(agentName) {
     endReason, endMessage, panelVersion, saved,
 
     // Actions
-    start, startWith, stop, toggleMute, awaitSaved,
+    startWith, stop, toggleMute, awaitSaved,
   }
 }
