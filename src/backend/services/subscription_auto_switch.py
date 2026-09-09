@@ -509,9 +509,16 @@ def is_api_key_fallback_enabled() -> bool:
     try:
         return db.get_setting_value(API_KEY_FALLBACK_SETTING, default="true") == "true"
     except Exception as e:  # noqa: BLE001
+        # The setting NAME is deliberately not interpolated. It is a hard-coded
+        # constant one line above, so the log gains nothing from repeating it —
+        # and CodeQL's clear-text-logging rule flags any `*_KEY`-shaped name
+        # reaching a log call, which would leave a permanent false positive on
+        # this file for every future PR. Removing the interpolation is cheaper
+        # and more honest than a dismissal a later reader has to re-litigate.
         logger.warning(
-            "[#2638] could not read %s (%s) — treating the fallback as enabled",
-            API_KEY_FALLBACK_SETTING, type(e).__name__,
+            "[#2638] could not read the API-key fallback setting (%s) — "
+            "treating it as enabled",
+            type(e).__name__,
         )
         return True
 
