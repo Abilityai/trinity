@@ -455,6 +455,7 @@ forwards `model` through `**execute_kwargs` on the initial call and on the cold 
 | `src/frontend/e2e/workspace-model-choice.spec.js` | **rendered geometry against a live stack** (#2662): the picker inside the composer shell, below the field, right of every icon button and left of Send, vertically centred with it; no border or fill of its own; the field ≥ 90% of the form; every action box 44px — **the picker's own box included**, measured rather than inferred from its class; and a click on the shell's padding band putting the caret in the field. Run at 375 / 768 / 1280 |
 | `src/frontend/tests/unit/portalComposerAlignment.spec.js` | the one-shell structure across **both** composers (`PortalConversation.vue`, `PortalRoom.vue`): the shell carries the chrome, the textarea is transparent and borderless, the focus ring is scoped `has-[textarea:focus]` and never `focus-within`, and `items-end` does not return |
 | `src/frontend/tests/unit/portalVoiceMode.spec.js` | the composer's call state (#2662): the shell sheds its border and fill for the call's duration rather than dimming — it is the parent of both inert regions and holds the live toggle — and **both** arms are bound, with no chrome colour in the static class |
+| `src/frontend/tests/unit/baseSelectChevron.spec.js` | the picker's open-state chevron (#2662): the `:open` sibling rule, that nothing may come between select and chevron, the reduced-motion guard, and that the flip stays on the `ghost` recipe rather than the shared `<select>` — plus a control proving the suite's comment-stripper is not the identity |
 
 The runtime read the capability gate is *driven by* has its own block in the first file:
 `agent_container_runtimes` reading `attrs["Labels"]` under `sparse=True` (docker-py's
@@ -488,6 +489,15 @@ picker's placement relative to the field, to every icon button and to Send; that
 no border or fill of its own; the field's share of the form; the 44px action boxes. What is
 still a **human** check: both themes, and the hover/focus tints — the e2e reads geometry and
 computed border/background, not the full colour ladder.
+
+The **open-state chevron is the exception, and it is source-asserted only.** The flip rides
+on `:open`, whose whole point is that the platform draws the picker — so no test in either
+suite can open it and read the rotation back. `baseSelectChevron.spec.js` pins the class, the
+sibling adjacency it depends on, the reduced-motion guard and the `ghost`-only scope; that
+the chevron *visibly* turns was confirmed by hand in a real Chrome 152 and is a **human**
+check on every future change. It also degrades silently by design: on an engine older than
+Baseline 2026-05 the chevron simply stays put, which is correct behaviour and indistinguishable
+from the rule having been broken.
 
 **Deferred, stated:** `model_used` records the model *requested at dispatch*, not one
 reconciled with what the agent actually ran — matching `execute_task`'s own semantics.
