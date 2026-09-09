@@ -39,6 +39,9 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// The one import of a real value in this otherwise source-text file: the ghost
+// recipe's height is a VALUE, and reading it as text matches its own comment.
+import { FIELD_GHOST_CLASS } from '../../src/components/base/fieldClasses.js'
 
 const read = (name) =>
   readFileSync(fileURLToPath(new URL(`../../src/components/portal/${name}`, import.meta.url)), 'utf8')
@@ -155,6 +158,36 @@ describe('#2259 workspace composer alignment', () => {
         expect(b).toMatch(/\bjustify-center\b/)
       }
     })
+
+    it('holds a composer select to the same 44px box as the buttons beside it', () => {
+      // #2662 FINDING-001. The buttons above are `<button>`s; the model picker
+      // is a `<BaseSelect>`, so the loop above never saw it — and a 30px select
+      // beside 44px buttons is a 30px tap target on a phone. Conditional
+      // because only the 1:1 composer has one: the picker is per-agent and a
+      // room has several, so PortalRoom's control row holds Send alone. Written
+      // as "if there is a select, it wears the ghost recipe" rather than "the
+      // select exists", so it keeps biting if the room ever gains one.
+      for (const tag of composerForm(src).match(/<BaseSelect[\s\S]*?>/g) || []) {
+        expect(tag).toMatch(/\bvariant="ghost"/)
+      }
+    })
+  })
+
+  it('gives the ghost recipe the 44px height the composer row is built on', () => {
+    // The other half of the guard above: the height lives in the shared recipe,
+    // not in the markup, so asserting `variant="ghost"` at the call site only
+    // means anything while the recipe still carries `h-11`.
+    //
+    // Asserted against the IMPORTED VALUE, not the source text. The first
+    // version of this read fieldClasses.js as a string and matched /\bh-11\b/,
+    // which passed with `h-11` deleted from the class — because the comment
+    // above the constant explains the choice and contains the literal `h-11`.
+    // A source-text guard over a documented constant tests the prose.
+    expect(FIELD_GHOST_CLASS.split(/\s+/)).toContain('h-11')
+    // Content-width is the property that keeps the picker out of the field's
+    // width budget: `w-full` here would re-create the ent#403 squeeze one level
+    // down, with the picker taking the row instead of the field.
+    expect(FIELD_GHOST_CLASS.split(/\s+/)).not.toContain('w-full')
   })
 
   it('initialises the room composer once the room has resolved', () => {
