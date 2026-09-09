@@ -96,6 +96,19 @@ jobs:
       - name: Deploy
         # SHA-pinned to mitigate supply-chain hijack of the v1 floating tag.
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        # Every value the remote script needs from the workflow context is
+        # resolved HERE, as step env, and handed over via `envs:` below. The
+        # script itself must contain no workflow expression: the whole
+        # `script:` scalar is evaluated as ONE expression when it carries any,
+        # and GitHub caps an expression at 21,000 chars -- past that the file
+        # does not parse and the run has zero jobs (#2625, trinity#2626).
+        # `tests/unit/test_2625_workflow_expression_cap.py` pins this.
+        env:
+          ALWAYS_DEPLOY: ${{ github.event_name != 'push' && '1' || '0' }}
+          NO_CACHE: ${{ (github.event_name == 'schedule' || inputs.no_cache) && '1' || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          ENT_PAT: ${{ secrets.ENT_SUBMODULE_PAT }}
+          ALLOW_OSS_ONLY: ${{ vars.DEPLOY_ALLOW_OSS_ONLY }}
         with:
           # Host + username come from repo secrets so this public workflow file
           # doesn't disclose the Tailscale topology of the dev environment.
@@ -103,13 +116,15 @@ jobs:
           username: ${{ secrets.DEV_USER }}
           key: ${{ secrets.DEV_SSH_KEY }}
           command_timeout: 25m
+          envs: ALWAYS_DEPLOY,NO_CACHE,RUN_ID,ENT_PAT,ALLOW_OSS_ONLY
           script: |
             set -e
             cd ~/trinity
 
-            # Build mode, resolved on the runner and baked into this script
-            # before it ships over SSH -- same interpolation reason as the run
-            # id below ($GITHUB_* env vars live on the runner, not on the VM).
+            # Build mode, resolved on the runner (step `env:`) and passed in
+            # through ssh-action `envs:` -- $GITHUB_* env vars live on the
+            # runner, not on the VM, and the script must not interpolate them
+            # itself (see the note above the step).
             #
             #  * per-merge          -> --pull: cached layers, but base images
             #    re-resolved every time. `--pull` is the half that must NOT be
@@ -125,8 +140,8 @@ jobs:
             # early on an unchanged dev is not a deploy-now button, and the
             # nightly must re-run every assertion whether or not dev moved.
             # NO_CACHE is only about the build.
-            ALWAYS_DEPLOY="${{ github.event_name != 'push' && '1' || '0' }}"
-            NO_CACHE="${{ (github.event_name == 'schedule' || inputs.no_cache) && '1' || '0' }}"
+            ALWAYS_DEPLOY="${ALWAYS_DEPLOY:-0}"
+            NO_CACHE="${NO_CACHE:-0}"
             if [ "${NO_CACHE}" = "1" ]; then
               BUILD_CACHE_FLAG="--no-cache"
             else
@@ -175,11 +190,10 @@ jobs:
             # Long-term fix is to move the build to CI + push images to a
             # registry so the dev VM is stateless (see #942). Until then, this
             # keeps deploys unblocked while preserving the audit trail.
-            # Workflow-syntax interpolation: GitHub expands `${{ github.run_id }}`
-            # at YAML render time so the literal run id is baked into the script
-            # before it ships over SSH. Using `$GITHUB_RUN_ID` here would fail
-            # silently — that env var lives on the GH Actions runner, not on
-            # the dev VM where this script actually executes.
+            # RUN_ID arrives via ssh-action `envs:` (resolved from github.run_id
+            # in the step env). Using `$GITHUB_RUN_ID` here would fail silently
+            # -- that env var lives on the GH Actions runner, not on the dev VM
+            # where this script actually executes.
             #
             # NO `-u`: the dev VM has Docker-volume directories (trinity-data/,
             # archives/, avatars/) owned by root inside containers. The trinity
@@ -189,7 +203,7 @@ jobs:
             # the failure as "no changes" — and the subsequent pull aborts on
             # the still-dirty tracked file. Tracked-only stash is what actually
             # blocks the pull; untracked Docker-owned files don't block git.
-            STASH_MSG="auto-stash-deploy-${{ github.run_id }}"
+            STASH_MSG="auto-stash-deploy-${RUN_ID:-unknown}"
             git stash push -m "${STASH_MSG}" || echo "No local changes to stash"
             git pull --ff-only --no-recurse-submodules origin dev
             echo "Version: $(git log -1 --oneline)"
@@ -225,7 +239,7 @@ jobs:
             #
             # Absent the secret this is byte-identical to the previous behaviour,
             # so the VM-side fix documented in docs/ENTERPRISE.md remains valid.
-            ENT_PAT="${{ secrets.ENT_SUBMODULE_PAT }}"
+            ENT_PAT="${ENT_PAT:-}"   # from the step env via `envs:`; empty when the secret is unset
             ENT_LOG=$(mktemp)
             ENT_STALE=0
             if [ -n "$ENT_PAT" ]; then
@@ -482,7 +496,7 @@ jobs:
               # Escape hatch without editing this file: set the repo variable
               # DEPLOY_ALLOW_OSS_ONLY=true to demote this back to a warning (for a
               # VM that legitimately has no enterprise access).
-              if [ "${{ vars.DEPLOY_ALLOW_OSS_ONLY }}" = "true" ]; then
+              if [ "${ALLOW_OSS_ONLY:-}" = "true" ]; then
                 echo "::warning::Deployed in OSS-only mode — enterprise submodule not mounted (allowed by DEPLOY_ALLOW_OSS_ONLY)"
               else
                 echo "::error::Deployed in OSS-only mode — the enterprise submodule is NOT mounted, so this instance runs unentitled: enterprise_features is empty and every requires_entitlement route 403s. See the ENTERPRISE: lines above for the classified cause, and trinity#2246."
