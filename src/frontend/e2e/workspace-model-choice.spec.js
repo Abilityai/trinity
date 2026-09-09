@@ -119,8 +119,13 @@ for (const width of [375, 768, 1280]) {
     expect(field.width).toBeGreaterThanOrEqual(form.width * 0.9)
     expect(await input.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
 
-    // 3. Every action button keeps its 44px touch target (#2259) — the cheap way
-    //    to fit a picker on the row would be to shrink these.
+    // 3. Every action box keeps its 44px touch target (#2259) — the cheap way
+    //    to fit a picker on the row would be to shrink these. The PICKER is one
+    //    of those boxes (#2662): a 30px select beside 44px buttons is a 30px tap
+    //    target on a phone. It needs its own line because nothing above catches
+    //    it — the loop below walks `<button>`s only, and the centre-alignment
+    //    check in 1 passes for a short picker exactly as it does for a tall one.
+    expect(picker.height).toBe(44)
     for (const button of buttons) {
       const action = await button.boundingBox()
       expect(action.width).toBe(44)
