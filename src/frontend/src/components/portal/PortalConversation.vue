@@ -540,9 +540,33 @@
                placeholder over four lines, and adding the model picker to that
                row was what left 34px in ent#403 (hence its own-row placement,
                and hence this issue). Stacked, the field takes the full shell at
-               every width and the controls have a row of their own to spend. -->
+               every width and the controls have a row of their own to spend.
+
+
+               The chrome is also CONDITIONAL on the call, not static. ent#547's
+               two inert regions dim the contents, but this element is the parent
+               of both and cannot join them: the call toggle lives inside it and
+               must stay at full contrast, and `opacity` on a parent is not
+               something a child can undo. So the border and fill are REMOVED for
+               the call's duration rather than dimmed — the composer recedes to
+               the page ground, the one live control stays bright. Removed and
+               not muted because a muted pair would be four more raw-gray classes
+               in a file whose baseline this issue's AC says must not grow, while
+               `border-transparent`/`bg-transparent` cost none.
+
+               BOTH arms are bound and the static class carries no chrome colour
+               at all. That is not tidiness — it is the fix for a bug this had on
+               its first cut. Leaving `border-transparent bg-transparent` static
+               and binding only the resting pair renders a light composer with NO
+               border: Tailwind emits `.border-transparent` AFTER `.border-gray-300`
+               (so transparent wins) but `.bg-transparent` BEFORE `.bg-white` (so
+               white wins), and the two utilities therefore disagree about which
+               of an equal-specificity pair survives. Dark hid it, because every
+               `dark:` variant is emitted after both. Mutually exclusive arms have
+               no ordering to get wrong. -->
           <div
-            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
           >
             <!-- ent#392's anchor, unchanged in job and in ref name (the
                  outside-click close reads `composerWrap`). It sheds `flex-1

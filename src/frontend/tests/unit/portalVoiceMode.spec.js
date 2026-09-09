@@ -304,6 +304,28 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(callAt).toBeGreaterThan(-1)
     expect(callAt, 'the call toggle must precede the inert wrapper').toBeLessThan(inertAt)
     expect(CODE).toContain(':disabled="transcribing || voiceCallActive"')
+  })
+
+  it('takes the shell chrome OFF for the call, because the shell cannot join the inert regions', () => {
+    // #2662. The shell is the PARENT of both regions above and it is what now
+    // carries the border and fill, so leaving it static rendered a full-contrast
+    // frame around opacity-60 contents — the pre-#2662 field dimmed with them.
+    // It cannot simply join them: the call toggle lives inside it and must stay
+    // bright, and `opacity` on a parent is not something a child can undo. So
+    // the chrome is REMOVED for the call's duration, and the resting pair is the
+    // false arm. A static border/fill on this element is the regression back.
+    //
+    // BOTH arms are bound and the static class holds no chrome colour, which is
+    // load-bearing: with `border-transparent bg-transparent` left static and only
+    // the resting pair bound, the LIGHT composer renders with no border at all —
+    // Tailwind emits `.border-transparent` after `.border-gray-300` but
+    // `.bg-transparent` before `.bg-white`, so the two disagree about which of an
+    // equal-specificity pair survives, and every `dark:` variant hides it.
+    expect(CODE).toMatch(/class="rounded-2xl border px-2 py-2 transition has-\[textarea:focus\]/)
+    expect(CODE).not.toMatch(/class="rounded-2xl border border-transparent/)
+    expect(CODE).toMatch(
+      /:class="voiceCallActive \? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"/
+    )
     expect(CODE).toContain(':disabled="sending || !input.trim() || voiceCallActive"')
     expect(TABS).toContain('disabled: { type: Boolean, default: false }')
     expect(TABS).toMatch(/function onSelect\(id\) \{\s*if \(props\.disabled\) return/)
