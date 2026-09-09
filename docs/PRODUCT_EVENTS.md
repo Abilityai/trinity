@@ -30,7 +30,10 @@ path and survive restarts by construction.
 Each event carries:
 
 - a stable, random **installation id** (the same anonymous per-install id used by
-  the operator-intake correlation key — not tied to any user account),
+  the operator-intake correlation key — not tied to any user account; minted
+  write-once by the first recorded event or the operator-updates opt-in, and
+  only ever *read* by the Activation panel, which says "no install id yet" until
+  then),
 - a **UTC timestamp**, and
 - optionally a tiny, non-sensitive context blob (e.g. which starter intent was
   picked). No message contents, credentials, emails, or PII are recorded.

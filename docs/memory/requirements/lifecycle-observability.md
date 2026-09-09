@@ -284,7 +284,16 @@ anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
   `system_settings` is claimed **before** the POST, so restarts / re-runs /
   concurrent workers never double-submit. A stable random `installation_id`
   (also in `system_settings`, the seed for future #758 telemetry) correlates the
-  submission.
+  submission. The id has exactly three writers — this consent POST, the
+  product-event emit (§45), and the canary alert label (a documented, deliberate
+  write, #1987) — all through `get_or_create_installation_id`; **every
+  read-shaped path** (a GET, a status readback) uses the non-minting twin
+  `get_installation_id()` and reports `None` honestly when nothing has minted
+  it yet (ent#545), because a `get_or_create_*` on a read path is a durable
+  write with a race (learnings 2026-08-05). The mint itself is a **write-once
+  claim** (`insert_setting_if_absent`, the #2380 primitive), so two workers
+  that SELECT-miss together land ONE id and the loser reads the winner's back —
+  the race #1987 recorded as pre-existing in the accessor is closed (ent#545).
 - **FR-4 — Off switch**: `OPERATOR_INTAKE_ENABLED=false` (or the cross-tool
   `DO_NOT_TRACK=1`) fully disables the outbound submission for air-gapped /
   privacy-strict installs — the consent box still appears, nothing leaves the box.
@@ -511,7 +520,15 @@ module's design lives in the private submodule.
   shows step-by-step activation counts + drop-off with an honest empty state when
   there's no data yet. It reads a gated enterprise endpoint
   (`requires_entitlement("telemetry")`) that aggregates `product_events` +
-  derives the first-value events from the OSS tables above. The **panel Vue**
+  derives the first-value events from the OSS tables above. **The read is pure
+  (ent#545)**: it reports the stored `installation_id` or `null` through the
+  non-minting accessor (§43.1) and never mints one — the first admin open of the
+  tab must not create the install's identity — and the panel footer renders an
+  honest "no install id yet" state rather than a blank, pointing at the one
+  writer an operator can actually reach (the updates opt-in, Settings →
+  General; the wizard's first product event only fires on an empty fleet or an
+  explicit `?onboarding=1`). A value that is neither an id nor the explicit
+  `null` renders as "unavailable", never as a claim about minting. The **panel Vue**
   ships in the OSS bundle but is hidden unless `telemetry` is in
   `enterprise_features` (the standard feature-flag gating). Explicitly **NOT** a
   new standalone analytics dashboard in v1.
