@@ -10,7 +10,8 @@
       "raw_nongray": "737 -> 815 (+78). Grew in 4 baselined files (ReliabilityPanel +4, ReportsPanelFleet +4, Dashboard +5, enterprise/Audit +4) and arrived in 10 files created after the freeze, led by settings/PortalSessionPolicyPanel (30) and AgentListPanel (28). views/Portal.vue is NOT among them: its 6 amber-* classes from #2261 were paid down to semantic status-warning tokens in this PR, since the issue named them as the exact thing the ratchet exists to catch.",
       "raw_gray": "6938 -> 8699 (+1761) across 24 baselined files plus 61 new ones. Gray is the neutral ink ladder and is ratcheted but not held to zero for new files.",
       "hardcoded_colors": "383 -> 456 (+73), which the issue did not report. Almost all of it is FleetGrid.vue (102 -> 156); the other five are single hex literals in ExecutionsPanel, OverviewPanel, ReliabilityPanel, ScheduleAnalyticsCard and settings/TelemetrySharingPanel.",
-      "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR."
+      "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR.",
+      "_ent553_note": "ent#553 (PR #2619): components/canvas/CanvasPanel.vue 25 -> 46 raw_gray, and 0 raw_nongray as before. The delete/pin/search chrome this PR adds is drawn entirely from the neutral ink ladder, which the design-system contract SPELLS as gray-N (surfaces gray-50/100/800/900, borders gray-200/300/700/800, ink gray-300/400/500/600) — there is no semantic token for a neutral, so honest new chrome cannot avoid the count. raw_nongray stays at zero, which is the rule the ratchet actually holds new code to. Named here rather than absorbed silently."
     },
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
     "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony — regenerate and the guard keeps biting at the new level."
@@ -513,7 +514,7 @@
     },
     "src/frontend/src/components/canvas/CanvasPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 25,
+      "raw_gray": 46,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/canvas/CanvasPieChart.vue": {
@@ -1004,9 +1005,9 @@
   },
   "totals": {
     "raw_nongray": 815,
-    "raw_gray": 8718,
+    "raw_gray": 8739,
     "hardcoded_colors": 456,
-    "semantic_tokens": 3997,
+    "semantic_tokens": 4021,
     "files_with_violations": 197
   }
 }
