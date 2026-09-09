@@ -242,6 +242,7 @@
                room has several — so its control row holds Send alone. -->
           <div
             class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            @click="focusComposerFromShell"
           >
             <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
                  wrapper as the 1:1 composer, same ref name, and the same
@@ -625,6 +626,18 @@ function onComposerInput(e) {
 }
 
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
+/**
+ * #2662: the shell owns the chrome, so the visible box is bigger than the field
+ * and a click on its padding used to land on <body>. Twin of the 1:1 composer's
+ * handler, guard included — the typeahead picks on `mousedown` and the click
+ * that follows would otherwise arrive here. No `voiceCallActive` arm: a room has
+ * no call. The room's shell chrome is unconditional for the same reason.
+ */
+const SHELL_INTERACTIVE = 'button, select, textarea, input, a, [role="listbox"], [role="option"]'
+function focusComposerFromShell(event) {
+  if (event.target?.closest?.(SHELL_INTERACTIVE)) return
+  textarea.value?.focus()
+}
 
 function onComposerKeydown(e) {
   const length = typeaheadBound.value.visible.length

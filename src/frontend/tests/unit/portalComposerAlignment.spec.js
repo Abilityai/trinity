@@ -159,6 +159,20 @@ describe('#2259 workspace composer alignment', () => {
       }
     })
 
+    it('lets a click on the shell land in the field', () => {
+      // #2662. The chrome moved off the textarea, so the visible box is now
+      // bigger than the field — its padding band and the control row's ground
+      // read as "the input" and, without a handler, a click there lands on
+      // <body>. Before the shell existed the box WAS the textarea. Both
+      // surfaces, because both grew the same box.
+      expect(composerForm(src)).toMatch(/@click="focusComposerFromShell"/)
+      expect(src).toContain('function focusComposerFromShell(event) {')
+      // The guard is the load-bearing half: an unconditional focus would steal
+      // the click from every control in the row, and from the typeahead, which
+      // picks on `mousedown` and is followed by a click that arrives here.
+      expect(src).toMatch(/\[role="option"\]/)
+    })
+
     it('holds a composer select to the same 44px box as the buttons beside it', () => {
       // #2662 FINDING-001. The buttons above are `<button>`s; the model picker
       // is a `<BaseSelect>`, so the loop above never saw it — and a 30px select

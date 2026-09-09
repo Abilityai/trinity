@@ -131,6 +131,19 @@ for (const width of [375, 768, 1280]) {
       expect(action.width).toBe(44)
       expect(action.height).toBe(44)
     }
+    // 4. The shell is ONE click target. The chrome moved off the textarea, so
+    //    the box's own 8px padding band is not the field any more — but it still
+    //    reads as the field, and before #2662 the box WAS the textarea. Measured
+    //    rather than asserted in source: the guard that keeps this from stealing
+    //    a control's click is easy to write in a way that never fires at all.
+    //
+    //    Mid-WIDTH, not a corner: the shell is `rounded-2xl` and hit-testing
+    //    respects border-radius, so a point 4px in from the right edge and 4px
+    //    down is OUTSIDE the 16px arc — the click falls through the shell and
+    //    reads BODY against a perfectly working handler.
+    await page.mouse.click(form.x + form.width / 2, form.y + 4)
+    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('TEXTAREA')
+
     await expect(sendEl).toBeVisible()
   })
 }

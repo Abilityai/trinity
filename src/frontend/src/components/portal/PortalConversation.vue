@@ -542,8 +542,16 @@
                and hence this issue). Stacked, the field takes the full shell at
                every width and the controls have a row of their own to spend.
 
+               Two consequences of the chrome living HERE rather than on the
+               textarea, both of which the first cut of this shape got wrong:
 
-               The chrome is also CONDITIONAL on the call, not static. ent#547's
+               (a) The visible box is now bigger than the field, so a click on
+               the 8px padding band or on the control row's ground landed on
+               <body> — where before the shell existed the box WAS the textarea
+               and a click anywhere in it put the caret in. `focusComposerFromShell`
+               puts that back.
+
+               (b) The chrome is CONDITIONAL on the call, not static. ent#547's
                two inert regions dim the contents, but this element is the parent
                of both and cannot join them: the call toggle lives inside it and
                must stay at full contrast, and `opacity` on a parent is not
@@ -567,6 +575,7 @@
           <div
             class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
             :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
+            @click="focusComposerFromShell"
           >
             <!-- ent#392's anchor, unchanged in job and in ref name (the
                  outside-click close reads `composerWrap`). It sheds `flex-1
@@ -1471,6 +1480,18 @@ function onComposerInput(e) {
 // The caret moves with no input event — a click, a drag-select — and accepting
 // against bounds computed for where it used to be splices over the wrong text.
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
+/**
+ * #2662: click anywhere on the composer shell lands in the field. Guarded, not
+ * unconditional — a click that already reached a control keeps its own effect,
+ * and the typeahead is excluded by role because it picks on `mousedown` and the
+ * click that follows would otherwise arrive here and steal the focus back.
+ */
+const SHELL_INTERACTIVE = 'button, select, textarea, input, a, [role="listbox"], [role="option"]'
+function focusComposerFromShell(event) {
+  if (voiceCallActive.value) return
+  if (event.target?.closest?.(SHELL_INTERACTIVE)) return
+  textarea.value?.focus()
+}
 
 function onComposerKeydown(e) {
   const length = typeaheadBound.value.visible.length
