@@ -28,6 +28,11 @@ from utils.helpers import utc_now_iso
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 
+# `__name__`, so the channel follows the code: fleet-restart lines now say
+# `services.fleet_ops_service` where they used to say `routers.ops` (#1028). Any
+# external log filter pinned to the old channel needs the new name — pinning the
+# stale one here would keep the filter working by making the channel a lie about
+# where the code lives, which is the harder thing to debug later.
 logger = logging.getLogger(__name__)
 
 

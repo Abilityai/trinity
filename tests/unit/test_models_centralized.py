@@ -46,11 +46,20 @@ def _is_basemodel(node: ast.ClassDef) -> bool:
 
 def _router_basemodels() -> set[tuple[str, str]]:
     found: set[tuple[str, str]] = set()
-    for path in sorted(_ROUTERS.glob("*.py")):
+    # rglob, not glob: #1028 made `routers/settings/` the first subdirectory
+    # under `routers/`, and a non-recursive glob stopped scanning its ten
+    # modules — an Invariant #14 guard going blind while staying green. Keyed by
+    # path relative to `routers/` so two packages can't share an allowlist key;
+    # a top-level file's relative path is its bare name, so `_ALLOWLIST` is
+    # unchanged.
+    for path in sorted(_ROUTERS.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        name = path.relative_to(_ROUTERS).as_posix()
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and _is_basemodel(node):
-                found.add((path.name, node.name))
+                found.add((name, node.name))
     return found
 
 

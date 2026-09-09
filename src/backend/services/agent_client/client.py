@@ -61,7 +61,6 @@ logger = logging.getLogger(__name__)
 
 from . import circuit, http_pool
 
-logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentChatMetrics:

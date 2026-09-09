@@ -39,9 +39,6 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 
-
-logger = logging.getLogger(__name__)
-
 _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
     ".trinity/pre-check",       # SCHED-COND-001 conditional-schedule hook (#454)
     # Template-authored output-contract validator. No platform executor runs it

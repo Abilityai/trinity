@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 from . import gitignore, remotes
 
-logger = logging.getLogger(__name__)
 
 MAX_INSTANCE_ID_RETRIES = 5
 

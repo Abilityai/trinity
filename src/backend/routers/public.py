@@ -39,14 +39,7 @@ from services.platform_prompt_service import (
     summarize_user_memory_background,
 )
 from services import public_chat_service
-from services.public_chat_service import (
-    PublicChatError,
-    # moved with the orchestration (#1028); re-imported for the other routes
-    # that gate on them — one definition, not a copy. The underscore
-    # aliases keep this module's ~10 call sites byte-identical.
-    agent_requires_email as _agent_requires_email,
-    agent_allows_open_access as _agent_allows_open_access,
-)
+from services.public_chat_service import PublicChatError
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
 
 
@@ -56,8 +49,13 @@ router = APIRouter(prefix="/api/public", tags=["public"])
 
 # Rate limiting constants
 MAX_VERIFICATION_REQUESTS_PER_EMAIL = 3  # per 10 minutes
-MAX_CHAT_MESSAGES_PER_IP = 30  # per minute
-MAX_CHAT_MESSAGES_PER_TOKEN = 60  # per minute, per public link token
+# Re-exported, NOT redeclared: the per-IP / per-token chat caps moved to
+# `public_chat_service` with the accounting that reads them (#1028). Two equal
+# literals would leave `tests/test_ip_rate_limit_fix.py` asserting a constant
+# nothing enforces — the values agree today, so only the guard would break, and
+# silently.
+MAX_CHAT_MESSAGES_PER_IP = public_chat_service.MAX_CHAT_MESSAGES_PER_IP
+MAX_CHAT_MESSAGES_PER_TOKEN = public_chat_service.MAX_CHAT_MESSAGES_PER_TOKEN
 PUBLIC_LINK_LOOKUP_RATE_LIMIT = 60  # max lookups per minute per IP (pentest 3.3.2)
 PUBLIC_LINK_LOOKUP_RATE_WINDOW = 60  # 1 minute in seconds
 
@@ -242,7 +240,7 @@ async def get_public_link_info(token: str, request: Request):
 
     return PublicLinkInfo(
         valid=True,
-        require_email=_agent_requires_email(agent_name),
+        require_email=public_chat_service.agent_requires_email(agent_name),
         agent_available=agent_available,
         reason=None,
         agent_display_name=agent_display_name,
@@ -307,7 +305,7 @@ async def request_verification_code(
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(verification.token)
 
-    if not _agent_requires_email(link["agent_name"]):
+    if not public_chat_service.agent_requires_email(link["agent_name"]):
         raise HTTPException(
             status_code=400,
             detail="This link does not require email verification"
@@ -437,7 +435,7 @@ async def get_agent_intro(
     link = _validate_public_link(token)
 
     # Verify session if email required
-    if _agent_requires_email(link["agent_name"]):
+    if public_chat_service.agent_requires_email(link["agent_name"]):
         if not session_token:
             raise HTTPException(
                 status_code=401,
@@ -517,7 +515,7 @@ async def get_public_chat_history(
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(token)
 
-    require_email = _agent_requires_email(link["agent_name"])
+    require_email = public_chat_service.agent_requires_email(link["agent_name"])
 
     # Determine session identifier
     session_identifier = None
@@ -594,7 +592,7 @@ async def clear_public_session(
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(token)
 
-    require_email = _agent_requires_email(link["agent_name"])
+    require_email = public_chat_service.agent_requires_email(link["agent_name"])
 
     # Determine session identifier
     session_identifier = None
@@ -796,7 +794,7 @@ async def public_terminate_execution(
     # Mirrors `status`/`stream`'s session handling, and then goes one step
     # further than they do — they only let a holder OBSERVE, this one kills —
     # by requiring the turn to be this visitor's own.
-    if _agent_requires_email(agent_name):
+    if public_chat_service.agent_requires_email(agent_name):
         if not session_token:
             raise HTTPException(
                 status_code=401, detail="Session token required for this link"

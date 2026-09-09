@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 from . import gitignore
 
-logger = logging.getLogger(__name__)
 
 DEFAULT_PERSISTENT_STATE: list[str] = [
     "workspace/**",

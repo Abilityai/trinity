@@ -59,9 +59,6 @@ logger = logging.getLogger(__name__)
 #                                 operator manually triggers a health check.
 
 
-
-logger = logging.getLogger(__name__)
-
 _client_pool: Dict[str, httpx.AsyncClient] = {}
 
 _recent_drops: Dict[str, float] = {}

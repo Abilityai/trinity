@@ -39,12 +39,95 @@ _REPO = Path(__file__).resolve().parents[2]
 _PKG = _REPO / "src" / "backend" / "routers" / "settings"
 
 
-def _pre_split_router(monkeypatch):
+# The 60 routes `routers/settings.py` mounted at `dd910564`, the commit this
+# split forked from — frozen here rather than read back out of git.
+#
+# The first version of this guard did `git show dd910564:…` at test time. That
+# reads better and never runs: `.github/workflows/backend-unit-test.yml` pins
+# `fetch-depth: 1` on every checkout, so the blob is unreachable on the runner
+# and the comparison skipped on every CI run it has ever had — leaving the one
+# property a 3,529 → 10 module split actually risks (a route silently lost or
+# invented) proven nowhere. A guard that only runs on the author's machine is
+# not a guard.
+#
+# A literal is the right shape for a *fork point*: it is a historical fact that
+# cannot change, so freezing it costs nothing in maintenance. It is not a
+# baseline that gets re-cut — a route added since the fork goes in
+# `_ADDED_SINCE_SPLIT` below, one reviewed line at a time.
+#
+# `test_the_frozen_pre_split_set_matches_git` re-derives this from the real blob
+# whenever history is deep enough (locally, and in any full-clone job), so the
+# literal cannot quietly drift away from what it claims to transcribe.
+_PRE_SPLIT_ROUTES = frozenset({
+    ('/api/settings', ('GET',), 'get_all_settings'),
+    ('/api/settings/a2a-endpoints', ('GET',), 'list_a2a_outbound_endpoints'),
+    ('/api/settings/a2a-endpoints', ('PUT',), 'upsert_a2a_outbound_endpoint'),
+    ('/api/settings/a2a-endpoints/{ref}', ('DELETE',), 'remove_a2a_outbound_endpoint'),
+    ('/api/settings/agent-defaults/access-policy', ('GET',), 'get_agent_default_access_policy'),
+    ('/api/settings/agent-defaults/access-policy', ('PUT',), 'update_agent_default_access_policy'),
+    ('/api/settings/agent-defaults/resources', ('GET',), 'get_agent_default_resources'),
+    ('/api/settings/agent-defaults/resources', ('PUT',), 'update_agent_default_resources'),
+    ('/api/settings/agent-quotas', ('GET',), 'get_agent_quotas'),
+    ('/api/settings/agent-quotas', ('PUT',), 'update_agent_quotas'),
+    ('/api/settings/api-keys', ('GET',), 'get_api_keys_status'),
+    ('/api/settings/api-keys/anthropic', ('DELETE',), 'delete_anthropic_key'),
+    ('/api/settings/api-keys/anthropic', ('PUT',), 'update_anthropic_key'),
+    ('/api/settings/api-keys/anthropic/test', ('POST',), 'test_anthropic_key'),
+    ('/api/settings/api-keys/github', ('DELETE',), 'delete_github_pat'),
+    ('/api/settings/api-keys/github', ('PUT',), 'update_github_pat'),
+    ('/api/settings/api-keys/github/test', ('POST',), 'test_github_pat'),
+    ('/api/settings/brain-orb', ('GET',), 'get_brain_orb_settings'),
+    ('/api/settings/brain-orb', ('PUT',), 'update_brain_orb_settings'),
+    ('/api/settings/elevenlabs', ('GET',), 'get_elevenlabs_settings'),
+    ('/api/settings/elevenlabs', ('PUT',), 'update_elevenlabs_settings'),
+    ('/api/settings/email-whitelist', ('GET',), 'list_email_whitelist'),
+    ('/api/settings/email-whitelist', ('POST',), 'add_email_to_whitelist'),
+    ('/api/settings/email-whitelist/{email}', ('DELETE',), 'remove_email_from_whitelist'),
+    ('/api/settings/feature-flags', ('GET',), 'get_public_feature_flags'),
+    ('/api/settings/github-templates', ('DELETE',), 'delete_github_templates'),
+    ('/api/settings/github-templates', ('GET',), 'get_github_templates'),
+    ('/api/settings/github-templates', ('PUT',), 'update_github_templates'),
+    ('/api/settings/max-parallel-tasks-ceiling', ('GET',), 'get_max_parallel_tasks_ceiling_setting'),
+    ('/api/settings/max-parallel-tasks-ceiling', ('PUT',), 'update_max_parallel_tasks_ceiling_setting'),
+    ('/api/settings/mcp-url', ('DELETE',), 'delete_mcp_url'),
+    ('/api/settings/mcp-url', ('GET',), 'get_mcp_url'),
+    ('/api/settings/mcp-url', ('PUT',), 'update_mcp_url'),
+    ('/api/settings/operator-intake', ('GET',), 'get_operator_intake'),
+    ('/api/settings/operator-intake', ('PUT',), 'set_operator_intake'),
+    ('/api/settings/ops/config', ('GET',), 'get_ops_settings'),
+    ('/api/settings/ops/config', ('PUT',), 'update_ops_settings'),
+    ('/api/settings/ops/reset', ('POST',), 'reset_ops_settings'),
+    ('/api/settings/portal-session-policy', ('GET',), 'get_portal_session_policy_status'),
+    ('/api/settings/proactive-rate-limits', ('GET',), 'get_proactive_rate_limits_setting'),
+    ('/api/settings/proactive-rate-limits', ('PUT',), 'update_proactive_rate_limits_setting'),
+    ('/api/settings/retention', ('GET',), 'get_retention_status'),
+    ('/api/settings/retention/acknowledge', ('POST',), 'acknowledge_retention_prune'),
+    ('/api/settings/skills-library', ('GET',), 'get_skills_library_automation_setting'),
+    ('/api/settings/skills-library', ('PUT',), 'update_skills_library_automation_setting'),
+    ('/api/settings/slack', ('DELETE',), 'delete_slack_settings'),
+    ('/api/settings/slack', ('GET',), 'get_slack_settings_status'),
+    ('/api/settings/slack', ('PUT',), 'update_slack_settings'),
+    ('/api/settings/slack/connect', ('POST',), 'connect_slack_transport'),
+    ('/api/settings/slack/disconnect', ('POST',), 'disconnect_slack_transport'),
+    ('/api/settings/slack/install', ('POST',), 'install_slack_workspace'),
+    ('/api/settings/slack/status', ('GET',), 'get_slack_transport_status'),
+    ('/api/settings/telemetry-sharing', ('GET',), 'get_telemetry_sharing'),
+    ('/api/settings/telemetry-sharing', ('PUT',), 'set_telemetry_sharing'),
+    ('/api/settings/template-registry', ('DELETE',), 'delete_template_registry'),
+    ('/api/settings/template-registry', ('GET',), 'get_template_registry'),
+    ('/api/settings/template-registry', ('PUT',), 'update_template_registry'),
+    ('/api/settings/{key}', ('DELETE',), 'delete_setting'),
+    ('/api/settings/{key}', ('GET',), 'get_setting'),
+    ('/api/settings/{key}', ('PUT',), 'update_setting'),
+})
+
+
+def _pre_split_router_from_git(monkeypatch, tmp_path):
     """The single-module `routers/settings.py` as it was before the split.
 
-    Read out of git rather than kept as a fixture copy: a checked-in duplicate
-    of a 3,529-line module would rot immediately, and the point of comparison
-    is the real thing this replaced.
+    Only reachable on a full clone. Written under `tmp_path`, NOT into
+    `src/backend/` — an interrupted run there leaves a top-level module behind
+    that `Dockerfile:131` would bake into the image.
     """
     blob = subprocess.run(
         ["git", "show", "dd910564:src/backend/routers/settings.py"],
@@ -52,18 +135,15 @@ def _pre_split_router(monkeypatch):
     )
     if blob.returncode != 0:
         pytest.skip("pre-split blob unavailable (shallow clone)")
-    tmp = _REPO / "src" / "backend" / "_pre_split_settings.py"
+    tmp = tmp_path / "_pre_split_settings.py"
     tmp.write_text(blob.stdout)
-    try:
-        spec = importlib.util.spec_from_file_location("_pre_split_settings", tmp)
-        mod = importlib.util.module_from_spec(spec)
-        # monkeypatch-scoped so the registration is reverted at test teardown
-        # (the sys.modules lint forbids bare assignment/pop here).
-        monkeypatch.setitem(sys.modules, "_pre_split_settings", mod)
-        spec.loader.exec_module(mod)
-        return mod.router
-    finally:
-        tmp.unlink(missing_ok=True)
+    spec = importlib.util.spec_from_file_location("_pre_split_settings", tmp)
+    mod = importlib.util.module_from_spec(spec)
+    # monkeypatch-scoped so the registration is reverted at test teardown
+    # (the sys.modules lint forbids bare assignment/pop here).
+    monkeypatch.setitem(sys.modules, "_pre_split_settings", mod)
+    spec.loader.exec_module(mod)
+    return mod.router
 
 
 def _sig(route):
@@ -83,15 +163,30 @@ _ADDED_SINCE_SPLIT = {
 }
 
 
-def test_the_mounted_route_set_is_unchanged(monkeypatch):
-    """The API a caller sees is identical — no route lost, none invented."""
+def test_the_mounted_route_set_is_unchanged():
+    """The API a caller sees is identical — no route lost, none invented.
+
+    Runs against the frozen fork-point set, so it runs in CI — which the
+    git-blob version it replaced never did.
+    """
     import routers.settings as new
 
-    before = {_sig(r) for r in _pre_split_router(monkeypatch).routes}
+    before = _PRE_SPLIT_ROUTES
     after = {_sig(r) for r in new.router.routes}
     invented = after - before - _ADDED_SINCE_SPLIT
     assert invented == set(), f"routes invented by the split: {sorted(invented)}"
     assert before - after == set(), f"routes lost by the split: {sorted(before - after)}"
+
+
+def test_the_frozen_pre_split_set_matches_git(monkeypatch, tmp_path):
+    """The literal above is a transcription; this is what keeps it honest.
+
+    Skips on a shallow clone — which is every CI checkout — and that is fine:
+    the property CI has to prove is the one above, and this only guards the
+    fixture against a hand-edit that would weaken it.
+    """
+    router = _pre_split_router_from_git(monkeypatch, tmp_path)
+    assert {_sig(r) for r in router.routes} == set(_PRE_SPLIT_ROUTES)
 
 
 def test_the_post_split_allowlist_is_not_stale():

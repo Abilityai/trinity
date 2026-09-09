@@ -59,9 +59,6 @@ logger = logging.getLogger(__name__)
 #                                 operator manually triggers a health check.
 
 
-
-logger = logging.getLogger(__name__)
-
 _CIRCUIT_HASH_PREFIX = "agent:circuit:"
 
 _CIRCUIT_PROBE_LOCK_SUFFIX = ":probe-lock"

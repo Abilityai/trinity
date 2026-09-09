@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 from . import conflicts, gitignore
 
-logger = logging.getLogger(__name__)
 
 async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
     """

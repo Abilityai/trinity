@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 from . import gitignore
 
-logger = logging.getLogger(__name__)
 
 REBIND_PUSH_TIMEOUT_S = 120
 

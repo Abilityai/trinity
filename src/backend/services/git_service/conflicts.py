@@ -39,9 +39,6 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 
-
-logger = logging.getLogger(__name__)
-
 _AUTH_PATTERNS = (
     re.compile(r"authentication failed", re.IGNORECASE),
     re.compile(r"could not read username", re.IGNORECASE),
