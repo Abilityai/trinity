@@ -46,7 +46,9 @@ export const FIELD_GHOST_CLASS =
   // Deliberately no hover ink change: the sibling "New chat" button spends two
   // more raw-gray classes on one, and the raw-colour ratchet (#2605) is a
   // budget — four classes buy the whole affordance, six buy a nuance.
-  'hover:bg-gray-100 dark:hover:bg-gray-800 transition ' +
+  // Dark hover is gray-750, the chrome shade (#2a303c): the composer shell it
+  // sits on IS gray-800, so a gray-800 tint was invisible in dark mode.
+  'hover:bg-gray-100 dark:hover:bg-gray-750 transition ' +
   'focus:outline-none focus:ring-[3px] ' +
   'disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-transparent'
 
