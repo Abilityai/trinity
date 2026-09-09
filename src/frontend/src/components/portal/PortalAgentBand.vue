@@ -9,8 +9,12 @@
        Deliberately not collapsible. A control that hides the one thing the
        operator asked to always see would re-create the state they objected
        to, one click deeper. -->
+  <!-- ent#547: COMPACT. `py-2` (8px) rather than `py-2.5`, because the band's
+       height is now the stats strip's and nothing else's — see the block
+       comment on the chart below. Measured in Chromium at 1440px: 99px → 56px,
+       against the issue's ≤60% target. -->
   <div
-    class="shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-4 py-2.5"
+    class="shrink-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-4 py-2"
     data-testid="portal-agent-band"
   >
     <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
@@ -55,7 +59,7 @@
       <template v-else>
         <div>
           <div class="text-lg font-semibold tabular-nums leading-tight">{{ stats.total_executions }}</div>
-          <div class="text-[11px] text-gray-500 dark:text-gray-400">tasks · last {{ windowLabel }}</div>
+          <div class="text-[11px] text-gray-500 dark:text-gray-400">tasks · last {{ WINDOW_LABEL }}</div>
         </div>
         <div>
           <div class="text-lg font-semibold tabular-nums leading-tight">{{ pct(stats.success_rate) }}</div>
@@ -84,22 +88,39 @@
       <!-- Bounded, not flexed to fill. Stretched across the whole band a 7-day
            window gives ~150px-wide columns, so a single execution renders as a
            slab rather than a bar — board A3's chart is a compact block beside
-           the figures, not a full-width plot. The spacer after it is what keeps
-           the window selector on the right. -->
+           the figures, not a full-width plot. -->
+      <!-- ent#547 — THE HEIGHT RULE, and the thing to preserve if you edit this
+           block. A stat block above is 39px (an 18px figure over an 11px
+           caption), so with the band's 8px padding the floor is 55px + 1px
+           border WHATEVER the chart does. This column is therefore budgeted at
+           exactly 39px — title 10 + `mb-1.5` 6 + a 23px row — which makes the
+           chart free: it can never lengthen the band, and shrinking it further
+           would buy nothing. Go over 39 and every pixel is one the band grows.
+           The `min-h` matches the bar height rather than the old 52px so the
+           chart, its scanline, "no activity" and "unavailable" all share ONE
+           footprint (contract principle 4) instead of the row resizing per
+           state.
+           What used to make this column tall was the LEGEND, not the bars: laid
+           out `flex-col` it grew ~13px per bucket, so a nine-bucket agent's band
+           ran to ~153px. `legend="none"` is most of the compaction; the tooltip
+           carries series identity, and it names every bucket with its swatch,
+           its count and the day's total. -->
       <div class="w-[26rem] max-w-[45%] shrink-0">
         <!-- Board A3 names the chart rather than leaving a bare plot beside a
              row of numbers — without it the bars read as another statistic. -->
         <div class="text-[10px] font-semibold uppercase tracking-wide text-gray-400 leading-none mb-1.5">
-          Activity · last {{ windowLabel }}
+          Activity · last {{ WINDOW_LABEL }}
         </div>
         <ScanlineReveal :loading="!loaded">
-          <!-- No fixed height here. The chart is bars + day labels + legend, so
-               a clipped box put its legend on top of the tab strip; the row
-               sizes to the chart instead. `legend="side"` is what keeps that
-               from doubling the band's height, and is board A3's arrangement. -->
-          <div class="min-h-[52px] flex items-center">
+          <div class="min-h-[23px] flex items-center">
             <p v-if="stats.unavailable" class="text-xs text-gray-400">Stats are unavailable right now.</p>
-            <p v-else-if="!hasActivity" class="text-xs text-gray-400">No activity in the last {{ windowLabel }}.</p>
+            <p v-else-if="!hasActivity" class="text-xs text-gray-400">No activity in the last {{ WINDOW_LABEL }}.</p>
+            <!-- `axis="false"`: at 7 columns the day labels are four truncated
+                 dates, and the tooltip gives each bar's full date. Dropping them
+                 is what buys the title its 16px inside the 39px budget — the
+                 chart can afford one of the two, and the title is the one board
+                 A3 argued for ("without it the bars read as another
+                 statistic"). -->
             <StackedBarChart
               v-else
               class="w-full"
@@ -107,25 +128,20 @@
               :buckets="chartBuckets"
               :colors="BUCKET_COLORS"
               :labels="PORTAL_BUCKET_LABELS"
-              :height="44"
-              legend="side"
+              :height="23"
+              legend="none"
+              :axis="false"
             />
           </div>
         </ScanlineReveal>
       </div>
 
-      <div class="flex-1"></div>
-
-      <select
-        v-model="timeWindow"
-        class="shrink-0 text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1"
-        aria-label="Time window"
-      >
-        <option value="7d">7 days</option>
-        <option value="14d">14 days</option>
-        <option value="30d">30 days</option>
-      </select>
-
+      <!-- ent#547: the 7d/14d/30d selector is gone and the window is fixed at 7
+           days. The spacer that pushed it to the right went with it — it existed
+           only to hold that control against the edge, and left behind it would
+           be an invisible flex child nobody could account for. `PortalAgentDetails`
+           already pinned '7d' for the same reason this now does: two controls
+           for one fact is how the band and the panel came to disagree. -->
     </div>
 
     <!-- ent#253: a failed REFRESH keeps the data and says so beside it; it does
@@ -154,12 +170,16 @@ const props = defineProps({
   agentName: { type: String, required: true },
 })
 
+// ent#547: FIXED at 7 days — the selector is gone. Still a `ref`, because
+// `usePortalAgentPage` takes the window as a reactive source and keys its cache
+// on it; a constant ref simply never changes, which also means the band and
+// `PortalAgentDetails` (which has always pinned '7d') now share one cache entry
+// instead of paying for two windows of the same agent.
 const timeWindow = ref('7d')
+const WINDOW_LABEL = '7 days'
 const { stats, ratings, loaded, error, reload } = usePortalAgentPage(
   toRef(props, 'agentName'), timeWindow,
 )
-
-const windowLabel = computed(() => ({ '7d': '7 days', '14d': '14 days', '30d': '30 days' }[timeWindow.value]))
 const chartBuckets = computed(() => bucketsForChart(stats.value))
 const hasActivity = computed(() => hasChartActivity(stats.value))
 const ratingsCaption = computed(() => (

@@ -11,7 +11,14 @@
          routinely opens with a code block, whose own Copy control sits exactly
          there, and on a one-line answer an overlay covers the answer. The row
          also gives the ent#366 thumbs somewhere to live beside it. -->
-    <div class="mt-1.5 flex items-center gap-1">
+    <!-- #2580: `items-start`, not `items-center`. Copy and the two thumbs are
+         all 22px boxes, so in the resting state the two are identical — but the
+         slotted rating grows DOWNWARD when its comment box opens, and under
+         `items-center` that re-centred Copy against an ~80px block, floating it
+         into the middle of the expanded panel. Top-aligning pins the one
+         baseline the issue asks for in BOTH states. The transient copy feedback
+         is the one child that is not 22px, so it centres itself. -->
+    <div class="mt-1.5 flex items-start gap-1">
       <button
         type="button"
         class="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 transition-colors"
@@ -27,7 +34,7 @@
            transient, so it is not standing noise on every message. -->
       <span
         v-if="feedback"
-        class="text-[11px]"
+        class="text-[11px] self-center"
         :class="copiedOk
           ? 'text-status-success-600 dark:text-status-success-400'
           : 'text-status-danger-600 dark:text-status-danger-400'"

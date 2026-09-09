@@ -206,6 +206,20 @@ rule is a plain function (the ent#392 precedent):
   the moment an agent is opened; the tab strip must still show it from the first
   visit, so this is a projection for one consumer (`sidebarThreads`), not a
   filter on `threads`.
+- **#2579 — "the moment an agent is opened" needed the shell's help.** Main is
+  minted only by the per-agent `list_sessions`; the Workspace lists threads from
+  the cross-agent batch, which deliberately never mints, and the one per-agent
+  read (`landOnAgent`'s miss branch) had never once run — it destructured
+  `{ sessions }` off an **array**. So a pair whose chats predate this issue had
+  no Main at all, and a brand-new pair got one server-side but not on screen
+  until some later refresh. `Portal.vue::ensureMainListed(name)` now makes that
+  call once per agent per session whenever the list on screen carries no Main
+  for the agent, and re-reads the batch. It is a **GET that inserts** — visiting
+  N agents creates N empty rows — which is this AC's intent, said out loud.
+  Deduplicated in flight, capped at two attempts (`fetchAllSessions` never
+  rejects, so a resolved entry over a miss would be permanent for the session),
+  and cleared at sign-out because that handler resets state in place. See
+  [workspace-chat-tabs-and-titles.md](workspace-chat-tabs-and-titles.md).
 - **The roster is ordered before the collapse.** Bounding first would sort a
   slice chosen by the old order.
 - **The composer labels, never disables.** A client whose agents are all stopped
@@ -219,6 +233,13 @@ rule is a plain function (the ent#392 precedent):
 a second, and the reason is in the defect it fixes: the gesture already existed
 on the Files panel, and the `files?.[0]` bug existed there too, because each
 surface had written its own.
+
+Since #2582 the upload also **announces itself to the rail owner** from the
+store funnel (`clientPortal.js::uploadDocument`, the one function all three
+consumers already call), so a file appears under "Files you sent" before any
+agent reply and lights the rail dot — with no edit to this file or to
+`PortalRoom.vue`. See `workspace-rail.md` Slice 3 for why the signal is a
+pending SET rather than a scalar.
 
 | Consumer | Destination |
 |---|---|

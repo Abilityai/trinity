@@ -28,6 +28,13 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
     logging: *default-logging
+    # #2541: the platform half of the same bug the agent containers had. Both
+    # prod and hosted already carried this; the BASE file — the one start.sh
+    # uses without --hosted, i.e. the README quickstart and the source install
+    # — did not, so a self-hosted Trinity's own control plane did not survive a
+    # host reboot either. `unless-stopped`, so an operator `docker compose stop`
+    # is still honoured.
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -84,6 +91,9 @@ services:
       - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
       - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
       - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_FILE_BURST_LIMIT=${PORTAL_FILE_BURST_LIMIT:-20}     # portal file downloads per email per 60s
+      - PORTAL_FILE_HOURLY_LIMIT=${PORTAL_FILE_HOURLY_LIMIT:-100}  # ... per 3600s — the tier that actually bounds it
+      - PORTAL_FILE_DELETE_BURST_LIMIT=${PORTAL_FILE_DELETE_BURST_LIMIT:-60}  # deletes per email per 60s
       - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
       - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
@@ -411,6 +421,7 @@ services:
     image: trinity-frontend:latest
     container_name: trinity-frontend
     logging: *default-logging
+    restart: unless-stopped   # #2541
     ports:
       - "${FRONTEND_PORT:-80}:80"
     volumes:
@@ -434,6 +445,7 @@ services:
     image: redis:7-alpine
     container_name: trinity-redis
     logging: *default-logging
+    restart: unless-stopped   # #2541
     # Loopback-only host port (test suites connect from the dev machine).
     # External LAN cannot reach Redis even with auth — defense in depth.
     ports:

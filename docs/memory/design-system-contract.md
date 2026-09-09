@@ -27,7 +27,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - BaseCard: surface bg, 1px border, radius 8px, padding 16, shadow-sm — the only surface recipe.
 - Agent-authored `v-html` on a canvas cannot mount a primitive: it uses the **canvas design kit** (`components/canvas/CanvasKit.vue`, classes in `utils/canvasKit.js`) — the v-html twin held to the same token values, unscoped under `.canvas-kit`, `theme()` colours only, `@container` collapse, never a viewport query (ent#537).
 - Modal: overlay gray-950/55%, 400px card radius 10 shadow-lg; Esc + click-outside close; focus trapped, **initial focus on the safe action**; destructive confirms restate the consequence.
-- Tabs: `OverflowTabs` everywhere — counted "+N more" overflow, re-measured on resize; never wrap or truncate.
+- Tabs: `OverflowTabs` everywhere — counted "+N more" overflow, re-measured on resize; never wrap or truncate. **Amendment (#2579):** that rule governs the *strip* — it overflows into a counted menu, it never drops or wraps tabs. A strip whose labels are unbounded user or model text (today only the Workspace chat tabs) may opt into `fixedWidth`, where every tab is one width and the *label* clamps with an ellipsis, carrying the full text on hover and in the menu. Opt-in only: a strip of short fixed labels stays intrinsic.
 - Tables: sticky mono-caps header on chrome, bounded viewport (max-height + internal scroll), tabular-nums right-aligned numbers, stated total ("412 · latest 50 shown"); virtualize/paginate past ~200 rows.
 
 ## Type, spacing, radius
@@ -62,7 +62,7 @@ Layout stability:
 
 Density:
 9. Overflowing tabs collapse into a counted "More ▾" menu (OverflowTabs) — everywhere.
-10. Any overflowable strip (toolbars, chips, actions) gets a counted overflow menu, not truncation.
+10. Any overflowable strip (toolbars, chips, actions) gets a counted overflow menu, not truncation — the SET is never truncated. An individual label may still clamp inside a fixed-width tab when the labels are unbounded text (#2579), provided the full text is recoverable on hover and in the menu.
 11. One primary action per view; the rest demote to secondary/ghost/overflow.
 
 Data loading:

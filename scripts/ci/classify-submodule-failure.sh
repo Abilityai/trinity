@@ -16,8 +16,14 @@
 # layer is worse than none: it spends someone's afternoon proving the hint wrong.
 #
 # Usage:
-#     bash scripts/ci/classify-submodule-failure.sh <file-with-captured-output>
-#     … | bash scripts/ci/classify-submodule-failure.sh -
+#     bash scripts/ci/classify-submodule-failure.sh <file-with-captured-output> [unpopulated|stale]
+#     … | bash scripts/ci/classify-submodule-failure.sh - [unpopulated|stale]
+#
+# The optional second argument names the tree state the caller observed:
+# `unpopulated` (default — the marker file is absent, the #2246 caller) or
+# `stale` (#2578 — the tree IS populated, at the OLD pin, because the update
+# failed on a moved gitlink). Only the `no-output` class words its CAUSE by it;
+# the host-key / authorization / network classes read the same either way.
 #
 # Prints a `CLASS: <name>` line followed by remedy lines, and exits 0 always — a
 # classifier must never be the thing that fails a deploy. The caller decides.
@@ -29,6 +35,7 @@
 set -uo pipefail
 
 SRC="${1:--}"
+STATE="${2:-unpopulated}"
 if [ "$SRC" = "-" ]; then
     OUTPUT="$(cat)"
 else
@@ -85,8 +92,15 @@ fi
 #    is what this script exists to stop, so it does not guess here.
 # ---------------------------------------------------------------------------
 if [ -z "${OUTPUT//[[:space:]]/}" ]; then
+    # #2578 — the same silence means a different state on the stale caller:
+    # the tree is there, at the OLD pin, and nothing tried to move it.
+    if [ "$STATE" = "stale" ]; then
+        CAUSE="CAUSE: The submodule update produced no output, yet the tree is still at the OLD pin."
+    else
+        CAUSE="CAUSE: The submodule update produced no output, yet the tree is unpopulated."
+    fi
     emit "CLASS: no-output" \
-         "CAUSE: The submodule update produced no output, yet the tree is unpopulated." \
+         "$CAUSE" \
          "FIX:   Check that .gitmodules still lists src/backend/enterprise, and that" \
          "       'git config submodule.src/backend/enterprise.update' is 'checkout' —" \
          "       an 'update = none' submodule (#1443) is SKIPPED and exits 0 silently."

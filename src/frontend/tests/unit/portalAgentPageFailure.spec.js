@@ -40,9 +40,16 @@ describe('#2597 — the composable already answered; the consumers had to ask', 
   it('still exposes the verdict, the error and the retry', () => {
     // The fix is entirely on the consumer side. If this ever stops being true
     // the guards below are testing something that cannot work.
-    for (const name of ['loaded', 'error', 'reload: load']) {
+    for (const name of ['loaded', 'error']) {
       expect(composable, name).toContain(name)
     }
+    // `reload` by NAME, not by the shape it happened to have: it was the alias
+    // `reload: load` and #2604 made it `const reload = () => load({ force: true })`.
+    // What the consumers need is that the composable RETURNS something called
+    // `reload` — pinning the spelling of its definition made this guard go red
+    // on a refactor that changed nothing it cares about.
+    expect(composable).toMatch(/\breload\b/)
+    expect(composable).toMatch(/return\s*\{[^}]*\breload\b[^}]*\}/s)
   })
 })
 
@@ -130,22 +137,25 @@ describe('#2597 — the band fails the other way, and is fixed with it', () => {
     expect(statsIdx).toBeGreaterThan(skeletonIdx)
   })
 
-  it('keeps the time-window selector reachable while the failure shows', () => {
-    // Caught re-reviewing my own first fix. Replacing the WHOLE row with the
-    // failure took the `<select>` with it — and changing the window is a
-    // second way out of a failure (`watch(timeWindow)` re-fetches) alongside
-    // the retry button. The selector is a sibling of the v-if chain, so it
-    // must sit inside the same flex row and outside every arm.
+  it('puts the failure INSIDE the row rather than in place of it', () => {
+    // Caught re-reviewing my own first fix: replacing the WHOLE row with the
+    // failure took the 7d/14d/30d `<select>` with it, and changing the window
+    // was a second way out of a failure (`watch(timeWindow)` re-fetches)
+    // alongside the retry button.
+    //
+    // ent#547 has since DELETED that selector — the window is fixed at 7 days,
+    // because two controls for one fact is how the band and the panel came to
+    // disagree — so the specific assertion this test used to make (the
+    // selector still follows the failure arm) now asserts a control that does
+    // not exist. What survives it is the structural half: the failure is an
+    // ARM INSIDE the row, so anything else the row ever holds is a sibling of
+    // the chain and cannot be swallowed by it. Kept rather than deleted,
+    // because the row is where a future control would land.
     const rowIdx = band.indexOf('class="flex flex-wrap items-center')
     const failIdx = band.indexOf('v-if="error && !loaded"')
-    const selectIdx = band.indexOf('<select')
     expect(rowIdx).toBeGreaterThan(-1)
-    expect(failIdx).toBeGreaterThan(rowIdx)   // the arm is INSIDE the row
-    expect(selectIdx).toBeGreaterThan(failIdx)
-    // …and not swallowed by an arm: no `v-if`/`v-else` opens between the last
-    // arm's close and the selector.
-    const tail = band.slice(band.lastIndexOf('</template>'), selectIdx)
-    expect(tail).not.toMatch(/v-(if|else)/)
+    expect(failIdx).toBeGreaterThan(rowIdx)
+    expect(band).not.toContain('<select')   // ent#547 removed it; see above
   })
 
   it('uses one failure language, not two', () => {
