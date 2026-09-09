@@ -370,8 +370,12 @@ describe('#2320 — deliver() enumerates every give-up it returns', () => {
   const deliverBody = () => code().split('async function deliver(')[1].split('\nasync function ')[0]
 
   it('returns the server verdict with its own copy and its own retryability', () => {
+    // The claim is that the COPY and the RETRYABILITY both come from the
+    // server's verdict — not that the object has exactly two keys. ent#403
+    // added `category` to it (the token the client keys the model self-heal
+    // on), so the tail is open; the two fields it is about are still exact.
     expect(deliverBody()).toMatch(
-      /return \{ failed: true, error: data\.outcome\.message,\s*retryable: data\.outcome\.retryable === true \}/)
+      /return \{ failed: true, error: data\.outcome\.message,\s*retryable: data\.outcome\.retryable === true[,}]/)
   })
 
   it('marks every lost branch non-retryable explicitly', () => {

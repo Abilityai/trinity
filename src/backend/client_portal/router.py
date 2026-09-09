@@ -887,10 +887,23 @@ async def portal_chat(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # ent#403: normalise blank → None, then authorise, then allow-list. The
+    # policy is one function shared with the streaming route below — enforcement
+    # at BOTH router entry points, because this route runs an inline path and
+    # the two must not disagree about which models exist. See
+    # `service.validate_requested_model` for why the order matters.
+    try:
+        requested_model = service.validate_requested_model(
+            body.model, is_platform=principal.is_platform
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
     try:
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
-                                          new_thread=body.new_thread)
+                                          new_thread=body.new_thread,
+                                          model=requested_model)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1512,7 +1525,23 @@ async def portal_chat_stream(
     # (500 at request time, not import time — so it only shows up when called).
     idempotency_key = request.headers.get("Idempotency-Key")
 
-    scope = f"portal_stream:{agent_name}:{email}"
+    # ent#403: same three steps as the synchronous route, before the idempotency
+    # scope is built — a refused model must not consume the key.
+    try:
+        requested_model = service.validate_requested_model(
+            body.model, is_platform=principal.is_platform
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # Invariant #18, ent#403: the requested model is part of the scope. Without
+    # it, a client that re-sent the same Idempotency-Key with a DIFFERENT model
+    # would be handed the previous turn's snapshot — a silent replay that
+    # ignores the change the user just made. The REQUESTED value and not the
+    # resolved one, deliberately: an owner editing `public_channel_model`
+    # between two genuine retries of ONE request must not fork the scope and
+    # turn a replay into a second billed turn.
+    scope = f"portal_stream:{agent_name}:{email}:{requested_model or '-'}"
     decision = idempotency_service.begin(scope, idempotency_key)
     if decision.replay:
         if decision.in_flight:
@@ -1538,6 +1567,7 @@ async def portal_chat_stream(
             # one above is its fallback. A flag honoured by only one brings the
             # bug back exactly when streaming fails.
             new_thread=body.new_thread,
+            model=requested_model,   # ent#403, same rule as the flag above
         )
     except ClientPortalError as e:
         idempotency_service.fail(decision)

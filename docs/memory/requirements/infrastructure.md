@@ -242,6 +242,20 @@
   - Operator kill-switch via `trinity_execution_context_enabled` setting (default enabled)
 - **Flow**: `docs/memory/feature-flows/execution-context-injection.md`
 
+### 12.6.2 Role Assignments in the Execution Context (trinity-enterprise#500)
+- **Status**: ✅ Seam implemented (2026-09-07)
+- **Description**: Four optional `ExecutionContext` fields — `primary_user_display`, `role_id`, `stakeholders`, `proactive_consent` — telling an agent *which human it primarily serves, which business role that person fills, who the other stakeholders are, and whether proactive contact is on file*. The record itself is supplied by a registered module through the OSS seam `services/assignment_provider.py`; the public build registers no provider, so every field stays `None` and the block renders exactly as it did before.
+- **Key Features**:
+  - Auto-filled by `compose_system_prompt` beside `collaborators` / `platform_url` — **zero call-site changes**, and the caller's context object is never mutated
+  - Resolved as ONE provider call per composition, since all four fields come from one answer
+  - The `replace` guard covers the new fields, so a caller that pre-fills `collaborators` AND `platform_url` still gets them (without that, the lines silently never render for exactly that caller)
+  - **Display name, never an email.** The block reaches anonymous public-link and paid turns, so an address would be third-party PII in front of an outside audience — the answer contract has no email-shaped key at all
+  - **Audience-scoped.** `triggered_by` is passed to the provider so it can suppress on an outside audience; a Workspace/portal turn is labelled `public`, so the outside set is `{public, paid}` with no third label. Fail-closed against a label nobody has thought of yet
+  - **Consent is reported, not granted.** An assignment records who fills a role; permission to reach out lives on the separate `agent_sharing.allow_proactive` consent bit, so the line states the consent explicitly rather than leaving a bare name that reads as permission
+  - Degrades to nothing on: no provider, a provider that raises, and a provider answering a malformed shape — the last needs its own check, because a `str` where a list was promised iterates into single characters and renders the WRONG prompt without raising
+  - The `trinity_execution_context_enabled` kill-switch covers these lines too (they are inside the block, not beside it)
+- **Flow**: `docs/memory/feature-flows/role-assignments.md`, `docs/memory/feature-flows/execution-context-injection.md`
+
 ### 12.7 Vector Memory
 - **Status**: ❌ Removed (2025-12-24)
 - **Reason**: Templates should define their own memory. Platform should not inject agent capabilities.

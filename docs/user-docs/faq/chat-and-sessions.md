@@ -72,4 +72,4 @@ Agent replies render as markdown (headings, lists, code blocks), sanitized befor
 
 ## Can I talk to my agent with voice?
 
-Yes — click the microphone button next to the chat input on the agent's Chat tab to open a full-screen voice overlay with real-time speech in both directions; transcripts are saved to the chat session when you end the call. It requires a Gemini API key configured on the platform, and it's available only in authenticated chat, not public links. See [Voice Chat](../advanced/voice-chat.md).
+Yes — click **Talk** in the agent's header. Trinity opens the Workspace on that agent and starts a real-time call, speech in both directions, with the agent's canvas beside the orb; the spoken turns land in that Workspace chat as one collapsed block. The agent's own **Chat** tab is text only. Voice requires a Gemini API key configured on the platform, and it's available to signed-in platform users only — not on public links, and not to external clients signed in with a portal code. See [Voice Chat](../advanced/voice-chat.md).

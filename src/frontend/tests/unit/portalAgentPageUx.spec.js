@@ -44,6 +44,7 @@ import { stripComments } from './helpers/stripComments'
 import {
   shouldEscapeStage,
   PORTAL_BUCKET_LABELS,
+  STAGE_QUERY_KEYS,
   WORKSPACE_ROOT,
 } from '@/components/portal/portalUtils'
 import {
@@ -122,6 +123,14 @@ describe('shouldEscapeStage', () => {
   it('escapes a stage named by the query at the workspace root', () => {
     expect(shouldEscapeStage('/workspace', { agent: 'acme-billing' })).toBe(true)
     expect(shouldEscapeStage('/workspace', { new: '1' })).toBe(true)
+    // #2559 — the Talk door's key. `bootstrap()` strips it on every exit, so this
+    // is belt-and-braces; it costs nothing and keeps the sign-out predicate
+    // honest if a residual key ever survives.
+    expect(shouldEscapeStage('/workspace', { voice: '1' })).toBe(true)
+  })
+
+  it('names every stage-bearing query key, so sign-out cannot leak one', () => {
+    expect(STAGE_QUERY_KEYS).toEqual(['agent', 'new', 'voice'])
   })
 
   it('ignores an empty or absent query', () => {

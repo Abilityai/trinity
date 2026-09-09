@@ -188,6 +188,20 @@ async def agent_container_states_async() -> Optional[Dict[str, str]]:
     return await loop.run_in_executor(_docker_executor, agent_container_states)
 
 
+async def agent_container_runtimes_async() -> Optional[Dict[str, str]]:
+    """Async form of ``docker_service.agent_container_runtimes`` (ent#403).
+
+    The batch runtime read the Workspace roster projects onto its model control.
+    Same tri-state semantics, same executor bound and the same function-local
+    import rule as the state pair above — only the ``from x import y`` form
+    resolves through ``sys.modules`` at call time, which is what a suite that
+    stubs ``services.docker_service`` depends on.
+    """
+    from services.docker_service import agent_container_runtimes
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, agent_container_runtimes)
+
+
 async def agent_container_state_async(name: str) -> Optional[str]:
     """Async form of ``docker_service.agent_container_state`` (#2196).
 
@@ -197,6 +211,18 @@ async def agent_container_state_async(name: str) -> Optional[str]:
     from services.docker_service import agent_container_state
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_docker_executor, agent_container_state, name)
+
+
+async def agent_runtime_async(name: str) -> str:
+    """Async form of ``docker_service.get_agent_runtime`` (ent#403).
+
+    Single-agent, so one agent's page never pays a fleet-scale read (#2160).
+    The leaf never raises and falls back to ``"claude-code"`` on any failure;
+    same function-local-import rule as the pairs above.
+    """
+    from services.docker_service import get_agent_runtime
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, get_agent_runtime, name)
 
 
 # =============================================================================

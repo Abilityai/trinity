@@ -358,9 +358,9 @@
 ### Advanced Features
 
 - [Can I talk to my agent by voice in the browser?](advanced-features.md#can-i-talk-to-my-agent-by-voice-in-the-browser)
-- [Why don't I see the microphone button in my agent's chat?](advanced-features.md#why-dont-i-see-the-microphone-button-in-my-agents-chat)
+- [I clicked Talk and the call didn't start — why?](advanced-features.md#i-clicked-talk-and-the-call-didnt-start--why)
 - [Can I change my agent's voice or how it speaks?](advanced-features.md#can-i-change-my-agents-voice-or-how-it-speaks)
-- [What is Workspace Mode?](advanced-features.md#what-is-workspace-mode)
+- [What happened to Workspace Mode?](advanced-features.md#what-happened-to-workspace-mode)
 - [Can Trinity generate images?](advanced-features.md#can-trinity-generate-images)
 - [How do agent avatars work?](advanced-features.md#how-do-agent-avatars-work)
 - [Why did my agent's avatar generation fail?](advanced-features.md#why-did-my-agents-avatar-generation-fail)
