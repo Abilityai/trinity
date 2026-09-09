@@ -34,7 +34,7 @@ Related: [public-channel-model.md](public-channel-model.md) (#894, the middle ru
 
 | Surface | Where | What it does |
 |---|---|---|
-| UI | `PortalConversation.vue` — the composer row, between the mic button and the textarea | the `BaseSelect`; renders only when the roster says this principal may choose |
+| UI | `PortalConversation.vue` — inside the composer shell, right-aligned on the control row beside Send (#2662) | the `BaseSelect` on `variant="ghost"`; renders only when the roster says this principal may choose |
 | API (read) | `GET /api/enterprise/client-portal/my-agents` | carries `model_options` (instance-level) and each card's `model_default` — the capability channel (#2128) |
 | API (turn) | `POST /api/enterprise/client-portal/agents/{name}/chat` and `.../chat/stream` | both accept `model`; both validate it before anything else. `/chat` is also ent#83's headless surface and the browser's fallback when streaming fails, which is why a check on one route only is a gap that opens exactly when the other is in use |
 | API (write) | `PUT /api/users/me/preferences/workspace_model` | the user's server record — not a new endpoint, one line in `PREFERENCE_KEYS` |
@@ -437,7 +437,8 @@ forwards `model` through `**execute_kwargs` on the initial call and on the cold 
 | File | Change |
 |---|---|
 | `components/portal/portalModelChoice.js` | **NEW** — the pure rules (`modelControlState`, `reconcileStored`, `storedFor`, `withChoice`, `optionText`, `optionTitle`, `defaultOptionText`, `shouldClearChoice`). No storage access |
-| `components/portal/PortalConversation.vue` | `BaseSelect` in the composer row; value from `userPreferences`; `model` on both send paths; disabled for a voice call and for a room-bound draft; the self-heal on settle and on reattach |
+| `components/portal/PortalConversation.vue` | `BaseSelect variant="ghost"` on the composer shell's control row, right-aligned beside Send (#2662 — ent#403 shipped it on its own row above the composer because the single-row layout had 34px left to give it); value from `userPreferences`; `model` on both send paths; disabled for a voice call and for a room-bound draft; the self-heal on settle and on reattach |
+| `components/base/BaseSelect.vue` · `components/base/fieldClasses.js` | `variant="ghost"` (#2662) — the borderless, content-width, 44px recipe (`FIELD_GHOST_CLASS`) this control wears in chat chrome. A variant on the primitive, not a hand-rolled lookalike; the native `<select>` is kept for keyboard, focus ring and the platform picker on touch |
 | `components/portal/portalVoiceMode.js` | `+'model-picker'` in `VOICE_LOCKED_CONTROLS` |
 | `stores/clientPortal.js` | `modelOptions` (fail-closed, cleared with the session); `model` on `sendPortalChat` + `startPortalChat` |
 | `utils/gridStorageKeys.js` | `+workspaceModel` in `PREF_KEYS` — the frontend half of the server allowlist |
@@ -451,6 +452,8 @@ forwards `model` through `**execute_kwargs` on the initial call and on the cold 
 | `tests/unit/test_ent403_workspace_model.py` | the ladder (incl. that it cannot see the principal); the four blank forms; the 403 and the string-detail 422; argv-shaped strings against the closed set; `model_used` at **both** creation sites; the cold-retry row; `triggered_by` unchanged; the card's fail-closed cases; the off-catalog label; `AUTH`/`BILLING`/`CAPACITY`/`TIMEOUT` copy unchanged; the idempotency scope |
 | `tests/unit/test_2086_model_catalog_parity.py` | the emitted key set; `WORKSPACE_MODELS ⊆ PUBLIC_CHANNEL_MODELS`; every workspace entry has a distinct tier |
 | `src/frontend/tests/unit/portalModelChoice.spec.js` | the pure rules; the curated set against the generated catalog; source-structure assertions for the wiring |
+| `src/frontend/e2e/workspace-model-choice.spec.js` | **rendered geometry against a live stack** (#2662): the picker inside the composer shell, below the field, right of every icon button and left of Send, vertically centred with it; no border or fill of its own; the field ≥ 90% of the form; every action box 44px. Run at 375 / 768 / 1280 |
+| `src/frontend/tests/unit/portalComposerAlignment.spec.js` | the one-shell structure across **both** composers (`PortalConversation.vue`, `PortalRoom.vue`): the shell carries the chrome, the textarea is transparent and borderless, the focus ring is scoped `has-[textarea:focus]` and never `focus-within`, and `items-end` does not return |
 
 The runtime read the capability gate is *driven by* has its own block in the first file:
 `agent_container_runtimes` reading `attrs["Labels"]` under `sparse=True` (docker-py's
@@ -473,10 +476,17 @@ ignored.
 
 **Verification honesty.** `ANTHROPIC_API_KEY` is present but empty locally, so a
 locally-created agent cannot execute a turn: the suites prove the value is threaded,
-validated and stamped — **not** that the agent ran on it. And because vitest runs
-`environment: 'node'` with no mount harness, **nothing rendered is machine-verified**: the
-select's width against the textarea, its alignment, both themes and the narrow viewport are
-human checks.
+validated and stamped — **not** that the agent ran on it.
+
+Rendered geometry **is** machine-verified as of #2662, which is a change from this flow's
+original posture. vitest still runs `environment: 'node'` with no mount harness, so the
+unit specs remain source-structure assertions — but `e2e/workspace-model-choice.spec.js`
+drives a real browser against a live sibling stack and measures actual boxes at three
+widths (#2659: assert what rendered, not what the source says). What that covers: the
+picker's placement relative to the field, to every icon button and to Send; that it carries
+no border or fill of its own; the field's share of the form; the 44px action boxes. What is
+still a **human** check: both themes, and the hover/focus tints — the e2e reads geometry and
+computed border/background, not the full colour ladder.
 
 **Deferred, stated:** `model_used` records the model *requested at dispatch*, not one
 reconciled with what the agent actually ran — matching `execute_task`'s own semantics.

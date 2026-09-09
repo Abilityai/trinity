@@ -789,13 +789,39 @@ empty state. Mobile is a **gain**: the old panel was `hidden sm:flex`, so the he
 did nothing visible there at all.
 
 **The composer owns attach and voice.** One paperclip (the header's opened the Files tab
-with the *attach* glyph); the composer row is voice-call · attach · dictate · send, every
-button a 44px box (#2259). **The call toggle sits OUTSIDE the composer's inert region** —
-the form goes `pointer-events-none` for the call's duration, so the button that ENDS the
-call would have rendered pressed and refused the click. The inert class moved onto a
-wrapper around everything else; that wrapper is a real flex row and **not** `display:
-contents`, which generates no box and would have silently dropped the dimming while
-`pointer-events` (which inherits) still applied.
+with the *attach* glyph); the controls are voice-call · attach · dictate · model · send,
+every button a 44px box (#2259) and the model picker the same height (#2662).
+
+**The composer is ONE shell, stacked (#2662).** The field is the first row and takes the
+shell's full width; the controls are a second row inside the same box, with the model
+picker right-aligned beside Send. The border, fill and focus ring live on the **shell**,
+not the textarea, which goes transparent and borderless — that is what makes the controls
+read as inside the field. The ring is scoped `has-[textarea:focus]`, deliberately **not**
+`focus-within`: the latter lit the whole shell when an icon button was merely tabbed onto,
+and drew a second ring concentric with the picker's own. A textarea that regains
+`rounded-2xl` or a background nests a second box inside the first.
+
+The shape is load-bearing, not cosmetic. While the buttons shared one row with a growing
+field, every 44px box came out of the field's width — 143px of a 351px form at 375px, a
+placeholder wrapped over four lines — and it is what left 34px when ent#403 tried to add
+the model picker there, hence that control's original own-row placement above the composer
+and hence #2662. Stacked, the field is ~333px at 375px and the **picker** is the element
+that yields, truncating itself while Send stays 44px.
+
+**The call toggle sits OUTSIDE the composer's inert region** — the form goes
+`pointer-events-none` for the call's duration, so the button that ENDS the call would have
+rendered pressed and refused the click. Stacking made this **two** inert regions, not one:
+the field's wrapper and the control row's wrapper each carry the pair, because "everything
+except the toggle" is now two boxes on two rows and one without the other leaves half the
+composer live during a call. Each is a real flex row and **not** `display: contents`, which
+generates no box and would have silently dropped the dimming while `pointer-events` (which
+inherits) still applied.
+
+**Both composers carry the shape.** `PortalConversation.vue` and `PortalRoom.vue` are the
+same markup in two files (the #2211 lesson), so a shell landing in one leaves the room
+visibly diverged from the chat beside it; `portalComposerAlignment.spec.js` runs every
+structural assertion over both. The room's control row holds Send alone — the model picker
+is per-agent and a room has several.
 
 **The band's remount is fixed at its source, not by moving it.** `PortalConversation` is
 keyed on `convKey`, whose `convGen` half bumps on every thread switch, and the band renders
