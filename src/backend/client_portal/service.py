@@ -143,6 +143,28 @@ PORTAL_FAILURE_CATEGORIES = (
     # every retry and every reload. `agent_error` must not carry that side
     # effect — it fires for every turn that ran and did not come back.
     "invalid_model",
+    # #2638 — the turn hit a usage limit AND SUB-003 moved the agent onto a
+    # different subscription (or the platform API key) while it failed.
+    #
+    # A TENTH token rather than reusing `auth`, because the two disagree on the
+    # only thing this taxonomy is consulted about: `auth` means retrying
+    # re-fails, and that is true exactly while nothing changed underneath. A
+    # switch is something changing underneath, so the same word would have to
+    # carry both "do not bother" and "try again" — and the client reads
+    # `retryable` off the outcome, so one token with two answers is a coin toss
+    # over whether the Retry button appears.
+    #
+    # It needs no client branch: `cancelled` and `invalid_model` are the only
+    # categories the client acts on, and everything else renders its message and
+    # its `retryable` flag. Declaring it is not optional bookkeeping —
+    # `record_turn_outcome` coerces an undeclared category to `internal`, so
+    # without this line the switch outcome would have been recorded as an
+    # uncategorised crash, not retryable, with the fixed internal copy in place
+    # of the sentence naming the new subscription. Caught by
+    # `test_every_declared_category_is_actually_raised_somewhere`, which is a
+    # closed taxonomy in BOTH directions precisely so a new raise site cannot
+    # silently degrade like that.
+    "auth_switched",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 

@@ -472,6 +472,23 @@ class TestThePortalReportsTheSwitch:
         assert "earliest_known_reset" in src
         assert "resets at" in src
 
+    def test_the_switched_category_is_declared_not_merely_raised(self):
+        """The half that makes the raise site actually work.
+
+        `record_turn_outcome` coerces a category outside
+        `PORTAL_FAILURE_CATEGORIES` to `internal` — silently. So an undeclared
+        `auth_switched` would have recorded the switch outcome as an
+        uncategorised crash, NOT retryable, with the fixed internal copy in
+        place of the sentence naming the new subscription: the gap-4 fix inert
+        while its raise site read as correct.
+        """
+        from client_portal import service as svc
+
+        assert "auth_switched" in svc.PORTAL_FAILURE_CATEGORIES
+        # And it is a token of its own, not a rename of `auth` — the two
+        # disagree about `retryable`, which is the only thing the client acts on.
+        assert "auth" in svc.PORTAL_FAILURE_CATEGORIES
+
     def test_the_reset_lookup_degrades_to_the_original_sentence(self, monkeypatch):
         """It runs on the path where things are ALREADY going wrong, so a nicer
         message is never worth a 500."""

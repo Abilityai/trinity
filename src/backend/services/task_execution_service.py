@@ -1925,10 +1925,20 @@ class TaskExecutionService:
                     retry_agent_timeout = int(
                         min(float(timeout_seconds or 600), retry_http_timeout)
                     )
+                    # #2638: the destination name is deliberately NOT
+                    # interpolated. `_perform_auto_switch` logs "Auto-switching
+                    # agent 'X' from 'A' to 'B'" one frame down, so this line
+                    # only ever repeated it — and reading a name off the switch
+                    # result makes this a sink for a value CodeQL taints from
+                    # `subscription_credentials` (that row carries an encrypted
+                    # token, so the whole record reads as a credential). The
+                    # finding is a false positive about the VALUE and a true
+                    # observation about the SHAPE; dropping a redundant
+                    # interpolation is cheaper than a standing dismissal on the
+                    # execution hot path.
                     logger.warning(
                         f"[TaskExecService] SUB-003 switched '{agent_name}' "
-                        f"({switch_failure_kind}) -> "
-                        f"'{switch_result.get('new_subscription')}' — auto-retry 1/1 "
+                        f"({switch_failure_kind}) — auto-retry 1/1 "
                         f"(prev_cost=${state.previous_attempt_cost:.4f})"
                     )
                     # Best-effort audit. phase=initiated documents the retry was queued.
