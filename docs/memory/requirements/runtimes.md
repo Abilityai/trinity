@@ -30,6 +30,7 @@
 - **Description**: Real-time voice conversations with agents via Gemini 2.5 Flash Native Audio
 - **Key Features**: `POST /api/agents/{name}/voice/start` loads voice prompt + summarizes prior chat, opens Gemini Live API WebSocket connection
 - **Architecture**: Browser (mic) → WebSocket → Backend (proxy) → Gemini Live API → Backend → WebSocket → Browser (speaker)
+- **Scope**: this is the **OSS start route**. The Workspace — the only front door since #2559 — starts through `client_portal/voice.py` (VOICE-010) under the portal principal. The bridge, the frames and `/ws/voice/{id}` are shared; only the start request differs. The OSS route is retained and unchanged, and has no first-party frontend caller after #2559.
 
 ### 29.2 Audio Streaming Bridge (VOICE-002)
 - **Status**: ✅ Implemented
@@ -37,14 +38,17 @@
 - **Key Features**: PCM 16kHz mono input, 24kHz mono output, base64 frame encoding
 
 ### 29.3 Transcript Persistence (VOICE-003)
-- **Status**: ✅ Implemented
+- **Status**: ✅ Implemented · **no first-party caller since #2559**
 - **Description**: Voice transcripts saved as ChatMessage rows with `source="voice"`, inline in existing chat sessions
 - **Key Features**: Automatic transcript extraction from Gemini, `source` column on chat_messages table
+- **Scope (#2559)**: the write path (`routers/voice.py::_save_transcript`) is **retained and unchanged**, but the only caller that supplied an Agent Detail chat session id was the retired chat-panel overlay, so no new `chat_messages` rows land here. **Historic rows keep rendering** — the `source === 'voice'` badge in `ChatBubble.vue` is their reader. The Workspace transcript is a different table written **per turn** (`enterprise_portal_messages.source` + `voice_call_id`, VOICE-010), not a save-at-end.
 
 ### 29.4 Frontend Voice UI (VOICE-004)
-- **Status**: ✅ Implemented
-- **Description**: Mic button next to chat input, voice overlay with status/mute/end controls
-- **Key Features**: VoiceOverlay component, pulsing status indicators, live transcript display, mute toggle
+- **Status**: ✅ Implemented · **the Agent Detail surface is a door since #2559**
+- **Description**: The voice orb (`components/chat/VoiceOverlay.vue`, driven by `composables/useVoiceSession.js`) has exactly **one** consumer: the Workspace conversation (VOICE-010). Agent Detail offers a **door**, not a surface — a **Talk** button in `AgentHeader` that navigates to `/workspace?agent=<name>&voice=1`, where the call starts.
+- **Key Features**: VoiceOverlay component, pulsing status indicators, live transcript display, mute toggle — all in the Workspace
+- **Visibility (#2559)**: Talk renders **unconditionally**. It is not gated on the platform voice flag, on the agent's running state, or on a per-agent probe. Availability is the destination's to report: the Workspace says in words why a call cannot start (`portalVoiceMode.js::voiceEntryState`), which is ent#438's ruling — *a dead button is a worse answer than a page that says why* — applied consistently. The per-agent `GET /api/agents/{name}/voice/status` probe the panel used is no longer called.
+- **Entry contract (#2559)**: `?voice=1` is a **one-shot intent armed in the app**, never by the URL alone — see VOICE-010 and `public-access.md` §48.3 FR-1.
 
 ### 29.5 Voice System Prompt (VOICE-005)
 - **Status**: ✅ Implemented
@@ -55,6 +59,7 @@
 - **Status**: ✅ Implemented
 - **Description**: On voice start, summarize prior messages and inject into Gemini system prompt
 - **Key Features**: Last 20 messages truncated to ~750 tokens, injected as conversation context
+- **Scope**: this is the **OSS start route**'s summary (`_build_context_summary`), with the same caller-less status as VOICE-001 since #2559. The Workspace builds its own context from the portal thread (`_format_history_context`, VOICE-010).
 
 ### 29.7 Tool Calls + Canvas Orb (VOICE-007)
 - **Status**: ✅ Implemented (#581)
@@ -63,7 +68,7 @@
 - **Architecture**: Gemini → `tool_call` WS message → `_execute_and_respond()` → `POST /api/agents/{name}/chat` → Gemini `tool_response`
 
 ### 29.8 Voice Workspace (VOICE-008)
-- **Status**: ✅ Implemented (#699)
+- **Status**: ⛔ **Retired (#2484)** — the page and its route are gone; recorded here for the panel-tool contract it introduced, which VOICE-009/VOICE-010 inherited. `AgentHeader`'s button now opens THE Workspace (ent#438), and since #2559 a second button beside it opens it **with the call starting**.
 - **Description**: Full-page workspace at `/agents/:name/workspace` with split layout — orb + controls left, agent-controlled canvas panel right; gated behind `voice_available` feature flag
 - **Key Features**: 6 in-process panel tools (`show_markdown`, `show_diagram`, `show_image`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
 
@@ -82,18 +87,20 @@
 1. **Phase 1 (MVP)**: Authenticated chat only, basic overlay, transcript on session end, manual voice prompt ✅
 2. **Phase 2 (Polish)**: Real-time waveform, incremental transcript, auto-generate voice prompt from CLAUDE.md ✅
 3. **Phase 3 (Advanced)**: Tool calling (run_task), canvas orb ✅ — multi-language auto-detection, custom voice per agent (deferred)
-4. **Phase 4 (Workspace)**: Full-page workspace with canvas panel tools, feature-flag gated (BETA) ✅
+4. **Phase 4 (Workspace)**: Full-page workspace with canvas panel tools, feature-flag gated (BETA) ✅ — page retired by #2484
+5. **Phase 5 (One front door)**: the call lives in the Workspace conversation (VOICE-010, ent#534) ✅ — and since #2559 that is the **only** front door: Agent Detail offers a Talk door into it, not a second surface
 
 ---
 
 ### 29.10 Workspace Voice Mode (VOICE-010, trinity-enterprise#534)
 - **Status**: ✅ Implemented (2026-09-07)
 - **Description**: The real-time voice session started from — and written back into — a **Workspace thread**, as a modal call with the orb. Start: `POST /api/enterprise/client-portal/agents/{name}/voice/start` under the portal principal (platform users only; off-roster, a foreign thread and a portal token are one uniform 404; per-(user, agent) rate limit; 503 with a reason when voice is off). The session carries `portal_session_id` + `client_email`, `workspace_mode=True`, `canvas_audience="operator"`, `max_duration=WORKSPACE_VOICE_MAX_DURATION` (default **1800 s**, env, wired through compose). `/stop`, `/ws/voice/{id}` and `/panel` are the shared OSS routes.
-- **Transcript**: written **turn by turn** by the worker holding the live socket (`client_portal/voice.py::persist_voice_turn`) as `enterprise_portal_messages` rows with `source='voice'` + `voice_call_id`; the call closes with one `system` row ("Voice call · N min", plus how it ended); a call with no turns writes nothing; `/stop` never writes for this surface; the Agent Detail save-at-end path is idempotent (in-process flag + Redis SETNX claim). Context for the call = the thread's recent turns (system rows skipped, earlier spoken rows labelled); `_format_history_context` labels spoken rows `(voice)` and budgets them to 12 per call.
+- **Transcript**: written **turn by turn** by the worker holding the live socket (`client_portal/voice.py::persist_voice_turn`) as `enterprise_portal_messages` rows with `source='voice'` + `voice_call_id`; the call closes with one `system` row ("Voice call · N min", plus how it ended); a call with no turns writes nothing; `/stop` never writes for this surface; the OSS save-at-end path (VOICE-003, caller-less since #2559) is idempotent (in-process flag + Redis SETNX claim). Context for the call = the thread's recent turns (system rows skipped, earlier spoken rows labelled); `_format_history_context` labels spoken rows `(voice)` and budgets them to 12 per call.
 - **Session lifetime**: every session requests context-window compression + session resumption; a `go_away` reconnects with the latest handle (≤ 8 per call) while the browser socket, watchdog and transcript span the call; the cap sends a spoken wrap-up notice at T-30 s (`send_realtime_input(text=…)`) and ends with `end_reason="cap"`; `status{ended, reason, message}` and a final `saved` frame tell the client why and when to reload.
 - **Capability**: `PortalRoster.realtime_voice {available, reason}` — platform principals only, fail-closed, provider-neutral name (ent#354); distinct from the per-agent TTS `voice_available`.
 - **Canvas**: the call's right column reads `/panel` (refetch on panel `tool_result` frames + 3 s poll) through `CanvasPanel`; a platform principal reads every canvas audience in the Workspace (`agent_page.canvas_audience_for`), a portal-token client stays `roster`.
-- **Retired**: the ent#440 hands-free loop (`voiceConversation.js`) — one voice entry point. See `public-access.md` §48.3.
+- **Front doors (#2559)**: the Call control in the Workspace conversation header, and the **Talk** door on Agent Detail (`AgentHeader` → `/workspace?agent=<name>&voice=1`). `?voice=1` is a **one-shot intent armed in the app**: `armVoiceAutoStart()` sets a module-scoped flag in `portalVoiceMode.js` before the push, and `voiceAutoStart()` honours the param only when it is armed **and** the agent landed **and** the principal is a platform user. A pasted, bookmarked or mailed link always arrives on a fresh document where the flag is false, so it never auto-starts a billed call — including the signed-out variant, where the sign-in click would otherwise satisfy any browser activation heuristic. `bootstrap()` strips the key on **every** exit, keyed on its presence.
+- **Retired**: the ent#440 hands-free loop (`voiceConversation.js`) — one voice entry point; and, by #2559, the Agent Detail chat-panel overlay. See `public-access.md` §48.3.
 
 ## 39. VoIP Telephony (VOIP-001)
 

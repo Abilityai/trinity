@@ -25,12 +25,50 @@ from . import db
 
 logger = logging.getLogger(__name__)
 
+# RETIRED as a gate (#2620). ent#443 moved rooms into OSS core: `main.py`
+# mounts both routers unconditionally, the routes dropped
+# `requires_entitlement`, and nothing registers this id any more — so
+# `isEntitled("shared_sessions")` is False on every build, OSS and enterprise
+# alike. A frontend gate on it therefore hides a working capability, which is
+# exactly what happened to the Room budget defaults panel for the whole life of
+# the OSS move.
+#
+# Kept rather than deleted only because the private enterprise submodule is not
+# visible from here and may still import the name; it is NOT an entitlement id.
+# Do not gate on it. Guarded by
+# `src/frontend/tests/unit/retiredEntitlementGates.spec.js`.
 FEATURE_ID = "shared_sessions"
 
 # Budgets — bounded by construction (the epic's measured reason: broadcast rooms
 # are quadratic in agents x rounds).
-DEFAULT_MAX_MESSAGES = 60
-DEFAULT_TTL_HOURS = 24
+#
+# 60 → 200 (#2620, operator ruling 2026-09-08): 60 turned out to be a working
+# session, not a runaway. Reaching it CLOSES the room permanently (`close_room`
+# is a one-way CAS with no reopen path), so the cap was ending real
+# conversations rather than catching abuse, and the only remedy — raising the
+# default — was behind a Settings panel that did not render.
+#
+# Worth knowing when tuning this: there is deliberately no default cost cap, so
+# THIS is the only hard spend bound a room has, and a message is not a unit of
+# spend — one @mention of three agents costs three turns. The time bound
+# (`DEFAULT_TTL_HOURS`) is the other backstop. Raising it further is an
+# operator decision about money, not a UI preference; `MAX_MESSAGES_CEILING`
+# (500) is the limit an admin may set from Settings → Retention.
+DEFAULT_MAX_MESSAGES = 200
+# 24h → 1 week (#2620, operator ruling 2026-09-08). The TTL is NOT a cost
+# control: an idle room costs nothing (agents run only when @mentioned), and
+# total spend is bounded by `DEFAULT_MAX_MESSAGES` regardless of when it is
+# spent. What it actually buys is hygiene, plus a bound on how long an old
+# room's remaining budget stays spendable by whoever can still reach it.
+#
+# 24h was ending working conversations overnight — the same complaint as the
+# 60-message cap, and the second of a room's two irreversible deaths
+# (`close_room` is a one-way CAS, so neither is undoable). A week outlives a
+# working week without leaving rooms open forever.
+#
+# `0` remains a supported explicit opt-out meaning NEVER expires (`_expiry`
+# returns None for `hours <= 0`), settable per install in Settings → Retention.
+DEFAULT_TTL_HOURS = 168
 
 # --- Operator budget defaults (ent#387) -----------------------------------
 #

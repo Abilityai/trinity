@@ -26,6 +26,7 @@ flips to collection error" is a real regression class.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tempfile
 import textwrap
@@ -88,11 +89,57 @@ def _parse_one(path: Path) -> XmlSummary:
     return summary
 
 
+# A pytest node id is PR-AUTHORED: the module path, the test name, and — the
+# part that matters — any `@pytest.mark.parametrize` value, which is an
+# arbitrary string chosen by whoever opened the PR. This document is spliced
+# into a sticky comment authored by `github-actions[bot]`, so an id carrying
+# markdown (or a newline and a heading) makes the bot's comment say something
+# its author never wrote. The bot's voice is the only reason anyone trusts that
+# comment (#2585).
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+# Long enough for any real node id; short enough that a megabyte-long
+# parametrize value cannot bloat the comment past GitHub's body limit.
+_MAX_TEST_ID_CHARS = 300
+
+
+def _inline_code(text: str) -> str:
+    """Render `text` as an inline code span its own content cannot escape.
+
+    CommonMark closes a code span on the first backtick run EQUAL IN LENGTH to
+    the opening one, so a hard-coded single backtick is escapable by any input
+    containing one. Opening with one more backtick than the longest run present
+    makes that unreachable for every input — the same rule #2533 applied to
+    fenced blocks in `alembic-head-verdict.js`, at the inline level.
+
+    Newlines are collapsed FIRST and separately: a code span cannot contain a
+    blank line, and a bullet must stay one bullet — an id carrying `\n## ` would
+    otherwise break out of the list and render as a heading no matter how the
+    backticks are counted.
+
+    A leading or trailing backtick is padded with a space, which CommonMark
+    strips back off when both sides have one, so the rendering is unchanged
+    while the span stays unambiguous.
+    """
+    body = _CONTROL_CHARS_RE.sub(" ", str(text))
+    body = body.strip()
+    if len(body) > _MAX_TEST_ID_CHARS:
+        body = body[: _MAX_TEST_ID_CHARS - 1] + "\u2026"
+    if not body:
+        return "`(empty)`"
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if body.startswith("`") or body.endswith("`") else ""
+    return f"{fence}{pad}{body}{pad}{fence}"
+
+
 def _format_test_id(test_id: TestId) -> str:
     classname, name, kind = test_id
     sigil = "F" if kind == "failure" else "E"
     full = f"{classname}::{name}" if classname else name
-    return f"[{sigil}] {full}"
+    # The sigil stays OUTSIDE the span so the legend at the foot of the document
+    # still reads; only the PR-authored half is neutralised.
+    return f"[{sigil}] {_inline_code(full)}"
 
 
 def _render_summary(
@@ -276,8 +323,8 @@ def _run_self_test() -> int:
         md, code = diff([tmp_path / "base1.xml"], [tmp_path / "head4.xml"])
         if code != 1:
             failures.append(f"case 4 (failure→error): expected 1, got {code}")
-        if "[E] t::bad" not in md:
-            failures.append("case 4: regression list missing [E] t::bad")
+        if "[E] `t::bad`" not in md:
+            failures.append("case 4: regression list missing [E] `t::bad`")
 
         # Case 5: missing XML is the ONLY input for its side → that side has no
         # usable baseline → still fatal → exit 1.
@@ -350,12 +397,32 @@ def _run_self_test() -> int:
         if code != 0:
             failures.append(f"case 8 (union de-noise): expected 0, got {code}")
 
+        # --- #2585: a PR-authored node id cannot escape its code span -----
+        hostile = _build_xml(
+            '<testcase classname="t" name="a`b"><failure/></testcase>'
+            '<testcase classname="t" name="x``y"><failure/></testcase>'
+        )
+        (tmp_path / "base12.xml").write_text(_build_xml(""))
+        (tmp_path / "head12.xml").write_text(hostile)
+        md, _ = diff([tmp_path / "base12.xml"], [tmp_path / "head12.xml"])
+        # One backtick inside -> opened with two. Padding applies only when the
+        # body itself starts or ends with a backtick, which these do not.
+        if "``t::a`b``" not in md:
+            failures.append("case 12: single-backtick id not fenced one longer")
+        if "```t::x``y```" not in md:
+            failures.append("case 12: double-backtick id not fenced one longer")
+
+        # A control: an ORDINARY id must still render plainly, or the fix has
+        # made every normal comment worse to read.
+        if "`t::plain`" not in _format_test_id(("t", "plain", "failure")):
+            failures.append("case 13: ordinary id no longer renders as plain code")
+
     if failures:
         print("SELF-TEST FAILURES:", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
-    print("self-test OK (11 cases pass)")
+    print("self-test OK (13 cases pass)")
     return 0
 
 

@@ -143,27 +143,18 @@
         <p class="text-sm" :class="isRateLimitError ? 'text-state-autonomous-600 dark:text-state-autonomous-400' : 'text-status-danger-600 dark:text-status-danger-400'">{{ error }}</p>
       </div>
 
-      <!-- Voice overlay (VOICE-004) -->
-      <VoiceOverlay
-        :voice="voice"
-        @end="endVoice"
-      />
-
       <!-- Input area -->
       <div class="px-6 pb-6">
         <ChatInput
           ref="chatInputRef"
           v-model="message"
-          :disabled="loading || voice.isActive.value"
+          :disabled="loading"
           :agent-name="agentName"
           :agent-status="agentStatus"
           :playbooks="playbooks"
-          :voice-available="voiceAvailable"
-          :voice-active="voice.isActive.value"
           :cancellable="canCancelTurn"
           :cancelling="cancelling"
           @submit="sendMessage"
-          @voice="startVoice"
           @cancel="cancelTurn"
         />
       </div>
@@ -177,10 +168,8 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
-import VoiceOverlay from './chat/VoiceOverlay.vue'
 import ModelSelector from './ModelSelector.vue'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
-import { useVoiceSession } from '../composables/useVoiceSession'
 
 const props = defineProps({
   agentName: {
@@ -204,57 +193,14 @@ const props = defineProps({
 
 const authStore = useAuthStore()
 
-// Voice chat (VOICE-004)
-const voice = useVoiceSession(props.agentName)
-const voiceAvailable = ref(false)
-
-// Check voice availability
-const checkVoiceAvailability = async () => {
-  try {
-    const response = await axios.get(
-      `/api/agents/${props.agentName}/voice/status`,
-      { headers: authStore.authHeader }
-    )
-    voiceAvailable.value = response.data.enabled && response.data.available
-  } catch {
-    voiceAvailable.value = false
-  }
-}
-
-const startVoice = () => {
-  // ent#438 — canvas tools ON. They used to be reachable only from the retired
-  // per-agent workspace page, which is why deleting that page would otherwise
-  // have removed the capability rather than moved it. The panel now writes the
-  // agent's durable `voice` canvas (operator audience), so what the agent draws
-  // while you talk to it is still there tomorrow, on the Canvas tab.
-  voice.start(currentSessionId.value, null, true)
-}
-
-const endVoice = async () => {
-  await voice.stop()
-  // Refresh messages to show the saved transcript
-  if (currentSessionId.value) {
-    try {
-      const response = await axios.get(
-        `/api/agents/${props.agentName}/chat/sessions/${currentSessionId.value}`,
-        { headers: authStore.authHeader }
-      )
-      messages.value = (response.data.messages || []).map(msg => ({
-        role: msg.role,
-        content: msg.content,
-        timestamp: msg.timestamp,
-        source: msg.source || 'text',
-      }))
-    } catch (err) {
-      console.error('Failed to reload messages after voice session:', err)
-    }
-  }
-  // If voice session created a new chat session, refresh sessions list
-  if (voice.chatSessionId.value && !currentSessionId.value) {
-    currentSessionId.value = voice.chatSessionId.value
-  }
-  await loadSessions(false)
-}
+// Voice lives in the Workspace (#2559). This panel used to mount the orb and
+// run a parallel call: its own start route, its own transcript home
+// (`chat_messages.source='voice'`) and its own per-agent availability probe —
+// a second front door, with a second place the conversation ended up. The
+// affordance is now a door: `AgentHeader`'s Talk button opens
+// `/workspace?agent=<name>&voice=1`, where the Workspace starts the call and
+// writes the transcript into that thread. Historic voice rows in THIS chat are
+// still rendered and still badged — see `source` in `loadSession` below.
 
 // State
 const message = ref('')
@@ -778,14 +724,15 @@ const cancelTurn = async () => {
 }
 
 // Escape stops the turn — and does nothing at all otherwise. The overlay list
-// is what keeps it from hijacking the Escape that closes a picker or exits the
-// voice overlay; the rule itself lives in `utils/turnCancel.js` so it can be
-// tested (vitest has no mount harness).
+// is what keeps it from hijacking the Escape that closes a picker; the rule
+// itself lives in `utils/turnCancel.js` so it can be tested (vitest has no
+// mount harness). The list lost the voice overlay with #2559 — Escape ends a
+// call in the Workspace now, where the call is.
 const onEscapeKeydown = (event) => {
   if (!shouldCancelOnEscape(event, {
     inFlight: canCancelTurn.value,
     cancelling: cancelling.value,
-    overlays: [voice.isActive.value, showSessionDropdown.value],
+    overlays: [showSessionDropdown.value],
   })) return
   event.preventDefault()
   cancelTurn()
@@ -811,7 +758,6 @@ watch(selectedModel, (val) => {
 watch(() => props.agentStatus, (newStatus) => {
   if (newStatus === 'running') {
     loadSessions()
-    checkVoiceAvailability()
     loadPlaybooks()
   }
 })
@@ -860,7 +806,6 @@ onMounted(() => {
   bindEscape()
   if (props.agentStatus === 'running') {
     loadSessions()
-    checkVoiceAvailability()
     loadPlaybooks()
   }
 })
@@ -869,9 +814,5 @@ onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
   unbindEscape()
   closeSSE()
-  // End voice session on unmount
-  if (voice.isActive.value) {
-    voice.stop()
-  }
 })
 </script>

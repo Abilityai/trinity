@@ -52,7 +52,7 @@
 
 Every area below is read **on demand**, not auto-loaded. The third column is the point: it names the regression that reading the file prevents, because a topic label gives an agent no reason to spend the tool call. If you are about to change a file matched by the middle column, open the area file first.
 
-A `PreToolUse` hook (`scripts/docs/architecture_context_hook.py`) parses **this table** and injects the matching area-file pointer when a session first edits an owning path, so correct loading does not depend on remembering to look. The hook has no map of its own — this table is the only source. Wiring: [Hook setup](#hook-setup).
+**Loading is a deliberate step, not an ambient one (#2642).** Before changing a path in the "Owns" column, read the named area file first — as an explicit action, at the point the reasoning needs it, not after the first edit. Nothing injects it for you: no hook fires, and a hook would fire too late anyway (an edit comes after the reasoning that needed the file). Tooling that resolves a path to its owner parses **this table** via `scripts/docs/architecture_map.py`; there is no second copy of the map to drift.
 
 | Area file | Owns | Read it first, because |
 |---|---|---|
@@ -70,27 +70,6 @@ A `PreToolUse` hook (`scripts/docs/architecture_context_hook.py`) parses **this 
 | [`database.md`](architecture/database.md) | `src/backend/db/schema.py`<br>`src/backend/db/migrations.py`<br>`src/backend/db/tables.py`<br>`src/backend/migrations/versions/**`<br>`src/backend/db/alembic_runner.py` | Every schema change needs BOTH tracks: a versioned SQLite entry and a new Alembic revision (Invariant #9). Two revisions sharing a `down_revision` are two heads, and `upgrade head` resolves its target before applying anything, so it applies ZERO revisions while git reports no conflict (#2068). |
 | [`security.md`](architecture/security.md) | `src/backend/dependencies.py`<br>`src/backend/error_handlers.py`<br>`src/backend/services/credential_encryption.py`<br>`src/backend/services/secret_settings.py`<br>`src/backend/services/credential_paths.py`<br>`src/backend/utils/url_validation.py`<br>`src/backend/utils/safe_yaml.py`<br>`docker-compose.yml`<br>`docker-compose.prod.yml` | `require_admin` and `assert_admin` reject agent principals themselves. An agent-scoped MCP key resolves to its owner CARRYING the owner's role, so on a default admin-owned install any agent's injected key satisfied every admin gate. That was five separate incidents (trinity-ops-agent#232, #1644, #1816, ent#236, ent#293) before the gate was fixed rather than the endpoints; never write `require_role("admin")`, which is a third spelling that lets agent keys through. |
 | [`background-services.md`](architecture/background-services.md) | `src/backend/main.py` | Every loop here starts in EVERY uvicorn worker. A cycle without a Redis leader lease double-probes the fleet, double-persists its rows, and gives each cross-cycle marker two writers (#1464, #1632, #1881). Whether the lease fails open or closed is decided per loop and stated in each entry. |
-
-### Hook setup
-
-The hook ships in the public repo and is wired per clone (the `.claude` submodule is core-team-only, so OSS clones simply run without it). Add to `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write|NotebookEdit",
-        "hooks": [
-          { "type": "command", "command": "python3 scripts/docs/architecture_context_hook.py", "timeout": 5 }
-        ]
-      }
-    ]
-  }
-}
-```
-
-It is advisory only — it emits `additionalContext` and never blocks a tool call. It injects each area file at most once per session, and exits silently (status 0, no output) on any error, so a malformed table or a missing file can never wedge editing.
 
 ---
 

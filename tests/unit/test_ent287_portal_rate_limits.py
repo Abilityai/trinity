@@ -88,13 +88,17 @@ def portal(tmp_path, monkeypatch):
 class _Body:
     """Minimal PortalChatRequest stand-in (the fields the router reads)."""
 
-    def __init__(self, message="hi", session_id=None, new_thread=False):
+    def __init__(self, message="hi", session_id=None, new_thread=False, model=None):
         self.message = message
         self.session_id = session_id
         # ent#451 — the router forwards this to both turn entry points. A
         # stand-in missing it fails with AttributeError rather than a useful
         # assertion, which is the cost of hand-rolling a model double.
         self.new_thread = new_thread
+        # ent#403 — same story one field on: the router reads `body.model`
+        # before it reaches the service, so a stand-in without it fails with
+        # AttributeError instead of the assertion this file is about.
+        self.model = model
 
 
 class _Upload:

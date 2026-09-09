@@ -25,10 +25,16 @@ Measured quantity: the PARSED, de-indented scalar — the raw block text carries
 message does not say whether it counts characters or bytes, ``dev`` was over on either
 reading, and bytes is the reading that cannot be wrong in the unsafe direction (the
 deploy script's em dashes cost 78). A long string WITHOUT an expression is not capped
-and is deliberately left alone. The structural fix for the one block that lives near
-the cap — passing the values through ``env:`` + ``envs:`` so the script carries no
-expression at all — is trinity#2626; until then the margin is the budget every edit
-to that script must fit in.
+and is deliberately left alone.
+
+The structural fix for the one block that lived near the cap — passing the values
+through step ``env:`` + ssh-action ``envs:`` so the script carries no expression at
+all — landed with trinity#2626 (#2629). The script is now ~22,000 bytes and OVER the
+cap, which is safe only for as long as it stays expression-free: one ``${{ }}`` put
+back anywhere in it, even in a comment, turns the whole scalar back into one
+expression and the file stops parsing. ``test_the_deploy_script_carries_no_expression``
+pins that directly, and the padded meta-test proves the guard would fire the moment
+one returns.
 """
 from __future__ import annotations
 
@@ -121,20 +127,49 @@ def test_the_file_set_covers_both_spellings_and_composite_actions(tmp_path: Path
     assert found == {"workflows/a.yml", "workflows/b.yaml", "actions/x/action.yml"}
 
 
+_DEPLOY = _GITHUB / "workflows" / "deploy-dev.yml"
+_SCRIPT_HEAD = "            set -e\n"
+
+
+def _deploy_script(doc) -> str:
+    return next(s for path, s in _strings(doc) if path.endswith(".with.script"))
+
+
+def _with_one_expression(text: str) -> str:
+    """The live script carries no expression (trinity#2626); the meta-tests put ONE
+    back so the block is an expression again, the shape that broke ``dev``."""
+    mutated = text.replace(_SCRIPT_HEAD, "            set -e  # ${{ github.sha }}\n", 1)
+    assert mutated != text, "the mutation did not change the file — it would prove nothing"
+    return mutated
+
+
+def test_the_deploy_script_carries_no_expression():
+    """trinity#2626: every workflow-context value the ssh script needs is resolved in
+    the step ``env:`` and passed through ``envs:``. The script is over the cap in
+    bytes, so it is safe ONLY while it contains no ``${{`` — a comment included."""
+    doc = _load(_DEPLOY)
+    script = _deploy_script(doc)
+    assert "${{" not in script, "a workflow expression is back in the deploy script — see trinity#2626"
+    step = next(s for s in doc["jobs"]["deploy"]["steps"] if "script" in (s.get("with") or {}))
+    passed = set(step["with"]["envs"].split(","))
+    assert passed == set(step["env"]), (passed, set(step["env"]))
+
+
 def test_the_scan_sees_the_block_that_bit():
-    paths = [path for path, _ in expression_bearing_strings(_load(_GITHUB / "workflows" / "deploy-dev.yml"))]
+    """The walk must reach ``.with.script`` — proven by putting one expression back
+    into the live file and watching the path appear."""
+    text = _DEPLOY.read_text(encoding="utf-8")
+    paths = [path for path, _ in expression_bearing_strings(yaml.safe_load(_with_one_expression(text)))]
     assert any(path.endswith(".with.script") for path in paths), paths
 
 
 def test_the_guard_measures_the_parsed_scalar_in_bytes():
     """Bytes ≥ characters (the em dashes), and the parsed scalar is what is measured —
     never the raw, indented block text, which reads thousands higher."""
-    text = (_GITHUB / "workflows" / "deploy-dev.yml").read_text(encoding="utf-8")
-    script = next(s for path, s in expression_bearing_strings(yaml.safe_load(text)) if path.endswith(".with.script"))
+    script = _deploy_script(_load(_DEPLOY))
     assert _size(script) >= len(script)
     raw_block = "\n".join("            " + line for line in script.splitlines())
     assert _size(raw_block) > _size(script)
-    assert _size(script) <= LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +177,16 @@ def test_the_guard_measures_the_parsed_scalar_in_bytes():
 # expression sits, and stays quiet on a long string that carries none.
 # ---------------------------------------------------------------------------
 
+def test_the_guard_rejects_the_deploy_script_the_moment_an_expression_returns():
+    """The live script is already past the cap in bytes; a single expression put back
+    is enough for the guard to fire on ``.with.script`` — no padding needed."""
+    text = _DEPLOY.read_text(encoding="utf-8")
+    with pytest.raises(AssertionError, match="with.script"):
+        check_no_expression_bearing_string_nears_the_cap(yaml.safe_load(_with_one_expression(text)), source="one-expr")
+
+
 def test_the_guard_rejects_the_deploy_script_padded_back_past_the_cap():
-    text = (_GITHUB / "workflows" / "deploy-dev.yml").read_text(encoding="utf-8")
+    text = _with_one_expression(_DEPLOY.read_text(encoding="utf-8"))
     padded = text.replace(
         '            echo "=== Done ==="\n',
         '            echo "=== Done ==="\n' + "            # padding for the meta-test only\n" * 200,
