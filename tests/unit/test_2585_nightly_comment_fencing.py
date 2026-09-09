@@ -38,6 +38,7 @@ Pinned below so a future change that makes seeds dynamic fails here.
 import importlib.util
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -57,13 +58,15 @@ def dpf():
         shutil.copy(_SCRIPT, target)
         spec = importlib.util.spec_from_file_location("dpf_2585", target)
         mod = importlib.util.module_from_spec(spec)
-        import sys
-        sys.modules["dpf_2585"] = mod
-        try:
+        # `MonkeyPatch.context()`, not the `monkeypatch` fixture: this fixture is
+        # module-scoped and that one is function-scoped. Same mechanism, same
+        # automatic unwind — which is what the #762 sys.modules lint asks for,
+        # and what a bare assign + `pop` in a `finally` only approximates (it
+        # deletes the name even if an earlier test had legitimately bound it).
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setitem(sys.modules, "dpf_2585", mod)
             spec.loader.exec_module(mod)
             yield mod
-        finally:
-            sys.modules.pop("dpf_2585", None)
 
 
 def _spans(text):
