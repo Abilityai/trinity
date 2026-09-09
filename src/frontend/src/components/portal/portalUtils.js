@@ -630,6 +630,12 @@ export function collapseSelection(selected, { multi = false } = {}) {
 // the same predicate rather than in a second one somebody has to remember.
 export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 
+// The Workspace root. Two consumers: the stage guard below, and the brand
+// mark's link target (ent#556, `PortalBrand`). It is the only route the mark
+// may point at — a client session holds no `users` row, so a platform route
+// would be a door that 404s or bounces to `/login` for exactly the audience
+// this surface exists for, and a dead affordance is one of the two failures
+// the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
 
 export function shouldEscapeStage(path, query) {
