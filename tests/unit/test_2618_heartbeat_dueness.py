@@ -542,6 +542,79 @@ def test_a_stamp_read_that_alone_raises_reads_as_due(tss):
     send.assert_awaited_once()
 
 
+def test_a_failure_before_the_post_is_recorded_and_the_cap_can_see_it(tss):
+    """A raise ahead of the POST (a settings read, the id claim, the aggregate build) used to return
+    False with NOTHING in the send log; under retry-at-next-wake the aggregate would then be rebuilt
+    every wake, unthrottled and invisible. It is now recorded like any failed attempt (#2654 review)."""
+    mod, store, _ = tss
+    _consent_on(mod, store)
+    store[mod.KEY_LAST_SHARED_AT] = _iso(T0)
+    store[mod.KEY_BACKFILL_DELIVERED_AT] = _iso(T0)
+    svc = mod.TelemetrySharingService(interval_hours=24)
+    builds: list = []
+
+    def _boom(*_a, **_k):
+        builds.append(1)
+        raise RuntimeError("schema drift in one aggregate")
+
+    wake = timedelta(seconds=mod._WAKE_SECONDS)
+    with patch.object(mod, "get_breaker_redis", return_value=None), \
+         patch.object(mod, "build_aggregate_payload", _boom):
+        t = T0 + 25 * H
+        for _ in range(8):                               # eight wakes against a raising build
+            with _at(mod, t):
+                assert asyncio.run(svc._tick()) is False
+            t += wake
+    assert len(builds) == mod.RECENT_SENDS_LIMIT         # five attempts, then the cap engaged
+    sends = json.loads(store[mod.KEY_RECENT_SENDS])
+    assert len(sends) == mod.RECENT_SENDS_LIMIT
+    newest = sends[0]
+    assert (newest["ok"], newest["http_status"], newest["error"], newest["payload"]) == (False, None, "RuntimeError", None)
+    assert newest["window_days"] == 1 and newest["backfill"] is False   # resolved before the raise
+    assert "schema drift" not in json.dumps(sends)       # the class, never the text
+    assert mod.receiver_hint(sends) == "failed"          # the panel can see it
+    assert store[mod.KEY_LAST_SHARED_AT] == _iso(T0)
+
+
+def test_an_inner_record_is_never_duplicated_and_an_acknowledged_send_stays_true(tss):
+    """The 2xx path records the acknowledged send; a raise after that (here: the logging sink) must
+    neither add a second, contradictory entry nor turn the acknowledgement into False."""
+    mod, store, _ = tss
+    _consent_on(mod, store)
+    store[mod.KEY_BACKFILL_DELIVERED_AT] = _iso(T0)
+    fake_ac, _client = _fake_client(200)
+    real_info = mod.logger.info
+
+    def _info(msg, *a, **k):
+        if "shared (share" in msg:
+            raise RuntimeError("logging sink exploded")
+        return real_info(msg, *a, **k)
+
+    with patch.object(mod.httpx, "AsyncClient", fake_ac), patch.object(mod.logger, "info", _info), \
+         _at(mod, T0 + 25 * H):
+        assert asyncio.run(mod.share_now(backfill=False)) is True
+    sends = json.loads(store[mod.KEY_RECENT_SENDS])
+    assert len(sends) == 1 and sends[0]["ok"] is True and sends[0]["http_status"] == 200
+
+
+@pytest.mark.parametrize("stamp, expected", [
+    ("2026-09-07T14:16:34.257400Z", 1),        # the utc_now_iso shape the column has always held
+    ("2026-09-07T14:16:34Z", 1),               # no fraction
+    ("2026-09-07T14:16:34.257400+00:00", 1),   # offset form
+    ("2026-09-07T16:16:34.257400+02:00", 1),   # a non-UTC offset, converted
+    ("2026-09-07T14:16:34", 1),                # naive ⇒ UTC
+    ("2026-09-08T10:16:34Z", 0),               # six hours ago ⇒ floor 0
+    ("2026-09-09T20:00:00Z", 0),               # in the future ⇒ clamped to 0
+    ("garbage", None), ("", None), (None, None), (42, None),
+])
+def test_days_since_pins_every_shape_the_column_has_held(tss, stamp, expected):
+    """`_days_since` now parses through `parse_iso_timestamp`; it feeds `_resolve_window`'s disclosed
+    window, so its answer across the stamp shapes is pinned rather than assumed (#2654 review)."""
+    mod, _, _ = tss
+    with _at(mod, T0 + 26 * H):                          # 2026-09-08T16:16:34Z
+        assert mod._days_since(stamp) == expected
+
+
 # ---------------------------------------------------------------------------
 # I. The persisted retry cap (AC 5 as amended): five consecutive failures ⇒ once per half-interval
 # ---------------------------------------------------------------------------

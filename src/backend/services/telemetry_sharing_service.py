@@ -764,6 +764,20 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
     schema BEFORE it leaves: a violation is refused, logged, and recorded —
     never sent (fail-closed egress).
     """
+    # The send-log entry exists BEFORE any step that can raise, so a failure
+    # ahead of the POST (a settings read, the id claim, the aggregate build) is
+    # recorded like a refused or failed send: the panel shows it and the retry
+    # cap can see it. Without a row the loop would rebuild the aggregate at
+    # every wake, unthrottled and invisible (#2654 review).
+    entry: Dict[str, Any] = {
+        "sent_at": _now_iso(),
+        "backfill": bool(backfill),
+        "window_days": int(window_days or 0),
+        "ok": False,
+        "http_status": None,
+        "error": None,
+        "payload": None,
+    }
     try:
         if is_hard_disabled():
             logger.info("[telemetry-share] disabled (TELEMETRY_SHARING_ENABLED / DO_NOT_TRACK)")
@@ -772,6 +786,7 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
             return False  # not opted in — nothing leaves the box
 
         backfill, window_days = _resolve_window(backfill, window_days)
+        entry["backfill"], entry["window_days"] = bool(backfill), int(window_days)
         sharing_id = get_or_mint_sharing_id()
 
         # Three table scans: off the event loop, so a 03:30 backup-window tick
@@ -779,15 +794,7 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
         payload = await asyncio.to_thread(
             build_aggregate_payload, window_days, backfill=backfill, sharing_id=sharing_id
         )
-        entry: Dict[str, Any] = {
-            "sent_at": _now_iso(),
-            "backfill": bool(backfill),
-            "window_days": int(window_days),
-            "ok": False,
-            "http_status": None,
-            "error": None,
-            "payload": payload,
-        }
+        entry["payload"] = payload
         try:
             validate_payload(payload)
         except TelemetryPayloadSchemaError as e:
@@ -817,7 +824,8 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
                 db.set_setting(KEY_LAST_SHARED_AT, _now_iso())
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    "[telemetry-share] delivered, but the last-shared stamp could not be persisted (%s)",
+                    "[telemetry-share] delivered, but the last-shared stamp could not be persisted (%s); "
+                    "until it can be, the cross-worker marker alone paces sends, at half the interval",
                     type(e).__name__,
                 )
             if backfill:
@@ -832,8 +840,16 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
         logger.warning("[telemetry-share] POST returned HTTP %s", resp.status_code)
         return False
     except Exception as e:  # noqa: BLE001 — fire-and-forget, swallow everything
+        # Record the attempt unless an inner path already did (each of those
+        # sets `error` or `http_status` before it records), so a raise before
+        # the POST reaches the send log, the panel and the retry cap. The
+        # return keeps the contract: True iff the receiver acknowledged, even
+        # when something raised after the acknowledgement.
+        if entry["error"] is None and entry["http_status"] is None:
+            entry["error"] = type(e).__name__
+            _record_send(entry)
         logger.info("[telemetry-share] skipped (ignored): %s", type(e).__name__)
-        return False
+        return bool(entry["ok"])
 
 
 # Strong references for fire-and-forget sends: a bare ``asyncio.create_task``
