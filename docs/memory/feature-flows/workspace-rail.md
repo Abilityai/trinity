@@ -33,6 +33,57 @@ Portal.vue (shell)
 └─ <PortalRail sheet sm:hidden>   the bottom sheet, when the strip is tapped
 ```
 
+## ent#547 — Info docks, and the contract grows a third shape
+
+The rail is **Work · Loops · Canvas · Files · Info** (State when #439 lands). Agent
+details was a SIBLING of the rail until 2026-09-07 (ruled 2026-09-05, on the grounds
+that the rail is participant-scoped with a fixed tab set and that details is dismissed
+rather than switched away from). The operator reversed that after testing `dev` — a
+header-launched sibling panel "reads as one more top-level thing" — and both original
+grounds are answered rather than dropped:
+
+| The 2026-09-05 objection | How the tab form answers it |
+|---|---|
+| "the rail is participant-scoped" | `RAIL_DOORS.SOLO_AGENT` — the tab renders only when the conversation has exactly ONE participant |
+| "dismissed, not switched away from" | true of a panel occupying the rail's column; false once it IS the column's content. Collapsing the rail dismisses it, and the rail already remembers the tab you left |
+
+**`SOLO_AGENT` is `=== 1`, not `> 0`.** With "at least one" the tab passes in a room and
+renders one arbitrary participant's panel under a strip that promises the whole
+conversation. It also must not be `PLATFORM`: the header control it replaces carried no
+gate at all, so it rendered for external clients, and a platform door would be a silent
+capability removal for exactly the audience the Workspace exists for (#2128).
+
+**Info does not group by agent in a room, and that is a recorded deviation from the
+issue's AC.** `stores/clientPortal.js` keeps report state as a singleton keyed to one
+agent: `loadAgentReports` calls `resetAgentReports` whenever the requested agent differs,
+which bumps `_reportsGeneration` and invalidates every sibling's in-flight request. N
+mounted panels therefore leave N−1 stuck in a **permanent loading skeleton** — worse than
+absence, because it claims to be fetching something it has already abandoned. Keying that
+store per agent unblocks the grouping; it is a store change, not a rail change.
+
+**The third registry shape: a STATIC tab.** Info declares `signal: RAIL_SIGNAL_NONE` and
+`empty: null`. Both absences are declared rather than filled, because an agent always has
+a name, a health state and a chat list — the body always renders, so the rail's generic
+empty branch is unreachable — and nothing ever writes an `info` signal, so a borrowed
+`updated` would light no dot while documenting a rule that does not exist, diluting the
+"a dot means something happened" vocabulary. No read-side special case was needed:
+`signalFor` already answers `emptySignal()` for a tab the signals map does not mention,
+and `signalShape` already answers `null` for that. `stripSegments` consequently omits Info
+from its signalled branch and names it in the "nothing to say" branch, which is correct.
+
+**Info is absent from `feedsFor` by design.** That map drives the SHELL-owned feeds, and
+Info's body owns its own two reads (the shared agent-page payload, and reports) — the one
+docked tab not fed from the shell. A key nothing reads would suggest a feed exists.
+
+**Both mounts get the body.** `PortalRail` is mounted twice — the column and the mobile
+sheet — and `#tab-info` is supplied to each. One alone leaves a phone on the registry's
+generic empty state. Mobile is a **gain** here: `PortalAgentDetails` was `hidden sm:flex`,
+so the header button it replaces did nothing visible on a phone at all.
+
+**The icon needs its own entry.** `PortalRail.vue`'s `iconPath` falls back to `ICONS.bolt`
+for an unknown id, silently — a tab with no entry wears Work's lightning bolt in the
+collapsed strip and in its empty state, and nothing fails.
+
 ## Design decisions
 
 ### `visibleTabs` is the one gate — for render AND for mount
@@ -108,7 +159,9 @@ room grouping, empty copy, placement) plus source guards (sibling of `<main>`
 with no key; `store.isPlatformSession` never a literal; the reset watch; the
 sheet; `PortalRail` renders nothing for an empty list and never reads the
 registry; `motion-safe:` only; the two emitters; the `OverflowTabs` mirror).
-`tests/unit/portalLoadingTreatment.spec.js` — the #2540 half. Verified live on
+`tests/unit/portalRailFiles.spec.js` and `tests/unit/portalFiles.spec.js` —
+Slice 3's upload signal, the flat projection, the preview rules and the delete
+matrix (see that section). `tests/unit/portalLoadingTreatment.spec.js` — the #2540 half. Verified live on
 the Docker frontend: collapsed → open → persisted across reload; light and dark;
 the mobile strip → sheet → Escape; the stage skeleton under a slowed roster; no
 console errors.
@@ -151,9 +204,12 @@ mounted**, so ownership moves to the shell — `composables/usePortalRailFeeds.j
 bodies only read. `stores/portalRailFeeds.js` is the same shape for canvases
 and documents: `allSettled` per participant, partial failure keeps rows, a
 fetch token drops a response that lands after a chat switch, **no timer while
-idle**. `uploads` (the viewer's own inbox) is a container read on the backend
-and never signals, so it is fetched only while Files is the open active tab
-and after an upload.
+idle**. `uploads` (the viewer's own inbox) is a container read on the backend,
+so it is fetched only while Files is the open active tab, after an upload from
+**any** surface, and after a delete. It **does** signal since #2582 — see
+Slice 3 — through `filesSignalItems`, which projects uploads onto the
+`created_at` key the Files dot already reads; the two collections stay
+separate and only the signal merges them.
 
 ### Fetching follows the door, and the stage verdict
 
@@ -177,8 +233,10 @@ a dot lit. Markers persist under a **second** key
 untouched. Refresh triggers: participants change, a turn ending (both chats,
 through the Work signal's live → 0 edge), `loop_*` and terminal
 `agent_activity` events for a participant (platform sessions), the tab being
-opened, a successful upload. An external client with a scheduled canvas
-rewrite and no chat turn sees the dot at its next turn or tab open — stated.
+opened, a successful upload **from any surface** (#2582 — the conversation
+composer, a room's fan-out, or the tab's own drop zone), and a delete. An
+external client with a scheduled canvas rewrite and no chat turn sees the dot
+at its next turn or tab open — stated.
 
 ### One rendering layer for the canvas
 
@@ -196,6 +254,207 @@ verdict (`feedView` → `viewState`; `loading` while a room's participants have
 not landed), `LoadFailed` + Retry on a failed first fetch, and keeps its rows
 under an `InlineError` on a failed refresh. The Files drawer's `animate-spin`
 is gone with the drawer.
+
+## Slice 3 — Files: uploads at once, save, preview, delete (trinity#2582 + ent#548)
+
+An operator tested the tab on `dev` (2026-09-07). Three defects and two asks,
+shipped as one change set because both halves edit `PortalRailFiles.vue`.
+
+### The upload had nowhere to announce itself
+
+The composer uploaded straight to the agent's per-client inbox and told the
+rail's feed store nothing, so "Files you sent" was stale until the tab was
+opened or a turn ended. The fix is **not** in `PortalConversation.vue`: the
+store funnel `clientPortal.js::uploadDocument` has exactly three callers —
+`portalRailFeeds.js`, `PortalConversation.vue`, `PortalRoom.vue` — so notifying
+from there catches the conversation, the room and the rail at once, and leaves
+the file the whole delivery sequence is serialized to protect untouched.
+
+The signal is a **pending-agent SET** drained by the owner composable, and that
+shape is load-bearing. A scalar (`lastUpload` + a watcher joining the in-flight
+promise) re-breaks the defect it fixes, twice:
+
+* **Trailing loss.** `usePortalFileDrop` uploads a batch sequentially and does
+  not await the feed re-read. File 1 resolves and starts a ~200–800 ms
+  `container_exec_run`; file 2 resolves at +300 ms and the watcher joins
+  promise #1, which returns a listing snapshotted *before* file 2 landed.
+* **Fan-out loss.** `PortalRoom.vue`'s drop is
+  `for (const name of names) await store.uploadDocument(name, file)` — three
+  calls for three *different* agents. Vue coalesces mutations in one flush
+  window into a single watcher invocation carrying only the last value.
+
+So: a set, a **trailing re-fire** (a dirty flag that re-runs once after the
+in-flight read settles), and an ordering against `refresh()` — which
+`refresh({uploads:true})` needs, or one issued before the upload and resolving
+after it clobbers the fresh listing with the pre-upload one, silently, because
+it rebuilds its map from a snapshot taken after its own awaits.
+
+**That ordering is a per-agent epoch, not the store's shared `_fetchToken`, and
+the room fan-out is what proved it.** The first cut did share the token, and the
+test failed: three concurrent per-agent reads each bumped the one counter, so
+each invalidated the last and two of the three listings were discarded. The two
+questions are different — *"has the chat moved on?"* is global (`_scopeToken`,
+bumped only by a participant change or a clear) and *"is this agent's listing
+still the newest?"* is per agent (`_uploadEpoch`, which `refresh()` snapshots
+before its awaits and re-checks per agent when it lands). One counter cannot
+answer both.
+
+**Stated reachability limit.** `feeds.uploads` is populated only on tab-open,
+turn-end-while-open, or a `noteUpload`. On a fresh page load with Files closed,
+`filesSignalItems` sees `{}`, so the dot **cannot** light for an upload made on
+another device or in a previous session. That is defensible — and it is also
+what avoids a one-time false-dot burst on deploy — but it is a real limit, not
+an oversight.
+
+### Download had to actually save
+
+`GET /api/files/{id}` serves ent#461's inline allowlist, so an image opened in
+a tab instead of saving. The route (and its `HEAD`, which must agree or a
+player mis-plans) gains a **one-way** `?download=1`: it may only force
+`attachment`, never `inline`. The asymmetry is the whole design — a requester
+choosing to be *more* restricted about their own download grants nothing, while
+the reverse is the XSS the allowlist exists to prevent. `sig` is a stored bearer
+token compared with `compare_digest`, not an HMAC over the URL, so appending the
+flag cannot invalidate it. Only the Files tab's URL carries it; the agent's chat
+link does not.
+
+**Download therefore takes two paths.** An agent share is saved by an anchor
+click on its already-`attachment` URL — natively streamed, no memory spike (a
+share may be 50 MB), and no programmatic blob save, which is the classic iOS
+Safari failure on a surface whose primary form is a phone sheet. Fetching those
+bytes into the tab only to hand them back would make the flag decorative.
+
+Own uploads had no control at all, because a client upload has no DB row — it is
+a file in a container directory. Reading one back is
+`GET …/uploads/{filename}` through `extract_from_agent`, deleting one is
+`rm -f --`, and the MIME has to be guessed (`mimetypes.guess_type` in
+`_read_inbox`, which also fixes a live bug: `PortalRailFiles.vue` has always
+rendered `<FileIcon :mime="u.mime_type">` against a field the response model
+stripped, so the icon was unconditionally generic).
+
+### Preview
+
+`components/portal/PortalFilePreview.vue`, `v-if`-mounted — never `v-show`,
+because the desktop column and the mobile sheet are siblings and a phone with
+the sheet open mounts the tab body twice, where a teleported overlay would
+ignore the hidden ancestor. Bytes come from the existing routes, not a new
+preview route: `/files/preview` is platform-JWT-gated, reads only the agent
+container's `/home/developer`, and serves `inline` unconditionally, so it can
+serve neither an external client nor agent-shared bytes (which live at
+`/data/agent-files/{id}` on the backend host).
+
+* Images render **only** via `<img :src="objectUrl">` — never inline `<svg>`,
+  never `v-html`. An uploaded SVG is a script host; `<img>` never executes it.
+* Markdown goes through `PortalMarkdown` (the one sanitiser policy); other text
+  renders in a `<pre>`, escaped by interpolation.
+* Text is capped at **256 KB** and fetched **whole, with no `Range` header**,
+  then sliced client-side. `main.py`'s CORS `allow_headers` does not list
+  `Range`, so a ranged preview dies silently wherever the portal base URL is
+  genuinely cross-origin. Shared-file preview reads carry `preview=1`; the
+  server audits them with `details.preview=true` without incrementing the
+  download counter. The cap is stated in the UI, not only in code.
+* Non-previewable types, and a **failed byte fetch**, both land on the same
+  name/size/type + Download card. "Never a blank modal" has to cover a failure,
+  not only an unknown type.
+* Next/previous walks the *previewable* subset of the flat list, so a `.zip`
+  every third row is skipped rather than opening blank, and it stops at the ends.
+
+Escape and the arrows are registered with **`{ capture: true }`** and call
+`preventDefault()`. Capture is required: the conversation's turn-cancel listener
+is on `document` in the bubble phase, so a bubble listener would let Escape
+cancel an in-flight turn before `shouldCancelOnEscape` sees `defaultPrevented`.
+**The delete confirm carries the same handler**, because `ConfirmDialog` has no
+key handling of its own — an unguarded Escape there dismissed nothing and
+cancelled the turn instead. The two capture listeners fire in registration
+order (the tab body mounts before the modal it opens), so each returns early on
+`event.defaultPrevented` and one keystroke closes one overlay.
+**Known residual (#2598):** `PortalConversation.vue` handles
+Escape for an active voice call in a branch *above* that rule, so a preview
+opened during a voice call also ends the call.
+
+### Delete, and who may do what
+
+| Case | Affordance | Mechanism |
+|---|---|---|
+| My own upload | **Delete** (real) | `rm -f --` in the container inbox |
+| Agent-shared, I am a viewer | **Remove from my list** | a `portal_file_dismissals` row; the share is untouched |
+| Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
+
+**The matrix is session-type dependent, and the copy says so.**
+`PortalPrincipal` is `(email, is_platform)` and carries no role, so
+`include_owned` is `principal.is_platform` everywhere (ent#358). A **non-owner
+admin is a viewer** in the Workspace — stricter than the platform surface, and
+correct — and an **owner on a magic-link portal token gets the viewer
+affordance too**. `portal_owns_agent` is the *same* membership the roster card
+renders, so the UI and the enforcement cannot disagree; the affordance is not
+offered rather than offered-and-refused.
+
+"Unshare" needed new storage: `agent_shared_files` has no audience column
+(`portal_documents` lists every active share of the agent, for every rostered
+client), and the one generic per-user preference store is FK'd to `users.id`,
+which a portal principal has no row in. `portal_file_dismissals` is that
+storage — server-side, auditable, and it survives a device change, which a
+`localStorage` "hidden on this device" would not. It carries `agent_name` so it
+follows the agent's lifecycle (and so it does not sidestep the cleanup parity
+guard), and it does **not** validate the `file_id`: a 404 for an unknown id is
+an existence oracle over every share in the install, exactly the fork
+`set_chat_star` already resolved by capping rows instead.
+
+`portal_revoke_shared_file` is **access-first** — roster (uniform 404) →
+ownership (403) → row lookup (404) — never existence-then-access, which is the
+shape Invariant #8 forbids. It returns **404** for an unknown id where the
+sibling operator route `DELETE /api/agents/{name}/shared-files/{id}` is
+documented idempotent-**204**; the divergence is enumeration-uniformity on an
+external surface, and it is recorded here so the next reader does not "align" it.
+
+### Costs, stated
+
+The download route is the first time a rostered client can reach
+`extract_from_agent`, which iterates the docker-py generator **synchronously
+inside `async def`** on the global 4-worker executor shared with agent
+start/stop/reload, and holds ~3× the file size in memory transiently. There is
+no streaming primitive and building one was out of scope. The bound is a
+**two-tier limiter** (`PORTAL_FILE_BURST_LIMIT` 20/60s,
+`PORTAL_FILE_HOURLY_LIMIT` 100/1h, per email, env-tunable, delete on its own
+looser counter) — the shape `router.py`'s own comment already required, and the
+reason the burst tier is 20 and not 60.
+
+Two smaller residuals: `uploaded_at` is a **container** mtime while `created_at`
+is a backend `utc_now_iso()`, and `markSeen` stores one marker across both, so a
+skewed agent clock can park the marker ahead and swallow a later real share. And
+`_safe_filename` mangles non-Latin filenames on the way in, so a preview title
+shows the mangled name — pre-existing and cosmetic, but it is the first thing a
+reviewer clicks.
+
+### Testing
+
+* `tests/unit/test_2582_download_flag.py` — the one-way flag on GET and HEAD,
+  `?download=` / `?download=x` not 422-ing, other headers preserved, the ranged
+  206 path, and that a ranged prefix read is audited `ranged_prefix: true`
+  without bumping `download_count`.
+* `tests/unit/test_2582_portal_uploads.py` — gate order, the uniform 404 on a
+  traversal attempt asserted **through the mounted route** as well as at the
+  handler (uvicorn normalises `../` before Starlette matches, so a handler-only
+  test cannot tell "gated" from "unroutable"), attachment headers, the `rm -f --`
+  quoting, the ent#308 email pair landing in different inboxes, and 429 at both
+  tiers.
+* `tests/unit/test_ent548_portal_share_delete.py` — the permission matrix,
+  access-first ordering, the dismissal's non-validation and row cap, both purge
+  paths, the `AgentRef` registration, and both migration tracks.
+* `src/frontend/tests/unit/portalRailFiles.spec.js` — an upload lights the dot
+  with Files closed, opening the tab clears it, a two-file batch does not lose
+  the second, a room fan-out notes all three, and a `refresh` resolving after
+  `noteUpload` does not clobber it. **The fan-out test found the shared-token
+  defect described above**; three mutation controls (a shared counter, no
+  trailing re-fire, a refresh ignoring the epoch snapshot) each fail exactly
+  their own test. The composable is mounted inside an `effectScope` stopped per
+  test — its watcher on the shared portal mock has no component to unmount it,
+  so the oldest survivor otherwise drains the queue against a previous test's
+  store.
+* `src/frontend/tests/unit/portalFiles.spec.js` — `previewKind`, `neighbour`,
+  `flattenFiles` order equalling render order, the `fileActions` matrix, and the
+  component's own source guards (an `<img>`, no `v-html`, capture + preventDefault,
+  `revokeObjectURL`, no `Range`, zero raw palette classes).
 
 ## Residuals (stated)
 

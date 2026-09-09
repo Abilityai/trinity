@@ -24,9 +24,15 @@ rows** and is deliberately dropped here (verified against `db/schedules.py`):
   `duration_ms = NULL`.
 
 E-03 therefore asserts only what *every* terminal path honors:
-`completed_at IS NOT NULL`. (A future `duration_ms`-coverage check would have to
-scope to dispatched rows — `claude_session_id IS NOT NULL` — never
-queue-terminated ones.)
+`completed_at IS NOT NULL`.
+
+(#2434 narrows this further: a `duration_ms`-coverage check is now unwritable
+even scoped to dispatched rows. Every watchdog sweep FABRICATED its duration
+from `now - started_at`, which past 24.855 days overflowed the PostgreSQL
+INTEGER column and rolled back the sweep's whole batch — so those sites now
+record NULL unconditionally. A dispatched row swept as stale is therefore
+legitimately `duration_ms = NULL` too, and NULL is a blessed value on a terminal
+row rather than a gap to audit.)
 
 ## Leading-edge tripwire, not a backfill auditor
 

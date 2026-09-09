@@ -339,6 +339,15 @@ class GitSyncResult(BaseModel):
     sync_time: Optional[datetime] = None
     conflict_type: Optional[str] = None  # "push_rejected", "merge_conflict", etc.
     conflict_class: Optional[str] = None  # S5 #386: operator-readable class (AHEAD_ONLY, PARALLEL_HISTORY, ...)
+    # #2529 — what the per-Push `.gitignore` sweep actually did. Populated on
+    # EVERY return of `git_service.sync_to_github`, success and failure alike:
+    # the index mutation happens before the HTTP call, so a 409 is exactly as
+    # obliged to report it as a 200. Invariant #14 does not apply here —
+    # `db_models.py` is the persistence-model home and is deliberately out of
+    # `test_models_centralized.py`'s router scope.
+    removed_paths: List[str] = Field(default_factory=list)      # tracked -> untracked by this Push
+    unignored_paths: List[str] = Field(default_factory=list)    # newly un-ignored, still untracked (advisory)
+    shadowed_negations: List[str] = Field(default_factory=list)  # "!rule -> deciding managed pattern"
 
 
 # =========================================================================

@@ -302,21 +302,38 @@ export function renameFailureMessage(err) {
   return "Couldn't save the new title. Check your connection and try again."
 }
 
-// --- The agent's chats as tabs (ent#451) ------------------------------------
+// --- The agent's chats as tabs (ent#451, #2579) -----------------------------
 // This user's threads with the active agent, most recent first, as the tab
 // strip above the thread. Rooms are not an agent's tabs (a room has no single
-// agent subject), and another agent's threads are not this agent's. A chat
-// that has not sent its first message is not a tab yet (ruling 2026-09-06:
-// "a new chat exists — tab and sidebar row — once its first message is sent"),
-// so an unsaved new chat renders no active tab rather than a phantom one.
-// #523's pinned Main chat is this list's first slot when it lands; nothing
-// here assumes there is not one.
+// agent subject), and another agent's threads are not this agent's.
+//
+// #2579 REVERSES one half of the 2026-09-06 ruling, deliberately. The ruling —
+// "a new chat exists (tab and sidebar row) once its first message is sent" —
+// stays true for the THREAD: nothing is created before the first message, and
+// this function still never invents a row. What changed is the STRIP: pressing
+// New chat and seeing nothing at all change is the defect the operator
+// reported, so an unsaved ACTIVE chat is drawn as a provisional tab labelled
+// "New chat" with `thread: null` behind it.
+//
+// The provisional tab is keyed ONLY off the caller's explicit `draft` intent,
+// never off "the active id is not in the list". That distinction is the whole
+// safety of it: a cold deep link to a thread the cross-agent batch has not
+// listed yet would otherwise wear a "New chat" label over a real conversation.
+// It carries no special styling either — the label IS the mark, and a second
+// visual language for a tab that lives for one round trip is noise.
+//
+// It is inserted directly AFTER Main, which is the slot the real row takes
+// once the list carries it (the sort below falls back to `created_at`), so
+// adoption swaps the tab in place instead of making it jump.
+export const NEW_CHAT_TAB_ID = '__new_chat__'
+export const NEW_CHAT_TAB_LABEL = 'New chat'
+
 // ent#523: the pinned Main chat's tab label. A constant because three places
 // have to agree on it — the strip, the details list, and the test — and a chat
 // whose title is literally "Main" would otherwise be indistinguishable from it.
 export const MAIN_TAB_LABEL = 'Main'
 
-export function agentChatTabs(threads, agentName) {
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false } = {}) {
   if (!agentName) return []
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
@@ -335,7 +352,7 @@ export function agentChatTabs(threads, agentName) {
     const n = iso ? new Date(iso).getTime() : 0
     return Number.isNaN(n) ? 0 : n
   }
-  return mine
+  const tabs = mine
     .slice()
     // Main first, then recency. Sorted rather than spliced so there is one
     // comparator to reason about, and so a payload that (wrongly) carries two
@@ -353,6 +370,69 @@ export function agentChatTabs(threads, agentName) {
       pinned: !!t.is_main,
       thread: t,
     }))
+  // #2579: the provisional tab. Only on an explicit draft, and only while no
+  // real row already carries the active id — once the list catches up with the
+  // adopted thread the real tab takes over in the same slot.
+  if (draft && !tabs.some((t) => t.id === activeId)) {
+    const after = tabs.length && tabs[0].pinned ? 1 : 0
+    tabs.splice(after, 0, {
+      // Keyed to the adopted id when there is one, so the tab the person is
+      // looking at keeps its identity across the gap between "the thread now
+      // exists" and "the list says so".
+      id: activeId || NEW_CHAT_TAB_ID,
+      label: NEW_CHAT_TAB_LABEL,
+      provisional: true,
+      pinned: false,
+      thread: null,
+    })
+  }
+  return tabs
+}
+
+// #2579: does this agent already have a Main chat on screen? The shell asks
+// before spending a per-agent round trip to mint one (the batch deliberately
+// never mints, so a pair whose chats predate ent#523 has no Main in the list).
+export function agentHasMain(threads, agentName) {
+  if (!agentName) return false
+  return (Array.isArray(threads) ? threads : [])
+    .some((t) => t && !t.is_room && t.agent_name === agentName && !!t.is_main)
+}
+
+// #2579: is this thread inside the window where a generated title may still
+// land? Two `touch_portal_session(added=1)` calls happen per exchange (the
+// user's message and the reply), and `_title_plan` gates on the PRE-turn
+// `message_count <= 2` — so a post-turn count of 2..4 is exactly the `first`
+// plus one `retry` window, and nothing wider.
+//
+// The `>= 2` floor is required, not defensive: `sessions-changed` fires from
+// four sites in the conversation, one of them right after the voice path's
+// `createSession` on a ZERO-message thread, and arming a settle cycle there
+// would poll for a title nothing is generating.
+//
+// Main is NOT excluded. Its tab is labelled by role, but its sidebar row
+// renders `threadTitle`, and post-ent#523 Main is the default landing thread —
+// so excluding it left the single most common conversation showing its first
+// message as its name.
+export function titleSettling(t) {
+  const n = Number(t?.message_count ?? 0)
+  return n >= 2 && n <= 4
+}
+
+// #2579: the re-read schedule after a turn, in ms since turn-done.
+//
+// A best-effort refresh WINDOW, and deliberately NOT a mirror of the server's
+// `PORTAL_TITLE_TIMEOUT_SECONDS` — that is operator-tunable, and a client that
+// invents its own ceiling for a server budget is the #2133 class. Exhausting
+// this schedule is therefore a trigger to ASK the authority (the health
+// record), never a verdict that generation is broken.
+export const TITLE_SETTLE_DELAYS_MS = [2000, 6000, 16000]
+
+// #2579: who may fetch the admin-only title-health endpoint. Request
+// avoidance, not a security gate — `assert_admin` on the endpoint is the
+// authority — but it matters that a portal client never asks: the endpoint is
+// dead for that audience (the #2128 lesson), so the notice must be too.
+export function shouldFetchTitleHealth(isPlatformSession, role) {
+  return !!isPlatformSession && role === 'admin'
 }
 
 // The overflow trigger's label: counted, as the contract asks ("N more").
@@ -1821,4 +1901,60 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
   }
   if (!newest) return ''
   return compactAge(newest, now)
+}
+
+// ---------------------------------------------------------------------------
+// #2580 — one shape for a message row, built in three places.
+//
+// `PortalConversation` constructs a thread row from history (`loadThread`), from
+// a completed turn (`deliver`) and from a reattached turn (`reattach`). The
+// defect the issue reports is that two of those three dropped the persisted
+// `id`, so a reply the user had just watched arrive carried no id and
+// `<PortalRating v-if="item.message.id">` hid the thumbs until the next page
+// load — arbitrary, from the reader's side, since an older reply two lines up
+// had them.
+//
+// A shared mapper rather than three corrected object literals: this is exactly
+// the #2211 shape (a fix landing in one twin and not the other), and it is also
+// the only form the rule can be TESTED in — `vitest.config.js` pins
+// `environment: 'node'` with no mount harness, so a rule living inside an SFC
+// is a rule no test can execute.
+//
+// `id` defaults to `null`, never `undefined`: the consumer's gate is a
+// truthiness test either way, but a row whose id is explicitly null says "this
+// was built without one" where a missing key says nothing at all.
+export function assistantRow({ content = '', id = null, my_rating = null,
+                               source = null, voice_call_id = null } = {}) {
+  return {
+    role: 'assistant',
+    content,
+    id: id || null,
+    myRating: my_rating || null,
+    source: source || null,
+    voiceCallId: voice_call_id || null,
+  }
+}
+
+// The reply a just-finished turn produced, read out of the history payload the
+// client polls anyway (`awaitPersistedReply`).
+//
+// `baselineAssistants` is the count taken BEFORE dispatch: the newest assistant
+// row is only this turn's reply if the count has grown, otherwise it is the
+// PREVIOUS turn's and would be shown twice. Returns null while that is the
+// case, which is the caller's "keep waiting".
+//
+// This is where the id was being lost. The persisted row was already in hand —
+// it is what the count is derived from — and only its content and cost were
+// carried out of the function.
+export function replyFromHistory(messages, baselineAssistants) {
+  const assistants = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'assistant')
+  if (assistants.length <= (Number(baselineAssistants) || 0)) return null
+  const last = assistants[assistants.length - 1]
+  return {
+    response: last.content,
+    cost: last.cost ?? null,
+    id: last.id || null,
+    myRating: last.my_rating || null,
+  }
 }

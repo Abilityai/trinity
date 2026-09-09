@@ -1,5 +1,18 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-09-07 (#2434, the terminal write's `duration_ms` is representable
+> or NULL):** `db.update_execution_status` — the CAS-won terminal write at step 6 — now
+> computes its duration through `utils/helpers.py::duration_ms_between` instead of a bare
+> `max(0, …)`. That clamp came from #1832 and guards only the **low** end; `max(0, 2_850_000_000)`
+> is still 2.85 bn, which the PostgreSQL `INTEGER` column cannot hold. Above the ceiling
+> (`2**31-1` ms = 24.855 days — reachable when `started_at` is stale or corrupt, never from a real
+> turn, since TIMEOUT-001 bounds `execution_timeout_seconds` to [60, 7200]) the helper returns
+> `None` and logs a warning carrying the execution id, so the number survives where an operator can
+> find it. The four watchdog sweeps that **fabricate** a close write NULL unconditionally — see
+> [cleanup-service.md → Wedged pre-upgrade instance](cleanup-service.md#wedged-pre-upgrade-instance-2434).
+> `models.TaskResultPayload.execution_time_ms`, which arrives agent-supplied on the #1083 async
+> result callback, is bounded to `[0, 2**31-1]` at the contract for the same reason.
+
 > **Updated 2026-09-01 (#2467, turn-integrity derivation at terminal write):** `apply_result`'s
 > SUCCESS branch now derives turn-integrity flags from the transcript it already holds —
 > `services/execution_integrity.py::derive_turn_integrity(exec_log, metadata)` (a pure leaf; the

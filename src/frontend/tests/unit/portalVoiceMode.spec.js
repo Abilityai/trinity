@@ -247,7 +247,11 @@ describe('the call is the Agent Detail orb, reused — not forked', () => {
     const start = CODE.slice(CODE.indexOf('async function startVoiceCall()'), CODE.indexOf('async function endVoiceCall()'))
     expect(start.indexOf('store.createSession(props.agent.name)')).toBeGreaterThan(-1)
     expect(start.indexOf('store.createSession(props.agent.name)')).toBeLessThan(start.indexOf('voice.startWith('))
-    expect(start).toContain("emit('session-adopted', sid)")
+    // #2579: adoption runs through the one `adoptSession` seam now — this site
+    // no longer emits by hand, because raising `bornHere` at only some of the
+    // three adoption sites drops the provisional tab for the whole round trip
+    // of starting a call. The emit still happens, inside it.
+    expect(start).toContain('adoptSession(sid)')
   })
   it('the composable exposes the end reason, the saved handshake and the panel version', () => {
     for (const name of ['endReason', 'endMessage', 'panelVersion', 'awaitSaved', 'startWith']) {
@@ -271,7 +275,20 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(CODE).toMatch(/<PortalStarButton[\s\S]{0,120}voiceCallActive \? 'opacity-40 pointer-events-none'/)
     expect(CODE).toContain(':disabled="sending || resetting || voiceCallActive"')
     expect(CODE).toMatch(/<PortalChatTabs[\s\S]{0,200}:disabled="voiceCallActive"/)
-    expect(CODE).toMatch(/<form[\s\S]{0,120}:class="voiceCallActive \? 'opacity-60 pointer-events-none' : ''"/)
+    // ent#547: the inert class moved OFF the <form> and onto a wrapper inside
+    // it, around every control except the voice-call toggle. The rule this
+    // asserts is unchanged — the composer goes inert for the call's duration —
+    // but the toggle must stay live, because it is the control that ENDS the
+    // call. Inside the inert region it would render pressed and refuse the
+    // click, a dead affordance manufactured by the move itself.
+    expect(CODE).toMatch(/<div\s+class="flex-1 min-w-0 flex items-end gap-2"\s+:class="voiceCallActive \? 'opacity-60 pointer-events-none' : ''"/)
+    // The toggle is a SIBLING of that wrapper, not a descendant. Positional, so
+    // it fails if a later edit moves the button inside.
+    const formStart = CODE.indexOf('<form')
+    const inertAt = CODE.indexOf('flex-1 min-w-0 flex items-end gap-2', formStart)
+    const callAt = CODE.indexOf('data-testid="portal-voice-call"', formStart)
+    expect(callAt).toBeGreaterThan(-1)
+    expect(callAt, 'the call toggle must precede the inert wrapper').toBeLessThan(inertAt)
     expect(CODE).toContain(':disabled="transcribing || voiceCallActive"')
     expect(CODE).toContain(':disabled="sending || !input.trim() || voiceCallActive"')
     expect(TABS).toContain('disabled: { type: Boolean, default: false }')
@@ -282,9 +299,18 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceCallActive\.value\) speak\(data\.response\)/)
   })
   it('Escape ends the call before the turn-cancel rule runs', () => {
+    // #2598 changed the SPELLING, not this property: the call is still asked
+    // first. The condition used to be the inline
+    // `voiceCallActive.value && event.key === 'Escape'`, which read none of the
+    // preconditions `shouldCancelOnEscape` reads — so an overlay that claimed
+    // Escape in the capture phase with `preventDefault()` closed AND ended the
+    // call. It now dispatches on the shared `shouldEndCallOnEscape` rule; the
+    // ORDERING assertion below is what ent#534 actually cares about and is
+    // unchanged.
     const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
-    expect(esc.indexOf("voiceCallActive.value && event.key === 'Escape'")).toBeGreaterThan(-1)
-    expect(esc.indexOf("voiceCallActive.value && event.key === 'Escape'")).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
+    const call = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    expect(call).toBeGreaterThan(-1)
+    expect(call).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
     expect(esc).toContain('void endVoiceCall()')
   })
   it('the header line names the state and the way out; End always works', () => {
@@ -316,7 +342,11 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(SHELL_CODE).toMatch(/<PortalVoiceCanvas\s+v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
     expect(CODE).toMatch(/watch\(\[voiceCallActive, \(\) => voice\.voiceSessionId\.value\]/)
     expect(CANVAS_COLUMN).toContain('if (inFlight || !props.voiceSessionId) return')
-    expect(SHELL_CODE).toMatch(/<PortalAgentDetails\s+v-else-if="detailsOpen && activeAgent"/)
+    // ent#547: there is no details SIBLING to swap out any more — it is the
+    // rail's Info tab, so the voice canvas now displaces the rail itself and the
+    // chain is two arms rather than three.
+    expect(SHELL_CODE).not.toContain('detailsOpen')
+    expect(SHELL_CODE).toMatch(/<PortalRail[\s\S]{0,80}v-else-if="railVisible"/)
     // The 40 / 60 split is two flex SHARES of a zero basis (2 : 3), never
     // percentages of the row: `w-[40%]` + `w-[60%]` beside the 18rem sidebar
     // summed to 100% + 18rem and the shell's overflow-hidden clipped the

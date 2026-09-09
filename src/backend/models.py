@@ -2114,7 +2114,18 @@ class ExecutionResultEnvelope(BaseModel):
     metadata: Optional[Dict] = None
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
-    execution_time_ms: Optional[int] = None
+    # #2434: agent-supplied and previously unbounded — it arrives on the #1083
+    # async result callback (`routers/agents.py`), the one duration on this
+    # surface a caller chooses rather than the backend measuring. Today it lands
+    # only in JSON (the activity `details` blob and the #1578 event payload):
+    # `schedule_executions.duration_ms` is recomputed from `started_at`, and the
+    # `execution_time_ms` int4 columns (`chat_messages`,
+    # `agent_session_messages`) are written from the backend's own in-request
+    # measurement, never from this field. So this is a boundary check, not a
+    # live overflow path: it is bounded HERE, at the contract, so a future
+    # writer that does persist it inherits the guarantee instead of rediscovering
+    # the int4 ceiling in production. A bad value is a clean 422.
+    execution_time_ms: Optional[int] = Field(None, ge=0, le=2**31 - 1)
 
 
 # =============================================================================
