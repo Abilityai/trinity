@@ -67,6 +67,9 @@ describe('ActivationFunnelPanel wiring (source-structure guard)', () => {
   it('routes the footer through the pure decision', () => {
     expect(panel).toMatch(/import \{[^}]*\binstallIdFooter\b[^}]*\} from '\.\/funnelFormat'/)
     expect(panel).toMatch(/installIdFooter\(installationId\.value\)/)
+    // The last inch: the computed must actually reach the DOM. Without this the
+    // guard passes with the footer rendered as static text (ent#545 review).
+    expect(panel).toMatch(/\{\{\s*installFooter\.text\s*\}\}/)
   })
 
   it('passes the wire value through untouched — null stays null, absent stays absent', () => {
