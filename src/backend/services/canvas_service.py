@@ -230,7 +230,13 @@ def visibility_for_canvas(canvas: Dict, agent_name: str) -> tuple:
     unknown or unreadable id arrives here as ``None`` and produces no claim,
     which is exactly the answer it deserves.
     """
-    execution_id = (canvas or {}).get("execution_id")
+    # `updated_by_execution_id`, the key every canvas dict actually carries —
+    # `db.upsert_agent_canvas`'s return, `_row_to_summary` and `_row_to_full`
+    # all name it that. Reading `execution_id` here made this function answer
+    # `(None, None)` on every write while its 42 tests stayed green, because
+    # they drive the pure rule and a source guard and never this wrapper with a
+    # stored row (#2603 review).
+    execution_id = (canvas or {}).get("updated_by_execution_id")
     if not execution_id:
         return None, None
     try:

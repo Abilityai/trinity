@@ -173,3 +173,81 @@ class TestTheToolSaysSo:
         # renders and never that the default is usually wrong off the operator
         # path — which is the only thing that would have prevented this.
         assert "visible_to_requester" in src
+
+
+class TestTheWrapperReadsTheKeyTheRowActuallyCarries:
+    """The #2603 review finding, pinned.
+
+    Every test above drives the pure rule or reads source. The wrapper between
+    them — `visibility_for_canvas` — took its execution id from
+    `canvas["execution_id"]`, a key no canvas dict has ever carried: the write
+    path (`db.upsert_agent_canvas`) and both read paths (`_row_to_summary`,
+    `_row_to_full`) all name it `updated_by_execution_id`. So the wrapper
+    answered `(None, None)` on every single write, the feature was inert, and
+    the suite was green — the exact failure a pure-rule test cannot see.
+
+    These drive the wrapper with the shape the database layer really returns,
+    so the two can no longer disagree without something going red.
+    """
+
+    def _stored(self, **over):
+        """The shape `db.upsert_agent_canvas` returns, key for key."""
+        row = {
+            "agent_name": "scribe",
+            "canvas_id": "default",
+            "title": "t",
+            "audience": "operator",
+            "schema_version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "updated_by_execution_id": "exec-1",
+            "template": None,
+            "blocks": [],
+        }
+        row.update(over)
+        return row
+
+    def test_the_stored_shape_reaches_a_real_verdict(self, monkeypatch):
+        from types import SimpleNamespace
+        from services import canvas_service
+
+        monkeypatch.setattr(
+            canvas_service, "resolve_and_validate_execution",
+            lambda eid, agent: SimpleNamespace(
+                triggered_by="public", source_channel=None
+            ),
+        )
+        visible, note = canvas_service.visibility_for_canvas(
+            self._stored(), "scribe"
+        )
+        assert visible is False, (
+            "the wrapper answered no-claim on a row that carries an execution id"
+        )
+        assert "roster" in note
+
+    def test_the_key_it_reads_is_the_key_the_db_layer_writes(self):
+        """Named separately so a rename on either side fails HERE, with the
+        reason, rather than as a silent return to no-claim."""
+        import inspect
+        from db import canvas as canvas_db
+        from services import canvas_service
+
+        assert '"updated_by_execution_id"' in inspect.getsource(
+            canvas_db.CanvasOperations.upsert_canvas
+        )
+        assert '"updated_by_execution_id"' in inspect.getsource(
+            canvas_service.visibility_for_canvas
+        )
+
+    def test_a_row_with_no_execution_id_still_makes_no_claim(self, monkeypatch):
+        from services import canvas_service
+
+        def _boom(*_a, **_kw):  # pragma: no cover — must never be reached
+            raise AssertionError("resolved an execution for a row that has none")
+
+        monkeypatch.setattr(
+            canvas_service, "resolve_and_validate_execution", _boom
+        )
+        assert canvas_service.visibility_for_canvas(
+            self._stored(updated_by_execution_id=None), "scribe"
+        ) == (None, None)
