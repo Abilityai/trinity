@@ -143,7 +143,15 @@ async def sync_to_github(
     # and untrack any files that NOW match a rule. Runs on every Push so
     # existing agents migrate without re-init or container rebuild. Best
     # effort — failures are logged inside the helper and Push proceeds.
-    await gitignore._migrate_workspace_gitignore(agent_name)
+    #
+    # #2529: the sweep now says what it did, on ALL FOUR returns below — the
+    # index mutation has already happened by the time the HTTP call runs, so a
+    # 409 or an exception is exactly as obliged to report it as a 200.
+    sweep = gitignore._coerce_sweep(
+        await gitignore._migrate_workspace_gitignore(agent_name)
+    )
+    await gitignore._emit_gitignore_untracked_alert(agent_name, sweep)
+    message = gitignore._augment_commit_message(message, sweep)
 
     try:
         # Call the agent's internal sync endpoint
@@ -166,14 +174,14 @@ async def sync_to_github(
                 if data.get("commit_sha"):
                     db.update_git_sync(agent_name, data["commit_sha"])
 
-                return GitSyncResult(
+                return gitignore._with_sweep(GitSyncResult(
                     success=data.get("success", False),
                     commit_sha=data.get("commit_sha"),
                     message=data.get("message", "Sync completed"),
                     files_changed=data.get("files_changed", 0),
                     branch=data.get("branch"),
                     sync_time=datetime.fromisoformat(data["sync_time"]) if data.get("sync_time") else datetime.utcnow()
-                )
+                ), sweep)
             elif response.status_code == 409:
                 # Conflict - return with conflict info
                 data = response.json()
@@ -185,23 +193,23 @@ async def sync_to_github(
                     or response.headers.get("X-Conflict-Class")
                     or "UNKNOWN"
                 )
-                return GitSyncResult(
+                return gitignore._with_sweep(GitSyncResult(
                     success=False,
                     message=data.get("detail", "Sync conflict"),
                     conflict_type=conflict_type,
                     conflict_class=conflict_class,
-                )
+                ), sweep)
             else:
                 error_detail = response.json().get("detail", "Sync failed")
-                return GitSyncResult(
+                return gitignore._with_sweep(GitSyncResult(
                     success=False,
                     message=f"Sync failed: {error_detail}"
-                )
+                ), sweep)
     except Exception as e:
-        return GitSyncResult(
+        return gitignore._with_sweep(GitSyncResult(
             success=False,
             message=f"Sync error: {str(e)}"
-        )
+        ), sweep)
 
 
 async def get_git_log(agent_name: str, limit: int = 10) -> Optional[Dict[str, Any]]:

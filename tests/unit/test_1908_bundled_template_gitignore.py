@@ -11,14 +11,20 @@ failed the same four HARD security checks at birth:
 This module does two jobs:
 
 1. **Regenerator** — ``python tests/unit/test_1908_bundled_template_gitignore.py
-   --regenerate`` rewrites every guarded template's `.gitignore` from the
-   canonical ```gitignore``` block in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`.
-   That block is parity-tested against `git_service._GITIGNORE_PATTERNS` by
-   `test_github_init_gitignore.py::test_doc_and_constant_in_sync`, but only in
-   the `canonical ⊆ doc` direction — so the block is a *superset* of the
-   constant (today: two `!` negations). `ALLOWED_NON_CANONICAL` below pins that
-   delta and `test_guarded_gitignore_ships_no_unreviewed_pattern` closes the
-   other direction. Same pattern as
+   --regenerate`` rewrites every guarded template's `.gitignore` as the exact
+   FIXED POINT of `git_service._build_gitignore_merge_command` (#2529): the
+   managed defaults block, then the template's own rules, then the protected
+   floor. Shipping the merge's own output is what keeps the byte-identity
+   property #953 depends on — a template that merely *contained* the canonical
+   patterns would now show `M .gitignore` on its first sync, because the merge
+   would hoist them into regions.
+
+   The patterns come from `_GITIGNORE_PATTERNS`, not from the guide's
+   ```gitignore``` fence, because since #2529 the two are asserted set-EQUAL by
+   `test_github_init_gitignore.py::test_doc_and_constant_in_sync`. That test
+   used to assert only `constant ⊆ doc`, which is precisely how the fence could
+   carry `!.env.example` for months while the constant did not — the gap #2529
+   reports. `ALLOWED_NON_CANONICAL` is consequently EMPTY. Same pattern as
    `tests/lint_sys_modules.py --regenerate-baseline`: the guard and
    the fix live in one file, so "the constant gained an entry" is a one-command
    change no matter how many templates are guarded.
@@ -74,7 +80,19 @@ from services.compatibility.collector import (  # noqa: E402
     _MAX_SKILL_FILES,
 )
 from services.compatibility.static_checks import run_static  # noqa: E402
-from services.git_service import _GITIGNORE_PATTERNS as CANONICAL  # noqa: E402
+# #1028: `services/git_service.py` is a package and deliberately re-exports no
+# private collaborator — a name mirrored on both the package and its owning
+# module gives one constant two homes and a patch can land on the wrong one.
+# These all belong to `gitignore`, so the import names it.
+from services.git_service.gitignore import (  # noqa: E402
+    _GITIGNORE_BLOCK_BEGIN,
+    _GITIGNORE_BLOCK_END,
+    _GITIGNORE_FLOOR_BEGIN,
+    _GITIGNORE_FLOOR_END,
+    _GITIGNORE_MANAGED_LINES,
+    _GITIGNORE_PATTERNS as CANONICAL,
+    _GITIGNORE_PROTECTED,
+)
 
 
 TEMPLATES_DIR = REPO_ROOT / "config" / "agent-templates"
@@ -122,17 +140,16 @@ TEMPLATE_EXTRAS: dict[str, tuple[str, ...]] = {
 # where the sync-time `git rm --cached` sweep would then untrack whatever it
 # newly matched. Each entry must be justified, and
 # `test_allowed_non_canonical_is_not_stale` deletes the pin when the doc drops it.
-ALLOWED_NON_CANONICAL = (
-    # Re-includes the example file that the canonical `.env.*` would otherwise
-    # hide. `.env.example` is meant to be committed (it documents the variables
-    # an operator must supply — F-004/K-001), and K-004 HARD-scans it for real
-    # secret values, so re-including it is covered.
-    "!.env.example",
-    # Belt-and-braces: canonical `.mcp.json` is an exact-name pattern and does
-    # not match `.mcp.json.template`, so this negation is a no-op today. Kept
-    # because it is what the guide tells template authors to write.
-    "!.mcp.json.template",
-)
+#
+# #2529 CLOSED THIS SEAM. The two entries that lived here — `!.env.example` and
+# `!.mcp.json.template` — were exactly the doc-carries-it/constant-does-not gap
+# the sibling parity test could not see, and losing `.env.example` on the first
+# Push is the bug #2529 reports. Both are now canonical (and both live in the
+# protected floor), so the reviewed delta between the guide's fence and
+# `_GITIGNORE_PATTERNS` is EMPTY. `test_allowed_non_canonical_is_not_stale`
+# passes vacuously on an empty tuple, which is the point: the mechanism stays,
+# with nothing to exempt.
+ALLOWED_NON_CANONICAL: tuple[str, ...] = ()
 
 # HARD static checks that these templates still fail after this change, with the
 # reason. Check-level, not template-level: it cannot hide a whole template, and
@@ -177,17 +194,24 @@ _HEADER = """\
 # Trinity bundled-template .gitignore -- GENERATED, do not hand-edit.
 #
 # Mirrors `_GITIGNORE_PATTERNS` in src/backend/services/git_service.py, the
-# single source of truth the platform re-appends to every agent's .gitignore on
-# each git sync. Shipping it in the template moves that protection from *first
-# sync* to *first boot* -- the window a freshly created agent's compatibility
-# report observes (#1908).
+# single source of truth the platform reconciles into every agent's .gitignore
+# on each git sync. Shipping it in the template moves that protection from
+# *first sync* to *first boot* -- the window a freshly created agent's
+# compatibility report observes (#1908).
+#
+# This comment sits in the USER region, between the two MANAGED regions (#2529):
+# the `>>> Trinity default ignore rules >>>` block above, which every sync
+# rewrites and which your own rules below it beat, and the
+# `>>> Trinity protected rules >>>` floor at the end, which they do not
+# (credentials and platform-authored `.trinity/` paths). Add your own rules
+# here. These bytes are exactly what a sync computes, so a fresh agent shows no
+# `.gitignore` drift against origin.
 #
 # Regenerate every bundled template with:
 #   python tests/unit/test_1908_bundled_template_gitignore.py --regenerate
 #
 # Do NOT add a bare `.claude/` line: Claude Code commands/skills/agents must
 # stay committed (compatibility check G-001 is HARD and fails on it).
-
 """
 
 REGEN_CMD = "python tests/unit/test_1908_bundled_template_gitignore.py --regenerate"
@@ -198,32 +222,72 @@ REGEN_CMD = "python tests/unit/test_1908_bundled_template_gitignore.py --regener
 # ---------------------------------------------------------------------------
 
 def canonical_block() -> str:
-    """The ```gitignore``` fence from the agent guide (no trailing newline)."""
+    """The ```gitignore``` fence from the agent guide (no trailing newline).
+
+    No longer the source of the templates' patterns (#2529 — see `render`), but
+    kept as the parser `test_guide_fence_order_matches_the_constant` reads: the
+    fence and the constant must agree on ORDER, not merely as sets, so the
+    guide a template author copies produces the same file the platform writes.
+    """
     text = GUIDE.read_text(encoding="utf-8")
     m = re.search(r"```gitignore\n(.*?)\n```", text, re.S)
     assert m, f"no ```gitignore``` block found in {GUIDE}"
     return m.group(1)
 
 
+def _managed_shape(raw: str) -> str:
+    """The FIXED POINT of `git_service._build_gitignore_merge_command`, in Python.
+
+    #2529 made the merge a normalize-and-rebuild into two managed regions, so a
+    template that merely *contains* the canonical patterns is no longer
+    drift-free: the merge would hoist them into the defaults block, sink the
+    protected ones into the floor, and leave the template's own comments behind
+    as the user region — `M .gitignore` (39+/37-) on every template-derived
+    agent, breaking the byte-identity property #953 depends on.
+
+    Shipping the merge's own output instead makes the drift structurally zero.
+    Every string here is IMPORTED from `git_service`, never retyped, so the
+    regenerator cannot drift from the builder.
+    """
+    managed = set(_GITIGNORE_MANAGED_LINES)
+    top = [p for p in CANONICAL if p not in _GITIGNORE_PROTECTED]
+    floor = [p for p in CANONICAL if p in _GITIGNORE_PROTECTED]
+    user = [line for line in raw.splitlines() if line not in managed]
+    lines = [
+        _GITIGNORE_BLOCK_BEGIN, *top, _GITIGNORE_BLOCK_END,
+        *user,
+        _GITIGNORE_FLOOR_BEGIN, *floor, _GITIGNORE_FLOOR_END,
+    ]
+    return "".join(f"{line}\n" for line in lines)
+
+
 def render(name: str, block: str | None = None) -> str:
-    """The exact bytes template ``name``'s `.gitignore` must contain."""
-    body = _HEADER + (canonical_block() if block is None else block) + "\n"
+    """The exact bytes template ``name``'s `.gitignore` must contain.
+
+    The patterns come from ``_managed_shape``, i.e. from the CONSTANT, not from
+    the guide's fence: since #2529 the two are asserted set-EQUAL by
+    ``test_github_init_gitignore.py::test_doc_and_constant_in_sync`` (it used to
+    assert only ``constant ⊆ doc``, which is exactly how the fence carried
+    ``!.env.example`` for months while the constant did not). ``block`` is
+    accepted for call-compatibility and, when given, is folded into the user
+    region — the regenerator passes none.
+    """
+    body = _HEADER + ("" if block is None else block + "\n")
     extras = TEMPLATE_EXTRAS.get(name)
     if extras:
         body += (
             "\n# Template-specific (preserved from this template's own .gitignore)\n"
             + "".join(f"{line}\n" for line in extras)
         )
-    return body
+    return _managed_shape(body)
 
 
 def regenerate() -> list[Path]:
     """Rewrite every guarded template's `.gitignore`. Idempotent."""
-    block = canonical_block()
     written = []
     for name in GUARDED_TEMPLATES:
         path = TEMPLATES_DIR / name / ".gitignore"
-        path.write_text(render(name, block), encoding="utf-8")
+        path.write_text(render(name), encoding="utf-8")
         written.append(path)
     return written
 
@@ -477,12 +541,12 @@ def _shipped_patterns(name: str) -> list[str]:
 
 @pytest.mark.parametrize("name", GUARDED_TEMPLATES)
 def test_guarded_gitignore_ships_no_unreviewed_pattern(name):
-    """The other half of the ratchet, and the one the sibling doc-parity test
-    leaves open: nothing may reach a bundled template that is not a canonical
-    pattern, a pinned `ALLOWED_NON_CANONICAL` entry, or that template's own
-    `TEMPLATE_EXTRAS`. Without this, `render()` copies the guide's fence
-    verbatim, so an unrelated doc edit silently changes what every new agent
-    excludes from its own repository."""
+    """The other half of the ratchet: nothing may reach a bundled template that
+    is not a canonical pattern, a pinned `ALLOWED_NON_CANONICAL` entry, or that
+    template's own `TEMPLATE_EXTRAS`. It stays load-bearing after #2529 moved
+    `render()` off the guide's fence — a hand-edit, or a `TEMPLATE_EXTRAS` entry
+    added without review, still changes what every new agent excludes from its
+    own repository."""
     allowed = set(CANONICAL) | set(ALLOWED_NON_CANONICAL) | set(TEMPLATE_EXTRAS.get(name, ()))
     unreviewed = sorted(set(_shipped_patterns(name)) - allowed)
     assert not unreviewed, (
@@ -503,6 +567,26 @@ def test_allowed_non_canonical_is_not_stale():
     stale = sorted(p for p in ALLOWED_NON_CANONICAL if p not in shipped)
     assert not stale, (
         f"ALLOWED_NON_CANONICAL entries no longer shipped by the guide: {stale} — delete them"
+    )
+
+
+def test_guide_fence_order_matches_the_constant():
+    """#2529: the guide's fence and `_GITIGNORE_PATTERNS` must agree on ORDER.
+
+    The sibling `test_doc_and_constant_in_sync` asserts set equality; this pins
+    the sequence. A template author copies the fence verbatim, and after #2529
+    the merge reorders whatever it finds into two regions — so a fence in a
+    different order would hand every author a file the platform immediately
+    rewrites, reintroducing the `M .gitignore` drift #953 closed.
+    """
+    fence = [
+        line.strip()
+        for line in canonical_block().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert fence == list(CANONICAL), (
+        "the agent guide's ```gitignore``` fence no longer matches "
+        "_GITIGNORE_PATTERNS in order"
     )
 
 

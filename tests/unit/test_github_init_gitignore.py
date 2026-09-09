@@ -154,13 +154,23 @@ def test_idempotent_double_run(tmp_path):
 
 
 def test_doc_and_constant_in_sync():
-    """The `.gitignore` code block in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
-    must contain every entry in `_GITIGNORE_PATTERNS`.
+    """The `.gitignore` fence in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` and
+    `_GITIGNORE_PATTERNS` must be the SAME SET — both directions.
 
-    The Python constant is the source of truth. The doc is hand-written and
-    drifts; this test catches drift in CI before the doc gets out of date
-    again. A new entry in `_GITIGNORE_PATTERNS` requires a matching update
-    to the doc block (see `### 5. .gitignore (Required)` section).
+    #2529 changed this from `constant ⊆ doc`, and the change is the point. The
+    old one-way assertion is exactly why the fence could carry `!.env.example`
+    and `!.mcp.json.template` for months while the constant did not: the guide
+    told template authors to write a negation the platform then appended a
+    broader rule below, so an agent shipping `.env.example` — which compat check
+    F-004 REQUIRES — lost it on its first Push, and CI could not see the
+    direction that mattered. The issue names it outright: "CI cannot catch this
+    direction."
+
+    Both surfaces are hand-maintained and both are read by real consumers (the
+    constant by the merge builder, the fence by every template author and by the
+    #1908 fence-order guard), so neither may be a superset of the other. Order
+    is pinned separately by
+    `test_1908_bundled_template_gitignore.py::test_guide_fence_order_matches_the_constant`.
     """
     import re
     gs = _load_git_service()
@@ -174,13 +184,27 @@ def test_doc_and_constant_in_sync():
         f"no ```gitignore``` code block found in {doc_path} — did the "
         "section get renamed or the fence language change?"
     )
-    doc_lines = set(match.group(1).splitlines())
+    # Comments and blank lines are prose, not patterns.
+    doc_lines = {
+        line.strip()
+        for line in match.group(1).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    constant = set(gs_gitignore._GITIGNORE_PATTERNS)
 
-    missing = [p for p in gs_gitignore._GITIGNORE_PATTERNS if p not in doc_lines]
+    missing = sorted(constant - doc_lines)
     assert not missing, (
         f"_GITIGNORE_PATTERNS entries missing from doc block: {missing}. "
         f"Update the gitignore code block in {doc_path.name} to match "
         "git_service.py — they are intentionally kept in sync."
+    )
+    extra = sorted(doc_lines - constant)
+    assert not extra, (
+        f"the {doc_path.name} gitignore fence carries {len(extra)} pattern(s) "
+        f"the platform does not implement: {extra}. This is the #2529 "
+        "direction: a fence-only negation is advice the merge does not honour. "
+        "Add them to _GITIGNORE_PATTERNS (and to _GITIGNORE_PROTECTED if they "
+        "must not be overridable) or delete them from the guide."
     )
 
 

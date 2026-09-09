@@ -35,6 +35,7 @@ Target: src/backend/services/agent_service/crud.py,
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import sys
 import tempfile
@@ -86,11 +87,19 @@ class _FakeRepoInfo:
 
 
 class _GitSyncResult:
-    """Attr-compatible stand-in for database.GitSyncResult."""
+    """Attr-compatible stand-in for database.GitSyncResult.
+
+    #2529: the kwarg list is CLOSED and there is no `**kwargs`, so a new field
+    on the real model raises `TypeError` right at the return this file asserts
+    on. `model_copy` is here for the same reason — `git_service._with_sweep`
+    attaches the sweep through it, and a fake of a Pydantic model that cannot be
+    copied is not a fake of a Pydantic model.
+    """
 
     def __init__(self, success, message="", commit_sha=None, files_changed=0,
                  branch=None, sync_time=None, conflict_type=None,
-                 conflict_class=None):
+                 conflict_class=None, removed_paths=None, unignored_paths=None,
+                 shadowed_negations=None):
         self.success = success
         self.message = message
         self.commit_sha = commit_sha
@@ -98,6 +107,15 @@ class _GitSyncResult:
         self.branch = branch
         self.conflict_type = conflict_type
         self.conflict_class = conflict_class
+        self.removed_paths = removed_paths or []
+        self.unignored_paths = unignored_paths or []
+        self.shadowed_negations = shadowed_negations or []
+
+    def model_copy(self, update=None):
+        clone = copy.copy(self)
+        for key, value in (update or {}).items():
+            setattr(clone, key, value)
+        return clone
 
 
 def _purge_real_services(monkeypatch, mocks):

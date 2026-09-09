@@ -289,9 +289,19 @@ class TestMergeBehaviour:
 # ---------------------------------------------------------------------------
 class TestIdempotence:
     def test_exact_seed_shows_no_drift_against_origin(self, gs, tmp_path):
-        """AC#4 / #953: a template already shipping EXACTLY the canonical list
-        shows no `M .gitignore` after the merge (the exact regression #953
-        removed the shell-level append for)."""
+        """AC#4 / #953: a template already shipping EXACTLY what the merge
+        computes shows no `M .gitignore` after the merge (the exact regression
+        #953 removed the shell-level append for).
+
+        AMENDED by #2529. The seed used to be a flat `"\n".join(_GITIGNORE_
+        PATTERNS)`; the merge is now a normalize-and-rebuild into two managed
+        regions, so a flat list is no longer its own fixed point and that seed
+        legitimately drifts. The #953 contract is unchanged in substance and
+        sharper in wording: *already in BLOCK SHAPE ⇒ no drift*. The 14 bundled
+        templates are regenerated into exactly this shape
+        (`test_1908_bundled_template_gitignore.py::_managed_shape`), which is
+        what keeps the property true where #953 actually bites.
+        """
         origin = tmp_path / "origin.git"
         work = tmp_path / "work"
         _git(tmp_path, "init", "-q", "--bare", str(origin))
@@ -300,7 +310,13 @@ class TestIdempotence:
         _git(work, "config", "user.name", "T")
         _git(work, "config", "commit.gpgsign", "false")
 
-        (work / ".gitignore").write_text("\n".join(gs._GITIGNORE_PATTERNS) + "\n")
+        top = [p for p in gs._GITIGNORE_PATTERNS if p not in gs._GITIGNORE_PROTECTED]
+        floor = [p for p in gs._GITIGNORE_PATTERNS if p in gs._GITIGNORE_PROTECTED]
+        seed = [
+            gs._GITIGNORE_BLOCK_BEGIN, *top, gs._GITIGNORE_BLOCK_END,
+            gs._GITIGNORE_FLOOR_BEGIN, *floor, gs._GITIGNORE_FLOOR_END,
+        ]
+        (work / ".gitignore").write_text("".join(f"{line}\n" for line in seed))
         _git(work, "add", ".gitignore")
         _git(work, "commit", "-q", "-m", "seed canonical .gitignore")
         _git(work, "push", "-q", "origin", "HEAD")

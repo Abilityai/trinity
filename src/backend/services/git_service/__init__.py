@@ -30,6 +30,16 @@ from .conflicts import (  # noqa: F401
 # split — so the collaborator-shaped ones are deliberately not mirrored.
 from .gitignore import (  # noqa: F401
     _GITIGNORE_PATTERNS,
+    # #2529 split the constant into a top region and a protected floor written
+    # between four markers. Tests read all six as DATA to reconstruct the block
+    # the merge is expected to produce, so they travel together — a partial
+    # re-export just moves the AttributeError to the next line. Data, not
+    # collaborators: there is nothing here to patch.
+    _GITIGNORE_PROTECTED,
+    _GITIGNORE_BLOCK_BEGIN,
+    _GITIGNORE_BLOCK_END,
+    _GITIGNORE_FLOOR_BEGIN,
+    _GITIGNORE_FLOOR_END,
     _TRINITY_AUTHORED_PATHS,
     _detect_git_dir,
     _git_auto_sync_baked,
