@@ -3,6 +3,24 @@ name: Deploy to Dev
 on:
   push:
     branches: [dev]
+  # Nightly cache-busting rebuild. The per-merge path builds with `--pull`
+  # (fresh base images, cached layers); this cron is the periodic `--no-cache`
+  # floor, so a stale intermediate layer can live at most 24h.
+  #
+  # `schedule` runs the workflow file from the DEFAULT branch, so this cron
+  # only starts firing once this file reaches `main` at the next release cut.
+  # That is exactly why it is a SUPPLEMENT and never a replacement for the
+  # push trigger: dropping `push` here would stop dev deploys outright until
+  # the next release, which is the silent-no-deploy class #2204 already cost
+  # this repo four days and thirty merges.
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      no_cache:
+        description: 'Full --no-cache rebuild (slower; use when a cached layer is suspect)'
+        type: boolean
+        default: false
 
 # CSO L5: least-privilege token — deploy runs over SSH/Tailscale secrets, not GITHUB_TOKEN.
 permissions:
@@ -21,6 +39,13 @@ permissions:
 # GitHub supersedes the *pending* run rather than the running one, so this
 # converges on "current deploy finishes, then the newest commit deploys"
 # without ever interrupting a deploy in flight.
+#
+# That supersede only collapses runs that OVERLAP, which in practice they did
+# not: measured 2026-09-07, 18 merges to dev produced 18 deploy runs (one
+# cancellation across 25 sampled runs). Merges arrive minutes apart and each
+# deploy is short enough to finish first, so the fleet paid a full image build
+# per merge. The settle window in the first step below manufactures the
+# overlap this block is written to exploit.
 concurrency:
   group: deploy-dev
   cancel-in-progress: false
@@ -28,9 +53,40 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Settle window (up to 5m) + the 25m SSH command_timeout below.
+    timeout-minutes: 40
 
     steps:
+      - name: Settle window (batch a burst of merges into one deploy)
+        # The dev VM is the scarcest resource in the merge path: one host, a
+        # full image build per run, and `concurrency` serialises them. This
+        # sleep parks the run so that merges landing behind it queue as a
+        # single pending run; when it wakes it deploys origin/dev HEAD, which
+        # already carries every commit from the window. The superseded pending
+        # run then wakes, finds its target SHA already deployed, and exits at
+        # the marker check below without touching the VM.
+        #
+        # Cost is runner minutes (free on a public repo) and up to
+        # DEPLOY_SETTLE_SECONDS of extra deploy latency -- deliberately paid on
+        # the post-merge path, which blocks nobody, rather than on any gate a
+        # PR waits for.
+        #
+        # What it buys is bounded by the merge cadence: only merges that land
+        # INSIDE the window batch. At the 2026-09-07 spacing (typically 5-15
+        # min apart, with a few tight clusters) 300s collapses the clusters
+        # and leaves the rest 1:1 -- the larger saving on that day comes from
+        # `--pull` replacing `--no-cache` below. Raise the window if the
+        # cadence tightens; keep it under ~10 min, because it is inside the
+        # job's timeout-minutes alongside the 25m SSH command_timeout.
+        #
+        # Not applied to workflow_dispatch (a deploy-now button must deploy
+        # now) or to the nightly cron (there is nothing to batch with).
+        # Tunable without editing this file via the repo variable, same
+        # precedent as DEPLOY_ALLOW_OSS_ONLY below; unset renders empty, which
+        # is falsy, so the `||` supplies the default.
+        if: github.event_name == 'push'
+        run: sleep "${{ vars.DEPLOY_SETTLE_SECONDS || 300 }}"
+
       - name: Connect to Tailscale
         # SHA-pinned to mitigate supply-chain hijack of the v2 floating tag.
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
@@ -40,6 +96,19 @@ jobs:
       - name: Deploy
         # SHA-pinned to mitigate supply-chain hijack of the v1 floating tag.
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        # Every value the remote script needs from the workflow context is
+        # resolved HERE, as step env, and handed over via `envs:` below. The
+        # script itself must contain no workflow expression: the whole
+        # `script:` scalar is evaluated as ONE expression when it carries any,
+        # and GitHub caps an expression at 21,000 chars -- past that the file
+        # does not parse and the run has zero jobs (#2625, trinity#2626).
+        # `tests/unit/test_2625_workflow_expression_cap.py` pins this.
+        env:
+          ALWAYS_DEPLOY: ${{ github.event_name != 'push' && '1' || '0' }}
+          NO_CACHE: ${{ (github.event_name == 'schedule' || inputs.no_cache) && '1' || '0' }}
+          RUN_ID: ${{ github.run_id }}
+          ENT_PAT: ${{ secrets.ENT_SUBMODULE_PAT }}
+          ALLOW_OSS_ONLY: ${{ vars.DEPLOY_ALLOW_OSS_ONLY }}
         with:
           # Host + username come from repo secrets so this public workflow file
           # doesn't disclose the Tailscale topology of the dev environment.
@@ -47,9 +116,38 @@ jobs:
           username: ${{ secrets.DEV_USER }}
           key: ${{ secrets.DEV_SSH_KEY }}
           command_timeout: 25m
+          envs: ALWAYS_DEPLOY,NO_CACHE,RUN_ID,ENT_PAT,ALLOW_OSS_ONLY
           script: |
             set -e
             cd ~/trinity
+
+            # Build mode, resolved on the runner (step `env:`) and passed in
+            # through ssh-action `envs:` -- $GITHUB_* env vars live on the
+            # runner, not on the VM, and the script must not interpolate them
+            # itself (see the note above the step).
+            #
+            #  * per-merge          -> --pull: cached layers, but base images
+            #    re-resolved every time. `--pull` is the half that must NOT be
+            #    dropped: `python:3.13-slim` is a floating tag that has already
+            #    migrated release under us once (bookworm->trixie, #1823). The
+            #    layer cache is the half that was costing ~8min a merge.
+            #  * nightly              -> --no-cache
+            #  * dispatch             -> --pull, or --no-cache if the box is ticked
+            #
+            # Two separate switches, because they answer different questions:
+            # ALWAYS_DEPLOY is "ignore the already-deployed guard" and is true
+            # for every non-push trigger -- a deploy-now button that exits
+            # early on an unchanged dev is not a deploy-now button, and the
+            # nightly must re-run every assertion whether or not dev moved.
+            # NO_CACHE is only about the build.
+            ALWAYS_DEPLOY="${ALWAYS_DEPLOY:-0}"
+            NO_CACHE="${NO_CACHE:-0}"
+            if [ "${NO_CACHE}" = "1" ]; then
+              BUILD_CACHE_FLAG="--no-cache"
+            else
+              BUILD_CACHE_FLAG="--pull"
+            fi
+            echo "Build mode: ${BUILD_CACHE_FLAG} (always_deploy=${ALWAYS_DEPLOY})"
 
             echo "=== Pull ==="
             # #2578 — `--no-recurse-submodules` on every git command here: git's
@@ -62,6 +160,25 @@ jobs:
             # sync path. Reasoning: trinity#2578, docs/ENTERPRISE.md. Keep this
             # script short: it embeds expressions, so GitHub caps it (trinity#2625).
             git fetch --no-recurse-submodules origin dev
+
+            # Skip a rebuild that would change nothing. This is where the runs
+            # superseded by the settle window cheaply stop.
+            #
+            # The marker is written ONLY after a fully successful deploy (see
+            # the end of this script), so a failed run leaves it stale and the
+            # next run rebuilds rather than skipping -- the guard can suppress
+            # a redundant deploy, never a needed one.
+            #
+            # It lives OUTSIDE the checkout deliberately: an untracked file in
+            # ~/trinity would sit in the path of the stash/pull dance below and
+            # show up in every `git status` on the box.
+            TARGET_SHA=$(git rev-parse origin/dev)
+            LAST_SHA=$(cat ~/.trinity-last-deployed-sha 2>/dev/null || echo "")
+            if [ "${ALWAYS_DEPLOY}" != "1" ] && [ "$TARGET_SHA" = "$LAST_SHA" ]; then
+              echo "dev is already deployed at ${TARGET_SHA} -- nothing to do."
+              exit 0
+            fi
+
             git checkout --no-recurse-submodules dev
             # The dev VM has a persistent checkout that may carry hand-applied
             # fixes (e.g. docker-compose.prod.yml tweaks). `git pull` aborts on
@@ -73,11 +190,10 @@ jobs:
             # Long-term fix is to move the build to CI + push images to a
             # registry so the dev VM is stateless (see #942). Until then, this
             # keeps deploys unblocked while preserving the audit trail.
-            # Workflow-syntax interpolation: GitHub expands `${{ github.run_id }}`
-            # at YAML render time so the literal run id is baked into the script
-            # before it ships over SSH. Using `$GITHUB_RUN_ID` here would fail
-            # silently — that env var lives on the GH Actions runner, not on
-            # the dev VM where this script actually executes.
+            # RUN_ID arrives via ssh-action `envs:` (resolved from github.run_id
+            # in the step env). Using `$GITHUB_RUN_ID` here would fail silently
+            # -- that env var lives on the GH Actions runner, not on the dev VM
+            # where this script actually executes.
             #
             # NO `-u`: the dev VM has Docker-volume directories (trinity-data/,
             # archives/, avatars/) owned by root inside containers. The trinity
@@ -87,7 +203,7 @@ jobs:
             # the failure as "no changes" — and the subsequent pull aborts on
             # the still-dirty tracked file. Tracked-only stash is what actually
             # blocks the pull; untracked Docker-owned files don't block git.
-            STASH_MSG="auto-stash-deploy-${{ github.run_id }}"
+            STASH_MSG="auto-stash-deploy-${RUN_ID:-unknown}"
             git stash push -m "${STASH_MSG}" || echo "No local changes to stash"
             git pull --ff-only --no-recurse-submodules origin dev
             echo "Version: $(git log -1 --oneline)"
@@ -123,7 +239,7 @@ jobs:
             #
             # Absent the secret this is byte-identical to the previous behaviour,
             # so the VM-side fix documented in docs/ENTERPRISE.md remains valid.
-            ENT_PAT="${{ secrets.ENT_SUBMODULE_PAT }}"
+            ENT_PAT="${ENT_PAT:-}"   # from the step env via `envs:`; empty when the secret is unset
             ENT_LOG=$(mktemp)
             ENT_STALE=0
             if [ -n "$ENT_PAT" ]; then
@@ -237,7 +353,7 @@ jobs:
               GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP}" \
               GIT_BRANCH="${GIT_BRANCH}" \
               BUILD_DATE="${BUILD_DATE}" \
-              docker compose ${COMPOSE_FILES} build --no-cache backend frontend mcp-server scheduler
+              docker compose ${COMPOSE_FILES} build ${BUILD_CACHE_FLAG} backend frontend mcp-server scheduler
 
             echo "=== Reap stale compose backup containers (#2204) ==="
             # Compose renames the outgoing container to <12-hex>_<name> before
@@ -380,7 +496,7 @@ jobs:
               # Escape hatch without editing this file: set the repo variable
               # DEPLOY_ALLOW_OSS_ONLY=true to demote this back to a warning (for a
               # VM that legitimately has no enterprise access).
-              if [ "${{ vars.DEPLOY_ALLOW_OSS_ONLY }}" = "true" ]; then
+              if [ "${ALLOW_OSS_ONLY:-}" = "true" ]; then
                 echo "::warning::Deployed in OSS-only mode — enterprise submodule not mounted (allowed by DEPLOY_ALLOW_OSS_ONLY)"
               else
                 echo "::error::Deployed in OSS-only mode — the enterprise submodule is NOT mounted, so this instance runs unentitled: enterprise_features is empty and every requires_entitlement route 403s. See the ENTERPRISE: lines above for the classified cause, and trinity#2246."
@@ -420,6 +536,16 @@ jobs:
             if [ "$ENT_STALE" = "1" ]; then
               exit 1
             fi
+
+            echo "=== Record deployed SHA ==="
+            # Written only here -- AFTER the enterprise-registration and
+            # agent-seeding assertions above AND the #2578 stale-enterprise
+            # exit immediately above, each of which ends the run under the
+            # `set -e` at the top. A deploy that ends red therefore never
+            # advances the marker: a stale enterprise tree on an otherwise
+            # healthy instance is exactly the state the next push must retry.
+            git rev-parse HEAD > ~/.trinity-last-deployed-sha
+            echo "Recorded $(cat ~/.trinity-last-deployed-sha)"
 
             echo "=== Done ==="
 
