@@ -124,7 +124,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 |---|---|---|
 | BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
-| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU |
+| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips |
@@ -162,10 +162,17 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 ### BaseSelect
 
-Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
+Two variants, both native `<select>` under the hood — keyboard operation, the `:focus-visible` ring and the platform picker on touch come free, and a trigger + popover inherits none of them.
 
-- **Do:** reuse the shared select for every dropdown.
-- **Don't:** ship a per-view custom dropdown when a select does the job.
+**`variant="field"` (default).** Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
+
+**`variant="ghost"` (#2662).** The same control wearing chat chrome instead of form chrome: no border, no fill, **content-width** (no `w-full`), `h-11` so it is the same 44px box as the icon buttons it sits beside, 13.5 ink like every sibling recipe, 12px chevron at right 8px with a 28px gutter. Hover tints the **ground only** (`gray-100` / dark `gray-750`, the chrome shade — a `gray-800` tint is invisible on the `gray-800` composer shell). No resting border to recolour, so the valid state is focus-only. Live at `PortalConversation.vue`'s composer control row.
+
+Both recipes live in `base/fieldClasses.js` (`FIELD_CLASS` / `FIELD_GHOST_CLASS`), and `BaseSelect.vue` resolves every variant-dependent class in one `recipe` computed so a third variant cannot be half-added.
+
+- **Do:** reuse the shared select for every dropdown; pick `ghost` when the select is a preference beside content, `field` when it is a field in a form.
+- **Don't:** ship a per-view custom dropdown when a select does the job — including a "just borderless" one in chat chrome, which is what `ghost` exists to absorb.
+- **Note:** `ghost` here is gray-inked chrome; `BaseButton`'s `ghost` is accent-inked. Same word, two recipes — see the open naming question in #2662.
 
 ### BaseToggle
 

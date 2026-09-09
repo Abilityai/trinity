@@ -22,6 +22,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 - Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
 - BaseButton: 4 variants (primary/secondary/danger/ghost) × 2 sizes (md 13.5 pad 7×14 · sm 12.5 pad 4×10), radius 6px. Disabled = opacity .45. In-flight = 16px spinner + progressive label. Focus ring on all variants.
 - BaseInput/BaseSelect: field bg, border-strong, radius 6px, pad 8×11; focus = accent border + 3px ring; errors name the problem, the fix, and an example — never a bare red border.
+- BaseSelect: 2 variants — `field` (default, the recipe above) and `ghost` (#2662: borderless, transparent, content-width, 44px tall, hover tints the ground only). Use `ghost` where a select is a lightweight preference beside content rather than a field in a form; a form keeps `field`. Reach for the variant, never a hand-rolled select in chat chrome.
 - BaseTextarea: min-height 84px, `resize: vertical` only, mono variant for prompts/config, same focus/error as inputs.
 - BaseBadge: pill, 11.5/550; light token-100 bg + token-700 text; dark token-500/16% + token-300; one fact per badge.
 - BaseCard: surface bg, 1px border, radius 8px, padding 16, shadow-sm — the only surface recipe.
