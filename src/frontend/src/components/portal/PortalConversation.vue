@@ -522,8 +522,13 @@
                row inside it, the model picker right-aligned beside Send.
 
                The border, fill and focus ring move OFF the textarea and onto
-               this shell (`focus-within:`), which is what makes the controls
-               read as being inside the field rather than parked around it. The
+               this shell, which is what makes the controls read as being inside
+               the field rather than parked around it. The ring is scoped to the
+               FIELD — `has-[textarea:focus]`, never `focus-within` — because
+               `focus-within` lit the whole shell when an icon button was merely
+               tabbed onto, and drew a second ring concentric with the model
+               picker's own. `portalComposerAlignment.spec.js` asserts the
+               absence of `focus-within:` here, so this is not a preference. The
                textarea keeps `block w-full` (#2259 — an inline-block textarea
                reserves a descender line box its wrapper then inherits) and goes
                transparent and borderless; it must never regain `rounded-2xl`
