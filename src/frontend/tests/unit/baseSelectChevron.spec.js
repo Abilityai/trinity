@@ -95,10 +95,13 @@ describe('#2662 BaseSelect open-state chevron', () => {
   })
 
   it('keeps the chevron as the select\'s immediate next sibling', () => {
-    // The rule is a sibling combinator, so the chevron must FOLLOW the select
-    // with no element between them. Wrapping the svg — or moving it above the
-    // select — leaves the class in place and silently kills the flip, which no
-    // class-string assertion elsewhere would notice.
+    // `~` is the GENERAL sibling combinator, so the CSS only needs the svg to
+    // FOLLOW the select — an element between the two still matches (verified in
+    // Chrome 151: `select ~ svg` yes, `select + svg` no). This asserts the
+    // stricter adjacency on purpose, because it is the cheap shape to keep and
+    // it also catches the two edits that DO kill the flip silently: wrapping the
+    // svg, and moving it above the select. Neither leaves a trace any other
+    // class-string assertion would notice — the class stays exactly where it is.
     expect(CODE).toMatch(/<\/select>\s*<svg/)
   })
 
