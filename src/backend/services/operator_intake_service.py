@@ -116,8 +116,8 @@ def get_or_create_installation_id() -> str:
     `get_installation_id()` instead, so that *looking* never mints identity
     (ent#545).
     """
-    existing = db.get_setting_value(_INSTALLATION_ID_KEY, "")
-    if existing:
+    existing = get_installation_id()
+    if existing is not None:
         return existing
     # A write-once CLAIM, not an upsert (ent#545, closing the race #1987
     # recorded as pre-existing): under `--workers 2` two first emits used to
@@ -127,8 +127,22 @@ def get_or_create_installation_id() -> str:
     # winner's id back instead of returning its own candidate — the shape
     # `insert_setting_if_absent` was built for (#2380) and
     # `telemetry_sharing_service._claim` already uses for the share id.
-    db.insert_setting_if_absent(_INSTALLATION_ID_KEY, str(uuid.uuid4()))
-    return db.get_setting_value(_INSTALLATION_ID_KEY, "") or ""
+    new_id = str(uuid.uuid4())
+    db.insert_setting_if_absent(_INSTALLATION_ID_KEY, new_id)
+    stored = get_installation_id()
+    if stored is not None:
+        return stored
+    # The row exists but holds nothing usable — an empty string (reachable
+    # through the generic `PUT /api/settings/installation_id`, a partial
+    # restore, a manual edit), whitespace, or a non-string. The claim cannot
+    # overwrite an existing row, so this is the one place the upsert is right:
+    # self-heal it, exactly as the pre-ent#545 mint did for a blank row, and
+    # for exactly the values the read twin refuses — the two accessors agree on
+    # what "minted" means. (Two workers healing the same corrupt row at once is
+    # last-write-wins, as it always was for that row; a healthy row never
+    # reaches this branch.)
+    db.set_setting(_INSTALLATION_ID_KEY, new_id)
+    return new_id
 
 
 def get_installation_id() -> Optional[str]:
@@ -142,10 +156,12 @@ def get_installation_id() -> Optional[str]:
     what created the durable identity row.
 
     A blank or non-string stored value reads as ``None`` — "not minted" is the
-    only honest rendering of an id that cannot be shown. A settings read that
-    raises is NOT swallowed to ``None``: ``None`` means "not minted" to every
-    caller, and reporting a DB fault as "not minted" would be a lie; the caller
-    decides what an unreadable store means for its surface.
+    only honest rendering of an id that cannot be shown, and it is the same
+    judgement the writers' accessor applies before it heals such a row. A
+    settings read that raises is NOT swallowed to ``None``: ``None`` means
+    "not minted" to every caller, and reporting a DB fault as "not minted"
+    would be a lie; the caller decides what an unreadable store means for its
+    surface.
     """
     stored = db.get_setting_value(_INSTALLATION_ID_KEY, None)
     if not isinstance(stored, str) or not stored.strip():

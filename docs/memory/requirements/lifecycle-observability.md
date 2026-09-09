@@ -290,7 +290,10 @@ anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
   read-shaped path** (a GET, a status readback) uses the non-minting twin
   `get_installation_id()` and reports `None` honestly when nothing has minted
   it yet (ent#545), because a `get_or_create_*` on a read path is a durable
-  write with a race (learnings 2026-08-05). The mint itself is a **write-once
+  write with a race (learnings 2026-08-05). The last such caller, the
+  enterprise activation-funnel read, adopts the twin in trinity-enterprise#570;
+  a public tree ahead of that submodule pointer still mints on the tab's first
+  open. The mint itself is a **write-once
   claim** (`insert_setting_if_absent`, the #2380 primitive), so two workers
   that SELECT-miss together land ONE id and the loser reads the winner's back —
   the race #1987 recorded as pre-existing in the accessor is closed (ent#545).

@@ -70,6 +70,10 @@ describe('ActivationFunnelPanel wiring (source-structure guard)', () => {
   })
 
   it('passes the wire value through untouched — null stays null, absent stays absent', () => {
+    // Positive anchor first: a negative-only guard passes vacuously on an
+    // absent or renamed file. The exact assignment is what the negatives
+    // below then constrain.
+    expect(panel).toMatch(/installationId\.value = r\.data\?\.installation_id\s*$/m)
     expect(panel).not.toMatch(/installation_id\s*(\|\||\?\?)\s*(''|null|"")/)
     expect(panel).not.toMatch(/Install \{\{ installationId \}\}/)
   })
