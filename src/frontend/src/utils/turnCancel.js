@@ -51,13 +51,56 @@ export function isNoopCancel(status) {
  * booleans — a menu open, a modal mounted, a picker showing.
  */
 export function shouldCancelOnEscape(event, { inFlight, cancelling, overlays = [] } = {}) {
-  if (!event || event.key !== 'Escape') return false
-  // A composed IME session uses Escape to abandon a candidate; taking it here
-  // would cancel the turn instead of the character.
-  if (event.isComposing) return false
-  if (event.defaultPrevented) return false
+  if (!ownsEscape(event)) return false
   if (!inFlight || cancelling) return false
   return !overlays.some(Boolean)
+}
+
+/**
+ * The three preconditions every Escape owner on these surfaces shares.
+ *
+ * Extracted in #2598 rather than left inline, because the bug was precisely
+ * that a SECOND Escape owner appeared and re-decided them — badly. `ent#534`
+ * gave the Workspace voice call the first branch of its handler, above
+ * `shouldCancelOnEscape` and reading none of this, so an overlay that claimed
+ * the keystroke in the capture phase with `preventDefault()` closed AND ended
+ * the call on one press. `preventDefault()` cannot help where nothing reads it.
+ *
+ *   - not Escape → not ours;
+ *   - a composed IME session uses Escape to abandon a candidate, so taking it
+ *     here acts on the turn instead of the character;
+ *   - `defaultPrevented` is the protocol on this surface: an overlay claims
+ *     Escape in the capture phase, and every owner downstream must yield.
+ */
+function ownsEscape(event) {
+  if (!event || event.key !== 'Escape') return false
+  if (event.isComposing) return false
+  if (event.defaultPrevented) return false
+  return true
+}
+
+/**
+ * Whether an Escape keydown should end an in-flight voice call (#2598).
+ *
+ * A sibling of `shouldCancelOnEscape`, not a special case of it: while a call
+ * is up the composer and the picker are inert, so there is no turn to cancel
+ * and no overlay list to consult — the only question is whether anything
+ * NEARER the keystroke already claimed it.
+ *
+ * It is a rule here rather than a guard clause in the SFC for the reason this
+ * whole module exists: `vitest.config.js` runs `environment: 'node'` with no
+ * mount harness, so a branch decided inside a component is a branch no test can
+ * reach — which is exactly how ent#534's version shipped able to ignore
+ * `defaultPrevented` and `isComposing` at once.
+ *
+ * The caller stays responsible for ordering: a call is the loudest thing on the
+ * surface, so this is asked FIRST and `shouldCancelOnEscape` only after it says
+ * no. Both now start from the same `ownsEscape` preconditions, so the two
+ * branches cannot drift apart again.
+ */
+export function shouldEndCallOnEscape(event, { callActive } = {}) {
+  if (!ownsEscape(event)) return false
+  return !!callActive
 }
 
 /**

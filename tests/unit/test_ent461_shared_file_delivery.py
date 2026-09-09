@@ -67,10 +67,35 @@ def test_the_allowlist_contains_no_scriptable_type():
 def test_inline_is_decided_by_the_server_not_the_request():
     """`_format_disposition` takes `inline` as a keyword the caller computes from
     `is_inline_safe`. Pinned so nobody later wires it to a `?inline=1` query
-    param, which would hand the decision to the attacker."""
+    param, which would hand the decision to the attacker.
+
+    **#2582 added a requester-supplied flag, and the rule survived because the
+    flag is ONE-WAY.** `?download=1` may only force `attachment` — the strictly
+    safer direction, which grants the requester nothing — and no input to
+    `_apply_download_flag` can produce `inline`. That asymmetry is asserted
+    positively below, so a reader who meets this docstring and the new parameter
+    together does not conclude they contradict each other and "fix" the wrong
+    one.
+    """
     import inspect
     sig = inspect.signature(_format_disposition)
     assert sig.parameters["inline"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_the_requester_flag_is_one_way_toward_attachment():
+    """#2582's asymmetry, stated here rather than only in its own file: this is
+    the guard a future widening would be edited past."""
+    from routers.files import _apply_download_flag
+
+    inline_headers = {"Content-Disposition": _format_disposition("clip.mp4", inline=True)}
+    # It CAN tighten...
+    assert _apply_download_flag(inline_headers, "clip.mp4", "1")[
+        "Content-Disposition"].startswith("attachment;")
+    # ...and there is no value that loosens.
+    attach_headers = {"Content-Disposition": _format_disposition("evil.html", inline=False)}
+    for raw in [None, "", "0", "false", "1", "inline", "yes", "attachment"]:
+        assert _apply_download_flag(attach_headers, "evil.html", raw)[
+            "Content-Disposition"].startswith("attachment;"), raw
 
 
 # --------------------------------------------------------------------------- #

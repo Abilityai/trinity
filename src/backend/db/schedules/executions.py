@@ -1,5 +1,6 @@
 """Execution-row create/update lifecycle, dispatch marker, and execution getters."""
 
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -12,8 +13,15 @@ from ..tables import (
 )
 from db_models import ScheduleExecution
 from models import TaskExecutionStatus
-from utils.helpers import utc_now_iso, to_utc_iso, parse_iso_timestamp
+from utils.helpers import (
+    duration_ms_between,
+    parse_iso_timestamp,
+    to_utc_iso,
+    utc_now_iso,
+)
 from ._common import _norm_ts
+
+logger = logging.getLogger(__name__)
 
 # #378: Error-message marker written by cleanup_service._process_stale_slot_reclaims
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
@@ -443,12 +451,25 @@ class ScheduleExecutionsMixin:
 
             started_at = parse_iso_timestamp(row["started_at"])
             completed_at = parse_iso_timestamp(utc_now_iso())
-            # started_at and completed_at are written by different processes
-            # (backend --workers 2, and the standalone scheduler container), so
-            # clock skew can make this subtraction negative. Clamp at the write
-            # rather than at every reader — get_agent_analytics consumes
-            # duration_ms unguarded (#1832).
-            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+            # Both ends are guarded at the WRITE, not at every reader —
+            # get_agent_analytics consumes duration_ms unguarded.
+            #   low  (#1832): started_at and completed_at are written by
+            #     different processes (backend --workers 2, and the standalone
+            #     scheduler container), so clock skew can go negative.
+            #   high (#2434): the pre-existing max(0, ...) guarded only the low
+            #     end — max(0, 2_850_000_000) is still 2.85 bn, which the
+            #     PostgreSQL INTEGER column cannot hold.
+            duration_ms = duration_ms_between(started_at, completed_at)
+            if duration_ms is None:
+                logger.warning(
+                    "[Execution] #2434 unrepresentable duration for %s: "
+                    "started_at=%s is %.1f days before completion — recording "
+                    "NULL. A gap that large means started_at is stale or "
+                    "corrupt, not that the turn ran that long.",
+                    execution_id,
+                    row["started_at"],
+                    (completed_at - started_at).total_seconds() / 86400,
+                )
 
             values = {
                 "status": status,
