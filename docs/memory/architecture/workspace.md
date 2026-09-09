@@ -801,6 +801,14 @@ read as inside the field. The ring is scoped `has-[textarea:focus]`, deliberatel
 and drew a second ring concentric with the picker's own. A textarea that regains
 `rounded-2xl` or a background nests a second box inside the first.
 
+Moving the chrome off the textarea makes the **visible** box larger than the field, so a
+click on the shell's padding band or on the control row's ground lands on `<body>` — before
+the shell existed the rounded box *was* the textarea. `focusComposerFromShell` puts the
+caret back, and is guarded twice: it returns for a live call, and for any event that already
+reached a control (`SHELL_INTERACTIVE`). The second guard is the model picker's — the
+typeahead commits on `mousedown` with the default prevented, so the click that follows would
+otherwise drag focus straight back out of the row the user just chose.
+
 The shape is load-bearing, not cosmetic. While the buttons shared one row with a growing
 field, every 44px box came out of the field's width — 143px of a 351px form at 375px, a
 placeholder wrapped over four lines — and it is what left 34px when ent#403 tried to add
@@ -816,6 +824,16 @@ except the toggle" is now two boxes on two rows and one without the other leaves
 composer live during a call. Each is a real flex row and **not** `display: contents`, which
 generates no box and would have silently dropped the dimming while `pointer-events` (which
 inherits) still applied.
+
+The shell is the **parent** of both regions and cannot become a third: the live toggle is
+inside it, and `opacity` on a parent is not something a child can undo. So it sheds its
+border and fill for the call's duration instead of dimming — the composer recedes to the
+page ground and the one live control stays at full contrast. Both arms are **bound**, with
+no chrome colour left in the static class: two Tailwind utilities of the same shape do not
+agree on which of an equal-specificity pair wins (the sheet emits `.border-transparent`
+after `.border-gray-300`, but `.bg-transparent` *before* `.bg-white`), and every `dark:`
+variant beats both — so the static-plus-resting spelling renders a borderless **light**
+composer that is invisible to anyone checking in dark.
 
 **Both composers carry the shape.** `PortalConversation.vue` and `PortalRoom.vue` are the
 same markup in two files (the #2211 lesson), so a shell landing in one leaves the room
