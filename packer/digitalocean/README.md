@@ -86,11 +86,48 @@ the build droplet running.
 1. Cut the Trinity release; confirm the `v*` tag published all five images and
    that each package is public.
 2. `packer build` with the new `image_tag` (above).
-3. Vendor Portal → the Trinity listing → submit the new snapshot for review.
-   Programmatic alternative once the listing exists:
-   `PATCH https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`
-   (`app_id` comes from the listing URL in Vendor Portal).
-4. Update the listing's version string and any changed sizing guidance.
+3. **Have another team member QA a droplet built from that snapshot.** Nothing is
+   submitted on the strength of a green build — see "Submission gate" below.
+4. Submit the snapshot for review, either from the Vendor Portal (the Trinity
+   listing → submit) or by letting the build do it:
+
+   ```bash
+   TRINITY_DO_APP_ID=<app_id> \
+   DIGITALOCEAN_API_TOKEN=dop_v1_... \
+   TRINITY_SUBMIT_REASON="Trinity v0.9.5" \
+     packer build -var "image_tag=v0.9.5" -var "do_token=$DIGITALOCEAN_TOKEN" \
+       trinity.pkr.hcl
+   ```
+
+   `app_id` comes from the listing URL in the Vendor Portal. The `manifest` +
+   `shell-local` post-processors read the snapshot id from the build's own
+   record and `PATCH` it to
+   `https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`. Without
+   `TRINITY_DO_APP_ID` the build simply does not submit.
+
+   The payload carries `imageId` (**required**), `reasonForUpdate`, `osVersion`
+   and `softwareIncluded[]`. A `null` field leaves the existing value alone; a
+   blank string clears it. `.../apps/<app_id>/versions/<version>` is deprecated
+   — do not use it.
+
+5. Update the listing's version string and any changed sizing guidance.
+   Catalog copy lives in [`listing.md`](listing.md), not only in the portal.
+
+### Submission gate
+
+**Nothing is submitted for review until another member of the team has QA'd a
+droplet created from that snapshot.** Not the author, and not "the build was
+green": `img_check.sh` validates DigitalOcean's *image* requirements — no baked
+secrets, firewall on, no pending security updates — and knows nothing about
+whether Trinity comes up, serves HTTPS, or can create an agent.
+
+### The state that blocks a resubmission
+
+**An app in `pending` or `in review` cannot be updated — the API answers 400.**
+Once a snapshot is submitted the listing is locked until DigitalOcean finishes
+reviewing it, so a release-day rebuild fails while an earlier submission is
+still queued. `mp-submit.sh` names this case in its error output, because the
+raw 400 reads like a bad token.
 
 ## Design notes
 
