@@ -24,55 +24,19 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
+import { stripComments } from './helpers/stripComments'
 
 const SRC = readFileSync(
   fileURLToPath(new URL('../../src/components/base/BaseSelect.vue', import.meta.url)),
   'utf8'
 )
-/**
- * Strip HTML comments, block comments and own-line `//` comments so the prose
- * cannot satisfy any assertion below.
- *
- * A single linear scan rather than a chain of `String.replace` regexes. The
- * regex version was flagged by CodeQL as `js/incomplete-multi-character-
- * sanitization` (high) and the rule was right about the shape: a non-greedy
- * `<!--[\s\S]*?-->` leaves residue on malformed or overlapping delimiters, so
- * it is exactly the "sanitiser that does not reach a fixed point" pattern. A
- * scan has no such failure mode — every byte is either inside a comment run or
- * copied out, once.
- *
- * `//` is honoured only at the start of a line so a `https://` inside a class
- * string or attribute can never truncate the code being asserted on.
- */
-function stripComments(src) {
-  let out = ''
-  let i = 0
-  let lineHasContent = false
-  while (i < src.length) {
-    if (src.startsWith('<!--', i)) {
-      const end = src.indexOf('-->', i + 4)
-      i = end === -1 ? src.length : end + 3
-      continue
-    }
-    if (src.startsWith('/*', i)) {
-      const end = src.indexOf('*/', i + 2)
-      i = end === -1 ? src.length : end + 2
-      continue
-    }
-    if (!lineHasContent && src.startsWith('//', i)) {
-      const end = src.indexOf('\n', i)
-      i = end === -1 ? src.length : end
-      continue
-    }
-    const ch = src[i]
-    if (ch === '\n') lineHasContent = false
-    else if (ch !== ' ' && ch !== '\t') lineHasContent = true
-    out += ch
-    i += 1
-  }
-  return out
-}
-
+// The comment stripper is the SHARED one (`tests/unit/helpers/stripComments.js`,
+// extracted in #2161 with the note that it "was about to gain a third copy, and
+// the copies carried a real defect"). This file shipped a fourth copy, and then
+// re-derived by hand the CodeQL fix — js/incomplete-multi-character-sanitization,
+// a non-greedy `<!--[\s\S]*?-->` leaving residue — that the shared helper had
+// already solved and documents at length. Importing it is the same rule the
+// component under test is here to enforce: reach for the primitive.
 const CODE = stripComments(SRC)
 
 describe('#2662 BaseSelect open-state chevron', () => {
