@@ -106,18 +106,26 @@ variable "region" {
 # droplet, so every customer was being forced onto an 80 GB boot disk to hold
 # 9 GiB — for nothing.
 #
-# s-1vcpu-2gb (50 GB) rather than DigitalOcean's recommended $6 s-1vcpu-1gb
-# (25 GB): 9.01 GiB is DigitalOcean's COMPRESSED stored size, while Docker's
-# overlay2 tree on the build droplet is uncompressed, so actual disk use during
-# the build is closer to 18-20 GB before Ubuntu and the apt caches. That is too
-# tight against 25 GB to commit without a build that proves it, and a build
-# droplet that runs out of disk fails after pulling every image. 50 GB is also
-# what three of DigitalOcean's own catalog apps use (openclaw, jellyfin,
-# craftcms), so it is not an unusual shape at review.
+# s-1vcpu-2gb (50 GB) was chosen on the assumption that Docker's uncompressed
+# overlay2 tree would run to 18-20 GB, too close to a 25 GB disk to risk. That
+# assumption was WRONG, and measuring it is what proved it: a droplet booted
+# from the 2026-09-10 snapshot reports
 #
-# ponytail: 25 GB is probably reachable and would match their $6 guidance
-# exactly — one experimental build at s-1vcpu-1gb settles it. Not worth blocking
-# the listing on; 80 -> 50 is the move that matters.
+#     /dev/vda1  77G  8.8G  68G  12% /
+#
+# 8.8 GB used, everything installed and Trinity running. Peak build-time usage
+# adds only the apt caches that cleanup.sh then removes. A 25 GB disk has room
+# several times over.
+#
+# 50 GB is also what three of DigitalOcean's own catalog apps use (openclaw,
+# jellyfin, craftcms), so it is not an odd shape at review — but on disk alone
+# it is no longer justified.
+#
+# ponytail: s-1vcpu-1gb (25 GB) is the remaining move — it is DigitalOcean's
+# recommended $6 build droplet and what #2281 AC 2 actually asks for. Disk is
+# settled; the open risk is its 1 GB of RAM against `apt full-upgrade` and
+# `docker pull` decompressing large layers. One build settles it, and their own
+# exa-24-04 builds on exactly that size.
 variable "build_size" {
   type    = string
   default = "s-1vcpu-2gb"
