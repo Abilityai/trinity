@@ -12,7 +12,12 @@
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { pickRecentMcpExecution } from "./client.js";
+import {
+  pickRecentMcpExecution,
+  extractIdempotencyExecutionId,
+  CHAT_RECOVERY_TRIGGERS,
+  TASK_RECOVERY_TRIGGERS,
+} from "./client.js";
 import type { ScheduleExecution } from "./types.js";
 
 const ISO_NOW = "2026-05-25T10:00:00.000Z";
@@ -32,14 +37,28 @@ function exec(over: Partial<ScheduleExecution>): ScheduleExecution {
 }
 
 describe("#914 pickRecentMcpExecution", () => {
-  it("picks newest non-terminal MCP row inside the window", () => {
+  it("picks the sole non-terminal MCP row inside the window", () => {
+    const rows = [
+      exec({ id: "terminal", status: "success", started_at: "2026-05-25T09:59:50.000Z" }),
+      exec({ id: "stale", started_at: "2026-05-25T09:59:00.000Z" }), // outside window
+      exec({ id: "mine", started_at: "2026-05-25T09:59:58.000Z" }),
+    ];
+    const picked = pickRecentMcpExecution(rows, { now: NOW_MS });
+    assert.equal(picked?.id, "mine");
+  });
+
+  it("#2661 SUPERSEDES newest-wins: several indistinguishable rows yield nothing", () => {
+    // This case asserted `newest` until #2661. That rule was only ever safe on
+    // the queue-serialised /chat route, and reusing it for the concurrent /task
+    // route would have attributed a peer's execution to the aborting caller.
+    // Ambiguity now yields no receipt — identical to the pre-#914 behaviour for
+    // that call, so nothing regresses; a WRONG id would have.
     const rows = [
       exec({ id: "old", started_at: "2026-05-25T09:59:50.000Z" }),
       exec({ id: "newer", started_at: "2026-05-25T09:59:58.000Z" }),
       exec({ id: "newest", started_at: "2026-05-25T09:59:59.500Z" }),
     ];
-    const picked = pickRecentMcpExecution(rows, { now: NOW_MS });
-    assert.equal(picked?.id, "newest");
+    assert.equal(pickRecentMcpExecution(rows, { now: NOW_MS }), undefined);
   });
 
   it("filters out terminal statuses (success / failed / cancelled / skipped)", () => {
@@ -110,5 +129,111 @@ describe("#914 pickRecentMcpExecution", () => {
       pickRecentMcpExecution(rows, { now: NOW_MS, windowMs: 60_000 })?.id,
       "x",
     );
+  });
+});
+
+/**
+ * #2661 — the sync `/task` route reuses this matcher, and `/task` is the
+ * CONCURRENT route. Every filter #914 relied on is identical across one
+ * caller's concurrent tasks, so the newest-wins rule had to go.
+ */
+describe("#2661 pickRecentMcpExecution — attribution under concurrency", () => {
+  it("returns undefined when two candidates survive, instead of guessing the newest", () => {
+    // The regression this pins: three parallel tasks from ONE caller to ONE
+    // agent share triggered_by, source_mcp_key_id and the window. Newest-wins
+    // handed every aborting caller the same id — a well-formed FOREIGN result.
+    const rows = [
+      exec({ id: "task-a", message: "task A", started_at: "2026-05-25T09:59:57.000Z" }),
+      exec({ id: "task-b", message: "task B", started_at: "2026-05-25T09:59:58.000Z" }),
+      exec({ id: "task-c", message: "task C", started_at: "2026-05-25T09:59:59.000Z" }),
+    ];
+    assert.equal(
+      pickRecentMcpExecution(rows, { now: NOW_MS, triggers: TASK_RECOVERY_TRIGGERS }),
+      undefined,
+    );
+  });
+
+  it("the message discriminator resolves that ambiguity to the caller's own row", () => {
+    const rows = [
+      exec({ id: "task-a", message: "task A", started_at: "2026-05-25T09:59:57.000Z" }),
+      exec({ id: "task-b", message: "task B", started_at: "2026-05-25T09:59:58.000Z" }),
+      exec({ id: "task-c", message: "task C", started_at: "2026-05-25T09:59:59.000Z" }),
+    ];
+    const picked = pickRecentMcpExecution(rows, {
+      now: NOW_MS,
+      triggers: TASK_RECOVERY_TRIGGERS,
+      message: "task A",
+    });
+    // Deliberately the OLDEST row — proves selection is by identity, not recency.
+    assert.equal(picked?.id, "task-a");
+  });
+
+  it("a non-matching message yields no receipt rather than a neighbouring row", () => {
+    const rows = [exec({ id: "someone-else", message: "their task" })];
+    assert.equal(
+      pickRecentMcpExecution(rows, { now: NOW_MS, message: "my task" }),
+      undefined,
+    );
+  });
+
+  it("accepts self_task ONLY under the task trigger set", () => {
+    const rows = [exec({ id: "self", triggered_by: "self_task" })];
+    // /task sees SELF-EXEC-001 rows...
+    assert.equal(
+      pickRecentMcpExecution(rows, { now: NOW_MS, triggers: TASK_RECOVERY_TRIGGERS })?.id,
+      "self",
+    );
+    // ...and /chat must NOT: it is queue-serialised, so a concurrently-running
+    // parallel self-task row would otherwise be attributed to a queued chat.
+    assert.equal(
+      pickRecentMcpExecution(rows, { now: NOW_MS, triggers: CHAT_RECOVERY_TRIGGERS }),
+      undefined,
+    );
+    // Default (no triggers passed) must stay the /chat set.
+    assert.equal(pickRecentMcpExecution(rows, { now: NOW_MS }), undefined);
+  });
+
+  it("covers pending_retry, a real non-terminal status the original set omitted", () => {
+    const rows = [exec({ id: "retrying", status: "pending_retry" as never })];
+    assert.equal(pickRecentMcpExecution(rows, { now: NOW_MS })?.id, "retrying");
+  });
+
+  it("a window derived from a RAISED timeout still matches (the #2661 knob fix)", () => {
+    // Operator sets MCP_CHAT_TIMEOUT_MS=45000 as the docs invite. The row is
+    // then ~45s old at abort. Under the old fixed 30s window every receipt
+    // silently degraded to the no-match throw — the knob disabled the feature.
+    const rows = [exec({ id: "slow", started_at: "2026-05-25T09:59:15.000Z" })]; // 45s ago
+    assert.equal(pickRecentMcpExecution(rows, { now: NOW_MS }), undefined); // old behaviour
+    assert.equal(
+      pickRecentMcpExecution(rows, { now: NOW_MS, windowMs: 45_000 + 10_000 })?.id,
+      "slow",
+    );
+  });
+});
+
+describe("#2661 extractIdempotencyExecutionId", () => {
+  it("reads FastAPI's detail-wrapped 409 body", () => {
+    const body = JSON.stringify({
+      detail: {
+        error: "request_in_progress",
+        message: "A request with this Idempotency-Key is still being processed.",
+        execution_id: "exec-123",
+      },
+    });
+    assert.equal(extractIdempotencyExecutionId(body), "exec-123");
+  });
+
+  it("reads a bare (unwrapped) body too", () => {
+    assert.equal(
+      extractIdempotencyExecutionId(JSON.stringify({ execution_id: "exec-9" })),
+      "exec-9",
+    );
+  });
+
+  it("never throws on a non-JSON or id-less body — it runs on an error path", () => {
+    assert.equal(extractIdempotencyExecutionId("502 Bad Gateway"), undefined);
+    assert.equal(extractIdempotencyExecutionId("{}"), undefined);
+    assert.equal(extractIdempotencyExecutionId(JSON.stringify({ detail: "plain string" })), undefined);
+    assert.equal(extractIdempotencyExecutionId(JSON.stringify({ execution_id: "" })), undefined);
   });
 });

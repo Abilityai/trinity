@@ -299,6 +299,14 @@ export async function runAgentChat(
       mcpKeyInfo,
       idempotencyKey
     );
+
+    // #2661: the parallel branch surfaces the gateway-timeout receipt exactly
+    // as the sequential branch does below. Without the log line the two routes
+    // are indistinguishable in the MCP server's own output, which is how the
+    // 2026-09-08 cascade read as "chat_with_agent just fails sometimes".
+    if ('status' in response && response.status === 'queued_timeout') {
+      console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
+    }
     return JSON.stringify(response, null, 2);
   }
 
@@ -392,13 +400,20 @@ export function createChatTools(
         "Best for independent tasks, batch processing, orchestrator delegation.\n" +
         "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
         "Poll GET /api/agents/{name}/executions/{execution_id} for results." +
-        "\n\n**#914 Gateway-Timeout Receipt (sync chat mode only):** " +
+        "\n\n**Gateway-Timeout Receipt (EVERY sync mode — #914 sequential, #2661 parallel):** " +
         "If the MCP-server's synchronous fetch to the backend takes longer than `MCP_CHAT_TIMEOUT_MS` " +
         "(default 25s, set under the typical 30-60s MCP gateway ceiling), the call returns " +
         "`{status: \"queued_timeout\", agent, execution_id, message}` instead of a generic `fetch failed`. " +
+        "This applies to `parallel=false` AND `parallel=true` sync calls. " +
         "The task IS still running on the agent — call `get_execution_result(execution_id)` to poll for the " +
         "result instead of retrying. Retrying will duplicate-queue and Trinity's concurrent-duplicate guard " +
-        "will kill mid-execution, burning budget. For tasks you know will exceed the gateway timeout, prefer " +
+        "will kill mid-execution, burning budget. **Never re-send a reworded variant** after any failure you " +
+        "cannot confirm: an identical re-send is deduplicated server-side and answers with the original " +
+        "`execution_id`, but a REWORDED one derives a different idempotency key and dispatches a second " +
+        "execution. If no execution can be attributed to your call, the error says so explicitly and names " +
+        "`list_recent_executions` — check it before retrying. " +
+        "In sync `parallel=true` mode `timeout_seconds` bounds only the agent-side run, not how long this " +
+        "call waits. For tasks you know will exceed the gateway timeout, prefer " +
         "`parallel=true, async=true` from the start.",
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),

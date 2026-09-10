@@ -1104,7 +1104,7 @@ schedules:
 
 ---
 
-## 37. MCP Chat Timeout Recovery (#914)
+## 37. MCP Dispatch Timeout Recovery (#914, #2661)
 
 ### 37.1 `chat_with_agent` Gateway-Timeout Receipt (#914)
 - **Status**: ✅ Implemented (#933)
@@ -1150,10 +1150,90 @@ schedules:
   - Real push-completion redesign (#408 / #428) — this is the
     cheap interim until that lands.
   - Idempotency keys (#914 comment) — needs new backend column
-    + write-path coordination; bigger surface.
+    + write-path coordination; bigger surface. **Superseded by
+    #2661**: the column shipped with RELIABILITY-006 (#525), and
+    37.2 now reads the `execution_id` the backend already returns
+    on an in-flight 409.
   - Backend-side change to return `execution_id` as a streaming
     response header on long calls — would obsolete the heuristic
     lookup but requires a `chat_with_agent` API contract change.
+    Still out of scope, and for a firmer reason than "contract
+    change": the handler is non-streaming, so headers cannot
+    precede the body — `task_execution_id` is only assembled once
+    the agent has answered.
+
+### 37.2 Sync `/task` Gateway-Timeout Receipt (#2661)
+- **Status**: ✅ Implemented (#2661)
+- **Implements**: Issue #2661
+- **Description**: 37.1 covered the synchronous `/chat` route only.
+  `chat_with_agent(parallel=true, async=false)` dispatches through
+  `client.ts::task()`, which held the backend fetch for
+  `timeout_seconds + 60` (up to 7260s). The MCP client's own gateway
+  timeout kills the JSON-RPC call long before that, so the caller saw
+  a bare `fetch failed` while the target kept running — no receipt,
+  no `execution_id`. The tool description's advice ("poll
+  `get_execution_result` instead of retrying") was unreachable on this
+  route because the caller never received an id. Fleet incident
+  2026-09-08: every duplicate dispatch in a three-hop cascade was a
+  re-send after "could not confirm delivery" on this path.
+- **Why 37.1's matcher could not simply be reused**: `/chat` is
+  queue-serialised, so "newest non-terminal MCP row wins" is
+  near-unambiguous there. `/task` exists to run N tasks concurrently
+  (`max_parallel_tasks`, default 3), and **every** filter that matcher
+  applies — `triggered_by`, `source_mcp_key_id`, the recency window —
+  is identical across one caller's concurrent tasks. Mirroring it would
+  have handed caller A the `execution_id` of caller B's task; A then
+  polls and acts on a well-formed **foreign** result. Silent wrong data
+  is worse than the loud `fetch failed` it replaces, so the receipt is
+  emitted only when attribution is *provable*.
+- **Attribution rule (applies to every route — state it once)**:
+  1. **Exact, when the backend already knows.** A duplicate dispatch
+     under the same `Idempotency-Key` answers `409` carrying
+     `execution_id` (RELIABILITY-006). That is an exact key→execution
+     mapping and is read directly rather than discarded as an opaque
+     `API error (409)`.
+  2. **Otherwise identify, never guess.** The executions scan matches
+     on the call's own `message` in addition to the key id and trigger
+     set, and **returns nothing when more than one candidate survives**.
+     Ambiguity yields no receipt — which is exactly the pre-#2661
+     behaviour, so refusing to guess is never worse than before.
+  3. The trigger set is **per call site**, not a widened shared
+     constant: `/chat` keeps `{mcp, agent}`; `/task` additionally
+     accepts `self_task` (SELF-EXEC-001). Widening the shared list
+     would let a `/chat` abort attribute a concurrently-running
+     parallel self-task row — a regression in the already-shipped route.
+- **Recovery must be bounded**: the abort exists because the gateway
+  ceiling is near; the lookup that follows spends what is left of that
+  budget. It gets its own short deadline (`MCP_RECOVERY_TIMEOUT_MS`,
+  default 5000) and does **not** re-authenticate on 401, so a slow
+  backend — the usual cause of the abort — cannot make the recovery
+  reproduce the very `fetch failed` it exists to prevent.
+- **`AbortError` only**: a `TypeError` (transport failure) may mean the
+  request never reached the backend. On the concurrent `/task` route a
+  peer execution is the normal state, so recovering from a transport
+  error would attribute someone else's row. `/chat` keeps its historical
+  `TypeError` branch.
+- **Configurability**: the recency window is **derived** from
+  `MCP_CHAT_TIMEOUT_MS` (`timeout + 10s`), not a fixed 30s. The fixed
+  window was a latent defect in 37.1: raising the documented knob to
+  ≥30s put every candidate row outside the window, silently degrading
+  every receipt on both routes to the no-match throw.
+- **`timeout_seconds` in sync parallel mode**: now bounds only the
+  agent-side run, not the client wait. A value above
+  `MCP_CHAT_TIMEOUT_MS` yields a receipt at the ceiling rather than a
+  held connection. (The parameter was already deprecated by #1068.)
+- **Out of scope**:
+  - `fan_out` (the third route of this class) — a fan-out dispatches N
+    executions, so the receipt needs a `fan_out_id`, and no polling
+    surface resolves one today. Tracked separately.
+  - A read-only `(scope, key) → execution_id` probe endpoint, which
+    would retire the heuristic on every route at once. Tracked
+    separately; deliberately not built under a P1 incident fix because
+    it is new authenticated surface.
+  - Re-POSTing the dispatch with the same key as a "probe":
+    `idempotency_service.begin()` fails **open**, so on that path the
+    probe would dispatch a second execution — precisely the bug being
+    fixed.
 ## 38. Sequential Agent Loops (#740)
 
 ### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)

@@ -1552,10 +1552,25 @@ async def _acquire_task_capacity(
     return cap_result, effective_timeout
 
 
-def _map_task_failure(name, result):
+def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
-    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError."""
+    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError.
+
+    #2661: releases the idempotency claim before raising. Both sync branches
+    call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
+    the raising path — so every failed/cancelled/timed-out sync `/task` left its
+    claim `in_flight` for the full 24h TTL. The user-visible effect was the
+    inverse of what idempotency is for: a legitimate retry of the same message
+    answered 409 for a day against a task that had died minutes earlier, while
+    the ONLY way to get through was to reword the message — which derives a
+    different key and dispatches a genuine duplicate.
+
+    `idem` is keyword-only and REQUIRED, not defaulted: a default would let a
+    third call site be added later that silently reintroduces the wedge, and the
+    wedge is invisible until someone retries a full day later.
+    """
     if result.status in ("failed", "cancelled"):
+        idempotency_service.fail(idem)
         if "at capacity" in (result.error or ""):
             raise ChatDispatchError(
                 429, f"Agent '{name}' is at capacity. Try again later."
@@ -1717,7 +1732,7 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
         )
         sync_chat_session_id = None
 
-    _map_task_failure(name, result)
+    _map_task_failure(name, result, idem=idem)
 
     sync_response_data = result.raw_response or {}
     if sync_chat_session_id:
@@ -1776,7 +1791,7 @@ async def _dispatch_sync_immediate(
             error=result.error if result.status == TaskExecutionStatus.FAILED else None,
         )
 
-    _map_task_failure(name, result)
+    _map_task_failure(name, result, idem=idem)
 
     response_data = result.raw_response
 
