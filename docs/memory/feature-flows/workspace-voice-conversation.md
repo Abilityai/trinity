@@ -273,8 +273,16 @@ enter/leave classes (a newly inserted element has no value to transition
 *from*, so the ramp cannot be a class toggle). Opacity rides the same
 transition, so the canvas's content is not re-wrapping in view while the column
 is still moving — the layout-stability rule in `design-system-contract.md`.
-`motion-reduce:transition-none` on every transitioning element makes it instant
-under `prefers-reduced-motion`.
+Instant under `prefers-reduced-motion` — and that needs **two** classes on every
+transitioning element, not one. `motion-reduce:transition-none` emits only
+`transition-property: none`; the `duration-300` beside it still applies, so
+`transitionDuration` stays `.3s`, and that is the exact property Vue's
+`getTransitionInfo` reads to decide how long to keep a leaving element alive.
+With `transition-none` alone nothing animates but `@after-leave` still resolves
+on a 300 ms fallback timer — a reduced-motion user saw the canvas vanish, an
+empty right column, then the rail appear. `motion-reduce:duration-0` drives that
+timeout to 0. Caught in review on #2640; the class-counting test passed because
+it asserted the class string rather than the behaviour, so it now counts both.
 
 Two consequences worth writing down:
 
@@ -289,6 +297,22 @@ Two consequences worth writing down:
   gate the rail would mount at its full fixed width beside a canvas that is
   still shrinking — three columns in a row sized for two, `<main>` squeezed by
   flex for 300 ms, a worse jump than the one being fixed.
+
+**Known limitation — the rail column itself still steps (#2676).** Two of the
+three columns interpolate; the rail does not. Its `<aside>` carries no width
+transition in either state and it is a `shrink-0` flex sibling of `<main>`, so
+on call end it mounts at its full width in one frame — 48 px collapsed, 384 px
+open, or whatever `--ws-rail` was dragged to. So "one continuous motion" is
+two-thirds true, and on a wide open rail the remaining step can be larger than
+the 211 px snap this work removed.
+
+It is left as a step here **deliberately**, not overlooked. The honest fix is to
+give the rail column an explicitly animatable width so it can ramp `0 → w`
+complementary to the canvas — and the width of that column is owned by ent#492's
+`--ws-rail` / grid work, not by this file. Doing it from here means either a new
+wrapper element in the row or holding the rail mounted through a call, and both
+are decisions for whoever owns the column, taken with something better than a
+node-env source scan to verify them. Tracked at #2676.
 
 **The orb.** `VoiceOverlay.vue::resizeCanvas` sized the canvas bitmap **once**,
 from the `watch(canvasEl)` that fires on mount — no `ResizeObserver`, no window

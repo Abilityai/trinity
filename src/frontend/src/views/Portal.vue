@@ -195,10 +195,19 @@
 
            The canvas column opposite ramps its own grow 0 → 3 over the same
            duration and easing, so the two interpolate together and the swap
-           reads as one motion instead of two. `motion-reduce:transition-none`
-           makes it instant under `prefers-reduced-motion`. -->
+           reads as one motion instead of two.
+
+           Under `prefers-reduced-motion` it is instant, and that takes BOTH
+           classes. `transition-none` emits only `transition-property: none`;
+           `duration-300` still applies, so `transitionDuration` stays `.3s` —
+           and Vue's `getTransitionInfo` reads exactly that property to decide
+           how long to keep a leaving element alive. With `transition-none`
+           alone nothing animates but every `@after-leave` is still gated on a
+           300ms fallback timer, which is how a reduced-motion user ended up
+           watching the canvas vanish, an empty column, and then the rail pop
+           in. `motion-reduce:duration-0` drives the timeout to 0. -->
       <main
-        class="min-w-0 flex flex-col bg-white dark:bg-gray-900 transition-[flex-grow] duration-300 ease-out motion-reduce:transition-none"
+        class="min-w-0 flex flex-col bg-white dark:bg-gray-900 transition-[flex-grow] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
         :class="voiceCall.active ? 'flex-1 sm:flex-[2_1_0%]' : 'flex-1'"
       >
         <!-- ent#361: a room takes the stage when the URL names one. The
@@ -477,8 +486,8 @@
            stability rule in design-system-contract.md); it fades in as the
            width arrives rather than reflowing behind it. -->
       <Transition
-        enter-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none"
-        leave-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none"
+        enter-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
+        leave-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
         enter-from-class="!grow-0 opacity-0"
         leave-to-class="!grow-0 opacity-0"
         @before-leave="voiceCanvasLeaving = true"
@@ -861,9 +870,16 @@ const voiceCanvasHasColumn = computed(() => Boolean(
 // #2640: true only while the canvas column is playing its leave transition.
 // Vue keeps a leaving element in the DOM for the transition's duration, and the
 // rail must not mount into the same row while it is still there — see the
-// template comment on the rail's `v-if`. Under `prefers-reduced-motion` the
-// transition is `none`, so `after-leave` fires immediately and this is never
-// observably true.
+// template comment on the rail's `v-if`.
+//
+// Under `prefers-reduced-motion` this is never observably true — but only
+// because the leave-active class carries `motion-reduce:duration-0` as well as
+// `motion-reduce:transition-none`. `transition-none` sets `transition-property`
+// and nothing else, so `getTransitionInfo` would still read a 300ms
+// `transitionDuration` and resolve `@after-leave` on the fallback timer with
+// nothing animating: a reduced-motion user would see the canvas disappear, then
+// an empty column, then the rail. The zero duration is what makes the claim in
+// this comment true; it is not decoration.
 const voiceCanvasLeaving = ref(false)
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())

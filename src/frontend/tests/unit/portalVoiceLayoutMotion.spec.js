@@ -36,7 +36,7 @@ describe('#2640 — the column swap is animated, not discrete', () => {
     // `flex-grow` is a <number> and therefore animatable, which is what lets
     // the share move continuously between 1 (no call) and 2 (call).
     expect(SHELL).toMatch(
-      /<main[\s\S]{0,400}transition-\[flex-grow\] duration-300 ease-out motion-reduce:transition-none/
+      /<main[\s\S]{0,400}transition-\[flex-grow\] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0/
     )
   })
 
@@ -55,10 +55,10 @@ describe('#2640 — the column swap is animated, not discrete', () => {
     expect(SHELL).toMatch(/enter-from-class="!grow-0 opacity-0"/)
     expect(SHELL).toMatch(/leave-to-class="!grow-0 opacity-0"/)
     expect(SHELL).toMatch(
-      /enter-active-class="transition-\[flex-grow,opacity\] duration-300 ease-out motion-reduce:transition-none"/
+      /enter-active-class="transition-\[flex-grow,opacity\] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"/
     )
     expect(SHELL).toMatch(
-      /leave-active-class="transition-\[flex-grow,opacity\] duration-300 ease-out motion-reduce:transition-none"/
+      /leave-active-class="transition-\[flex-grow,opacity\] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"/
     )
   })
 
@@ -72,11 +72,52 @@ describe('#2640 — the column swap is animated, not discrete', () => {
   it('honours prefers-reduced-motion on every transitioning element', () => {
     // AC 1: instant, no animation. Counted rather than merely present, so a
     // future third transitioning element cannot be added without one.
+    //
+    // BOTH classes, and the second one is the load-bearing half. Tailwind's
+    // `transition-none` emits only `transition-property: none` — the
+    // `duration-300` beside it still applies, so `transitionDuration` stays
+    // `.3s`. Vue's `getTransitionInfo` reads exactly that property to size the
+    // fallback timer it resolves `@after-leave` on, so with `transition-none`
+    // alone nothing animates and every leave is still gated for 300ms: the
+    // canvas vanishes, the column sits empty, the rail pops in. Asserting only
+    // the class string is why this shipped green (#2640 review).
     const transitions = SHELL.match(/transition-\[[^\]]+\][^"]*/g) || []
     expect(transitions.length).toBeGreaterThan(0)
     for (const t of transitions) {
       expect(t, `missing motion-reduce on: ${t}`).toContain('motion-reduce:transition-none')
+      expect(t, `transition-none without duration-0 still runs a 300ms timer: ${t}`)
+        .toContain('motion-reduce:duration-0')
     }
+  })
+
+  it('the zero duration is what Vue reads, not the property reset', () => {
+    // The relation the class pair encodes, stated once so a future edit that
+    // drops `duration-0` as "redundant" has something to fail against: every
+    // transitioning element pairs a non-zero duration with a reduced-motion
+    // zero, and the zero is declared AFTER it so the cascade lands the right
+    // way round (Tailwind emits variants after base utilities).
+    const transitions = SHELL.match(/transition-\[[^\]]+\][^"]*/g) || []
+    for (const t of transitions) {
+      expect(t).toMatch(/duration-\d+/)
+      expect(t.indexOf('motion-reduce:duration-0'))
+        .toBeGreaterThan(t.search(/\bduration-\d+/))
+    }
+  })
+
+  it('the rail column\'s own step is a recorded limitation, not an oversight', () => {
+    // #2640 review: two of the three columns interpolate, the rail does not.
+    // Its <aside> carries no width transition and it is a `shrink-0` flex
+    // sibling of <main>, so it mounts at full width in one frame — up to the
+    // dragged `--ws-rail`, which can be a bigger step than the 211px snap this
+    // work removed. Fixing it means owning the rail column's width, which is
+    // ent#492's, so it is tracked at #2676 rather than guessed at here. This
+    // test exists so the limitation cannot quietly disappear from the record.
+    const FLOW = read('../../../../docs/memory/feature-flows/workspace-voice-conversation.md')
+    expect(FLOW).toMatch(/Known limitation — the rail column itself still steps \(#2676\)/)
+    const RAIL = read('../../src/components/portal/PortalRail.vue')
+    // If the rail ever DOES animate its width, this test is what tells the
+    // author to come back and delete the limitation.
+    expect(RAIL).not.toMatch(/transition-\[width/)
   })
 
   it('the rail waits for the canvas to finish leaving', () => {
