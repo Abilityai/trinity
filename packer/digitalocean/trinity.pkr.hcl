@@ -97,11 +97,30 @@ variable "region" {
 # actually fit on, with whatever CPU/RAM makes the build fast — NOT the smallest
 # plan, and unrelated to the >=8 GB the LISTING recommends for running Trinity.
 #
-# ponytail: still the 80 GB default, pending the measured size of the baked
-# image set (#2281 AC). Drop it to the smallest fitting boot disk once measured.
+# Measured 2026-09-10 against snapshot trinity-v0-9-5-rc2-20260903:
+#
+#     Min Disk Size    Size
+#     80               9.01 GiB
+#
+# The content is 9 GiB. The 80 GB floor was inherited entirely from the build
+# droplet, so every customer was being forced onto an 80 GB boot disk to hold
+# 9 GiB — for nothing.
+#
+# s-1vcpu-2gb (50 GB) rather than DigitalOcean's recommended $6 s-1vcpu-1gb
+# (25 GB): 9.01 GiB is DigitalOcean's COMPRESSED stored size, while Docker's
+# overlay2 tree on the build droplet is uncompressed, so actual disk use during
+# the build is closer to 18-20 GB before Ubuntu and the apt caches. That is too
+# tight against 25 GB to commit without a build that proves it, and a build
+# droplet that runs out of disk fails after pulling every image. 50 GB is also
+# what three of DigitalOcean's own catalog apps use (openclaw, jellyfin,
+# craftcms), so it is not an unusual shape at review.
+#
+# ponytail: 25 GB is probably reachable and would match their $6 guidance
+# exactly — one experimental build at s-1vcpu-1gb settles it. Not worth blocking
+# the listing on; 80 -> 50 is the move that matters.
 variable "build_size" {
   type    = string
-  default = "s-2vcpu-4gb"
+  default = "s-1vcpu-2gb"
 }
 
 locals {
