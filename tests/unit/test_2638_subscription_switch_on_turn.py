@@ -520,7 +520,8 @@ class TestTheTurnCompletesOnAnotherSubscription:
     can be deterministic.
     """
 
-    def _run_turn(self, monkeypatch, *, viable, refused=None, readings=None):
+    def _run_turn(self, monkeypatch, *, viable, refused=None, readings=None,
+                  pre_limited=False):
         import asyncio
         import json
         from unittest.mock import patch
@@ -557,7 +558,10 @@ class TestTheTurnCompletesOnAnotherSubscription:
         sw_db.record_rate_limit_event.return_value = 1
         sw_db.get_setting_value.return_value = "true"
         sw_db.get_subscription.return_value = _sub("sub-a", name="A")
-        sw_db.is_subscription_rate_limited.return_value = False
+        # `pre_limited` is the pre-dispatch evidence arm: the platform's own 2h
+        # 429 record says the ASSIGNED subscription cannot serve, so the switch
+        # happens before the first attempt rather than after a refusal.
+        sw_db.is_subscription_rate_limited.return_value = pre_limited
         sw_db.list_viable_alternative_subscriptions.return_value = viable
         sw_db.list_recently_failed_alternatives.return_value = refused or []
         # Real-clock-relative, deliberately: `_readmit_recovered` calls
@@ -675,3 +679,175 @@ class TestTheTurnCompletesOnAnotherSubscription:
         result, sw_db, Status = self._run_turn(monkeypatch, viable=[], refused=[])
         assert result.status == Status.FAILED
         assert result.subscription_switch is None
+        # The assertion that would have caught the inert client-facing half: a
+        # subscription usage limit arrives as 429, and until #2638's review that
+        # produced `error_code = None` because only 503 was classified. The
+        # portal gate is `code in ("AUTH", "BILLING")`, so with None it fell
+        # through to the generic "something went wrong" — the exact symptom in
+        # this PR's title, on the exact path a Workspace turn takes.
+        #
+        # Compared by `.value`/`.name`, never by enum identity: the fieldless
+        # `@dataclass` on `TaskExecutionErrorCode` makes `BILLING == AUTH` True
+        # (#1085), so an identity assertion here would pass for any code at all.
+        assert result.error_code is not None
+        assert result.error_code.value == "billing"
+        assert result.error_code.name == "BILLING"
+
+    def test_a_pre_dispatch_switch_spends_the_turns_one_remediation(self, monkeypatch):
+        """The turn's budget is ONE switch, and the pre-dispatch path spends it.
+
+        Before the review fix the pre-dispatch arm set `subscription_switch`
+        but not `subscription_switch_attempted`, so a turn moved before its
+        first attempt and refused again would switch a SECOND time, re-issue,
+        and burn a further rate-limit event — churning towards a third
+        never-used subscription, which is the cascade the flag exists to stop.
+
+        Here the assigned subscription is already known limited, so the switch
+        happens up front; the destination then refuses too. One switch, one
+        notification, and the turn ends FAILED rather than being retried.
+        """
+        result, sw_db, Status = self._run_turn(
+            monkeypatch, viable=[_sub("sub-b", name="B")], pre_limited=True,
+        )
+        assert result.status == Status.FAILED
+        # It DID move, and the caller can still see where — that half is AC#5.
+        assert result.subscription_switch["new_subscription"] == "B"
+        # ...but only once. Two switches would be two notifications and a
+        # second dispatch, which would have come back SUCCESS.
+        assert sw_db.create_notification.call_count == 1
+
+
+# =============================================================================
+# G — review follow-ups: the client-facing half, the #447 shape, the budget
+# =============================================================================
+
+class TestTheRefusalPredicateIsThreeState:
+    """`_assigned_subscription_is_refused` must not be `fresh OR db_events`.
+
+    That is the shape #447 exists to replace, and here it makes the two
+    directions disagree: `recovery_verdict` READMITS a subscription a fresh
+    reading says is serving, while an OR would keep EVACUATING agents off it on
+    every dispatch — a hot-reload and a high-priority notification per turn, and
+    with two such subscriptions a flap turn after turn.
+    """
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        auto_switch = _auto_switch()
+        db = MagicMock(name="db")
+        db.is_subscription_rate_limited.return_value = True   # a ≤2h 429 event
+        monkeypatch.setattr(auto_switch, "db", db)
+        return auto_switch, db
+
+    def _with_reading(self, monkeypatch, reading):
+        svc = _svc()
+        monkeypatch.setattr(
+            svc, "cached_headroom_readings",
+            lambda ids, **_k: {i: reading for i in ids},
+        )
+
+    def test_a_fresh_serving_reading_beats_a_stale_event(self, wired, monkeypatch):
+        auto_switch, db = wired
+        self._with_reading(monkeypatch, _reading(
+            five={"utilization_pct": 32.0, "blocked": False, "resets_at": None},
+        ))
+        assert auto_switch._assigned_subscription_is_refused("sub-a") is None
+        # And the db predicate is not even consulted — the question is answered.
+        db.is_subscription_rate_limited.assert_not_called()
+
+    def test_a_fresh_refusing_reading_still_refuses(self, wired, monkeypatch):
+        auto_switch, _db = wired
+        self._with_reading(monkeypatch, _reading(
+            five={"utilization_pct": 100.0, "blocked": True, "resets_at": None},
+        ))
+        assert auto_switch._assigned_subscription_is_refused("sub-a") == "provider_refusing"
+
+    def test_no_reading_falls_through_to_the_event(self, wired, monkeypatch):
+        """The case the event arm was added for: ambient refresh off, so the
+        sampler has never been here and the platform's own record is all there
+        is. Absence of evidence is not evidence of health."""
+        auto_switch, db = wired
+        self._with_reading(monkeypatch, None)
+        assert auto_switch._assigned_subscription_is_refused("sub-a") == "recent_rate_limit"
+        db.is_subscription_rate_limited.assert_called_once()
+
+    def test_an_unreadable_snapshot_falls_through_rather_than_clearing(self, wired, monkeypatch):
+        """A raise proves nothing in either direction, so it must not be read as
+        'serving' — that would silently disable the whole pre-dispatch arm on a
+        Redis blip."""
+        auto_switch, db = wired
+        svc = _svc()
+        def _boom(ids, **_k):
+            raise RuntimeError("redis is down")
+        monkeypatch.setattr(svc, "cached_headroom_readings", _boom)
+        assert auto_switch._assigned_subscription_is_refused("sub-a") == "recent_rate_limit"
+
+    def test_it_agrees_with_recovery_verdict_on_the_same_reading(self, monkeypatch):
+        """The invariant behind all of the above, stated once: a subscription a
+        fresh reading calls serving is readmitted as a DESTINATION and is not
+        evacuated as a SOURCE. Disagreement here is the flap."""
+        auto_switch, svc = _auto_switch(), _svc()
+        db = MagicMock(name="db")
+        db.is_subscription_rate_limited.return_value = True
+        monkeypatch.setattr(auto_switch, "db", db)
+        serving = _reading(five={"utilization_pct": 20.0, "blocked": False, "resets_at": None})
+        monkeypatch.setattr(svc, "cached_headroom_readings",
+                            lambda ids, **_k: {i: serving for i in ids})
+
+        readmitted = svc.recovery_verdict(serving, serving, _iso(_real_now()))
+        evacuated = auto_switch._assigned_subscription_is_refused("sub-a")
+        assert readmitted == svc.RECOVERY_SERVING_NOW
+        assert evacuated is None, (
+            "the readmit door opens on a fresh serving reading while the evacuate "
+            "door also opens on it — that is the #447 OR, one level over"
+        )
+
+
+class TestEveryTerminalCarriesTheSwitch:
+    """`_with_switch` at EVERY return site of `execute_task`, not most of them.
+
+    Two were missing — `BackendAgentCallBudgetExhausted` and the generic
+    `except Exception` — and both are reachable after a pre-dispatch switch, so
+    the portal would have told the person their message was not retryable while
+    the agent sat on a fresh subscription. Asserted structurally because the
+    failure mode is a return site ADDED later, which no behavioural test of
+    today's six can see.
+    """
+
+    def _execute_task_returns(self):
+        import ast
+        from pathlib import Path
+        src = Path("src/backend/services/task_execution_service.py")
+        if not src.exists():  # pytest may run from the repo root or from tests/
+            src = Path(__file__).resolve().parents[2] / src
+        tree = ast.parse(src.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == "execute_task":
+                return [r for r in ast.walk(node) if isinstance(r, ast.Return) and r.value is not None]
+        raise AssertionError("execute_task not found")
+
+    # Returned BEFORE any dispatch and therefore before any switch can have
+    # happened: admission refused at the capacity gate, and the circuit-breaker
+    # fast-fail. Named rather than pattern-matched so a third one has to be
+    # justified here.
+    PRE_DISPATCH_RETURNS = {"admission_denied", "breaker_denied"}
+
+    def test_every_terminal_return_is_wrapped(self):
+        import ast
+        unwrapped = []
+        for r in self._execute_task_returns():
+            v = r.value
+            if isinstance(v, ast.Name) and v.id in self.PRE_DISPATCH_RETURNS:
+                continue
+            if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "_with_switch":
+                continue
+            unwrapped.append((r.lineno, ast.unparse(v)[:80]))
+        assert not unwrapped, (
+            "these `execute_task` returns drop the turn's subscription switch, so a "
+            f"caller cannot say 'moved to X, try again': {unwrapped}"
+        )
+
+    def test_the_wrapped_set_is_the_whole_set(self):
+        """A sanity floor: if someone replaces the return sites wholesale this
+        test says so rather than passing vacuously on an empty list."""
+        assert len(self._execute_task_returns()) >= 6

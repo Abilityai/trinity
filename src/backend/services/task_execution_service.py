@@ -1293,12 +1293,16 @@ class TaskExecutionService:
             ), state)
 
         except BackendAgentCallBudgetExhausted as e:
-            return await self._handle_budget_exhausted(
+            # #2638: wrapped like every other terminal. A pre-dispatch switch
+            # can have happened before the budget was exhausted, and a caller
+            # that cannot see it tells the person their message is not
+            # retryable while the agent sits on a fresh subscription.
+            return _with_switch(await self._handle_budget_exhausted(
                 e,
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
-            )
+            ), state)
 
         except httpx.HTTPError as e:
             return _with_switch(await self._handle_http_error(
@@ -1322,12 +1326,14 @@ class TaskExecutionService:
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
-            return TaskExecutionResult(
+            # #2638: reachable after a pre-dispatch switch too — same reason
+            # as the budget handler above.
+            return _with_switch(TaskExecutionResult(
                 execution_id=execution_id or "",
                 status=TaskExecutionStatus.FAILED,
                 response="",
                 error=error_msg,
-            )
+            ), state)
 
         except asyncio.CancelledError:
             # Python 3.11+: CancelledError is BaseException, bypasses except Exception.
@@ -1737,6 +1743,17 @@ class TaskExecutionService:
             pre_switch = await ensure_serviceable_subscription(agent_name)
             if pre_switch:
                 state.subscription_switch = pre_switch
+                # A turn gets at most ONE remediation, and this was it. Without
+                # this line the pre-dispatch path spends none of the budget the
+                # #792 flag exists to hold, so a turn that was moved here and
+                # then refused again would switch a SECOND time, re-issue, and
+                # burn a further rate-limit event — churning to a third
+                # never-used subscription, which is precisely the cascade the
+                # flag was introduced to stop. The except handler reads the same
+                # flag, so it also stops recording a second failure event; that
+                # is the existing rule stated at its other read site, not a new
+                # one.
+                state.subscription_switch_attempted = True
                 # The DESTINATION is deliberately not interpolated here.
                 # `_perform_auto_switch` already logs "Auto-switching agent 'X'
                 # from 'A' to 'B'" one frame down, so repeating it buys nothing —
@@ -2261,6 +2278,28 @@ class TaskExecutionService:
         if agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
+        elif agent_status_code == 429:
+            # #2638: a Claude subscription usage limit surfaces from the agent
+            # as 429, not 503 — and this branch classified only 503, so the code
+            # stayed None and every client-facing consumer fell through to the
+            # generic "something went wrong". `BILLING` had NO assignment site
+            # anywhere in the backend; it existed in the enum, in comments, and
+            # in the portal's gate tuple, and nothing ever produced it. That is
+            # why the half of this PR the title advertises — telling the person
+            # their turn moved to another subscription — could not fire for the
+            # symptom in the title: a Workspace turn is `triggered_by="public"`,
+            # which is not async-eligible, so it takes THIS path.
+            #
+            # Safe downstream by construction: the dispatch breaker counts
+            # `auth` only (#526 D10), so a quota 429 still cannot trip it. The
+            # #1085 shared-cause governor DOES count `billing`, which is what it
+            # was written for ("a fleet-wide Claude-API 429 storm") and has
+            # never been reachable from the sync path until now; it is behind
+            # `REDELIVERY_GOVERNOR_ENABLED`, default OFF.
+            logger.warning(
+                f"[TaskExecService] Usage limit detected on {agent_name}: {error_msg[:200]}"
+            )
+            error_code = TaskExecutionErrorCode.BILLING
 
         # #678 salvage + terminal write + side-effects live in apply_result.
         # The RAW partial_metadata and the pre-classified error_code are
@@ -2273,7 +2312,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=error_msg,
-            error_code=error_code,  # Issue #285: AUTH (503) or None
+            error_code=error_code,  # AUTH (503) / BILLING (429, #2638) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors

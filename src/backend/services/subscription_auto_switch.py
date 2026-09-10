@@ -393,12 +393,24 @@ def _assigned_subscription_is_refused(subscription_id: str) -> Optional[str]:
     Fail-CLOSED to `None` on every error: "we could not tell" must dispatch
     normally, because the alternative is refusing to run a turn that would very
     likely have worked. The post-failure switch (#792) is still behind it.
+
+    THREE-STATE, not an OR (#447, and `recovery_verdict`'s rule one level over).
+    A fresh reading that says *serving* ends the question — it does NOT fall
+    through to the 2h event predicate. Written as `fresh_refusing OR db_events`
+    this is exactly the shape #447 exists to replace, and it makes the two
+    directions disagree: `recovery_verdict` readmits a subscription the provider
+    is demonstrably serving, while this would keep evacuating agents off it on
+    every dispatch — a hot-reload and a high-priority notification per turn, and
+    with two such subscriptions, a flap turn after turn. The db predicate is an
+    inference from past failures; a probe is ground truth about now, so it wins
+    in both directions. Absence of a fresh reading still falls through, which is
+    the case the event arm was added for (ambient refresh off).
     """
     try:
         headroom = importlib.import_module("services.subscription_headroom_service")
         reading = headroom.cached_headroom_readings([subscription_id]).get(subscription_id)
-        if reading is not None and reading.refusing:
-            return "provider_refusing"
+        if reading is not None:
+            return "provider_refusing" if reading.refusing else None
     except Exception as e:  # noqa: BLE001 — unreadable evidence proves nothing
         logger.warning(
             "[#2638] could not read the headroom snapshot for subscription %s "
