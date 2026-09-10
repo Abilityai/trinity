@@ -821,9 +821,12 @@ that yields, truncating itself while Send stays 44px.
 rendered pressed and refused the click. Stacking made this **two** inert regions, not one:
 the field's wrapper and the control row's wrapper each carry the pair, because "everything
 except the toggle" is now two boxes on two rows and one without the other leaves half the
-composer live during a call. Each is a real flex row and **not** `display: contents`, which
-generates no box and would have silently dropped the dimming while `pointer-events` (which
-inherits) still applied.
+composer live during a call. Each **generates a real box** — the field's wrapper is a block
+(`composerWrap`, deliberately not a flex container: the `block w-full` textarea inside it is
+what fixes #2259's line box, and making the wrapper flex would turn that textarea into a flex
+item and undo it), the control row's is a flex row. What neither may become is
+`display: contents`, which generates no box and would have silently dropped the dimming while
+`pointer-events` (which inherits) still applied.
 
 The shell is the **parent** of both regions and cannot become a third: the live toggle is
 inside it, and `opacity` on a parent is not something a child can undo. So it sheds its
