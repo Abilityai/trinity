@@ -4620,21 +4620,36 @@ def get_chat_state(email: str) -> dict:
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email)
     chats = []
+    seen_threads: set[str] = set()
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
+        if kind == "thread":
+            seen_threads.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
             "unread": unread.get(cid, 0) if kind == "thread" else 0,
         })
-    # No fallback for "unread without a state row": `count_unread_by_session`
-    # INNER JOINs the state table and requires `last_read_at IS NOT NULL`, so
-    # every session it can return already has a row `get_chat_state` yielded.
-    # The loop that used to be here could never append, and a safety net that
-    # cannot fire is worse than none — it reads as protection that exists.
+    # A CURSORLESS thread has unread and no state row, so the loop above never
+    # reaches it — and that is the whole ent#557 case: an agent replies into a
+    # freshly minted Main the viewer has never opened, so no row was ever
+    # written for it. Since ent#557 `count_unread_by_session` LEFT JOINs the
+    # state table and counts those threads against the account baseline, so it
+    # is now the wider set of the two and this is where its extra rows enter the
+    # payload. Emitting them is what makes the badge, the per-agent pill, the
+    # wordmark total and the tab title fire at all.
+    #
+    # Bounded by the same read: `count_unread_by_session` is scoped to the
+    # caller's own `enterprise_portal_messages`, so this cannot append a chat
+    # that is not already theirs. `starred` is False by construction — a chat
+    # with no row has never been starred.
+    for cid, n in unread.items():
+        if not cid or cid in seen_threads or n <= 0:
+            continue
+        chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
     return {"chats": chats}
 
 

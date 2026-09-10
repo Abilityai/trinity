@@ -176,6 +176,19 @@ subquery is NULL, so the comparison is NULL, so nothing counts. ent#359's
 property is preserved rather than traded away, and it falls out of SQL's NULL
 semantics rather than a second branch.
 
+**The payload is built from two passes, and the second one is the feature.**
+`service.get_chat_state` iterates the viewer's state ROWS and reads the unread
+map off them — which reaches every chat that has a cursor and, by construction,
+none of the chats ent#557 exists for: a never-opened Main has no row. Since the
+SQL now LEFT JOINs, `count_unread_by_session` is the WIDER of the two sets, so a
+second pass emits its remaining thread ids as `starred: false` entries. Without
+it the SQL is correct and nothing on screen changes — no badge, no per-agent
+pill, no wordmark total, no tab title. The pass is bounded by the same read
+(scoped to the caller's own `enterprise_portal_messages`), de-duplicated against
+the ids the first pass already emitted so one chat cannot be counted twice in
+the wordmark total, and the account baseline is excluded one layer down so it
+can never surface as a phantom chat.
+
 **Liveness.** `refreshThreads()` is event-driven — a send, a navigation, a turn
 finishing — so before ent#557 an agent-initiated reply reached the sidebar on
 the viewer's next action and not before, which is the same as never for someone
@@ -384,6 +397,7 @@ can actually see.
 | `tests/unit/test_ent557_unread_never_opened_chat.py` | ent#557: the agent-started Main case; a first-ever sign-in still counting nothing; a chat predating the baseline not retroactively unread; **reading one chat not clearing another** (the case that rejects both derived baselines); the baseline frozen at the first read; the baseline row invisible to the sidebar and both caps; cross-viewer isolation of the baseline subquery |
 | `src/frontend/tests/unit/portalUnreadTabTitle.spec.js` | ent#557: the marker's format executed (prefix, cap, zero, non-numbers, empty base) and the two-writer ordering — a navigation keeps the count, a count change keeps the label |
 | `src/frontend/tests/unit/portalUnreadLiveness.spec.js` | ent#557: the poll refreshes threads, stays visibility-aware and adds no second timer; the tab reads the same total the rows do; asks and unread stay separate |
+| `tests/unit/test_ent557_unread_never_opened_chat.py` (service section) | ent#557: the db→service boundary — a cursorless thread reaches the API payload, a chat with a row is emitted once, a star survives gaining a count, the baseline is never a chat, and a first-ever viewer still gets nothing |
 | `tests/unit/test_ent359_portal_chat_state.py` | cross-viewer isolation; kind/id key separation; email-case normalisation; no-cursor ⇒ nothing unread; only agent messages after the cursor count; re-reading clears; star and read don't overwrite each other; unstar keeps the cursor; validation; unknown ids don't 404; the cap bounds new rows but never freezes owned ones; mark-read at the cap is a no-op |
 | `src/frontend/tests/unit/portalSidebarIA.spec.js` | starred lifted out of every date group and appearing once; per-agent sums; a room crediting every participant; wordmark total; row-avatar cap and overflow |
 | `src/frontend/tests/unit/portalUndefinedCalls.spec.js` | (existing guard) the two new SFCs call nothing undefined |

@@ -263,3 +263,80 @@ def test_reading_the_never_opened_chat_clears_it(chat_db):
 
     pdb.mark_chat_read(ALICE, "thread", "main-scribe", "2026-09-08T14:30:00Z")
     assert pdb.count_unread_by_session(ALICE) == {}
+
+
+# ---------------------------------------------------------------------------
+# The service layer, which is what the API actually returns
+# ---------------------------------------------------------------------------
+#
+# Every test above calls `client_portal.db` directly. That is the layer the SQL
+# lives in, and it was green while the feature reached nobody: `service.
+# get_chat_state` built its payload by iterating the STATE ROWS and reading the
+# unread map off them, so a cursorless thread — the entire ent#557 case — has no
+# row, never appears, and produces no badge, no per-agent pill, no wordmark
+# total and no tab title. These cross the db→service boundary so the delivery
+# half cannot rot green again.
+
+def _service_chats(email):
+    from client_portal import service as svc
+    return {c["id"]: c for c in svc.get_chat_state(email)["chats"]}
+
+
+def test_the_api_reports_a_chat_that_has_no_state_row(chat_db):
+    """AC 1/AC 2 end to end: agent replies into a never-opened Main, and the
+    payload the sidebar reads says so."""
+    from client_portal import db as pdb
+
+    pdb.mark_chat_read(ALICE, "thread", "t-old", "2026-09-01T09:00:00Z")
+    _msg(chat_db, session_id="main-scribe", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    chats = _service_chats(ALICE)
+    assert "main-scribe" in chats, "a cursorless thread never reached the payload"
+    assert chats["main-scribe"] == {
+        "kind": "thread", "id": "main-scribe", "starred": False, "unread": 1,
+    }
+
+
+def test_a_chat_with_a_row_is_reported_once(chat_db):
+    """The cursorless pass must not double-append a thread the row loop already
+    emitted — two entries for one id would double the wordmark total."""
+    from client_portal import db as pdb
+
+    pdb.mark_chat_read(ALICE, "thread", "t-a", "2026-09-01T09:00:00Z")
+    _msg(chat_db, session_id="t-a", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    from client_portal import service as svc
+    ids = [c["id"] for c in svc.get_chat_state(ALICE)["chats"]]
+    assert ids.count("t-a") == 1
+    assert _service_chats(ALICE)["t-a"]["unread"] == 1
+
+
+def test_a_starred_chat_keeps_its_star_and_gains_its_count(chat_db):
+    from client_portal import db as pdb
+
+    pdb.mark_chat_read(ALICE, "thread", "t-a", "2026-09-01T09:00:00Z")
+    pdb.set_chat_star(ALICE, "thread", "t-star", True, "2026-09-02T09:00:00Z")
+    _msg(chat_db, session_id="t-star", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    entry = _service_chats(ALICE)["t-star"]
+    assert entry["starred"] is True
+    assert entry["unread"] == 1
+
+
+def test_the_account_baseline_row_is_never_a_chat(chat_db):
+    """It lives in the same table under a reserved kind; the payload must not
+    grow a phantom `account/baseline` chat."""
+    from client_portal import db as pdb
+
+    pdb.mark_chat_read(ALICE, "thread", "t-a", "2026-09-01T09:00:00Z")
+    assert pdb.BASELINE_ID not in _service_chats(ALICE)
+
+
+def test_a_first_ever_viewer_gets_nothing(chat_db):
+    """No baseline, no cursors — ent#359's property, at the API."""
+    _msg(chat_db, session_id="t-new", email=BOB, role="assistant",
+         at="2026-09-08T14:00:00Z")
+    assert _service_chats(BOB) == {}
