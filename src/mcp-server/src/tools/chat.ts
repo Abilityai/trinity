@@ -611,7 +611,17 @@ export function createChatTools(
         "\n\n**Concurrency:** Controlled by max_concurrency (default 3, max 10). " +
         "Tasks beyond the limit queue internally until a slot frees up. " +
         "\n\n**Timeout:** Overall deadline for the entire fan-out. Tasks still running " +
-        "when the deadline hits are marked as failed with timeout error.",
+        "when the deadline hits are marked as failed with timeout error." +
+        "\n\n**Gateway timeout (#2670) — READ THIS BEFORE RETRYING.** A fan-out runs " +
+        "longer than any single task in it, so this call is the most likely of all the " +
+        "dispatch tools to outlive the MCP gateway. When it does, the tool returns " +
+        "`{status: 'fan_out_timeout', agent, fan_out_id, execution_ids, task_count, message}` " +
+        "instead of results — the batch is STILL RUNNING and nothing was lost. Poll " +
+        "`get_fan_out_result(agent_name, fan_out_id)` for the aggregate. " +
+        "\n\nDo not re-send to 'try again': an IDENTICAL re-send is deduplicated " +
+        "server-side and answers with the same batch, but a REWORDED one derives a " +
+        "different idempotency key and dispatches all N tasks a second time — N more " +
+        "executions, N more times the cost, against an agent already working.",
       parameters: z.object({
         agent_name: z
           .string()

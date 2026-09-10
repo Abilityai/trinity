@@ -26,6 +26,9 @@ import type {
   CompatibilityReport,
   AgentFileTreeResponse,
   ReportSummary,
+  FanOutBatchStatus,
+  FanOutDispatchResult,
+  FanOutTimeoutReceipt,
 } from "./types.js";
 
 /**
@@ -159,6 +162,84 @@ export function pickRecentMcpExecution(
   // Emit nothing rather than the newest guess (see the ambiguity note above).
   if (matches.length > 1) return undefined;
   return matches[0];
+}
+
+/** #2670: the trigger a fan-out subtask row carries (`fan_out_service.py`). */
+export const FAN_OUT_RECOVERY_TRIGGERS = ["fan_out"] as const;
+
+/**
+ * #2670 pure matcher for the fan-out dispatch-timeout recovery lookup.
+ *
+ * The batch analogue of `pickRecentMcpExecution`, and the difference is what
+ * makes it tractable: a fan-out stamps ONE `fan_out_id` on all N of its rows,
+ * so "which row is mine" — the question that forced #2661's >1-candidate
+ * refusal — is not asked at all. Finding ANY row of the batch finds the batch.
+ * N surviving rows is the EXPECTED shape here, not ambiguity.
+ *
+ * Ambiguity is therefore redefined, not dropped: **more than one distinct
+ * `fan_out_id`** means two of the caller's batches are in the window and the
+ * filters cannot say which is this call's, so nothing is returned. Same rule as
+ * #2661 ("a wrong id is worse than none"), measured on the right unit.
+ *
+ * Filters, and why each is needed:
+ *   - `triggered_by === "fan_out"` — the only trigger a subtask row carries, so
+ *     no other route's rows can be attributed to a batch;
+ *   - `fan_out_id` present — a row with none cannot identify a batch;
+ *   - `source_mcp_key_id` matches when supplied (rows with none pass, for an
+ *     older backend);
+ *   - the row's `message` is one this call dispatched — the per-call
+ *     discriminator #2661 established, and a fan-out has N of them, so it is a
+ *     STRONGER filter here than on a single-message route;
+ *   - started within `windowMs` — derived from the abort budget by the caller,
+ *     never a fixed constant (#2661: a fixed window turned raising the timeout
+ *     knob into a silent kill-switch for every receipt).
+ *
+ * Status is deliberately NOT filtered. On `/chat` and `/task` a terminal row is
+ * evidence the receipt is unnecessary; here, by the time the gateway gives up,
+ * some subtasks have usually finished while others run — a batch is a mix by
+ * construction, and requiring non-terminal rows would drop exactly the batches
+ * furthest along. The window is what bounds staleness.
+ */
+export function pickRecentFanOut(
+  executions: ScheduleExecution[],
+  opts: {
+    mcpKeyId?: string;
+    now?: number;
+    windowMs?: number;
+    triggers?: readonly string[];
+    /** The messages THIS call dispatched. Empty/absent skips the discriminator. */
+    messages?: readonly string[];
+  } = {},
+): { fan_out_id: string; execution_ids: string[] } | undefined {
+  const now = opts.now ?? Date.now();
+  const windowMs = opts.windowMs ?? 30_000;
+  const cutoffMs = now - windowMs;
+  const triggers = new Set(opts.triggers ?? FAN_OUT_RECOVERY_TRIGGERS);
+  const wanted = opts.messages && opts.messages.length
+    ? new Set(opts.messages)
+    : undefined;
+
+  const byBatch = new Map<string, string[]>();
+  for (const e of executions) {
+    if (!e.fan_out_id) continue;
+    if (!triggers.has(e.triggered_by)) continue;
+    if (opts.mcpKeyId && e.source_mcp_key_id && e.source_mcp_key_id !== opts.mcpKeyId) {
+      continue;
+    }
+    if (wanted && !wanted.has(e.message)) continue;
+    const started = Date.parse(e.started_at);
+    if (Number.isNaN(started) || started < cutoffMs) continue;
+    const ids = byBatch.get(e.fan_out_id) ?? [];
+    ids.push(e.id);
+    byBatch.set(e.fan_out_id, ids);
+  }
+
+  // Two batches of ours in the same window: the filters identified the caller,
+  // not the call. Refusing degrades to the pre-#2670 behaviour for this call,
+  // which is never worse than not having the receipt at all.
+  if (byBatch.size !== 1) return undefined;
+  const [fanOutId, executionIds] = [...byBatch.entries()][0];
+  return { fan_out_id: fanOutId, execution_ids: executionIds };
 }
 
 /**
@@ -1279,24 +1360,7 @@ export class TrinityClient {
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
     idempotencyKey?: string
-  ): Promise<{
-    fan_out_id: string;
-    status: string;
-    total: number;
-    completed: number;
-    failed: number;
-    results: Array<{
-      id: string;
-      status: string;
-      response?: string;
-      error?: string;
-      error_code?: string;
-      execution_id?: string;
-      cost?: number;
-      context_used?: number;
-      duration_ms?: number;
-    }>;
-  }> {
+  ): Promise<FanOutDispatchResult | FanOutTimeoutReceipt> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
@@ -1342,14 +1406,30 @@ export class TrinityClient {
       body.timeout_seconds = options.timeout_seconds;
     }
 
-    // HTTP ceiling: when no explicit fan-out timeout, cover the platform max
-    // per-agent timeout (7200s) + buffer so we don't abort before the backend.
-    const timeout = (options?.timeout_seconds ?? 7200) + 60;
+    // #2670: bounded by OUR ceiling, not the backend's. The old
+    // `(timeout_seconds ?? 7200) + 60` was written (#418) to avoid aborting
+    // before the backend — correct against the backend, and irrelevant to the
+    // party that actually gives up first: the MCP client's own 30-60s gateway
+    // timeout kills the JSON-RPC call long before 7260s, and the caller sees a
+    // bare `fetch failed` while N executions keep running.
+    //
+    // This is the third route of the #914 class and the one that hits it most
+    // reliably, because a fan-out runs longer than any single task in it by
+    // construction. Same knob as the other two so an operator has one number to
+    // reason about, and `||` not `??` for the #1076 empty-string shadow.
+    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const startTime = Date.now();
+    // Derived from the abort budget, never fixed (#2661): a constant window
+    // turns raising MCP_CHAT_TIMEOUT_MS into a silent kill-switch for every
+    // receipt, because the row is then always older than the window.
+    const recoveryWindowMs = timeoutMs + 10_000;
+    const messages = tasks.map((t) => t.message);
 
+    let response: Response;
     try {
-      const response = await fetch(
+      response = await fetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/fan-out`,
         {
           method: "POST",
@@ -1358,33 +1438,123 @@ export class TrinityClient {
           signal: controller.signal,
         }
       );
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`API error (${response.status}): ${error}`);
+    } catch (err) {
+      // AbortError ONLY, matching `/task` (#2661) and deliberately not `/chat`.
+      // A `TypeError` can mean the request never landed, and on a route whose
+      // normal state is N concurrent rows a wrong attribution is worse than a
+      // loud error.
+      if ((err as Error)?.name !== "AbortError") throw err;
+      debugLog(
+        `[fanOut] client abort after ${Date.now() - startTime}ms on '${name}'; ` +
+        `attempting fan_out_id lookup (#2670)`
+      );
+      const batch = await this.findRecentFanOut(name, mcpKeyInfo?.keyId, {
+        messages,
+        windowMs: recoveryWindowMs,
+      });
+      if (batch) {
+        return this.fanOutReceipt(name, batch, tasks.length, timeoutMs);
       }
-
-      return (await response.json()) as {
-        fan_out_id: string;
-        status: string;
-        total: number;
-        completed: number;
-        failed: number;
-        results: Array<{
-          id: string;
-          status: string;
-          response?: string;
-          error?: string;
-          error_code?: string;
-          execution_id?: string;
-          cost?: number;
-          context_used?: number;
-          duration_ms?: number;
-        }>;
-      };
+      throw new Error(
+        `MCP-server timeout on fan_out (${timeoutMs}ms) and no matching batch found on '${name}'. ` +
+        `The tasks are probably still running — check list_recent_executions(agent_name="${name}") ` +
+        `before re-sending, since a reworded fan-out derives a different idempotency key and ` +
+        `dispatches the whole batch a second time (#2670).`
+      );
     } finally {
       clearTimeout(timeoutId);
     }
+
+    if (response.status === 409) {
+      // #2670: an in-flight duplicate. The backend now returns the same
+      // `{error, message, execution_id}` shape `/chat` and `/task` do, and for
+      // this route that id is the BATCH id — attached to the idempotency claim
+      // the moment it is minted. Reading it turns `API error (409)` into a
+      // pollable receipt, which is the whole reason the backend shape changed.
+      const body409 = await response.text();
+      const fanOutId = extractIdempotencyExecutionId(body409);
+      if (fanOutId) {
+        return this.fanOutReceipt(
+          name, { fan_out_id: fanOutId, execution_ids: [] }, tasks.length, timeoutMs,
+          "A fan-out with this idempotency key is already running",
+        );
+      }
+      throw new Error(`API error (409): ${body409}`);
+    }
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`API error (${response.status}): ${error}`);
+    }
+
+    return (await response.json()) as FanOutDispatchResult;
+  }
+
+  /** #2670: the receipt text, in one place so both paths word it identically. */
+  private fanOutReceipt(
+    agent: string,
+    batch: { fan_out_id: string; execution_ids: string[] },
+    taskCount: number,
+    timeoutMs: number,
+    lead = `MCP-server timeout (${timeoutMs}ms) on fan_out`,
+  ): FanOutTimeoutReceipt {
+    return {
+      status: "fan_out_timeout",
+      agent,
+      fan_out_id: batch.fan_out_id,
+      execution_ids: batch.execution_ids,
+      task_count: taskCount,
+      message:
+        `${lead} — the batch is still running on '${agent}'. ` +
+        `Poll get_fan_out_result(agent_name="${agent}", fan_out_id="${batch.fan_out_id}") ` +
+        `instead of re-sending. An IDENTICAL re-send is deduplicated server-side and answers ` +
+        `with this same batch; a REWORDED one derives a different idempotency key and ` +
+        `dispatches all ${taskCount} tasks again (#2670).`,
+    };
+  }
+
+  /**
+   * #2670 recovery lookup: which batch did this call start?
+   *
+   * Reuses the `/task` recovery read verbatim — separately bounded
+   * (`MCP_RECOVERY_TIMEOUT_MS`), no 401-reauth — because whatever is left of the
+   * gateway budget is all this has, and an unbounded lookup reproduces the
+   * `fetch failed` the feature exists to prevent.
+   *
+   * 50 rows: a fan-out is up to `MAX_TASKS` rows of its own, so a 10-row page
+   * cannot even hold one batch.
+   */
+  private async findRecentFanOut(
+    agentName: string,
+    mcpKeyId?: string,
+    opts: { messages?: readonly string[]; windowMs?: number } = {},
+  ): Promise<{ fan_out_id: string; execution_ids: string[] } | undefined> {
+    try {
+      const recent = await this.getRecentExecutionsForRecovery(agentName, 50);
+      return pickRecentFanOut(recent, {
+        mcpKeyId,
+        now: Date.now(),
+        messages: opts.messages,
+        windowMs: opts.windowMs,
+      });
+    } catch (err) {
+      debugLog(`[fanOut] findRecentFanOut failed for '${agentName}': ${(err as Error)?.message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * #2670: read one fan-out batch back from its execution rows.
+   *
+   * The polling surface the receipt points at. Goes through `request()` (not the
+   * bounded recovery client) because this is an ordinary tool call with the
+   * caller's full budget, not an abort-path lookup.
+   */
+  async getFanOutResult(agentName: string, fanOutId: string): Promise<FanOutBatchStatus> {
+    return this.request<FanOutBatchStatus>(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/fan-out/${encodeURIComponent(fanOutId)}`,
+    );
   }
 
   // ============================================================================
