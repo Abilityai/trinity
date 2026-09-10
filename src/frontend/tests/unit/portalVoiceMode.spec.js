@@ -362,7 +362,14 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     // #2640: `v-if` with the negated shared condition, not `v-else-if` — the
     // <Transition> wrapper broke the adjacency that chain needs. Exclusivity is
     // the property; which construct expresses it is not.
-    expect(SHELL_CODE).toMatch(/<PortalRail[\s\S]{0,120}v-if="railVisible && !voiceCanvasHasColumn/)
+    //
+    // #2676 moved the rail's half onto the column WRAPPER, which is where the
+    // animatable width lives. Same rule, one element out: both arms still read
+    // the one shared computed, so they still cannot both claim the column.
+    expect(SHELL_CODE).toMatch(/v-if="railHasColumn"/)
+    expect(SHELL_CODE).toMatch(
+      /const railHasColumn = computed\([\s\S]{0,200}!voiceCanvasHasColumn\.value/
+    )
     // The 40 / 60 split is two flex SHARES of a zero basis (2 : 3), never
     // percentages of the row: `w-[40%]` + `w-[60%]` beside the 18rem sidebar
     // summed to 100% + 18rem and the shell's overflow-hidden clipped the
