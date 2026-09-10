@@ -756,18 +756,25 @@ def portal_agent_canvases(
 
 
 @router.post("/agents/{agent_name}/canvas/bulk-delete")
-def portal_bulk_delete_canvases(
+async def portal_bulk_delete_canvases(
     agent_name: str,
     body: CanvasBulkDelete,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Remove several of this agent's canvases from the Workspace (ent#553).
 
-    Declared above the parameterized canvas routes (Invariant #4).
+    Declared above the parameterized canvas routes (Invariant #4). Audited like
+    its operator twin — see `_audit_canvas_change`.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     deleted = db.delete_agent_canvases(agent_name, body.canvas_ids)
+    await _audit_canvas_change(
+        request, principal, action="canvas_bulk_delete", agent_name=agent_name,
+        details={"requested": len(body.canvas_ids), "deleted": deleted,
+                 "surface": "workspace"},
+    )
     return {"agent_name": agent_name, "requested": len(body.canvas_ids),
             "deleted": deleted}
 
@@ -799,6 +806,37 @@ def portal_agent_canvas_detail(
     return canvas
 
 
+async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
+                               action: str, agent_name: str, details: dict) -> None:
+    """One audit row per Workspace canvas delete/pin (ent#553 review).
+
+    The operator twins in `routers/canvas.py` have logged since they shipped and
+    `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited —
+    these routes recorded nothing, so the claim was false for exactly the surface
+    an external-facing product is most often asked about. `_gate_human_removal`'s
+    twin here (`_require_canvas_manager`) is platform-only and owner-or-admin, so
+    the actor is always a real Trinity user; the portal principal carries only
+    their verified email, which is the documented `actor_email` path (the #848
+    inline-auth precedent) rather than a fabricated `User`.
+
+    Ids and counts only — a canvas's blocks are agent-authored free-form content
+    and the audit log is broadly readable (the canary G-04 rule the operator
+    routes state).
+    """
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action=action,
+        source="api",
+        actor_email=principal.email,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details=details,
+    )
+
+
 def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None:
     """Owner-or-admin, platform-only — the ent#553 gate for changing a canvas.
 
@@ -813,34 +851,53 @@ def _require_canvas_manager(agent_name: str, principal: PortalPrincipal) -> None
 
 
 @router.delete("/agents/{agent_name}/canvas/{canvas_id}")
-def portal_delete_canvas(
+async def portal_delete_canvas(
     agent_name: str,
     canvas_id: str,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Remove one canvas from the Workspace (ent#553).
 
     Idempotent, matching the operator route: a list one poll out of date must
-    not turn a second click into an error.
+    not turn a second click into an error. Only a delete that REMOVED something
+    is audited — the same rule as the operator twin, for the same reason: a
+    repeat click is a no-op and logging those fills the trail with events where
+    nothing happened.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     deleted = db.delete_agent_canvas(agent_name, canvas_id)
+    if deleted:
+        await _audit_canvas_change(
+            request, principal, action="canvas_delete", agent_name=agent_name,
+            details={"canvas_id": canvas_id, "surface": "workspace"},
+        )
     return {"canvas_id": canvas_id, "deleted": bool(deleted)}
 
 
 @router.put("/agents/{agent_name}/canvas/{canvas_id}/pin")
-def portal_pin_canvas(
+async def portal_pin_canvas(
     agent_name: str,
     canvas_id: str,
     body: CanvasPinRequest,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
-    """Pin or unpin one canvas so it stays at the top of the rail (ent#553)."""
+    """Pin or unpin one canvas so it stays at the top of the rail (ent#553).
+
+    Audited: a pin is what decides which canvas a whole roster sees first, so it
+    is an administrative act on a shared surface, not a per-viewer preference.
+    """
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):
         raise HTTPException(status_code=404, detail="Canvas not found")
+    await _audit_canvas_change(
+        request, principal, action="canvas_pin", agent_name=agent_name,
+        details={"canvas_id": canvas_id, "pinned": bool(body.pinned),
+                 "surface": "workspace"},
+    )
     return {"canvas_id": canvas_id, "pinned": body.pinned}
 
 

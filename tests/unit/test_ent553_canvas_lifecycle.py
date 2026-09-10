@@ -276,6 +276,68 @@ def test_both_delete_routes_are_audited():
         assert "canvas_id" in src
 
 
+def test_the_workspace_routes_are_audited_too():
+    """The review finding. This guard only ever looked at `routers.canvas`, so
+    it passed while the three Workspace twins recorded nothing at all — and
+    `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited,
+    which made that sentence false for the client-facing surface.
+
+    Checked over the source rather than by driving the routes because the thing
+    that went wrong is a route existing with no audit call in it; a behavioural
+    test of the three that exist cannot see a fourth added later.
+    """
+    import inspect
+    from client_portal import router as portal_router
+
+    for handler in (portal_router.portal_delete_canvas,
+                    portal_router.portal_bulk_delete_canvases,
+                    portal_router.portal_pin_canvas):
+        src = inspect.getsource(handler)
+        assert "_audit_canvas_change" in src, f"{handler.__name__} is not audited"
+    # ...and the shared helper is what actually writes the row.
+    assert "platform_audit_service.log" in inspect.getsource(
+        portal_router._audit_canvas_change)
+
+
+def test_pinning_is_audited_on_both_surfaces():
+    """A pin decides what an entire roster sees first, so it is an
+    administrative act on a shared surface — not a per-viewer preference. The
+    operator route was the one that recorded nothing."""
+    import inspect
+    from routers import canvas as canvas_router
+    from client_portal import router as portal_router
+
+    assert "platform_audit_service.log" in inspect.getsource(canvas_router.pin_canvas)
+    assert "_audit_canvas_change" in inspect.getsource(portal_router.portal_pin_canvas)
+
+
+def test_an_agent_key_may_not_pin_its_own_canvas():
+    """`docs/user-docs/agents/agent-canvas.md` says "the agent cannot pin its
+    own canvas". It could: `_gate_human_removal` lets an agent-scoped key act on
+    its own canvases (right for delete — tidying up after itself) and pin shared
+    that gate. `pinned` being absent from the MCP tools is a property of the
+    CLIENT, not of this route, so the doc was describing a convention rather
+    than a control. `_gate_pin` is humans-only, which makes it true.
+    """
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    with pytest.raises(HTTPException) as excinfo:
+        canvas_router._gate_pin(_user(agent_name="agent-a"), "agent-a")
+    assert excinfo.value.status_code == 403
+    # ...while delete deliberately still allows exactly that.
+    canvas_router._gate_human_removal(_user(agent_name="agent-a"), "agent-a")
+
+
+def test_the_pin_route_uses_the_humans_only_gate():
+    import inspect
+    from routers import canvas as canvas_router
+
+    src = inspect.getsource(canvas_router.pin_canvas)
+    assert "_gate_pin(" in src
+    assert "_gate_human_removal(" not in src
+
+
 # --- who may remove ---------------------------------------------------------
 
 def _user(username="alice", role="user", agent_name=None):
@@ -396,3 +458,44 @@ def test_the_agent_facing_tools_cannot_pin():
     repo = pathlib.Path(__file__).resolve().parents[2]
     tools = (repo / "src" / "mcp-server" / "src" / "tools" / "canvas.ts").read_text()
     assert "pinned" not in tools
+
+
+# --- the stated bound actually reaches the client ----------------------------
+
+def test_the_canvas_ceiling_is_on_the_feature_flags_surface():
+    """AC: "a stated bound for the canvas pile". It was enforced and unstated —
+    `canvasLimit` was a `ref(0)` nothing ever assigned, so `canvasHeadroom(n, 0)`
+    returned `{label: null}` and the early warning could not render.
+
+    The ceiling is a CONSTANT, not per-agent state, and the client already holds
+    the count, so it rides the established UI-value surface rather than a new
+    route (Invariant #13's three surfaces for one integer) or an envelope around
+    the canvas list (which the MCP tool and the Workspace both read as a bare
+    array).
+    """
+    import inspect
+    from routers import settings as settings_router
+
+    src = inspect.getsource(settings_router.get_public_feature_flags)
+    assert '"canvas_max_per_agent": CANVAS_MAX_PER_AGENT' in src
+    # ...and it is the same constant the refusal is raised from, not a copy.
+    from models import CANVAS_MAX_PER_AGENT
+    from db import canvas as canvas_db
+    assert canvas_db.CANVAS_MAX_PER_AGENT is CANVAS_MAX_PER_AGENT
+
+
+def test_the_agent_card_and_the_roster_agree_about_canvas_management():
+    """`get_agent_card` omitted `can_manage_canvases`, so the SAME owner read
+    `true` in the sidebar and `false` on the agent's own page — two
+    representations of one card answering differently, which is the defect
+    #2160's docstring says that function exists to prevent. It failed closed (a
+    hidden control, never one that 403s), which is why it was latent.
+    """
+    import inspect
+    from client_portal import service as portal_service
+
+    src = inspect.getsource(portal_service.get_agent_card)
+    assert "can_manage_canvases=may_manage_canvases(" in src, (
+        "the single-card path does not resolve canvas management, so it "
+        "disagrees with the roster for the same viewer"
+    )

@@ -790,7 +790,20 @@ async def get_agent_card(email: str | None, agent_name: str,
                         # (ent#357), which is the same door ent#403 gates on.
                         is_platform=include_owned,
                         runtime=runtime,
-                        model_context=_model_context())
+                        model_context=_model_context(),
+                        # ent#553 (review): the roster resolves this per row and
+                        # this path did not, so the SAME owner saw
+                        # `can_manage_canvases: true` in the sidebar and `false`
+                        # on the agent's own page — two representations of one
+                        # card answering differently, which is precisely the
+                        # defect #2160's docstring above says this function
+                        # exists to prevent. It failed CLOSED (a control hidden,
+                        # never one that 403s), which is why it was latent.
+                        # Resolved through `may_manage_canvases`, the predicate
+                        # the write routes enforce with, for the reason stated
+                        # at the roster's own call site.
+                        can_manage_canvases=may_manage_canvases(
+                            agent_name, email, is_platform=include_owned))
     # #2163: exactly one briefing (not N), and now a BOUNDED one — this page's
     # floor was the agent's own 5s-per-phase HTTP, so a wedged agent made its
     # own page hang. `ok` is what makes an unreachable agent legible: without it

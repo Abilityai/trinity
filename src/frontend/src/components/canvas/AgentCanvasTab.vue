@@ -27,23 +27,41 @@
 </template>
 
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import api from '../../api'
+import { useSessionsStore } from '../../stores/sessions'
 import CanvasPanel from './CanvasPanel.vue'
 
-const props = defineProps({ agentName: { type: String, required: true } })
+const props = defineProps({
+  agentName: { type: String, required: true },
+  // ent#553 (review) — the agent's own `can_share`, which is `db.
+  // can_user_share_agent`: exactly the predicate `_gate_human_removal` enforces
+  // server-side, and the same one `ReportsPanel` five lines up in `AgentDetail`
+  // already reads for its delete control.
+  //
+  // It was hardcoded `true`, on the argument that "the server decides". The
+  // server does decide — but a merely-SHARED user was then shown Manage →
+  // Delete / Pin and got a 403 on click, which is the failing-control problem
+  // `can_manage_canvases` exists to prevent on the Workspace. One model for
+  // both surfaces: the control renders where the call would succeed.
+  //
+  // Defaults FALSE, deliberately: an ancestor that forgets the prop hides an
+  // affordance rather than offering one that 403s.
+  canManage: { type: Boolean, default: false },
+})
 
 const canvases = ref([])
 const error = ref('')
-// ent#553 — Agent Detail is the operator surface, so the affordance is shown
-// and the SERVER decides: a non-owner's call is refused by the same predicate
-// the Workspace uses. Showing it here rather than resolving ownership in the
-// client keeps one authority; the failure is a named message, not a dead
-// control, because this tab is only reachable by someone with agent access.
-const canManage = ref(true)
-// Surfaced so the header can warn before the agent meets the refusal. 0 = the
-// panel says nothing, which is the honest reading of "not told".
-const canvasLimit = ref(0)
+const sessions = useSessionsStore()
+// Surfaced so the header can warn BEFORE the agent meets the refusal. It is a
+// platform constant, not per-agent state, and the client already holds the
+// count — so it rides `GET /api/settings/feature-flags`, the established home
+// for a value the browser needs to render a surface, rather than a new route
+// (Invariant #13) or an envelope around the canvas list (which the MCP tool and
+// the Workspace both read as a bare array). 0 = "not told", and
+// `canvasHeadroom(n, 0)` renders nothing — the honest reading, and what an
+// older backend gets.
+const canvasLimit = computed(() => sessions.canvasMaxPerAgent)
 
 async function load() {
   error.value = ''
@@ -87,6 +105,11 @@ async function pinCanvas(canvasId, pinned) {
   return true
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  // Cached for the page load and shared with every other flag consumer, so this
+  // is a no-op whenever anything else already asked.
+  sessions.loadFeatureFlags?.()
+})
 watch(() => props.agentName, load)
 </script>
