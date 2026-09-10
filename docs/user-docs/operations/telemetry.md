@@ -84,7 +84,7 @@ Full API reference: http://localhost:8000/docs
 - Tier 1 local events are default-on with no toggle — by design, they never leave your server.
 - Tier 2 sends **aggregates only**; it is not a stream of individual events and cannot be used to reconstruct activity.
 - The hosted funnel/benchmark analytics that consume these aggregates are a separate enterprise surface; this page covers only the user-facing opt-in and what is shared.
-- With both gates on, sharing runs on the configured interval — it is not real-time.
+- With both gates on, sharing runs on the configured interval — it is not real-time. A backend restart does not reset that interval: the next share is due when the last delivered one is older than the interval, so an install that restarts often keeps sharing on cadence.
 
 ## See Also
 

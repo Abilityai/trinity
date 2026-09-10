@@ -121,7 +121,7 @@
                   <template v-else-if="send.error"> · {{ send.error }}</template>
                 </span>
               </summary>
-              <pre class="mt-2 max-h-56 overflow-auto rounded bg-gray-50 dark:bg-gray-900 p-2 text-gray-700 dark:text-gray-300"><code>{{ pretty(send.payload) }}</code></pre>
+              <pre class="mt-2 max-h-56 overflow-auto rounded bg-gray-50 dark:bg-gray-900 p-2 text-gray-700 dark:text-gray-300"><code>{{ payloadText(send) }}</code></pre>
             </details>
           </li>
         </ul>
@@ -156,6 +156,14 @@ const receiverLine = computed(() =>
 
 function pretty(obj) {
   try { return JSON.stringify(obj, null, 2) } catch { return String(obj) }
+}
+
+// #2618: an attempt that failed BEFORE a payload was built (a settings read, the
+// share-id claim, the aggregate build) is logged with `payload: null`. The
+// disclosure must say so rather than open onto the word "null".
+function payloadText(send) {
+  if (send.payload) return pretty(send.payload)
+  return `No payload — this attempt failed before one was built${send.error ? ` (${send.error})` : ''}.`
 }
 
 function fmt(iso) {
