@@ -4611,6 +4611,23 @@ def _would_create_row_past_cap(email: str, kind: str, cid: str) -> bool:
     return db.count_chat_state_rows(email) >= db.MAX_CHAT_STATE_ROWS
 
 
+def _chat_state_room_left(email: str) -> bool:
+    """Can this viewer still gain a chat-state row (ent#557 review)?
+
+    Read-side twin of `_would_create_row_past_cap`, minus the per-row existence
+    check: the caller is asking about rows that provably do NOT exist yet.
+    Fails OPEN — an unreadable count reports room, because refusing to show an
+    unread badge on a count that could not be taken would hide real unread from
+    every viewer on a transient DB error, and the write path is what actually
+    enforces the cap.
+    """
+    try:
+        return db.count_chat_state_rows(email) < db.MAX_CHAT_STATE_ROWS
+    except Exception:  # noqa: BLE001 — the cap is enforced on the write path
+        logger.warning("chat-state cap read failed for %s; assuming room", email)
+        return True
+
+
 def get_chat_state(email: str) -> dict:
     """Star + unread state for every chat the caller has state for.
 
@@ -4646,9 +4663,28 @@ def get_chat_state(email: str) -> dict:
     # caller's own `enterprise_portal_messages`, so this cannot append a chat
     # that is not already theirs. `starred` is False by construction — a chat
     # with no row has never been starred.
-    for cid, n in unread.items():
-        if not cid or cid in seen_threads or n <= 0:
-            continue
+    cursorless = [
+        (cid, n) for cid, n in unread.items()
+        if cid and cid not in seen_threads and n > 0
+    ]
+    # ...but ONLY while the viewer can still clear it, and that is not a
+    # nicety. `mark_chat_read` silently no-ops when the row would be a NEW one
+    # and the viewer is at `MAX_CHAT_STATE_ROWS` — deliberately, because a read
+    # marker is "incidental to what the user asked for". A cursorless thread is
+    # by definition a new row, so at the cap this pass would raise a badge on
+    # the wordmark, the agent pill and the browser tab title that opening the
+    # chat cannot dismiss. ent#557 made the no-op load-bearing: before it, a
+    # cursorless thread showed nothing, so the no-op was invisible and the
+    # justification held.
+    #
+    # Not shown beats shown-and-stuck. A capped viewer degrades to exactly the
+    # ent#359 behaviour, which is the state they were in before this feature,
+    # rather than to a badge that never goes away. The COUNT is paid only when
+    # there is something to emit — i.e. never on the ordinary load, where the
+    # list is empty and the cap cannot be the reason.
+    if cursorless and not _chat_state_room_left(email):
+        cursorless = []
+    for cid, n in cursorless:
         chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
     return {"chats": chats}
 

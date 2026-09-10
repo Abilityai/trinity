@@ -340,3 +340,113 @@ def test_a_first_ever_viewer_gets_nothing(chat_db):
     _msg(chat_db, session_id="t-new", email=BOB, role="assistant",
          at="2026-09-08T14:00:00Z")
     assert _service_chats(BOB) == {}
+
+
+# ---------------------------------------------------------------------------
+# The badge must be clearable (ent#557 review)
+# ---------------------------------------------------------------------------
+#
+# `service.mark_chat_read` silently no-ops when the row would be a NEW one and
+# the viewer is at `MAX_CHAT_STATE_ROWS` — deliberately, on the argument that a
+# read marker is "incidental to what the user asked for". A cursorless thread is
+# by definition a new row, so ent#557 made that no-op load-bearing: before it, a
+# cursorless thread showed nothing and the no-op was invisible. After it, a
+# capped viewer would get a badge on the wordmark, the agent pill AND the
+# browser tab title that opening the chat cannot dismiss.
+
+def _fill_chat_state(pdb, email, n):
+    for i in range(n):
+        pdb.set_chat_star(email, "thread", f"filler-{i}", True, "2026-09-01T00:00:00Z")
+
+
+def test_a_capped_viewer_is_not_shown_a_badge_they_cannot_clear(chat_db, monkeypatch):
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    # Small cap so the test states the RULE rather than writing 1000 rows.
+    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", 3)
+    monkeypatch.setattr(pdb, "MAX_STARRED_CHATS", 100)
+
+    pdb.mark_chat_read(ALICE, "thread", "t-old", "2026-09-01T09:00:00Z")
+    _fill_chat_state(pdb, ALICE, 3)
+    _msg(chat_db, session_id="main-scribe", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    # The SQL still counts it — the data is not wrong, only unshowable.
+    assert pdb.count_unread_by_session(ALICE) == {"main-scribe": 1}
+    # ...and opening it genuinely cannot record a cursor.
+    svc.mark_chat_read(ALICE, "thread", "main-scribe")
+    assert pdb.count_unread_by_session(ALICE) == {"main-scribe": 1}
+
+    # So it is not offered. A capped viewer degrades to ent#359's behaviour —
+    # the state they were in before this feature — not to a stuck badge.
+    assert "main-scribe" not in _service_chats(ALICE)
+
+
+def test_room_left_means_the_badge_is_shown_and_clears(chat_db, monkeypatch):
+    """The other side of the same rule, so the guard cannot be satisfied by
+    never emitting anything."""
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", 50)
+
+    pdb.mark_chat_read(ALICE, "thread", "t-old", "2026-09-01T09:00:00Z")
+    _msg(chat_db, session_id="main-scribe", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    assert _service_chats(ALICE)["main-scribe"]["unread"] == 1
+    svc.mark_chat_read(ALICE, "thread", "main-scribe")
+    # It now HAS a row, so it is reported by the first pass at zero rather than
+    # disappearing — which is the difference between "nothing new" and "no such
+    # chat", and the reason the assertion is on the count and not on absence.
+    assert _service_chats(ALICE)["main-scribe"]["unread"] == 0
+
+
+def test_a_thread_that_already_has_a_row_still_badges_at_the_cap(chat_db, monkeypatch):
+    """The cap gate applies to the CURSORLESS pass only. A thread with a row
+    can always be marked read (`_would_create_row_past_cap` allows updating a
+    row the caller already owns), so capping its badge would hide unread the
+    viewer can perfectly well clear."""
+    from client_portal import db as pdb
+
+    pdb.mark_chat_read(ALICE, "thread", "t-a", "2026-09-01T09:00:00Z")
+    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", 1)
+    _msg(chat_db, session_id="t-a", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    assert _service_chats(ALICE)["t-a"]["unread"] == 1
+
+
+def test_an_unreadable_cap_count_fails_open(chat_db, monkeypatch):
+    """Refusing to show unread because a COUNT could not be taken would hide
+    real unread from every viewer on a transient DB error. The write path is
+    what enforces the cap."""
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    pdb.mark_chat_read(ALICE, "thread", "t-old", "2026-09-01T09:00:00Z")
+    _msg(chat_db, session_id="main-scribe", email=ALICE, role="assistant",
+         at="2026-09-08T14:00:00Z")
+
+    def _boom(_email):
+        raise RuntimeError("count unavailable")
+    monkeypatch.setattr(pdb, "count_chat_state_rows", _boom)
+
+    assert _service_chats(ALICE)["main-scribe"]["unread"] == 1
+
+
+def test_the_cap_read_is_not_paid_on_an_ordinary_load(chat_db, monkeypatch):
+    """Cost note, asserted so it stays true: the COUNT is only taken when there
+    is something to emit, which is the rare case — never on the ordinary
+    sidebar load where every thread already has a row."""
+    from client_portal import db as pdb
+
+    pdb.mark_chat_read(ALICE, "thread", "t-a", "2026-09-01T09:00:00Z")
+    calls = []
+    real = pdb.count_chat_state_rows
+    monkeypatch.setattr(pdb, "count_chat_state_rows",
+                        lambda e: (calls.append(e), real(e))[1])
+
+    _service_chats(ALICE)
+    assert calls == []

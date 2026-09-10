@@ -189,6 +189,22 @@ the ids the first pass already emitted so one chat cannot be counted twice in
 the wordmark total, and the account baseline is excluded one layer down so it
 can never surface as a phantom chat.
 
+**And only while the badge is CLEARABLE.** `mark_chat_read` silently no-ops when
+the row would be a new one and the viewer is at `MAX_CHAT_STATE_ROWS`, on the
+stated ground that a read marker is "incidental to what the user asked for". A
+cursorless thread is by definition a new row, so ent#557 made that no-op
+load-bearing: before it a cursorless thread showed nothing and the no-op was
+invisible; after it a capped viewer would get a badge on the wordmark, the agent
+pill *and* the browser tab title that opening the chat cannot dismiss. So the
+second pass is gated on there being room, and a capped viewer degrades to
+ent#359's behaviour — the state they were in before this feature — rather than
+to a stuck badge. The gate is read-side only and applies to the cursorless pass
+alone: a thread that already has a row can always be marked read, so capping its
+badge would hide unread the viewer can perfectly well clear. It fails OPEN (an
+unreadable count reports room — the write path is what enforces the cap) and the
+COUNT is paid only when there is something to emit, which is never on the
+ordinary load.
+
 **Liveness.** `refreshThreads()` is event-driven — a send, a navigation, a turn
 finishing — so before ent#557 an agent-initiated reply reached the sidebar on
 the viewer's next action and not before, which is the same as never for someone
