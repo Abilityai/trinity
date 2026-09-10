@@ -296,6 +296,74 @@ async def handle_subscription_failure(
         )
 
 
+# #2643: strong refs for the fire-and-forget switches spawned below. asyncio
+# holds only a WEAK reference to a bare `create_task`, so an un-referenced
+# switch can be collected mid-flight — the #1083 `_inflight` footgun, and here
+# it would drop the remediation silently on a path nobody is watching yet.
+_inflight_switch_tasks: "set[asyncio.Task]" = set()
+
+
+def spawn_subscription_failure(
+    agent_name: str,
+    *,
+    error_message: str = "",
+    failure_kind: str = "rate_limit",
+) -> None:
+    """Fire `handle_subscription_failure` from a SYNCHRONOUS terminal writer.
+
+    The pull sink (`pull_coordination_service.apply_task_result`, #2643) is a
+    sync function called from an async router handler, exactly like the #1578
+    emit and the #1804 activity close it sits beside — so it gets the same
+    wrapper shape rather than a bespoke `create_task` at the call site:
+    `spawn_task_terminal_event` / `spawn_close_execution_activity`.
+
+    Fail-open in both directions, because it runs AFTER a committed, billed
+    terminal and must never be able to turn one into a 500 on the result
+    endpoint: a raising switch is logged and swallowed, and no running loop is
+    a skip (with the coroutine closed, so it cannot warn "never awaited").
+
+    It deliberately does NOT re-deliver the turn. Re-delivery is the lease
+    reaper's decision (#1081 Phase 3) and the #1085 governor's correlated-cause
+    pause still gates it; this only makes sure the agent is on a subscription
+    that can serve the NEXT attempt.
+    """
+    # ONE coroutine, and the handler call lives inside it — building the inner
+    # coroutine here and wrapping it would leave TWO objects to close on the
+    # no-loop path, and closing only the inner one still warns "never awaited"
+    # for the wrapper.
+    coro = _guarded_switch(
+        agent_name, error_message=error_message, failure_kind=failure_kind
+    )
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as e:
+        coro.close()
+        logger.debug(
+            "[SUB-003] pull-path switch skipped for '%s' (no running loop): %s",
+            agent_name, e,
+        )
+        return
+    _inflight_switch_tasks.add(task)
+    task.add_done_callback(_inflight_switch_tasks.discard)
+
+
+async def _guarded_switch(
+    agent_name: str, *, error_message: str, failure_kind: str
+) -> None:
+    """Run a spawned switch, swallowing anything it raises (#2643)."""
+    try:
+        await handle_subscription_failure(
+            agent_name=agent_name,
+            error_message=error_message,
+            failure_kind=failure_kind,
+        )
+    except Exception as e:  # noqa: BLE001 — never affect the billed terminal
+        logger.error(
+            "[SUB-003] auto-switch failed for '%s' after a pull terminal: %s",
+            agent_name, e,
+        )
+
+
 async def handle_rate_limit_error(
     agent_name: str,
     error_message: str = "",
