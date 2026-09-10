@@ -43,7 +43,7 @@ the **Canvas tab in the Workspace rail**.
 - **Delete one**, or switch on **Manage** to select several and delete them in
   one action. You are asked to confirm once, and the confirmation names how many
   will go. Deleting is recorded in the audit log — from the Workspace as well as
-  from Agent Detail.
+  from Agent Detail, attributed to the person who did it either way.
 - **Only the agent's owner (or an admin) can delete or pin.** If you can see an
   agent's canvases but do not own the agent, there are no delete controls —
   rather than buttons that would refuse.

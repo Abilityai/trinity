@@ -29,6 +29,8 @@ the pin exists to give the person.
 """
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from models import CANVAS_MAX_PER_AGENT, User
@@ -297,6 +299,51 @@ def test_the_workspace_routes_are_audited_too():
     # ...and the shared helper is what actually writes the row.
     assert "platform_audit_service.log" in inspect.getsource(
         portal_router._audit_canvas_change)
+
+
+def test_the_workspace_audit_names_the_OPERATOR_not_the_platform():
+    """An audit row that lands under the wrong actor is worse than none.
+
+    `platform_audit_service._resolve_actor` keys `actor_type` off
+    `actor_user` / `actor_agent_name` / `mcp_scope` / `mcp_key_id` — NOT off
+    `actor_email`. So an email-only call falls through to its last branch and
+    the row is written as `actor_type="system"`, `actor_id="trinity-system"`:
+    a named operator's Workspace deletion recorded as a platform action,
+    invisible to every `actor_type=user` query and to the per-actor filter the
+    audit UI offers. The row exists, so nothing fails — it just says the wrong
+    thing, which is the failure mode a missing row does not have.
+
+    Asserted against the REAL resolver rather than by reading the call, because
+    the defect is entirely in what that function does with the arguments.
+    """
+    from services.platform_audit_service import PlatformAuditService
+
+    # The shape the fix must not regress to.
+    assert PlatformAuditService._resolve_actor(
+        actor_user=None, actor_agent_name=None, mcp_scope=None, mcp_key_id=None,
+    ) == ("system", "trinity-system", None)
+
+    # ...and the shape it produces now.
+    actor = types.SimpleNamespace(id=7, email="op@example.com", username="op")
+    kind, actor_id, email = PlatformAuditService._resolve_actor(
+        actor_user=actor, actor_agent_name=None, mcp_scope=None, mcp_key_id=None,
+    )
+    assert (kind, actor_id, email) == ("user", "7", "op@example.com")
+
+
+def test_the_workspace_audit_resolves_a_real_user_row():
+    """The helper must pass `actor_user`, not only `actor_email` — and must not
+    let a lookup failure drop the row."""
+    import inspect
+    from client_portal import router as portal_router
+
+    src = inspect.getsource(portal_router._audit_canvas_change)
+    assert "db.get_user_by_email" in src
+    assert "actor_user=actor_user" in src
+    # Best-effort: the action is already done, so attribution must never raise.
+    assert "except Exception" in src
+    # The email still rides along, so a miss under-attributes rather than losing it.
+    assert "actor_email=principal.email" in src
 
 
 def test_pinning_is_audited_on_both_surfaces():

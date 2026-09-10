@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import Optional
 
 import httpx
@@ -813,20 +814,53 @@ async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
     The operator twins in `routers/canvas.py` have logged since they shipped and
     `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited —
     these routes recorded nothing, so the claim was false for exactly the surface
-    an external-facing product is most often asked about. `_gate_human_removal`'s
-    twin here (`_require_canvas_manager`) is platform-only and owner-or-admin, so
-    the actor is always a real Trinity user; the portal principal carries only
-    their verified email, which is the documented `actor_email` path (the #848
-    inline-auth precedent) rather than a fabricated `User`.
+    an external-facing product is most often asked about.
+
+    **The actor is resolved to the real `users` row, not left as an email.**
+    Passing `actor_email` alone looks sufficient and is not: `_resolve_actor`
+    keys `actor_type` off `actor_user` / `actor_agent_name` / `mcp_scope` /
+    `mcp_key_id`, so an email-only call falls through to its last branch and the
+    row lands as `actor_type="system"`, `actor_id="trinity-system"` — a named
+    operator's deletion recorded as a PLATFORM action, invisible to any
+    `actor_type=user` query and to the per-actor filter the audit UI offers.
+    That is worse than the missing row this function was added to fix: a wrong
+    attribution is believed. (The #848 inline-auth precedent for `actor_email`
+    holds where the caller genuinely has no `users` row; here
+    `_require_canvas_manager` is platform-only and resolves through
+    `db.can_user_share_agent`, so a row exists by construction.)
+
+    The lookup is best-effort: if it somehow misses, the row is still written
+    with the email attached rather than dropped — an under-attributed audit
+    entry beats none — and the miss is logged, because it would mean the gate
+    admitted someone the user table does not know.
 
     Ids and counts only — a canvas's blocks are agent-authored free-form content
     and the audit log is broadly readable (the canary G-04 rule the operator
     routes state).
     """
+    actor_user = None
+    try:
+        row = db.get_user_by_email(principal.email)
+        if row:
+            actor_user = SimpleNamespace(
+                id=row.get("id"), email=row.get("email") or principal.email,
+                username=row.get("username"),
+            )
+    except Exception as e:  # noqa: BLE001 — attribution must not fail the action
+        logger.warning("canvas audit: could not resolve actor for %s: %s",
+                       principal.email, e)
+    if actor_user is None:
+        logger.warning(
+            "canvas audit: no users row for %s on a platform-only route; "
+            "recording the action with the email but no user attribution",
+            principal.email,
+        )
+
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action=action,
         source="api",
+        actor_user=actor_user,
         actor_email=principal.email,
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
