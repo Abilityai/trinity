@@ -35,18 +35,18 @@ const MARKDOWN = readFileSync(
  * it reads a checked-in file — but the loop is both the rule's prescribed fix
  * and the more correct strip, so there is no reason to carry the weaker one.
  */
-const code = (text) => {
-  let out = text
+const withoutHtmlComments = (source) => {
+  let out = source
   let previous
   do {
     previous = out
-    out = out
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '')
+    out = out.replace(/<!--[\s\S]*?-->/g, '')
   } while (out !== previous)
   return out
 }
+const code = (text) => withoutHtmlComments(text)
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
 
 const CSS = code(MARKDOWN)
 /** Does the sheet have a rule whose selector list mentions this element? */
