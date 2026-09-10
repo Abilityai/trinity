@@ -134,8 +134,22 @@ raw 400 reads like a bad token.
 **Admin password.** DigitalOcean 1-Clicks have no vendor-defined input form at
 deploy time — verified against `digitalocean/marketplace-partners`, where the
 only prompt is the optional Managed Database checkbox. So the password is
-generated at first boot and printed in the MOTD, which the user reads from the
-control panel's browser Console (Droplet → Console); no SSH client is needed.
+generated at first boot and printed in the MOTD.
+
+**The MOTD is reachable by two different routes, and which one the customer has
+depends on a choice they make before we ever run.** DigitalOcean's create page
+requires either a password or an SSH key:
+
+- *password auth* — root has a password, so **Droplet → Console** works and no SSH
+  client is needed. This is the path the listing copy used to describe as if it
+  were the only one.
+- *SSH key auth* — DigitalOcean leaves the root account **locked** (`passwd -S
+  root` reports `L`), so the Console renders a `login:` prompt that cannot be
+  satisfied. The customer must `ssh root@<ip>` instead.
+
+Setting a root password to unify them is not available: `img_check.sh` scores
+`User root has no password set` as a PASS condition, so an image that sets one
+fails review. Documenting both routes is the fix, and `listing.md` does.
 
 An operator who prefers to choose it can supply one through *Additional Options →
 Startup scripts* on the Create page, as `#cloud-config`:

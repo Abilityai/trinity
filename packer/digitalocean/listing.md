@@ -70,9 +70,19 @@ certificate for the Droplet's IP, and starts Trinity.
 
 ### 2. Get your admin password
 
-Open **Droplet → Console** in the DigitalOcean control panel. The login banner
-prints your password, the URL to open, and whether HTTPS came up. No SSH client
-and no SSH key are needed — the Console is a browser terminal.
+Your password is generated on first boot and printed in the login banner. How you
+reach that banner depends on the authentication you chose when creating the
+Droplet:
+
+- **If you chose a password**, open **Droplet → Console** in the DigitalOcean
+  control panel and log in as `root`. The Console is a browser terminal, so no
+  SSH client is needed.
+- **If you chose an SSH key**, DigitalOcean leaves the root account locked and the
+  Console cannot accept a login. Connect with your key instead:
+  `ssh root@your_droplet_public_ipv4`
+
+Either way the banner prints your Trinity password, the URL to open, and whether
+HTTPS came up. You can re-read it at any time with `cat /etc/trinity/admin-credentials`.
 
 To choose the password yourself instead, paste this into **Additional Options →
 Startup scripts** when creating the Droplet:
