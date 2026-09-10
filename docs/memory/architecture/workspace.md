@@ -835,6 +835,14 @@ after `.border-gray-300`, but `.bg-transparent` *before* `.bg-white`), and every
 variant beats both — so the static-plus-resting spelling renders a borderless **light**
 composer that is invisible to anyone checking in dark.
 
+The **same trap caught the ghost select twice more**, one level down: `border-transparent` in
+`FIELD_GHOST_CLASS`'s base string beat the error arm's `border-status-danger-500` (emitted
+later, equal specificity), and the unvariated `disabled:hover:bg-transparent` only TIES
+`dark:hover:bg-gray-750` (`:hover:is(.dark *)`, emitted later), so a **disabled** picker still
+lit up under the cursor during a call — in dark only. Both are fixed in `fieldClasses.js` with
+the colour on the arms and the reset in both theme arms. The rule for any future field recipe
+is in `design-system.md` → BaseSelect → Ordering rule.
+
 **Both composers carry the shape.** `PortalConversation.vue` and `PortalRoom.vue` are the
 same markup in two files (the #2211 lesson), so a shell landing in one leaves the room
 visibly diverged from the chat beside it; `portalComposerAlignment.spec.js` runs every
