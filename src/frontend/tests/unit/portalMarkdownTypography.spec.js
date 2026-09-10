@@ -24,12 +24,29 @@ const here = dirname(fileURLToPath(import.meta.url))
 const MARKDOWN = readFileSync(
   resolve(here, '../../src/components/portal/PortalMarkdown.vue'), 'utf8',
 )
-/** Source with comments removed: the prose legitimately names the very
- *  selectors and values these assertions are about. */
-const code = (text) => text
-  .replace(/<!--[\s\S]*?-->/g, '')
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/^\s*\/\/.*$/gm, '')
+/**
+ * Source with comments removed: the prose legitimately names the very
+ * selectors and values these assertions are about.
+ *
+ * Stripped to a FIXPOINT rather than in one pass, as `hardeningGuide.spec.js`
+ * does: a single `replace(/<!--[\s\S]*?-->/g, '')` leaves a live `<!--` behind
+ * on nested input (`<!--<!-- -->` -> `<!--`), which CodeQL flags as
+ * js/incomplete-multi-character-sanitization. Nothing untrusted reaches this —
+ * it reads a checked-in file — but the loop is both the rule's prescribed fix
+ * and the more correct strip, so there is no reason to carry the weaker one.
+ */
+const code = (text) => {
+  let out = text
+  let previous
+  do {
+    previous = out
+    out = out
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+  } while (out !== previous)
+  return out
+}
 
 const CSS = code(MARKDOWN)
 /** Does the sheet have a rule whose selector list mentions this element? */
