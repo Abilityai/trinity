@@ -41,7 +41,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 // The one import of a real value in this otherwise source-text file: the ghost
 // recipe's height is a VALUE, and reading it as text matches its own comment.
-import { FIELD_GHOST_CLASS } from '../../src/components/base/fieldClasses.js'
+import { FIELD_GHOST_CLASS, FIELD_GHOST_VALID_CLASS } from '../../src/components/base/fieldClasses.js'
 
 const read = (name) =>
   readFileSync(fileURLToPath(new URL(`../../src/components/portal/${name}`, import.meta.url)), 'utf8')
@@ -202,6 +202,44 @@ describe('#2259 workspace composer alignment', () => {
     // width budget: `w-full` here would re-create the ent#403 squeeze one level
     // down, with the picker taking the row instead of the field.
     expect(FIELD_GHOST_CLASS.split(/\s+/)).not.toContain('w-full')
+  })
+
+  it('keeps the ghost recipe out of every cascade race it can be written into', () => {
+    // These are SHAPE guards, and they are honest about what they cannot do: a
+    // class-string assertion is structurally blind to the cascade (#2662's own
+    // learnings entry — the shell's missing light-mode border was green under
+    // test:unit, check:tokens and the ratchet, and only `getComputedStyle` off a
+    // live render found it). What a string CAN pin is the arrangement that makes
+    // the cascade safe, so a future edit has to re-open the question deliberately.
+    //
+    // Both of the arrangements below were wrong when this variant first shipped,
+    // and both were measured wrong in a real Chromium before being changed.
+    const ghost = FIELD_GHOST_CLASS.split(/\s+/)
+    const valid = FIELD_GHOST_VALID_CLASS.split(/\s+/)
+
+    // 1. The resting border COLOUR lives on the valid arm, never in the base
+    //    string. With `border-transparent` in the base, a ghost select carrying
+    //    an `error` rendered with NO danger border: `.border-transparent` is
+    //    emitted after `.border-status-danger-500` at equal specificity, so the
+    //    resting keyword beat the error colour. `field` never had the bug because
+    //    FIELD_CLASS has always kept its border colour on the arms. Measured:
+    //    ghost error border was rgba(0,0,0,0) against field's rgb(239,68,68).
+    expect(ghost).toContain('border')
+    expect(ghost.filter((c) => /^border-(?!\[)[a-z]/.test(c))).toEqual([])
+    expect(valid).toContain('border-transparent')
+
+    // 2. Every dark hover tint is paired with a dark disabled reset. The
+    //    unvariated `disabled:hover:bg-transparent` outranks `hover:bg-gray-100`
+    //    (3 classes/pseudos vs 2) but merely TIES `dark:hover:bg-gray-750`, which
+    //    compiles to `:hover:is(.dark *)` and is emitted later — so a disabled
+    //    ghost select still lit up under the cursor in dark mode while light was
+    //    correct. Written as a pairing over whatever dark hover tints exist, so a
+    //    second one added later is covered without editing this test.
+    const darkHoverTints = ghost.filter((c) => /^dark:hover:bg-/.test(c))
+    expect(darkHoverTints.length).toBeGreaterThan(0)
+    expect(ghost).toContain('disabled:hover:bg-transparent')
+    expect(ghost, 'a dark hover tint needs its dark disabled reset in the same breath')
+      .toContain('dark:disabled:hover:bg-transparent')
   })
 
   it('initialises the room composer once the room has resolved', () => {

@@ -40,7 +40,15 @@ export const FIELD_GHOST_CLASS =
   // `h-11`: the ghost select is a 44px box, the same box as the composer row's
   // icon buttons (#2259) — a 30px select beside 44px buttons is a 30px tap
   // target on a phone. The native select centres its text in a fixed height.
-  'h-11 w-auto max-w-full rounded-lg border border-transparent bg-transparent ' +
+  // `border` with NO colour here, exactly like FIELD_CLASS: the 1px is reserved
+  // so the focus border costs no layout shift, but WHICH colour it takes is the
+  // valid/invalid arms' business. Carrying `border-transparent` in this base
+  // string made the ghost's error state borderless — `.border-transparent` is
+  // emitted AFTER `.border-status-danger-500`, and the two are equal
+  // specificity, so the resting keyword silently beat the error colour
+  // (measured, not reasoned: transparent on ghost against rgb(239,68,68) on
+  // field). Same cascade trap as the shell's, one level down.
+  'h-11 w-auto max-w-full rounded-lg border bg-transparent ' +
   'pl-2 py-1 text-[13.5px] text-gray-600 dark:text-gray-300 ' +
   // Hover tints the GROUND only, matching the Workspace agent picker exactly.
   // Deliberately no hover ink change: the sibling "New chat" button spends two
@@ -50,10 +58,21 @@ export const FIELD_GHOST_CLASS =
   // sits on IS gray-800, so a gray-800 tint was invisible in dark mode.
   'hover:bg-gray-100 dark:hover:bg-gray-750 transition ' +
   'focus:outline-none focus:ring-[3px] ' +
-  'disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-transparent'
+  // The disabled reset needs BOTH arms. `disabled:hover:bg-transparent` outranks
+  // `hover:bg-gray-100` on specificity (3 vs 2), but `dark:hover:bg-gray-750`
+  // compiles to `:hover:is(.dark *)` — also 3 — and is emitted later, so it won:
+  // a disabled ghost select still lit up under the cursor in DARK mode while
+  // light was correct. Measured on a live render, both themes. Any dark hover
+  // tint added here needs its dark disabled reset in the same breath.
+  'disabled:opacity-45 disabled:cursor-not-allowed ' +
+  'disabled:hover:bg-transparent dark:disabled:hover:bg-transparent'
 
-// Ghost has no resting border to recolour, so its valid state is focus-only.
+// Ghost's resting border is transparent — it lives HERE and not in the base
+// string so the invalid arm's `border-status-danger-500` is the only border
+// colour in play when there is an error (see the base string's note). Focus
+// recolours it, as on the field recipe.
 export const FIELD_GHOST_VALID_CLASS =
+  'border-transparent ' +
   'focus:border-action-primary-600 dark:focus:border-action-primary-500 ' +
   'focus:ring-action-primary-500/40 dark:focus:ring-action-primary-400/40'
 
