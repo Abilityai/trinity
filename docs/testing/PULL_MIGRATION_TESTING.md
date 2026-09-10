@@ -1,5 +1,9 @@
 # Pull / Work-Stealing Migration (#1081) — Testing, Findings & Pilot Record
 
+> **Start at [`PULL_MIGRATION_STATUS.md`](../planning/PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
+> place that states current phase, remaining gates and open decisions. This file is reference
+> material.**
+
 **Branch:** `feature/target-arch-pull-migration` · **Dates:** 2026-07-07 → 07-09
 **Source design:** `docs/planning/TARGET_ARCHITECTURE.md` (v2) · **Status:** `docs/planning/PULL_MIGRATION_STATUS.md`
 
@@ -34,7 +38,8 @@ integration stage gated on defect confirmation):
 5. ✅ **P1 correctness** — Tiers 1/4/5; B1/B2/B3/B5 fixed + verified; B6 fixed (static).
 6. ⬜ **Opt-in gate** — Tier 6 side-effect safety (`effect_guard` fail-open when `execution_id` absent). Open.
 7. ✅ **Integration** — live pilot (#946), pull PROVEN end-to-end on `gtm-synthesizer` (§6).
-8. ⬜ **Soak** — #856 fleet-scale ≥2-week zero-orphan (Phase-5 gate). Not laptop-reproducible.
+8. ⬜ **Soak** — fleet-scale, the Phase-5 gate (#1766). Not laptop-reproducible. ⚠️ The duration bar
+   is **not** settled — see `../planning/PULL_MIGRATION_STATUS.md` §4.
 
 **Environment that moved this plan:** the local stack is now **PostgreSQL** (pull revisions `0016`/`0017`,
 `0012` as originally tested; dark columns verified on live PG), and live turns are locally exercisable with a
@@ -184,7 +189,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 |----|------|----------|
 | T6.1 | Re-delivery preserves `execution_id` | Requeue and park both keep the row id. |
 | T6.2 | effect_guard dedup across re-delivery | Same `execution_id` re-run → `send_message`/`create_share`/`voip` de-duped. |
-| T6.3 | **effect_guard fail-open when `execution_id` absent** | Without trusted injection a re-run **double-emits**. Must close before default-ON for side-effect agents. |
+| T6.3 | **effect_guard fail-open when `execution_id` absent** | Without trusted injection a re-run **double-emits**. Must close before default-ON for side-effect agents. **Policy is decided — `TARGET_ARCHITECTURE.md` says fail-closed; #2392 is the build, not a decision.** |
 | T6.4 | Nevermined settle exactly-once | Duplicate re-delivery → single settle on native `agent_request_id` token. |
 
 ### TIER 7 — PostgreSQL (now the LOCAL backend) — P0
@@ -325,8 +330,9 @@ Ran on `gtm-synthesizer` (rebuilt image, `AGENT_AUTH_SECRET` fixed; chosen becau
 2. **A backend↔worker↔DB integration rig** — nothing today wires the real `pull_worker` to the real router to
    the real DB; the claim→run→result round-trip is never exercised across the seam.
 3. **A flag-ON live-turn env** — local PG + an out-of-tree `ANTHROPIC_API_KEY` make T5.5/T5.6/T6 runnable.
-4. **A fleet-scale soak leg (#856)** — Tiers 3–5 at scale over ≥2 weeks; the Phase-5 default-ON gate; not
-   laptop-reproducible.
+4. **A fleet-scale soak leg (#1766)** — Tiers 3–5 at scale; the Phase-5 default-ON gate; not
+   laptop-reproducible. The duration bar is unsettled and was previously mis-cited to #856 — see
+   `../planning/PULL_MIGRATION_STATUS.md` §4.
 
 ## 8. Net remaining before a default-ON decision
 
@@ -340,7 +346,7 @@ the moment the lease-reaper became eligible and stayed red until its next sweep.
 the reaper never touches still fires — that is M4's automated owner (§9). Canary lease-awareness is now
 complete: S-01 and E-05 exclude leased rows, E-01 grace-bounds them; E-02 deliberately does neither (a
 terminal→non-terminal reversal is corruption regardless of ownership, and pull is the more exposed path) ·
-Tier-6 `effect_guard` `execution_id` injection · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
+Tier-6 `effect_guard` `execution_id` injection (**#2392** — build fail-closed injection + operator alarm; the policy itself is already decided in the spec, do not re-open it) · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
 B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, measurement set in §9).
 
 **Also closed by #1766:** the pilot flag was purely additive, so a pilot ran push AND pull concurrently —
@@ -670,6 +676,32 @@ claim failure.
 **M5 — re-delivery + poison-park.** Proves the lease machinery behaves under real
 load rather than in the 2026-07-08 synthetic pilot.
 
+> **First end-to-end observation outside that synthetic pilot: 2026-09-09, local
+> PG stack, forced fault.** Every production soak window to date has reported
+> `redelivery_count = 0`, so a zero in this column had never been distinguishable
+> from "the mechanism is untested". It is now. Method: drop the agent's
+> `execution_timeout_seconds` to 60 so the lease is 360s (`timeout +
+> SLOT_TTL_BUFFER`, stamped exact), dispatch on a pull-eligible trigger, then
+> `SIGKILL` the agent container the moment a worker claims it.
+>
+> *Recovery* — lease expired at +360s, the reaper re-queued the **same
+> `execution_id`** with `redelivery_count` 0→1 and the lease/worker cleared, a
+> **different worker** re-claimed it, and the turn completed `success`. Reproduced
+> twice. On the push path the same kill strands the row until the watchdog writes
+> it off hours later.
+>
+> *Cap* — killing on every claim walked `redelivery_count` 1→2→3 across four
+> claims and then went terminal: `failed`, `error = "poison_lease: pull lease
+> expired and re-delivery cap (3) reached — parked to operator queue"`, lease and
+> worker null, plus a **high-priority pending operator-queue alert** naming the
+> execution. Bounded exactly at the cap, honest terminal, human told.
+>
+> This does not replace the soak — it is a forced fault on one agent, not fleet
+> traffic. It does mean a zero in the production column now reads as "no faults
+> occurred" rather than "unknown". It also makes the T6.3 gate concrete: re-running
+> the same execution is now demonstrated behaviour, which is the condition
+> fail-closed `execution_id` injection was written for.
+
 ```sql
 SELECT redelivery_count, COUNT(*)
 FROM schedule_executions
@@ -781,7 +813,7 @@ Read it against M6's `caller_timeout` baseline class:
 
 **Limitation, stated so it isn't rediscovered mid-analysis:** true
 receipt→terminal wall-clock — the number the calling orchestrator actually feels
-(`PULL_PILOT_946_SOAK.md` §3a) — is recorded **nowhere** on the platform. The row
+— is recorded **nowhere** on the platform. The row
 carries no caller budget and no receipt timestamp. If that number is wanted, the
 caller has to log it, and that instrumentation must exist *before* the flip.
 

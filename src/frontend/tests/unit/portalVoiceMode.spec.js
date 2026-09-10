@@ -346,14 +346,23 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(SHELL).toContain("import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'")
     // The column mounts only once the session id is known — `active` rises before
     // the start request answers (found live: a fetch of `/voice//panel`).
-    expect(SHELL_CODE).toMatch(/<PortalVoiceCanvas\s+v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
+    // #2640 moved the condition into a named computed (the canvas is inside a
+    // <Transition> now, so the rail can no longer be its `v-else-if` and both
+    // arms have to read the SAME rule); the rule itself is unchanged.
+    expect(SHELL_CODE).toMatch(/<PortalVoiceCanvas[\s\S]{0,200}v-if="voiceCanvasHasColumn"/)
+    expect(SHELL_CODE).toMatch(
+      /const voiceCanvasHasColumn = computed\(\(\) => Boolean\(\s*voiceCall\.value\.active && voiceCall\.value\.voiceSessionId && activeAgent\.value/
+    )
     expect(CODE).toMatch(/watch\(\[voiceCallActive, \(\) => voice\.voiceSessionId\.value\]/)
     expect(CANVAS_COLUMN).toContain('if (inFlight || !props.voiceSessionId) return')
     // ent#547: there is no details SIBLING to swap out any more — it is the
     // rail's Info tab, so the voice canvas now displaces the rail itself and the
     // chain is two arms rather than three.
     expect(SHELL_CODE).not.toContain('detailsOpen')
-    expect(SHELL_CODE).toMatch(/<PortalRail[\s\S]{0,80}v-else-if="railVisible"/)
+    // #2640: `v-if` with the negated shared condition, not `v-else-if` — the
+    // <Transition> wrapper broke the adjacency that chain needs. Exclusivity is
+    // the property; which construct expresses it is not.
+    expect(SHELL_CODE).toMatch(/<PortalRail[\s\S]{0,120}v-if="railVisible && !voiceCanvasHasColumn/)
     // The 40 / 60 split is two flex SHARES of a zero basis (2 : 3), never
     // percentages of the row: `w-[40%]` + `w-[60%]` beside the 18rem sidebar
     // summed to 100% + 18rem and the shell's overflow-hidden clipped the

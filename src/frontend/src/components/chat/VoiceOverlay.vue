@@ -100,6 +100,15 @@ defineEmits(['end'])
 const canvasEl = ref(null)
 let rafHandle = null
 let frameCount = 0
+// #2640: the canvas's CSS box, in CSS pixels, and the device-pixel ratio the
+// bitmap was last sized for. The render loop works in CSS pixels and lets the
+// context scale, so the particle field — which lives in a fixed coordinate
+// space around (0,0) and is seeded ONCE — is untouched by a resize. Re-seeding
+// on resize would restart the orb every time the column moves.
+let cssWidth = 0
+let cssHeight = 0
+let pixelRatio = 1
+let resizeObserver = null
 
 // ── Noise (simple value noise, smooth enough for smoke) ──────────────────────
 
@@ -310,8 +319,15 @@ function renderFrame() {
   const canvas = canvasEl.value
   if (!canvas) return
 
-  const W = canvas.width, H = canvas.height
+  // #2640: CSS pixels, not bitmap pixels. `resizeCanvas` sizes the bitmap at
+  // `css * devicePixelRatio` so the orb is not blurry on a HiDPI screen; the
+  // transform below puts the drawing back into CSS-pixel units, so every
+  // literal in this loop (the 45px core, the particles' fixed radii) keeps
+  // meaning what it meant before DPR scaling existed.
+  const W = cssWidth, H = cssHeight
+  if (W <= 0 || H <= 0) { rafHandle = requestAnimationFrame(renderFrame); return }
   const ctx = canvas.getContext('2d')
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
   const cx = W/2, cy = H/2
   frameCount++
 
@@ -350,14 +366,66 @@ function renderFrame() {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
+// #2640: the bitmap must FOLLOW the box. This used to run once, from the
+// `watch(canvasEl)` below, and nothing ever called it again — no
+// ResizeObserver, no window listener, no per-frame check. The canvas is
+// `absolute inset-0 w-full h-full`, so any later change to the column's width
+// (starting or ending a call, dragging the rail, resizing the window, crossing
+// the `sm` breakpoint) left CSS stretching a stale bitmap. That is the
+// reported squashed orb: an ellipse because the bitmap's aspect ratio no
+// longer matched its box's.
+//
+// `DPR_CAP`: a 3x display would otherwise quadruple the fill cost of a
+// full-column particle field for detail nobody can see at this blur radius.
+const DPR_CAP = 2
+
 function resizeCanvas() {
   const canvas = canvasEl.value
   if (!canvas) return
   const { width, height } = canvas.getBoundingClientRect()
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width
-    canvas.height = height
+  // A hidden or not-yet-laid-out canvas measures 0. Sizing a bitmap to 0 throws
+  // away the last good size and draws nothing, so leave it alone and let the
+  // observer fire again when it has a box.
+  if (width <= 0 || height <= 0) return
+  const ratio = Math.min(
+    DPR_CAP,
+    Math.max(1, (typeof window !== 'undefined' && window.devicePixelRatio) || 1),
+  )
+  const nextW = Math.round(width * ratio)
+  const nextH = Math.round(height * ratio)
+  cssWidth = width
+  cssHeight = height
+  pixelRatio = ratio
+  // Assigning to `canvas.width`/`height` CLEARS the canvas and resets its
+  // context state, so it is guarded on an actual change — an observer that
+  // fires on every scroll-induced sub-pixel reflow would otherwise blank the
+  // orb continuously.
+  if (canvas.width !== nextW || canvas.height !== nextH) {
+    canvas.width = nextW
+    canvas.height = nextH
   }
+}
+
+// Both, deliberately. `ResizeObserver` catches the box moving under a stable
+// window — the call's column swap, a rail drag, a flex reflow — which a window
+// listener never sees. The window listener catches a `devicePixelRatio` change
+// (dragging the window to a different-density monitor), which resizes no box
+// at all and so fires no observer.
+function observeCanvas(canvas) {
+  unobserveCanvas()
+  if (typeof ResizeObserver === 'function') {
+    resizeObserver = new ResizeObserver(() => resizeCanvas())
+    resizeObserver.observe(canvas)
+  }
+  if (typeof window !== 'undefined') window.addEventListener('resize', resizeCanvas)
+}
+
+function unobserveCanvas() {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  if (typeof window !== 'undefined') window.removeEventListener('resize', resizeCanvas)
 }
 
 function startLoop() {
@@ -382,13 +450,21 @@ function stopLoop() {
 watch(canvasEl, (canvas) => {
   if (canvas) {
     resizeCanvas()
+    // #2640: the overlay mounts in the same tick the call re-lays out the
+    // columns, so this first measurement can capture the PRE-call width even
+    // with nothing resizing afterwards. The observer fires on the layout that
+    // follows and corrects it, which is why the one-shot measurement above is
+    // no longer the only one.
+    observeCanvas(canvas)
     startLoop()
   } else {
+    unobserveCanvas()
     stopLoop()
   }
 })
 
 onUnmounted(() => {
+  unobserveCanvas()
   stopLoop()
 })
 

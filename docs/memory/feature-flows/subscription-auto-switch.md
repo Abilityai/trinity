@@ -94,6 +94,8 @@ value `.env` supplied, re-arming if the key is removed and re-added.
 | HTTP 429 from agent | rate-limit reached | `rate_limit` |
 | HTTP 503 from agent | auth failure (#285 detection) | `auth` |
 | Error message matches `AUTH_INDICATORS` | credit balance / expired token / unauthorized / etc. | `auth` |
+| Pull terminal `error_code=billing` (#2643) | a pull-owned turn the provider refused on quota | `rate_limit` |
+| Pull terminal `error_code=auth` (#2643) | a pull-owned turn the provider refused on credentials | `auth` |
 
 `AUTH_INDICATORS` (canonical list in
 `src/backend/services/failure_classifier.py::is_auth_failure`, #1088):
@@ -340,3 +342,66 @@ The portal's AUTH/BILLING branch consults it **before** refusing:
 Pull-dispatched terminals still never trigger SUB-003 — `pull_coordination_service.apply_task_result` has no switch hook, and the re-delivery governor treats `billing` as a correlated code. Filed as #2643; inert today because no agent is piloted onto the pull path.
 
 **Tests:** `tests/unit/test_2638_subscription_switch_on_turn.py` — `recovery_verdict` as a pure table (including the failure-after-reset ordering and the fail-closed unreadable-instant cases), readmission through the real selector, the fail-open path readmitting nobody, the pre-dispatch switch's five contracts, `earliest_known_reset`, the fallback's setting semantics, the three-state refusal predicate (including its agreement with `recovery_verdict` on one reading, and the fail-closed unreadable-snapshot case), the `_with_switch` AST guard, and four end-to-end turns through the real `execute_task` + real switcher: 429 → completes on a never-failed alternative, 429 → completes on a **readmitted** one, the honest negative (nothing to switch to ⇒ still FAILED, asserting `error_code == BILLING` — compared by `.value`/`.name`, since #1085's fieldless-dataclass quirk makes `BILLING == AUTH` True), and a pre-dispatch switch spending the turn's single remediation rather than switching twice. Not an integration test against a live instance: a real 429 cannot be provoked from a provider on demand, so the seam actually under test — refusal in, completed turn plus switch out — is exercised where it can be deterministic.
+
+## #2643 (2026-09-09) — the pull sink is a trigger surface too
+
+`pull_coordination_service.apply_task_result` is a CAS-won terminal writer
+and had every other terminal hook — the #1578 completion event, the #1804
+activity close — but no SUB-003 hook. So a pull-dispatched turn that the
+provider refused recorded **no** `subscription_rate_limit_events` row (no
+skip-list entry, no usage card, no pressure badge) and left the agent pinned
+to the subscription that had just refused it. Everything the push path gained
+in #441 / #471 / #792 — and everything #2638 added on top — was unreachable
+from a pull-dispatched turn.
+
+Inert today: the pull path is gated on `PULL_MODE_PILOT_AGENTS` and no agent
+is piloted. It mattered as a prerequisite on the pull-mode default-ON gate
+list — piloting a subscription-backed agent would have silently removed
+SUB-003 from that agent, with nothing saying so.
+
+Three properties are load-bearing:
+
+* **The vocabularies do not line up.** The worker's typed `error_code` calls
+  the quota class `billing` (`result_callback._STATUS_MAP` maps an agent 429
+  to it); this subsystem calls it `rate_limit`. `_switch_failure_kind` is the
+  map, and it is an **allowlist** — an `error_code` it has not heard of
+  switches nothing, because the inverse ("switch unless the code looks
+  benign") would churn an agent through every subscription it owns the first
+  time a worker reports an unfamiliar crash class.
+* **A SUCCESS terminal is excluded, on the merits.** The gate is
+  `error_code` rather than the FAILED/CANCELLED split — a worker that labels a
+  quota refusal `cancelled` still refused for a quota reason — but a turn the
+  provider *served* is evidence the subscription works, so a stray `error_code`
+  riding a success must not move the agent off it. (It is also the only branch
+  where the sink never binds `err_text`, so an ungated hook would raise
+  `NameError` and turn a committed, billed terminal into a 500.)
+* **CAS-won branch only**, beside the two hooks it sits with. A replayed
+  terminal short-circuits above the write and a late one loses the CAS, so
+  neither can spend a second switch (the #1083 rule). Once past that gate
+  `handle_subscription_failure` owns the rest: it records the event
+  unconditionally, then takes the #799 per-agent `agent_switch_lock` and
+  re-reads under it, so two failures racing on one agent still switch once.
+* **It re-delivers nothing.** Re-delivery is the lease reaper's decision
+  (#1081 Phase 3) and the #1085 governor's correlated-cause pause still gates
+  it. The switch only puts the agent somewhere the NEXT attempt can succeed;
+  whether that attempt happens at all is not this hook's call. Concretely: a
+  switched agent's re-delivery is expected to succeed **if** the reaper
+  re-queues the row (under `MAX_REDELIVERY`) and the governor is not paused —
+  and a `billing` terminal is exactly the class the governor counts, so a
+  fleet-wide quota event can legitimately hold the re-delivery back even
+  after a successful switch. The switch is not wasted in that case: it is the
+  next scheduled or claimed turn that benefits.
+
+The sink is synchronous and its caller is async, so the call goes through
+`subscription_auto_switch.spawn_subscription_failure` — the same wrapper shape
+as `spawn_task_terminal_event` (#1578) and `spawn_close_execution_activity`
+(#1804): one coroutine, a strong reference held until it finishes, a raising
+switch logged and swallowed, and no-running-loop treated as a skip with the
+coroutine closed. It runs after a committed, billed terminal and must never be
+able to turn one into a 500 on the result endpoint.
+
+**Still not wired on the pull sink** (out of scope here, named so it is not
+mistaken for done): the #526 AUTH dispatch breaker and the #1085 governor's
+`record_terminal_failure`. `apply_result` has both; `apply_task_result` has
+neither, and neither is a SUB-003 concern.
+

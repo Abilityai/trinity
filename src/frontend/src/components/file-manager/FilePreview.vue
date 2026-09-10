@@ -100,9 +100,14 @@
           spellcheck="false"
         ></textarea>
         <!-- View Mode: Pre/Code -->
+        <!-- #2666: `break-words` beside `whitespace-pre-wrap`, which wraps at
+             ordinary break opportunities only. Wrap rather than horizontal
+             scroll, deliberately: it matches `PortalFilePreview.vue`, and a
+             scrollbar here would sit at the bottom of a `<pre>` that can be
+             80 KB tall — below the fold, so unreachable. -->
         <pre
           v-else
-          class="p-4 text-sm font-mono bg-gray-900 text-gray-100 rounded-lg m-2 overflow-auto whitespace-pre-wrap"
+          class="p-4 text-sm font-mono bg-gray-900 text-gray-100 rounded-lg m-2 overflow-auto whitespace-pre-wrap break-words"
         ><code>{{ textContent }}</code></pre>
       </div>
 
