@@ -1063,6 +1063,16 @@ async def _shutdown_loops_and_transports(app: FastAPI) -> None:
     except Exception as e:
         logger.error(f"Error stopping sync health service: {e}")
 
+    # Shutdown the telemetry-sharing heartbeat (ent#12; #2618). Cancelling the
+    # task mid-send takes the tick's release path, so a graceful shutdown never
+    # leaves this process's tick marker blocking the next boot's first wake.
+    try:
+        from services.telemetry_sharing_service import telemetry_sharing_service
+        await telemetry_sharing_service.stop()
+        logger.info("Telemetry-sharing heartbeat stopped")
+    except Exception as e:
+        logger.error(f"Error stopping telemetry-sharing heartbeat: {e}")
+
     # Shutdown skills library sync service (trinity-enterprise#236)
     try:
         from services.skills_sync_service import skills_sync_service

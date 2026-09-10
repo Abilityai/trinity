@@ -61,7 +61,7 @@ from database import db
 from redis_breaker_util import SingleFlightLock, get_breaker_redis
 from services import settings_service
 from utils.app_version import resolve_release_version
-from utils.helpers import utc_now_iso, iso_cutoff
+from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +84,26 @@ DEFAULT_SHARE_URL = "https://intake.abilityai.dev/v1/telemetry-share"
 _ALL_TIME_HOURS = 24 * 3650
 
 # One send per interval fleet-wide under ``--workers 2``: the two heartbeat
-# loops tick independently (interval + jitter), so a mutex released after the
-# POST would dedupe nothing — this key is a TICK MARKER held by TTL and never
-# released. Fail-open (Redis down ⇒ both workers send, today's behaviour).
+# loops wake independently, so a mutex released after the POST would dedupe
+# nothing — this key is a TICK MARKER held by a TTL keyed to the SEND cadence
+# (half the interval, never the wake). Released only when the receiver did not
+# acknowledge (#2618), so a failed send is retried at the next wake by either
+# worker; an acknowledged send keeps it. Fail-open (Redis down ⇒ both workers
+# send, today's behaviour).
 _TICK_LOCK_KEY = "telemetry_share:tick"
+
+# The heartbeat WAKES far more often than it SENDS (#2618). Dueness is decided
+# at every wake from the persisted last-share stamp, so a restart never resets
+# the cadence: the earliest possible send is one wake after boot (no boot
+# burst), and an overdue install sends 10–20 minutes after boot instead of a
+# full interval later. The jitter keeps today's 10-minute spread on a
+# synchronized fleet reboot. Not an operator setting —
+# TELEMETRY_SHARING_INTERVAL_HOURS stays the only cadence lever.
+_WAKE_SECONDS = 600
+_WAKE_JITTER_SECONDS = 600
+# How long lifespan shutdown waits for the cancelled loop to unwind (the
+# release path is one bounded Redis call; a send in flight is abandoned).
+_STOP_TIMEOUT_SECONDS = 2.0
 
 # The preview cannot show a real share id before consent (none exists yet —
 # minting one on a preview GET would create identity without consent). A fixed,
@@ -655,16 +671,62 @@ def build_aggregate_payload(
 # Egress (gated, validated, fail-open on delivery)
 # ---------------------------------------------------------------------------
 
-def _days_since(iso: Any) -> Optional[int]:
+def _now() -> datetime:
+    """The module's one clock (tests pin it instead of sleeping)."""
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return to_utc_iso(_now())
+
+
+def _seconds_since(iso: Any, *, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds between a stored ISO stamp and ``now`` — None when the stamp is
+    empty or unparseable, NEGATIVE when it lies in the future. One parser for
+    the column (``parse_iso_timestamp``: ``Z``, an offset, or naive-as-UTC)."""
     if not isinstance(iso, str) or not iso:
         return None
     try:
-        then = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
+        then = parse_iso_timestamp(iso)
+    except (ValueError, TypeError):
         return None
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    return max(int((datetime.now(timezone.utc) - then).total_seconds() // 86400), 0)
+    return ((now or _now()) - then).total_seconds()
+
+
+def _days_since(iso: Any) -> Optional[int]:
+    secs = _seconds_since(iso)
+    if secs is None:
+        return None
+    return max(int(secs // 86400), 0)
+
+
+def is_share_due(last_shared_at: Any, interval_seconds: int, *, now: Optional[datetime] = None) -> bool:
+    """Is a heartbeat owed? Due unless the last acknowledged share is PROVABLY
+    inside the current interval (#2618). Empty ⇒ due (the owed backfill retries
+    at the first wake); unparseable ⇒ due (the next 2xx rewrites the row, so a
+    corrupt stamp self-heals); in the future ⇒ due (the clock moved backwards or
+    was fast at write time; one send re-anchors it). Pure — the loop's decision,
+    testable without sleeping."""
+    elapsed = _seconds_since(last_shared_at, now=now)
+    if elapsed is None:
+        return True
+    return not (0 <= elapsed < interval_seconds)
+
+
+def _retry_throttled(recent: List[Dict], interval_seconds: int, *, now: Optional[datetime] = None) -> bool:
+    """After ``RECENT_SENDS_LIMIT`` consecutive failures, attempt at most once per
+    half-interval (#2618, AC 5 as amended at the plan gate). A transient failure
+    is retried at the very next wake; a dead receiver, an air gap or a shipped
+    schema bug falls to twice a day — today's order of magnitude — instead of
+    every wake, and recovers within half an interval of the receiver returning.
+    Measured from the persisted send log, so it survives restarts and needs no
+    Redis; a log that cannot be measured does not throttle (the AC's default)."""
+    if len(recent) < RECENT_SENDS_LIMIT or any(e.get("ok") is True for e in recent):
+        return False
+    age = _seconds_since(recent[0].get("sent_at"), now=now)
+    if age is None:
+        return False
+    return 0 <= age < interval_seconds // 2
 
 
 def _resolve_window(backfill: bool, window_days: Optional[int]) -> tuple[bool, int]:
@@ -674,7 +736,8 @@ def _resolve_window(backfill: bool, window_days: Optional[int]) -> tuple[bool, i
     receiver first acknowledges it — otherwise the disclosed history is lost
     forever for every install that consented before ent#190 existed. Once
     delivered, a heartbeat covers everything since the last successful share
-    (cumulative, gap-free), never a fixed one-day slice.
+    (cumulative, in whole days — the floor means the minutes past the exact
+    interval are not counted; see the feature flow), never a fixed one-day slice.
     """
     if window_days is not None:
         return backfill, max(int(window_days), 0)
@@ -693,12 +756,28 @@ def _resolve_window(backfill: bool, window_days: Optional[int]) -> tuple[bool, i
 async def share_now(*, backfill: bool = False, window_days: Optional[int] = None) -> bool:
     """POST one anonymized aggregate to the hosted intake, IF both gates allow.
 
-    Returns True only on a genuine 2xx. Never raises — best-effort. Both gates
+    Returns True only when the receiver acknowledged (a genuine 2xx), even if
+    the local last-shared stamp could not be written afterwards (#2618). Never
+    raises — best-effort. Both gates
     (config hard-switch + stored consent) are re-checked here so a stale caller
     can't force an egress. The payload is validated against the documented
     schema BEFORE it leaves: a violation is refused, logged, and recorded —
     never sent (fail-closed egress).
     """
+    # The send-log entry exists BEFORE any step that can raise, so a failure
+    # ahead of the POST (a settings read, the id claim, the aggregate build) is
+    # recorded like a refused or failed send: the panel shows it and the retry
+    # cap can see it. Without a row the loop would rebuild the aggregate at
+    # every wake, unthrottled and invisible (#2654 review).
+    entry: Dict[str, Any] = {
+        "sent_at": _now_iso(),
+        "backfill": bool(backfill),
+        "window_days": int(window_days or 0),
+        "ok": False,
+        "http_status": None,
+        "error": None,
+        "payload": None,
+    }
     try:
         if is_hard_disabled():
             logger.info("[telemetry-share] disabled (TELEMETRY_SHARING_ENABLED / DO_NOT_TRACK)")
@@ -707,6 +786,7 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
             return False  # not opted in — nothing leaves the box
 
         backfill, window_days = _resolve_window(backfill, window_days)
+        entry["backfill"], entry["window_days"] = bool(backfill), int(window_days)
         sharing_id = get_or_mint_sharing_id()
 
         # Three table scans: off the event loop, so a 03:30 backup-window tick
@@ -714,15 +794,7 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
         payload = await asyncio.to_thread(
             build_aggregate_payload, window_days, backfill=backfill, sharing_id=sharing_id
         )
-        entry: Dict[str, Any] = {
-            "sent_at": utc_now_iso(),
-            "backfill": bool(backfill),
-            "window_days": int(window_days),
-            "ok": False,
-            "http_status": None,
-            "error": None,
-            "payload": payload,
-        }
+        entry["payload"] = payload
         try:
             validate_payload(payload)
         except TelemetryPayloadSchemaError as e:
@@ -743,9 +815,21 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
         entry["http_status"] = int(resp.status_code)
         if 200 <= resp.status_code < 300:
             entry["ok"] = True
-            db.set_setting(KEY_LAST_SHARED_AT, utc_now_iso())
+            # The receiver has the snapshot: from here the outcome is True
+            # whatever the local bookkeeping does. An unfenced stamp write used
+            # to turn an acknowledged send into False, and a loop that releases
+            # its marker on False would then re-send an accepted snapshot every
+            # wake (#2618). Status/exception CLASS only — never the URL.
+            try:
+                db.set_setting(KEY_LAST_SHARED_AT, _now_iso())
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[telemetry-share] delivered, but the last-shared stamp could not be persisted (%s); "
+                    "until it can be, the cross-worker marker alone paces sends, at half the interval",
+                    type(e).__name__,
+                )
             if backfill:
-                _claim(KEY_BACKFILL_DELIVERED_AT, utc_now_iso())
+                _claim(KEY_BACKFILL_DELIVERED_AT, _now_iso())
             _record_send(entry)
             logger.info(
                 "[telemetry-share] shared (share %s…, backfill=%s, window=%sd)",
@@ -756,8 +840,16 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
         logger.warning("[telemetry-share] POST returned HTTP %s", resp.status_code)
         return False
     except Exception as e:  # noqa: BLE001 — fire-and-forget, swallow everything
+        # Record the attempt unless an inner path already did (each of those
+        # sets `error` or `http_status` before it records), so a raise before
+        # the POST reaches the send log, the panel and the retry cap. The
+        # return keeps the contract: True iff the receiver acknowledged, even
+        # when something raised after the acknowledgement.
+        if entry["error"] is None and entry["http_status"] is None:
+            entry["error"] = type(e).__name__
+            _record_send(entry)
         logger.info("[telemetry-share] skipped (ignored): %s", type(e).__name__)
-        return False
+        return bool(entry["ok"])
 
 
 # Strong references for fire-and-forget sends: a bare ``asyncio.create_task``
@@ -774,54 +866,133 @@ def spawn_share(*, backfill: bool = False) -> None:
 
 class TelemetrySharingService:
     """Background heartbeat that shares the aggregate on the configured cadence
-    when consent is on. Inert (a cheap consent read) when opted out."""
+    when consent is on. Inert (a cheap consent read) when opted out.
+
+    The loop WAKES every ``_WAKE_SECONDS`` and decides at each wake, from the
+    persisted ``telemetry_sharing_last_shared_at``, whether a send is due
+    (#2618). Before that it slept the whole interval from process start, so an
+    install that restarted inside every window shared once — the consent-time
+    backfill — and never again.
+    """
 
     def __init__(self, interval_hours: int = TELEMETRY_SHARING_INTERVAL_HOURS):
         self.interval_seconds = max(int(interval_hours), 1) * 3600
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        # The marker THIS tick claimed, kept only so this tick can release it.
+        self._tick_lock: Optional[SingleFlightLock] = None
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info("[telemetry-share] heartbeat started (every %sh)", self.interval_seconds // 3600)
+        logger.info(
+            "[telemetry-share] heartbeat started (every %sh, checked every %sm)",
+            self.interval_seconds // 3600, _WAKE_SECONDS // 60,
+        )
 
     async def stop(self) -> None:
+        """Cancel the loop and wait (briefly) for it to unwind, so a cancellation
+        mid-send takes the tick's release path before the process goes away."""
         self._running = False
-        if self._task:
-            self._task.cancel()
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=_STOP_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001 — shutdown never blocks on the heartbeat
+            pass
 
     def _claim_tick(self) -> bool:
-        """One send per interval across workers: a TTL-held tick marker, never
-        released (a mutex released after the POST would dedupe nothing — the
-        loops drift by jitter). Fail-open when Redis is unavailable."""
+        """One send per interval across workers: a TTL-held tick marker keyed to
+        the SEND cadence. The TTL (half the interval) must outlive the longest
+        wake and the claim → stamp-write gap; it is the stamp, not the marker,
+        that defers the next send. A FRESH lock per claim: ``SingleFlightLock``
+        is single-use (``acquire()`` answers True forever once it has won or
+        degraded), so a reused instance would dedupe nothing. Fail-open when
+        Redis is unavailable."""
+        self._tick_lock = None
         try:
             lock = SingleFlightLock(
                 _TICK_LOCK_KEY, max(self.interval_seconds // 2, 60), client=get_breaker_redis()
             )
-            return bool(lock.acquire())
+            won = bool(lock.acquire())
         except Exception:  # noqa: BLE001 - never block a heartbeat on the marker
             return True
+        if won:
+            self._tick_lock = lock
+        return won
+
+    def _release_tick(self) -> None:
+        """Compare-and-delete the marker THIS tick claimed — foreign-safe by
+        construction, a no-op on a fail-open lock. Never raises."""
+        lock, self._tick_lock = self._tick_lock, None
+        if lock is None:
+            return
+        try:
+            lock.release_if_owned()
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _tick(self) -> bool:
+        """One wake (#2618): gates → dueness from the persisted stamp → the retry
+        cap → the cross-worker marker → one send. Returns True only when the
+        receiver acknowledged. The settings reads run off the event loop, so a
+        wake landing in a write-locked moment cannot stall every request for
+        the busy timeout."""
+        def _state():
+            # Gates first (AC 7): no stamp read and no Redis touch while either is off.
+            if is_hard_disabled() or not is_consent_enabled():
+                return None
+            return _read(KEY_LAST_SHARED_AT, ""), _recent_sends()
+
+        state = await asyncio.to_thread(_state)
+        if state is None:
+            return False
+        last_shared_at, recent = state
+        if not is_share_due(last_shared_at, self.interval_seconds):
+            return False
+        if _retry_throttled(recent, self.interval_seconds):
+            logger.debug("[telemetry-share] retry throttled after %s consecutive failures", RECENT_SENDS_LIMIT)
+            return False
+        if not self._claim_tick():
+            logger.debug("[telemetry-share] tick already claimed by a sibling worker")
+            return False
+        acknowledged = False
+        try:
+            acknowledged = await share_now(backfill=False)
+        finally:
+            # Released only when the receiver did not acknowledge — including a
+            # cancellation mid-send (a reload, a SIGTERM), so a dead process's
+            # marker never blocks the next boot's first wake. An acknowledged
+            # send keeps it: with the stamp unwritable, the marker is what
+            # stands between a sibling and a duplicate of an accepted snapshot.
+            if not acknowledged:
+                self._release_tick()
+            else:
+                self._tick_lock = None
+        return bool(acknowledged)
 
     async def _loop(self) -> None:
         while self._running:
-            # Sleep FIRST so boot isn't a share burst; jitter so replicas don't
-            # realign. If hard-disabled, idle (the operator can't opt in anyway).
-            jitter = random.uniform(0, min(600, self.interval_seconds * 0.1))
+            # Sleep FIRST so boot isn't a share burst — the earliest possible send
+            # is one wake in; jitter so replicas don't realign. Dueness is decided
+            # at every wake from the persisted stamp, never from process age.
+            jitter = random.uniform(0, _WAKE_JITTER_SECONDS)
             try:
-                await asyncio.sleep(self.interval_seconds + jitter)
+                await asyncio.sleep(_WAKE_SECONDS + jitter)
             except asyncio.CancelledError:
                 break
             if not self._running:
                 break
-            if is_hard_disabled() or not is_consent_enabled():
-                continue
-            if not self._claim_tick():
-                logger.debug("[telemetry-share] tick already claimed by a sibling worker")
-                continue
-            await share_now(backfill=False)
+            try:
+                await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a tick must never end the loop
+                logger.exception("[telemetry-share] tick failed; the next wake retries")
 
 
 telemetry_sharing_service = TelemetrySharingService()

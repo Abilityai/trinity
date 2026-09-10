@@ -29,6 +29,12 @@ class FakeDB:
     def set_setting(self, key, value):
         self.settings[key] = value
 
+    def insert_setting_if_absent(self, key, value):
+        if key in self.settings:
+            return False
+        self.settings[key] = value
+        return True
+
 
 class FakeResp:
     """httpx.Response stand-in with a controllable status + .json() behavior."""
@@ -289,8 +295,142 @@ def test_network_failure_swallowed_and_marker_still_claimed(fake_db, monkeypatch
     assert "me@acme.com" not in caplog.text
 
 
+class _ReadOnlyDB(FakeDB):
+    """A store that refuses every write — the proof that a read path is a read
+    path is a sink that raises, not a mock whose calls are counted (a stubbed
+    accessor is exactly the test that cannot see its own side effect,
+    learnings 2026-08-05)."""
+
+    def set_setting(self, key, value):
+        raise AssertionError(f"a read-shaped path wrote {key!r}")
+
+    def insert_setting_if_absent(self, key, value):
+        raise AssertionError(f"a read-shaped path claimed {key!r}")
+
+
+# ---------------------------------------------------------------------------
+# ent#545 — the non-minting read twin
+# ---------------------------------------------------------------------------
+
+def test_get_installation_id_is_none_on_a_fresh_store_and_writes_nothing(monkeypatch):
+    db = _ReadOnlyDB()
+    monkeypatch.setattr(ois, "db", db)
+    assert ois.get_installation_id() is None
+    assert db.settings == {}  # no row appeared behind the reader's back
+
+
+def test_get_installation_id_returns_the_stored_id_verbatim(monkeypatch):
+    db = _ReadOnlyDB({"installation_id": "9c3f00a1-1111-2222-3333-444455556666"})
+    monkeypatch.setattr(ois, "db", db)
+    assert ois.get_installation_id() == "9c3f00a1-1111-2222-3333-444455556666"
+
+
+@pytest.mark.parametrize("stored", ["", "   ", None, 42, b"bytes"])
+def test_get_installation_id_reads_an_unusable_value_as_not_minted(monkeypatch, stored):
+    db = _ReadOnlyDB({"installation_id": stored})
+    monkeypatch.setattr(ois, "db", db)
+    assert ois.get_installation_id() is None
+
+
+def test_get_installation_id_does_not_hide_a_read_failure(monkeypatch):
+    """`None` means "not minted" on the wire; a DB fault must not be rendered
+    as that state. The caller decides what an unreadable store means."""
+    class _Broken(_ReadOnlyDB):
+        def get_setting_value(self, key, default=None):
+            raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr(ois, "db", _Broken())
+    with pytest.raises(RuntimeError, match="settings unreadable"):
+        ois.get_installation_id()
+
+
+def test_the_read_twin_sees_what_the_writer_minted(fake_db):
+    """The two accessors are one key: whatever the writers' accessor mints, the
+    read twin reports, and the read twin reports nothing before that."""
+    assert ois.get_installation_id() is None
+    minted = ois.get_or_create_installation_id()
+    assert ois.get_installation_id() == minted
+
+
 def test_installation_id_created_once_and_stable(fake_db):
     a = ois.get_or_create_installation_id()
     b = ois.get_or_create_installation_id()
     assert a == b
     assert fake_db.settings["installation_id"] == a
+
+
+@pytest.mark.parametrize("corrupt", ["", "   ", None, 42])
+def test_a_corrupt_row_is_healed_to_a_fresh_id_and_stored(monkeypatch, corrupt):
+    """The review of the first cut found the claim shape had destroyed the
+    pre-ent#545 self-heal: with a stored `""`, the SELECT-miss fell through to
+    a claim the PRIMARY KEY refuses, and the read-back returned `""` — forever,
+    keying every product event, the intake POST and the canary label on the
+    empty string. The writer now heals exactly the values the read twin
+    refuses, through the upsert (the one place it is right), and stores it."""
+    db = FakeDB({"installation_id": corrupt})
+    monkeypatch.setattr(ois, "db", db)
+    got = ois.get_or_create_installation_id()
+    assert got and got.strip() and got != corrupt
+    assert db.settings["installation_id"] == got          # healed IN the store, not just returned
+    assert ois.get_installation_id() == got                # the read twin agrees
+    assert ois.get_or_create_installation_id() == got      # and it is stable from here on
+
+
+def test_a_healthy_row_is_returned_verbatim_without_any_write(monkeypatch):
+    db = _ReadOnlyDB({"installation_id": "9c3f00a1-1111-2222-3333-444455556666"})
+    monkeypatch.setattr(ois, "db", db)
+    assert ois.get_or_create_installation_id() == "9c3f00a1-1111-2222-3333-444455556666"
+
+
+@pytest.mark.parametrize("corrupt", ["", "   "])
+def test_the_real_settings_layer_heals_a_blank_row(tmp_path, monkeypatch, corrupt):
+    """The same proof against the REAL SQLite settings layer, not the FakeDB —
+    the shape the reviewer used to find the regression. `insert_setting_if_absent`
+    is refused by the primary key on the blank row, so only the upsert can heal
+    it; a stub that auto-succeeds would pass with the bug intact."""
+    db_file = tmp_path / "trinity-545-heal.db"
+    monkeypatch.setenv("TRINITY_DB_PATH", str(db_file))
+    import db.connection as conn_mod
+    monkeypatch.setattr(conn_mod, "DB_PATH", str(db_file))
+    from db.engine import get_engine
+    from db.settings import SettingsOperations
+    from db.tables import metadata, system_settings
+    metadata.create_all(get_engine(), tables=[system_settings])
+    ops = SettingsOperations()
+    ops.set_setting("installation_id", corrupt)
+    assert ops.get_setting_value("installation_id", None) == corrupt
+
+    class _RealDB:
+        get_setting_value = staticmethod(ops.get_setting_value)
+        set_setting = staticmethod(ops.set_setting)
+        insert_setting_if_absent = staticmethod(ops.insert_setting_if_absent)
+
+    monkeypatch.setattr(ois, "db", _RealDB)
+    got = ois.get_or_create_installation_id()
+    assert got and got.strip() and got != corrupt
+    assert ops.get_setting_value("installation_id", None) == got
+    assert ois.get_or_create_installation_id() == got
+
+
+def test_minting_is_a_write_once_claim_and_a_loser_keeps_the_winners_id(monkeypatch):
+    """Two workers SELECT-miss together (ent#545, the race #1987 recorded as
+    pre-existing in the accessor). The claim must go through the write-once
+    primitive, never the upsert, and the worker whose claim loses must return
+    the id that actually landed — not the candidate it minted and lost."""
+    WINNER = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+
+    class _Racing(FakeDB):
+        def set_setting(self, key, value):
+            raise AssertionError("minting must not upsert — an upsert is last-write-wins")
+
+        def insert_setting_if_absent(self, key, value):
+            # The other worker's row lands between this worker's SELECT-miss
+            # and its claim: the PRIMARY KEY refuses ours.
+            self.settings.setdefault(key, WINNER)
+            return self.settings[key] == value
+
+    db = _Racing()
+    monkeypatch.setattr(ois, "db", db)
+    assert ois.get_or_create_installation_id() == WINNER
+    assert db.settings == {"installation_id": WINNER}
+    assert ois.get_installation_id() == WINNER
