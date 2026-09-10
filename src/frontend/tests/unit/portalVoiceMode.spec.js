@@ -189,6 +189,54 @@ describe('the transcript block — grouped by call id, never by an opener row', 
     expect(items[0].kind).toBe('message')
   })
 
+  // trinity#2694 — the thread is one timeline. The block sits exactly where the
+  // call happened: after every turn before it, before every turn after it, and
+  // a second call is a second block at its own position.
+  it('renders typed → call → typed → call → typed in that order, each call at its own place (#2694)', () => {
+    const rows = [
+      typed(0), typed(1, 'assistant'),
+      spoken('c1', 2), spoken('c1', 3, 'assistant'), label('c1', 'Voice call · 4 min'),
+      typed(5), typed(6, 'assistant'),
+      spoken('c2', 7), spoken('c2', 8, 'assistant'), label('c2', 'Voice call · 1 min'),
+      typed(10), typed(11, 'assistant'),
+    ]
+    const items = groupVoiceBlocks(rows)
+    expect(items.map((i) => (i.kind === 'voice-call' ? `call:${i.callId}` : `m:${i.index}`)))
+      .toEqual(['m:0', 'm:1', 'call:c1', 'm:5', 'm:6', 'call:c2', 'm:10', 'm:11'])
+    // the two rows of one exchange keep their order inside the block
+    expect(items[2].turns.map((t) => t.content)).toEqual(['said 2', 'said 3'])
+    expect(items[5].turns.map((t) => t.content)).toEqual(['said 7', 'said 8'])
+    expect(items[2].label).toBe('Voice call · 4 min')
+    expect(items[5].label).toBe('Voice call · 1 min')
+  })
+
+  it('anchors a block at the call’s first row in the array, never hoisted (#2694)', () => {
+    // The array IS the timeline (the server orders by created_at). A block must
+    // never be moved ahead of a typed row that precedes the call's first row.
+    const rows = [typed(0), typed(1, 'assistant'), typed(2), spoken('c1', 3), label('c1', 'Voice call · 1 min')]
+    const items = groupVoiceBlocks(rows)
+    expect(items.map((i) => i.kind)).toEqual(['message', 'message', 'message', 'voice-call'])
+  })
+
+  it('says when the window’s ceiling cut the old end of the thread (#2694)', () => {
+    // The read is a window of typed turns under a row ceiling; a thread that
+    // silently starts mid-call is the very symptom the window fix removes.
+    const src = stripComments(CONVERSATION)
+    expect(src).toContain('data-testid="portal-history-truncated"')
+    expect(src).toMatch(/v-if="historyTruncated"/)
+    expect(src).toContain('historyTruncated.value = truncated === true')
+  })
+
+  it('polls for the reply with the narrow read, never the window (#2694)', () => {
+    const src = stripComments(CONVERSATION)
+    expect(src).toContain('{ limit: REPLY_POLL_ROWS }')
+    expect(src).toContain('replyBaseline(')
+    expect(src).not.toContain('persistedAssistantCount')
+    // the store threads `limit` through as a query param
+    const store = read('../../src/stores/clientPortal.js')
+    expect(store).toContain('if (limit) params.limit = limit')
+  })
+
   it('labels a call by rounded minutes, never under one, and says when the cap ended it', () => {
     expect(voiceCallLabel(12)).toBe('Voice call · 1 min')
     expect(voiceCallLabel(250)).toBe('Voice call · 4 min')

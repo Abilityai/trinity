@@ -2867,6 +2867,30 @@
         "unit"
       ],
       "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
+    },
+    {
+      "file": "unit/test_2694_voice_thread_window.py",
+      "feature": "#2694",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "client-portal",
+        "voice",
+        "unit"
+      ],
+      "description": "#2694 read side: the thread window is counted in TYPED turns (the spoken rows of the calls among them ride along) under a row ceiling that reports `truncated`, so a 180-row voice call can no longer push the typed turns before it off the screen; typed->call->typed->call->typed reads back as the timeline through the real writers; the resend-dedup read keeps row semantics; equal stamps order deterministically; the platform-rows-since-last-reply delta is cursored on the newest typed ASSISTANT row (survives a failed typed turn); the history route accepts a bounded `limit` for the poll's narrow read and nothing that widens the window."
+    },
+    {
+      "file": "unit/test_2694_voice_delta_context.py",
+      "feature": "#2694",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "client-portal",
+        "voice",
+        "unit"
+      ],
+      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on."
     }
   ]
 }

@@ -142,13 +142,91 @@ rating control.
 
 **Readers of the table** (the ent#428 lesson — a column that changes what a row
 *is* must be met by every existing reader): `_format_history_context` labels
-spoken rows `Client (voice):` / `You (voice):` and **budgets** them to the last
-12 per call with an omission line; the resend dedup in `_persist_user_turn`
+spoken rows `Client (voice):` / `You (voice):` and budgets them — since #2694 under
+ONE total char budget across calls (24k, a whole 30-minute call fits), trimmed
+oldest-first with every cut named, the call's label as a bracketed marker; the resend dedup in `_persist_user_turn`
 ignores spoken rows (typing the words you just said is a new message, not a
 retry); `_title_plan`'s two-message window is bypassed by `title_if_empty` from
 the first spoken line; `PortalHistoryMessage` carries `source` /
 `voice_call_id`; ratings on spoken rows are accepted via the API but the block
 renders no control.
+
+## One timeline, and the agent knows what was said (trinity#2694)
+
+Two defects reported together on 2026-09-10, one per side of the table.
+
+**The read side — the window, not the sort.** The stored order was never
+wrong: both writers stamp the same ISO-Z microsecond format and the read
+orders by it. `get_history` returned the newest **100 rows**, and a 30-minute
+call is ~180, so one call filled the window, every typed turn before it fell
+off, and the block — anchored at the call's first row *in the window* —
+rendered as the head of the thread. `db.get_portal_thread_window` now counts
+the window in **typed turns** (`source IS NULL`; the newest 100 for the
+endpoint, 20 for the cold replay): the `(created_at, id)` of the N-th newest
+typed row is the threshold, everything at or after it rides along (so a call's
+rows come whole), under `PORTAL_HISTORY_ROW_CEILING` (600, the NEWEST survive)
+that reports itself as `PortalHistory.truncated`; the chat then shows one
+platform line, "Earlier messages in this chat aren't shown", instead of
+silently re-creating the symptom at call #9. Both statements order by
+`created_at DESC, id DESC` — the `id` tiebreak is a uuid, stable not
+chronological, so the threshold and the range agree at a tie. Verified on
+SQLite (the test suite) and PostgreSQL (the statements run as-is). The
+resend-dedup read (`limit=1`) and the voice prompt's own opening context keep
+row semantics — the latter trims oldest-first at 3 000 chars and would have
+lost the newest turns under a wider window.
+
+**The reply poll pays for none of it.** `awaitPersistedReply` polls history
+every 700 ms early in a turn; over the window that would be hundreds of KB per
+tick, and its count-based detector would break — between the baseline and a
+poll the window can shift by a whole call, the count never grows, and a turn
+that answered is reported as "check shortly". `GET …/history?limit=N` (1–50,
+row semantics, the newest rows) is the poll's narrow read, and
+`portalUtils.js::replyFromHistory` finds the reply by **identity**: the
+baseline is the newest *typed* assistant row's id (`replyBaseline`), a reply
+is new when that id changed, and a spoken reply is never this turn's answer.
+Nothing on the route can widen the window.
+
+**The turn side — what the live session never heard.** A call runs on the
+voice provider and writes its spoken turns straight into the thread; the
+agent's own session was not there. The history replay is dropped on the
+resumed path (ent#358 — the session already remembers the typed conversation),
+which was true for typed turns and false for spoken ones. A resumed turn is
+now prefixed with the **delta**: `db.get_platform_rows_since_last_reply` — the
+spoken rows and platform `system` lines later than the newest typed
+*assistant* row (the last thing the live session itself wrote; a user-row
+cursor would erase a call from every later delta after one failed typed turn)
+— rendered by `_format_voice_delta` under `VOICE_DELTA_HEADER`. The cold
+replay (`_format_history_context`, rewritten) renders the same rows in the same
+form and the delta is *not* added on top, so a cold retry never double-sends.
+One renderer (`_context_lines`) for both: `Client (voice):` / `You (voice):`,
+the platform's own row as a bracketed marker `[Voice call · 4 min]` (ent#523
+skipped these; a marker keeps "never the agent's words" and stops hiding that a
+call ended or Main was reset), whitespace collapsed inside a row so a
+transcript line cannot forge a labelled line, and ONE total spoken budget
+(`_SPOKEN_CONTEXT_MAX_CHARS`, 24k — a whole 30-minute call fits) trimmed
+oldest-first across calls, every cut named by count and nothing pointing the
+agent at a place it cannot read. Read before `_persist_user_turn`, fail-soft,
+computed in `portal_chat` only (the streaming entry funnels through it).
+
+**No reply lands mid-call — two gates, one marker.** The tab's composer is
+inert during a call, but a reply can be in flight from another tab, a reload,
+or the headless `/chat` surface, and a reply between two spoken rows would sit
+after the cursor and hide the call's first half from the next delta. So both
+sides refuse, in words, after their uniform 404: `start_workspace_voice`
+answers **409** ("A reply is still being written — wait for it, then start the
+call.") when `get_turn_inflight` is set, and both turn entries (`portal_chat`,
+`start_portal_turn`) answer **409** (`category="voice_call_active"`, unbilled,
+retryable) through `_refuse_turn_during_voice_call` while the thread's live-call
+marker `portal_voice_active:{session}` is set — written by `start_workspace_voice`
+once the provider session exists (TTL = the cap + slack), cleared by the bridge's
+`finally` and by the REST `/stop`. Both reads are fail-open on a Redis outage:
+a call over a possibly running turn, or a turn over a possibly live call, beats
+silencing either. A client-side lock is never the second gate — it covers one
+tab (the review's finding, recorded in `docs/memory/learnings.md`).
+
+Deferred, registered in the debt inbox: cursor pagination for long threads
+(the ceiling is the honest stopgap), a transcript file the agent can read
+(the budget covers the cap), a partial index on typed rows.
 
 ## The session outlives the connection
 

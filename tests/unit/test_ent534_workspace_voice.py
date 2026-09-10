@@ -371,22 +371,31 @@ def test_the_call_label_says_how_it_ended():
 # ---------------------------------------------------------------------------
 
 def test_history_context_labels_spoken_rows_and_budgets_a_long_call():
-    from client_portal.service import _format_history_context, _VOICE_CONTEXT_ROWS_PER_CALL
+    """#2694 rewrote the budget: the 12-rows-per-call counter (which hid nine
+    tenths of a real call) became ONE total char budget across calls, trimmed
+    oldest-first with every cut named; and the call's label is a bracketed
+    marker rather than skipped — still never the agent's words."""
+    from client_portal.service import _format_history_context
     rows = [{"role": "user", "content": "typed first", "source": None}]
     for i in range(20):
-        rows.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"spoken {i}",
+        rows.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"spoken {i:02d}",
                      "source": "voice", "voice_call_id": "c1"})
     rows.append({"role": "system", "content": "Voice call · 9 min", "source": "voice", "voice_call_id": "c1"})
     rows.append({"role": "assistant", "content": "typed reply", "source": None})
+    # a call of this size fits whole at the default budget
     out = _format_history_context(rows)
     lines = out.splitlines()
     assert lines[1] == "Client: typed first"
-    assert lines[2] == f"[{20 - _VOICE_CONTEXT_ROWS_PER_CALL} earlier spoken turns of a voice call omitted]"
-    spoken = [l for l in lines if "(voice)" in l]
-    assert len(spoken) == _VOICE_CONTEXT_ROWS_PER_CALL
-    assert spoken[-1] == "You (voice): spoken 19"
-    assert "Voice call · 9 min" not in out            # the platform's label is not a party
+    assert len([l for l in lines if "(voice)" in l]) == 20
+    assert "[Voice call · 9 min]" in lines and "You: Voice call" not in out
     assert lines[-1] == "You: typed reply"
+    # under a tight budget the OLDEST spoken rows go, the cut is named, the
+    # newest exchange — what the next typed turn is about — survives
+    out = _format_history_context(rows, spoken_budget=len("spoken 00") * 8)
+    lines = out.splitlines()
+    assert lines[2] == "[12 earlier spoken turns of this call not included]"
+    spoken = [l for l in lines if "(voice)" in l]
+    assert len(spoken) == 8 and spoken[-1] == "You (voice): spoken 19"
 
 
 def test_a_spoken_last_line_does_not_swallow_the_same_words_typed(monkeypatch):
