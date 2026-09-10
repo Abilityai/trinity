@@ -121,7 +121,10 @@ case "$_go" in y|Y|yes|YES) ;; *) fail "Nothing was created." ;; esac
 # group-readable for the instant between creation and chmod, and it carries
 # both secrets.
 umask 077
-USER_DATA="$(mktemp -t trinity-user-data)"
+# A full path template, not `mktemp -t NAME`: `-t` takes a bare prefix on
+# macOS/BSD but GNU coreutils requires the trailing X's and dies with
+# "too few X's in template" — which is every Linux operator running this.
+USER_DATA="$(mktemp "${TMPDIR:-/tmp}/trinity-user-data.XXXXXX")"
 trap 'rm -f "$USER_DATA"' EXIT
 
 cat > "$USER_DATA" <<USERDATA
