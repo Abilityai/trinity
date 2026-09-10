@@ -96,11 +96,11 @@ export function receiverCopy(hint, shareUrl = '') {
     case 'ok':
       return 'The receiving service acknowledged the last send.'
     case 'receiver_not_live':
-      return 'The receiving service answered 404 at the default address. The send is recorded here and retried daily.'
+      return 'The receiving service answered 404 at the default address. The send is recorded here and retried automatically.'
     case 'receiver_404':
       return `The receiver at ${shareUrl} answered 404. Check TELEMETRY_SHARING_URL.`
     case 'failed':
-      return 'The last send failed; it is recorded below and retried daily.'
+      return 'The last send failed; it is recorded below and retried automatically.'
     default:
       return 'Nothing has been sent yet.'
   }

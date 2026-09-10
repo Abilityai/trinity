@@ -13,9 +13,13 @@
     <!-- ============================ SIGN-IN ============================ -->
     <div v-else-if="!store.isClientSignedIn" class="flex-1 flex items-center justify-center px-4">
       <div class="w-full max-w-sm">
-        <div class="flex items-center gap-2 mb-6">
-          <svg class="w-7 h-7 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-          <span class="font-semibold text-lg">Workspace</span>
+        <!-- ent#556: the same mark and wording as the signed-in shell, from the
+             same component. Deliberately INERT here: the reader is signed out
+             and already at the Workspace root, so a link would go nowhere they
+             are not — and the one destination that would mean something is a
+             platform route a client session cannot open. -->
+        <div class="mb-6">
+          <PortalBrand mark-size="h-7 w-7" text-size="text-lg" />
         </div>
 
         <!-- #2261 — the store has set `sessionExpired` since ent#375 and nothing
@@ -625,6 +629,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
+import PortalBrand from '@/components/portal/PortalBrand.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalLoops from '@/components/portal/PortalLoops.vue'

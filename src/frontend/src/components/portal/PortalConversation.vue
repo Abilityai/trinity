@@ -240,7 +240,7 @@
          tabs and composer stay in view, inert. -->
     <div class="relative flex-1 min-h-0 flex flex-col">
     <VoiceOverlay :voice="voice" @end="endVoiceCall" />
-    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
+    <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5" @scroll.passive="onTranscriptScroll">
       <!-- #2540: a skeleton while the thread's history loads — the scanline is
            the chart motion, not a page's. Keyed on the VERDICT `historyLoaded`,
            never on `loadingHistory`: the session-adoption path re-runs
@@ -401,6 +401,7 @@
       </div>
       </div>
     </div>
+    <PortalJumpToLatest :show="showJumpToLatest" :count="unreadBelow" @jump="scrollToLatest" />
     </div>
 
     <!-- ent#364: asks this agent raised, immediately above the composer — the
@@ -696,7 +697,9 @@ import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { useStickToBottom } from '@/composables/useStickToBottom'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
@@ -1030,6 +1033,18 @@ const {
 const offline = ref(typeof navigator !== 'undefined' && navigator.onLine === false)
 
 const scrollEl = ref(null)
+// #2624: an agent's reply settling must not move a transcript the reader is
+// holding. The rule lives in the composable, shared with `PortalRoom` — the two
+// surfaces had two copies of the same unconditional `scrollTop = scrollHeight`.
+const {
+  unread: unreadBelow,
+  showJumpToLatest,
+  onScroll: onTranscriptScroll,
+  onArrive: onMessagesArrived,
+  pinToBottom,
+  scrollToLatest,
+  reset: resetFollowing,
+} = useStickToBottom(scrollEl)
 const textarea = ref(null)
 const fileInput = ref(null)
 const pickerRef = ref(null)
@@ -1078,7 +1093,9 @@ async function loadThread(sessionId) {
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
   } catch { /* start empty */ }
-  finally { loadingHistory.value = false; historyLoaded.value = true; await scrollDown() }
+  // #2624: opening a thread is an intent — it pins and re-arms, so a thread
+  // always opens at the bottom however the previous one was left.
+  finally { loadingHistory.value = false; historyLoaded.value = true; await pinToBottom() }
 
   // ent#286: a turn was still running when this client loaded — reattach to it
   // rather than showing a thread that looks finished. The user's message is
@@ -1185,7 +1202,10 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     liveActivity.value = []
     activeExecutionId.value = null
     clearInterval(elapsedTimer)
-    await scrollDown()
+    // #2624: a reply settling is an ARRIVAL, not an intent — this turn was
+    // already running when the thread loaded, so the reader may well have
+    // scrolled up while waiting for it.
+    await onMessagesArrived(1)
   }
 }
 
@@ -1195,6 +1215,10 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   if (voiceCallActive.value) await voice.stop()
   currentSessionId.value = sid
   resetTypeahead()
+  // #2624: the outgoing thread's element is about to be replaced, so re-arm
+  // WITHOUT scrolling it. Every branch below either loads a thread (which pins)
+  // or empties the transcript, so both land at the bottom.
+  resetFollowing()
   // ent#451: `newChat` is the deliberate-fresh-start signal, and it has to be
   // consulted BEFORE the agent-changed branch. Without it this read a changed
   // agent as "load that agent's history" and called `fetchHistory(name, null)`,
@@ -1264,10 +1288,6 @@ function pickAgent(a) {
   emit('switch-agent', a.name)   // mid-thread → parent starts a NEW chat with that agent (no carry-over)
 }
 
-async function scrollDown() {
-  await nextTick()
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
-}
 // #2211: the composer's growth ceiling, matching the `max-h-40` class on the
 // textarea (40 * 4px). Named so the class and the JS cannot drift apart.
 const COMPOSER_MAX_PX = 160
@@ -1654,7 +1674,13 @@ async function deliver(text) {
     activeExecutionId.value = null
     pendingUserText.value = ''
     cancelling.value = false
-    await scrollDown()
+    // #2624: the reply landing is an arrival. The SEND that started this turn
+    // already pinned and re-armed (below), so a reader who stayed at the bottom
+    // still follows the answer down — and one who scrolled up mid-turn, to
+    // re-read what they asked about, keeps their place. A long streaming reply
+    // is the same story: nothing here moves the viewport while it grows, and
+    // this settle is the only scroll it can cause.
+    await onMessagesArrived(1)
   }
 }
 
@@ -1949,7 +1975,10 @@ async function submitUserText(text) {
     // Ordering is a convenience; it must never be able to block a send.
   }
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
-  await scrollDown()
+  // #2624: sending is an explicit intent to follow the bottom — it pins and
+  // re-arms whatever the prior scroll position, so the reader is never handed
+  // an unread badge for their own message.
+  await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text)
