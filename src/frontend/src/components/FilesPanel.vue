@@ -91,7 +91,12 @@
       </div>
 
       <!-- Right Panel: Preview -->
-      <div class="flex-1 flex flex-col bg-gray-50 dark:bg-gray-900">
+      <!-- #2666: `min-w-0` is load-bearing. A flex item's automatic minimum
+           size is its content's min-content width, so one unbreakable token in
+           a previewed file made this column refuse to shrink; the root clips
+           (`overflow-hidden`) and nothing scrolls horizontally, so the overflow
+           was unreachable — measured 3048px of content in a 1280px clip. -->
+      <div class="flex-1 min-w-0 flex flex-col bg-gray-50 dark:bg-gray-900">
         <!-- No File Selected -->
         <div v-if="!selectedFile" class="flex-1 flex items-center justify-center">
           <div class="text-center">

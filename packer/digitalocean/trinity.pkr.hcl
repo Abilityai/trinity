@@ -78,16 +78,72 @@ variable "region" {
   default = "nyc3"
 }
 
-# DO's own guidance builds on the smallest size; the snapshot is size-agnostic.
-# The LISTING recommends 8 GB — that is a droplet-plan recommendation in the
-# listing copy, unrelated to what the image is built on.
+# The build droplet's CPU and RAM do NOT reach the snapshot — a snapshot is a
+# disk image, and Trinity never runs during the build (01-provision.sh installs
+# and pulls; start.sh runs at first boot on the customer's droplet). The only
+# property that propagates is the DISK SIZE, and DigitalOcean does not let it
+# shrink: "You can increase the boot disk size when resizing, but you cannot
+# decrease it."
+#
+# So this value decides which plans a customer can deploy the listing to. At
+# s-2vcpu-4gb (80 GB disk) every plan with a smaller boot disk is excluded —
+# and on DigitalOcean's v5 line disk is decoupled from memory, so that is not
+# just the cheap tiers: s5-8vcpu-16gb-30gb is 8 vCPU and 16 GiB RAM on a 30 GiB
+# disk, exactly the plan a Trinity operator should pick, and an 80 GB snapshot
+# cannot deploy to it. Same shape across the General Purpose and CPU-Optimized
+# lines, which are deliberately RAM-rich and disk-poor.
+#
+# The criterion is therefore the smallest boot disk Trinity's baked images
+# actually fit on, with whatever CPU/RAM makes the build fast — NOT the smallest
+# plan, and unrelated to the >=8 GB the LISTING recommends for running Trinity.
+#
+# Measured 2026-09-10 against snapshot trinity-v0-9-5-rc2-20260903:
+#
+#     Min Disk Size    Size
+#     80               9.01 GiB
+#
+# The content is 9 GiB. The 80 GB floor was inherited entirely from the build
+# droplet, so every customer was being forced onto an 80 GB boot disk to hold
+# 9 GiB — for nothing.
+#
+# s-1vcpu-2gb (50 GB) was chosen on the assumption that Docker's uncompressed
+# overlay2 tree would run to 18-20 GB, too close to a 25 GB disk to risk. That
+# assumption was WRONG, and measuring it is what proved it: a droplet booted
+# from the 2026-09-10 snapshot reports
+#
+#     /dev/vda1  77G  8.8G  68G  12% /
+#
+# 8.8 GB used, everything installed and Trinity running. Peak build-time usage
+# adds only the apt caches that cleanup.sh then removes. A 25 GB disk has room
+# several times over.
+#
+# 50 GB is also what three of DigitalOcean's own catalog apps use (openclaw,
+# jellyfin, craftcms), so it is not an odd shape at review — but on disk alone
+# it is no longer justified.
+#
+# s-1vcpu-1gb is DigitalOcean's recommended $6 build droplet and what AC 2 asks
+# for. Both open questions about it are now measured rather than estimated:
+#
+#   disk  a droplet from the resulting snapshot reports 8.8 GB used, everything
+#         installed and Trinity running, against the 25 GB this size carries
+#   RAM   a full build on 1 GB completed in 11m53s with img_check 8 PASSED /
+#         0 FAILED, no OOM and no disk exhaustion, through `apt full-upgrade`
+#         and the agent base image pull, the two places 1 GB would have bitten
+#
+# It is also faster than the 50 GB build it replaces (11m53s vs 14m38s), and
+# DigitalOcean's own exa-24-04 builds on this size.
 variable "build_size" {
   type    = string
-  default = "s-2vcpu-4gb"
+  default = "s-1vcpu-1gb"
 }
 
 locals {
-  snapshot_name = "trinity-${replace(var.image_tag, ".", "-")}-${formatdate("YYYYMMDD", timestamp())}"
+  # Minute-resolution, not just the date. Two builds of the same tag on the same
+  # day produced two snapshots named identically, distinguishable only by ID and
+  # min disk size — and the Vendor Portal's "select a system image" step picks by
+  # what it shows you. Submitting the wrong image is a review cycle lost, and it
+  # is silent: both are valid Trinity snapshots.
+  snapshot_name = "trinity-${replace(var.image_tag, ".", "-")}-${formatdate("YYYYMMDD-hhmm", timestamp())}"
 }
 
 source "digitalocean" "trinity" {
@@ -154,5 +210,24 @@ build {
   # verified was gone (shell history, logs, host keys).
   provisioner "shell" {
     scripts = ["scripts/90-cleanup-and-check.sh"]
+  }
+
+  # Record the snapshot id, then offer it to the Vendor Portal. A `post-processors`
+  # (plural) block runs its members as a CHAIN, which is required here: shell-local
+  # reads the file manifest writes. Declaring two sibling `post-processor` blocks
+  # would run them in parallel and the submit would race the manifest.
+  #
+  # mp-submit.sh is a no-op unless TRINITY_DO_APP_ID is set, so a plain
+  # `packer build` still just builds. See the header of that script.
+  post-processors {
+    post-processor "manifest" {
+      output     = "manifest.json"
+      strip_path = true
+    }
+
+    post-processor "shell-local" {
+      environment_vars = ["TRINITY_IMAGE_TAG=${var.image_tag}"]
+      inline           = ["bash scripts/mp-submit.sh"]
+    }
   }
 }

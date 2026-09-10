@@ -49,56 +49,102 @@ async function workspace(page) {
   return state
 }
 
-// The composer's action row is `flex items-end gap-2`: every button is a 44px
-// box (#2259) and the field takes whatever is left. So for B buttons the row
-// spends exactly `B * (44 + 8)` — B boxes and, whatever the nesting, B gaps
-// (each row of N items has N-1 gaps, and the field's wrapper is the one item
-// that is not a button) — and a correct layout gives the field the remainder.
-const ROW_COST_PER_BUTTON = 44 + 8
-
-// What this PR is answerable for is that the picker costs the composer NOTHING
-// horizontally — the defect it fixes is a select sharing the action row and
-// leaving 34px to type in.
+// #2662: the composer is ONE shell — the field on top, the controls in a row
+// inside it, the model picker right-aligned beside Send. What this file is
+// answerable for is that shape, rendered: the picker inside the shell and on
+// Send's row, and the field spanning the shell rather than sharing a row with
+// 44px buttons. That sharing is what this test used to police from the other
+// direction — the single-row layout left 34px to type in when ent#403 put the
+// picker beside the buttons, and 143px of a 351px form even without it.
 //
 // Deliberately NOT an absolute pixel floor. The row's total width depends on
 // the scrollbar the host platform draws — macOS overlays it and reserves
 // nothing, Linux CI reserves ~15px — so the identical correct layout measures
-// 143px of field on a developer's machine and 128px on the runner, and a floor
-// between the two passes locally and fails in CI for a reason no change to this
+// differently on a developer's machine and on the runner, and a floor between
+// the two passes locally and fails in CI for a reason no change to this
 // feature can fix. Every assertion below is therefore taken from ONE render and
-// stated relative to the row it is in, which is true under either scrollbar.
+// stated relative to the boxes around it, which is true under either scrollbar.
 for (const width of [375, 768, 1280]) {
-  test(`@smoke the model picker costs the composer no typing space at ${width}px`, async ({ page }) => {
+  test(`@smoke the composer is one shell — field on top, picker beside Send — at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
     await workspace(page)
 
     const input = page.locator('textarea')
     await input.fill('A readable message for the agent')
     const field = await input.boundingBox()
-    const form = await input.locator('xpath=ancestor::form').boundingBox()
-    const picker = await page.getByTestId('portal-model-picker').boundingBox()
+    const formEl = input.locator('xpath=ancestor::form')
+    const form = await formEl.boundingBox()
+    const pickerEl = page.getByTestId('portal-model-picker')
+    const picker = await pickerEl.boundingBox()
+    const sendEl = page.getByRole('button', { name: 'Send', exact: true })
+    const send = await sendEl.boundingBox()
 
-    // 1. The picker is on its OWN row — it ends above where the action row
-    //    begins. This is the regression itself: put it back beside the buttons
-    //    and this fails at every width.
-    expect(picker.y + picker.height).toBeLessThanOrEqual(form.y)
-    expect(picker.x + picker.width).toBeLessThanOrEqual(width)
+    // 1. The picker is INSIDE the shell, under the field, on Send's row, and
+    //    immediately left of Send. Each of the three ways this has shipped or
+    //    could regress fails a different line: above the form (ent#403), below
+    //    it as a footer (the first cut of #2662), or drifted into the left
+    //    cluster of icon buttons.
+    expect(picker.y).toBeGreaterThanOrEqual(field.y + field.height)
+    expect(picker.y + picker.height).toBeLessThanOrEqual(form.y + form.height)
+    expect(picker.x + picker.width).toBeLessThanOrEqual(send.x)
+    expect(Math.abs((picker.y + picker.height / 2) - (send.y + send.height / 2))).toBeLessThanOrEqual(2)
+    const buttons = await formEl.locator('button').all()
+    expect(buttons.length).toBeGreaterThan(1)
+    for (const button of buttons) {
+      const box = await button.boundingBox()
+      if (box.x >= send.x) continue                       // Send itself
+      expect(box.x + box.width, 'an icon button sits right of the picker').toBeLessThanOrEqual(picker.x)
+    }
 
-    // 2. The field takes ALL the slack the buttons leave, so the picker's row
-    //    is free and nothing else has crept into the action row either.
-    const buttons = await input.locator('xpath=ancestor::form').locator('button').all()
-    expect(buttons.length).toBeGreaterThan(0)
-    expect(field.width).toBe(form.width - buttons.length * ROW_COST_PER_BUTTON)
+    // 1b. It is a chat control, not a form field — the original complaint.
+    //     Ghost means no visible border and no fill of its own. Rendered, not
+    //     source-matched: a class list proves the classes were written, not
+    //     that they survived to the box (#2659). And it is the element that
+    //     yields when the row runs out — at 375px it truncates; Send does not.
+    const chrome = await pickerEl.evaluate((el) => {
+      const cs = getComputedStyle(el)
+      return { border: cs.borderTopColor, background: cs.backgroundColor }
+    })
+    const invisible = (c) => c === 'rgba(0, 0, 0, 0)' || c === 'transparent'
+    expect(invisible(chrome.border)).toBe(true)
+    expect(invisible(chrome.background)).toBe(true)
+    expect(picker.width).toBeLessThanOrEqual(272)          // the ghost `max-w-[17rem]` ceiling — fits the longest label at 13.5px
+    expect(send.width).toBe(44)
+
+    // 2. The field spans the shell. Stacked, it competes with nothing for width,
+    //    so it is the shell's inner width — the form less the shell's own
+    //    padding — at EVERY viewport. Relative, so it holds under either
+    //    scrollbar and any padding tweak short of putting a button back beside
+    //    it: before #2662 this was 41% of the form at 375px.
+    expect(field.width).toBeGreaterThanOrEqual(form.width * 0.9)
     expect(await input.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
 
-    // 3. Every action button keeps its 44px touch target — the other half of
-    //    the fix, since the cheap way to buy typing space is to shrink these.
+    // 3. Every action box keeps its 44px touch target (#2259) — the cheap way
+    //    to fit a picker on the row would be to shrink these. The PICKER is one
+    //    of those boxes (#2662): a 30px select beside 44px buttons is a 30px tap
+    //    target on a phone. It needs its own line because nothing above catches
+    //    it — the loop below walks `<button>`s only, and the centre-alignment
+    //    check in 1 passes for a short picker exactly as it does for a tall one.
+    expect(picker.height).toBe(44)
     for (const button of buttons) {
       const action = await button.boundingBox()
       expect(action.width).toBe(44)
       expect(action.height).toBe(44)
     }
-    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible()
+    // 4. The shell is ONE click target. The chrome moved off the textarea, so
+    //    the box's own 8px padding band is not the field any more — but it still
+    //    reads as the field, and before #2662 the box WAS the textarea. Measured
+    //    rather than asserted in source: the guard that keeps this from stealing
+    //    a control's click is easy to write in a way that never fires at all.
+    //
+    //    Mid-WIDTH, not a corner: the shell is `rounded-2xl` and hit-testing
+    //    respects border-radius, so a point 4px in from the right edge and 4px
+    //    down is OUTSIDE the 16px arc — the click falls through the shell and
+    //    reads BODY against a perfectly working handler.
+    await page.mouse.click(form.x + form.width / 2, form.y + 4)
+    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('TEXTAREA')
+
+    await expect(sendEl).toBeVisible()
   })
 }
 

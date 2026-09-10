@@ -1,14 +1,13 @@
-# Pull / Work-Stealing Migration — Status & Handoff
+# Pull / Work-Stealing Migration — Status
 
-**Branch:** `feature/target-arch-pull-migration` (based on `origin/dev @ 0d3e58b7`)
-**Umbrella:** #1081 (Epic #1045) · **Target design:** `docs/planning/TARGET_ARCHITECTURE.md` (v2 / Direction B, merged #1404)
-**Wire contract:** `docs/planning/MESSAGE_ENVELOPE_SCHEMA.md` (#945) · **Taxonomy:** `docs/planning/ACTOR_MODEL_POSTCARD.md`
-**Testing + findings:** `docs/testing/PULL_MIGRATION_TESTING.md` · **Rollback:** `docs/planning/PULL_MIGRATION_ROLLBACK.md`
+> **This is the entry point.** Read this file first; it is the one place that says where the
+> migration actually is. Everything else is reference material and is listed in §7.
+>
+> **Umbrella:** [#1081](https://github.com/abilityai/trinity/issues/1081) (Epic #1045) — the ticket
+> carries the live to-do list. **Design:** `TARGET_ARCHITECTURE.md` (v2 / Direction B, #1404).
 
-> Consolidates the former `ORCHESTRATOR_SESSION_CONTEXT.md`, `PULL_MIGRATION_SESSION_HANDOFF_2026-07-07.md`,
-> and `PRD.json` into one status doc. The work was built by an orchestration session that fanned out
-> sub-agents and verified their test evidence; a separate human-interactive session owned the design
-> decisions. This file is the durable record of **what was built, what is load-bearing, and what remains**.
+**Last verified against `dev` and the tracker: 2026-09-09.** When you change the migration's state,
+change this file in the same PR.
 
 ---
 
@@ -17,168 +16,142 @@
 The backend owns one durable per-agent queue (`schedule_executions` rows: `queued → claimed/running →
 terminal`). Each agent's worker pool **pulls** the next task when it has a free worker, runs it, and POSTs
 the result back under a compare-and-set guard. Nothing is pushed at a busy or dead agent. Everything ships
-behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert), on read-only agents first.
+behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert).
 
 ## 2. Phase status
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| #945 | Message-envelope payload schema (spec) | ✅ done (`MESSAGE_ENVELOPE_SCHEMA.md`) |
-| **Phase 0** | Dark nullable `claim_token` / `lease_expires_at` / `claimed_by_worker` on `schedule_executions` | ✅ done (dual-track: SQLite `migrations.py` + Alembic `0016`) |
+| #945 | Message-envelope payload schema (spec) | ✅ done |
+| **Phase 0** | Dark `claim_token` / `lease_expires_at` / `claimed_by_worker` columns | ✅ done (Alembic `0016`) |
 | **Phase 1** | Dark pull endpoints — atomic claim + result CAS | ✅ done |
-| **Phase 2** | Agent worker-pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done (build + **live pilot proven**, §6) |
-| **Phase 3** | Lease-reaper + `MAX_REDELIVERY` + capacity **shadow** meter + canary S-01 lease-exclusion | ✅ done (Alembic `0017` adds `redelivery_count`) |
-| **Phase 4** | Sync edge adapter (`/chat`, `chat_with_agent`) + async fan-out join | ⬜ not started |
-| **Phase 5** | Default-ON + delete legacy (ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03) | ⬜ blocked on ≥2-wk soak (#856) + side-effect gates |
+| **Phase 2** | Agent worker pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done |
+| **Phase 3** | Lease reaper + `MAX_REDELIVERY` + capacity shadow meter + canary lease-awareness | ✅ done (Alembic `0017`) |
+| **Phase 4** | Sync edge adapter + async fan-out join | 🔶 **in review — [#2532](https://github.com/abilityai/trinity/pull/2532)** |
+| **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 | ⬜ blocked — see §4 |
 
-**Prerequisite — PostgreSQL at fleet scale (#1183/#746/#1278, SQLite EOS 2026-09-01):** the local instance
-now runs on PostgreSQL; the dark migrations (`0016`, `0017` — originally `0011`/`0012`, renumbered on rebase
-onto dev) are applied and verified on live PG. Fleet-scale carry + single-source consolidation remain. Not
-needed for the local pilot.
+## 3. Trigger reach — which work can actually reach the queue
 
-## 3. What was built (the increment)
+Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the source of truth in code.
 
-1. **#945 message-envelope schema** (`MESSAGE_ENVELOPE_SCHEMA.md`): field-level payload per boundary
-   message kind (chat/task/event/reply + next-task claim + result POST); `status` + `error_code` taxonomy
-   byte-identical to `ACTOR_MODEL_POSTCARD.md`.
-2. **Phase 0 — dark schema** (Alembic `0016`, SQLite `schedule_executions_pull_claim_lease`): three nullable
-   columns on `schedule_executions`. Dual-track (`migrations.py` + Alembic + `schema.py`/`tables.py`/`db_models.py`).
-3. **Phase 1 — dark pull endpoints** (`routers/internal.py` → `services/pull_coordination_service.py` →
-   `db/schedules.py`):
-   - `GET /api/internal/next-task` — atomic claim of the oldest `queued` row for an agent; stamps
-     `claim_token` / `lease_expires_at` (= `execution_timeout + SLOT_TTL_BUFFER`) / `claimed_by_worker`;
-     status → `running`. Returns the claim envelope; empty ⇒ `{envelope: null}`.
-   - `POST /api/internal/tasks/{id}/result` — CAS-applies a terminal (status-precondition + `claim_token`
-     match); idempotent replay.
-   - **Dark:** no production caller; push path unchanged.
-4. **Phase 2 — agent worker-pool** (`agent_server/services/pull_worker.py`, wired in agent-server `main.py`):
-   bounded pool (N = `max_parallel_tasks`) short-polling `next-task`, running the turn, POSTing the result.
-   Gated per-agent by the backend `PULL_MODE_PILOT_AGENTS` allowlist (`services/agent_service/pull_mode.py`
-   injects `TRINITY_PULL_MODE` / `TRINITY_MAX_PARALLEL_TASKS` at create/recreate). **Default OFF ⇒ no-op.**
-5. **Pull-seam auth hardening**: the two pull seams accept either a valid `X-Internal-Secret` (backend) **or**
-   the agent's own scoped MCP key with agent_name/ownership match (via `authorize_heartbeat`). No master
-   secret in an agent container; the worker auths with `Bearer ${TRINITY_MCP_API_KEY}` (respects #1159/#307).
-6. **Phase 3 — reaper + `MAX_REDELIVERY`** (Alembic `0017` adds `redelivery_count`, distinct from `retry_count`):
-   `services/lease_reaper_service.py` + additive `cleanup_service._sweep_expired_leases`. Finds
-   `status='running' AND lease_expires_at < now`; under cap → **re-queue the SAME `execution_id`** (status →
-   queued, clear lease/claim/worker, `redelivery_count++`); at cap (`>= MAX_REDELIVERY`, default 3) → FAIL +
-   park to the OPS-001 operator queue. CAS-guarded.
-   - **Sweep-exclusion:** `lease_expires_at IS NULL` added to 6 non-reaper selectors so leased rows are owned
-     **exclusively** by the reaper.
-   - **#1082 status-guard:** `park_expired_lease` / `requeue_expired_lease` registered in `_EXPECTED_UPDATE_SITES`.
-7. **Phase 3 — capacity shadow meter** (`db/schedules.py::count_active_leased_by_agent` → `CapacityManager`
-   `get_all_states` / `get_slot_state`): read-only physical-occupancy term (`active = zcard + leased`) merged
-   into the capacity **meter** for pilot agents. **SHADOW only** — admission stays on the ZSET
-   (`acquire`/`acquire_slot`/`release` and `slot_service.py` untouched). Physical **admission** is Phase 5.
-8. **Canary lease-awareness** (all read the additive `snapshot.running_lease_expires_at`): **S-01** excludes
-   leased rows from the slot–row bijection so a pilot does not false-fire `in_sql_only`; **E-05** (#1982)
-   because a claimed row is `running` with a NULL `claude_session_id` by design; **E-01** (#1990) because a
-   claimed row's deadline is its lease — stamped at exactly `timeout + SLOT_TTL_BUFFER`, so E-01 fired
-   **critical** the instant the reaper became eligible to act. **E-01's is a bounded grace, not an
-   exclusion**: past `LEASE_REAPER_GRACE_SECONDS` (600s = 2 × the `cleanup_service` interval the reaper runs
-   in) an overdue-leased row fires as a *lease-reaper* failure, so a stuck or dead reaper — §9 **M4**, a soak
-   abort criterion — has an automated owner instead of only a human running SQL. **E-02 is the deliberate
-   exception** — it reads the same running set and must keep seeing leased rows: a terminal→non-terminal
-   reversal is corruption regardless of ownership, and pull (late worker result vs reaper pass) is the more
-   exposed path.
+| | triggers | state |
+|---|---|---|
+| **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
+| **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
+| **Deliberately excluded** | interactive chat / Session-tab turns | scope cut, see §4 item 5 |
 
-## 4. Load-bearing invariants — DO NOT break
+`schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
+inert for the fleet's dominant traffic class, so a cron-driven agent was not a viable pilot. It is now.
+
+## 4. What remains before default-ON
+
+The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effect Recovery):
+
+> Default-on for effect-bearing agents is still gated on trace fidelity (#548/#333), `prior_trace`
+> injection (#1401), and **fail-closed `execution_id` injection**.
+
+**Two of those three are shipped.** The full remaining list, in order:
+
+1. **Land Phase 4** — [#2532](https://github.com/abilityai/trinity/pull/2532). Rebased on `dev`, migration
+   renumbered to `0059`, full unit suite matched against unmodified `dev` (same single pre-existing
+   failure, 21 net new tests). Blocked only on review.
+2. **Fail-closed `execution_id` injection** — [#2392](https://github.com/abilityai/trinity/issues/2392).
+   **The policy is decided, not open**: the spec says fail-closed. What is missing is the build —
+   platform-side injection, reject + operator alarm when the id is still absent, and a regression test that
+   a re-delivered execution emits each effect once. *(Trace fidelity #548/#333 closed Aug/Jun; `prior_trace`
+   injection #1401 closed 2026-07-08; #1402 closed 2026-07-26.)*
+3. **A soak on an agent that actually emits.** The current pilot (`cornelius-oracle` on eu2) emits no
+   messages, calls or shares — measured 2026-09-02: 219 `idempotency_keys` rows, all `agent:*`, zero
+   `effect:*`. It has therefore never entered the code path item 2 protects, so a clean window on it is not
+   evidence about that gate. Mechanics for a second, disposable emitting pilot are in the ops repo
+   (`trinity-ops-agent:docs/pull-soak-eu2.md`). System of record for the soak is
+   [#1766](https://github.com/abilityai/trinity/issues/1766)'s comment thread — read it before measuring.
+4. **Phase 5: flip default-ON and delete the legacy machinery** — the 9-path cleanup pyramid, the slot ZSET,
+   the overflow LIST, the dispatch-breaker gate, canary S-01–S-03. Tracked as
+   [#429](https://github.com/abilityai/trinity/issues/429). Until this lands, both systems run at once.
+5. **Decide whether interactive chat joins the queue** — [#1989](https://github.com/abilityai/trinity/issues/1989),
+   `TARGET_ARCHITECTURE.md` Open Question 7, *under consideration, not decided*. Until it is decided,
+   "everything is pull" is false **by design**, not by omission. One FIFO ordered by `queued_at` would park
+   a human turn behind autonomous work, which is why the cut exists.
+
+### The soak duration requirement is mis-cited — correct it when you touch it
+
+Four documents said the Phase-5 gate was a *"≥2-week zero-orphan soak (#856)"*. **#856 sets no such bar** —
+it is a closed 2026-05-15 spike on soak-testing approaches for multi-agent fleet stability (context
+exhaustion, retry storms) and says nothing about duration, orphans, or pull. The two-week figure originates
+in **#429's own gating condition** — *"#306 must be in production for ≥2 weeks with zero observed orphan
+recoveries"* — written for the Redis-Streams event bus, then carried onto #1081 Phase 5. #306 closed
+2026-04-21. #1766's own acceptance criterion asks for *"several days of real traffic"*, not fourteen.
+
+Re-derive the bar deliberately rather than inheriting it. Note which measurements pool across windows
+(M4 lost/phantom, M5 re-delivery, M3 peak, M7 canary — all event-driven) and which do not (M6/M9 need a
+build-matched pre-flip baseline, which is what makes a reset expensive).
+
+## 5. Load-bearing invariants — DO NOT break
 
 1. **Preserve `execution_id` on re-delivery.** The reaper (and any operator-gate resolution) re-queues the
-   **same** row — never mints a new `execution_id`. `effect_guard` (#1084) and #525 idempotency are
-   `execution_id`-scoped; a new id would re-emit side effects. (Decision session's hard cross-cutting
-   invariant, #1402.)
-2. **Leased rows (`lease_expires_at IS NOT NULL`) are owned exclusively by the lease-reaper.** Every other
-   sweep / ZSET-consistency check excludes them (`lease_expires_at IS NULL`). Applies to the 6 cleanup
-   selectors AND canary S-01.
+   **same** row — never mints a new `execution_id`. `effect_guard` and #525 idempotency are
+   `execution_id`-scoped; a new id would re-emit side effects.
+2. **Leased rows (`lease_expires_at IS NOT NULL`) are owned exclusively by the lease reaper.** Every other
+   sweep and ZSET-consistency check excludes them.
 3. **Everything is flag-gated, default-OFF.** `PULL_MODE_PILOT_AGENTS` empty ⇒ no worker, no lease, meter
-   no-op, reaper finds nothing. Populating it is the ONLY switch that activates pull for an agent.
-4. **No master secret in an agent container.** Pull seams use the agent's scoped MCP key; the internal secret
-   is a backend-only alternate.
-5. **Additive until Phase 5.** The push path, Redis slot ZSET, overflow LIST, dispatch-breaker-gate, and
-   canary S-01/S-02/S-03 are NOT deleted or bypassed until Phase 5 (gated on ≥2-week zero-orphan soak, #856).
-6. **`MAX_REDELIVERY = 3`**, per-agent override deferred (seam = `lease_reaper_service.get_max_redelivery`).
-   `redelivery_count` column ≠ `retry_count` (#678 reader-race).
+   no-op, reaper finds nothing. ⚠️ **Exception, and it is not small:** the loop and fan-out *orchestrators*
+   were rewritten unconditionally (#2523, #2524), because neither could be made pullable while it held the
+   work in a coroutine. With an empty allowlist those rewrites still change behaviour — see §6.
+4. **No master secret in an agent container.** Pull seams use the agent's scoped MCP key.
+5. **Additive until Phase 5.** The push path, slot ZSET, overflow LIST, dispatch-breaker gate and canary
+   S-01/S-02/S-03 are not deleted or bypassed before Phase 5.
+6. **`MAX_REDELIVERY = 3`.** `redelivery_count` ≠ `retry_count` (#678 reader-race).
+7. **The pilot flag is a true either/or** (#1982). A pilot agent's autonomous triggers reach it *only* by
+   the queue; the backend neither pushes them nor drains them. Before this, a pilot ran both systems with
+   two independent capacity counters and could run up to 2× `max_parallel_tasks`, invisible to canary S-02.
 
-## 5. Design decisions (side-effect-gate track)
+## 6. Behaviour that is NOT flag-gated
 
-The v2 target-arch pivot reframes side-effect handling from a single universal `effect_guard` to **per-effect**
-gating. Decisions below were resolved by the human-interactive decision session and settled by v2 (#1404).
+Shipped with the loop and fan-out rewrites and live on every install regardless of the allowlist. Verified
+on a local stack with `PULL_MODE_PILOT_AGENTS=""` and every agent recreated (2026-09-04):
 
-- **#1401 — structured recovery trace + injection** (`decided`, not yet built). Irreversible effects through
-  un-confineable channels (own key / gh / curl): **best-effort trace + fall back to the #1402 async operator
-  human-gate**. The continue / verify-before-redo / fail-gracefully branch is **prompt-advisory** — the agent
-  decides (Principle #8). Injection = bounded system-prompt summary + full record in a context file.
-- **#1402 — `MAX_REDELIVERY` cap + async operator-queue human-gate** (`decided`; reactive-park half built).
-  Operator resolution **re-queues the SAME `execution_id`** (park = a non-terminal state; lease/worker
-  released, identity kept), injecting the #1401 trace + the operator's answer — one code path for both
-  auto-retry and human-gated resume. Cap default **3**, per-agent overridable (the poison-task cap, NOT the
-  un-confineable lever). Park reuses the OPS-001 operator_queue create path. Counter = a new
-  `schedule_executions` column (built), distinct from `retry_count`.
-- **#1408 — deterministic tool-side gate on confined-irreversible rails** (`decided`, not built). Eligibility
-  bar: Trinity solely fronts the rail AND the agent holds no direct credential (v1 = **Nevermined settle
-  only**). Enforcement v1 = the eligibility bar (credential platform-held, not agent-injectable); defer the
-  runtime credential-scanning guard until a rail whose credential could be agent-held is proposed. Effect
-  classes declared as per-MCP-tool metadata. **Caveat:** tool-metadata tags only *confined* effects;
-  un-confineable effects have no tool to tag — the platform's only handle is the agent's credential surface +
-  optional `template.yaml` author declaration.
-- **#1084 — `effect_guard` re-scoped** (`n/a`, buildable): reversible/backend-sink slice; hand
-  confined-irreversible to #1408. No longer gates pull. 4 sinks already merged (`send_message`,
-  `place_outbound_call`, `create_share`, `settle_payment_once`).
+- **Loops are terminal-driven.** `delay_seconds` becomes a park on `agent_loops.next_run_at` cleared by a 5s
+  sweep, so granularity is the sweep period, not the exact delay. Measured: park stamped at +15.000s, cleared
+  4–6s after due.
+- **A loop survives a backend restart** instead of being flipped `interrupted` — `mark_orphan_loops_interrupted`
+  is gone. Measured: restarted mid-park at 1/3 runs, loop stayed `running`, resumed, finished `max_runs_reached`,
+  zero `interrupted` rows. **This is an operator-visible change and belongs in release notes.**
+- **A fan-out deadline reports a still-open subtask as `running`, not `failed`** — a contract change on every
+  install. The batch still reports `deadline_exceeded`; the status endpoint is the source of truth and the
+  subtask's real terminal lands on the row afterwards.
+- **One extra indexed read per execution terminal** (loop) and one PK read (fan-out), fleet-wide.
+- **Alembic `0050`/`0051` on the loops track and `0059` with Phase 4.**
 
-**Still `questions-open`** (owned by the decision session, not started): **#927** replica groups
-(post-Phase-5 + PG), **#947** GuardAgent output interception (orthogonal), **#948** workflow-scoped capability
-tokens (gated on the #946 decision). Do not implement until flipped to `decided`.
+Push-path parity was verified for the same paths: every row `claimed_by_worker IS NULL`, no row ever `queued`,
+`max_concurrency` still bounds concurrency, and capacity overflow is still **rejected** rather than queued.
 
-## 6. Live pilot (#946) — proven
+## 7. Reference documents
 
-Executed end-to-end on `gtm-synthesizer` (rebuilt base image, `AGENT_AUTH_SECRET` populated):
-- Worker pool up (`3 worker(s)`); happy path `queued → running` (claim_token + lease set) → run → CAS result
-  → terminal `success`, with **`ZCARD(agent:slots)=0` the whole run** (pure SQL lease, no ZSET slot — the core
-  pull invariant). `execution_id` preserved.
-- Reaper: requeue ×3 (`redelivery_count` 0→3, same id, `claim_token` kept) → park at cap (row `failed` +
-  `poison-{eid}` operator alert). **Late SUCCESS after park with the kept token → `applied`** (failed→success).
-- Canary S-01 lease-exclusion holds; **E-05 fires** (known open gate — §7).
+Five superseded planning documents were deleted on 2026-09-09 (their content is folded into the spec, and
+git retains them). These six remain:
 
-Full walkthrough, gaps, and the two ops fixes surfaced (G1 compose-forwarding, G2 recreate backend-URL) are in
-`docs/testing/PULL_MIGRATION_TESTING.md`.
+| file | what it is for |
+|---|---|
+| `PULL_MIGRATION_STATUS.md` | **this file** — where the migration is |
+| `TARGET_ARCHITECTURE.md` | the destination design (v2 / Direction B) |
+| `../testing/PULL_MIGRATION_TESTING.md` | tiers, confirmed defects, and the §9 soak measurement set |
+| `PULL_MIGRATION_ROLLBACK.md` | rollback runbook — flag off-switch, code/DB tiers, detection signals |
+| `MESSAGE_ENVELOPE_SCHEMA.md` | the wire contract (#945) |
+| `ACTOR_MODEL_POSTCARD.md` | the pinned status / `error_code` taxonomy |
 
-## 7. Remaining work & gates
+Ops-side operational detail (probe scripts, instance quirks) lives in the ops repo at
+`docs/pull-soak-eu2.md`. Results and soak status live on #1766, never in a repo file — a second narrative
+does not stay in sync.
 
-- **Canary E-05 / E-01 lease-awareness** — E-05 *will* false-fire on a pull lease (running >60s,
-  `claude_session_id` NULL). Apply the same `lease_expires_at IS NULL` exclusion, or retire with the ZSET at
-  Phase 5 — **decide before opting a pilot in** for a clean canary.
-- **Canary collector on PG (G3) — ✅ closed by #1540** — the SQL-tier collector reads now route through the
-  `get_engine()`/`DATABASE_URL` seam, so on a PG instance the SQL-tier checks read the live PG database
-  instead of a frozen/empty `/data/trinity.db`. The canary is a trustworthy signal for a default-ON decision
-  on PG. (`db/connection.py` stays the sqlite-only maintenance seam; the canary is routed around it.)
-- **Tier-6 side-effect safety** — `effect_guard` is fail-open without trusted `execution_id` injection; a
-  **BLOCKING prerequisite** before default-ON for side-effect agents (read-only agents reach Phase 5 without it).
-- **Phase 4** — sync edge adapter + async fan-out join.
-- **Build #1401 / #1402 / #1408** — now `decided`; #1402's proactive fire-and-park half + the per-agent
-  `MAX_REDELIVERY` override are not yet built.
-- **Phase 5** — default-ON + delete ZSET/overflow/breaker-gate/canary S-01–S-03. Gated on ≥2-wk zero-orphan
-  soak (#856) + the side-effect gates.
+## 8. Environment caveats
 
-## 8. Environment & verification caveats
-
-- **Local stack now on PostgreSQL** (`DATABASE_URL=postgresql://…@postgres:5432/trinity`; no SQLite file).
-  Backend **bind-mounts `src/backend`**, so it runs the uncommitted pull code live (endpoints answer 403/422,
-  not 404). The **agent base image** was rebuilt to bake in `pull_worker.py` + scoped-key auth (the original
-  image predated the worker; agents bake `agent_server` with no source bind-mount).
-- **Claude auth for live turns:** local Trinity otherwise has no Claude auth (agents auth-fail in ~1s). Use a
-  working out-of-tree `ANTHROPIC_API_KEY` for live pilots; prefer unit/integration tests elsewhere.
-- **Status-writers:** any change writing `schedule_executions.status` MUST pass
+- **PostgreSQL only** for the pull path at fleet scale. The double-claim race manifests only on PG; SQLite
+  serialises writes and hides it. Point PG tests at a throwaway database.
+- **Status writers:** any change writing `schedule_executions.status` must pass
   `tests/unit/test_schedule_status_observability.py` (the #1082 `_EXPECTED_UPDATE_SITES` guard).
-- **Capacity/slots:** any change near capacity/slots MUST run `tests/test_canary_invariants.py` (S-01/S-02) —
-  prove you didn't "fix" a meter by writing pull rows into the ZSET.
-- **PG-only races:** the double-claim race (see testing doc, C1) only manifests on PostgreSQL; SQLite
-  serializes writes and hides it. Point PG tests at a **throwaway** DB, never the live `trinity` DB.
-
-## 9. Pointers
-
-- `docs/planning/TARGET_ARCHITECTURE.md` — v2 destination design.
-- `docs/planning/MESSAGE_ENVELOPE_SCHEMA.md` — the wire contract (#945).
-- `docs/planning/ACTOR_MODEL_POSTCARD.md` — the pinned status/error_code taxonomy.
-- `docs/testing/PULL_MIGRATION_TESTING.md` — tiered QA plan, confirmed defects, and the live-pilot record.
-- `docs/planning/PULL_MIGRATION_ROLLBACK.md` — rollback runbook (flag off-switch, code/DB tiers, detection signals).
+- **Capacity/slots:** any change near capacity or slots must run `tests/test_canary_invariants.py` — prove
+  you did not "fix" a meter by writing pull rows into the ZSET.
+- **Making an agent a pilot needs a recreate, not a start.** `TRINITY_PULL_MODE` bakes in at agent
+  create/recreate; setting the flag and calling start leaves the container without it, silently never
+  pulling.
