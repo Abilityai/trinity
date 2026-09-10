@@ -408,7 +408,27 @@ def _assigned_subscription_is_refused(subscription_id: str) -> Optional[str]:
     """
     try:
         headroom = importlib.import_module("services.subscription_headroom_service")
-        reading = headroom.cached_headroom_readings([subscription_id]).get(subscription_id)
+        # Bounded at the DISPLAY freshness (`FRESHNESS_SECONDS`, 30 min), not at
+        # `cached_headroom_readings`' default SELECTION bound
+        # (`MAX_READING_AGE_SECONDS`, >= 2h). The default is calibrated for
+        # RANKING candidates, where a stale reading is better than none; this
+        # call decides whether a verdict may OVERRULE the 2h event predicate,
+        # and a reading as old as the window it overrules cannot. Without the
+        # bound a two-hour-old "serving" reading suppresses a five-minute-old
+        # 429 and pins the agent on a subscription that is refusing it right
+        # now — the #447 rule ("a probe is ground truth about NOW") applied to a
+        # probe that is no longer about now.
+        #
+        # This is the same bound `_headroom_indicates_healthy` uses for the same
+        # judgement one module over, and the same one the file already declares
+        # for the mirror case: `REFUSAL_FRESHNESS_SECONDS = FRESHNESS_SECONDS`,
+        # "a refusal is trusted exactly as long as the LIMIT badge trusts one".
+        # It tightens the refusing arm too, which is deliberate and safe — a
+        # stale refusal now falls through to the event predicate rather than
+        # evacuating on its own.
+        reading = headroom.cached_headroom_readings(
+            [subscription_id], max_age_seconds=headroom.FRESHNESS_SECONDS
+        ).get(subscription_id)
         if reading is not None:
             return "provider_refusing" if reading.refusing else None
     except Exception as e:  # noqa: BLE001 — unreadable evidence proves nothing

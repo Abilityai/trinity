@@ -739,12 +739,24 @@ class TestTheRefusalPredicateIsThreeState:
         monkeypatch.setattr(auto_switch, "db", db)
         return auto_switch, db
 
-    def _with_reading(self, monkeypatch, reading):
+    def _with_reading(self, monkeypatch, reading, *, honour_age=False):
+        """Model the AGE GATE when asked, not just the lookup.
+
+        `cached_headroom_readings` returns None for a snapshot older than the
+        bound it was ASKED for, and which bound this caller asks for is the
+        whole of the finding below — a fake that ignores `max_age_seconds`
+        hands back a "fresh" reading whatever the caller requested and the
+        distinction is untestable (the same trap the ent#2638 E2E harness
+        documents for the readmission path).
+        """
         svc = _svc()
-        monkeypatch.setattr(
-            svc, "cached_headroom_readings",
-            lambda ids, **_k: {i: reading for i in ids},
-        )
+
+        def _fake(ids, *, max_age_seconds=None, **_k):
+            limit = max_age_seconds if max_age_seconds is not None else svc.MAX_READING_AGE_SECONDS
+            usable = reading is not None and (not honour_age or reading.age_seconds <= limit)
+            return {i: (reading if usable else None) for i in ids}
+
+        monkeypatch.setattr(svc, "cached_headroom_readings", _fake)
 
     def test_a_fresh_serving_reading_beats_a_stale_event(self, wired, monkeypatch):
         auto_switch, db = wired
@@ -781,6 +793,58 @@ class TestTheRefusalPredicateIsThreeState:
             raise RuntimeError("redis is down")
         monkeypatch.setattr(svc, "cached_headroom_readings", _boom)
         assert auto_switch._assigned_subscription_is_refused("sub-a") == "recent_rate_limit"
+
+    def test_a_serving_verdict_is_trusted_only_while_DISPLAY_fresh(self, wired, monkeypatch):
+        """The bound matters as much as the direction (review of #2638).
+
+        `cached_headroom_readings`' default is the SELECTION bound
+        (`MAX_READING_AGE_SECONDS`, >= 2h) — right for ranking candidates, wrong
+        here: this verdict OVERRULES the 2h event predicate, so a reading as old
+        as the window it overrules would let a two-hour-old "serving" snapshot
+        suppress a five-minute-old 429 and pin the agent on a subscription that
+        is refusing it right now.
+        """
+        auto_switch, db = wired
+        svc = _svc()
+        stale_serving = _reading(
+            five={"utilization_pct": 20.0, "blocked": False, "resets_at": None},
+            age=svc.FRESHNESS_SECONDS + 60,
+        )
+        self._with_reading(monkeypatch, stale_serving, honour_age=True)
+
+        # The stale reading is not usable at the bound this caller asks for, so
+        # the question falls through to the platform's own record — which says
+        # limited.
+        assert auto_switch._assigned_subscription_is_refused("sub-a") == "recent_rate_limit"
+
+    def test_a_display_fresh_serving_verdict_still_wins(self, wired, monkeypatch):
+        """The #447 arm is unaffected: inside the display bound, ground truth
+        about now still beats an inference from past failures."""
+        auto_switch, db = wired
+        svc = _svc()
+        fresh_serving = _reading(
+            five={"utilization_pct": 20.0, "blocked": False, "resets_at": None},
+            age=svc.FRESHNESS_SECONDS - 60,
+        )
+        self._with_reading(monkeypatch, fresh_serving, honour_age=True)
+        assert auto_switch._assigned_subscription_is_refused("sub-a") is None
+
+    def test_it_asks_for_the_display_bound_explicitly(self, wired, monkeypatch):
+        """Pinned as the ARGUMENT, not only as behaviour: the default is the
+        selection bound, so omitting it is the bug and a behavioural test alone
+        would pass again the day the default changes."""
+        auto_switch, db = wired
+        svc = _svc()
+        asked = {}
+
+        def _fake(ids, *, max_age_seconds=None, **_k):
+            asked["bound"] = max_age_seconds
+            return {i: None for i in ids}
+
+        monkeypatch.setattr(svc, "cached_headroom_readings", _fake)
+        auto_switch._assigned_subscription_is_refused("sub-a")
+        assert asked["bound"] == svc.FRESHNESS_SECONDS
+        assert svc.FRESHNESS_SECONDS < svc.MAX_READING_AGE_SECONDS
 
     def test_it_agrees_with_recovery_verdict_on_the_same_reading(self, monkeypatch):
         """The invariant behind all of the above, stated once: a subscription a
