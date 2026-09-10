@@ -189,8 +189,29 @@
            `overflow-hidden` clipped the canvas column off the right edge with
            no scrollbar — the #2581 report, measured at 296px on a 1280px
            viewport by the gallery (#2583). -->
+      <!-- #2640: the share ANIMATES rather than snapping. `flex-grow` is a
+           `<number>` and therefore animatable, so transitioning it moves this
+           column between its 1 (no call) and 2 (call) shares continuously —
+           which is also why the shares stay shares. Reverting to `w-[40%]` /
+           `w-[60%]` would animate just as well and re-open #2581: those summed
+           to 100% + an 18rem sidebar and the shell clipped the canvas column
+           off the right edge.
+
+           The canvas column opposite ramps its own grow 0 → 3 over the same
+           duration and easing, so the two interpolate together and the swap
+           reads as one motion instead of two.
+
+           Under `prefers-reduced-motion` it is instant, and that takes BOTH
+           classes. `transition-none` emits only `transition-property: none`;
+           `duration-300` still applies, so `transitionDuration` stays `.3s` —
+           and Vue's `getTransitionInfo` reads exactly that property to decide
+           how long to keep a leaving element alive. With `transition-none`
+           alone nothing animates but every `@after-leave` is still gated on a
+           300ms fallback timer, which is how a reduced-motion user ended up
+           watching the canvas vanish, an empty column, and then the rail pop
+           in. `motion-reduce:duration-0` drives the timeout to 0. -->
       <main
-        class="min-w-0 flex flex-col bg-white dark:bg-gray-900"
+        class="min-w-0 flex flex-col bg-white dark:bg-gray-900 transition-[flex-grow] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
         :class="voiceCall.active ? 'flex-1 sm:flex-[2_1_0%]' : 'flex-1'"
       >
         <!-- ent#361: a room takes the stage when the URL names one. The
@@ -456,18 +477,53 @@
            of a voice call — in the rail's (and the details panel's) place, the
            way Agent details takes it. The rail's own state is a setup ref and
            comes back untouched when the call ends. -->
-      <PortalVoiceCanvas
-        v-if="voiceCall.active && voiceCall.voiceSessionId && activeAgent"
-        class="hidden min-w-0 sm:flex sm:flex-[3_1_0%]"
-        :agent-name="activeAgent.name"
-        :voice-session-id="voiceCall.voiceSessionId || ''"
-        :panel-version="voicePanelVersion"
-      />
+      <!-- #2640: enters and leaves as a width, not as an appearance. A newly
+           inserted element has no starting value to transition FROM, so the
+           ramp is expressed as Vue enter/leave classes: grow 0 and transparent
+           at both ends, the element's own `sm:flex-[3_1_0%]` in between. `!` on
+           the grow-0 class is deliberate — `grow-0` and `sm:flex-[3_1_0%]` are
+           both single-class selectors, so without it which one wins would be
+           decided by Tailwind's output order rather than by intent.
+
+           Opacity rides the same transition so the canvas's CONTENT is not
+           re-wrapping in view while the column is still moving (the layout
+           stability rule in design-system-contract.md); it fades in as the
+           width arrives rather than reflowing behind it. -->
+      <Transition
+        enter-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
+        leave-active-class="transition-[flex-grow,opacity] duration-300 ease-out motion-reduce:transition-none motion-reduce:duration-0"
+        enter-from-class="!grow-0 opacity-0"
+        leave-to-class="!grow-0 opacity-0"
+        @before-leave="voiceCanvasLeaving = true"
+        @after-leave="voiceCanvasLeaving = false"
+      >
+        <PortalVoiceCanvas
+          v-if="voiceCanvasHasColumn"
+          class="hidden min-w-0 sm:flex sm:flex-[3_1_0%]"
+          :agent-name="activeAgent.name"
+          :voice-session-id="voiceCall.voiceSessionId || ''"
+          :panel-version="voicePanelVersion"
+        />
+      </Transition>
       <!-- ent#547: `PortalAgentDetails` is no longer a sibling arm here. It is
            the rail's Info tab, so this chain is back to two: the voice canvas
            takes the column during a call, the rail has it otherwise. -->
+      <!-- #2640: `v-if`, no longer `v-else-if` — the canvas above is inside a
+           <Transition> now, so the two are no longer adjacent siblings and the
+           chain is broken. The condition is written out instead: the rail has
+           the column whenever the canvas does not. Stated rather than inferred,
+           because a `v-else-if` silently becoming a `v-if` is how both columns
+           end up on screen at once.
+
+           `!voiceCanvasLeaving` is the second half of that. A leaving element
+           stays in the DOM for the length of its transition, so without it the
+           rail would mount at its full fixed width while the canvas is still
+           shrinking — three columns competing for the row, main squeezed by
+           flex for 300ms, which is a worse jump than the one being fixed. The
+           rail arrives once the canvas is gone, so the motion reads as one
+           column handing the space back. -->
       <PortalRail
-        v-else-if="railVisible"
+        v-if="railVisible && !voiceCanvasHasColumn && !voiceCanvasLeaving"
         :tabs="railTabs"
         :active-tab="railState.tab"
         :open="railState.open"
@@ -805,6 +861,31 @@ const columns = useColumnResize({
 const thirdColumnResizable = computed(() => (
   !voiceCall.value.active && railVisible.value && railState.value.open
 ))
+
+// #2640: the ONE condition the canvas column and the rail column share, so the
+// two cannot both claim it. It used to be a `v-if` / `v-else-if` chain, which
+// guaranteed exclusivity by construction; wrapping the canvas in a <Transition>
+// broke the adjacency that chain needs, so the exclusivity is written down
+// instead of inferred. Identical to the canvas's own `v-if`, deliberately —
+// deriving one from the other is what keeps them from drifting apart.
+const voiceCanvasHasColumn = computed(() => Boolean(
+  voiceCall.value.active && voiceCall.value.voiceSessionId && activeAgent.value
+))
+
+// #2640: true only while the canvas column is playing its leave transition.
+// Vue keeps a leaving element in the DOM for the transition's duration, and the
+// rail must not mount into the same row while it is still there — see the
+// template comment on the rail's `v-if`.
+//
+// Under `prefers-reduced-motion` this is never observably true — but only
+// because the leave-active class carries `motion-reduce:duration-0` as well as
+// `motion-reduce:transition-none`. `transition-none` sets `transition-property`
+// and nothing else, so `getTransitionInfo` would still read a 300ms
+// `transitionDuration` and resolve `@after-leave` on the fallback timer with
+// nothing animating: a reduced-motion user would see the canvas disappear, then
+// an empty column, then the rail. The zero duration is what makes the claim in
+// this comment true; it is not decoration.
+const voiceCanvasLeaving = ref(false)
 const roomParticipants = ref([])
 const workSignal = ref(emptySignal())
 
