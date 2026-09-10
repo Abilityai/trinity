@@ -1,5 +1,9 @@
 # Message Envelope — Payload-per-Kind Schema (#945)
 
+> **Start at [`PULL_MIGRATION_STATUS.md`](PULL_MIGRATION_STATUS.md) — it is the migration's entry point and the one
+> place that states current phase, remaining gates and open decisions. This file is reference
+> material.**
+
 > **Status**: Contract spec. Companion to [`ACTOR_MODEL_POSTCARD.md`](ACTOR_MODEL_POSTCARD.md).
 > Gates the pull pilot ([#946](https://github.com/abilityai/trinity/issues/946)).
 >
@@ -24,8 +28,8 @@
 > is a **documented contract, not a physically enforced wire format**. The pilot
 > rides the existing `backlog_metadata` / `ParallelTaskRequest` reconstruction
 > shape; whether the envelope can cleanly *replace* that shape is itself a Phase 3
-> finding (postcard §"scope caveat"; [PULL_PILOT_946_SOAK.md](PULL_PILOT_946_SOAK.md)
-> §4 "Envelope finding"). Physically enforcing it is the six demotion PRs in
+> finding (postcard §"scope caveat"). The #946 pilot that was to record it closed
+> without the finding being filled in. Physically enforcing it is the six demotion PRs in
 > [`ACTOR_MODEL_TASK_DEMOTION_MAP.md`](ACTOR_MODEL_TASK_DEMOTION_MAP.md).
 
 ---
@@ -489,8 +493,6 @@ enforcement (the demotion PRs, #1081 Phase 3+).
   §"Recovery: Lease-Expiry Re-Delivery", §"Async-First Communication".
 - [`ACTOR_MODEL_TASK_DEMOTION_MAP.md`](ACTOR_MODEL_TASK_DEMOTION_MAP.md) — the
   `ParallelTaskRequest` → envelope demotion (the physical-enforcement pre-work).
-- [`PULL_PILOT_946_SOAK.md`](PULL_PILOT_946_SOAK.md) — the pilot this gates; §4
-  "Envelope finding" is where the reconciliation (§5 above) is decided.
 - Code precedent for the result shape:
   `docker/base-image/agent_server/services/result_callback.py` (#1083 terminal
   envelope), `src/backend/services/task_execution_service.py`

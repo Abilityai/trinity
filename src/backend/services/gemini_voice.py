@@ -15,7 +15,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Awaitable
+from typing import Any, Optional, Callable, Awaitable
 
 from google import genai
 from google.genai import types as genai_types
@@ -23,6 +23,7 @@ from google.genai import types as genai_types
 from config import GEMINI_API_KEY, VOICE_MODEL, VOICE_MAX_DURATION, REDIS_URL
 from models import DEFAULT_CANVAS_ID
 from services.canvas_blocks import WORKSPACE_ROOT, classify_image_src, map_panel_tool
+from services.voice_tools import RUN_TASK, platform_default_tools, resolve_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,83 @@ HTML rule (for `update_panel`):
 """
 
 
+# ent#535 — how long the model waits before it must say something. Past this
+# the turn keeps running and its answer lands in the chat; the call never
+# freezes and the work is never thrown away. Deliberately shorter than any
+# turn timeout: it bounds SPEECH, not the task.
+_SPOKEN_BUDGET_SECONDS = 20.0
+
+# What the model is told when the budget passes. Phrased as a fact about where
+# the answer will appear, because the model reads it out and the person needs
+# to know to look at the chat rather than keep waiting for a voice answer.
+_STILL_WORKING_RESULT = (
+    "Still working on that one. It is running in this chat and the answer will "
+    "appear there when it is done — tell the user that, and carry on."
+)
+
+# Strong references for turns that outlived their spoken budget. asyncio holds
+# only a weak reference to a bare `create_task`, so a detached turn could be
+# collected mid-flight — losing work the person asked for, with the reply row
+# never written and nothing to say why (the #1083 `_inflight` footgun).
+_detached_turns: set = set()
+
+
+def _session_manifest(session: "VoiceSession") -> frozenset:
+    """The tool names this session may call.
+
+    `None` means the manifest was never resolved (a session built directly, an
+    older reconstruction) — fall back to the platform default, which is the
+    pre-ent#535 surface and the safe answer.
+
+    An EMPTY frozenset is a decision, not an absence: an agent that declared
+    `voice.tools: []` wants no tools, and reading that as "unset" would hand the
+    strongest possible narrowing the widest possible manifest. This is why the
+    field is tri-state rather than falsy-checked — the first cut of this used
+    `session.tool_manifest or default`, which had exactly that inversion.
+
+    A value that is not a set at all cannot be trusted to answer `in`, so it is
+    also treated as unresolved rather than crashing the audio loop.
+    """
+    manifest = getattr(session, "tool_manifest", None)
+    if isinstance(manifest, (set, frozenset)):
+        return frozenset(manifest)
+    return platform_default_tools(
+        workspace_mode=bool(getattr(session, "workspace_mode", False))
+    )
+
+
+def _manifest_from_meta(meta: dict) -> Optional[frozenset]:
+    """Read a persisted tool manifest back, preserving the tri-state.
+
+    `None` (absent or stored null) = never resolved; the caller falls back to
+    the platform default. A list — INCLUDING an empty one — is a decision and
+    comes back as a frozenset. Anything else (a dict, a string, a number: a
+    hand-edited or corrupted blob) is not a manifest and is treated as
+    unresolved rather than crashing the audio loop, which is the same rule
+    `_session_manifest` applies to the field itself.
+    """
+    raw = (meta or {}).get("tool_manifest")
+    if isinstance(raw, list):
+        return frozenset(str(t) for t in raw)
+    return None
+
+
+def _tool_prompt(args: dict) -> str:
+    """The `prompt` argument, trimmed and capped. One reader, so the container
+    path and the chat path cannot disagree about what was asked."""
+    prompt = str((args or {}).get("prompt", "")).strip()
+    if len(prompt) > _TOOL_PROMPT_MAX:
+        prompt = prompt[:_TOOL_PROMPT_MAX] + "..."
+    return prompt
+
+
+def _is_workspace_bound(session: "VoiceSession") -> bool:
+    """Can this call run a turn in a chat? Both halves or neither — a thread id
+    with no email cannot be attributed and an email with no thread has nowhere
+    to land, and either alone would silently fall back to the container."""
+    return bool(session.portal_session_id and session.client_email)
+
+
 # Single tool declaration for all voice sessions
 _RUN_TASK_TOOL = genai_types.Tool(
     function_declarations=[
@@ -274,6 +352,29 @@ class VoiceSession:
     # there, not because the call published wider. A voice write never lands on
     # a canvas WIDER than this.
     canvas_audience: str = "operator"
+    # ent#535 review — whether the caller reached this call through the PLATFORM
+    # door, carried on the session for the same reason `canvas_audience` is: the
+    # turn path re-asserts it, and a constant at that line is a scope decision
+    # made a long way from the gate that authorizes it.
+    #
+    # `include_owned` widens `agent_on_roster` past what was shared with the
+    # caller. Today only `start_workspace_voice` writes `portal_session_id` +
+    # `client_email`, and it refuses a non-platform caller outright — so the
+    # constant is correct RIGHT NOW and wrong the first time an external-client
+    # voice call sets those two fields, which would silently widen the roster
+    # check with no change at that line (an Invariant #8 scope break).
+    #
+    # Defaults FALSE: a session assembled by some future path that does not
+    # think about this gets the NARROW answer.
+    is_platform: bool = False
+    # ent#535 — the tool names this session may call, resolved ONCE at start
+    # from the platform default narrowed by the agent's own declaration. The
+    # dispatcher refuses everything outside it; nothing later can widen it.
+    tool_manifest: Optional[frozenset] = None
+    # ent#535 — turns still running past their spoken budget. The surface shows
+    # a badge while this is non-zero; it is a count and not a flag because two
+    # tasks can be in flight and the first to finish must not clear the badge.
+    _pending_turns: int = 0
     _gemini_session: object = field(default=None, repr=False)
     _send_task: object = field(default=None, repr=False)
     _receive_task: object = field(default=None, repr=False)
@@ -343,6 +444,8 @@ class GeminiVoiceService:
         portal_session_id: Optional[str] = None,
         client_email: Optional[str] = None,
         canvas_audience: str = "operator",
+        declared_tools: Any = None,
+        is_platform: bool = False,
     ) -> VoiceSession:
         """Create a new voice session (does not connect yet).
 
@@ -354,6 +457,12 @@ class GeminiVoiceService:
         `portal_session_id` + `client_email` bind the call to a Workspace thread
         instead of a chat session (ent#534). `canvas_audience` is the widest
         audience the call may draw at (ent#536).
+
+        `declared_tools` is the agent's own `template.yaml` `voice: tools:` list,
+        if it has one. It may only NARROW the platform default (ent#535) — the
+        file is agent-writable, so a declaration that could ADD would let an
+        agent grant itself a capability by editing itself. The resolved set is
+        locked onto the session here and never recomputed.
         """
         session_id = f"vs_{secrets.token_urlsafe(16)}"
         effective_max_duration = max_duration if max_duration is not None else VOICE_MAX_DURATION
@@ -370,6 +479,8 @@ class GeminiVoiceService:
             portal_session_id=portal_session_id,
             client_email=client_email,
             canvas_audience=canvas_audience,
+            tool_manifest=resolve_manifest(declared_tools, workspace_mode=workspace_mode),
+            is_platform=is_platform,
         )
         self._sessions[session_id] = session
 
@@ -392,6 +503,26 @@ class GeminiVoiceService:
             "portal_session_id": portal_session_id,
             "client_email": client_email,
             "canvas_audience": canvas_audience,
+            "is_platform": is_platform,
+            # ent#535 review — WITHOUT this the "locked" manifest is silently
+            # unlocked by the cross-worker rebuild: `get_session` would pass
+            # nothing, `_session_manifest` would read `None` as "never
+            # resolved", and the reconstruction would hand the model the FULL
+            # platform default. Production runs `--workers 2` and the WebSocket
+            # routinely lands on a worker other than the one `/voice/start` ran
+            # on, so an agent that declared `voice.tools: [run_task]` to keep
+            # the model off its canvas would get every canvas tool the moment
+            # the call connected — in the config AND in the dispatcher, with no
+            # log line, because from that worker's view nothing was narrowed.
+            #
+            # `sorted(...)`/`None`, not the frozenset: `json.dumps` cannot
+            # serialize a set, so writing it raw would raise inside the try and
+            # lose the WHOLE blob. The tri-state has to survive the round trip
+            # (`None` ≠ `[]`) or this reintroduces the exact inversion #535
+            # fixed — an agent declaring NO tools would read as "unset" and get
+            # the widest manifest there is.
+            "tool_manifest": (None if session.tool_manifest is None
+                              else sorted(session.tool_manifest)),
         }
         try:
             r = await self._get_redis()
@@ -523,13 +654,31 @@ class GeminiVoiceService:
         has the provider's default lifetime, which is the pre-ent#534 behaviour
         rather than a crash at connect time.
         """
-        tools = [_RUN_TASK_TOOL]
-        if session.workspace_mode:
-            tools.append(_PANEL_TOOLS)
+        # ent#535: the manifest decides, not the mode. `tool_manifest` was
+        # resolved once at session start (platform default ∩ the agent's own
+        # declaration); building the config from it is what makes the lock real
+        # rather than a comment — an agent that narrowed to `run_task` never
+        # sees a canvas declaration, and the model is never told about a tool
+        # the dispatcher would refuse.
+        manifest = _session_manifest(session)
+        tools = []
+        if RUN_TASK in manifest:
+            tools.append(_RUN_TASK_TOOL)
+        panel_declared = [
+            d for d in _PANEL_TOOLS.function_declarations if d.name in manifest
+        ]
+        if panel_declared:
+            tools.append(genai_types.Tool(function_declarations=panel_declared))
 
+        # AC 6: the prompt must not advertise a tool the lock removed. The
+        # etiquette block is entirely about `run_task`'s spoken filler, so it
+        # rides the manifest rather than every session.
+        instruction = session.system_prompt
+        if RUN_TASK in manifest:
+            instruction += _TOOL_ETIQUETTE_INSTRUCTION
         kwargs = dict(
             response_modalities=["AUDIO"],
-            system_instruction=session.system_prompt + _TOOL_ETIQUETTE_INSTRUCTION,
+            system_instruction=instruction,
             speech_config=genai_types.SpeechConfig(
                 voice_config=genai_types.VoiceConfig(
                     prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
@@ -764,8 +913,29 @@ class GeminiVoiceService:
 
     async def _execute_and_respond(self, session: VoiceSession, call_id: str, fc):
         """Execute a Gemini tool call and send the response back. Runs as a background task."""
-        tool_name = getattr(fc, 'name', 'run_task')
+        # ent#535: no default. A tool call with no name is not a `run_task` —
+        # reading it as one sent the model's arguments to the agent under a name
+        # nobody chose, which is exactly what the manifest exists to stop.
+        tool_name = getattr(fc, 'name', None) or ''
         args = dict(fc.args) if getattr(fc, 'args', None) else {}
+
+        # Defence in depth (ent#535): the model can only call what the config
+        # offered, so this should never fire — which is the point. The manifest
+        # is the session's, not this function's, so a future path that builds a
+        # config from somewhere else still cannot reach a tool the session was
+        # not granted. Refuse by NAME, before any argument is read.
+        manifest = _session_manifest(session)
+        if tool_name not in manifest:
+            logger.warning(
+                "[ent#535] voice session %s called %r, which is not in its manifest %s — refused",
+                session.session_id, tool_name, sorted(manifest),
+            )
+            await self._send_tool_response(
+                session, call_id, tool_name or "unknown",
+                "That tool is not available in this call.",
+            )
+            session._pending_tool_tasks.pop(call_id, None)
+            return
 
         try:
             if session._on_tool_call:
@@ -773,13 +943,23 @@ class GeminiVoiceService:
 
             if tool_name in _PANEL_TOOL_NAMES:
                 result = self._execute_panel_tool(session, tool_name, args)
+            elif _is_workspace_bound(session):
+                # ent#535 — run it AS the agent, in the thread this call is
+                # bound to. The routing lives here because this is where the
+                # session is; `_execute_tool` keeps its container contract.
+                result = await self._run_task_in_chat(session, _tool_prompt(args))
             else:
+                # No chat to run in (VoIP, the legacy Agent Detail session):
+                # the container path, with its own hard bound.
+                session.transcript.append(
+                    VoiceTranscriptEntry(role="system", text=f"[ran a task] {_tool_prompt(args)[:200]}")
+                )
                 result = await asyncio.wait_for(
                     self._execute_tool(session.agent_name, tool_name, args),
                     timeout=30.0,
                 )
         except asyncio.TimeoutError:
-            result = "Tool execution timed out after 30 seconds."
+            result = "Tool execution timed out."
             logger.warning(f"Voice tool call timed out: {tool_name} session={session.session_id}")
         except Exception as e:
             result = f"Tool error: {str(e)[:200]}"
@@ -793,6 +973,13 @@ class GeminiVoiceService:
             except Exception:
                 pass
 
+        await self._send_tool_response(session, call_id, tool_name, result)
+
+    async def _send_tool_response(self, session: VoiceSession, call_id: str,
+                                  tool_name: str, result: str) -> None:
+        """Hand one tool result back to the model. Extracted so the manifest
+        refusal answers the call rather than leaving it hanging — a model that
+        never receives a response for a call it made stops speaking."""
         if session._gemini_session and session._active:
             try:
                 await session._gemini_session.send_tool_response(
@@ -808,14 +995,18 @@ class GeminiVoiceService:
                 logger.error(f"Failed to send tool response for {call_id}: {e}")
 
     async def _execute_tool(self, agent_name: str, tool_name: str, args: dict) -> str:
-        """Route a tool call to the agent container via the task endpoint."""
+        """Route a tool call to the agent container via the task endpoint.
+
+        The pre-ent#535 path, unchanged, and still the right one for a call with
+        no chat to run in (VoIP). A Workspace call does NOT come here — the
+        dispatcher routes it to `_run_task_in_chat` so the turn runs as the
+        agent in its own thread.
+        """
         from services.agent_client import get_agent_client, AgentNotReachableError, AgentRequestError
 
-        prompt = str(args.get("prompt", "")).strip()
+        prompt = _tool_prompt(args)
         if not prompt:
             return "No prompt provided."
-        if len(prompt) > _TOOL_PROMPT_MAX:
-            prompt = prompt[:_TOOL_PROMPT_MAX] + "..."
 
         logger.info(f"Voice tool call: agent={agent_name} tool={tool_name} prompt={prompt[:80]!r}")
         try:
@@ -829,6 +1020,102 @@ class GeminiVoiceService:
         except Exception as e:
             logger.error(f"Voice tool execution error for {agent_name}: {e}")
             return f"Execution error: {str(e)[:200]}"
+
+    async def _run_task_in_chat(self, session: VoiceSession, prompt: str) -> str:
+        """The Workspace path: one real turn in the bound thread, on a budget.
+
+        The latency contract (ent#535 AC 2). The turn is started as its own
+        task and raced against `_SPOKEN_BUDGET_SECONDS`:
+
+        * back in time  → the model speaks the answer, as today;
+        * past the budget → the model is told the work is still running and
+          keeps the floor, while the turn CONTINUES. `portal_chat` persists the
+          reply into the thread when it lands, so the result arrives as a chat
+          turn (and on the canvas, if the agent drew) with the call still up.
+
+        The budget is therefore a SPEAKING deadline, never a cancellation: a
+        long task used to hit a 30s `wait_for` and be thrown away with its work
+        already done and paid for. The task is strongly referenced until it
+        finishes so it cannot be collected mid-flight (the #1083 footgun), and
+        it deliberately outlives the call — a turn the person asked for is
+        worth landing whether or not they are still on the line.
+        """
+        # The guard `_execute_tool` has always had (`"No prompt provided."`,
+        # zero side effects), which the new path dropped: `portal_chat` calls
+        # `_persist_user_turn` unconditionally, so a `run_task` with a blank
+        # prompt would durably write an empty user row into the person's
+        # Workspace thread and dispatch a real, cost-tracked execution.
+        # `required=["prompt"]` makes that unlikely, not impossible — the
+        # argument is model-generated.
+        # Stripped, not merely falsy: the dispatcher already passes
+        # `_tool_prompt(args)` so whitespace cannot arrive from there today, but
+        # this method takes the string directly and a guard that lets `"   "`
+        # through would persist a user row of spaces.
+        if not str(prompt or "").strip():
+            return "No prompt provided."
+
+        turn = asyncio.create_task(self._portal_turn(session, prompt))
+        _detached_turns.add(turn)
+        turn.add_done_callback(_detached_turns.discard)
+        session._pending_turns += 1
+        turn.add_done_callback(lambda _t, s=session: setattr(s, "_pending_turns", max(0, s._pending_turns - 1)))
+
+        done, _ = await asyncio.wait({turn}, timeout=_SPOKEN_BUDGET_SECONDS)
+        if turn in done:
+            try:
+                return turn.result()
+            except Exception as e:  # noqa: BLE001 — a failed turn is spoken, never raised at the model
+                logger.error("[ent#535] voice turn failed for %s: %s", session.agent_name, e)
+                return f"That did not go through: {str(e)[:200]}"
+        logger.info(
+            "[ent#535] voice turn past the %ss spoken budget for %s — it lands in the chat",
+            _SPOKEN_BUDGET_SECONDS, session.agent_name,
+        )
+        # Tell the surface when the detached turn actually lands, so the badge
+        # clears on the real event rather than on a timer. A notification, not a
+        # tool response: the model was answered at the budget and must not be
+        # spoken to again about a call it has already closed.
+        turn.add_done_callback(
+            lambda t, sess=session: self._spawn_turn_landed(sess, t)
+        )
+        return _STILL_WORKING_RESULT
+
+    def _spawn_turn_landed(self, session: VoiceSession, turn: "asyncio.Task") -> None:
+        """Fire the surface notification for a turn that outran its budget."""
+        if not session._on_tool_result:
+            return
+        try:
+            reply = turn.result()
+        except Exception:  # noqa: BLE001 — the chat row carries the failure
+            reply = "That task did not finish."
+        try:
+            note = asyncio.create_task(session._on_tool_result(RUN_TASK, reply))
+        except RuntimeError:
+            return  # no loop (shutdown) — the chat row is still the record
+        _detached_turns.add(note)
+        note.add_done_callback(_detached_turns.discard)
+
+    async def _portal_turn(self, session: VoiceSession, prompt: str) -> str:
+        """One `portal_chat` turn in the bound thread. Imported lazily: the
+        portal service pulls in the whole execution stack, and the voice module
+        is imported by the VoIP path too."""
+        from client_portal.service import portal_chat
+
+        result = await portal_chat(
+            session.agent_name,
+            prompt,
+            email=session.client_email,
+            session_id=session.portal_session_id,
+            # From the SESSION, never a constant here (ent#535 review). The
+            # authorization lives in `start_workspace_voice`, which refuses a
+            # non-platform caller; re-asserting it as `True` at this line makes
+            # the widening survive any future path that sets `portal_session_id`
+            # + `client_email` without going through that gate — a scope break
+            # with no diff here. `canvas_audience` already travels for exactly
+            # this reason.
+            include_owned=session.is_platform,
+        )
+        return (result or {}).get("response") or "The agent finished with no reply."
 
     async def _timeout_watchdog(self, session: VoiceSession):
         """Auto-end session after its max duration (per-session; phone calls
@@ -949,6 +1236,18 @@ class GeminiVoiceService:
             portal_session_id=meta.get("portal_session_id"),
             client_email=meta.get("client_email"),
             canvas_audience=meta.get("canvas_audience") or "operator",
+            # ent#535 review — the tri-state, restored. `.get(..., _MISSING)`
+            # rather than `.get(...)`: an absent key (a session written by an
+            # older worker mid-deploy) means "never resolved" and must fall back
+            # to the platform default, while a stored `null` means the same and
+            # a stored `[]` means "this agent declared no tools" — three inputs,
+            # two of which a bare `or` would collapse into the widest possible
+            # manifest.
+            tool_manifest=_manifest_from_meta(meta),
+            # Absent (an older blob) reads as the NARROW answer, matching the
+            # dataclass default — the reconstruction must not be the widest
+            # reading of a field it was never told about.
+            is_platform=bool(meta.get("is_platform", False)),
         )
         self._sessions[session_id] = session
         logger.info(f"Voice session {session_id} reconstructed from Redis on worker")
