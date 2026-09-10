@@ -138,8 +138,17 @@
           @sign-out="onSignOut"
         />
       </div>
+      <!-- #2617: `:value` is the EFFECTIVE width, not the desired one. The two
+           are different numbers on a viewport that cannot honour a width
+           arranged on a bigger screen, and a handle that reports the desire
+           would emit `aria-valuenow` above its own `aria-valuemax` and start
+           every drag from a position the clamp immediately discards — the
+           handle sits still for the first few hundred px of travel. The desire
+           survives in `columns.sidebar` / `columns.railOpenWidth` and comes
+           back when there is room; a drag from a clamped position deliberately
+           replaces it, because the person is moving the handle they can see. -->
       <ColumnResizeHandle
-        :value="columns.sidebar.value"
+        :value="columns.effectiveSidebar.value"
         :min="columns.limits.sidebar.min"
         :max="columns.sidebarMax.value"
         label="Resize the sidebar"
@@ -434,7 +443,7 @@
            handle rather than a second one. -->
       <ColumnResizeHandle
         v-if="thirdColumnResizable"
-        :value="columns.railOpenWidth.value"
+        :value="columns.effectiveRail.value"
         :min="columns.limits.rail.min"
         :max="columns.railMax.value"
         label="Resize the side panel"

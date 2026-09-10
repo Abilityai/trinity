@@ -169,6 +169,13 @@ describe('#2617 — the composable exposes the derived ceilings', () => {
     expect(shell).toMatch(/:max="columns\.railMax\.value"/)
     expect(shell).toMatch(/:max="columns\.sidebarMax\.value"/)
     expect(shell).not.toMatch(/limits\.(rail|sidebar)\.max/)
+    // ...and `:value` is the EFFECTIVE width, so `aria-valuenow` cannot exceed
+    // the `aria-valuemax` beside it and a drag starts where the handle is. The
+    // behavioural half of this is in the driving block below; this pins the
+    // PAIRING, which lives in the template and nowhere else.
+    expect(shell).toMatch(/:value="columns\.effectiveSidebar\.value"/)
+    expect(shell).toMatch(/:value="columns\.effectiveRail\.value"/)
+    expect(shell).not.toMatch(/:value="columns\.(sidebar|railOpenWidth)\.value"/)
   })
 
   it('the viewport is recorded even while the rail is collapsed', async () => {
@@ -192,5 +199,151 @@ describe('#2617 — the composable exposes the derived ceilings', () => {
       ), 'utf8',
     )
     expect(src).toMatch(/fitsThreeColumns\(vw, effectiveSidebar\.value, effectiveRail\.value\)/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The composable itself, driven — not scanned
+// ---------------------------------------------------------------------------
+//
+// Every assertion above this line is either a pure helper or a regex over the
+// source. That is why the collapsed-rail ceiling shipped wrong: the AC-4 case
+// recomputed its own expectation from `railMaxFor` rather than reading what
+// `useColumnResize` actually derives, so the composable's own wiring was never
+// executed. It can be: `effectScope` gives it a reactive owner, and the two
+// lifecycle hooks are the only thing it wants a component for.
+
+describe('#2617 — driving useColumnResize', () => {
+  async function drive({ viewport = LAPTOP, railOpen = true, stored = null } = {}) {
+    const { effectScope, ref } = await import('vue')
+    const { useColumnResize } = await import('@/composables/useColumnResize')
+
+    const prevWindow = globalThis.window
+    const store = fakeStorage(
+      stored ? { 'trinity-workspace-columns:anon': JSON.stringify(stored) } : {},
+    )
+    globalThis.window = {
+      innerWidth: viewport,
+      localStorage: store,
+      addEventListener() {},
+      removeEventListener() {},
+    }
+    // `onMounted` outside a component is a no-op with a dev warning; the hooks
+    // only install the resize listener, which these tests drive by hand.
+    const warn = console.warn
+    console.warn = () => {}
+
+    const open = ref(railOpen)
+    const scope = effectScope()
+    let columns
+    try {
+      columns = scope.run(() => useColumnResize({ railOpen: open, setRailOpen: (v) => { open.value = v } }))
+    } finally {
+      console.warn = warn
+      globalThis.window = prevWindow
+    }
+    return { columns, open, scope, store }
+  }
+
+  it('bills the sidebar for the COLLAPSED strip when the rail is closed', async () => {
+    // The finding: `sidebarMax` read `effectiveRail`, which carries no
+    // `railOpen` term, so a closed rail was charged at its full open width.
+    const { columns } = await drive({ viewport: LAPTOP, railOpen: false })
+    expect(columns.railWidth.value).toBe(48)
+    expect(columns.sidebarMax.value).toBe(LAPTOP - 48 - CONVERSATION_MIN) // 752
+  })
+
+  it('does not regress the narrow window below the constant it replaces', async () => {
+    // 416 was the number this shipped with — under `SIDEBAR_MAX = 480`, so a
+    // laptop came out WORSE than before #2617. AC 3 is that it does not.
+    const { columns } = await drive({ viewport: LAPTOP, railOpen: false })
+    expect(columns.sidebarMax.value).toBeGreaterThanOrEqual(480)
+  })
+
+  it('bills the sidebar for the rail\'s real width when it is open', async () => {
+    const { columns } = await drive({ viewport: LAPTOP, railOpen: true })
+    expect(columns.railWidth.value).toBe(RAIL_DEFAULT)
+    expect(columns.sidebarMax.value).toBe(LAPTOP - RAIL_DEFAULT - CONVERSATION_MIN)
+  })
+
+  it('collapsing the rail widens the sidebar\'s ceiling, reopening narrows it', async () => {
+    const { columns, open } = await drive({ viewport: LAPTOP, railOpen: true })
+    const openCeiling = columns.sidebarMax.value
+    open.value = false
+    expect(columns.sidebarMax.value).toBeGreaterThan(openCeiling)
+    open.value = true
+    expect(columns.sidebarMax.value).toBe(openCeiling)
+  })
+
+  it('never lets the three columns exceed the viewport, either way round', async () => {
+    for (const railOpen of [true, false]) {
+      const { columns } = await drive({ viewport: LAPTOP, railOpen })
+      const total = columns.sidebarMax.value + columns.railWidth.value + CONVERSATION_MIN
+      expect(total).toBeLessThanOrEqual(LAPTOP)
+    }
+  })
+
+  it('keeps the desired width while showing the clamped one (AC 4)', async () => {
+    // Arranged on a wide monitor, viewed on a laptop.
+    const { columns } = await drive({
+      viewport: LAPTOP, railOpen: true, stored: { sidebar: 700, rail: 900 },
+    })
+    expect(columns.sidebar.value).toBe(700)              // the desire survives
+    expect(columns.railOpenWidth.value).toBe(900)
+    expect(columns.effectiveRail.value).toBe(columns.railMax.value)
+    expect(columns.effectiveSidebar.value).toBe(columns.sidebarMax.value)
+    expect(columns.effectiveSidebar.value).toBeLessThan(700)
+  })
+
+  it('reports a width the handle can legally announce (aria-valuenow <= max)', async () => {
+    // The second finding: the handles bound `:value` to the DESIRE and `:max`
+    // to the derived ceiling, so `aria-valuenow` could exceed `aria-valuemax`
+    // and `startValue` began every drag at a position the clamp discards.
+    const { columns } = await drive({
+      viewport: LAPTOP, railOpen: true, stored: { sidebar: 700, rail: 900 },
+    })
+    expect(columns.effectiveSidebar.value).toBeLessThanOrEqual(columns.sidebarMax.value)
+    expect(columns.effectiveRail.value).toBeLessThanOrEqual(columns.railMax.value)
+  })
+
+  it('a drag from a clamped position moves immediately; the desire would not', async () => {
+    // Arranged on a 2560px screen, viewed on a 1600px one, so the rail's
+    // desire is far above its ceiling and the ceiling is above its floor.
+    const { columns } = await drive({
+      viewport: 1600, railOpen: true, stored: { sidebar: SIDEBAR_DEFAULT, rail: 2000 },
+    })
+    expect(columns.railOpenWidth.value).toBe(2000)
+    expect(columns.effectiveRail.value).toBe(columns.railMax.value)
+    expect(columns.effectiveRail.value).toBeGreaterThan(RAIL_MIN)
+
+    // What ColumnResizeHandle does with whatever `:value` it is given:
+    // startValue = props.value, then every move is clamped.
+    const drag = (startValue, delta) =>
+      Math.min(columns.railMax.value, Math.max(RAIL_MIN, startValue - delta))
+
+    // Bound to the EFFECTIVE width — the handle tracks the pointer from pixel one.
+    expect(drag(columns.effectiveRail.value, 1)).toBe(columns.effectiveRail.value - 1)
+
+    // Bound to the DESIRE, as it shipped: the handle is inert for the whole
+    // distance between the desire and the ceiling.
+    const dead = columns.railOpenWidth.value - columns.railMax.value
+    expect(dead).toBeGreaterThan(300)
+    expect(drag(columns.railOpenWidth.value, 1)).toBe(columns.railMax.value)
+    expect(drag(columns.railOpenWidth.value, dead)).toBe(columns.railMax.value)
+  })
+
+  it('records the viewport on resize even while the rail is collapsed', async () => {
+    const { columns } = await drive({ viewport: LAPTOP, railOpen: false })
+    const before = columns.sidebarMax.value
+    columns.enforceFit(WIDE)
+    expect(columns.viewportWidth.value).toBe(WIDE)
+    expect(columns.sidebarMax.value).toBeGreaterThan(before)
+  })
+
+  it('collapses the rail when the window can no longer fit three columns', async () => {
+    const { columns, open } = await drive({ viewport: DESK, railOpen: true })
+    expect(open.value).toBe(true)
+    columns.enforceFit(600)
+    expect(open.value).toBe(false)
   })
 })

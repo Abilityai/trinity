@@ -248,14 +248,24 @@ export function useColumnResize({ railOpen, setRailOpen = () => {} } = {}) {
   // that looks nothing like its cause.
   const railMax = computed(() => railMaxFor(viewportWidth.value, sidebar.value))
   const effectiveRail = computed(() => Math.min(railOpenWidth.value, railMax.value))
-  // The sidebar's ceiling is measured against what the rail is ACTUALLY taking,
-  // not what it would like to take: otherwise a rail whose desired width the
-  // viewport cannot honour would keep charging the sidebar for space nobody is
-  // using.
-  const sidebarMax = computed(() => sidebarMaxFor(viewportWidth.value, effectiveRail.value))
-  const effectiveSidebar = computed(() => Math.min(sidebar.value, sidebarMax.value))
-
+  // What the rail is RENDERING: its effective width when open, the fixed strip
+  // when collapsed. Declared here rather than after the sidebar's ceiling
+  // because that ceiling is measured against it.
   const railWidth = computed(() => (railOpen?.value ? effectiveRail.value : RAIL_COLLAPSED))
+  // The sidebar's ceiling is measured against what the rail is ACTUALLY taking
+  // — `railWidth`, which carries the open/closed state — not against the width
+  // it would like to take if it were open. Two ways to get this wrong, and the
+  // second one shipped:
+  //
+  //   * `railOpenWidth` (the desire) would keep charging the sidebar for space
+  //     a rail the viewport cannot honour is not using;
+  //   * `effectiveRail` looks like the fix and is only two thirds of it — it
+  //     has no `railOpen` term, so a COLLAPSED rail is still billed at its full
+  //     open width. At 1280px that put the ceiling at 416 while 752 was
+  //     genuinely free, which is BELOW the `SIDEBAR_MAX = 480` constant this
+  //     replaces: a narrow window would have come out worse than before.
+  const sidebarMax = computed(() => sidebarMaxFor(viewportWidth.value, railWidth.value))
+  const effectiveSidebar = computed(() => Math.min(sidebar.value, sidebarMax.value))
 
   // What the grid reads. Kept as one object so `Portal.vue` binds a single
   // `:style` and cannot set one variable and forget the other.

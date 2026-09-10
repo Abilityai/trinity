@@ -2462,6 +2462,22 @@ to localStorage in the clear.
   same floor `fitsThreeColumns` asks about, a drag can no longer break the fit
   at all — what remains for auto-collapse is the case it was written for, a
   window too narrow for three columns at their minima.
+- **The sidebar's ceiling is billed against what the rail RENDERS, and the
+  handle reports the effective width (#2617 review).** Two mistakes of one shape,
+  both caught in review. `sidebarMax` was measured against `effectiveRail`, which
+  carries no open/closed term, so a COLLAPSED rail was still charged at its full
+  open width — at 1280px the ceiling landed at 416 while 752 was free, *below*
+  the `SIDEBAR_MAX = 480` constant being replaced, so a narrow window came out
+  worse than before the change. It is measured against `railWidth` (the rendered
+  width: effective when open, the 48px strip when closed). And the two handles
+  bound `:value` to the DESIRE while `:max` was the derived ceiling — which lets
+  `aria-valuenow` exceed `aria-valuemax`, and makes `startValue` begin every drag
+  at a position the clamp discards, so the handle is inert for the whole distance
+  between the desire and the ceiling (several hundred px on a laptop). They bind
+  `columns.effectiveSidebar` / `columns.effectiveRail`. The desire still survives
+  untouched in storage and returns when there is room; a drag from a clamped
+  position deliberately replaces it, because the person is moving the handle they
+  can see.
 - The message cap has ONE definition (`--ws-message-max`, 1100px, wider than the
   `max-w-4xl` it replaces) and `PortalSkeleton` shares it: the skeleton exists to
   hold the footprint the loaded surface lands on (#2540), so a placeholder capped
