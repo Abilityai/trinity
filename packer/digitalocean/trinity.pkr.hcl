@@ -121,18 +121,29 @@ variable "region" {
 # jellyfin, craftcms), so it is not an odd shape at review — but on disk alone
 # it is no longer justified.
 #
-# ponytail: s-1vcpu-1gb (25 GB) is the remaining move — it is DigitalOcean's
-# recommended $6 build droplet and what #2281 AC 2 actually asks for. Disk is
-# settled; the open risk is its 1 GB of RAM against `apt full-upgrade` and
-# `docker pull` decompressing large layers. One build settles it, and their own
-# exa-24-04 builds on exactly that size.
+# s-1vcpu-1gb is DigitalOcean's recommended $6 build droplet and what AC 2 asks
+# for. Both open questions about it are now measured rather than estimated:
+#
+#   disk  a droplet from the resulting snapshot reports 8.8 GB used, everything
+#         installed and Trinity running, against the 25 GB this size carries
+#   RAM   a full build on 1 GB completed in 11m53s with img_check 8 PASSED /
+#         0 FAILED, no OOM and no disk exhaustion, through `apt full-upgrade`
+#         and the agent base image pull, the two places 1 GB would have bitten
+#
+# It is also faster than the 50 GB build it replaces (11m53s vs 14m38s), and
+# DigitalOcean's own exa-24-04 builds on this size.
 variable "build_size" {
   type    = string
-  default = "s-1vcpu-2gb"
+  default = "s-1vcpu-1gb"
 }
 
 locals {
-  snapshot_name = "trinity-${replace(var.image_tag, ".", "-")}-${formatdate("YYYYMMDD", timestamp())}"
+  # Minute-resolution, not just the date. Two builds of the same tag on the same
+  # day produced two snapshots named identically, distinguishable only by ID and
+  # min disk size — and the Vendor Portal's "select a system image" step picks by
+  # what it shows you. Submitting the wrong image is a review cycle lost, and it
+  # is silent: both are valid Trinity snapshots.
+  snapshot_name = "trinity-${replace(var.image_tag, ".", "-")}-${formatdate("YYYYMMDD-hhmm", timestamp())}"
 }
 
 source "digitalocean" "trinity" {
