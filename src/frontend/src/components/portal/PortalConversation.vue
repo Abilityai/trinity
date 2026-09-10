@@ -658,6 +658,15 @@
                          is the thing that truncates when the row runs out — never
                          Send, which is `shrink-0`. -->
                 <div class="ml-auto flex items-center gap-1 min-w-0">
+                  <!-- `@keydown.enter.prevent` is the price of moving the picker
+                       INSIDE the <form>. On dev it was a sibling above it, so Enter
+                       there did nothing; inside, Chrome and Firefox route Enter on a
+                       focused <select> to the form's default button, and a user who
+                       arrows to another model and presses Enter to commit the choice
+                       sends their unfinished draft instead. Preventing it costs
+                       nothing: on every engine whose picker is drawn by the platform
+                       the open dropdown never dispatches here, so the only page-level
+                       effect of Enter on this control was the submit. -->
                   <BaseSelect
                     v-if="modelControl.render"
                     v-model="selectedModel"
@@ -667,6 +676,7 @@
                     :title="modelControl.reason || 'Which model this chat runs on'"
                     aria-label="Model for this chat"
                     data-testid="portal-model-picker"
+                    @keydown.enter.prevent
                   >
                     <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
                     <option

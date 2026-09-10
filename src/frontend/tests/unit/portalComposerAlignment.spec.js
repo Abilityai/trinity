@@ -185,6 +185,19 @@ describe('#2259 workspace composer alignment', () => {
         expect(tag).toMatch(/\bvariant="ghost"/)
       }
     })
+
+    it('keeps Enter on a composer select from submitting the form', () => {
+      // #2662 moved the picker INSIDE the <form>; on dev it was a sibling above
+      // it. Chrome and Firefox route Enter on a focused <select> to the form's
+      // default button, so the user who arrows to another model and presses
+      // Enter to commit sends their draft unread. The regression is invisible in
+      // every geometry assertion in this file, and the same trap waits for any
+      // select a composer gains later — hence the same "if there is one" shape
+      // as the ghost-recipe guard above, over both surfaces.
+      for (const tag of composerForm(src).match(/<BaseSelect[\s\S]*?>/g) || []) {
+        expect(tag).toMatch(/@keydown\.enter\.prevent/)
+      }
+    })
   })
 
   it('gives the ghost recipe the 44px height the composer row is built on', () => {
