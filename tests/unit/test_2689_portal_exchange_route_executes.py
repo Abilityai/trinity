@@ -143,6 +143,17 @@ async def test_the_settings_read_cannot_500_an_auth_path(delegate_db, monkeypatc
     assert out.expires_in > 0, "and still reports a usable lifetime"
 
 
+# NO LATE-BINDING GUARD, DELIBERATELY. The handler imports
+# `_portal_session_policy` function-locally, so it resolves through
+# `sys.modules` at call time and cannot hold a stale reference. Asserting that
+# by patching `dependencies` is not possible in this suite: `tests/unit/
+# conftest.py` lists `dependencies` in `_POP_PREFIXES` and an autouse fixture
+# evicts it from `sys.modules` before AND after every test, so a test's
+# `import dependencies` gets a different module object than the one
+# `client_portal.router` captured at import time. Measured: the route returned
+# the shipped 604800 while the patched module returned 111. That is a harness
+# property, not a defect — and a guard that fails for harness reasons is worse
+# than no guard.
 # ---------------------------------------------------------------------------
 # The gates the route already owned — pinned here because they now run
 # ---------------------------------------------------------------------------

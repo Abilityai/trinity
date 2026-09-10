@@ -33,11 +33,6 @@ from dependencies import (
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
-    # #2689: the ONE reader of the sliding-session policy. Underscore-private to
-    # `dependencies`, imported here on the same footing as `_norm_ts` and
-    # `_detect_git_dir` are elsewhere — reuse beats a second copy of a read whose
-    # fail-open degrade is the load-bearing half.
-    _portal_session_policy,
 )
 from models import REPORT_ROWS_PAGE_MAX, User
 from services.agent_auth import agent_httpx_client
@@ -353,12 +348,26 @@ async def portal_auth_exchange(
     # constant. The session now slides, so this is when it expires *if the
     # client goes quiet* — a client that keeps using it keeps it alive.
     #
-    # #2689: through `dependencies`, not `settings_service` directly. This line
-    # named a module the router never imported, so every call to this route —
-    # the whole ent#163 trusted-issuer seam — answered 500 with a NameError, on
-    # `dev` and on `main`. The shared reader also carries the degrade this route
-    # needs: a settings failure must not 500 an auth path, and importing
-    # `settings_service` here again would be a second chance to omit it.
+    # #2689: this line named `settings_service`, which the router never imports,
+    # so every call to this route — the whole ent#163 trusted-issuer seam —
+    # answered 500 with a NameError, on `dev` and on `main`.
+    #
+    # Read through `dependencies`, which owns the ONE reader of this setting and
+    # carries the two properties the route needs: the import is function-local
+    # (`settings_service` imports `db`, so a module-level import cycles) and the
+    # read degrades to the shipped policy, because a settings hiccup must not
+    # 500 an auth path. A second copy of the call here would be a second chance
+    # to omit that degrade.
+    #
+    # Imported INSIDE the handler, not at module scope. Both module-scope forms
+    # capture at import time — a `from`-import binds the function object, and
+    # `import dependencies as _deps` binds the module object — and both go stale
+    # if `dependencies` is re-imported after this module. Measured under pytest:
+    # `sys.modules["dependencies"]` and the router's captured reference were
+    # different objects, so the route read the shipped default while the test's
+    # patch moved the live module. Resolving through `sys.modules` at call time
+    # cannot diverge.
+    from dependencies import _portal_session_policy
     idle_s, _ = _portal_session_policy()
     return PortalExchangeResponse(
         token=token,
