@@ -62,41 +62,43 @@ running Droplet, never decreased.
 
 ## Getting started
 
-### 1. Create the Droplet
+### 1. Choose your password while creating the Droplet
 
-Choose a plan of at least 4 GB RAM (8 GB recommended) and create it. First boot
-takes about ninety seconds: it generates your admin password, obtains a
-certificate for the Droplet's IP, and starts Trinity.
-
-### 2. Get your admin password
-
-Your password is generated on first boot and printed in the login banner. How you
-reach that banner depends on the authentication you chose when creating the
-Droplet:
-
-- **If you chose a password**, open **Droplet → Console** in the DigitalOcean
-  control panel and log in as `root`. The Console is a browser terminal, so no
-  SSH client is needed.
-- **If you chose an SSH key**, DigitalOcean leaves the root account locked and the
-  Console cannot accept a login. Connect with your key instead:
-  `ssh root@your_droplet_public_ipv4`
-
-Either way the banner prints your Trinity password, the URL to open, and whether
-HTTPS came up. You can re-read it at any time with `cat /etc/trinity/admin-credentials`.
-
-To choose the password yourself instead, paste this into **Additional Options →
-Startup scripts** when creating the Droplet:
+Pick a plan of at least 4 GB RAM (8 GB recommended). Before you click Create, open
+**Additional Options** and paste this into **Startup scripts**, with your own
+password:
 
 ```yaml
 #cloud-config
 write_files:
   - path: /etc/trinity/admin-password
     permissions: '0600'
-    content: "your-password-here"
+    content: "the-password-you-want"
 ```
 
-It must be `#cloud-config` with `write_files`, not a shell script — a shell
-script runs too late in cloud-init to be seen.
+That is the whole setup. Trinity uses that password instead of generating one, and
+you never need a terminal.
+
+It must be `#cloud-config` with `write_files`, not a shell script. 1-Click code
+runs in cloud-init's `scripts-per-instance` stage, which runs *before* the stage
+that would run a shell script, so a script would execute after Trinity had already
+started.
+
+### 2. If you skipped that step
+
+Trinity generates a password on first boot and prints it in the server's login
+banner. How you reach that banner depends on the authentication you chose when
+creating the Droplet:
+
+- **Password authentication** — open **Droplet → Console** in the DigitalOcean
+  control panel and log in as `root` with the password you set. The Console is a
+  browser terminal, so no SSH client is needed.
+- **SSH key authentication** — DigitalOcean leaves the root account locked and the
+  Console cannot accept a login. Connect with your key instead:
+  `ssh root@your_droplet_public_ipv4`
+
+Either way the banner prints your Trinity password, the URL, and whether HTTPS came
+up. You can re-read it later with `cat /etc/trinity/admin-credentials`.
 
 ### 3. Sign in
 
