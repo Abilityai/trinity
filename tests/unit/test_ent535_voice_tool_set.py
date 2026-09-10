@@ -116,6 +116,11 @@ def _session(gv, **over):
         workspace_mode=True,
         portal_session_id="portal-1",
         client_email="op@example.com",
+        # A Workspace call is a platform-door call; `start_workspace_voice`
+        # refuses anything else. Set explicitly so the DEFAULT stays the narrow
+        # one — a helper that quietly widened every session would hide exactly
+        # the regression the test below exists for.
+        is_platform=True,
     )
     base.update(over)
     return gv.VoiceSession(**base)
@@ -347,3 +352,103 @@ class TestConfigIsBuiltFromTheManifest:
         cfg = svc._build_live_config(session)
         names = {d.name for t in (cfg.tools or []) for d in (t.function_declarations or [])}
         assert gv.RUN_TASK in names and "show_markdown" in names
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups
+# ---------------------------------------------------------------------------
+
+class TestTheEmptyPromptGuardSurvivedTheNewPath:
+    """`_execute_tool` returns `"No prompt provided."` with zero side effects.
+    The chat path dropped that guard, and `portal_chat` calls
+    `_persist_user_turn` unconditionally — so a `run_task` with a blank prompt
+    would durably write an empty user row into the person's Workspace thread and
+    dispatch a real, cost-tracked execution. `required=["prompt"]` makes that
+    unlikely, not impossible: the argument is model-generated.
+    """
+
+    def test_a_blank_prompt_runs_nothing(self):
+        gv = _voice_module()
+        session = _session(gv)
+        svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
+
+        chat = AsyncMock(return_value={"response": "should never run"})
+        with patch("client_portal.service.portal_chat", chat):
+            for blank in ("", "   ", "\n\t "):
+                out = asyncio.run(svc._run_task_in_chat(session, blank))
+                assert out == "No prompt provided."
+        chat.assert_not_awaited()
+
+    def test_it_matches_the_container_path_word_for_word(self):
+        """Two paths, one answer — the model must not be able to tell which one
+        it reached by the wording of a refusal."""
+        import inspect
+        gv = _voice_module()
+        assert '"No prompt provided."' in inspect.getsource(gv.GeminiVoiceService._execute_tool)
+        assert '"No prompt provided."' in inspect.getsource(gv.GeminiVoiceService._run_task_in_chat)
+
+
+class TestTheRosterWideningTravelsOnTheSession:
+    """`include_owned=True` was a constant at the turn site, decoupled from
+    `start_workspace_voice`, which is where the authorization actually lives.
+
+    Sound today — that function is the only writer of `portal_session_id` +
+    `client_email` and it refuses a non-platform caller — and wrong the first
+    time some other path sets those two fields, which would widen
+    `agent_on_roster` past the caller's roster with no change at that line
+    (Invariant #8). `canvas_audience` already travels for exactly this reason.
+    """
+
+    def test_a_platform_session_still_reads_owned_agents(self):
+        gv = _voice_module()
+        session = _session(gv, is_platform=True)
+        svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
+        chat = AsyncMock(return_value={"response": "ok"})
+        with patch("client_portal.service.portal_chat", chat):
+            asyncio.run(svc._run_task_in_chat(session, "go"))
+        assert chat.await_args.kwargs["include_owned"] is True
+
+    def test_a_session_that_is_not_platform_does_not_widen_the_roster(self):
+        gv = _voice_module()
+        session = _session(gv, is_platform=False)
+        svc = gv.GeminiVoiceService.__new__(gv.GeminiVoiceService)
+        chat = AsyncMock(return_value={"response": "ok"})
+        with patch("client_portal.service.portal_chat", chat):
+            asyncio.run(svc._run_task_in_chat(session, "go"))
+        assert chat.await_args.kwargs["include_owned"] is False
+
+    def test_the_field_defaults_to_the_narrow_answer(self):
+        gv = _voice_module()
+        assert gv.VoiceSession(
+            session_id="v", agent_name="a", chat_session_id=None, user_id=1,
+            user_email="u@example.com", system_prompt="p",
+        ).is_platform is False
+
+    def test_the_gate_that_authorizes_it_is_the_one_that_records_it(self):
+        import inspect
+        from client_portal import voice as portal_voice
+
+        src = inspect.getsource(portal_voice.start_workspace_voice)
+        assert "is_platform=True" in src
+        # ...and the turn does not re-assert it as a constant.
+        gv = _voice_module()
+        turn_src = inspect.getsource(gv.GeminiVoiceService._portal_turn)
+        assert "include_owned=session.is_platform" in turn_src
+        assert "include_owned=True" not in turn_src
+
+
+def test_the_portal_turn_has_no_unreachable_tail():
+    """15 lines of `_execute_tool` were copy-pasted below `_portal_turn`'s
+    `return`, referencing names that do not exist in that scope. Dead today; an
+    instant `NameError` inside the audio loop's tool task for whoever adds an
+    early return above it or re-indents the return."""
+    import ast
+    import inspect
+    import textwrap
+    gv = _voice_module()
+
+    src = textwrap.dedent(inspect.getsource(gv.GeminiVoiceService._portal_turn))
+    fn = ast.parse(src).body[0]
+    for i, node in enumerate(fn.body):
+        if isinstance(node, ast.Return):
+            assert i == len(fn.body) - 1, "_portal_turn has statements after its return"

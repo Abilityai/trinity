@@ -871,6 +871,133 @@ class TestRedisSessionFallback:
         assert stored["agent_name"] == "my-agent"
         assert stored["system_prompt"] == "Be helpful."
 
+    def test_the_redis_blob_carries_every_decided_field(self, svc):
+        """ROUND-TRIP COMPLETENESS, not three named keys.
+
+        This test asserted `user_id`, `agent_name` and `system_prompt` and
+        nothing else, so ent#535 could add a decision field, omit it from the
+        blob, and stay green — which is exactly what happened to
+        `tool_manifest`: the cross-worker rebuild read it as "never resolved"
+        and handed the model the full platform default, silently unlocking a
+        manifest the agent had narrowed.
+
+        The rule the block comment above the dict states is "EVERY field a
+        reconstructed session decides on must be here". Asserted here as a
+        SUBSET relation over the session's own fields, so a field added
+        tomorrow fails this rather than shipping unpersisted. Fields that are
+        deliberately not persisted are listed with the reason.
+        """
+        import dataclasses
+
+        redis_mock = self._make_redis_mock()
+        svc._get_redis = AsyncMock(return_value=redis_mock)
+        session = _run(svc.create_session(
+            agent_name="my-agent", chat_session_id="cs_1", user_id=7,
+            user_email="test@example.com", system_prompt="Be helpful.",
+        ))
+        stored = json.loads(redis_mock.setex.call_args[0][2])
+
+        # Runtime state, not decisions: live objects, per-connection tasks, and
+        # values a rebuilt session legitimately starts fresh from.
+        not_persisted = {
+            "transcript",        # rebuilt worker records its own leg
+            "end_reason",        # set by whichever worker ends the call
+            "end_message",
+        }
+        decided = {
+            f.name for f in dataclasses.fields(session)
+            if not f.name.startswith("_")
+        } - not_persisted
+        missing = sorted(decided - set(stored))
+        assert not missing, (
+            "these session fields are decided at start and are NOT in the Redis "
+            f"blob, so a cross-worker rebuild silently defaults them: {missing}"
+        )
+
+    def test_a_narrowed_tool_manifest_survives_the_rebuild(self, svc):
+        """The critical, end to end: worker A resolves, worker B reconstructs.
+
+        Production runs `--workers 2` and the WebSocket routinely lands on a
+        different worker than `/voice/start`, so this IS the normal path, not an
+        edge case.
+        """
+        from services.gemini_voice import _session_manifest
+
+        redis_mock = self._make_redis_mock()
+        svc._get_redis = AsyncMock(return_value=redis_mock)
+        session = _run(svc.create_session(
+            agent_name="my-agent", chat_session_id="cs_1", user_id=7,
+            user_email="test@example.com", system_prompt="p",
+            workspace_mode=True, declared_tools=["run_task"],
+        ))
+        assert _session_manifest(session) == frozenset({"run_task"})
+
+        raw = redis_mock.setex.call_args[0][2]
+        redis_mock.get = AsyncMock(return_value=raw)
+        svc._sessions.clear()                       # worker B has never seen it
+        rebuilt = _run(svc.get_session(session.session_id))
+
+        assert rebuilt is not None
+        assert _session_manifest(rebuilt) == frozenset({"run_task"}), (
+            "the rebuilt session was handed the full platform default — the "
+            "'locked' manifest is unlocked by the cross-worker rebuild"
+        )
+
+    def test_an_empty_manifest_survives_as_a_decision(self, svc):
+        """`None` != `[]` across the round trip.
+
+        An agent declaring NO tools is the strongest possible narrowing, and it
+        is the one a falsy read turns into the widest possible manifest — the
+        exact inversion ent#535's `_session_manifest` docstring records having
+        already made once.
+        """
+        from services.gemini_voice import _session_manifest, _manifest_from_meta
+
+        redis_mock = self._make_redis_mock()
+        svc._get_redis = AsyncMock(return_value=redis_mock)
+        session = _run(svc.create_session(
+            agent_name="my-agent", chat_session_id="cs_1", user_id=7,
+            user_email="test@example.com", system_prompt="p",
+            workspace_mode=True, declared_tools=[],
+        ))
+        stored = json.loads(redis_mock.setex.call_args[0][2])
+        assert stored["tool_manifest"] == []          # a decision, serialized
+        assert _manifest_from_meta(stored) == frozenset()
+
+        redis_mock.get = AsyncMock(return_value=redis_mock.setex.call_args[0][2])
+        svc._sessions.clear()
+        rebuilt = _run(svc.get_session(session.session_id))
+        assert _session_manifest(rebuilt) == frozenset()
+
+    def test_an_older_blob_with_no_manifest_falls_back_to_the_default(self, svc):
+        """A session written by a worker that predates this field, read by one
+        that does not — the mid-deploy case. Absent means "never resolved",
+        which is the pre-ent#535 surface and the safe answer."""
+        from services.gemini_voice import _session_manifest, platform_default_tools
+
+        redis_mock = self._make_redis_mock()
+        svc._get_redis = AsyncMock(return_value=redis_mock)
+        session = _run(svc.create_session(
+            agent_name="my-agent", chat_session_id="cs_1", user_id=7,
+            user_email="test@example.com", system_prompt="p", workspace_mode=True,
+        ))
+        stored = json.loads(redis_mock.setex.call_args[0][2])
+        stored.pop("tool_manifest", None)
+        redis_mock.get = AsyncMock(return_value=json.dumps(stored))
+        svc._sessions.clear()
+
+        rebuilt = _run(svc.get_session(session.session_id))
+        assert _session_manifest(rebuilt) == platform_default_tools(workspace_mode=True)
+
+    def test_a_corrupt_manifest_reads_as_unresolved_not_as_a_crash(self):
+        """The blob is JSON someone could hand-edit; a dict or a string is not a
+        manifest and must not reach the audio loop as one."""
+        from services.gemini_voice import _manifest_from_meta
+
+        for bad in ({"tool_manifest": {"a": 1}}, {"tool_manifest": "run_task"},
+                    {"tool_manifest": 7}, {"tool_manifest": None}, {}):
+            assert _manifest_from_meta(bad) is None
+
     def test_create_session_redis_failure_raises(self, svc):
         """Redis write failure raises RuntimeError; session must not remain in memory."""
         redis_mock = AsyncMock()

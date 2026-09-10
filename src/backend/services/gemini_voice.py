@@ -229,6 +229,22 @@ def _session_manifest(session: "VoiceSession") -> frozenset:
     )
 
 
+def _manifest_from_meta(meta: dict) -> Optional[frozenset]:
+    """Read a persisted tool manifest back, preserving the tri-state.
+
+    `None` (absent or stored null) = never resolved; the caller falls back to
+    the platform default. A list — INCLUDING an empty one — is a decision and
+    comes back as a frozenset. Anything else (a dict, a string, a number: a
+    hand-edited or corrupted blob) is not a manifest and is treated as
+    unresolved rather than crashing the audio loop, which is the same rule
+    `_session_manifest` applies to the field itself.
+    """
+    raw = (meta or {}).get("tool_manifest")
+    if isinstance(raw, list):
+        return frozenset(str(t) for t in raw)
+    return None
+
+
 def _tool_prompt(args: dict) -> str:
     """The `prompt` argument, trimmed and capped. One reader, so the container
     path and the chat path cannot disagree about what was asked."""
@@ -336,6 +352,21 @@ class VoiceSession:
     # there, not because the call published wider. A voice write never lands on
     # a canvas WIDER than this.
     canvas_audience: str = "operator"
+    # ent#535 review — whether the caller reached this call through the PLATFORM
+    # door, carried on the session for the same reason `canvas_audience` is: the
+    # turn path re-asserts it, and a constant at that line is a scope decision
+    # made a long way from the gate that authorizes it.
+    #
+    # `include_owned` widens `agent_on_roster` past what was shared with the
+    # caller. Today only `start_workspace_voice` writes `portal_session_id` +
+    # `client_email`, and it refuses a non-platform caller outright — so the
+    # constant is correct RIGHT NOW and wrong the first time an external-client
+    # voice call sets those two fields, which would silently widen the roster
+    # check with no change at that line (an Invariant #8 scope break).
+    #
+    # Defaults FALSE: a session assembled by some future path that does not
+    # think about this gets the NARROW answer.
+    is_platform: bool = False
     # ent#535 — the tool names this session may call, resolved ONCE at start
     # from the platform default narrowed by the agent's own declaration. The
     # dispatcher refuses everything outside it; nothing later can widen it.
@@ -414,6 +445,7 @@ class GeminiVoiceService:
         client_email: Optional[str] = None,
         canvas_audience: str = "operator",
         declared_tools: Any = None,
+        is_platform: bool = False,
     ) -> VoiceSession:
         """Create a new voice session (does not connect yet).
 
@@ -448,6 +480,7 @@ class GeminiVoiceService:
             client_email=client_email,
             canvas_audience=canvas_audience,
             tool_manifest=resolve_manifest(declared_tools, workspace_mode=workspace_mode),
+            is_platform=is_platform,
         )
         self._sessions[session_id] = session
 
@@ -470,6 +503,26 @@ class GeminiVoiceService:
             "portal_session_id": portal_session_id,
             "client_email": client_email,
             "canvas_audience": canvas_audience,
+            "is_platform": is_platform,
+            # ent#535 review — WITHOUT this the "locked" manifest is silently
+            # unlocked by the cross-worker rebuild: `get_session` would pass
+            # nothing, `_session_manifest` would read `None` as "never
+            # resolved", and the reconstruction would hand the model the FULL
+            # platform default. Production runs `--workers 2` and the WebSocket
+            # routinely lands on a worker other than the one `/voice/start` ran
+            # on, so an agent that declared `voice.tools: [run_task]` to keep
+            # the model off its canvas would get every canvas tool the moment
+            # the call connected — in the config AND in the dispatcher, with no
+            # log line, because from that worker's view nothing was narrowed.
+            #
+            # `sorted(...)`/`None`, not the frozenset: `json.dumps` cannot
+            # serialize a set, so writing it raw would raise inside the try and
+            # lose the WHOLE blob. The tri-state has to survive the round trip
+            # (`None` ≠ `[]`) or this reintroduces the exact inversion #535
+            # fixed — an agent declaring NO tools would read as "unset" and get
+            # the widest manifest there is.
+            "tool_manifest": (None if session.tool_manifest is None
+                              else sorted(session.tool_manifest)),
         }
         try:
             r = await self._get_redis()
@@ -987,6 +1040,20 @@ class GeminiVoiceService:
         it deliberately outlives the call — a turn the person asked for is
         worth landing whether or not they are still on the line.
         """
+        # The guard `_execute_tool` has always had (`"No prompt provided."`,
+        # zero side effects), which the new path dropped: `portal_chat` calls
+        # `_persist_user_turn` unconditionally, so a `run_task` with a blank
+        # prompt would durably write an empty user row into the person's
+        # Workspace thread and dispatch a real, cost-tracked execution.
+        # `required=["prompt"]` makes that unlikely, not impossible — the
+        # argument is model-generated.
+        # Stripped, not merely falsy: the dispatcher already passes
+        # `_tool_prompt(args)` so whitespace cannot arrive from there today, but
+        # this method takes the string directly and a guard that lets `"   "`
+        # through would persist a user row of spaces.
+        if not str(prompt or "").strip():
+            return "No prompt provided."
+
         turn = asyncio.create_task(self._portal_turn(session, prompt))
         _detached_turns.add(turn)
         turn.add_done_callback(_detached_turns.discard)
@@ -1039,27 +1106,16 @@ class GeminiVoiceService:
             prompt,
             email=session.client_email,
             session_id=session.portal_session_id,
-            # The caller is a platform user in their own Workspace (ent#357),
-            # so owned agents are in scope exactly as they are for a typed turn.
-            include_owned=True,
+            # From the SESSION, never a constant here (ent#535 review). The
+            # authorization lives in `start_workspace_voice`, which refuses a
+            # non-platform caller; re-asserting it as `True` at this line makes
+            # the widening survive any future path that sets `portal_session_id`
+            # + `client_email` without going through that gate — a scope break
+            # with no diff here. `canvas_audience` already travels for exactly
+            # this reason.
+            include_owned=session.is_platform,
         )
         return (result or {}).get("response") or "The agent finished with no reply."
-
-        try:
-            client = get_agent_client(agent_name)
-            response = await asyncio.wait_for(
-                client.task(prompt, timeout=28.0), timeout=30.0
-            )
-            return response.response_text or "Task completed with no response."
-        except asyncio.TimeoutError:
-            return "Tool execution timed out."
-        except AgentNotReachableError:
-            return f"Agent {agent_name!r} is not currently running."
-        except AgentRequestError as e:
-            return f"Task error: {str(e)[:200]}"
-        except Exception as e:
-            logger.error(f"Voice tool execution error for {agent_name}: {e}")
-            return f"Execution error: {str(e)[:200]}"
 
     async def _timeout_watchdog(self, session: VoiceSession):
         """Auto-end session after its max duration (per-session; phone calls
@@ -1180,6 +1236,18 @@ class GeminiVoiceService:
             portal_session_id=meta.get("portal_session_id"),
             client_email=meta.get("client_email"),
             canvas_audience=meta.get("canvas_audience") or "operator",
+            # ent#535 review — the tri-state, restored. `.get(..., _MISSING)`
+            # rather than `.get(...)`: an absent key (a session written by an
+            # older worker mid-deploy) means "never resolved" and must fall back
+            # to the platform default, while a stored `null` means the same and
+            # a stored `[]` means "this agent declared no tools" — three inputs,
+            # two of which a bare `or` would collapse into the widest possible
+            # manifest.
+            tool_manifest=_manifest_from_meta(meta),
+            # Absent (an older blob) reads as the NARROW answer, matching the
+            # dataclass default — the reconstruction must not be the widest
+            # reading of a field it was never told about.
+            is_platform=bool(meta.get("is_platform", False)),
         )
         self._sessions[session_id] = session
         logger.info(f"Voice session {session_id} reconstructed from Redis on worker")
