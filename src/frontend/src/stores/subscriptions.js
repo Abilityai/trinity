@@ -21,6 +21,11 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
     breakdownLoading: {},  // subscription_id -> bool
     refreshingHeadroom: {},// subscription_id -> bool (click probe in flight)
     headroomAutoRefresh: { enabled: true, refresh_seconds: 900, loaded: false },
+    // #2638 — the API-key fallback. `enabled` mirrors the backend default (ON),
+    // `key_configured` is unknown until the fetch lands, which is why it starts
+    // null rather than false: `false` would render "no key configured" as a
+    // fact on first paint.
+    apiKeyFallback: { enabled: true, key_configured: null, loaded: false },
     // ent#259 — the roster the Dashboard pressure tile renders. Settings fetches
     // the same list with a raw axios call it owns; this is the store-side read
     // the tile uses, so the Grid never reaches into a view's local state.
@@ -137,6 +142,25 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
     async setHeadroomAutoRefresh(enabled) {
       await api.put(`/api/subscriptions/settings/headroom-auto-refresh?enabled=${enabled}`)
       this.headroomAutoRefresh = { ...this.headroomAutoRefresh, enabled }
+    },
+
+    // #2638 AC#4. `key_configured` rides the same payload rather than being
+    // derived here: "the fallback is on" and "there is a key for it to use" are
+    // different facts, and a toggle that shows only the first would describe a
+    // remedy that cannot run.
+    async fetchApiKeyFallback() {
+      try {
+        const { data } = await api.get('/api/subscriptions/settings/api-key-fallback')
+        this.apiKeyFallback = { ...data, loaded: true }
+      } catch (e) {
+        // Older backend — leave the default-ON value; a failed save surfaces
+        // its own error, and the control never claims a status it did not read.
+      }
+    },
+
+    async setApiKeyFallback(enabled) {
+      await api.put(`/api/subscriptions/settings/api-key-fallback?enabled=${enabled}`)
+      this.apiKeyFallback = { ...this.apiKeyFallback, enabled }
     },
 
     // ent#434. Refetches rather than patching state locally: `weekly_alert`

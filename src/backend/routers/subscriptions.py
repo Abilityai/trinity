@@ -719,6 +719,61 @@ async def set_headroom_auto_refresh_setting(
     return {"enabled": enabled}
 
 
+@router.get("/settings/api-key-fallback")
+async def get_api_key_fallback_setting(
+    current_user: User = Depends(get_current_user)
+):
+    """Whether a turn may fall back to the platform API key when NO
+    subscription can serve it (#2638 AC#4). Default ON.
+
+    `key_configured` is the honest half the AC asks for: with the setting on
+    and no key stored, the fallback is enabled and inert, and a toggle that
+    says only "on" would be describing a remedy that cannot run. Never echoes
+    the key — only whether one resolves (`has_secret_setting`'s presence rule,
+    so a row written under a rotated encryption key still reports configured).
+    """
+    assert_admin(current_user)
+    from services.subscription_auto_switch import (
+        API_KEY_FALLBACK_SETTING, is_api_key_fallback_enabled,
+    )
+    from services.settings_service import get_anthropic_api_key
+
+    enabled = await asyncio.to_thread(is_api_key_fallback_enabled)
+    key_configured = bool(await asyncio.to_thread(get_anthropic_api_key))
+    return {
+        "enabled": enabled,
+        "key_configured": key_configured,
+        "setting_key": API_KEY_FALLBACK_SETTING,
+    }
+
+
+@router.put("/settings/api-key-fallback")
+async def set_api_key_fallback_setting(
+    enabled: bool,
+    current_user: User = Depends(get_current_user)
+):
+    """Enable/disable the API-key fallback (#2638 AC#4).
+
+    Turning it OFF is a real choice, not an edge case: an operator who
+    registered subscriptions did so to control where spend goes, and a silent
+    move onto a metered key is exactly what they were avoiding. Turning it ON
+    is the default because the alternative is a user's message dying while a
+    usable key sits in settings.
+
+    The fallback CLEARS the agent's subscription assignment when it fires, so
+    it is not a temporary redirect — see `fallback_to_api_key`.
+    """
+    assert_admin(current_user)
+    from services.subscription_auto_switch import API_KEY_FALLBACK_SETTING
+
+    db.set_setting(API_KEY_FALLBACK_SETTING, "true" if enabled else "false")
+    logger.info(
+        "Subscription API-key fallback %s by %s",
+        "enabled" if enabled else "disabled", current_user.username,
+    )
+    return {"enabled": enabled}
+
+
 @router.put("/settings/headroom-alert-threshold")
 async def set_headroom_alert_threshold(
     threshold_pct: int,

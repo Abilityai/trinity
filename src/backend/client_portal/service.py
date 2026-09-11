@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
-from utils.helpers import utc_now_iso
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 from services.chat_title import (
     chat_title_problem,
     is_greeting,
@@ -144,6 +144,28 @@ PORTAL_FAILURE_CATEGORIES = (
     # every retry and every reload. `agent_error` must not carry that side
     # effect — it fires for every turn that ran and did not come back.
     "invalid_model",
+    # #2638 — the turn hit a usage limit AND SUB-003 moved the agent onto a
+    # different subscription (or the platform API key) while it failed.
+    #
+    # A TENTH token rather than reusing `auth`, because the two disagree on the
+    # only thing this taxonomy is consulted about: `auth` means retrying
+    # re-fails, and that is true exactly while nothing changed underneath. A
+    # switch is something changing underneath, so the same word would have to
+    # carry both "do not bother" and "try again" — and the client reads
+    # `retryable` off the outcome, so one token with two answers is a coin toss
+    # over whether the Retry button appears.
+    #
+    # It needs no client branch: `cancelled` and `invalid_model` are the only
+    # categories the client acts on, and everything else renders its message and
+    # its `retryable` flag. Declaring it is not optional bookkeeping —
+    # `record_turn_outcome` coerces an undeclared category to `internal`, so
+    # without this line the switch outcome would have been recorded as an
+    # uncategorised crash, not retryable, with the fixed internal copy in place
+    # of the sentence naming the new subscription. Caught by
+    # `test_every_declared_category_is_actually_raised_somewhere`, which is a
+    # closed taxonomy in BOTH directions precisely so a new raise site cannot
+    # silently degrade like that.
+    "auth_switched",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -457,6 +479,44 @@ def _refusal_detail(availability: str) -> str:
     return _AVAILABILITY_REFUSAL.get(
         availability, "This agent can't take a message right now — its owner needs to start it."
     )
+
+
+def _usage_limit_detail(agent_name: str) -> str:
+    """The 502 body when NO subscription can serve and nothing was switched.
+
+    Names the earliest reset instant the headroom sampler already knows (#2638
+    AC#4). "Please try again later" is true and nearly useless: the person has
+    no way to know whether later means ten minutes or two days, so they either
+    give up or re-send in a loop that cannot succeed.
+
+    Degrades to the original sentence whenever the instant is unknown or
+    unreadable — a fabricated time would be worse than a vague one, and this
+    runs on the path where things are already going wrong, so it must not be
+    able to raise.
+    """
+    fallback = (
+        "The agent has reached its usage limit and can't respond right now. "
+        "Please try again later."
+    )
+    try:
+        from database import db as _db
+        from services.subscription_auto_switch import earliest_known_reset
+
+        sub_id = _db.get_agent_subscription_id(agent_name)
+        if not sub_id:
+            return fallback
+        resets_at = earliest_known_reset([sub_id])
+        if not resets_at:
+            return fallback
+        when = parse_iso_timestamp(resets_at).strftime("%H:%M UTC on %-d %b")
+        return (
+            "The agent has reached its usage limit and can't respond right now. "
+            f"Its quota resets at {when}."
+        )
+    except Exception:  # noqa: BLE001 — a nicer message is never worth a 500
+        logger.debug("[#2638] could not resolve a reset time for %s", agent_name,
+                     exc_info=True)
+        return fallback
 
 
 def _turn_failed_detail(availability: str) -> str:
@@ -2770,14 +2830,31 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # additive — nothing that classified before stops classifying now.
         code = _error_code_name(result)
         if code in ("AUTH", "BILLING"):
-            # The pool is exhausted, not momentarily busy — re-sending re-fails.
-            # Remediation ("add an API key", "register a subscription") is
-            # OPERATOR guidance and stays on the Executions surface; a client can
-            # only be told to come back later.
+            # #2638: "re-sending re-fails" is only true while nothing changed
+            # underneath. SUB-003 may have MOVED the agent onto a different
+            # subscription during this very turn (pre-dispatch, or after the
+            # first refusal), in which case the sentence below was telling a
+            # person their message could not be retried while the agent sat on
+            # a fresh subscription that would have served it.
+            switch = getattr(result, "subscription_switch", None)
+            if isinstance(switch, dict) and switch.get("switched"):
+                where = switch.get("new_subscription")
+                moved = (
+                    f"moved onto '{where}'" if where
+                    else "moved onto the platform API key"
+                )
+                raise ClientPortalError(
+                    503,
+                    f"The agent hit its usage limit, so it was {moved}. "
+                    "Send that again and it should go through.",
+                    category="auth_switched", retryable=True)
+            # Nothing changed: the pool really is exhausted. Say WHEN, if the
+            # provider told us — the headroom sampler already caches the reset
+            # instants, and "try again later" is the least useful true thing
+            # the platform can say when it knows the hour.
             raise ClientPortalError(
                 502,
-                "The agent has reached its usage limit and can't respond right now. "
-                "Please try again later.",
+                _usage_limit_detail(agent_name),
                 category="auth", retryable=False)
         if code == "CAPACITY" or "at capacity" in err:
             # Admission refused before any agent work — unbilled, and the queue

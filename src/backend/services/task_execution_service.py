@@ -963,6 +963,26 @@ class _AttemptState:
     previous_attempt_cost: float = 0.0
     subscription_switch_attempted: bool = False
     execution_time_ms: int = 0
+    # #2638: the switch that actually happened during this turn — pre-dispatch
+    # or post-failure — carried onto `TaskExecutionResult` so a caller can say
+    # "moved to <sub>, try again" instead of "not retryable". None = none.
+    subscription_switch: Optional[dict] = None
+
+
+def _with_switch(
+    result: TaskExecutionResult, state: "_AttemptState"
+) -> TaskExecutionResult:
+    """Carry the turn's SUB-003 switch (if any) onto its result (#2638).
+
+    Applied at `execute_task`'s return sites rather than inside each terminal
+    builder, because the builders are also called from the #1083 callback path
+    where there is no attempt state — one place that knows both, instead of a
+    parameter threaded through five constructors that would be `None` on half
+    of them.
+    """
+    if state.subscription_switch:
+        result.subscription_switch = state.subscription_switch
+    return result
 
 
 class TaskExecutionService:
@@ -1244,15 +1264,15 @@ class TaskExecutionService:
                     f"[TaskExecService] Agent {agent_name} ACK'd async dispatch (202) "
                     f"for execution {execution_id}; handing slot lease to result callback"
                 )
-                return TaskExecutionResult(
+                return _with_switch(TaskExecutionResult(
                     execution_id=execution_id or "",
                     status=TaskExecutionStatus.RUNNING,
                     response="",
                     dispatched_async=True,
-                )
+                ), state)
 
             # ---- 5/6/7. Finalize the synchronous response -----------------
-            return await self._finalize_sync_response(
+            return _with_switch(await self._finalize_sync_response(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
@@ -1261,34 +1281,38 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 response=response,
                 state=state,
-            )
+            ), state)
 
         except httpx.TimeoutException:
-            return await self._handle_timeout(
+            return _with_switch(await self._handle_timeout(
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 timeout_seconds=timeout_seconds,
                 state=state,
-            )
+            ), state)
 
         except BackendAgentCallBudgetExhausted as e:
-            return await self._handle_budget_exhausted(
+            # #2638: wrapped like every other terminal. A pre-dispatch switch
+            # can have happened before the budget was exhausted, and a caller
+            # that cannot see it tells the person their message is not
+            # retryable while the agent sits on a fresh subscription.
+            return _with_switch(await self._handle_budget_exhausted(
                 e,
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
-            )
+            ), state)
 
         except httpx.HTTPError as e:
-            return await self._handle_http_error(
+            return _with_switch(await self._handle_http_error(
                 e,
                 agent_name=agent_name,
                 execution_id=execution_id,
                 activity_id=activity_id,
                 breaker_enabled=breaker_enabled,
                 state=state,
-            )
+            ), state)
 
         except Exception as e:
             error_msg = str(e)
@@ -1302,12 +1326,14 @@ class TaskExecutionService:
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
-            return TaskExecutionResult(
+            # #2638: reachable after a pre-dispatch switch too — same reason
+            # as the budget handler above.
+            return _with_switch(TaskExecutionResult(
                 execution_id=execution_id or "",
                 status=TaskExecutionStatus.FAILED,
                 response="",
                 error=error_msg,
-            )
+            ), state)
 
         except asyncio.CancelledError:
             # Python 3.11+: CancelledError is BaseException, bypasses except Exception.
@@ -1699,6 +1725,53 @@ class TaskExecutionService:
         those handlers exactly as they did inline.
         """
         effective_timeout = float(timeout_seconds or 600) + 10
+
+        # #2638 AC#3: SUB-003 has always been reactive — dispatch, get refused,
+        # switch, re-issue once (#792). Everything needed to skip that first
+        # doomed attempt is already known here: the sampler's cached provider
+        # reading and the platform's own 2h 429 events both say whether the
+        # assigned subscription can serve. On the Workspace the wasted attempt
+        # is not an internal retry, it is a person watching their message fail.
+        #
+        # Best-effort by construction: `ensure_serviceable_subscription` never
+        # raises and returns None for every "cannot tell" case, so a turn that
+        # would have run still runs and #792 remains the backstop.
+        try:
+            from services.subscription_auto_switch import (
+                ensure_serviceable_subscription,
+            )
+            pre_switch = await ensure_serviceable_subscription(agent_name)
+            if pre_switch:
+                state.subscription_switch = pre_switch
+                # A turn gets at most ONE remediation, and this was it. Without
+                # this line the pre-dispatch path spends none of the budget the
+                # #792 flag exists to hold, so a turn that was moved here and
+                # then refused again would switch a SECOND time, re-issue, and
+                # burn a further rate-limit event — churning to a third
+                # never-used subscription, which is precisely the cascade the
+                # flag was introduced to stop. The except handler reads the same
+                # flag, so it also stops recording a second failure event; that
+                # is the existing rule stated at its other read site, not a new
+                # one.
+                state.subscription_switch_attempted = True
+                # The DESTINATION is deliberately not interpolated here.
+                # `_perform_auto_switch` already logs "Auto-switching agent 'X'
+                # from 'A' to 'B'" one frame down, so repeating it buys nothing —
+                # and reading a name off the switch dict makes this a sink for a
+                # value CodeQL taints from `subscription_credentials` (the row
+                # carries an encrypted token, so the whole record reads as a
+                # credential). Not worth a standing false positive on the hot
+                # path for a line that duplicates the one above it.
+                logger.warning(
+                    f"[TaskExecService] #2638 pre-dispatch switch for "
+                    f"'{agent_name}' before the first attempt"
+                )
+        except Exception as pre_err:  # noqa: BLE001 — never fail a turn from here
+            logger.error(
+                f"[TaskExecService] #2638 pre-dispatch check raised for "
+                f"'{agent_name}': {pre_err}"
+            )
+
         logger.info(f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={payload['allowed_tools']}, msg_len={len(payload['message'])})")
 
         response = await agent_post_with_retry(
@@ -1836,7 +1909,27 @@ class TaskExecutionService:
                         f"[SUB-003] Auto-switch failed for '{agent_name}': {switch_err}"
                     )
 
+                # #2638 AC#4: the switcher declined — every subscription is
+                # exhausted, refused, or skip-listed. Before giving the user a
+                # dead end, fall back to the platform API key if one is
+                # configured and the operator has left the setting on. Same
+                # one-shot budget: this rides the `subscription_switch_attempted`
+                # flag already set above, so a turn gets at most one remediation.
+                if not (switch_result and switch_result.get("switched")):
+                    try:
+                        from services.subscription_auto_switch import fallback_to_api_key
+                        switch_result = await fallback_to_api_key(agent_name)
+                    except Exception as fb_err:  # noqa: BLE001
+                        logger.error(
+                            f"[#2638] API-key fallback raised for '{agent_name}': {fb_err}"
+                        )
+
                 if switch_result and switch_result.get("switched"):
+                    # #2638 AC#5: remember it. If the one retry below also
+                    # fails, the caller has to be able to say "we moved you to
+                    # <sub>, try again" — the portal was reporting these as
+                    # not-retryable while the agent sat on a fresh subscription.
+                    state.subscription_switch = switch_result
                     state.retry_count += 1
                     # #678 R2 rollup: accumulate the failed attempt's cost so it
                     # isn't absorbed by the retry's success replacement.
@@ -1849,10 +1942,20 @@ class TaskExecutionService:
                     retry_agent_timeout = int(
                         min(float(timeout_seconds or 600), retry_http_timeout)
                     )
+                    # #2638: the destination name is deliberately NOT
+                    # interpolated. `_perform_auto_switch` logs "Auto-switching
+                    # agent 'X' from 'A' to 'B'" one frame down, so this line
+                    # only ever repeated it — and reading a name off the switch
+                    # result makes this a sink for a value CodeQL taints from
+                    # `subscription_credentials` (that row carries an encrypted
+                    # token, so the whole record reads as a credential). The
+                    # finding is a false positive about the VALUE and a true
+                    # observation about the SHAPE; dropping a redundant
+                    # interpolation is cheaper than a standing dismissal on the
+                    # execution hot path.
                     logger.warning(
                         f"[TaskExecService] SUB-003 switched '{agent_name}' "
-                        f"({switch_failure_kind}) -> "
-                        f"'{switch_result.get('new_subscription')}' — auto-retry 1/1 "
+                        f"({switch_failure_kind}) — auto-retry 1/1 "
                         f"(prev_cost=${state.previous_attempt_cost:.4f})"
                     )
                     # Best-effort audit. phase=initiated documents the retry was queued.
@@ -2175,6 +2278,28 @@ class TaskExecutionService:
         if agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
+        elif agent_status_code == 429:
+            # #2638: a Claude subscription usage limit surfaces from the agent
+            # as 429, not 503 — and this branch classified only 503, so the code
+            # stayed None and every client-facing consumer fell through to the
+            # generic "something went wrong". `BILLING` had NO assignment site
+            # anywhere in the backend; it existed in the enum, in comments, and
+            # in the portal's gate tuple, and nothing ever produced it. That is
+            # why the half of this PR the title advertises — telling the person
+            # their turn moved to another subscription — could not fire for the
+            # symptom in the title: a Workspace turn is `triggered_by="public"`,
+            # which is not async-eligible, so it takes THIS path.
+            #
+            # Safe downstream by construction: the dispatch breaker counts
+            # `auth` only (#526 D10), so a quota 429 still cannot trip it. The
+            # #1085 shared-cause governor DOES count `billing`, which is what it
+            # was written for ("a fleet-wide Claude-API 429 storm") and has
+            # never been reachable from the sync path until now; it is behind
+            # `REDELIVERY_GOVERNOR_ENABLED`, default OFF.
+            logger.warning(
+                f"[TaskExecService] Usage limit detected on {agent_name}: {error_msg[:200]}"
+            )
+            error_code = TaskExecutionErrorCode.BILLING
 
         # #678 salvage + terminal write + side-effects live in apply_result.
         # The RAW partial_metadata and the pre-classified error_code are
@@ -2187,7 +2312,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=error_msg,
-            error_code=error_code,  # Issue #285: AUTH (503) or None
+            error_code=error_code,  # AUTH (503) / BILLING (429, #2638) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors

@@ -262,6 +262,87 @@ just-rejected) sub off the candidate list.
 
 **Tests:** `tests/unit/test_2409_headroom_ranked_switch.py` — gate table, frozen-oracle classifier parity, ranker tables (incl. the storm/band case and the reviewer's 7d 20% / 5h 98% example), MGET single-call, tri-state Redis, no-probe guard, poisoned-import fail-open beside a positive real-import proof, wiring off the loop, notification clause, new-agent assignment. The #444 / #2352 db-level pins moved to the list form unchanged in substance.
 
+## #2638 (2026-09-09) — the turn COMPLETES on another subscription
+
+**Before:** a Workspace message to an agent whose subscription was rate-limited failed outright — "The agent has reached its usage limit and can't respond right now. Please try again later." — the message was lost to a FAILED execution, and the client was told the failure was **not retryable**. Every mechanism above was working; four gaps between them left the turn failing anyway.
+
+### 1. The 2h skip-list is now overridable — on evidence, per candidate
+
+`list_viable_alternative_subscriptions` drops any subscription with **any** failure event in a flat 2h window. That window is a proxy for "the provider is still refusing it", and on a two-subscription install a single stale event is the difference between a completed turn and a user watching their message die. #2320's own evidence was exactly this: *"no viable alternative — the whole pool was exhausted"*, with an alternative sitting right there.
+
+The exclusion is now overridden per candidate by `subscription_headroom_service.recovery_verdict`, on **positive evidence only**:
+
+| verdict | evidence |
+|---|---|
+| `serving_now` | a FRESH reading says the provider is not refusing this token. Ground truth about now beats an inference from past failures (#447's rule), and it is the same evidence `rank_subscriptions` already trusts in the other direction when it drops a refusing candidate. |
+| `window_reset` | no fresh reading, but a BLOCKED window's own reset instant has elapsed **and predates the failure**. The window the subscription failed in has rolled over, so the event is about a quota that no longer exists. |
+| `None` | everything else. |
+
+Three properties keep #444's ping-pong closed:
+
+- **Absence of evidence readmits nothing.** #444 was caused by *forgetting* a failure; nothing here forgets one.
+- **A fresh refusal does not fall through to the instant arm.** The strongest signal available points the other way, so the weaker one is not consulted.
+- **The failure must PREDATE the reset.** Without that ordering, a subscription that 429'd a minute *after* its window rolled over — i.e. one that is exhausted again — would be readmitted on a reset it had already consumed.
+
+Instants are read from an **aged** snapshot (`RECOVERY_INSTANT_MAX_AGE_SECONDS`, bounded by the snapshot's own 7-day Redis TTL) on the asymmetry this codebase already states (#447/#2396): a utilisation *number* decays, an *instant* does not.
+
+Two interactions worth stating because both would make the feature inert:
+
+- **The fail-open path readmits nobody.** `select_best_alternative_subscription`'s `except` degrades the whole ranking half to the pre-#2409 load-balance order, and that branch is precisely where the evidence could not be read — so the skip-list stands. (It also now returns `None` on an empty survivor set instead of indexing into it; the old early return moved inside the `try`.)
+- **A `window_reset` candidate is handed to the ranker as UNKNOWN.** Its reading's `blocked` flag describes the window that just rolled over, and `rank_subscriptions` drops a blocked candidate as `refused` — so the readmission would be thrown straight back out in exactly the case it exists for. The number is stale and the flag is about a quota that no longer exists, so `unknown` is the honest tier; it still ranks, after any measured candidate, in load-balance order. (`serving_now` readmissions are untouched — their reading is fresh and says the provider is serving.)
+
+db layer: `list_recently_failed_alternatives` (the filter's complement) and `last_failure_at_by_subscription` (kind-blind, like the predicate it sits beside). Both share `_list_all_alternatives` with the filter, so "the other subscriptions" is one query asked twice with different predicates rather than two queries that can disagree about which rows exist.
+
+### 2. The switch can happen BEFORE the first dispatch
+
+SUB-003 has always been reactive: dispatch → refused → switch → re-issue once. That works, but the first message after a subscription hits its wall always burns a failed attempt — and on the Workspace that attempt is a person watching their message fail.
+
+`ensure_serviceable_subscription(agent)` runs immediately before the first POST, from `_call_agent_with_retries`. It switches when the assigned subscription is **already known not to serve**:
+
+- a fresh cached provider reading that is `refusing` (`provider_refusing`), or
+- a 429 in the platform's own 2h window (`recent_rate_limit`).
+
+The second uses `is_subscription_rate_limited` — the 429-only DISPLAY predicate (#2352) — deliberately, **not** the kind-blind candidate-skip one: an auth failure is a credential problem a different subscription may share (a `.env` shadow is per-agent, not per-subscription), and quota exhaustion is the case a switch actually fixes.
+
+**The provider reading is bounded at DISPLAY freshness, not at the selection bound.** `cached_headroom_readings`' default is `MAX_READING_AGE_SECONDS` (≥2h) — calibrated for *ranking* candidates, where a stale reading beats none. This call is a different job: it decides whether a provider verdict may **overrule** the 2h event predicate, and a reading as old as the window it overrules cannot. Unbounded, a two-hour-old "serving" snapshot suppresses a five-minute-old 429 and pins the agent on a subscription that is refusing it right now — the #447 rule ("a probe is ground truth about NOW") applied to a probe that is no longer about now. It asks for `FRESHNESS_SECONDS`, the same bound `_headroom_indicates_healthy` uses for the same judgement and the one the file already declares for the mirror case (`REFUSAL_FRESHNESS_SECONDS = FRESHNESS_SECONDS`). Caught in re-review of #2638; the argument is pinned as an argument, not only as behaviour, because omitting it *is* the bug and a behavioural test alone would pass again the day the default moves.
+
+**The two are read three-state, never OR'd.** A fresh reading ENDS the question in both directions: `refusing` → switch, *not* refusing → dispatch, and only the absence of a usable reading falls through to the 2h event. `fresh_refusing OR db_events` is the shape `resolve_rate_limited_now` exists to replace (#447) and it makes the two doors disagree — `recovery_verdict` readmits a subscription the provider is demonstrably serving while the evacuate door would keep moving agents off it on every dispatch, one hot-reload and one high-priority notification per turn, and with two such subscriptions a flap turn after turn. The db predicate is an inference from past failures; a probe is ground truth about now. Caught in review on #2638; pinned by `TestTheRefusalPredicateIsThreeState`, whose last case asserts the two doors agree on one reading rather than testing each in isolation.
+
+Contracts:
+
+- **It never raises and never blocks.** Every "cannot tell" path returns `None`; a pre-flight optimisation must not be able to fail a turn that would otherwise have run, and #792 remains the backstop for everything it declines to do.
+- **It records no failure event.** Nothing failed — that is the point — and a synthetic event would poison the very skip-list that decides where the agent may move next.
+- **With no alternative it dispatches anyway.** Refusing would turn a probably-failing turn into a certainly-failing one; the provider's answer is better evidence than ours.
+- **It performs the SAME switch** (`_perform_auto_switch`), so the activity, the notification and the hot-reload the Settings usage cards and Dashboard pressure badges read happen whichever path fired. `pre_dispatch=True` changes only the wording (`_failure_phrase`): "switched after a rate-limit error" for a turn that never ran sends an operator looking for a failed execution that does not exist.
+- **It spends the turn's one remediation.** The pre-dispatch arm sets `subscription_switch_attempted`, the same one-shot flag #792's switch-retry and the API-key fallback ride. Without it a turn moved before its first attempt and refused again would switch a SECOND time, re-issue, and burn a further rate-limit event — churning towards a third never-used subscription, which is the cascade the flag was introduced to stop. The except handler reads the same flag, so it also stops recording a second failure event; that is the rule already stated at its other read site, not a new one.
+
+### 3. Last resort: the platform API key
+
+When the switcher declines — every subscription exhausted, refused or skip-listed with no recovery evidence — `fallback_to_api_key` keeps the agent working instead of failing the message: clear the subscription assignment, set `use_platform_api_key`, **restart**. A restart rather than a hot-reload because the reload endpoint pushes an OAuth token and the change needed here is the opposite one (`ANTHROPIC_API_KEY` set, `CLAUDE_CODE_OAUTH_TOKEN` dropped), which `lifecycle`'s own auth block already derives correctly from DB state — including #2114's shadowing guard, so nothing here reasons about that.
+
+It **clears** rather than remembering-and-restoring: a hidden "go back when the window resets" would be a second, invisible scheduler competing with the operator's own assignment. The notification says what happened; reassignment is a deliberate act.
+
+Narrow by construction: only after the switcher declined, only for a Claude runtime, only with a key actually configured, only with the setting on, and it rides the existing one-shot `subscription_switch_attempted` budget so a turn gets at most one remediation.
+
+**Setting** `subscription_api_key_fallback`, default ON — `GET`/`PUT /api/subscriptions/settings/api-key-fallback`, rendered in Settings → Subscriptions beside the auto-switch and headroom toggles. The GET also returns `key_configured`: with the setting on and no key stored the fallback is enabled and inert, and a control that showed only "on" would be describing a remedy that cannot run. The read fails **open** (enabled) — the failure it guards is a user's turn dying with a usable key sitting in settings.
+
+### 4. The client is told what changed
+
+`TaskExecutionResult.subscription_switch` carries the switch dict (in-memory, like `dispatched_async`), stamped at `execute_task`'s return sites by `_with_switch` — one place that knows both the result and the attempt state, rather than a parameter threaded through five constructors that would be `None` on half of them. **Every** terminal return, not most: two were missed in review (`BackendAgentCallBudgetExhausted` and the generic `except Exception`), and both are reachable after a pre-dispatch switch, so the portal would have said "not retryable" while the agent sat on a fresh subscription. The only unwrapped returns are the two that precede any dispatch — `admission_denied` and `breaker_denied` — and an AST guard (`TestEveryTerminalCarriesTheSwitch`) names them, so a return site added later has to be justified rather than silently dropping the switch.
+
+**A subscription usage limit is `BILLING`, and until #2638's review nothing ever produced that code.** The agent surfaces a Claude usage limit as **429**, not 503, and `_handle_http_error` classified only 503 → `AUTH`. `TaskExecutionErrorCode.BILLING` had no assignment site anywhere in `src/backend`: it existed in the enum, in comments, and in the portal's own gate tuple, and was never set. A Workspace turn is `triggered_by="public"`, which is not async-eligible, so it takes exactly that sync path — which is why the client-facing half of this work was inert for the symptom that motivated it, and fired only when a failure happened to arrive as 503. A 429 now sets `BILLING`. Safe by construction downstream: the dispatch breaker counts `auth` only (#526 D10), and the #1085 shared-cause governor DOES count `billing` — which is what it was written for ("a fleet-wide Claude-API 429 storm"), has never been reachable from the sync path before, and is behind a default-OFF flag.
+
+The portal's AUTH/BILLING branch consults it **before** refusing:
+
+- **switched** → `503`, `category="auth_switched"`, `retryable=True`, naming the new subscription (or the platform API key). #2320's `retryable=False` rested on "re-sending re-fails", which holds only while nothing changed underneath — and a switch is exactly something changing underneath.
+- **not switched** → still `502` / `retryable=False`, but the body now names the earliest reset instant the sampler already caches (`earliest_known_reset` → `_usage_limit_detail`). "Please try again later" is true and nearly useless: the person cannot tell whether later means ten minutes or two days, so they either give up or re-send in a loop that cannot succeed. Degrades to the original sentence whenever the instant is unknown or unreadable — a fabricated time would be worse than a vague one, and this runs where things are already going wrong, so it must not be able to raise.
+
+### Not covered
+
+Nothing on the trigger side any more: #2643 (section below) gave `pull_coordination_service.apply_task_result` the SUB-003 hook on its CAS-won branch, so a pull-dispatched terminal triggers the same switch as a push one (inert today only because no agent is piloted onto the pull path). What is still deliberately outside SUB-003 is the re-delivery governor's treatment of `billing` as a correlated code — a fleet-wide throttling decision, not a per-agent switch.
+
+**Tests:** `tests/unit/test_2638_subscription_switch_on_turn.py` — `recovery_verdict` as a pure table (including the failure-after-reset ordering and the fail-closed unreadable-instant cases), readmission through the real selector, the fail-open path readmitting nobody, the pre-dispatch switch's five contracts, `earliest_known_reset`, the fallback's setting semantics, the three-state refusal predicate (including its agreement with `recovery_verdict` on one reading, and the fail-closed unreadable-snapshot case), the `_with_switch` AST guard, and four end-to-end turns through the real `execute_task` + real switcher: 429 → completes on a never-failed alternative, 429 → completes on a **readmitted** one, the honest negative (nothing to switch to ⇒ still FAILED, asserting `error_code == BILLING` — compared by `.value`/`.name`, since #1085's fieldless-dataclass quirk makes `BILLING == AUTH` True), and a pre-dispatch switch spending the turn's single remediation rather than switching twice. Not an integration test against a live instance: a real 429 cannot be provoked from a provider on demand, so the seam actually under test — refusal in, completed turn plus switch out — is exercised where it can be deterministic.
+
 ## #2643 (2026-09-09) — the pull sink is a trigger surface too
 
 `pull_coordination_service.apply_task_result` is a CAS-won terminal writer
