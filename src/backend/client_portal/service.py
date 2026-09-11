@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 import shlex
@@ -52,6 +53,8 @@ from .models import (
     PortalBriefings,
     PortalExposureConfig,
     PortalExposureUpdate,
+    PortalModelDefault,
+    PortalModelOption,
     PortalPlaybook,
     PortalRoster,
 )
@@ -132,6 +135,14 @@ PORTAL_FAILURE_CATEGORIES = (
     "timeout",             # the turn RAN and hit the agent's bound
     "agent_error",         # the turn RAN and did not come back
     "cancelled",           # the PERSON stopped it — not a failure at all
+    # ent#403 — the chosen model is the problem, and the client can act on it.
+    # A NINTH token rather than a reuse, because it is the one category the
+    # client BRANCHES on rather than merely renders: it clears the stored model
+    # preference, so the "switched back to the agent's default" sentence is true
+    # on the next turn instead of looping the user into the same failure on
+    # every retry and every reload. `agent_error` must not carry that side
+    # effect — it fires for every turn that ran and did not come back.
+    "invalid_model",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -459,8 +470,162 @@ def _turn_failed_detail(availability: str) -> str:
     return "The agent couldn't respond. Please try again."
 
 
+# ---------------------------------------------------------------------------
+# The Workspace model control (ent#403)
+# ---------------------------------------------------------------------------
+
+# Runtimes the Workspace model control is offered for. The curated set is
+# Claude-only, and the platform passes `--model` to the Claude and Gemini
+# runtimes but NOT to Codex (`codex_runtime.py` takes no model from the
+# platform) — so offering a Claude model list to a Codex agent is a control that
+# promises something and changes nothing. Claude-runtime only, by name: a
+# runtime we have not heard of is not assumed to accept these ids.
+_MODEL_CONTROL_RUNTIMES = ("claude-code",)
+
+# What an unreadable runtime resolves to. Fail-OPEN, matching
+# `docker_service.get_agent_runtime`'s own documented fallback: Codex is the
+# exception, and hiding a working control on EVERY Claude agent because one
+# Docker read hiccuped is the #2196 inversion. The closed allow-list at the
+# router still bounds what may actually be sent.
+_DEFAULT_RUNTIME = "claude-code"
+
+
+class ModelContext(NamedTuple):
+    """The once-per-roster-load model facts (ent#403).
+
+    Resolved ONCE in `get_roster`, beside `tts_ready` and `default_voice`, and
+    threaded into `_row_to_card` — never re-read per card. The option list and
+    the platform default are instance-level; only the resolved default varies
+    per agent, and that is derived from the row's own column.
+    """
+    options: list          # list[PortalModelOption] — instance-level, may be empty
+    platform_default: str  # the id a turn runs on with no override anywhere
+    platform_label: str    # its display name, or the raw id if it is off-catalog
+
+
+def workspace_model_options() -> list:
+    """The curated option list, in catalog order. Derived from the ONE catalog
+    (#2086), never a second hand-typed list — the drift that registry exists to
+    prevent."""
+    from services.model_catalog import MODEL_CATALOG
+
+    return [
+        PortalModelOption(id=m.id, tier=m.workspace_tier, label=m.label)
+        for m in MODEL_CATALOG
+        if m.workspace
+    ]
+
+
+def catalog_label(model_id: str) -> str:
+    """A model id as a person should read it, degrading to the id itself.
+
+    `catalog_label(id) or id`, never a bare lookup: `platform_default_model` is
+    written through the generic `PUT /api/settings/{key}`, which applies NO
+    catalog check, and `model_catalog.py` documents free-text ids like
+    `claude-sonnet-4-6[1m]` in legitimate circulation. A KeyError here would 500
+    the roster — this surface's front door — over a display string.
+    """
+    from services.model_catalog import MODEL_CATALOG
+
+    for m in MODEL_CATALOG:
+        if m.id == model_id:
+            return m.label
+    return model_id
+
+
+def _model_context() -> ModelContext:
+    """Resolve the instance-level model facts once. Never raises: a failed read
+    yields an empty option list, which renders no control (fail-closed)."""
+    try:
+        from services import settings_service
+
+        platform_default = settings_service.get_platform_default_model()
+        return ModelContext(
+            options=workspace_model_options(),
+            platform_default=platform_default,
+            platform_label=catalog_label(platform_default),
+        )
+    except Exception as e:  # noqa: BLE001 — a roster must never 500 over this
+        logger.warning("[ent#403] model context read failed: %s", e)
+        return ModelContext(options=[], platform_default="", platform_label="")
+
+
+def _card_model_default(row: dict, ctx: ModelContext, runtime: str) -> Optional[PortalModelDefault]:
+    """This agent's resolved default, or None when the control must not render.
+
+    The stored `public_channel_model` is run through the SAME validity check
+    `db.get_public_channel_model` applies (#1080 graceful degradation), so a
+    stale override degrades to the platform default here exactly as it does at
+    turn time — otherwise the label and the turn would disagree about one value.
+    """
+    if not ctx.options or not ctx.platform_default:
+        return None
+    if (runtime or _DEFAULT_RUNTIME).lower() not in _MODEL_CONTROL_RUNTIMES:
+        return None
+    try:
+        from services import settings_service
+
+        stored = (row.get("public_channel_model") or "").strip()
+        if stored and settings_service.is_valid_public_channel_model(stored):
+            return PortalModelDefault(
+                model=stored, label=catalog_label(stored), source="agent"
+            )
+        return PortalModelDefault(
+            model=ctx.platform_default, label=ctx.platform_label, source="platform"
+        )
+    except Exception as e:  # noqa: BLE001 — fail closed: no control, never a 500
+        logger.warning("[ent#403] model default resolution failed: %s", e)
+        return None
+
+
+async def _runtime_map(names: list[str]) -> dict[str, str]:
+    """`{agent_name: runtime}` for exactly `names`, in one Docker call.
+
+    Same three guards as `_availability_map`, for the same three reasons: the
+    result is NARROWED to `names` (the underlying call sees every agent
+    container on the host, including other tenants'), the return type is
+    VALIDATED before it is trusted (a stubbed `services.docker_service` yields a
+    truthy MagicMock that is neither dict nor None), and it never raises.
+
+    It is a SECOND Docker read per roster load, taken SEQUENTIALLY after the
+    availability one — see the call site in `get_roster` for why it is not
+    gathered. Deliberately not folded into `_availability_map`: that
+    function's fail-open behaviour is pinned by the #2196 guard suite through
+    `docker_service.agent_container_states`, and re-pointing it at a different
+    leaf would silently unhook every one of those tests. The cost is O(1) in
+    fleet size — one `/containers/json` per roster load, not per agent.
+
+    An absent or unreadable answer leaves the name out; the caller resolves that
+    to `_DEFAULT_RUNTIME` (fail-open — see its comment).
+    """
+    if not names:
+        return {}                      # zero rows ⇒ zero Docker calls
+    try:
+        from services.docker_utils import agent_container_runtimes_async
+        runtimes = await agent_container_runtimes_async()
+    except Exception as e:  # noqa: BLE001 — a roster must never 500 over Docker
+        logger.warning("[ent#403] batch runtime read failed: %s", e)
+        return {}
+    if not isinstance(runtimes, dict):
+        return {}
+    return {n: runtimes[n] for n in names if isinstance(runtimes.get(n), str)}
+
+
+async def _agent_runtime(agent_name: str) -> str:
+    """One agent's runtime. Single Docker read, never the batch — the #2160 rule
+    the agent page is built on. Fail-open, like the batch above."""
+    try:
+        from services.docker_utils import agent_runtime_async
+        return await agent_runtime_async(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#403] runtime read failed for %s: %s", agent_name, e)
+        return _DEFAULT_RUNTIME
+
+
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
-                 availability: str = "unknown",
+                 availability: str = "unknown", *,
+                 is_platform: bool, runtime: str,
+                 model_context: ModelContext,
                  can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
@@ -468,6 +633,14 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     `availability` (#2196) is THREADED IN, never computed here: the roster
     resolves it for the whole set in one Docker call while the agent page
     resolves one agent's, and a per-card read would put the fleet cost back.
+
+    ent#403: `is_platform`, `runtime` and `model_context` are keyword-only with
+    NO default, on purpose. A default would let the agent page keep compiling
+    while silently serving the wrong card — the model control is a capability
+    gate, and the safe value differs per call site rather than being a property
+    of this function. `model_context` is resolved once per load for the same
+    reason `availability` is threaded: it is instance-level, and re-reading it
+    per card would put a settings read back on every row.
     """
     from services import tts_service
     name = r["agent_name"]
@@ -481,6 +654,11 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     )
     return PortalAgentCard(
         name=name,
+        # #2582: which arm of the roster union this row came from. The Files
+        # tab's "Delete for everyone" is gated on it, and `portal_owns_agent`
+        # resolves it identically server-side (#2128 — the roster payload is
+        # THE capability channel for this surface).
+        owned=bool(r.get("owned")),
         # #2159: NULL display_label means "render the slug" (ent#181), so it is
         # passed through as None and resolved at the render site rather than
         # coalesced here — the two would then disagree about what an unset label
@@ -513,19 +691,61 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # caller knows its own principal kind and this builder is shared with
         # the single-agent lookup.
         can_manage_canvases=can_manage_canvases,
+        # ent#403: `None` — no control at all — for every non-platform principal.
+        # The roster payload is the ONLY capability channel an external client
+        # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
+        # is `get_current_user`-gated and returns empty for exactly that
+        # audience, so the gate has to be here.
+        model_default=(
+            _card_model_default(r, model_context, runtime) if is_platform else None
+        ),
     )
 
 
 def _roster_rows(email: str | None, include_owned: bool) -> list[dict]:
     """The union the roster is built from — shared rows, plus owned rows for a
     platform session (ent#357). Extracted so the single-agent lookup resolves
-    membership by exactly the same rule."""
-    rows = db.get_shared_roster(email or "")
+    membership by exactly the same rule.
+
+    #2582: each row is tagged ``owned`` — whether it arrived through the OWNED
+    arm rather than the shared one. That bit is what the Files tab's "Delete for
+    everyone" affordance renders from, and `portal_owns_agent` resolves the same
+    way, so the UI and the enforcement cannot disagree about who may revoke.
+    """
+    rows = [{**r, "owned": False} for r in db.get_shared_roster(email or "")]
     if include_owned:
         seen = {r["agent_name"] for r in rows}
-        rows = rows + [r for r in db.get_owned_roster(email or "") if r["agent_name"] not in seen]
+        rows = rows + [
+            {**r, "owned": True}
+            for r in db.get_owned_roster(email or "")
+            if r["agent_name"] not in seen
+        ]
         rows.sort(key=lambda r: r["agent_name"])
     return rows
+
+
+def portal_owns_agent(email: str | None, agent_name: str, include_owned: bool) -> bool:
+    """Whether this caller is the agent's OWNER for Workspace purposes (#2582).
+
+    The same membership the roster card renders (`_roster_rows` → `owned`), so
+    the affordance the UI offers and the gate the service enforces cannot
+    disagree — the "Delete for everyone" button is simply not offered rather
+    than offered and then refused.
+
+    ``include_owned`` is ``principal.is_platform`` at every call site, exactly as
+    for `agent_on_roster` (ent#358), and that has two deliberate consequences.
+    A **non-owner admin is a viewer** in the Workspace — stricter than the
+    platform surface, and correct, since the Workspace scope is what was shared
+    with you. And an **owner signed in with a magic-link portal token also gets
+    the viewer affordance**, because a portal token carries no platform identity
+    to own anything with. Neither is a bug; both are the ent#358 rule applied.
+    """
+    if not include_owned:
+        return False
+    return any(
+        r["agent_name"] == agent_name and r.get("owned")
+        for r in _roster_rows(email, include_owned)
+    )
 
 
 async def get_agent_card(email: str | None, agent_name: str,
@@ -553,8 +773,37 @@ async def get_agent_card(email: str | None, agent_name: str,
     # #2196: the SINGLE tri-state read, not the batch — one agent's page must
     # not pay a fleet-scale Docker call, which is this function's whole point.
     availability = await _agent_availability(agent_name)
+    # ent#403: the SINGLE runtime read, not the batch — same #2160 rule as the
+    # availability read above.
+    #
+    # The agent page renders no composer, so it never USES `model_default`. It
+    # is resolved anyway, and pays one inspect for it, because #2160's own note
+    # on this function is that "the page and the sidebar could not disagree
+    # about an agent's capabilities" — two representations of one card that
+    # answer differently is the defect, not the cost. Negligible beside this
+    # function's existing availability read and its bounded briefing HTTP.
+    runtime = await _agent_runtime(agent_name)
     card = _row_to_card(row, tts_service.is_available(), _default_voice_id(),
-                        availability=availability)
+                        availability=availability,
+                        # `include_owned` IS the platform-session bit here — the
+                        # roster unions owned agents only for a platform session
+                        # (ent#357), which is the same door ent#403 gates on.
+                        is_platform=include_owned,
+                        runtime=runtime,
+                        model_context=_model_context(),
+                        # ent#553 (review): the roster resolves this per row and
+                        # this path did not, so the SAME owner saw
+                        # `can_manage_canvases: true` in the sidebar and `false`
+                        # on the agent's own page — two representations of one
+                        # card answering differently, which is precisely the
+                        # defect #2160's docstring above says this function
+                        # exists to prevent. It failed CLOSED (a control hidden,
+                        # never one that 403s), which is why it was latent.
+                        # Resolved through `may_manage_canvases`, the predicate
+                        # the write routes enforce with, for the reason stated
+                        # at the roster's own call site.
+                        can_manage_canvases=may_manage_canvases(
+                            agent_name, email, is_platform=include_owned))
     # #2163: exactly one briefing (not N), and now a BOUNDED one — this page's
     # floor was the agent's own 5s-per-phase HTTP, so a wedged agent made its
     # own page hang. `ok` is what makes an unreachable agent legible: without it
@@ -620,17 +869,41 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # `_agent_briefing` (so #2163 can defer/bound/cache the briefing freely).
     # It also REPLACES the per-card `get_agent_container()` the briefing used to
     # make and throw away: N inspects become one list call.
-    availability = await _availability_map([r["agent_name"] for r in rows])
-    # ent#553 — resolved through `may_manage_canvases`, the SAME predicate the
-    # write routes enforce with, rather than a faster per-row comparison
-    # against `r["owner"]`. That shortcut would be two ownership answers that
-    # merely agree today, and this file already carries the scar of a display
-    # rule drifting from the rule it displays. The cost is a couple of indexed
-    # lookups per agent on a load that already makes a Docker call; if it ever
-    # matters, memoize INSIDE the predicate so both callers benefit.
+    # ent#403: the runtime for the same set, in its own single Docker call.
+    #
+    # SEQUENTIAL, not `asyncio.gather`, and that is a deliberate trade. #2163's
+    # guard (`test_2163_roster_latency_floor.py`) pins that this function
+    # contains no fan-out AT ALL, because the defect it closed was a `gather`
+    # over N agents that made every sign-in wait for the slowest one. Two fixed
+    # O(1) Docker reads are not that defect — but the guard is blanket on
+    # purpose ("a source pin, because the behavioural test can be satisfied by a
+    # stub-shaped accident"), and loosening a guard to admit one's own change is
+    # how the property it protects stops being true. The cost is one extra
+    # `/containers/json` on the roster path (~50-200ms, O(1) in fleet size),
+    # paid once per roster load, in exchange for a capability gate that does not
+    # offer a Claude-model list to a Codex agent.
+    names = [r["agent_name"] for r in rows]
+    availability = await _availability_map(names)
+    runtimes = await _runtime_map(names)
+    # ent#403: the once-per-load model facts (option list + platform default +
+    # its label), resolved HERE beside `tts_ready` and `default_voice` and
+    # threaded into every card — never re-read per card.
+    model_context = _model_context()
     cards = [
         _row_to_card(r, tts_ready, default_voice,
                      availability=availability.get(r["agent_name"], "unknown"),
+                     is_platform=include_owned,
+                     runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
+                     model_context=model_context,
+                     # ent#553 — resolved through `may_manage_canvases`, the SAME
+                     # predicate the write routes enforce with, rather than a
+                     # faster per-row comparison against `r["owner"]`. That
+                     # shortcut would be two ownership answers that merely agree
+                     # today, and this file already carries the scar of a display
+                     # rule drifting from the rule it displays. The cost is a
+                     # couple of indexed lookups per agent on a load that already
+                     # makes a Docker call; if it ever matters, memoize INSIDE
+                     # the predicate so both callers benefit.
                      can_manage_canvases=may_manage_canvases(
                          r["agent_name"], email, is_platform=include_owned))
         for r in rows
@@ -651,6 +924,12 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         realtime_voice=realtime_voice_capability(include_owned),
+        # ent#403: instance-level, so it rides the roster rather than every card.
+        # Empty for a non-platform principal — belt to the per-card braces: the
+        # ROUTER is the control (a client that fabricated a `model` is refused
+        # there), but a payload that ships the list to an audience with no
+        # control would still be an unnecessary disclosure.
+        model_options=(model_context.options if include_owned else []),
     )
 
 
@@ -1881,6 +2160,133 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
+    """The ONE model ladder for a portal turn (ent#403).
+
+    ``requested`` (the user's explicit pick, already validated at the router)
+    → the agent's #894 ``public_channel_model`` → the PLATFORM DEFAULT. The
+    ladder resolves to a concrete id and only degrades to ``None`` when the
+    platform default itself is unreadable.
+
+    Three states on the WIRE, one value on the row. ``None`` in
+    ``PortalChatRequest.model`` still means INHERIT — the shape the #894
+    plumbing uses (``routers/agent_config.py`` writes ``None`` for "unset") —
+    but the ladder's job is to say what the turn will actually run on, and
+    stopping at ``None`` made that unanswerable exactly where it is recorded.
+
+    **Why the last rung exists (review, 2026-09-08).**
+    ``schedule_executions.model_used`` is written ONLY at row creation, and both
+    portal paths pre-create the row, so ``execute_task``'s own
+    ``model_used=model`` write (inside ``if not execution_id:``) never runs for
+    a portal turn. Returning ``None`` therefore stamped the row NULL for the
+    commonest case there is — no explicit pick, no agent override — while the
+    turn ran on the platform default ``execute_task`` resolved a moment later.
+    AC 7 says the model reaches the row; on the default path it did not, and the
+    execution page AC 7 pairs with would have read blank for most Workspace
+    turns. This is NOT a guessed default: it is
+    ``settings_service.get_platform_default_model()``, the same function
+    ``execute_task`` calls, so the row and the turn agree by construction and
+    ``execute_task``'s resolution becomes a no-op rather than a second opinion.
+
+    **The middle rung is a deliberate behaviour change, and it applies to EVERY
+    portal turn — not only a platform user's.** ent#403 calls its absence the
+    defect: a Workspace turn has always dispatched as ``triggered_by="public"``,
+    so the owner's public-channel override was expected to apply here and never
+    did. Gating the rung on the principal would leave the streaming route and
+    the synchronous ent#83 route resolving differently, which is precisely the
+    "two sources silently disagree" AC 5 exists to kill. So on deploy the model
+    changes for existing external-client conversations wherever an owner set the
+    override — recorded in `requirements/core-agent.md` §5.32 as the deliberate
+    change it is.
+
+    ``db.get_public_channel_model`` already degrades an allow-list-absent stored
+    value to "unset" (#1080), which is why the roster's label runs the same check
+    — the label and the turn must not disagree about one stale value.
+
+    Never raises: a DB hiccup degrades to the platform default, never a failed
+    turn. The requested value is returned as-is on that path because it is the
+    user's explicit instruction, and dropping it silently would run the turn on
+    a model they did not choose.
+    """
+    if requested:
+        return requested
+    try:
+        from database import db as core_db
+        override = core_db.get_public_channel_model(agent_name) or None
+    except Exception as e:  # noqa: BLE001 — never fail a turn over the override
+        logger.warning("[ent#403] public_channel_model read failed for %s: %s", agent_name, e)
+        override = None
+    if override:
+        return override
+    try:
+        from services import settings_service
+        return settings_service.get_platform_default_model() or None
+    except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
+        # Degrading to None is the pre-ent#403 behaviour: the row goes back to
+        # NULL and `execute_task` resolves the default itself. Worse than a
+        # stamped row, better than a refused turn.
+        logger.warning("[ent#403] platform default read failed for %s: %s", agent_name, e)
+        return None
+
+
+def validate_requested_model(raw: str | None, *, is_platform: bool) -> str | None:
+    """Normalise and authorise a requested model. The POLICY behind the router's
+    two turn entry points (Invariant #1: the router maps the refusal onto HTTP,
+    it does not decide it).
+
+    Order is load-bearing:
+
+    1. **Normalise blank FIRST.** The control's default option has value ``""``,
+       so ``""``, whitespace and an omitted field all mean *inherit*. Validating
+       the raw field would 422 every default turn on day one — the same reason
+       ``PUT /api/agents/{name}/public-channel-model`` normalises before it
+       validates.
+    2. **Then the principal gate.** A caller with no control who sends a model is
+       refused 403 rather than silently ignored: ignoring it would run the turn
+       on something other than what was asked for and say nothing. The gate is
+       ``is_platform`` — the same bit the roster's control renders on, so the UI
+       and the door cannot disagree. A ent#163 delegated principal holds a portal
+       SESSION, so it is ``is_platform=False`` and cannot pass here.
+    3. **Then the closed allow-list.** ``WORKSPACE_MODELS``, never a regex and
+       never a prefix check: the value reaches the agent as a ``--model`` argv
+       element, so an arbitrary string is argv/flag-smuggling surface against
+       the agent runtime — and the Workspace sends no model today, so this field
+       CREATES that surface.
+
+    The 422's detail is a **string**, not a dict: `portalUtils.js`'s
+    `deliveryFailureReason` returns `detail` only when it is a string and
+    degrades anything else to "The message wasn't delivered (error 422)", which
+    would drop the model name, the reason and the remedy on the one surface this
+    message exists for.
+    """
+    model = (raw or "").strip() or None
+    if model is None:
+        return None
+    if not is_platform:
+        raise ClientPortalError(
+            403, "Choosing a model isn't available on this chat.",
+            category="invalid_model", retryable=False,
+        )
+    from services.model_catalog import WORKSPACE_MODELS
+
+    if model not in WORKSPACE_MODELS:
+        # The rejected value is REFLECTED back, so it is bounded before it is
+        # echoed. `PortalChatRequest.model` is deliberately unvalidated at the
+        # payload layer (a length rule there would refuse before the 403 that
+        # this principal has no control at all), and every sibling field on that
+        # model IS bounded — `message` is `max_length=8000`. Without this an
+        # authenticated caller can post a megabyte-long `model` and have it
+        # echoed verbatim into the error body. Truncated rather than dropped:
+        # naming what was refused is the whole point of the message.
+        shown = model if len(model) <= 64 else model[:64] + "\u2026"
+        raise ClientPortalError(
+            422,
+            f"'{shown}' isn't a model you can pick for this chat — choose another.",
+            category="invalid_model", retryable=False,
+        )
+    return model
+
+
 async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: str,
                                           marker_execution_id: str | None, **kwargs):
     """Run the turn, and always take the marker back down if we put it up.
@@ -1900,6 +2306,7 @@ async def _run_sync_turn_and_clear_marker(owns_marker: bool, marker_session_id: 
 
 def _precreate_sync_execution(
     agent_name: str, message: str, email: str, session_id: str,
+    resolved_model: str | None,
     open_canvas_id: str | None = None,
 ) -> str | None:
     """Create the execution row for a synchronous portal turn (ent#365 review).
@@ -1922,7 +2329,12 @@ def _precreate_sync_execution(
 
     `session_id` is a required parameter rather than an optional one: the value
     is in scope at the only call site, and a default would let a future caller
-    reintroduce the silent-inert row this fixes.
+    reintroduce the silent-inert row this fixes. ent#403's `resolved_model` is
+    required for exactly the same reason, and it is the SAME BUG CLASS one field
+    over: `schedule_executions.model_used` is written ONLY at row creation
+    (`execute_task` persists it inside `if not execution_id:`), so a turn whose
+    row was pre-created here lands with `model_used` NULL no matter what model
+    the turn then runs on. Passing it as a turn kwarg alone would not fix it.
 
     Fail-soft to None: this exists so an addressed report finds its session, and
     a turn must not be refused because that bookkeeping could not be done. ONLY
@@ -1955,6 +2367,10 @@ def _precreate_sync_execution(
             # this third one.
             source_channel_chat_id=session_id,
             source_channel_client=email,
+            # ent#403 AC 7 — the model the turn will run on, stamped where the
+            # row is MADE. See the docstring: there is no UPDATE path for this
+            # column anywhere in the repo.
+            model_used=resolved_model,
             # ent#555 — what the user was looking at when they sent this.
             open_canvas_id=open_canvas_id,
         )
@@ -1973,6 +2389,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # ent#451 — the caller asked for a fresh thread. Defaults
                       # False so every existing caller keeps resuming.
                       new_thread: bool = False,
+                      # ent#403 — the user's explicit pick, already normalised
+                      # and allow-listed at the router. None = inherit.
+                      model: str | None = None,
+                      # ent#403 — the fully-resolved model, passed by a caller
+                      # that has ALREADY stamped it on a pre-created row.
+                      resolved_model: str | None = None,
                       # ent#555 — the canvas on screen, validated at the router.
                       # Stamped on the execution so the agent's tools default to it.
                       open_canvas_id: str | None = None) -> dict:
@@ -1995,7 +2417,16 @@ async def portal_chat(agent_name: str, message: str, email: str,
     #2214: ``turn_timeout_seconds`` is the per-turn bound. The streaming path
     (`start_portal_turn`) resolves it ONCE and passes it, so marker TTL, 202
     budget and dispatch share one number; the synchronous `POST .../chat` path
-    passes nothing (it sets no marker) and this resolves it here."""
+    passes nothing (it sets no marker) and this resolves it here.
+
+    ent#403: `resolved_model` is **required whenever `execution_id` is passed**,
+    and is asserted so. The alternative shape — `resolved_model or
+    resolve_turn_model(...)` — would let a caller hand in an id it had already
+    stamped a row with and silently RE-resolve to something else, so the row and
+    the turn would disagree about one turn's model. The requested value cannot
+    simply be re-laundered either: an inherited `public_channel_model` may
+    legitimately sit outside the curated set (`claude-opus-4-7` is
+    public-channel-selectable but not workspace-selectable)."""
     if not agent_on_roster(agent_name, email, include_owned):
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
         raise ClientPortalError(404, "Agent not found",
@@ -2026,6 +2457,27 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # stay independent rather than one derived from the other.
         raise ClientPortalError(502, _refusal_detail(availability),
                                 category="agent_unavailable", retryable=False)
+
+    # ent#403: resolve the model ONCE, HERE — immediately after the availability
+    # gate and before anything is created. Not where the value is used.
+    #
+    # `_precreate_sync_execution` runs ~200 lines below, after `_persist_user_turn`,
+    # the history read, the inbox collection and the system-prompt build.
+    # Resolving beside the turn kwargs would stamp that pre-created row `None`
+    # again and half-fix AC 7 on exactly the path #2426 already burned.
+    if execution_id:
+        # The caller already stamped a row with `resolved_model`; this path must
+        # NOT re-resolve, or the row and the turn would disagree about one
+        # turn's model. Contract violation, not a request outcome — no client
+        # can produce it, so it fails loud rather than degrading.
+        if model is not None and resolved_model is None:
+            raise ValueError(
+                "portal_chat: a caller passing `execution_id` and a requested "
+                "`model` must also pass the `resolved_model` it stamped on the "
+                "row (ent#403 — `model_used` has no UPDATE path)"
+            )
+    else:
+        resolved_model = resolve_turn_model(agent_name, model)
 
     # Imported here, like every other service this module reaches for: the
     # portal package is imported during app construction, and the execution
@@ -2247,7 +2699,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
         owns_marker = False
         if not execution_id:
             execution_id = _precreate_sync_execution(
-                agent_name, message, email, session_id, open_canvas_id)
+                agent_name, message, email, session_id, resolved_model,
+                open_canvas_id=open_canvas_id)
             if execution_id:
                 mark_turn_inflight(session_id, execution_id, turn_timeout + 60)
                 owns_marker = True
@@ -2282,6 +2735,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
             images=images or None,      # referenced inbox images as vision input (#78)
             system_prompt=system_prompt,
             execution_id=execution_id,  # ent#286: pre-created row, so the client can already be watching
+            # ent#403: the resolved model — forwarded through
+            # `run_resumable_turn`'s `**execute_kwargs` on BOTH the initial call
+            # and the cold retry, so the second row a cold retry creates carries
+            # the same model as the first. `execute_task` treats a non-None model
+            # as final and skips its own platform-default lookup.
+            model=resolved_model,
         )
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
@@ -2362,6 +2821,27 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # #2196: the turn RAN and did not come back, so retrying may genuinely
         # help and the instruction stays — but "it may be offline" is only
         # honest when we could not read the agent's state at dispatch.
+        #
+        # ent#403: this — the GENERIC branch, and only it — names the chosen
+        # model when the user chose one. The three branches above are left
+        # ALONE deliberately. There is no "this model is unavailable" code in
+        # the #2320 ladder (`_PULL_ERROR_CODES` has no model member), and the
+        # AUTH/BILLING branch merges into one "reached its usage limit" answer
+        # with a true and specific cause — rewording it whenever a model was
+        # picked would blame the model for an exhausted subscription.
+        if model:
+            raise ClientPortalError(
+                502,
+                f"The agent couldn't complete this on {catalog_label(model)}. "
+                "Switched back to the agent's default — try again, or pick "
+                "another model.",
+                # `invalid_model` is what the client keys the self-heal on: it
+                # clears the stored preference, so the sentence above is TRUE on
+                # the next turn and the user is not looped into the same failure
+                # on every retry and every reload. A copy-only degradation would
+                # keep sending the same model forever.
+                category="invalid_model", retryable=False,
+            )
         raise ClientPortalError(502, _turn_failed_detail(availability),
                                 category="agent_error", retryable=False)
 
@@ -2866,6 +3346,11 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # carry it or the Workspace's streaming path and its
                             # synchronous fallback disagree.
                             new_thread: bool = False,
+                            # ent#403 — same rule, same reason: a model honoured
+                            # by only one route brings the bug back exactly when
+                            # streaming fails. Already normalised and
+                            # allow-listed at the router; None = inherit.
+                            model: str | None = None,
                             # ent#555 — the canvas on screen, validated at the router.
                             # Stamped on the execution so the agent's tools default to it.
                             open_canvas_id: str | None = None) -> dict:
@@ -2901,6 +3386,11 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
 
     # Resolve the thread up front so the client can adopt it immediately rather
     # than waiting for the turn; `portal_chat` resolving it again is idempotent.
+    # ent#403: resolve the model ONCE, here — after the availability gate and
+    # before the row exists, so the SAME value reaches `model_used` and the turn.
+    # `portal_chat` is told not to re-resolve (it receives `resolved_model`).
+    resolved_model = resolve_turn_model(agent_name, model)
+
     session_id = _resolve_session_id(agent_name, email, session_id,
                                      new_thread=new_thread)
 
@@ -2924,6 +3414,11 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         source_channel_chat_id=session_id,
         # ent#457 review: see the sibling site above.
         source_channel_client=email,
+        # ent#403 AC 7: the second of the two creation sites. `model_used` is
+        # written ONLY at creation — there is no UPDATE path for the column
+        # anywhere in the repo — so a model passed as a turn kwarg alone would
+        # never reach the row a client can see.
+        model_used=resolved_model,
         # ent#555 — both creation sites carry it, for the reason stated above
         # about the stamp otherwise being a coin flip.
         open_canvas_id=open_canvas_id,
@@ -2955,6 +3450,11 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               turn_timeout_seconds=turn_timeout,
                               # #2196: already resolved above — one Docker read per turn.
                               availability=availability,
+                              # ent#403: the request's own pick (so the failure
+                              # ladder can name it) AND the trusted resolution
+                              # already stamped on the row above, so `portal_chat`
+                              # never re-resolves and the two cannot disagree.
+                              model=model, resolved_model=resolved_model,
                               open_canvas_id=open_canvas_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
@@ -3471,10 +3971,24 @@ def portal_documents(agent_name: str, email: str, include_owned: bool = False) -
     from database import db as core_db
 
     base = get_portal_base_url().rstrip("/")
+    # #2582 — this list is what the viewer sees, so it is where a dismissal
+    # applies. One read per call, and the ONLY frontend consumer of this
+    # response is the rail's Files feed (`portalRailFeeds.js` →
+    # `clientPortal.js::fetchDocuments`), so the filter cannot leak into the
+    # turn manifest the agent is handed.
+    dismissed = db.dismissed_file_ids(email)
     docs = []
     for row in core_db.list_active_shared_files_for_agent(agent_name):
         fid, token = row["id"], row["download_token"]
-        path = f"/api/files/{fid}?sig={token}"
+        if fid in dismissed:
+            continue
+        # `&download=1` (#2582): the ONE-WAY flag that makes the Files tab's
+        # Download actually save rather than open a tab. Only THIS base URL
+        # carries it — the agent's own chat link is built by
+        # `agent_shared_files_service.build_download_url` off
+        # `get_public_chat_url()` and is untouched, so ent#461's mobile inline
+        # path still opens inline where it should.
+        path = f"/api/files/{fid}?sig={token}&download=1"
         docs.append({
             "id": fid,
             "filename": row.get("filename") or fid,
@@ -3559,6 +4073,35 @@ def _legacy_email_dir(email: str) -> str:
     return _email_slug(email)
 
 
+def _running_container_or_refuse(agent_name: str):
+    """The agent's container, or the named refusal every inbox verb shares.
+
+    #2196: "Try again later" was wrong for the state that actually reaches here
+    most often — an agent with no container, where waiting never helps. Same
+    next action as the chat refusals, from the same table. A STOPPED container
+    still resolves and the docker exec would raise, so it gets its own clear
+    non-500 signal.
+
+    #2582 — extracted so upload, download and delete cannot drift, and with one
+    DELIBERATE consequence worth naming: **download 409s on a stopped agent**
+    even though `container.get_archive` could read a stopped container's
+    filesystem. That is consistent with `_read_inbox`, which returns `[]` for a
+    stopped agent — so the list the client is looking at is empty anyway, and a
+    download that worked from a surface that shows nothing would be the odder
+    behaviour. It is a choice, not an accident of reuse.
+    """
+    from services.docker_service import get_agent_container
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise ClientPortalError(502, _AVAILABILITY_REFUSAL["unavailable"])
+    if getattr(container, "status", "running") != "running":
+        raise ClientPortalError(
+            409, "The agent isn't running right now — ask the operator to start it, then try again."
+        )
+    return container
+
+
 async def portal_upload_document(agent_name: str, email: str, filename: str, data: bytes,
                                  include_owned: bool = False) -> dict:
     """Upload a client file into a rostered agent's per-client inbox
@@ -3578,21 +4121,9 @@ async def portal_upload_document(agent_name: str, email: str, filename: str, dat
     if len(data) > MAX_UPLOAD_BYTES:
         raise ClientPortalError(413, "File is too large (max 25 MiB).")
 
-    from services.docker_service import get_agent_container
     from services.docker_utils import container_put_archive, container_exec_run
 
-    container = get_agent_container(agent_name)
-    if not container:
-        # #2196: "Try again later" was wrong for the state that actually reaches
-        # here most often — an agent with no container, where waiting never
-        # helps. Same next action as the chat refusals, from the same table.
-        raise ClientPortalError(502, _AVAILABILITY_REFUSAL["unavailable"])
-    # A stopped container still resolves; the docker exec below would raise. Give
-    # the client a clear, non-500 signal instead.
-    if getattr(container, "status", "running") != "running":
-        raise ClientPortalError(
-            409, "The agent isn't running right now — ask the operator to start it, then try again."
-        )
+    container = _running_container_or_refuse(agent_name)
 
     # Per-client inbox quota (the epic's "quota-gated"). Sum what's already in the
     # client's inbox and reject if this file would overflow it.
@@ -3782,10 +4313,17 @@ async def _read_inbox(agent_name: str, email: str) -> list[dict]:
                 uploaded_at = datetime.fromtimestamp(float(mtime), tz=timezone.utc).isoformat().replace("+00:00", "Z")
             except (TypeError, ValueError, OSError):
                 uploaded_at = None
+        filename = it.get("filename") or ""
         out.append({
-            "filename": it.get("filename") or "",
+            "filename": filename,
             "size_bytes": int(it.get("size_bytes") or 0),
             "uploaded_at": uploaded_at,
+            # #2582 — a client upload has NO DB row (it is a file in a container
+            # directory), so there is no detected type to carry and the
+            # extension is all there is. Safe for this function's other two
+            # consumers: the quota path reads `size_bytes`, and the turn
+            # manifest reads `filename` + `size_bytes` only.
+            "mime_type": mimetypes.guess_type(filename)[0],
         })
     return out
 
@@ -3884,6 +4422,170 @@ async def list_client_uploads(agent_name: str, email: str, include_owned: bool =
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "uploads": await _read_inbox(agent_name, email)}
+
+
+# ---------------------------------------------------------------------------
+# #2582 / ent#548 — reading back, deleting and un-sharing a Workspace file
+# ---------------------------------------------------------------------------
+#
+# A client upload has no DB row. It is a file in a container directory with no
+# id, no URL and no stored MIME — which is why listing one needs a docker exec,
+# reading one back needs `extract_from_agent`, deleting one needs `rm`, and the
+# type has to be guessed. That single fact is the root cause of three of this
+# issue's four defects, and it is recorded as deliberate debt rather than as the
+# design (see the follow-up on #2582): landing client uploads in the same
+# `/data/agent-files/{id}` storage the agent's own shares use would collapse
+# listing, download, delete, preview and MIME onto one already-tested path.
+
+
+def _inbox_path_for(email: str, filename: str) -> Optional[str]:
+    """The absolute container path of one of this client's uploads, or None.
+
+    None means "there is no such file for you", and the caller MUST turn it into
+    the same uniform 404 an off-roster agent gets — never a distinguishable 400.
+    A traversal attempt and a typo are the same answer, which is the whole point
+    (OSS invariant #8).
+
+    The check is `_safe_filename(name) == name`: the name must be exactly what
+    the upload path would have written, so nothing that was rewritten on the way
+    in can be addressed on the way out. Note `_safe_filename` admits spaces,
+    parens and a **leading `-`** (`.strip(". ")` does not strip it), which is
+    why every shell use below is `shlex.quote` plus a `--` terminator — required,
+    not tidy.
+    """
+    name = (filename or "").strip()
+    if not name or _safe_filename(name) != name:
+        return None
+    return f"{_client_inbox(email)}/{name}"
+
+
+async def portal_download_upload(agent_name: str, email: str, filename: str,
+                                 include_owned: bool = False) -> tuple[bytes, str, str]:
+    """Read one of the client's OWN uploads back out of the agent's inbox.
+
+    Returns ``(data, filename, mime_type)``. Roster-scoped (miss → uniform 404);
+    an unaddressable filename gets that same 404.
+
+    Reuses `agent_shared_files_service.extract_from_agent` rather than adding a
+    second tar-extraction path. Its own exceptions are translated here because
+    they are written for a different audience: its 404 detail echoes the
+    container path, which this surface must not disclose.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+    path = _inbox_path_for(email, filename)
+    if path is None:
+        raise ClientPortalError(404, "File not found")
+    _running_container_or_refuse(agent_name)
+
+    # Function-local: `agent_shared_files_service` imports `database`, and this
+    # module is imported by it transitively at app start.
+    from fastapi import HTTPException
+    from services import agent_shared_files_service
+
+    try:
+        data, name = await agent_shared_files_service.extract_from_agent(agent_name, path)
+    except HTTPException as e:
+        if e.status_code == 413:
+            raise ClientPortalError(413, "That file is too large to download here.")
+        if e.status_code in (400, 404):
+            raise ClientPortalError(404, "File not found")
+        raise ClientPortalError(502, "Could not read the file from the agent. Try again.")
+    return data, name, (mimetypes.guess_type(name)[0] or "application/octet-stream")
+
+
+async def portal_delete_upload(agent_name: str, email: str, filename: str,
+                               include_owned: bool = False) -> None:
+    """Delete one of the client's OWN uploads from the agent's inbox.
+
+    Idempotent — `rm -f` on a missing file exits 0, and a client who clicks
+    Delete twice has got what they asked for both times.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+    path = _inbox_path_for(email, filename)
+    if path is None:
+        raise ClientPortalError(404, "File not found")
+    container = _running_container_or_refuse(agent_name)
+
+    from services.docker_utils import container_exec_run
+
+    # `--` as well as `shlex.quote`: `_safe_filename` admits a LEADING HYPHEN,
+    # so a quoted `'-rf'` would still be read by `rm` as a flag.
+    try:
+        res = await container_exec_run(
+            container, f"rm -f -- {shlex.quote(path)}", user="developer"
+        )
+    except Exception as e:  # noqa: BLE001 — never 500 on a container hiccup
+        logger.warning("portal upload delete on %s failed: %s", agent_name, e)
+        raise ClientPortalError(502, "Could not delete the file — the agent may be offline. Try again.")
+    if getattr(res, "exit_code", 1) != 0:
+        raise ClientPortalError(502, "The agent refused to delete the file. Try again.")
+    logger.info("portal upload delete: %s from %s by %s", filename, agent_name, email)
+
+
+def portal_revoke_shared_file(agent_name: str, email: str, file_id: str,
+                              include_owned: bool = False) -> None:
+    """Revoke an agent-shared file for EVERYONE. Owner-only (ent#548).
+
+    **Access-first gate order (OSS invariant #8).** Roster (uniform 404) →
+    ownership (403) → row lookup (404). The tempting order — look the row up,
+    404 if missing, then check ownership — is existence-then-access, the shape
+    the invariant forbids, and it costs nothing to avoid.
+
+    Soft revoke through the OSS primitive `db.revoke_agent_shared_file`, the same
+    one `routers/agent_files.py` calls: the link 410s at once and the cleanup
+    sweeper reclaims the bytes within the 24h grace window. Do not write a second
+    implementation.
+
+    **Divergence worth stating so nobody "aligns" it:** that sibling operator
+    route is documented idempotent-**204** for a missing id. This one returns
+    **404**, because it is an EXTERNAL surface and a 204 for an id that does not
+    exist, against a 404 for one that belongs to another agent, is an
+    enumeration differential.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+    if not portal_owns_agent(email, agent_name, include_owned):
+        raise ClientPortalError(
+            403,
+            "Only the agent's owner can delete a shared file for everyone. "
+            "You can remove it from your own list instead.",
+        )
+
+    from database import db as core_db
+
+    row = core_db.get_agent_shared_file(file_id)
+    # A row belonging to a DIFFERENT agent is the same answer as no row: the
+    # caller's authority is scoped to this agent, so anything else does not
+    # exist as far as this route is concerned.
+    if not row or row["agent_name"] != agent_name:
+        raise ClientPortalError(404, "File not found")
+    core_db.revoke_agent_shared_file(file_id)
+    logger.info("portal share revoke: %s on %s by %s", file_id, agent_name, email)
+
+
+def portal_dismiss_shared_file(agent_name: str, email: str, file_id: str,
+                               include_owned: bool = False) -> None:
+    """Remove an agent-shared file from THIS viewer's list. The share is untouched.
+
+    **Deliberately does NOT verify that the file exists**, exactly as
+    `set_chat_star` resolved the same fork: the write lands in a row keyed by the
+    caller's own email, so an unknown or someone else's id gains them nothing —
+    while a 404 for "no such file" would be an existence oracle over every share
+    id in the install (OSS invariant #8). The row cap is what bounds the write
+    instead.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+    fid = (file_id or "").strip()
+    if not fid or len(fid) > 200:
+        raise ClientPortalError(400, "Invalid file reference")
+    if db.count_file_dismissals(email) >= db.MAX_FILE_DISMISSALS:
+        raise ClientPortalError(
+            409, "Too many hidden files — ask the agent's owner to remove some shares."
+        )
+    db.dismiss_shared_file(email, fid, agent_name, utc_now_iso())
 
 
 # ---------------------------------------------------------------------------

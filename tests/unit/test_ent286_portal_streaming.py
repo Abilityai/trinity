@@ -338,10 +338,13 @@ def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, m
 
     seen = {}
 
-    # `**_` so this stub does not have to be re-edited every time the real
-    # `portal_chat` gains an optional per-turn field (ent#451's new_thread,
-    # ent#555's open_canvas_id). The test is about the in-flight MARKER, not
-    # about the signature.
+    # `**_` like the other stand-ins in this suite, so this stub does not have
+    # to be re-edited every time the real `portal_chat` gains an optional
+    # per-turn field (ent#451's new_thread, ent#403's model / resolved_model,
+    # ent#555's open_canvas_id). A stub that refuses an unknown kwarg raises
+    # inside the background task, where the failure surfaces as a missing key
+    # rather than a TypeError anyone can read. The test is about the in-flight
+    # MARKER, not about the signature.
     async def _slow_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
                          turn_timeout_seconds=None, availability=None, **_):

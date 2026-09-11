@@ -681,7 +681,10 @@ describe('PortalConversation wiring', () => {
 
   it('anchors the popup without collapsing the flex field', () => {
     const src = convSource()
-    expect(src).toContain('relative flex-1 min-w-0')
+    // #2662: the anchor is the composer shell's first ROW, so it is `relative`
+    // and full width rather than a `flex-1 min-w-0` item beside the buttons.
+    // The ref name is unchanged — the outside-click close reads `composerWrap`.
+    expect(src).toMatch(/<div ref="composerWrap" class="relative"/)
     // Matched on the class LIST, not on `class="w-full` — #2259 prepends `block`
     // to the same attribute, and an anchored match would read that as the field
     // having lost its width.

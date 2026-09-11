@@ -15,7 +15,7 @@ from sqlalchemy import select, func, and_, or_, text, bindparam
 from db.engine import get_engine, make_insert
 from db.tables import (
     system_settings, agent_sharing, agent_ownership, users,
-    enterprise_portal_chat_state,
+    enterprise_portal_chat_state, portal_file_dismissals,
 )
 from utils.helpers import iso_cutoff, utc_now_iso
 
@@ -81,6 +81,11 @@ def get_shared_roster(email: str) -> list[dict]:
             # than resolved per agent — `get_display_label` is one query each,
             # which would add an N+1 to fix a row that renders the wrong title.
             agent_ownership.c.display_label,
+            # ent#403: the #894 per-agent model override, selected HERE for the
+            # same reason `display_label` is — this query already joins
+            # `agent_ownership`, so it is one column rather than a per-card read,
+            # and the roster's model control needs it for every row.
+            agent_ownership.c.public_channel_model,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -134,6 +139,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.tts_voice_id,
             agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
+            agent_ownership.c.public_channel_model,  # ent#403, same rationale
             users.c.username.label("owner"),
         )
         .select_from(
@@ -874,6 +880,67 @@ def count_starred_rows(client_email: str) -> int:
 def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
     """Advance one chat's read cursor for one user."""
     _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
+
+
+# ---------------------------------------------------------------------------
+# #2582 / ent#548 — per-viewer dismissal of an agent-shared file
+# ---------------------------------------------------------------------------
+#
+# Same tenancy shape as the chat state above: the row is keyed by the caller's
+# own email, so there is no filter that could be forgotten and no way to address
+# another viewer's rows. And the same abuse bound, for the same reason — the
+# write deliberately does NOT verify the share exists (a 404 for an unknown id
+# would be an existence oracle over every share in the install, OSS invariant
+# #8), so without a cap a portal session is an unbounded write primitive.
+#
+# One ceiling, not two. The chat-state table needed a second because read
+# cursors accumulate from ordinary use and unstarring cannot remove them, which
+# made a single total cap unreachable-by-recovery. Nothing here accumulates
+# without the user asking: every row is a deliberate "remove this from my list",
+# and the sweeper drops the row when the share it names is purged. So the total
+# IS the recoverable set.
+MAX_FILE_DISMISSALS = 1000
+
+
+def count_file_dismissals(client_email: str) -> int:
+    stmt = select(func.count()).select_from(portal_file_dismissals).where(
+        portal_file_dismissals.c.client_email == (client_email or "").lower()
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt).scalar() or 0)
+
+
+def dismiss_shared_file(client_email: str, file_id: str, agent_name: str,
+                        now: str) -> None:
+    """Hide one agent-shared file from one viewer's list. Idempotent."""
+    email = (client_email or "").lower()
+    stmt = (
+        make_insert(portal_file_dismissals)
+        .values(client_email=email, file_id=file_id, agent_name=agent_name,
+                dismissed_at=now)
+        .on_conflict_do_update(
+            index_elements=[
+                portal_file_dismissals.c.client_email,
+                portal_file_dismissals.c.file_id,
+            ],
+            set_={"agent_name": agent_name, "dismissed_at": now},
+        )
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt)
+
+
+def dismissed_file_ids(client_email: str) -> set[str]:
+    """Every share id this viewer has dismissed.
+
+    Unbounded read, bounded set — `MAX_FILE_DISMISSALS` caps the write path, and
+    the PK's leading column is `client_email`, which is this predicate.
+    """
+    stmt = select(portal_file_dismissals.c.file_id).where(
+        portal_file_dismissals.c.client_email == (client_email or "").lower()
+    )
+    with get_engine().connect() as conn:
+        return {r[0] for r in conn.execute(stmt)}
 
 
 def count_unread_by_session(client_email: str) -> dict[str, int]:

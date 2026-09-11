@@ -47,3 +47,30 @@
 
 **Agent-to-agent collaboration data** (`stores/network.js`): the Vue Flow node-graph rendering of collaboration (the Dashboard's Graph mode + `AgentNode.vue`) was **decommissioned in #1689**; the underlying collaboration data still flows and feeds the Timeline replay. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed/cancelled — a user-cancelled terminal is recorded as `cancelled`, distinct from `failed`, #1332).
 
+
+**Voice has one consumer, and Agent Detail has a door (#2559).** The orb
+(`components/chat/VoiceOverlay.vue`) and the session composable
+(`composables/useVoiceSession.js`) are mounted in exactly **one** place:
+`components/portal/PortalConversation.vue`, the Workspace conversation. The
+chat-panel overlay on Agent Detail — a second front door with a second transcript
+home (`chat_messages.source='voice'`) and its own per-agent `/voice/status`
+probe — is retired; `ChatPanel.vue` and `chat/ChatInput.vue` carry no voice
+wiring, and `useVoiceSession` exposes `startWith`/`stop` but no longer the
+Agent-Detail-shaped `start()`. What Agent Detail offers instead is a **door**: an
+ungated `Talk` button in `AgentHeader.vue` beside the `Workspace` one, pushing
+`/workspace?agent=<name>&voice=1` in the same tab (same-document, so the
+Workspace's `AudioContext` stays resumable). It is ungated on purpose — the
+destination reports availability in words, per ent#438's ruling.
+
+The `?voice=1` rule is a pure function in `components/portal/portalVoiceMode.js`
+(`voiceAutoStart`), alongside the module-scoped **armed** flag it reads. The flag
+is what makes the param safe: `armVoiceAutoStart()` is called by the Talk button
+before the push, and it lives exactly as long as the document, so a pasted,
+bookmarked or mailed link — always a fresh document — is never honoured. A
+browser-activation heuristic cannot do that job: `Portal.vue` skips `bootstrap()`
+while signed out, so a pasted link survives unconsumed until exactly the sign-in
+click that would satisfy it. `Portal.vue` sets the intent in `resolveAgentQuery()`,
+strips the key **once** in `bootstrap()`'s `finally` keyed on its presence (so a
+deep-link early return, a fall-through, `?voice=0` and a throw all strip), and
+hands off to `PortalConversation`'s exposed `startVoiceCall` through a template
+ref after a `nextTick`.

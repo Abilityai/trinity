@@ -910,7 +910,10 @@ that rather than blocking on it:
   Guards: disabled via `OPERATOR_INTAKE_ENABLED=false` / `DO_NOT_TRACK`; **at-most-
   once** via the `operator_intake_submitted` marker claimed *before* the POST;
   no-op without an email. Owns the stable `installation_id` (random UUID in
-  `system_settings`, the #758 telemetry seed). Never raises; never logs the email.
+  `system_settings`, the #758 telemetry seed — minted write-once by the writers'
+  accessor on this POST, the product-event emit and the canary label; read
+  without minting by `get_installation_id`, ent#545). Never raises; never logs
+  the email.
   **Delivery-failure observability (#1593):** success is gated on a *true* 2xx —
   a non-2xx **response** (3xx redirect or 4xx/5xx) logs at **WARNING** (status +
   the Worker's coded `error`, echoed only when it matches a lowercase

@@ -44,6 +44,7 @@ import { stripComments } from './helpers/stripComments'
 import {
   shouldEscapeStage,
   PORTAL_BUCKET_LABELS,
+  STAGE_QUERY_KEYS,
   WORKSPACE_ROOT,
 } from '@/components/portal/portalUtils'
 import {
@@ -122,6 +123,14 @@ describe('shouldEscapeStage', () => {
   it('escapes a stage named by the query at the workspace root', () => {
     expect(shouldEscapeStage('/workspace', { agent: 'acme-billing' })).toBe(true)
     expect(shouldEscapeStage('/workspace', { new: '1' })).toBe(true)
+    // #2559 — the Talk door's key. `bootstrap()` strips it on every exit, so this
+    // is belt-and-braces; it costs nothing and keeps the sign-out predicate
+    // honest if a residual key ever survives.
+    expect(shouldEscapeStage('/workspace', { voice: '1' })).toBe(true)
+  })
+
+  it('names every stage-bearing query key, so sign-out cannot leak one', () => {
+    expect(STAGE_QUERY_KEYS).toEqual(['agent', 'new', 'voice'])
   })
 
   it('ignores an empty or absent query', () => {
@@ -331,7 +340,11 @@ describe('Overview containment', () => {
     // a grid. Retired deliberately and replaced, rather than deleted, per this
     // file's own #2169 convention.
     const src = pageSource()
-    expect(src).toMatch(/v-if="!loaded"[\s\S]{0,400}animate-pulse/)
+    // #2597 made the skeleton the SECOND arm of the chain (`v-else-if`), after
+    // a failed-first-load arm. The gate is matched position-independently so
+    // this test keeps asserting its own property — the skeleton's SHAPE — and
+    // stops failing whenever an arm is added above it.
+    expect(src).toMatch(/v-(?:else-)?if="!loaded"[\s\S]{0,400}animate-pulse/)
     expect(src).not.toMatch(/xl:grid-cols-2/)
   })
 
@@ -340,7 +353,9 @@ describe('Overview containment', () => {
     // the numbers on every window change and would be counted by the
     // loading-gate ratchet.
     const src = pageSource()
-    expect(src).toMatch(/v-if="!loaded"/)
+    // Position-independent for the #2597 reason above. The negative assertion
+    // — never `loading` — is the point of this test and is untouched.
+    expect(src).toMatch(/v-(?:else-)?if="!loaded"/)
     expect(src).not.toMatch(/v-if="loading"/)
   })
 })

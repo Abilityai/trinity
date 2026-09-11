@@ -13,11 +13,17 @@
  *      a new chat gets its thread BEFORE the call starts, and the shell swaps the
  *      rail for the canvas column and refuses navigation.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import {
   CANVAS_SAFETY_POLL_MS,
+  VOICE_QUERY_KEY,
+  armVoiceAutoStart,
+  disarmVoiceAutoStart,
+  voiceAutoStart,
+  voiceAutoStartArmed,
+  voiceQueryRequested,
   END_REASON_TEXT,
   PANEL_TOOL_NAMES,
   VOICE_INSECURE_REASON,
@@ -57,6 +63,7 @@ const COMPOSABLE = read('../../src/composables/useVoiceSession.js')
 const CANVAS_COLUMN = read('../../src/components/portal/PortalVoiceCanvas.vue')
 const TABS = read('../../src/components/portal/PortalChatTabs.vue')
 const STORE = read('../../src/stores/clientPortal.js')
+const HEADER = read('../../src/components/AgentHeader.vue')
 const CODE = stripComments(CONVERSATION)
 const SHELL_CODE = stripComments(SHELL)
 
@@ -231,7 +238,7 @@ describe('the #440 hands-free loop is retired — one voice entry point', () => 
   })
 })
 
-describe('the call is the Agent Detail orb, reused — not forked', () => {
+describe('the call is the shared platform orb, reused — not forked (and since #2559 this is its only consumer)', () => {
   it('mounts VoiceOverlay and drives it from useVoiceSession', () => {
     expect(CODE).toContain("import VoiceOverlay from '../chat/VoiceOverlay.vue'")
     expect(CODE).toContain("import { useVoiceSession } from '../../composables/useVoiceSession'")
@@ -281,15 +288,44 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     // but the toggle must stay live, because it is the control that ENDS the
     // call. Inside the inert region it would render pressed and refuse the
     // click, a dead affordance manufactured by the move itself.
-    expect(CODE).toMatch(/<div\s+class="flex-1 min-w-0 flex items-end gap-2"\s+:class="voiceCallActive \? 'opacity-60 pointer-events-none' : ''"/)
-    // The toggle is a SIBLING of that wrapper, not a descendant. Positional, so
-    // it fails if a later edit moves the button inside.
+    // #2662 stacked the composer, so "everything except the toggle" is now TWO
+    // regions on two rows — the field's wrapper and the control row's wrapper —
+    // and `opacity` needs a real box on each. Both must carry the inert pair;
+    // one without the other leaves half the composer live during a call.
+    const INERT = ":class=\"voiceCallActive \\? 'opacity-60 pointer-events-none' : ''\""
+    expect(CODE).toMatch(new RegExp('<div ref="composerWrap" class="relative" ' + INERT))
+    expect(CODE).toMatch(new RegExp('<div class="flex-1 min-w-0 flex items-center gap-1" ' + INERT))
+    // The toggle is a SIBLING of the control row's wrapper, not a descendant.
+    // Positional, so it fails if a later edit moves the button inside.
     const formStart = CODE.indexOf('<form')
-    const inertAt = CODE.indexOf('flex-1 min-w-0 flex items-end gap-2', formStart)
+    const inertAt = CODE.indexOf('flex-1 min-w-0 flex items-center gap-1', formStart)
     const callAt = CODE.indexOf('data-testid="portal-voice-call"', formStart)
+    expect(inertAt).toBeGreaterThan(-1)
     expect(callAt).toBeGreaterThan(-1)
     expect(callAt, 'the call toggle must precede the inert wrapper').toBeLessThan(inertAt)
     expect(CODE).toContain(':disabled="transcribing || voiceCallActive"')
+  })
+
+  it('takes the shell chrome OFF for the call, because the shell cannot join the inert regions', () => {
+    // #2662. The shell is the PARENT of both regions above and it is what now
+    // carries the border and fill, so leaving it static rendered a full-contrast
+    // frame around opacity-60 contents — the pre-#2662 field dimmed with them.
+    // It cannot simply join them: the call toggle lives inside it and must stay
+    // bright, and `opacity` on a parent is not something a child can undo. So
+    // the chrome is REMOVED for the call's duration, and the resting pair is the
+    // false arm. A static border/fill on this element is the regression back.
+    //
+    // BOTH arms are bound and the static class holds no chrome colour, which is
+    // load-bearing: with `border-transparent bg-transparent` left static and only
+    // the resting pair bound, the LIGHT composer renders with no border at all —
+    // Tailwind emits `.border-transparent` after `.border-gray-300` but
+    // `.bg-transparent` before `.bg-white`, so the two disagree about which of an
+    // equal-specificity pair survives, and every `dark:` variant hides it.
+    expect(CODE).toMatch(/class="rounded-2xl border px-2 py-2 transition has-\[textarea:focus\]/)
+    expect(CODE).not.toMatch(/class="rounded-2xl border border-transparent/)
+    expect(CODE).toMatch(
+      /:class="voiceCallActive \? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"/
+    )
     expect(CODE).toContain(':disabled="sending || !input.trim() || voiceCallActive"')
     expect(TABS).toContain('disabled: { type: Boolean, default: false }')
     expect(TABS).toMatch(/function onSelect\(id\) \{\s*if \(props\.disabled\) return/)
@@ -299,9 +335,18 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceCallActive\.value\) speak\(data\.response\)/)
   })
   it('Escape ends the call before the turn-cancel rule runs', () => {
+    // #2598 changed the SPELLING, not this property: the call is still asked
+    // first. The condition used to be the inline
+    // `voiceCallActive.value && event.key === 'Escape'`, which read none of the
+    // preconditions `shouldCancelOnEscape` reads — so an overlay that claimed
+    // Escape in the capture phase with `preventDefault()` closed AND ended the
+    // call. It now dispatches on the shared `shouldEndCallOnEscape` rule; the
+    // ORDERING assertion below is what ent#534 actually cares about and is
+    // unchanged.
     const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
-    expect(esc.indexOf("voiceCallActive.value && event.key === 'Escape'")).toBeGreaterThan(-1)
-    expect(esc.indexOf("voiceCallActive.value && event.key === 'Escape'")).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
+    const call = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    expect(call).toBeGreaterThan(-1)
+    expect(call).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
     expect(esc).toContain('void endVoiceCall()')
   })
   it('the header line names the state and the way out; End always works', () => {
@@ -330,14 +375,23 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(SHELL).toContain("import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'")
     // The column mounts only once the session id is known — `active` rises before
     // the start request answers (found live: a fetch of `/voice//panel`).
-    expect(SHELL_CODE).toMatch(/<PortalVoiceCanvas\s+v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
+    // #2640 moved the condition into a named computed (the canvas is inside a
+    // <Transition> now, so the rail can no longer be its `v-else-if` and both
+    // arms have to read the SAME rule); the rule itself is unchanged.
+    expect(SHELL_CODE).toMatch(/<PortalVoiceCanvas[\s\S]{0,200}v-if="voiceCanvasHasColumn"/)
+    expect(SHELL_CODE).toMatch(
+      /const voiceCanvasHasColumn = computed\(\(\) => Boolean\(\s*voiceCall\.value\.active && voiceCall\.value\.voiceSessionId && activeAgent\.value/
+    )
     expect(CODE).toMatch(/watch\(\[voiceCallActive, \(\) => voice\.voiceSessionId\.value\]/)
     expect(CANVAS_COLUMN).toContain('if (inFlight || !props.voiceSessionId) return')
     // ent#547: there is no details SIBLING to swap out any more — it is the
     // rail's Info tab, so the voice canvas now displaces the rail itself and the
     // chain is two arms rather than three.
     expect(SHELL_CODE).not.toContain('detailsOpen')
-    expect(SHELL_CODE).toMatch(/<PortalRail[\s\S]{0,80}v-else-if="railVisible"/)
+    // #2640: `v-if` with the negated shared condition, not `v-else-if` — the
+    // <Transition> wrapper broke the adjacency that chain needs. Exclusivity is
+    // the property; which construct expresses it is not.
+    expect(SHELL_CODE).toMatch(/<PortalRail[\s\S]{0,120}v-if="railVisible && !voiceCanvasHasColumn/)
     // The 40 / 60 split is two flex SHARES of a zero basis (2 : 3), never
     // percentages of the row: `w-[40%]` + `w-[60%]` beside the 18rem sidebar
     // summed to 100% + 18rem and the shell's overflow-hidden clipped the
@@ -370,6 +424,142 @@ describe('the capability field is named for the capability, not the provider', (
     expect(CODE).toContain('const ttsEnabled = computed(() => !!props.agent.voice_available)')
     for (const src of [CODE, SHELL_CODE, COMPOSABLE, CANVAS_COLUMN]) {
       expect(src.toLowerCase()).not.toContain('gemini')
+    }
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// 3. The Talk door — `?voice=1` (trinity#2559)
+// ---------------------------------------------------------------------------
+
+describe('the `?voice=1` query is read strictly', () => {
+  it('accepts only the literal string "1"', () => {
+    expect(voiceQueryRequested('1')).toBe(true)
+    for (const v of ['0', 'true', 'yes', '', 'on', ' 1', '1 ', undefined, null, 1, true]) {
+      expect(voiceQueryRequested(v), String(v)).toBe(false)
+    }
+  })
+  it('takes the first entry when vue-router hands back an array for a repeated key', () => {
+    expect(voiceQueryRequested(['1', '0'])).toBe(true)
+    expect(voiceQueryRequested(['0', '1'])).toBe(false)
+    expect(voiceQueryRequested([])).toBe(false)
+  })
+  it('names the key once, so the parser and the strip cannot drift', () => {
+    expect(VOICE_QUERY_KEY).toBe('voice')
+  })
+})
+
+describe('the auto-start intent is ARMED IN THE APP, never by the URL alone', () => {
+  // The flag is module state by design (it must die with the document), so each
+  // case starts from a known position rather than inheriting the previous one.
+  beforeEach(() => disarmVoiceAutoStart())
+
+  const ok = { query: { voice: '1' }, landed: true, isPlatform: true, armed: true }
+
+  it('starts only when every condition holds at once', () => {
+    expect(voiceAutoStart(ok)).toEqual({ start: true, why: '' })
+  })
+
+  it('REFUSES a perfect request that was not armed — the pasted-link case', () => {
+    // This is the regression test for the signed-out hot mic: `Portal.vue` runs
+    // `bootstrap()` only while signed in, so a pasted `?voice=1` survives
+    // unconsumed until the sign-in click — which is exactly the click that
+    // satisfies a browser activation heuristic. The arm flag does not care.
+    expect(voiceAutoStart({ ...ok, armed: false })).toEqual({ start: false, why: 'unarmed' })
+  })
+
+  it('refuses when the agent did not land, or the principal is not a platform session', () => {
+    expect(voiceAutoStart({ ...ok, landed: false })).toEqual({ start: false, why: 'unreachable' })
+    expect(voiceAutoStart({ ...ok, isPlatform: false })).toEqual({ start: false, why: 'principal' })
+  })
+
+  it('is silent — no `why` — when the key is simply absent or rejected', () => {
+    expect(voiceAutoStart({ ...ok, query: {} })).toEqual({ start: false, why: '' })
+    expect(voiceAutoStart({ ...ok, query: { voice: '0' } })).toEqual({ start: false, why: '' })
+    expect(voiceAutoStart()).toEqual({ start: false, why: '' })
+    expect(voiceAutoStart({ ...ok, query: null })).toEqual({ start: false, why: '' })
+  })
+
+  it('the arm lifecycle: false, armed, disarmed', () => {
+    expect(voiceAutoStartArmed()).toBe(false)
+    armVoiceAutoStart()
+    expect(voiceAutoStartArmed()).toBe(true)
+    expect(voiceAutoStart({ ...ok, armed: voiceAutoStartArmed() }).start).toBe(true)
+    disarmVoiceAutoStart()
+    expect(voiceAutoStartArmed()).toBe(false)
+    expect(voiceAutoStart({ ...ok, armed: voiceAutoStartArmed() }).start).toBe(false)
+  })
+
+  it('returns no verdict about stripping — one site owns that', () => {
+    // A helper that stripped on its own verdict left `?voice=0` resident,
+    // because a rejected value is still PRESENT. `bootstrap()` keys on presence.
+    expect(voiceAutoStart(ok)).not.toHaveProperty('strip')
+    expect(voiceAutoStart({ ...ok, query: { voice: '0' } })).not.toHaveProperty('strip')
+  })
+})
+
+describe('the door and the hand-off are wired (source, since there is no mount harness)', () => {
+  it('the Talk button arms the one-shot BEFORE it navigates', () => {
+    const header = stripComments(HEADER)
+    expect(header).toContain("import { armVoiceAutoStart } from './portal/portalVoiceMode'")
+    const fn = header.slice(header.indexOf('function goToTalk()'), header.indexOf('function goToBrain()'))
+    expect(fn).toContain('armVoiceAutoStart()')
+    expect(fn).toMatch(/router\.push\(\{ path: '\/workspace', query: \{ agent: props\.agent\.name, voice: '1' \} \}\)/)
+    expect(fn.indexOf('armVoiceAutoStart()')).toBeLessThan(fn.indexOf('router.push'))
+  })
+
+  it('the shell records the intent, and strips NOTHING, inside resolveAgentQuery', () => {
+    const fn = SHELL_CODE.slice(SHELL_CODE.indexOf('function resolveAgentQuery()'), SHELL_CODE.indexOf('const ASKS_POLL_MS'))
+    expect(fn).toContain('pendingVoiceStart = voiceAutoStart({')
+    expect(fn).toContain('armed: voiceAutoStartArmed(),')
+    expect(fn).not.toContain('stripVoiceQuery()')
+    // ...but it DOES record that its own replace happened. That replace takes a
+    // bare path, so it drops the whole query — `voice` included.
+    expect(fn).toContain('landingReplaced = true; router.replace(`/workspace/c/${landing.sessionId}`)')
+  })
+
+  it('bootstrap resets the intent, reads the key before the first await, and strips ONCE in the finally', () => {
+    const fn = SHELL_CODE.slice(SHELL_CODE.indexOf('async function bootstrap()'), SHELL_CODE.indexOf('onMounted(async () =>'))
+    // The reset must precede the try: bootstrap has no `catch`, so a throw would
+    // otherwise carry a billed intent into the next sign-in re-bootstrap.
+    expect(fn.indexOf('pendingVoiceStart = false')).toBeLessThan(fn.indexOf('try {'))
+    // Read before the first await, or the landing replace has already rewritten it.
+    const keyRead = fn.indexOf('const voiceKeyPresent = route.query[VOICE_QUERY_KEY] !== undefined')
+    expect(keyRead).toBeGreaterThan(-1)
+    expect(keyRead).toBeLessThan(fn.indexOf('await '))
+    // One strip, in the finally, keyed on PRESENCE — and skipped when the
+    // landing replace already dropped the query. Two `router.replace` calls
+    // started in one tick do not compose: vue-router cancels the first
+    // (NAVIGATION_CANCELLED), so an unconditional strip here would land the
+    // door on `/workspace?agent=X` instead of `/workspace/c/<sid>`. `route`
+    // updates asynchronously, so the strip cannot detect that itself.
+    expect(fn).toMatch(/\} finally \{[\s\S]{0,600}if \(voiceKeyPresent\) \{ if \(!landingReplaced\) stripVoiceQuery\(\); disarmVoiceAutoStart\(\) \}/)
+    expect(fn.match(/stripVoiceQuery\(\)/g)).toHaveLength(1)
+    // Reset with the intent, for the same reason: a stale `true` from a throw
+    // would suppress the next bootstrap's strip.
+    expect(fn.indexOf('landingReplaced = false')).toBeLessThan(fn.indexOf('try {'))
+    // Then the hand-off, after the finally.
+    expect(fn.indexOf('conversationRef.value?.startVoiceCall?.()')).toBeGreaterThan(fn.indexOf('if (voiceKeyPresent)'))
+    expect(fn).toContain('await nextTick()')
+  })
+
+  it('the strip reads the CURRENT route, so it composes with the landing replace', () => {
+    const fn = SHELL_CODE.slice(SHELL_CODE.indexOf('function stripVoiceQuery()'), SHELL_CODE.indexOf('function stripVoiceQuery()') + 300)
+    expect(fn).toContain('const query = { ...route.query }')
+    expect(fn).toContain('delete query[VOICE_QUERY_KEY]')
+    expect(fn).toContain('router.replace({ path: route.path, query })')
+  })
+
+  it('the shell holds the conversation ref, and the conversation exposes the call', () => {
+    expect(stripHtmlComments(SHELL)).toMatch(/<PortalConversation[\s\S]{0,120}ref="conversationRef"/)
+    expect(CODE).toMatch(/defineExpose\(\{[^}]*startVoiceCall[^}]*\}\)/)
+  })
+
+  it('does NOT use `navigator.userActivation` — it is a heuristic, not a provenance check', () => {
+    for (const src of [SHELL, HEADER, read('../../src/components/portal/portalVoiceMode.js')]) {
+      // The rationale lives in comments; no CODE path may consult it.
+      expect(stripComments(src)).not.toContain('userActivation')
     }
   })
 })

@@ -153,9 +153,13 @@ def insert_execution(
     is why nine of these cases raised ``NumericValueOutOfRange`` on PostgreSQL
     while SQLite — untyped — kept quietly widening the value.
 
-    The column width is a separate product concern; this default is what makes
-    the tests date-independent, and it would keep them passing after the column
-    is widened, because a fixed anchor's duration only ever grows.
+    That product concern was settled by #2434, and NOT by widening: the column
+    stays `int4` and `utils.helpers.duration_ms_between` returns None above the
+    ceiling, because a >24.8-day "duration" is a stale `started_at`, not a
+    measurement. This relative default is still the right one — it keeps the
+    cases date-independent and exercises a REAL duration, which is exactly what
+    `test_2434_duration_overflow.py` deliberately does not do (it seeds a 33-day
+    anchor on purpose, to reach the branch this default avoids).
     """
     if started_at is _UNSET:
         started_at = _recent_iso()

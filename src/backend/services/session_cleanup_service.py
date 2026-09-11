@@ -15,13 +15,23 @@ Two paths feed the cleanup:
    to the user.
 
 2. **Periodic sweep** (every 6h, default) that diffs the on-disk JSONL set
-   against the keep set: every ``cached_claude_session_id`` currently stored
-   for that agent, on an active ``agent_sessions`` row **or** on an
-   ``enterprise_portal_sessions`` (Workspace) thread — both surfaces resume,
-   so both are live (ent#358). JSONLs older than the age guard whose UUID is
-   in neither are deleted. Catches dropped synchronous reaps,
-   externally-modified state, and any churn from fallback turns that orphaned
-   a JSONL behind a fresh UUID.
+   against the keep set: every resume handle currently stored for that agent,
+   on an active ``agent_sessions`` row, on an ``enterprise_portal_sessions``
+   (Workspace) thread (ent#358), **or** on an open room's
+   ``enterprise_room_participants`` row (#2610). All three surfaces resume, so
+   all three are live. JSONLs older than the age guard whose UUID is in none of
+   them are deleted. Catches dropped synchronous reaps, externally-modified
+   state, and any churn from fallback turns that orphaned a JSONL behind a
+   fresh UUID.
+
+   **Every surface that stores a ``--resume`` id must be unioned in here.** The
+   omission is silent by construction — resuming keeps working until the sweep
+   runs, and then the conversation is simply gone with no error anywhere. It
+   has now shipped twice (ent#358 for Workspace threads, #2610 for rooms), so
+   treat a new resume-capable surface as owing a keep-set accessor on the same
+   PR. Each source is read in its own try/except that ABORTS the sweep on
+   failure: skipping a cycle costs disk, reaping against a partial keep set
+   costs users their conversations.
 
 The age guard (default 1h) prevents a race where a brand-new cold turn
 writes a JSONL **before** the backend has updated
@@ -227,6 +237,25 @@ class SessionCleanupService:
         except Exception as e:
             logger.warning(
                 "[SessionCleanup] agent=%s could not load Workspace keep set — "
+                "skipping sweep rather than reaping against a partial set: %s",
+                agent_name, e,
+            )
+            per["errors"] += 1
+            return per
+
+        # #2610: rooms are the THIRD surface that resumes. Each room stores a
+        # per-(agent, room) handle in `enterprise_room_participants` and passes
+        # it as `resume_session_id`, so those JSONLs are as live as the two
+        # sets above — and were reaped an hour after they were written, which
+        # made every multi-agent room fail its next mention with "No
+        # conversation found with session ID". Same failure and the same
+        # fail-closed rule as the Workspace half directly above.
+        try:
+            from shared_sessions import db as rooms_db
+            keep_set.update(rooms_db.list_active_claude_session_ids(agent_name))
+        except Exception as e:
+            logger.warning(
+                "[SessionCleanup] agent=%s could not load room keep set — "
                 "skipping sweep rather than reaping against a partial set: %s",
                 agent_name, e,
             )

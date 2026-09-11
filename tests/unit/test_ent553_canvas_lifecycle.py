@@ -29,6 +29,8 @@ the pin exists to give the person.
 """
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from models import CANVAS_MAX_PER_AGENT, User
@@ -60,6 +62,29 @@ def canvas_db(tmp_path, monkeypatch):
     yield str(db_file)
 
 
+def _set_cap(monkeypatch, value):
+    """Set the per-agent canvas cap the LIVE code will actually read.
+
+    Not `monkeypatch.setattr(db.canvas, "CANVAS_MAX_PER_AGENT", ...)`, which is
+    what this file did first and which fails in a full-suite run while passing
+    in isolation. Some earlier test evicts `db.canvas` from `sys.modules`, so a
+    fresh `import db.canvas` hands back a NEW module object while the live
+    `db._canvas_ops` is still an instance of the OLD class — whose method reads
+    the OLD module's globals. The patch then lands somewhere nothing consults
+    and the cap stays at its default, so the "refuses" assertions fail.
+
+    Patching the bound method's own `__globals__` targets whichever module dict
+    the running code actually closes over, whether or not an eviction happened.
+    Same fix as #2589, for the same reason.
+    """
+    from database import db
+    monkeypatch.setitem(
+        type(db._canvas_ops).upsert_canvas.__globals__,
+        "CANVAS_MAX_PER_AGENT",
+        value,
+    )
+
+
 def _write(agent: str, canvas_id: str, **kw):
     from database import db
     return db.upsert_agent_canvas(agent, canvas_id, blocks=kw.pop("blocks", []), **kw)
@@ -70,9 +95,8 @@ def _write(agent: str, canvas_id: str, **kw):
 def test_the_cap_refuses_a_new_canvas_by_name(canvas_db, monkeypatch):
     """The refusal names the count, the limit, and the way out. An agent reads
     this string — "you are full" with no remedy is a dead end."""
-    import db.canvas as canvas_mod
     from db.canvas import CanvasLimitExceeded
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 3)
+    _set_cap(monkeypatch, 3)
 
     for i in range(3):
         _write("agent-a", f"c{i}")
@@ -88,8 +112,7 @@ def test_updating_an_existing_canvas_is_never_refused_at_the_cap(canvas_db, monk
     """The property that makes the cap safe to ship. An agent at its limit must
     still be able to keep its live surfaces current; a cap that blocked updates
     would freeze the fleet's dashboards the moment it bit."""
-    import db.canvas as canvas_mod
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+    _set_cap(monkeypatch, 2)
 
     _write("agent-a", "c0", title="first")
     _write("agent-a", "c1", title="second")
@@ -103,8 +126,7 @@ def test_the_cap_is_per_agent_not_global(canvas_db, monkeypatch):
     from sqlalchemy import insert
     from db.engine import get_engine
     from db.tables import agent_ownership
-    import db.canvas as canvas_mod
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+    _set_cap(monkeypatch, 2)
 
     with get_engine().begin() as conn:
         conn.execute(insert(agent_ownership).values(
@@ -219,11 +241,10 @@ def test_the_default_canvas_can_be_deleted_and_comes_back_empty(canvas_db):
 def test_deleting_the_default_canvas_frees_a_slot_against_the_cap(canvas_db, monkeypatch):
     """The remedy the refusal names has to actually work on every canvas,
     including the default one."""
-    import db.canvas as canvas_mod
     from db.canvas import CanvasLimitExceeded
     from database import db
     from models import DEFAULT_CANVAS_ID
-    monkeypatch.setattr(canvas_mod, "CANVAS_MAX_PER_AGENT", 2)
+    _set_cap(monkeypatch, 2)
 
     _write("agent-a", DEFAULT_CANVAS_ID)
     _write("agent-a", "other")
@@ -255,6 +276,113 @@ def test_both_delete_routes_are_audited():
         src = inspect.getsource(handler)
         assert "platform_audit_service.log" in src, f"{handler.__name__} is not audited"
         assert "canvas_id" in src
+
+
+def test_the_workspace_routes_are_audited_too():
+    """The review finding. This guard only ever looked at `routers.canvas`, so
+    it passed while the three Workspace twins recorded nothing at all — and
+    `docs/user-docs/agents/agent-canvas.md` tells users deletion is audited,
+    which made that sentence false for the client-facing surface.
+
+    Checked over the source rather than by driving the routes because the thing
+    that went wrong is a route existing with no audit call in it; a behavioural
+    test of the three that exist cannot see a fourth added later.
+    """
+    import inspect
+    from client_portal import router as portal_router
+
+    for handler in (portal_router.portal_delete_canvas,
+                    portal_router.portal_bulk_delete_canvases,
+                    portal_router.portal_pin_canvas):
+        src = inspect.getsource(handler)
+        assert "_audit_canvas_change" in src, f"{handler.__name__} is not audited"
+    # ...and the shared helper is what actually writes the row.
+    assert "platform_audit_service.log" in inspect.getsource(
+        portal_router._audit_canvas_change)
+
+
+def test_the_workspace_audit_names_the_OPERATOR_not_the_platform():
+    """An audit row that lands under the wrong actor is worse than none.
+
+    `platform_audit_service._resolve_actor` keys `actor_type` off
+    `actor_user` / `actor_agent_name` / `mcp_scope` / `mcp_key_id` — NOT off
+    `actor_email`. So an email-only call falls through to its last branch and
+    the row is written as `actor_type="system"`, `actor_id="trinity-system"`:
+    a named operator's Workspace deletion recorded as a platform action,
+    invisible to every `actor_type=user` query and to the per-actor filter the
+    audit UI offers. The row exists, so nothing fails — it just says the wrong
+    thing, which is the failure mode a missing row does not have.
+
+    Asserted against the REAL resolver rather than by reading the call, because
+    the defect is entirely in what that function does with the arguments.
+    """
+    from services.platform_audit_service import PlatformAuditService
+
+    # The shape the fix must not regress to.
+    assert PlatformAuditService._resolve_actor(
+        actor_user=None, actor_agent_name=None, mcp_scope=None, mcp_key_id=None,
+    ) == ("system", "trinity-system", None)
+
+    # ...and the shape it produces now.
+    actor = types.SimpleNamespace(id=7, email="op@example.com", username="op")
+    kind, actor_id, email = PlatformAuditService._resolve_actor(
+        actor_user=actor, actor_agent_name=None, mcp_scope=None, mcp_key_id=None,
+    )
+    assert (kind, actor_id, email) == ("user", "7", "op@example.com")
+
+
+def test_the_workspace_audit_resolves_a_real_user_row():
+    """The helper must pass `actor_user`, not only `actor_email` — and must not
+    let a lookup failure drop the row."""
+    import inspect
+    from client_portal import router as portal_router
+
+    src = inspect.getsource(portal_router._audit_canvas_change)
+    assert "db.get_user_by_email" in src
+    assert "actor_user=actor_user" in src
+    # Best-effort: the action is already done, so attribution must never raise.
+    assert "except Exception" in src
+    # The email still rides along, so a miss under-attributes rather than losing it.
+    assert "actor_email=principal.email" in src
+
+
+def test_pinning_is_audited_on_both_surfaces():
+    """A pin decides what an entire roster sees first, so it is an
+    administrative act on a shared surface — not a per-viewer preference. The
+    operator route was the one that recorded nothing."""
+    import inspect
+    from routers import canvas as canvas_router
+    from client_portal import router as portal_router
+
+    assert "platform_audit_service.log" in inspect.getsource(canvas_router.pin_canvas)
+    assert "_audit_canvas_change" in inspect.getsource(portal_router.portal_pin_canvas)
+
+
+def test_an_agent_key_may_not_pin_its_own_canvas():
+    """`docs/user-docs/agents/agent-canvas.md` says "the agent cannot pin its
+    own canvas". It could: `_gate_human_removal` lets an agent-scoped key act on
+    its own canvases (right for delete — tidying up after itself) and pin shared
+    that gate. `pinned` being absent from the MCP tools is a property of the
+    CLIENT, not of this route, so the doc was describing a convention rather
+    than a control. `_gate_pin` is humans-only, which makes it true.
+    """
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    with pytest.raises(HTTPException) as excinfo:
+        canvas_router._gate_pin(_user(agent_name="agent-a"), "agent-a")
+    assert excinfo.value.status_code == 403
+    # ...while delete deliberately still allows exactly that.
+    canvas_router._gate_human_removal(_user(agent_name="agent-a"), "agent-a")
+
+
+def test_the_pin_route_uses_the_humans_only_gate():
+    import inspect
+    from routers import canvas as canvas_router
+
+    src = inspect.getsource(canvas_router.pin_canvas)
+    assert "_gate_pin(" in src
+    assert "_gate_human_removal(" not in src
 
 
 # --- who may remove ---------------------------------------------------------
@@ -365,7 +493,7 @@ def test_the_pinned_column_ships_on_both_migration_tracks():
     assert "agent_canvases_pinned" in sqlite_src
     assert "ADD COLUMN pinned" in sqlite_src
 
-    alembic = backend / "migrations" / "versions" / "0058_agent_canvases_pinned.py"
+    alembic = backend / "migrations" / "versions" / "0059_agent_canvases_pinned.py"
     assert alembic.exists(), "no Alembic revision for the pinned column"
     assert "IF NOT EXISTS pinned" in alembic.read_text()
 
@@ -377,3 +505,44 @@ def test_the_agent_facing_tools_cannot_pin():
     repo = pathlib.Path(__file__).resolve().parents[2]
     tools = (repo / "src" / "mcp-server" / "src" / "tools" / "canvas.ts").read_text()
     assert "pinned" not in tools
+
+
+# --- the stated bound actually reaches the client ----------------------------
+
+def test_the_canvas_ceiling_is_on_the_feature_flags_surface():
+    """AC: "a stated bound for the canvas pile". It was enforced and unstated —
+    `canvasLimit` was a `ref(0)` nothing ever assigned, so `canvasHeadroom(n, 0)`
+    returned `{label: null}` and the early warning could not render.
+
+    The ceiling is a CONSTANT, not per-agent state, and the client already holds
+    the count, so it rides the established UI-value surface rather than a new
+    route (Invariant #13's three surfaces for one integer) or an envelope around
+    the canvas list (which the MCP tool and the Workspace both read as a bare
+    array).
+    """
+    import inspect
+    from routers import settings as settings_router
+
+    src = inspect.getsource(settings_router.get_public_feature_flags)
+    assert '"canvas_max_per_agent": CANVAS_MAX_PER_AGENT' in src
+    # ...and it is the same constant the refusal is raised from, not a copy.
+    from models import CANVAS_MAX_PER_AGENT
+    from db import canvas as canvas_db
+    assert canvas_db.CANVAS_MAX_PER_AGENT is CANVAS_MAX_PER_AGENT
+
+
+def test_the_agent_card_and_the_roster_agree_about_canvas_management():
+    """`get_agent_card` omitted `can_manage_canvases`, so the SAME owner read
+    `true` in the sidebar and `false` on the agent's own page — two
+    representations of one card answering differently, which is the defect
+    #2160's docstring says that function exists to prevent. It failed closed (a
+    hidden control, never one that 403s), which is why it was latent.
+    """
+    import inspect
+    from client_portal import service as portal_service
+
+    src = inspect.getsource(portal_service.get_agent_card)
+    assert "can_manage_canvases=may_manage_canvases(" in src, (
+        "the single-card path does not resolve canvas management, so it "
+        "disagrees with the roster for the same viewer"
+    )

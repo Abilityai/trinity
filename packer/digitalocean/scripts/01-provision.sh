@@ -23,6 +23,31 @@ echo "=== Trinity 1-Click build: baking ${TRINITY_IMAGE_TAG} ==="
 
 # --- Base packages -----------------------------------------------------------
 apt-get update -q
+
+# Install pending security updates BEFORE anything else. This is not hygiene —
+# DigitalOcean's own 99-img-check.sh scores a pending security update as a hard
+# [FAIL], not a warning:
+#
+#     uc=$(apt-get --just-print upgrade | grep -i "security" -c)
+#     [FAIL] There are ${update_count} security updates available for this image
+#     ((FAIL++)); STATUS=2
+#
+# and any FAIL exits non-zero, which fails the build. Nothing in this bundle ran
+# an upgrade before, so every green build so far was luck: either DigitalOcean's
+# base image happened to be current that day, or Ubuntu's own boot-time
+# unattended-upgrades timers happened to land before Packer's SSH session. The
+# build is not the owner of either. Rebuild the same bundle on a day Ubuntu has
+# published a security update those timers have not yet applied and it fails —
+# reading as a flake, in the step furthest from the cause.
+#
+# The flags are DigitalOcean's, from their reference marketplace-image.json:
+# keep the maintainer's config on conflict rather than prompting, since this
+# runs headless.
+apt-get -y -q \
+  -o Dpkg::Options::='--force-confdef' \
+  -o Dpkg::Options::='--force-confold' \
+  full-upgrade
+
 apt-get install -y -q ca-certificates curl gnupg git jq ufw debian-goodies
 
 # --- Docker (official repo, not the distro package) --------------------------

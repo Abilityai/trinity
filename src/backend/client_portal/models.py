@@ -39,6 +39,38 @@ class PortalPlaybook(BaseModel):
     starter_prompt: str
 
 
+class PortalModelOption(BaseModel):
+    """One model the Workspace composer may offer (ent#403).
+
+    `tier` is the option's PRIMARY text — plain language, not a model id, and not
+    `label — note` (two catalog entries both lead with "Most capable", and the
+    join nests an em-dash inside an em-dash). The model name rides `label`, which
+    the control puts on the `title`; the closed state therefore shows a short
+    string on any viewport.
+    """
+    id: str
+    tier: str
+    label: str
+
+
+class PortalModelDefault(BaseModel):
+    """What a turn runs on when the user picks "Agent's default" (ent#403).
+
+    `label` is a display name that NEVER crashes and never renders blank:
+    `platform_default_model` is written through the generic
+    `PUT /api/settings/{key}` with no catalog check, and free-text ids like
+    `claude-sonnet-4-6[1m]` are in legitimate circulation, so the resolver falls
+    back to the raw id rather than a bare catalog lookup that would 500 the
+    roster — this surface's front door.
+
+    `source` is for docs and tests ("did the agent's own override win, or the
+    platform default?"), never for the label.
+    """
+    model: str
+    label: str
+    source: Literal["agent", "platform"]
+
+
 class PortalAgentCard(BaseModel):
     """One agent on the client's "My Agents" roster."""
     name: str
@@ -134,6 +166,29 @@ class PortalAgentCard(BaseModel):
     # customer's roster over an infrastructure fault. When Docker is unreadable
     # every card reads `unknown` and the roster renders exactly as it does today.
     availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
+    # #2582 — is this caller the agent's OWNER, as the roster union resolved it?
+    # The Files tab's "Delete for everyone" affordance is gated on this, and
+    # `service.portal_owns_agent` enforces the same membership server-side, so
+    # the button and the gate cannot disagree. Fails CLOSED (`False`): the bug
+    # to avoid is offering a destructive action the server will refuse. Note it
+    # is session-type dependent by construction — `include_owned` is
+    # `principal.is_platform` (ent#358) — so an owner on a magic-link portal
+    # token reads `False` here, and that is correct rather than a defect.
+    owned: bool = False
+
+    # ent#403 — what THIS agent runs on when the composer's model control is left
+    # on "Agent's default": the agent's #894 `public_channel_model` when one is
+    # set and still valid, else the platform default.
+    #
+    # `None` means the control does not render AT ALL — for every non-platform
+    # principal (the Workspace model choice is platform-users-only, per the
+    # operator ruling) and for a non-Claude runtime (the platform does not pass
+    # `--model` to Codex, so a Claude-model list there is a dead affordance).
+    # Fails CLOSED, like `voice_available` and `multi_agent_chat_available` and
+    # deliberately UNLIKE the `availability` field above: the bug this guards is
+    # promising an affordance that cannot work, not denying a working one. An
+    # older client, a partial payload or a failed read renders no control.
+    model_default: Optional[PortalModelDefault] = None
 
 
 class PortalBriefing(BaseModel):
@@ -209,6 +264,15 @@ class PortalRoster(BaseModel):
     # Defaults False so an older client, a partial payload or a failed read
     # never advertises an affordance that cannot work (the whole of this bug).
     multi_agent_chat_available: bool = False
+    # ent#403 — the curated model list the composer offers. INSTANCE-level, like
+    # the two fields above and for the same reason `realtime_voice` is: the
+    # option list is identical for every agent, and putting it on each card would
+    # ship N copies of it on exactly the path #2159/#2163 exist to keep small.
+    # Only the resolved default varies per agent (`PortalAgentCard.model_default`).
+    #
+    # Empty by default, and an empty list renders no control — the same
+    # fail-closed direction as `model_default`.
+    model_options: list[PortalModelOption] = Field(default_factory=list)
 
 
 class PortalAuthRequest(BaseModel):
@@ -264,6 +328,18 @@ class PortalChatRequest(BaseModel):
     # existing caller (and the headless integration surface ent#83 documents)
     # is unaffected.
     open_canvas_id: Optional[str] = Field(None, max_length=64)
+    # ent#403 — the model this turn should run on. THREE states, preserving the
+    # #894 shape rather than collapsing it to two: a curated id = an explicit
+    # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
+    # else the platform default). The router normalises blank to None BEFORE it
+    # validates — `""` is the control's own default-option value, so validating
+    # the raw field would 422 every default turn on day one.
+    #
+    # Typed `Optional[str]` and NOT validated here: the closed-allow-list check
+    # is the security control and it lives at the router, which also knows
+    # whether this principal may choose at all. A payload-level enum would refuse
+    # before the 403 and leak which ids exist to a principal with no control.
+    model: Optional[str] = None
 
 
 class PortalChatResponse(BaseModel):
@@ -522,6 +598,12 @@ class PortalUploadItem(BaseModel):
     filename: str
     size_bytes: int
     uploaded_at: Optional[str] = None
+    # #2582 — guessed from the extension by `_read_inbox`, because a client
+    # upload has no DB row to carry a detected type. Declaring it here is what
+    # makes it reach the client at all: the route's `response_model` silently
+    # strips undeclared keys, so `PortalRailFiles.vue`'s `<FileIcon :mime>` has
+    # been rendering the generic icon unconditionally since it shipped.
+    mime_type: Optional[str] = None
 
 
 class PortalUploads(BaseModel):

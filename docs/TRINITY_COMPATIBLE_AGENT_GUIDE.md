@@ -159,10 +159,10 @@ Must exclude secrets, instance-specific files, and large content.
 
 > **Source of truth**: this list mirrors `_GITIGNORE_PATTERNS` in
 > `src/backend/services/git_service.py`. The Python constant is the
-> source of truth — the platform appends every entry to the agent's
-> `.gitignore` on init and again on every Push. A unit test
+> source of truth — the platform reconciles your `.gitignore` against it on
+> init, at creation, and again on every Push. A unit test
 > (`tests/unit/test_github_init_gitignore.py::test_doc_and_constant_in_sync`)
-> asserts the two stay in sync.
+> asserts the two are the same set, in both directions.
 
 ```gitignore
 # Shell init / history (instance-specific)
@@ -264,6 +264,93 @@ __pycache__/
 - ❌ `.claude/debug/` - Debug logs
 - ❌ `.claude/sessions/` - Per-session state
 - ❌ `.claude/shell-snapshots/` - Shell environment snapshots
+
+#### How the platform merges this list into your `.gitignore` (#2529)
+
+Every sync **rewrites** your `.gitignore` into three parts, in this order:
+
+```
+# >>> Trinity default ignore rules — managed; your own rules go BELOW and win (#2529) >>>
+   ... the list above, minus the protected ones ...
+# <<< Trinity default ignore rules <<<
+
+   ... YOUR rules, in the order you wrote them ...
+
+# >>> Trinity protected rules — managed; NOT overridable (...) >>>
+   ... credentials + platform-authored .trinity/ paths ...
+# <<< Trinity protected rules <<<
+```
+
+Both managed regions are rewritten on every sync. Do not edit inside them —
+edit between them.
+
+**Overriding a default.** Git is last-match-wins, so a negation you write in the
+middle region beats the defaults block above it. Since #2529 it **no longer has
+to be the last line of the file** — anything below the defaults block wins.
+Write, for example:
+
+```gitignore
+!keep.db          # override the canonical *.db
+!important.log    # override the canonical *.log
+```
+
+**What you cannot override.** The protected floor sits *below* your rules, so
+these win no matter what you write:
+
+- the credential patterns (`.env`, `.env.*`, `.mcp.json`, `credentials.json`,
+  `*.pem`, `*.key`, `.ssh/`) — an inert `!.env` or `!.ssh` that suddenly went live
+  on an unattended 15-minute auto-sync would push a live secret (or an SSH private
+  key) into your own repo, so the platform refuses;
+- `.trinity/*` and the `!` re-includes for the paths the platform itself authors
+  and reads back (`pre-check`, `post-check`, `pre-snapshot`, `setup.sh`,
+  `persistent-processes.allow`, `brain-orb/`, `pipelines/`, `plugins.yaml`) — a
+  broad rule of yours (`*.sh`, `*.yaml`, `*.json`) must not silently stop your
+  own hooks from being committed.
+
+`!.env.example` and `!.mcp.json.template` are *in* the floor, so those two files
+are always committable — which is what compatibility check **F-004** requires.
+
+**One honest git limitation.** A negation cannot re-include a file whose
+**parent directory** is excluded: git never descends into an excluded directory,
+so the negation is inert *wherever* you put it. This applies to every dir-form
+rule in the list above — `content/`, `node_modules/`, `.venv/`,
+`.claude/projects/`, `.claude/plugins/`, `.cache/`, and the rest:
+
+```gitignore
+content/            # canonical
+!content/keep.md    # INERT — git never looked inside content/
+```
+
+The workaround is to keep the file outside the excluded directory. When this
+bites you, the sync now **tells you**: its result carries
+`shadowed_negations`, e.g. `"!content/keep.md -> content/"`.
+
+**Recovering a file a sync already untracked.** The sweep only touches the
+index, so the file is still on disk. Two steps:
+
+```bash
+# 1. Negate it in your .gitignore. Appending is fine — the next sync moves the
+#    line into the user region for you, where it beats the defaults block.
+echo '!path/to/file' >> .gitignore
+
+# 2. Re-add it once — it was ignored, so a plain `git add` will skip it
+git add -f path/to/file
+```
+
+After that the next sync keeps it: once the negation is effective, the file is
+no longer "tracked but ignored", so nothing untracks it again. If step 1 does
+not take effect, the file's parent directory is excluded — see the limitation
+above.
+
+**Knowing it happened at all.** A sync's result names what it removed
+(`removed_paths`), what it newly un-ignored and is about to commit
+(`unignored_paths`), and which of your negations a managed rule defeated
+(`shadowed_negations`). A sync that changes what is tracked — in **either**
+direction, untracked *or* newly committed — also files an operator-queue entry,
+so an unattended 15-minute cycle is not silent. Watch `unignored_paths` in
+particular: those files were ignored before this sync and are now in your
+repository's history, so if one turns out to be a secret, rotate it rather than
+just deleting the file.
 
 **Note on Skills**: Skills in templates are seeded to the **Platform Skills Library** on first deployment, then managed centrally. See [Platform Skills](#platform-skills).
 

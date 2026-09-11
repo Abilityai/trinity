@@ -2744,6 +2744,30 @@
       "description": "Loops run off execution terminals instead of an in-process for loop (#2523). LoopService._run used to be one long-lived asyncio.Task per loop that awaited execute_task inside a for over iterations and kept every cross-iteration value (previous response, accumulated cost, consecutive failures, the #1157 fingerprints, the stop flag, the inter-run sleep) in Python locals. That made the loop structurally push-only - a pull-claimed row returns no TaskExecutionResult - so 'loop' sat in the stranded half of PULL_REACHABLE_TRIGGERS (#2048); and it made a loop unable to survive a restart, so cleanup_service flipped every in-flight loop to 'interrupted'. test_loop_service.py still covers the behaviour that had to stay identical (the seven stop conditions and their precedence, template substitution, cost budget, failure policy); this file covers what a terminal-driven driver newly has to get right. The advance is idempotent under at-least-once delivery - db.claim_loop_advance is a CAS on runs_completed from N-1 to N, so a re-delivered pull terminal cannot double-fire iteration N+1, an unknown execution is ignored, and a late terminal cannot resurrect a finalized loop. A QUEUED dispatch (the pull path) does NOT advance - the worker's terminal does - and agent_loop_runs.execution_id is stamped before dispatch so the advance can find its iteration from an execution id. The terminal fan-out actually reaches the advance: it hangs off event_dispatch_service.spawn_task_terminal_event, the wrapper every CAS-won terminal writer already calls, and NOT inside emit_task_terminal_event, which returns early when no event subscription matches (the common case); a broken advance never breaks the already-billed terminal. A fast-fail dispatch still advances - a raise, and execute_task's capacity/circuit-open/ephemeral returns, write a FAILED row without reaching a terminal writer, so without the direct advance in _run_and_advance the loop would stall forever with one open run row. And the due-loop sweep (the replacement for asyncio.sleep(delay_seconds), a parked agent_loops.next_run_at plus a 5s tick) dispatches a parked loop exactly once: not before it is due, once across two workers sweeping the same row (the claim is a CAS on the exact next_run_at), re-evaluating rather than dispatching blind so a stop that arrived while parked wins, and one bad loop does not stall the rest of the sweep."
     },
     {
+      "file": "unit/test_2578_deploy_fetch_never_recurses.py",
+      "feature": "#2578",
+      "added": "2026-09-08",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "Dev deploy's superproject fetch never recurses into a submodule (#2578). Deploy to Dev went red on every commit that moved the src/backend/enterprise gitlink: git's default fetch.recurseSubmodules=on-demand fetched the submodule over its stored SSH URL before the PAT transport block ran, died at host-key, and set -e stopped the script in === Pull === — self-healing on the next push (the refs advance before the recursion), which is why it never had a ticket. Static half: every git fetch/pull/checkout in the deploy script carries --no-recurse-submodules (tokenised scan over the WHOLE script, comments never count, git remote update absent), the pull keeps --ff-only, the Pull-block comment names the class, a STALE enterprise tree fails the run after the health check (flag raised in the submodule block, error printed before the registration greps, exit at the END of the script after the #2204 seeding check and the error check (review I1), no DEPLOY_ALLOW_OSS_ONLY hatch, classifier runs in the stale branch with the `stale` tree state (review I3)), and the auto-filed incident names the enterprise stages — plus an 11-way mutation meta-test. Behavioural half: real git in tmp_path, a VM-shaped superproject+submodule fixture (populated submodule, SSH remote, the real .gitmodules stanza incl. update = none), a fake ssh that logs every dial, and the workflow's OWN Pull block run verbatim via bash -e against a pointer bump (default config and submodule.recurse=true): exit 0, gitlink moved, submodule untouched, ssh never dialled — with an in-clone control proving the same fixture still reproduces the class, the self-heal pinned, the submodule block's insteadOf form syncing HAVE==WANT, and a failed sync leaving the STALE state without wedging the next deploy. GitHub's 21,000-character expression cap, which the #2578 comments tripped (#2625), is guarded workflow-wide in unit/test_2625_workflow_expression_cap.py."
+    },
+    {
+      "file": "unit/test_2625_workflow_expression_cap.py",
+      "feature": "#2625",
+      "added": "2026-09-08",
+      "categories": [
+        "ci",
+        "unit",
+        "infrastructure",
+        "deployment"
+      ],
+      "description": "GitHub evaluates a workflow string that contains any ${{ }} as ONE expression and refuses the file at parse time above 21,000 characters (#2625: deploy-dev.yml's ssh script embeds three expressions; the #2578 comments took it from 17,837 to 21,923, the first dev push after #2622 came up as a run named after the file with zero jobs, and the notify-failure job that files the #2204 incident never ran — PyYAML and bash -n accept such a file and a dev-push-only workflow is never parsed before merge). Walks EVERY string in EVERY workflow (.yml and .yaml) and composite-action manifest, measured as the parsed scalar in UTF-8 bytes, and fails any expression-bearing one past 20,000 (1,000 in hand), with a vacuity check that the deploy script is found and carries expressions, mutations proving the guard rejects the deploy script padded back past the cap and an expression-bearing string wherever it sits (run, with-input, env), and that a long string WITHOUT an expression is left alone. Structural fix (no expression in the script at all) is #2626."
+    },
+    {
       "file": "unit/test_lilu20_claude_install_layer.py",
       "feature": "Abilityai/lilu#20",
       "added": "2026-09-06",
@@ -2779,6 +2803,70 @@
         "regression"
       ],
       "description": "ent#534 Workspace voice mode: the portal-principal start route (one uniform 404, the Workspace session shape), write-as-you-go transcript persistence into enterprise_portal_messages (per-row call id, strictly increasing stamps, no tombstone for a silent call, scrubbed), the history readers (labelled + budgeted spoken rows, dedup ignores spoken rows), the roster realtime_voice field, and the voice service's session lifetime (compression + resumption, go_away reconnect, the cap's spoken/written notice, Redis round-trip of the Workspace fields, the SETNX save claim)."
+    },
+    {
+      "file": "unit/test_2582_download_flag.py",
+      "feature": "#2582",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "files",
+        "security",
+        "unit"
+      ],
+      "description": "The one-way ?download=1 flag on GET/HEAD /api/files/{id}, and the counter split (#2582). Proves the ASYMMETRY rather than the feature: the flag can force attachment and NO input can force inline (?download=0 on text/html stays attachment) — asserted both on the pure helper AND through the mounted route on a NOT-inline-safe row, because a helper test cannot tell you the handler passed it the right inline=, because inline is ent#461's XSS allowlist. Tolerance: ?download= / ?download=x / a repeated pair never 422 — the route is the public link Telegram/WhatsApp/iOS open and it ignores unrecognised query pairs today, so a bool annotation would trade an outage for a type. HEAD agrees with GET (a probe that disagrees mis-plans the player). The sig stays valid (a stored bearer token compared with compare_digest, not an HMAC over the URL). Every other ent#461 header (nosniff, Accept-Ranges, CORP, Cache-Control) survives, and the flag rides the 206 branch. Counter: a ranged PREFIX read (the Workspace preview, which starts at byte 0) is audited with ranged_prefix:true but does NOT bump download_count; a full-file range and a plain GET do; a mid-file seek does neither; HEAD never counts. Also pins that portal_documents appends the flag and build_download_url does not — two base URLs, one flagged. FastAPI TestClient, no Docker."
+    },
+    {
+      "file": "unit/test_2582_portal_uploads.py",
+      "feature": "#2582",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "files",
+        "packaging",
+        "security",
+        "unit",
+        "workspace"
+      ],
+      "description": "Reading back and deleting a Workspace client's own uploads (#2582). A client upload has no DB row, so listing needs a docker exec, reading needs extract_from_agent, deleting needs rm, and the MIME is guessed — everything here follows from that. Gate order: an off-roster agent 404s before any docker work (the ent#287 rule extended). Traversal: an unaddressable filename is the SAME uniform 404 as an unknown agent, never a 400 — asserted at the handler AND through the mounted route, with a positive control, because %2F shapes never match the route while %2E%2E does reach the handler and a status-only test cannot tell gated from unroutable. ent#308's collision restated on the read side (two emails that slug alike read different inboxes). Download: attachment + nosniff + no-store, 409 on a stopped agent and 502 on a missing one (deliberate — _read_inbox returns [] for a stopped agent, so the list is empty anyway), extract_from_agent's exceptions translated so its 404 detail cannot echo the container path, audited with actor_email (a PortalPrincipal is not a User). Delete: rm -f -- with shlex.quote proven by a name that needs quoting, idempotent, a failing exec is a named 502. Limiters: both tiers bind, the hourly one is the real bound, download is tighter than upload and delete is on its own looser counter. Redis forced off; docker stubbed via sys.modules. Also guards the LIMITER PACKAGING (#1056/#2433 class, caught at the /validate-pr gate): all three knobs must be forwarded by docker-compose.yml, .prod.yml and .hosted.yml, with defaults agreeing across the three AND with the module default — they shipped read-by-code and documented-in-.env.example while forwarded by none, and prod/hosted launch standalone so dev wiring would not carry."
+    },
+    {
+      "file": "unit/test_ent548_portal_share_delete.py",
+      "feature": "ent#548",
+      "added": "2026-09-07",
+      "categories": [
+        "backend",
+        "workspace",
+        "files",
+        "security",
+        "database",
+        "unit"
+      ],
+      "description": "The Workspace delete permission matrix and the per-viewer dismissal (ent#548). Ownership is session-type dependent by construction: include_owned IS principal.is_platform (ent#358), so a non-owner admin is a viewer AND an owner on a magic-link portal token is a viewer — both pinned, because both look like bugs to a reader who has not met the rule. portal_owns_agent is the same membership _roster_rows tags onto the card, so the button and the gate cannot drift. Revoke is ACCESS-FIRST (roster 404 -> owner 403 -> row 404): the row must not be read before the caller is authorized, proven with a call-recording monkeypatch, or a viewer's 404-vs-403 would be an enumeration oracle; a cross-agent id is the same 404 and never reaches the revoke primitive; the deliberate 404-where-the-operator-sibling-204s divergence is pinned in the docstring. Dismissal hides the file from ONE viewer, leaves the share and every other viewer untouched, is idempotent, does NOT validate the file_id (an existence oracle — the set_chat_star fork, resolved the same way) and is row-capped, which is the other half of that pair. Both purge paths delete the rows in the same transaction, the AgentRef registration is asserted directly, and both migration tracks plus the PK's leading column are pinned. Real SQLite over six tables, seeded idempotently for the shared-database tier."
+    },
+    {
+      "file": "unit/test_2618_heartbeat_dueness.py",
+      "feature": "#2618",
+      "added": "2026-09-09",
+      "categories": [
+        "backend",
+        "telemetry",
+        "reliability",
+        "unit"
+      ],
+      "description": "The sharing heartbeat's dueness comes from the persisted last-share stamp, not from process age (#2618). Pre-fix the loop slept the whole 24h interval from process start and then sent unconditionally, so an install that restarted inside every window shared its consent-time backfill once and never again (a dev instance sat 45h past its last share with five reloads a day while Settings reported sharing as on). Pure dueness matrix over empty / unparseable / future / exact / offset / naive stamps and a 1h interval (due unless the stamp is provably inside the interval); one wake on a store without sleeping (the consent and hard-disable gates run before any stamp read or Redis touch, with a positive control); three boots over one store driven through _loop with a fake clock the sleep stub advances (nothing sends inside the window, exactly one send lands past it, a further restart stays silent); sleep-first pinned on an ordered sleep/send timeline with the jitter fixed; the tick marker on fakeredis (TTL keyed to the send cadence at both 1h and 24h, a fresh SETNX per claim, released on the STORE after a failed send so a sibling retries at the next wake, kept after an acknowledged send even when the stamp write raises \u2014 share_now True means the receiver acknowledged \u2014 release touching only this tick's lock, fail-open, released on a cancellation mid-send); retry at the next wake with a 2xx-only stamp; an unreadable store never sends while a stamp read that alone raises reads as due; the persisted retry cap (the rule, honoured before the claim, and ten wakes against a dead receiver costing five attempts then one per half-interval); a tick that raises does not end the loop; a raise ahead of the POST is recorded in the send log and throttled like any failed attempt while a raise after an acknowledgement neither duplicates the entry nor turns True into False; _days_since pinned across every stamp shape the column has held; and a guard that the module never again says the marker is never released. Harness mirrors test_ent437 (real write-once settings store, fake httpx, asyncio.run under the unit island's strict asyncio mode)."
+    },
+    {
+      "file": "unit/test_operator_intake.py",
+      "feature": "ent#38 / #1593 / ent#545",
+      "added": "2026-06-23",
+      "categories": [
+        "backend",
+        "telemetry",
+        "security",
+        "unit"
+      ],
+      "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
     }
   ]
 }

@@ -7,8 +7,11 @@
          the agents block now occupies the top of the scroll region and would
          otherwise scroll a fleet-wide signal out of view. -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
-      <svg class="w-6 h-6 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-      <span class="font-semibold">Workspace</span>
+      <!-- ent#556: Trinity's mark and the product's name, replacing a
+           hand-drawn outline icon and the bare word "Workspace". Linked to the
+           Workspace root — true for both principals, and the only destination a
+           client session can actually open. -->
+      <PortalBrand :to="WORKSPACE_ROOT" />
       <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
            on you to decide, the other on you to read — so it gets its own badge
            rather than being summed into that one. Before the unread count,
@@ -155,10 +158,24 @@
                The chip sets the expectation; the server's 502 is the honest
                refusal. Nothing is rendered for `ready` or `unknown`.
 
-               The slot's footprint is RESERVED (`min-w`, on the row always) so
-               a row does not reflow when an agent starts or stops between
-               refreshes — the same reason the roster is not re-sorted by this. -->
-          <span class="shrink-0 min-w-[4.5rem] flex justify-end">
+               The slot's footprint is RESERVED so a row does not reflow when an
+               agent starts or stops between refreshes — the same reason the
+               roster is not re-sorted by this.
+
+               #2641: the reservation is a property of the LIST, not of a row.
+               `availabilityChip` answers null for everything except `stopped`
+               and `unavailable`, so on a fleet where everything is running the
+               strip was empty on EVERY row — which is why the dates stopped
+               72px short of the right edge and the name was charged 72px for
+               nothing. Reserved on every row iff any VISIBLE row can show a
+               chip: uniform down the list, so #2580's identical truncation
+               point survives, and absent entirely when there is nothing to hold
+               space for, which puts the date flush against the row's edge.
+
+               The whole element goes, not just its width — a zero-width flex
+               child still sits between the date and the edge, and `gap-2.5` on
+               the row would keep paying 10px for it. -->
+          <span v-if="reserveAvailability" class="shrink-0 min-w-[4.5rem] flex justify-end">
             <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
           </span>
           <!-- #2424: the ask badge ent#364's comment above already promised.
@@ -316,16 +333,19 @@
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
+import PortalBrand from './PortalBrand.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
+  reservesAvailabilitySlot,
   orderRosterAgents, agentRowMeta,
   asksByAgent, askBadgeTitle, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
+  WORKSPACE_ROOT,
 } from './portalUtils'
 
 const props = defineProps({
@@ -473,6 +493,15 @@ const orderedRoster = computed(() => orderRosterAgents(
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible
   : visibleAgentRows(orderedRoster.value, { expanded: agentsExpanded.value, askCounts: asksPerAgent.value })))
+
+// #2641: computed over `shownAgents` — the rows actually RENDERED — not over
+// the whole roster. A stopped agent hidden by search or by the collapse limit
+// would otherwise reserve width on a list that shows no chip, which is the
+// reported bug with extra steps. Declared after `shownAgents` rather than
+// beside `chipFor` so the dependency reads in source order; one pass per
+// render, beside `rowMeta`'s.
+const reserveAvailability = computed(() => reservesAvailabilitySlot(
+  shownAgents.value, { detailed: props.isPlatformSession }))
 
 // The one-line preview under the name (AC 6): the newest chat you have with
 // this agent. Null when there is nothing to show, so a row with no history

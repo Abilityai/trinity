@@ -77,10 +77,12 @@ class MetadataMixin:
         """
         Rename an agent by updating all database references.
 
-        Re-keys `agent_name` in `agent_ownership` (here) and in EVERY table
-        registered in `db.agent_cleanup.AGENT_REFS` (via `cascade_rename`),
-        plus any entitled-module table registered at runtime through
-        `register_agent_owned_table`.
+        Re-keys `agent_name` in `agent_ownership` (here) and, via
+        `cascade_rename`, in EVERY table registered in
+        `db.agent_cleanup.AGENT_REFS` **and** every entitled-module table
+        registered at runtime through `register_agent_owned_table`. Both
+        registries are swept by the one shared function; this method carries no
+        table loop of its own.
 
         Deliberately NOT a hand-maintained list of tables (#1819): the previous
         docstring enumerated 19 and the code matched it, while the registry had
@@ -225,20 +227,14 @@ class MetadataMixin:
                 from ..tags import rename_reports_to_refs
                 rename_reports_to_refs(conn, old_name, new_name)
 
-                # Entitled-module agent-scoped tables (ent#46) registered via
-                # db.agent_cleanup.register_agent_owned_table. Kept separate
-                # from the registry pass: these are runtime-registered by the
-                # private submodule, so they are not in `AGENT_REFS` at import
-                # time. Table/column come from code (not user input); values
-                # are bound. Absent tables are skipped.
-                from db.agent_cleanup import EXTRA_AGENT_REFS, _table_exists
-                for table, column in EXTRA_AGENT_REFS:
-                    if not _table_exists(conn, table):
-                        continue
-                    conn.execute(
-                        text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),
-                        {"new": new_name, "old": old_name},
-                    )
+                # Entitled-module agent-scoped tables (ent#46) used to be swept
+                # by a copy of this loop HERE. It moved into `cascade_rename`
+                # (trinity-enterprise#500), which is where the delete path had
+                # always swept them and what `register_agent_owned_table`'s
+                # docstring had always claimed. Same #1819 lesson one level
+                # down: the behaviour lived in the caller, so the shared
+                # function disagreed with its own contract and any second caller
+                # would have silently lost it.
 
                 return True
 
