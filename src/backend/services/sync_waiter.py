@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 # execution_id -> Future that resolves to {"result": ..., "chat_session_id": ...}
 _sync_waiters: Dict[str, asyncio.Future] = {}
 
+# #2524: fan_out_id -> Future resolved when the LAST row of that batch reaches a
+# terminal. Same shape and same invariants as `_sync_waiters` above (in-process,
+# signal is a no-op with no waiter registered, DB poll is the safety net) — a
+# separate registry because the key is a batch, not an execution, and a fan-out
+# waiter must survive every individual subtask terminal but the last.
+_fan_out_waiters: Dict[str, asyncio.Future] = {}
+
 # DB-poll cadence safety net for terminal flips that don't signal directly.
 # Module-level constant so tests can monkeypatch a tighter interval.
 SYNC_WAITER_POLL_INTERVAL = 5.0  # seconds
@@ -73,6 +80,80 @@ def signal_sync_waiter(
         # Already cancelled between the .done() check and set_result.
         # Safe to ignore — caller is gone.
         pass
+
+
+def signal_fan_out_batch(fan_out_id: Optional[str]) -> None:
+    """Notify a sync fan-out caller that every row of its batch is terminal (#2524).
+
+    Called from the terminal fan-out once `db.count_fan_out_open` reaches 0.
+    Safe no-op when no waiter is registered — which is the normal case, since
+    `async_mode` callers and the status endpoint never register one.
+    """
+    if not fan_out_id:
+        return
+    fut = _fan_out_waiters.get(fan_out_id)
+    if fut is None or fut.done():
+        return
+    try:
+        fut.set_result(True)
+    except asyncio.InvalidStateError:
+        # Already cancelled between the .done() check and set_result — the
+        # caller is gone (its deadline fired, or it disconnected).
+        pass
+
+
+async def wait_for_fan_out_batch(fan_out_id: str, timeout: float) -> None:
+    """Wait until every execution in a fan-out batch has reached a terminal (#2524).
+
+    The sync edge adapter #1081 Phase 4 asks for, in the shape `sync_waiter`
+    already uses for `/task`: an in-process Future for latency, plus a DB poll
+    as the correctness net for terminal flips that cannot signal it (another
+    uvicorn worker, the lease reaper, `cleanup_service` recovery).
+
+    ⚠️ The registry is in-process. On a multi-worker deployment the terminal can
+    land on a worker other than the one holding the HTTP connection, so the poll
+    is not an optimisation there — it is the mechanism. Latency is then bounded
+    by `SYNC_WAITER_POLL_INTERVAL`, which is why the poll interval matters more
+    here than on the single-execution path.
+
+    Raises:
+        asyncio.TimeoutError when the batch is still open after `timeout`.
+        The caller reports the aggregate as of that instant; the executions
+        themselves keep running (#2524 — the deadline bounds the WAIT, not the
+        work, because a queued or claimed row is not the backend's to cancel).
+    """
+    from database import db
+
+    # Check before registering: a short batch can finish while the caller is
+    # still setting up, and the signal would then fire into an empty registry.
+    if db.count_fan_out_open(fan_out_id) == 0:
+        return
+
+    fut = asyncio.get_running_loop().create_future()
+    _fan_out_waiters[fan_out_id] = fut
+
+    async def _poll_db():
+        while True:
+            await asyncio.sleep(SYNC_WAITER_POLL_INTERVAL)
+            if db.count_fan_out_open(fan_out_id) == 0:
+                return True
+
+    poll_task = asyncio.create_task(_poll_db())
+    try:
+        done, _pending = await asyncio.wait(
+            [fut, poll_task],
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise asyncio.TimeoutError()
+        next(iter(done)).result()
+    finally:
+        _fan_out_waiters.pop(fan_out_id, None)
+        if not poll_task.done():
+            poll_task.cancel()
+        if not fut.done():
+            fut.cancel()
 
 
 async def wait_for_sync_terminal(
