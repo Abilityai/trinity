@@ -2015,6 +2015,19 @@ export function replyBaseline(messages) {
   return { id: last?.id || null, count: typedReplyCount(messages) }
 }
 
+// A missing session id is not an empty conversation. The portal backend resolves
+// it to the pair's Main chat, so the baseline read must make the same request and
+// let the server name the thread. Otherwise Main's last reply looks new as soon
+// as the streaming dispatch adopts the resolved session.
+export async function readReplyBaseline(fetchHistory, sessionId) {
+  try {
+    const data = await fetchHistory(sessionId || null)
+    return replyBaseline(data?.messages)
+  } catch {
+    return replyBaseline([])
+  }
+}
+
 export function replyFromHistory(messages, baseline) {
   const last = latestTypedReply(messages)
   if (!last) return null

@@ -742,7 +742,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -1991,13 +1991,10 @@ async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
 // reply must differ from (#2694: by identity, read from the same narrow rows
 // the poll reads, so the two can never disagree about the window).
 async function persistedReplyBaseline(sessionId) {
-  if (!sessionId) return replyBaseline([])
-  try {
-    const data = await store.fetchHistory(props.agent.name, sessionId, { limit: REPLY_POLL_ROWS })
-    return replyBaseline(data.messages)
-  } catch {
-    return replyBaseline([])
-  }
+  return readReplyBaseline(
+    (resolved) => store.fetchHistory(props.agent.name, resolved, { limit: REPLY_POLL_ROWS }),
+    sessionId,
+  )
 }
 
 // Mark a sent message as undelivered, THROUGH the reactive array.
