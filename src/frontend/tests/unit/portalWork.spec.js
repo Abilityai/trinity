@@ -480,8 +480,128 @@ describe('ent#525 — the tab and the card are wired (source guards)', () => {
     expect(card).toContain("steps.kind !== 'pending'")
   })
 
-  it('the WebSocket handler routes activity and loop events to the Work store', () => {
+  it('the WebSocket handler routes activity, loop and pipeline events to the Work store', () => {
     expect(ws).toContain("import { usePortalWorkStore } from '../stores/portalWork'")
-    expect((ws.match(/portalWorkStore\.handleWebSocketEvent\(data\)/g) || []).length).toBe(2)
+    // activity + loop (ent#525) + pipeline_state_changed (ent#533)
+    expect((ws.match(/portalWorkStore\.handleWebSocketEvent\(data\)/g) || []).length).toBe(3)
+  })
+})
+
+describe('ent#533 — a stage advance arrives as a push, and the poll still backs it up', () => {
+  const ws = src('utils/websocket.js')
+  const store = src('stores/portalWork.js')
+  const rules = src('components/portal/portalWork.js')
+
+  function live() {
+    portal.fetchWork.mockImplementation(async () => ({
+      now: [item()], earlier: [], earlier_total: 0,
+    }))
+  }
+
+  it('refetches ~500 ms after a participant advances a stage', async () => {
+    vi.useFakeTimers()
+    live()
+    const s = usePortalWorkStore()
+    s.setScope(['scout'])
+    s.handleWebSocketEvent({
+      type: 'pipeline_state_changed', agent_name: 'scout',
+      pipeline_id: 'digest', instance_id: 'i1', stage: 'synthesis',
+    })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(portal.fetchWork).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(portal.fetchWork).toHaveBeenCalledTimes(1)
+    s.clear()
+    vi.useRealTimers()
+  })
+
+  it('ignores an advance it cannot attribute to a participant', async () => {
+    vi.useFakeTimers()
+    const s = usePortalWorkStore()
+    s.setScope(['scout'])
+    s.handleWebSocketEvent({ type: 'pipeline_state_changed', agent_name: 'other' })
+    s.handleWebSocketEvent({ type: 'pipeline_state_changed' })
+    s.handleWebSocketEvent({ type: 'pipeline_state_changed', agent_name: '' })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(portal.fetchWork).not.toHaveBeenCalled()
+    s.clear()
+    vi.useRealTimers()
+  })
+
+  it('the EARLIER deadline wins — a later 2 s push cannot postpone a pending stage refetch', async () => {
+    vi.useFakeTimers()
+    live()
+    const s = usePortalWorkStore()
+    s.setScope(['scout'])
+    s.handleWebSocketEvent({ type: 'pipeline_state_changed', agent_name: 'scout' })
+    await vi.advanceTimersByTimeAsync(100)
+    // The ent#525 push is 2 s. Re-arming on it would push the stage refetch
+    // out to 2.1 s and this feature would be defeated by its own store.
+    s.handleWebSocketEvent({ type: 'agent_activity', agent_name: 'scout', activity_state: 'started' })
+    await vi.advanceTimersByTimeAsync(420)
+    expect(portal.fetchWork).toHaveBeenCalledTimes(1)
+    s.clear()
+    vi.useRealTimers()
+  })
+
+  it('and it cuts the other way — a stage advance shortens a pending 2 s push', async () => {
+    vi.useFakeTimers()
+    live()
+    const s = usePortalWorkStore()
+    s.setScope(['scout'])
+    s.handleWebSocketEvent({ type: 'agent_activity', agent_name: 'scout', activity_state: 'started' })
+    await vi.advanceTimersByTimeAsync(100)
+    s.handleWebSocketEvent({ type: 'pipeline_state_changed', agent_name: 'scout' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(portal.fetchWork).toHaveBeenCalledTimes(1)   // at ~600 ms, not 2 s
+    s.clear()
+    vi.useRealTimers()
+  })
+
+  it('a burst cannot drive the read faster than the floor — the limiter 429s in VISIBLE text', async () => {
+    vi.useFakeTimers()
+    live()
+    const s = usePortalWorkStore()
+    s.setScope(['scout'])
+    for (let i = 0; i < 20; i++) {
+      s.handleWebSocketEvent({ type: 'pipeline_state_changed', agent_name: 'scout', instance_id: `i${i}` })
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    // 20 notices across 2 s: earlier-deadline-wins alone would make this a
+    // 500 ms throttle (~4 reads). The Work read is limited 120/60 s per
+    // VIEWER and its 429 renders as LoadFailed / InlineError on the card.
+    expect(portal.fetchWork.mock.calls.length).toBeLessThanOrEqual(2)
+    expect(portal.fetchWork).toHaveBeenCalled()
+    s.clear()
+    vi.useRealTimers()
+  })
+
+  it('the floor does not bind on the common path — one advance on an idle card still lands at ~500 ms', async () => {
+    vi.useFakeTimers()
+    live()
+    const s = usePortalWorkStore()
+    s.setScope(['scout'])
+    s.handleWebSocketEvent({ type: 'pipeline_state_changed', agent_name: 'scout' })
+    await vi.advanceTimersByTimeAsync(520)
+    expect(portal.fetchWork).toHaveBeenCalledTimes(1)
+    s.clear()
+    vi.useRealTimers()
+  })
+
+  it('routes the thin trigger from the one WebSocket router (source guard)', () => {
+    expect(ws).toContain("data.type === 'pipeline_state_changed'")
+    const at = ws.indexOf("data.type === 'pipeline_state_changed'")
+    expect(ws.slice(at, at + 200)).toContain('portalWorkStore.handleWebSocketEvent(data)')
+  })
+
+  it('AC-2: the poll is untouched, so a lost notice costs latency and nothing else', () => {
+    // WORK_POLL_MS lives in the COMPONENT module and is imported by the store —
+    // a guard pointed at the store would pass vacuously.
+    expect(rules).toContain('WORK_POLL_MS = 12000')
+    expect(store).toContain("import { WORK_POLL_MS, liveItems } from '../components/portal/portalWork'")
+    expect(store).toContain('function _ensurePolling()')
+    expect(store).toContain('setInterval(() => { refresh() }, WORK_POLL_MS)')
+    expect(store).toContain('const PIPELINE_PUSH_DEBOUNCE_MS = 500')
+    expect(store).toContain('const PUSH_MIN_GAP_MS = 1500')
   })
 })
