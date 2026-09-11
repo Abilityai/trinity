@@ -1744,12 +1744,12 @@ well, and the agent never touches CSS.
   under Pinia, the owner wiring, source guards on both hosts).
 - **Out of scope (stated)**: a step-level restart (#919 territory, ruled
   out); ent#367's profile scope. A backend broadcast for pipeline-state
-  writes was out of scope *here* and is **delivered by ent#533** (§5.23) —
+  writes was out of scope *here* and is **delivered by ent#533** (§5.33) —
   the 12 s poll stays as the fallback, so this section's behaviour is
   unchanged when the notice never arrives.
 - **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
-### 5.23 Live pipeline-state stage advances (trinity-enterprise#533)
+### 5.33 Live pipeline-state stage advances (trinity-enterprise#533)
 
 - **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_STEPS_PUSH`
 - **Description**: §5.22's steps refreshed only on the 12 s poll, so a stage

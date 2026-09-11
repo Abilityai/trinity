@@ -1023,7 +1023,7 @@ schedules:
   Work card refetches through the existing read. Still a **read surface**:
   no DAG logic, no transition logic, no pipeline state in the database — the
   notice says only *a file changed*, and the 12 s poll remains the fallback
-  (Rule #8). See `requirements/core-agent.md` §5.23.
+  (Rule #8). See `requirements/core-agent.md` §5.33.
 - **Out of scope**: DAG execution engine in backend; cross-agent DAGs
   (expressed as event chains between independent per-agent pipelines);
   GUI editor for `pipeline.yaml`; persisting pipeline state in
