@@ -33,12 +33,12 @@ Backend orchestration in `services/subscription_auto_switch.py`: `_hot_reload_su
 ### Install Provenance & First-Run Hardening Guide (#2380)
 
 **How** an instance was installed, recorded once at boot, gating a first-run
-HTTPS/VPN hardening guide that can appear on a marketplace install and nowhere
-else. Full flow: [install-provenance.md](../feature-flows/install-provenance.md);
+hardening guide that can appear on a marketplace or DigitalOcean-script
+(`do-script`) install and nowhere else. Full flow: [install-provenance.md](../feature-flows/install-provenance.md);
 requirements §8.10 (`infrastructure.md`).
 
-- **Provenance is the gate, and it has to be** — a marketplace droplet is the one
-  install where Trinity knows at boot that it is on a public IPv4 with no domain
+- **Provenance is the gate, and it has to be** — a provisioned droplet (marketplace
+  image or DigitalOcean install script) is the one install where Trinity knows at boot that it is on a public IPv4 with no domain
   and zero network configuration. The obvious predicate is unusable: measured
   across all 16 managed instances, every one serves plain HTTP with no `DOMAIN`,
   no `HTTPS_ENABLED`, on a `100.x` Tailscale CGNAT address — structurally
@@ -83,22 +83,24 @@ requirements §8.10 (`infrastructure.md`).
   ship Caddy with them, so a droplet can boot on genuinely trusted HTTPS — just
   on a short renewal cycle at an unmemorable address.
 - **The card** (`components/onboarding/HardeningGuide.vue`) renders only when the
-  flags have loaded AND `marketplace_install` AND not dismissed AND posture ≠
-  `https-domain`. Dismissal is localStorage (the ent#319 precedent — no new
-  endpoint); retirement is server state, so a configured domain hides it with no
-  client state. Server *state*, not verified fact: the posture reads an
-  operator-declared address, so an admin who types any https domain suppresses
-  the card. That is deliberate — it is the AC's completion condition, and an
-  admin can already dismiss it outright — but it is NOT the standard PROV-003
-  holds provenance to, and the difference is that this one gates a nudge while
-  that one gates whether the nudge may exist at all. It offers a real domain and
-  a VPN as **complementary** paths, and says plainly that Trinity issues no
-  certificate itself: setting the Public URL changes the name Trinity hands out,
-  and whatever terminates TLS in front of it is what acts on that.
-- **Nothing in the OSS tree writes the marker** — #2281's Packer snapshot and
-  §8.9's outstanding cloud-init example do — so provenance reads `unknown` on
-  every install today and the guide renders nowhere. That is the contract
-  working, and it is what makes this half safe to ship first.
+  flags have loaded AND a verified admin AND `hardening_guide_eligible` (a
+  separate set from `marketplace_install`: the marketplace sources plus
+  `do-script`) AND the current stage is not dismissed. It has two stages —
+  `address`, then `tunnel` — and the posture picks the stage: `https-domain`
+  **advances** the card to the tunnel step rather than retiring it. Dismissal is
+  localStorage **per stage** (the ent#319 precedent — no new endpoint), and is the
+  only thing that ends the guide. Server *state*, not verified fact: the posture
+  reads an operator-declared address, so an admin who types any https domain
+  advances the card. That is deliberate — it only moves a nudge — and it is NOT
+  the standard PROV-003 holds provenance to, which gates whether the nudge may
+  exist at all. It offers a real domain, then a Cloudflare Tunnel, as steps that
+  stack. Trinity issues no certificate itself; on a `start.sh --provision` host
+  Caddy obtains one for the saved Public URL behind the backend's on-demand-TLS
+  `ask` gate (`GET /api/public/tls-allowed`, PROV-015).
+- **The marker's writer is `start.sh --provision`** (PROV-011): `--provenance`
+  if given, else `do-script` on DigitalOcean. An install that never passes
+  through `--provision` writes nothing, reads `unknown`, and never sees the guide
+  — the contract working.
 
 ### First-Run Provisioning — honest `setup_completed` (#2381)
 
