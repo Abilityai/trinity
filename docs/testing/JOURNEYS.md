@@ -24,3 +24,10 @@ coverage debt is queryable rather than rediscovered.
 | **J11** | A companion's brief reaches me where I already work, without me asking. | user | local | live-stack | **no** | — | E-01, E-05, L-03 | #2565 |
 
 **0 of 11 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+
+## Variants
+
+A journey holds only if it holds on every shape listed for it.
+
+- **J01 · claimable** — I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal.
+- **J01 · pre-provisioned** — I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it.

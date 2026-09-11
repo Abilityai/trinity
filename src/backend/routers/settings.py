@@ -25,6 +25,7 @@ from models import (
     ProactiveRateLimitsUpdate,
     ApiKeyTest,
     ApiKeyUpdate,
+    ResendKeyRequest,
     BrainOrbSettingsUpdate,
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
@@ -43,11 +44,16 @@ from models import (
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import operator_intake_service, telemetry_sharing_service
+from services import operator_intake_service, platform_keys_service, telemetry_sharing_service
+from services.subscription_service import (
+    connect_agents_to_first_credential,
+    is_claude_auth_configured,
+)
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
     get_anthropic_api_key,
+    get_gemini_api_key,
     get_github_pat,
     get_google_api_key,
     get_ops_setting,
@@ -178,7 +184,6 @@ async def get_public_feature_flags(
     still keep them out of the unauthenticated surface.
     """
     from config import (
-        GEMINI_API_KEY,
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
@@ -191,7 +196,10 @@ async def get_public_feature_flags(
     # package into the settings-router load; the handler pattern here is
     # function-local imports.
     from services.canary_service import canary_service
-    voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
+    # ent#582: the Gemini key resolves per request (Settings → env), so a key
+    # saved in the first-run flow lights these flags without a restart.
+    gemini_key = bool(get_gemini_api_key())
+    voice_available = VOICE_ENABLED and gemini_key
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
     # is reflected here without a backend restart.
@@ -202,7 +210,7 @@ async def get_public_feature_flags(
         "workspace_available": voice_available and settings_service.is_workspace_enabled(),
         # VoIP telephony (VOIP-001, #1056) — default OFF, mirrors workspace_available.
         # Also requires a per-agent voip_bindings row to actually function.
-        "voip_available": VOIP_ENABLED and bool(GEMINI_API_KEY),
+        "voip_available": VOIP_ENABLED and gemini_key,
         # Brain Orb (#58, trinity-enterprise) — gates the per-agent /agents/:name/brain
         # route + tab. Static render needs no Gemini; the per-agent capability gate is
         # the template.yaml `brain-orb` token, checked frontend-side.
@@ -214,7 +222,7 @@ async def get_public_feature_flags(
         # on AND the agent carries the `brain-orb` capability. Default OFF.
         "brain_orb_voice_available": brain_orb_enabled
         and settings_service.is_brain_orb_voice_enabled()
-        and bool(GEMINI_API_KEY),
+        and gemini_key,
         # Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
         # capture/link. DISTINCT kill-switch from brain_orb_available so writes can be
         # disabled without downing read/voice. UI-only hint (the write routes independently
@@ -288,12 +296,12 @@ async def get_public_feature_flags(
         # "advertises", never assert a verified certificate.
         "install_tls_posture": settings_service.get_install_tls_posture(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
-        # Trinity agents can't think without it, so the first-run wizard uses
+        # Trinity agents can't think without it, so the first-run flow uses
         # this to surface the one hard setup gate. True if a platform-wide
         # Anthropic key exists (DB or env) OR any Claude subscription is
-        # registered. Non-sensitive: a boolean, never the key itself.
-        "claude_auth_configured": bool(settings_service.get_anthropic_api_key())
-        or db.has_any_subscription(),
+        # registered — one helper, shared with the ent#582 first-credential
+        # check. Non-sensitive: a boolean, never the key itself.
+        "claude_auth_configured": is_claude_auth_configured(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
         # enterprise-only tabs cleanly without server-side conditional
@@ -886,6 +894,13 @@ async def get_api_keys_status(
         github_configured = bool(github_pat)
         github_from_settings = has_secret_setting('github_pat')
 
+        def _status(value: str, setting_key: str) -> dict:
+            return {
+                "configured": bool(value),
+                "masked": mask_api_key(value) if value else None,
+                "source": "settings" if has_secret_setting(setting_key) else ("env" if value else None),
+            }
+
         return {
             "anthropic": {
                 "configured": anthropic_configured,
@@ -896,7 +911,15 @@ async def get_api_keys_status(
                 "configured": github_configured,
                 "masked": mask_api_key(github_pat) if github_configured else None,
                 "source": "settings" if github_from_settings else ("env" if github_configured else None)
-            }
+            },
+            # ent#582 — the two keys the first-run flow adds.
+            "resend": {
+                **_status(settings_service.get_resend_api_key(), 'resend_api_key'),
+                # Which provider actually sends: a key saved here selects Resend.
+                "provider": settings_service.get_email_provider(),
+                "from_address": settings_service.get_email_from_address(),
+            },
+            "gemini": _status(get_gemini_api_key(), 'google_api_key'),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get API keys status: {str(e)}")
@@ -916,16 +939,20 @@ async def update_anthropic_key(
     assert_admin(current_user)
 
     try:
-        # Validate format
+        # Validate format — an `sk-ant-oat` subscription token is refused with
+        # the ent#582 copy that names the right tab.
         key = body.api_key.strip()
-        if not key.startswith('sk-ant-'):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid API key format. Anthropic keys start with 'sk-ant-'"
-            )
+        format_error = platform_keys_service.anthropic_api_key_error(key)
+        if format_error:
+            raise HTTPException(status_code=400, detail=format_error)
+
+        # ent#582: read BEFORE the write — did this save give the install its
+        # first Claude credential?
+        first_credential = not is_claude_auth_configured()
 
         # Store in settings — AES-256-GCM encrypted at rest (ent#435)
         set_secret_setting('anthropic_api_key', key)
+        connected = connect_agents_to_first_credential() if first_credential else 0
 
         # SEC-001: audit API key change
         await platform_audit_service.log(
@@ -941,7 +968,10 @@ async def update_anthropic_key(
 
         return {
             "success": True,
-            "masked": mask_api_key(key)
+            "masked": mask_api_key(key),
+            # ent#582: HOW MANY agents had no Claude credential and now use this
+            # one (int; running ones restart in the background).
+            "connected_agents": connected,
         }
     except HTTPException:
         raise
@@ -1005,12 +1035,10 @@ async def test_anthropic_key(
     try:
         key = body.api_key.strip()
 
-        # Validate format first
-        if not key.startswith('sk-ant-'):
-            return {
-                "valid": False,
-                "error": "Invalid format. Anthropic keys start with 'sk-ant-'"
-            }
+        # Validate format first (ent#582: an `sk-ant-oat` token names its tab)
+        format_error = platform_keys_service.anthropic_api_key_error(key)
+        if format_error:
+            return {"valid": False, "error": format_error}
 
         # Make a lightweight API call to test the key
         # Using the models endpoint which is simple and doesn't create any resources
@@ -1029,12 +1057,16 @@ async def test_anthropic_key(
             elif response.status_code == 401:
                 return {
                     "valid": False,
-                    "error": "Invalid API key"
+                    "error": (
+                        "Anthropic rejected this key — it may be revoked or mistyped. "
+                        "Copy it again from console.anthropic.com → API Keys "
+                        "(it starts with sk-ant-api)."
+                    ),
                 }
             else:
                 return {
                     "valid": False,
-                    "error": f"API returned status {response.status_code}"
+                    "error": f"Anthropic returned HTTP {response.status_code} — try again in a moment."
                 }
 
     except httpx.TimeoutException:
@@ -1246,6 +1278,157 @@ async def test_github_pat(
             "valid": False,
             "error": f"Error testing token: {str(e)}"
         }
+
+
+# ============================================================================
+# Email provider (Resend) + Gemini keys (trinity-enterprise#582)
+# Env-only until ent#582; now writable from the first-run flow and Settings →
+# Integrations. Persisted through the ent#435 encrypted secret-settings path and
+# resolved per call (Settings → env). Registered before `/{key}` (Invariant #4).
+# ============================================================================
+
+async def _audit_key_change(request: Request, current_user: User, setting: str, action: str, **extra) -> None:
+    # Key value never logged — only which setting changed and how.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"setting": setting, "action": action, **extra},
+    )
+
+
+def _validated_resend_body(body: ResendKeyRequest) -> tuple:
+    """(key, from_address to check/keep, from_address to store or None); 400 on a bad field."""
+    key = body.api_key.strip()
+    new_from = (body.from_address or '').strip() or None  # blank = keep the one in force
+    error = platform_keys_service.resend_key_error(key)
+    if not error and new_from:
+        error = platform_keys_service.from_address_error(new_from)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    return key, new_from or settings_service.get_email_from_address(), new_from
+
+
+@router.put("/api-keys/resend")
+async def update_resend_key(
+    body: ResendKeyRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set the Resend key (+ optional sender address) that email-code sign-in sends through.
+
+    Admin-only. Key stored AES-256-GCM encrypted (`resend_api_key_encrypted`);
+    the sender is the plain `email_from_address` setting. A key saved here
+    selects Resend as the provider, overriding `EMAIL_PROVIDER` (a fresh
+    install's `.env` says `console`). Takes effect on the next send.
+    """
+    assert_admin(current_user)
+    key, _from_in_force, new_from = _validated_resend_body(body)
+    set_secret_setting('resend_api_key', key)
+    if new_from:
+        settings_service.set_email_from_address(new_from)
+    await _audit_key_change(request, current_user, "resend_api_key", "update",
+                            from_address_changed=bool(new_from))
+    return {
+        "success": True,
+        "masked": mask_api_key(key),
+        "from_address": settings_service.get_email_from_address(),
+    }
+
+
+@router.delete("/api-keys/resend")
+async def delete_resend_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove the Resend key AND the stored sender — email reverts to the `.env` config."""
+    assert_admin(current_user)
+    deleted = clear_secret_setting('resend_api_key')
+    from_deleted = settings_service.clear_email_from_address()
+    if deleted or from_deleted:
+        await _audit_key_change(request, current_user, "resend_api_key", "delete")
+    return {
+        "success": True,
+        "deleted": deleted,
+        "fallback_configured": bool(os.getenv('RESEND_API_KEY', '')),
+    }
+
+
+@router.post("/api-keys/resend/test")
+async def test_resend_key(
+    body: ResendKeyRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Check a Resend key AND that Resend will send from the sender address.
+
+    Admin-only. Reads the account's domains; sends nothing. Format errors come
+    back as `{valid: false, error}` like the other key tests, not a 400.
+    """
+    assert_admin(current_user)
+    try:
+        key, from_address, _new = _validated_resend_body(body)
+    except HTTPException as e:
+        return {"valid": False, "error": e.detail}
+    return await platform_keys_service.check_resend_key(key, from_address)
+
+
+@router.put("/api-keys/gemini")
+async def update_gemini_key(
+    body: ApiKeyUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set the platform Gemini key (voice features, generated agent avatars).
+
+    Admin-only. Stored through the ent#435 `google_api_key` secret
+    (`google_api_key_encrypted`) — the platform already treats a Google API
+    key as its Gemini key. Resolved per call, so no restart.
+    """
+    assert_admin(current_user)
+    key = body.api_key.strip()
+    error = platform_keys_service.gemini_key_error(key)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    set_secret_setting('google_api_key', key)
+    await _audit_key_change(request, current_user, "google_api_key", "update")
+    return {"success": True, "masked": mask_api_key(key)}
+
+
+@router.delete("/api-keys/gemini")
+async def delete_gemini_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove the stored Gemini key — falls back to `GEMINI_API_KEY`/`GOOGLE_API_KEY` env."""
+    assert_admin(current_user)
+    deleted = clear_secret_setting('google_api_key')
+    if deleted:
+        await _audit_key_change(request, current_user, "google_api_key", "delete")
+    return {
+        "success": True,
+        "deleted": deleted,
+        "fallback_configured": bool(get_gemini_api_key()),
+    }
+
+
+@router.post("/api-keys/gemini/test")
+async def test_gemini_key(
+    body: ApiKeyTest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Check a Gemini key with a model-list call (no generation). Admin-only."""
+    assert_admin(current_user)
+    key = body.api_key.strip()
+    error = platform_keys_service.gemini_key_error(key)
+    if error:
+        return {"valid": False, "error": error}
+    return await platform_keys_service.check_gemini_key(key)
 
 
 # ============================================================================
@@ -2632,16 +2815,14 @@ async def get_brain_orb_settings(
     Get the Brain Orb platform flags with per-flag source (trinity-enterprise#85).
 
     Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
-    `gemini_key_configured` reflects the env-only GEMINI_API_KEY secret the
-    voice tile additionally requires (boolean only — never the key).
+    `gemini_key_configured` reflects the Gemini key the voice tile additionally
+    requires — Settings → env, ent#582 (boolean only — never the key).
     """
     assert_admin(current_user)
 
-    from config import GEMINI_API_KEY
-
     return {
         "flags": _brain_orb_flag_state(),
-        "gemini_key_configured": bool(GEMINI_API_KEY),
+        "gemini_key_configured": bool(get_gemini_api_key()),
     }
 
 
@@ -2661,7 +2842,6 @@ async def update_brain_orb_settings(
     """
     assert_admin(current_user)
 
-    from config import GEMINI_API_KEY
     from services.settings_service import BRAIN_ORB_FLAGS
 
     clear = body.clear or []
@@ -2724,7 +2904,7 @@ async def update_brain_orb_settings(
         "updated": updated,
         "cleared": cleared,
         "flags": after,
-        "gemini_key_configured": bool(GEMINI_API_KEY),
+        "gemini_key_configured": bool(get_gemini_api_key()),
     }
 
 

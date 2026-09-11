@@ -635,6 +635,12 @@ def _mark_setup_completed_if_provisioned(cursor, conn):
     all end in the same observable state, and all three mean the same thing —
     somebody can log in, so the wizard has nothing left to do.
 
+    The other branch — no admin, flag left alone — is not only a dev leftover.
+    Since trinity-enterprise#580 it is how a marketplace one-click image boots on
+    purpose (`ADMIN_PASSWORD` blank, `ADMIN_PASSWORD_SOURCE=browser`): the first
+    visitor creates the admin at /setup. Its residual risk is accepted and
+    written down in `docs/DEPLOYMENT.md` → Security Recommendations.
+
     Fails SAFE and never raises. `init_database` runs at import time, so raising
     here would crash-loop the backend permanently (the `_seed_fresh_install_*`
     contract). A skipped write costs one more boot in the old behaviour; a raise
@@ -827,6 +833,15 @@ def _record_install_source_engine():
         print(_INSTALL_SOURCE_SKIPPED_NOTE % e)
 
 
+# Blank ADMIN_PASSWORD is a supported boot (ent#580: a marketplace image claimed
+# in the browser), so this says what happens next rather than "set the variable".
+_NO_ADMIN_AT_BOOT_NOTE = (
+    "ADMIN_PASSWORD not set - no admin account created at boot. The first "
+    "visitor to the web UI creates it at /setup (set ADMIN_PASSWORD to "
+    "provision it here instead)."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
@@ -837,7 +852,7 @@ def _ensure_admin_user_engine():
     admin_password = os.getenv("ADMIN_PASSWORD", "")
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     if not admin_password:
-        print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
+        print(_NO_ADMIN_AT_BOOT_NOTE)
         return
 
     from passlib.context import CryptContext
@@ -890,8 +905,7 @@ def _ensure_admin_user(cursor, conn):
     if existing is None:
         # Create admin user
         if not admin_password:
-            print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
-            print("         Set ADMIN_PASSWORD environment variable to create admin user")
+            print(_NO_ADMIN_AT_BOOT_NOTE)
             return
 
         now = utc_now_iso()
@@ -2904,6 +2918,10 @@ class DatabaseManager:
     def has_any_subscription(self):
         return self._subscription_ops.has_any_subscription()
 
+    def list_agents_awaiting_first_credential(self):
+        """ent#582: agents the install's first Claude credential should reach."""
+        return self._subscription_ops.list_agents_awaiting_first_credential()
+
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
 
@@ -3101,6 +3119,10 @@ class DatabaseManager:
     def get_agent_last_execution_at(self, agent_name: str):
         """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
         return self._schedule_ops.get_agent_last_execution_at(agent_name)
+
+    def agent_has_running_execution(self, agent_name: str):
+        """ent#582: would a restart kill a turn right now?"""
+        return self._schedule_ops.agent_has_running_execution(agent_name)
 
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):

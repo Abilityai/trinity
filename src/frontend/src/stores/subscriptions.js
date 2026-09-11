@@ -150,5 +150,19 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
       )
       await this.fetchHeadroomAutoRefresh()
     },
+
+    // ent#582 — the first-run Claude step validates a token BEFORE registering
+    // it (one max_tokens=1 probe), then registers it through the same endpoint
+    // Settings uses. The first registration on an install also connects the
+    // agents that were created with no Claude credential (server-side).
+    async testToken(token) {
+      const { data } = await api.post('/api/subscriptions/test', { token })
+      return data
+    },
+
+    async registerToken(name, token) {
+      const { data } = await api.post('/api/subscriptions', { name, token })
+      return data
+    },
   },
 })

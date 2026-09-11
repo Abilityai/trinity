@@ -46,6 +46,7 @@
 
 ## Credentials
 
+- [Platform Keys](credentials/platform-keys.md) — Claude, GitHub, email (Resend) and Gemini keys, set from the browser
 - [Credential Management](credentials/credential-management.md) — Adding, editing, hot-reload, encrypted backup
 - [OAuth Credentials](credentials/oauth-credentials.md) — OAuth2 flows for Google, Slack, GitHub, Notion
 - [Subscription Credentials](credentials/subscription-credentials.md) — Shared Claude subscriptions, auto-assign, auto-switch

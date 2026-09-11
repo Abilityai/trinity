@@ -39,17 +39,17 @@ start.sh --provision → provision_site() writes .env      [scripts/deploy/start
     TRINITY_INSTALL_SOURCE=do-script        ← DO installer: the --cloud digitalocean default (:181-186)
         │
         ▼  (compose forwards it — dev, prod AND hosted)
-backend boot: database._record_install_source(cursor, conn)   [SQLite, database.py:697]
-              database._record_install_source_engine()        [PostgreSQL, database.py:786]
+backend boot: database._record_install_source(cursor, conn)   [SQLite, database.py:703]
+              database._record_install_source_engine()        [PostgreSQL, database.py:792]
         │  validate against INSTALL_SOURCE_VALUES               [config.py:561]
         │  write ONLY if no row exists
         ▼
 system_settings.install_source = 'do-marketplace'
         │
         ▼  every later read — the env var is never consulted again
-settings_service.get_install_source()          →  'do-marketplace' | … | 'unknown'   [settings_service.py:484]
-settings_service.is_marketplace_install()      →  bool                               [settings_service.py:515]
-settings_service.is_hardening_guide_eligible() →  bool  ← the guide's gate           [settings_service.py:526]
+settings_service.get_install_source()          →  'do-marketplace' | … | 'unknown'   [settings_service.py:539]
+settings_service.is_marketplace_install()      →  bool                               [settings_service.py:570]
+settings_service.is_hardening_guide_eligible() →  bool  ← the guide's gate           [settings_service.py:581]
 ```
 
 **Who writes it.** `start.sh --provision` is the only writer in the tree: the
@@ -117,7 +117,7 @@ already in the closed set.
 ## The surface
 
 `GET /api/settings/feature-flags` — the established home for UI-gating flags, and
-an explicit AC that no new endpoint appear (`routers/settings.py:266-289`):
+an explicit AC that no new endpoint appear (`routers/settings.py:274-297`):
 
 | field | type | notes |
 |---|---|---|
@@ -128,8 +128,8 @@ an explicit AC that no new endpoint appear (`routers/settings.py:266-289`):
 
 Both booleans are resolved server-side, so the browser holds no second copy of
 which provenances qualify (the ent#386 rule). The store reads only
-`hardening_guide_eligible` for the card and fails closed to `false` on a failed
-fetch (`stores/sessions.js:143-145`, `:170-172`).
+`hardening_guide_eligible` for the step and fails closed to `false` on a failed
+fetch (`stores/sessions.js:148-150`, `:177-179`).
 
 `GET /api/version` also carries `install_source`, for operator support. It is
 threaded into `_build_version_payload` as a **parameter** — that function is
@@ -166,65 +166,71 @@ upgrade prompt, and must not read as a breakage warning. Renewal happens only
 while the machine runs, so the copy also says that a server left off for longer
 than the certificate's life comes back to a browser warning until renewal catches
 up — stated as a property of the profile, never of this instance's certificate
-(`hardeningGuide.js:144-150`).
+(`hardeningGuide.js:81-87`).
 
-## The card
+## The step
 
-`components/onboarding/HardeningGuide.vue`, first in the Dashboard onboarding
-stack (`views/Dashboard.vue:258-279`), which renders at most one card with DOM
-order as priority (`.onboarding-stack`, `Dashboard.vue:1145`) — a
-security-posture prompt outranks a getting-started nudge. A card hidden by that
-rule still mounts, which is why the Finish-setup card marks its warm telemetry
-ask seen only through an `IntersectionObserver` — see
-[telemetry-sharing.md](telemetry-sharing.md) → *The ask*.
+**Since ent#581 the guide is the `secure` step of the first-run overlay**
+(`components/onboarding/steps/StepSecure.vue`, dispatched by
+`FirstRunOverlay.vue`; its registry entry is first in the fixed step order,
+`components/onboarding/firstRunSteps.js:30-42`). It replaced the Dashboard card
+`HardeningGuide.vue` (deleted); the posture copy in `hardeningGuide.js` is
+unchanged.
 
-Renders only when (`hardeningGuide.js:78-93`, wired at `HardeningGuide.vue:237-254`):
-flags loaded **and** a verified admin **and** `hardening_guide_eligible` **and**
-the current stage not dismissed. The flags-loaded term prevents a flash before
-the answer arrives (the `firstRun.js` rationale). Admin is a real gate: the one
-action lands in Settings → General, which is `adminOnly`, and the copy discloses
-the instance's network posture.
+Applies only when (`firstRunSteps.js:40-41`, context wired at
+`FirstRunOverlay.vue:205-228`): flags loaded **and** a verified admin **and**
+`hardening_guide_eligible` (handed to the registry as `marketplaceInstall`,
+`FirstRunOverlay.vue:214`) **and** posture ≠ `https-domain`. The overlay itself
+opens only once the flags, the profile and the first-run read have landed
+(`isFirstRunOverlayVisible`, `firstRunSteps.js:145-151`), which prevents a flash
+before the answer arrives (the `firstRun.js` rationale). Admin is a real gate:
+the one action lands in Settings → General, which is `adminOnly`, and the copy
+discloses the instance's network posture.
 
-**Two stages; the posture picks the stage, not visibility.** `hardeningStage()`
-(`hardeningGuide.js:30-32`) maps `https-domain` → `tunnel` and every other
+**Two stages in one step; the posture picks the stage.** `hardeningStage()`
+(`hardeningGuide.js:28-30`) maps `https-domain` → `tunnel` and every other
 posture → `address`:
 
-| posture | stage | the card shows |
+| posture | stage | the step shows |
 |---|---|---|
-| `unconfigured` / `http` / `https-ip` | `address` | the posture badge and headline, the **Add a domain** button (`HardeningGuide.vue:69-78`), and both steps behind "Why this matters" |
-| `https-domain` | `tunnel` | "Your domain is set" and the tunnel step only (`POSTURE_COPY['https-domain']`, `hardeningGuide.js:151-158`) |
+| `unconfigured` / `http` / `https-ip` | `address` | the posture badge and headline, the **Public URL** field (`StepSecure.vue:43-65`), and both paths behind "Why this matters" |
+| `https-domain` | `tunnel` | "Your domain is set" and the tunnel guidance only (`POSTURE_COPY['https-domain']`, `hardeningGuide.js:88-95`) |
 
-A configured domain therefore **advances** the card to the tunnel step rather
-than retiring it. Retiring on step one meant step two was mentioned once and
-never again, on the one surface that raises it (`hardeningGuide.js:19-23`).
+`https-domain` is also the step's completion: its `pending` term goes false, so
+the step reads done and no longer opens the overlay on its own. The `tunnel`
+stage is what the step shows when opened again — e.g. on a re-open
+(`?onboarding=1`, Settings → General → Re-run setup), which lists every eligible
+step, done ones included.
 
 Two steps that stack, never either/or (PROV-009): a real domain, then a
 Cloudflare Tunnel so the server stops listening on the public internet — the
 tunnel needs the name. A tunnel rather than a VPN because a VPN breaks every
 inbound integration (Telegram, WhatsApp, VoIP, public agent links, webhook
-triggers). The tunnel step is guidance with no button: `TUNNEL_TOKEN` lives in
+triggers). The tunnel stage is guidance with no button: `TUNNEL_TOKEN` lives in
 `.env` and `cloudflared` starts under a compose profile, neither reachable from a
 container.
 
-**Dismissal is localStorage, per stage** (the ent#319 precedent — no new
-endpoint, no server row). `dismissKeyForStage()` (`hardeningGuide.js:42-44`)
-keeps `address` on the original `trinity_hardening_guide_dismissed` key, so a
-dismissal made before the split still holds, and gives `tunnel` its own
-`trinity_hardening_guide_tunnel_dismissed`. Waving away step one cannot
-silently spend step two, and a dismissal is the **only** thing that ends the
-guide — no server state retires it (`HardeningGuide.vue:230-233`, `:258-264`).
+**Skipping is localStorage** (the ent#319 precedent — no new endpoint, no server
+row). The overlay's per-step Skip — or Continue past the step while it is still
+pending (`FirstRunOverlay.vue:347-369`) — writes `trinity_first_run_skipped`
+(`firstRunSteps.js:251-259`), and a skipped step does not re-open the overlay
+(`firstRunSteps.js:145-151`). The retired card's address-stage dismissal
+(`trinity_hardening_guide_dismissed`) is read once as a skip of `secure`
+(`legacySkips`, `firstRunSteps.js:226-238`), so an operator who declined before
+the upgrade is not re-asked; nothing writes that key any more. Its tunnel-stage
+key is not read: at that posture the step is already done.
 
 State, not verified fact — and worth being precise about, because this design
 refuses exactly that shape one level up. `public_chat_url` is operator-declared,
-so an admin who types any https domain advances the card to the tunnel stage
-whether or not DNS resolves or a certificate exists. That is accepted here and
-refused for `install_source` because the two gate different things: provenance
-decides whether this surface may exist at all, while the posture only decides
-which nudge to show someone who can already dismiss it outright.
+so an admin who types any https domain completes the step whether or not DNS
+resolves or a certificate exists. That is accepted here and refused for
+`install_source` because the two gate different things: provenance decides
+whether this surface may exist at all, while the posture only decides whether a
+nudge is still pending for someone who can already skip it outright.
 
 **The domain field is the whole step.** Saving the Public URL used to reconfigure
 nothing: the instance started advertising a name no web server answered to while
-the card advanced as though step one were done. On a host provisioned by
+the guide moved on as though step one were done. On a host provisioned by
 `start.sh --provision`, the Caddyfile carries on-demand TLS behind an `ask` gate
 (`scripts/deploy/start.sh:325-362`), so Caddy obtains a certificate for the saved
 name on its first request:
@@ -254,21 +260,17 @@ Caddy obtains an ordinary Let's Encrypt certificate and serves the name
   DNS answers anyway.
 
 The copy still claims only what it can know. Trinity issues no certificate
-itself; the card says the web server in front "is configured to obtain one for
-the name you save" — a statement about provisioning, never a verdict on a
-handshake — and tells the operator to let DNS settle first
-(`HardeningGuide.vue:127-137`).
-
-It composes `BaseCard` / `BaseButton` / `BaseBadge`. Both sibling onboarding
-cards hand-roll their shell and dismiss button and predate the primitives
-ratchet — they are the behavioural model, not the markup model.
+itself; the step says whatever terminates TLS in front of it "is configured to
+obtain one for the name you save" — a statement about provisioning, never a
+verdict on a handshake — and tells the operator to let DNS settle first
+(`StepSecure.vue:99-109`).
 
 ## What is deliberately not here
 
 A marker for installs that never pass through `start.sh --provision`. A plain or
 `--hosted` `start.sh` writes no `TRINITY_INSTALL_SOURCE`, so provenance reads
 `unknown` there and the guide renders nowhere. That is PROV-004's contract
-working as specified, not a gap — it is what keeps the card off every instance
+working as specified, not a gap — it is what keeps the step off every instance
 whose posture someone already chose.
 
 A Vultr provisioner. `vultr-marketplace` is in both sets, but `--provision`

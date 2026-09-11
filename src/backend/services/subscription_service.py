@@ -8,6 +8,7 @@ as `CLAUDE_CODE_OAUTH_TOKEN` env var on agent containers at creation time.
 No file injection is needed — the token is part of the container environment.
 """
 
+import asyncio
 import importlib
 import logging
 from typing import Optional
@@ -102,4 +103,129 @@ def select_subscription_for_new_agent() -> Optional[SubscriptionCredential]:
         if _db.get_subscription_token(sub.id):
             return sub
     return None
+
+
+# =============================================================================
+# The install's first Claude credential (trinity-enterprise#582)
+# =============================================================================
+
+def is_claude_auth_configured() -> bool:
+    """Can ANY agent on this instance authenticate to Claude?
+
+    A platform Anthropic key (settings or env) OR any registered subscription.
+    The one definition behind the `claude_auth_configured` feature flag and the
+    first-credential check below, so "configured" cannot mean two things.
+    """
+    from database import db as _db
+    from services.settings_service import get_anthropic_api_key
+
+    return bool(get_anthropic_api_key()) or _db.has_any_subscription()
+
+
+# Strong refs for the fire-and-forget restarts — the event loop holds only a
+# WEAK reference to a bare `create_task` (the #1083 `_inflight` footgun).
+_inflight_connect_tasks: "set[asyncio.Task]" = set()
+
+
+def connect_agents_to_first_credential(subscription_id: Optional[str] = None) -> int:
+    """Bring agents that were created with NO Claude credential onto the first one.
+
+    Call when a write took the install from not-configured to configured, and
+    again at the end of the first-run seed pass (agents whose create straddled
+    the save). Agents created before any credential existed — the ent#124
+    seeded fleet, Cornelius, `trinity-system` — were baked with no Claude auth:
+    #74 auto-assign runs only at create, and nothing re-bakes a running
+    container's env. Without this the operator finishes the Claude step and the
+    fleet on the dashboard still cannot run.
+
+    Scope is exactly the agents that could not authenticate anyway, read from
+    the DB agent rows (`list_agents_awaiting_first_credential`): durable, no
+    subscription, `use_platform_api_key` on, never a successful execution — a
+    success means it authenticates another way (#2114 would shadow it) — and a
+    Claude runtime (container label; absent or unreadable fails open to
+    claude-code, the ent#403 rule).
+
+    `subscription_id` given → assign it to each (DB, now). Either way, agents
+    whose container is running are restarted in the background — but never one
+    with a running execution, nor one whose env already carries the credential
+    (which makes a re-run idempotent). Everyone else picks it up on their next
+    start via `check_api_key_env_matches`. Returns how many agents now use the
+    credential. Never raises: the credential is already saved.
+    """
+    from database import db as _db
+    from services.agent_service.helpers import is_claude_runtime
+    from services.docker_service import agent_container_runtimes, agent_container_states
+
+    try:
+        names = _db.list_agents_awaiting_first_credential()
+    except Exception as e:  # noqa: BLE001 — never fail the credential save
+        logger.warning("[ent#582] could not list agents to connect: %s", e)
+        return 0
+    runtimes = agent_container_runtimes() or {}
+    states = agent_container_states()
+    if states is None:
+        logger.warning("[ent#582] Docker unreadable: connecting in the DB only, no restarts")
+
+    connected, to_restart = [], []
+    for name in names:
+        try:
+            if not is_claude_runtime(runtimes.get(name)):
+                continue
+            if subscription_id:
+                _db.assign_subscription_to_agent(name, subscription_id)
+            connected.append(name)
+            if states and states.get(name) == "running":
+                to_restart.append(name)
+        except Exception as e:  # noqa: BLE001 — one bad agent must not stop the rest
+            logger.warning("[ent#582] could not connect agent '%s': %s", name, e)
+
+    if to_restart:
+        try:
+            task = asyncio.create_task(_restart_connected_agents(to_restart))
+            _inflight_connect_tasks.add(task)
+            task.add_done_callback(_inflight_connect_tasks.discard)
+        except RuntimeError:  # no running loop — they pick it up on next start
+            logger.info("[ent#582] no event loop; %d agent(s) connect on next start", len(to_restart))
+    if connected:
+        logger.info("[ent#582] first Claude credential connected %d agent(s): %s",
+                    len(connected), ", ".join(connected))
+    return len(connected)
+
+
+def _auth_env_is_current(agent_name: str) -> bool:
+    """Does the running container already carry the auth env the DB wants?"""
+    from services.agent_service.helpers import check_api_key_env_matches
+    from services.docker_service import get_agent_container
+
+    container = get_agent_container(agent_name)
+    return container is not None and check_api_key_env_matches(container, agent_name)
+
+
+async def _restart_connected_agents(agent_names: list) -> None:
+    """Recreate each running agent so the new credential is in its env.
+
+    Sequential, under the #799 per-agent switch lock so a restart cannot
+    interleave with a concurrent SUB-003 auto-switch on the same agent. Checked
+    per agent at restart time, not when the list was built: an agent with a
+    running execution is left alone (a restart would kill the turn), and one
+    whose env is already current is skipped.
+    """
+    from database import db as _db
+    from services.subscription_auto_switch import _restart_agent, agent_switch_lock
+
+    for name in agent_names:
+        try:
+            async with await agent_switch_lock(name):
+                # ponytail: check-then-restart, not atomic — a turn admitted in
+                # this window is killed. Needs an admission hold to close.
+                if _db.agent_has_running_execution(name):
+                    logger.info("[ent#582] '%s' has a running execution — not restarting; "
+                                "it picks the credential up on its next start", name)
+                    continue
+                if _auth_env_is_current(name):
+                    continue
+                result = await _restart_agent(name)
+            logger.info("[ent#582] restarted '%s' onto the first Claude credential: %s", name, result)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[ent#582] restart of '%s' failed: %s", name, e)
 

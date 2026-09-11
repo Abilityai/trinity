@@ -1,7 +1,10 @@
 # Hosted Docker Compose for Trinity — PULL-ONLY (#2280)
 #
 # Identical to docker-compose.prod.yml in every respect except one: it carries
-# NO `build:` blocks. Every service resolves a prebuilt image from GHCR, so a
+# NO `build:` blocks. (Plus the ent#580 marketplace admin claim: this file
+# renders an explicitly blank ADMIN_PASSWORD and forwards ADMIN_PASSWORD_SOURCE;
+# prod refuses a blank one. The parity test allowlists exactly those lines.)
+# Every service resolves a prebuilt image from GHCR, so a
 # fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
 # the agent base image on first boot. That build time is what fails the
 # "one click" bar for every marketplace channel (#2281 DigitalOcean, #2282
@@ -106,7 +109,19 @@ services:
       - "8000:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY}
-      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
+      # `?`, not `:?` (ent#580) — HOSTED ONLY; prod keeps `:?` (the marketplace and
+      # `start.sh --hosted` run this file, never prod). An UNSET password still
+      # refuses to render; an explicitly blank one is the marketplace browser-claim
+      # path — no admin at boot, the first visitor creates it at /setup. start.sh
+      # writes that blank only under ADMIN_PASSWORD_SOURCE=browser and
+      # refuses/generates otherwise.
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
+      # Backstop for a HAND-RUN hosted compose (ent#580): a blank password with no
+      # marker renders `unset`, and POST /api/setup/admin-password refuses (403)
+      # instead of handing the instance to its first visitor. start.sh writes
+      # `browser` on the marketplace path. Not in prod (no blank ever renders
+      # there) — allowlisted in test_2280_hosted_compose_parity.py.
+      - ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}
       # #2381: present in docker-compose.yml and .env.example but missing here,
       # so setting ADMIN_USERNAME never reached a production container. The
       # backend then provisioned `admin` while the operator believed otherwise —
@@ -762,8 +777,11 @@ services:
       - TRINITY_API_URL=http://backend:8000
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
       # MCP server uses ADMIN_PASSWORD for legacy non-API-key auth path.
-      # Fail-loud at compose render rather than silently use a well-known fallback (issue #692).
-      - "TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"
+      # Fail-loud rather than silently use a well-known fallback (issue #692): unset
+      # refuses to render; blank (the ent#580 claim path, hosted only — prod keeps
+      # `:?`) is refused by the server itself unless MCP_REQUIRE_API_KEY is true —
+      # the default, needing no password.
+      - "TRINITY_PASSWORD=${ADMIN_PASSWORD?ADMIN_PASSWORD must be set in .env}"
       - MCP_REQUIRE_API_KEY=${MCP_REQUIRE_API_KEY:-true}
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).

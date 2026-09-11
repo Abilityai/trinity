@@ -175,7 +175,7 @@ poll https://<ip>/ with verification for 15 min → print the address, or the co
 
 ### A domain is a Settings field
 
-The provisioned Caddyfile has two HTTPS sites: the bare IP on the `shortlived` profile, and a catch-all with `tls { on_demand }` gated by `ask http://127.0.0.1:8000/api/public/tls-allowed`. So Caddy obtains a certificate for the saved Public URL's host on its first request and refuses every other name; the operator never needs a root shell on the host. The gate's contract — exact parsed host, unauthenticated, fails closed — lives in [install-provenance.md](install-provenance.md) → *The card*.
+The provisioned Caddyfile has two HTTPS sites: the bare IP on the `shortlived` profile, and a catch-all with `tls { on_demand }` gated by `ask http://127.0.0.1:8000/api/public/tls-allowed`. So Caddy obtains a certificate for the saved Public URL's host on its first request and refuses every other name; the operator never needs a root shell on the host. The gate's contract — exact parsed host, unauthenticated, fails closed — lives in [install-provenance.md](install-provenance.md) → *The step*.
 
 ## Stop Layer — `scripts/deploy/stop.sh`
 

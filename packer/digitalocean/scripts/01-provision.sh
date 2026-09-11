@@ -117,8 +117,8 @@ install -D -m 0755 /tmp/trinity-files/etc/update-motd.d/99-trinity \
   /etc/update-motd.d/99-trinity
 rm -rf /tmp/trinity-files
 
-# Ubuntu's stock MOTD is noisy and pushes ours off the first screen; the
-# credential line is the one thing a 1-Click user must not miss.
+# Ubuntu's stock MOTD is noisy and pushes ours off the first screen; the URL
+# and admin lines are the ones a 1-Click user who does SSH in must not miss.
 chmod -x /etc/update-motd.d/10-help-text /etc/update-motd.d/50-motd-news 2>/dev/null || true
 
 echo "=== build provisioning complete ==="

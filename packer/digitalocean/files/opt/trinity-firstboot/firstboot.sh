@@ -7,7 +7,7 @@
 # the SAME code a doc-driven install runs (#2380) — the Caddyfile, the
 # certificate poll and the .env keys used to be a second copy that had already
 # drifted from the first. What is left is the one thing genuinely specific to a
-# Marketplace droplet: where the admin password comes from.
+# Marketplace droplet: whether an admin account exists before anyone opens it.
 set -euo pipefail
 
 # start.sh --provision needs iptables and systemctl out of /usr/sbin; cloud-init
@@ -27,61 +27,48 @@ echo "=== Trinity first boot: $(date -u +%FT%TZ) ==="
 mkdir -p "$STATE_DIR"
 chmod 0700 "$STATE_DIR"
 
-# --- 1. Admin password -------------------------------------------------------
+# --- 1. Admin account (ent#580) ----------------------------------------------
 # A 1-Click has no vendor-defined input form at deploy time (verified against
 # digitalocean/marketplace-partners: the only prompt is the optional Managed
-# Database checkbox), so the password cannot be collected in the UI.
+# Database checkbox), so nothing about the admin can be collected at create time.
 #
-# Two sources, in order:
-#   (a) user-data, if the operator supplied one. It must arrive as #cloud-config
-#       `write_files` and NOT as a shell script: 1-Click per-instance code runs
-#       from cloud-init's `scripts-per-instance` module, which runs BEFORE
-#       `scripts-user`, so a user-data shell script would execute after this
-#       script had already generated a password and started Trinity.
-#   (b) generated here, and shown in the MOTD.
-PW_SOURCE="generated"
+# Two paths:
+#   (a) user-data, if the operator supplied a password. It must arrive as
+#       #cloud-config `write_files` and NOT as a shell script: 1-Click
+#       per-instance code runs from cloud-init's `scripts-per-instance` module,
+#       which runs BEFORE `scripts-user`, so a user-data shell script would
+#       execute after this script had already started Trinity. The admin is
+#       provisioned at boot and the /setup wizard never opens.
+#   (b) otherwise NO admin is provisioned. ADMIN_PASSWORD stays blank and
+#       ADMIN_PASSWORD_SOURCE=browser tells start.sh that is deliberate, so the
+#       first person to open the instance creates the admin at /setup — email,
+#       password, product-updates consent — without ever opening a terminal.
+#       Nothing is generated, so there is nothing for the MOTD to print.
+#
+# Accepted risk (2026-09-10): until that first visit, anyone who finds the IP
+# can claim the instance. It is empty at that moment and can be destroyed; see
+# docs/DEPLOYMENT.md -> Security Recommendations.
+# --- admin-source (behaviour-tested; see test_2281_firstboot_password) ---
+ADMIN_PASSWORD=""
 if [ -s "$USER_SUPPLIED_PW" ]; then
     ADMIN_PASSWORD="$(head -c 512 "$USER_SUPPLIED_PW" | tr -d '\r\n')"
-    PW_SOURCE="user-data"
     shred -u "$USER_SUPPLIED_PW" 2>/dev/null || rm -f "$USER_SUPPLIED_PW"
 fi
-if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    # --- password-generation (behaviour-tested; see test_2281_firstboot_password) ---
-    # NOT `tr -dc ... </dev/urandom | head -c 24`. Under this script's own
-    # `set -o pipefail` that is fatal, every time: head closes the pipe after 24
-    # bytes, tr dies of SIGPIPE against an endless source, and the non-zero
-    # status propagates out of the command substitution, where `set -e` ends the
-    # script. First boot died on this line on the very first droplet ever created
-    # from the snapshot — three lines in, before it had written anything but its
-    # own header, leaving a droplet with no Trinity, no certificate and no
-    # password.
-    #
-    # Reading a bounded chunk first means nothing closes a pipe early: head takes
-    # 1024 bytes and exits, tr drains all of them and exits 0. LC_ALL=C keeps tr
-    # byte-oriented rather than trusting the ambient locale to tolerate random
-    # bytes.
-    _pw_raw="$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
-    ADMIN_PASSWORD="${_pw_raw:0:24}"
-    # 1024 random bytes yield ~635 alphanumerics on average, so this cannot
-    # plausibly fail — but it is a credential, and a short one must never be
-    # written rather than silently accepted.
-    if [ "${#ADMIN_PASSWORD}" -ne 24 ]; then
-        echo "FATAL: could not generate a 24-character admin password." >&2
-        exit 1
-    fi
-    unset _pw_raw
-    # --- end password-generation ---
+if [ -n "$ADMIN_PASSWORD" ]; then
+    PW_SOURCE="user-data"
+    export ADMIN_PASSWORD
+else
+    PW_SOURCE="browser"
+    unset ADMIN_PASSWORD
+    export ADMIN_PASSWORD_SOURCE=browser
 fi
 
-# The MOTD never echoes a password the operator chose — they already have it,
-# and reprinting it widens where it exists for no benefit.
+# Only the SOURCE is recorded, for the MOTD. It never holds a password: the
+# operator's own is theirs already, and the browser path has none to hold.
 umask 077
-if [ "$PW_SOURCE" = "user-data" ]; then
-    printf 'source=user-data\npassword=\n' > "$CRED_FILE"
-else
-    printf 'source=generated\npassword=%s\n' "$ADMIN_PASSWORD" > "$CRED_FILE"
-fi
+printf 'source=%s\n' "$PW_SOURCE" > "$CRED_FILE"
 chmod 0600 "$CRED_FILE"
+# --- end admin-source ---
 
 # --- 2. Close the Docker/ufw gap --------------------------------------------
 # trinity-docker-firewall.service was enabled at BUILD time and applies these
@@ -108,8 +95,11 @@ fi
 # an argument rather than being hardcoded in the installer, because the very
 # same code path serves a doc-driven install, which is honestly a different
 # provenance (`do-script`).
+#
+# The admin source travels in the environment exported above: ADMIN_PASSWORD
+# (user-data) or ADMIN_PASSWORD_SOURCE=browser (claim at /setup). start.sh
+# persists either into .env.
 cd "$TRINITY_DIR"
-export ADMIN_PASSWORD
 export TRINITY_IMAGE_TAG="$(cat "${STATE_DIR}/baked-image-tag" 2>/dev/null || echo latest)"
 ./scripts/deploy/start.sh \
     --provision --cloud digitalocean --site-only --provenance do-marketplace \

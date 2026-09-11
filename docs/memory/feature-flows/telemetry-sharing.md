@@ -12,16 +12,15 @@ Nothing leaves the box until an admin turns sharing on. When they do, Trinity se
 
 | Surface | Where | Who | What it does |
 |---|---|---|---|
-| **Finish setup card** (ent#437) | Dashboard, `components/onboarding/FinishSetupCard.vue` | verified admin | Section 2 is the consent ask: **Share anonymous usage** / **Not now** (14-day per-browser snooze) / **Don't ask again** (server marker). Section 1 is the #2381 sign-in-email nudge, moved in from `AdminEmailNudge.vue`. |
+| **First-run overlay, `sharing` step** (ent#581; was the ent#437 Finish setup card) | Dashboard overlay, `components/onboarding/steps/StepSharing.vue` | verified admin | The consent ask as one step of the setup sequence: **Share anonymous usage** / **Don't ask again** (both write the server marker); the overlay's Skip replaces **Not now**. The sign-in-email nudge is the sibling `email` step. |
 | **Usage sharing panel** (ent#12) | Settings → General, `components/settings/TelemetrySharingPanel.vue` | admin | The reversible toggle, the backfill window choice, the exact payload preview, the share id and its rule, **Recent sends**. |
-| **Wizard ask** (ent#12) | `components/OnboardingWizard.vue` | first-run | Value-framed one-line ask; only renders on a zero-agent install, which seeding makes rare — a secondary surface since ent#437. |
 | **Feature flags** | `GET /api/settings/feature-flags` | any authenticated user | Four booleans: `telemetry_sharing_enabled` / `_hard_disabled` / `_dismissed` / `_first_value`. The card decides from these alone. |
 
 ## Backend flow
 
 ```
 Dashboard load ──▶ stores/sessions.loadFeatureFlags()  (cached, `once`)
-                       │  four bools ─▶ telemetryConsent.isTelemetryConsentVisible(...)
+                       │  four bools ─▶ firstRunSteps.js `sharing` step applies(...) (FirstRunOverlay)
                        │                  false ⇒ nothing rendered, ZERO telemetry queries
                        ▼ true
                    stores/telemetrySharing.load({preview:false}) ─▶ GET /api/settings/telemetry-sharing?preview=0
@@ -31,7 +30,7 @@ Dashboard load ──▶ stores/sessions.loadFeatureFlags()  (cached, `once`)
                        │
         Share ─────────┼──▶ PUT …/telemetry-sharing {enabled:true, backfill_days:30}
                        │      set_consent: claim sharing_id + dismissed_at (insert_setting_if_absent), audit, spawn_share(backfill=True)
-        Not now ───────┼──▶ localStorage snooze (no request)
+        Skip ──────────┼──▶ overlay skip, localStorage `trinity_first_run_skipped` (no request)
         Don't ask ─────┴──▶ POST …/telemetry-sharing/ask/dismiss  (admin + human-only, audit, idempotent)
 
 heartbeat (wake every 10 min + ≤10 min jitter, sleep-first, every worker — #2618)
@@ -52,7 +51,7 @@ share_now ── gates: TELEMETRY_SHARING_ENABLED/DO_NOT_TRACK AND stored consen
           ── 2xx ⇒ last_shared_at (+ backfill_delivered_at on a backfill)
 ```
 
-**Files**: `services/telemetry_sharing_service.py` (everything above), `routers/settings.py` (the three routes + the flags spread), `db/schedules/stats.py::count_terminal_executions_by_status` / `first_autonomous_success_at` (+ facade delegations in `database.py`), `utils/app_version.py` (release version), `stores/telemetrySharing.js`, `stores/sessions.js`, `components/onboarding/telemetryConsent.js` (every decision, pure), `components/onboarding/FinishSetupCard.vue`, `components/settings/TelemetrySharingPanel.vue`; the benchmark card (ent#190): `components/settings/ActivationFunnelPanel.vue` (fetch, once per mount), `components/settings/FleetBenchmarkCard.vue` (render), `components/settings/benchmarkFormat.js` (every decision, pure); the funnel footer (ent#545): `components/settings/funnelFormat.js` (the install-id footer's three states, pure), `services/operator_intake_service.py::get_installation_id` (the non-minting read the enterprise funnel GET uses).
+**Files**: `services/telemetry_sharing_service.py` (everything above), `routers/settings.py` (the three routes + the flags spread), `db/schedules/stats.py::count_terminal_executions_by_status` / `first_autonomous_success_at` (+ facade delegations in `database.py`), `utils/app_version.py` (release version), `stores/telemetrySharing.js`, `stores/sessions.js`, `components/onboarding/firstRunSteps.js` (the `sharing` step's predicate, pure), `components/onboarding/telemetryConsent.js` (copy variant + the per-browser keys, pure), `components/onboarding/steps/StepSharing.vue`, `components/settings/TelemetrySharingPanel.vue`; the benchmark card (ent#190): `components/settings/ActivationFunnelPanel.vue` (fetch, once per mount), `components/settings/FleetBenchmarkCard.vue` (render), `components/settings/benchmarkFormat.js` (every decision, pure); the funnel footer (ent#545): `components/settings/funnelFormat.js` (the install-id footer's three states, pure), `services/operator_intake_service.py::get_installation_id` (the non-minting read the enterprise funnel GET uses).
 
 ## The payload (schema v2)
 
@@ -83,13 +82,13 @@ Both keys are written with `db.insert_setting_if_absent` (#2380's write-once pri
 
 ## The ask: snooze-first, warm once
 
-`telemetryConsent.isTelemetryConsentVisible` renders the section only when: flags loaded ∧ profile verified ∧ admin ∧ ¬enabled ∧ ¬hard-disabled ∧ ¬dismissed (server) ∧ (¬snoozed ∨ (firstValue ∧ ¬warmShown)).
+The first-run overlay's `sharing` step (`components/onboarding/firstRunSteps.js`, ent#581) applies when: admin ∧ ¬hard-disabled ∧ ¬enabled ∧ ¬dismissed (server). The overlay itself opens only once flags, profile and first-run state have loaded (`isFirstRunOverlayVisible`), and a skipped step does not re-open it.
 
-- **Not now** = `localStorage['trinity_telemetry_ask_snoozed_until']`, 14 days. No request. A one-shot cold ask at the coldest moment is ent#12's own "pure opt-in gets almost no data" trap; the snooze is the operator override on the plan (trail #35).
-- **Warm re-ask** = the card returns **once per browser** with value-framed copy after the install's first SUCCESS execution with an autonomous trigger (`schedule`/`webhook`). The milestone is **derived on read and memoised** (`telemetry_sharing_first_value_at`, via `db.first_autonomous_success_at()` — one `LIMIT 1` read until it exists, a settings read forever after), deliberately *not* a hook in the dispatch terminal: `task_execution_service.py` is a code-health hotspot under #2314.
-- **Warm is spent only when seen**: `warmShown` is persisted by an `IntersectionObserver` on the card root (`FinishSetupCard.vue:271-313`), not when `consentVisible` flips. The Dashboard renders one onboarding card at a time and a card hidden by that rule still mounts, so marking it on the predicate burned the one re-ask while it sat behind the hardening guide. An observer rather than a `display` check because the card surfaces when a *sibling* is dismissed, which changes no state this component can watch. No `IntersectionObserver` → nothing is persisted.
-- **Cost**: the section reads the flags document the Dashboard already awaits and calls the admin status route only when it will render; the preview loads on expand (`?preview=0` first). Steady state after consent, dismissal or hard-disable: zero telemetry queries per Dashboard load.
-- The chassis is one `BaseCard` with a section per open item so the Dashboard does not grow a fifth stacked nudge; each section keeps its own dismissal (the email nudge's `localStorage` key is unchanged from #2381).
+- **Skip** (the overlay footer; it replaced **Not now**) = a per-browser skip in `localStorage['trinity_first_run_skipped']`. No request. A pre-ent#581 snooze (`trinity_telemetry_ask_snoozed_until`, 14 days) is honoured as a skip of this step while it lasts. A one-shot cold ask at the coldest moment is ent#12's own "pure opt-in gets almost no data" trap; the snooze was the operator override on the plan (trail #35).
+- **Warm copy** = `telemetryConsent.consentVariant` picks value-framed copy **once per browser** after the install's first SUCCESS execution with an autonomous trigger (`schedule`/`webhook`). Since ent#581 it changes only the copy of a step that is shown; it no longer re-opens a skipped ask. The milestone is **derived on read and memoised** (`telemetry_sharing_first_value_at`, via `db.first_autonomous_success_at()` — one `LIMIT 1` read until it exists, a settings read forever after), deliberately *not* a hook in the dispatch terminal: `task_execution_service.py` is a code-health hotspot under #2314.
+- **Warm is spent only when seen**: `warmShown` is persisted when `StepSharing.vue` mounts on the warm copy (`StepSharing.vue:122-127`), not when the predicate flips. The overlay mounts only the step on screen (`FirstRunOverlay.vue:70-77`), so mounting is being seen. The retired Dashboard stack still mounted a card it hid, so marking it on the predicate burned the one warm ask while it sat behind the hardening guide — which #2564 fixed with an `IntersectionObserver` on the card root, retired with the card. Already persisted → the cold copy.
+- **Cost**: the step reads the flags document the Dashboard already awaits and calls the admin status route only when it will render; the preview loads on expand (`?preview=0` first). Steady state after consent, dismissal or hard-disable: zero telemetry queries per Dashboard load.
+- The chassis is the first-run overlay (`FirstRunOverlay.vue`): one step per open item, so the Dashboard grows no stacked nudge; the email nudge is the sibling `email` step, and its #2381 `localStorage` dismissal counts as a skip of it.
 
 ## Delivery that survives a missing receiver
 

@@ -187,6 +187,15 @@ def render(catalog: dict, junit_dir: str | None) -> str:
         out.append("")
         out.append(f"_Harnesses not present in `tests/registry.json`: "
                    f"{', '.join(unindexed)}._")
+
+    # A journey can hold on more than one shape of the same promise (ent#580:
+    # J01 on a claimable vs a pre-provisioned droplet). Rendered so the doc says
+    # what a harness must drive, not just that one exists.
+    variants = [(j["id"], v) for j in catalog["journeys"] for v in j.get("variants") or []]
+    if variants:
+        out += ["", "## Variants", "",
+                "A journey holds only if it holds on every shape listed for it.", ""]
+        out += [f"- **{jid} · {v['name']}** — {v['promise']}" for jid, v in variants]
     return "\n".join(out) + "\n"
 
 

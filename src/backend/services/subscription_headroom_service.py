@@ -175,6 +175,45 @@ def parse_unified_headers(headers) -> Optional[dict]:
     }
 
 
+async def _post_probe(token: str) -> httpx.Response:
+    """THE probe request: a ``max_tokens=1`` Haiku message under ``token``."""
+    async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+        return await client.post(
+            PROBE_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "anthropic-version": "2023-06-01",
+                "User-Agent": "claude-code/2.0.32",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": PROBE_MODEL,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+
+async def check_token(token: str) -> str:
+    """Validate a raw setup token BEFORE it is registered (ent#582).
+
+    The same one-message probe as the headroom snapshot, so it costs the same
+    ~dozen tokens of the operator's own quota. Returns ``ok`` | ``rate_limited``
+    (a valid token that is at a limit right now) | ``invalid_token`` (401/403)
+    | ``error`` (transport failure or any other status). Never raises, never
+    logs the token.
+    """
+    try:
+        resp = await _post_probe(token)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#582] token check transport failure: %s", type(e).__name__)
+        return "error"
+    if resp.status_code in (401, 403):
+        return "invalid_token"
+    return {200: "ok", 429: "rate_limited"}.get(resp.status_code, "error")
+
+
 async def _probe(subscription_id: str) -> Optional[dict]:
     """One probe call; returns the snapshot dict (with status) or None when the
     subscription has no usable token. Never raises; never logs the token."""
@@ -186,22 +225,7 @@ async def _probe(subscription_id: str) -> Optional[dict]:
 
     snapshot: Dict[str, Any] = {"fetched_at": utc_now_iso(), "status": "ok"}
     try:
-        async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
-            resp = await client.post(
-                PROBE_URL,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                    "anthropic-version": "2023-06-01",
-                    "User-Agent": "claude-code/2.0.32",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": PROBE_MODEL,
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}],
-                },
-            )
+        resp = await _post_probe(token)
     except Exception as e:
         logger.warning(
             "[#471] headroom probe transport failure for subscription %s: %s",

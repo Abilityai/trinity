@@ -1632,11 +1632,15 @@ def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
     # Add Google API key if using Gemini runtime
     # Gemini CLI expects GEMINI_API_KEY environment variable
     if config.runtime == 'gemini-cli' or config.runtime == 'gemini':
-        google_api_key = os.getenv('GOOGLE_API_KEY', '')
+        # ent#582: the saved Settings key first, then GEMINI_API_KEY/GOOGLE_API_KEY
+        # env — the resolver every other Gemini reader uses. Lazy: the creation
+        # harnesses stub `services.*` selectively at load.
+        from services.settings_service import get_gemini_api_key
+        google_api_key = get_gemini_api_key()
         if google_api_key:
             env_vars['GEMINI_API_KEY'] = google_api_key  # Gemini CLI expects this name
         else:
-            logger.warning("Gemini runtime selected but GOOGLE_API_KEY not configured")
+            logger.warning("Gemini runtime selected but no Gemini key configured (Settings or GEMINI_API_KEY/GOOGLE_API_KEY)")
 
     # OpenTelemetry Configuration (enabled by default)
     # Claude Code has built-in OTel support - these vars enable metrics export

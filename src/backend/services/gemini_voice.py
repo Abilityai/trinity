@@ -20,7 +20,7 @@ from typing import Any, Optional, Callable, Awaitable
 from google import genai
 from google.genai import types as genai_types
 
-from config import GEMINI_API_KEY, VOICE_MODEL, VOICE_MAX_DURATION, REDIS_URL
+from config import VOICE_MODEL, VOICE_MAX_DURATION, REDIS_URL
 from models import DEFAULT_CANVAS_ID
 from services.canvas_blocks import WORKSPACE_ROOT, classify_image_src, map_panel_tool
 from services.voice_tools import RUN_TASK, platform_default_tools, resolve_manifest
@@ -410,6 +410,7 @@ class GeminiVoiceService:
 
     def __init__(self):
         self._client: Optional[genai.Client] = None
+        self._client_key: Optional[str] = None
         self._sessions: dict[str, VoiceSession] = {}
         self._redis = None  # lazy-init async Redis client
 
@@ -420,15 +421,20 @@ class GeminiVoiceService:
         return self._redis
 
     def is_available(self) -> bool:
-        """Check if Gemini voice is configured."""
-        return bool(GEMINI_API_KEY)
+        """Check if Gemini voice is configured (key resolved per call, ent#582)."""
+        from services.settings_service import get_gemini_api_key
+        return bool(get_gemini_api_key())
 
     def _get_client(self) -> genai.Client:
-        """Get or create the Gemini client."""
-        if not self._client:
-            if not GEMINI_API_KEY:
-                raise ValueError("GEMINI_API_KEY not configured")
-            self._client = genai.Client(api_key=GEMINI_API_KEY)
+        """Get or create the Gemini client — rebuilt when the key changes, so a
+        key saved or rotated in Settings applies without a restart (ent#582)."""
+        from services.settings_service import get_gemini_api_key
+        key = get_gemini_api_key()
+        if not key:
+            raise ValueError("GEMINI_API_KEY not configured")
+        if not self._client or self._client_key != key:
+            self._client = genai.Client(api_key=key)
+            self._client_key = key
         return self._client
 
     async def create_session(

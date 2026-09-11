@@ -13,7 +13,8 @@
 #   - all five images pulled at a PINNED tag, agent base retagged locally
 #
 # What happens at FIRST BOOT (per droplet, see files/.../per-instance):
-#   - admin password resolved (user-data-supplied, else generated)
+#   - admin source resolved: a user-data password, else none — the first
+#     browser visitor creates the admin at /setup (ent#580)
 #   - .env written, including TRINITY_INSTALL_SOURCE=do-marketplace
 #   - Caddy issued a Let's Encrypt certificate for the droplet's own IP
 #   - `start.sh --hosted --unattended` brings the stack up

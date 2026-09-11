@@ -48,6 +48,11 @@ export const useSessionsStore = defineStore('sessions', {
 
     // Feature-flag cache (resolved once per page load)
     featureFlagsLoaded: false,
+    // ent#581: `featureFlagsLoaded` is also true after a FAILED read, whose
+    // catch reports every flag closed — including `claudeAuthConfigured` false.
+    // The first-run overlay's one blocking step must not read that as "Claude
+    // is not configured", so it needs to tell the two apart.
+    featureFlagsFailed: false,
     sessionTabEnabled: false,
     voiceAvailable: false,
     workspaceAvailable: false,
@@ -153,7 +158,9 @@ export const useSessionsStore = defineStore('sessions', {
         // is entitled (registered in enterprise_features).
         this.a2aAvailable = Array.isArray(r.data?.enterprise_features)
           && r.data.enterprise_features.includes('a2a')
+        this.featureFlagsFailed = false
       } catch {
+        this.featureFlagsFailed = true
         this.sessionTabEnabled = false
         this.voiceAvailable = false
         this.workspaceAvailable = false

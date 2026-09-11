@@ -15,7 +15,7 @@ fails the one-click bar — which is why #2280 gates this work.
 | Stage | What happens |
 |---|---|
 | Build | Trinity checkout at `/opt/trinity`, then `start.sh --provision --cloud digitalocean --machine-only` (Docker, pinned Caddy, ufw, the firewall unit); all five images pulled at a pinned tag; agent base retagged `trinity-agent-base:latest` |
-| First boot | admin password resolved, then `start.sh --provision --cloud digitalocean --site-only --provenance do-marketplace --hosted --unattended` (`.env` including the provenance marker, Docker/ufw gap closed, a certificate for the droplet's own IP, and the install itself) |
+| First boot | admin source resolved (a user-data password, or none — the first visitor claims it at `/setup`), then `start.sh --provision --cloud digitalocean --site-only --provenance do-marketplace --hosted --unattended` (`.env` including the provenance marker, Docker/ufw gap closed, a certificate for the droplet's own IP, and the install itself) |
 
 Both phases are the **same installer** a doc-driven install runs (#2380) — the
 Packer scripts contribute only what is specific to baking a snapshot. There is no
@@ -136,28 +136,31 @@ raw 400 reads like a bad token.
 
 ## Design notes
 
-**Admin password.** DigitalOcean 1-Clicks have no vendor-defined input form at
-deploy time — verified against `digitalocean/marketplace-partners`, where the
-only prompt is the optional Managed Database checkbox. So the password is
-generated at first boot and printed in the MOTD.
+**Admin account — claimed in the browser (ent#580).** DigitalOcean 1-Clicks have
+no vendor-defined input form at deploy time — verified against
+`digitalocean/marketplace-partners`, where the only prompt is the optional
+Managed Database checkbox. So first boot provisions **no** admin: `ADMIN_PASSWORD`
+stays blank, `ADMIN_PASSWORD_SOURCE=browser` records that the blank is
+deliberate, and the first person to open `https://<ip>` gets `/setup` — email,
+password, product-updates consent — and creates the admin there. Nothing is
+generated, so nothing is printed, and the customer never needs a terminal.
 
-**The MOTD is reachable by two different routes, and which one the customer has
-depends on a choice they make before we ever run.** DigitalOcean's create page
-requires either a password or an SSH key:
+It used to be the other way round: a password generated at first boot and
+printed in the MOTD, which forced every customer into the droplet Console or an
+SSH client just to learn how to log in — and the Console cannot even accept a
+login on an SSH-key droplet, whose root account DigitalOcean leaves locked. The
+MOTD still exists, for whoever does SSH in: it prints the URL, the TLS state and
+whether an admin exists yet — never a password.
 
-- *password auth* — root has a password, so **Droplet → Console** works and no SSH
-  client is needed. This is the path the listing copy used to describe as if it
-  were the only one.
-- *SSH key auth* — DigitalOcean leaves the root account **locked** (`passwd -S
-  root` reports `L`), so the Console renders a `login:` prompt that cannot be
-  satisfied. The customer must `ssh root@<ip>` instead.
+The cost is a window between creation and the first visit in which anyone who
+finds the IP can claim the droplet. That was accepted on 2026-09-10 (the
+instance is empty then, and a squatted droplet can be destroyed); the practical
+advice lives in `docs/DEPLOYMENT.md` → Security Recommendations.
 
-Setting a root password to unify them is not available: `img_check.sh` scores
-`User root has no password set` as a PASS condition, so an image that sets one
-fails review. Documenting both routes is the fix, and `listing.md` does.
-
-An operator who prefers to choose it can supply one through *Additional Options →
-Startup scripts* on the Create page, as `#cloud-config`:
+An operator who prefers to choose the password up front can supply one through
+*Additional Options → Startup scripts* on the Create page, as `#cloud-config` —
+the admin is then provisioned at boot, the wizard never opens, and the MOTD says
+"the password you supplied":
 
 ```yaml
 #cloud-config
@@ -170,8 +173,8 @@ write_files:
 It must be `write_files` and **not** a shell script. 1-Click per-instance code
 runs from cloud-init's `scripts-per-instance` module, which runs *before*
 `scripts-user`, so a user-data shell script would execute after first boot had
-already generated a password and started Trinity. `write_files` runs in the
-earlier `cloud_config` stage and lands in time.
+already started Trinity with no admin. `write_files` runs in the earlier
+`cloud_config` stage and lands in time.
 
 **TLS with no domain.** Let's Encrypt has issued certificates for bare IP
 addresses since 2026-01-15 via the `shortlived` ACME profile (~6-day validity,

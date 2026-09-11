@@ -40,9 +40,6 @@ _FIRSTBOOT = (
     _ROOT / "packer" / "digitalocean" / "files" / "opt" / "trinity-firstboot" / "firstboot.sh"
 )
 _BAKERY = _ROOT / "packer" / "digitalocean" / "scripts" / "01-provision.sh"
-_CARD = (
-    _ROOT / "src" / "frontend" / "src" / "components" / "onboarding" / "HardeningGuide.vue"
-)
 
 
 def _code(path: Path) -> str:

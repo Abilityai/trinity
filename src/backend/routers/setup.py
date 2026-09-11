@@ -18,15 +18,35 @@ after the first success, so the exposure is limited to the pre-setup window only
 
 #2381 narrows that window to where ent#49's reasoning actually holds. ent#49
 priced the tradeoff on the premise *there is no admin yet, so there is nothing
-to hijack* — true for a blank-`ADMIN_PASSWORD` dev install, false for every
-install that boots with `ADMIN_PASSWORD` set (mandatory in prod compose, always
-present after `start.sh`), where `_ensure_admin_user` has already created a real
-admin. This endpoint now refuses whenever a usable admin account exists, so it
-provisions the first account and can never overwrite an existing one. The
-wizard therefore still renders for installs that genuinely have no way in, and
-disappears for installs where it had nothing left to do.
+to hijack* — true for a blank-`ADMIN_PASSWORD` install, false for every install
+that boots with `ADMIN_PASSWORD` set, where `_ensure_admin_user` has already
+created a real admin. This endpoint now refuses whenever a usable admin account
+exists, so it provisions the first account and can never overwrite an existing
+one. The wizard therefore still renders for installs that genuinely have no way
+in, and disappears for installs where it had nothing left to do.
+
+trinity-enterprise#580 makes that first case a product path, not a leftover: a
+marketplace one-click image boots with `ADMIN_PASSWORD` deliberately blank
+(`ADMIN_PASSWORD_SOURCE=browser`, set only by the image's first boot), so the
+first person to open the instance creates the admin here — no terminal. #2381's
+invariant is untouched: this still never renders over an existing admin; the
+marketplace path simply no longer pre-provisions one. The residual — the window
+between instance creation and that first visit, in which anyone who finds the
+address can claim it — was accepted on 2026-09-10 as the operator's
+responsibility (the instance is empty then, and a squatted one can be destroyed).
+See `docs/DEPLOYMENT.md` → Security Recommendations.
+
+That acceptance covers the marketplace only, so nothing else may become
+claimable by it. Only `docker-compose.hosted.yml` renders a blank
+`ADMIN_PASSWORD` (prod keeps `:?`), and it forwards
+`ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}`. A blank password with
+`ADMIN_PASSWORD_SOURCE=unset` is therefore a HAND-RUN hosted compose — not the
+marketplace (start.sh writes `browser`) — and this endpoint refuses it (403),
+after the #2381 existing-admin check and before any password work. An ABSENT
+variable (the dev compose, ent#49's blank dev install) and `browser` still pass.
 """
 import logging
+import os
 import re
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -121,9 +141,21 @@ async def set_admin_password(
             status_code=403,
             detail=(
                 "This instance already has an administrator account. "
-                "Sign in with the admin password from your deployment "
-                "configuration; this endpoint only provisions the very first "
-                "account."
+                "Sign in with its password; this endpoint only provisions the "
+                "very first account."
+            ),
+        )
+
+    # ent#580 backstop: a blank password is claimable only where it was meant to
+    # be. `unset` is what the hosted compose renders when nothing opted in (see
+    # module docstring); absent (dev compose) and `browser` fall through.
+    if not os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_PASSWORD_SOURCE") == "unset":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This instance has no admin password and was not set up to be "
+                "claimed in the browser. Set ADMIN_PASSWORD in .env and restart "
+                "Trinity, or run ./scripts/deploy/start.sh --hosted."
             ),
         )
 
