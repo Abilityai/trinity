@@ -85,6 +85,20 @@ def _set_cap(monkeypatch, value):
     )
 
 
+def _limit_exceeded():
+    """The `CanvasLimitExceeded` the LIVE code will actually raise.
+
+    Same eviction hazard as `_set_cap`, one object over: after `db.canvas` is
+    evicted and re-imported, `from db.canvas import CanvasLimitExceeded` hands
+    back a class from the NEW module while `db._canvas_ops` raises the OLD
+    module's class, and `pytest.raises` on the wrong one reports the correct
+    refusal as an unexpected exception. Read it from the same globals the cap
+    patch targets, so both resolve against whatever the running code closes over.
+    """
+    from database import db
+    return type(db._canvas_ops).upsert_canvas.__globals__["CanvasLimitExceeded"]
+
+
 def _write(agent: str, canvas_id: str, **kw):
     from database import db
     return db.upsert_agent_canvas(agent, canvas_id, blocks=kw.pop("blocks", []), **kw)
@@ -95,13 +109,12 @@ def _write(agent: str, canvas_id: str, **kw):
 def test_the_cap_refuses_a_new_canvas_by_name(canvas_db, monkeypatch):
     """The refusal names the count, the limit, and the way out. An agent reads
     this string — "you are full" with no remedy is a dead end."""
-    from db.canvas import CanvasLimitExceeded
     _set_cap(monkeypatch, 3)
 
     for i in range(3):
         _write("agent-a", f"c{i}")
 
-    with pytest.raises(CanvasLimitExceeded) as excinfo:
+    with pytest.raises(_limit_exceeded()) as excinfo:
         _write("agent-a", "c3")
 
     message = str(excinfo.value)
@@ -241,14 +254,13 @@ def test_the_default_canvas_can_be_deleted_and_comes_back_empty(canvas_db):
 def test_deleting_the_default_canvas_frees_a_slot_against_the_cap(canvas_db, monkeypatch):
     """The remedy the refusal names has to actually work on every canvas,
     including the default one."""
-    from db.canvas import CanvasLimitExceeded
     from database import db
     from models import DEFAULT_CANVAS_ID
     _set_cap(monkeypatch, 2)
 
     _write("agent-a", DEFAULT_CANVAS_ID)
     _write("agent-a", "other")
-    with pytest.raises(CanvasLimitExceeded):
+    with pytest.raises(_limit_exceeded()):
         _write("agent-a", "third")
 
     db.delete_agent_canvas("agent-a", DEFAULT_CANVAS_ID)
