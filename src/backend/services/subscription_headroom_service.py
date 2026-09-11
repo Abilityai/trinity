@@ -41,7 +41,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 import httpx
@@ -1007,23 +1007,42 @@ def recovery_verdict(
     or `None` for "leave the skip-list standing". Pure — every input is already
     resolved by the caller, so this is testable without Redis or a clock.
 
-    `fresh` is a reading inside the selection bound; `aged` is the same snapshot
-    read with only its instants believed (see the block comment above). A caller
-    with no aged reading passes the fresh one for both.
+    `fresh` is a reading inside the DISPLAY bound (`FRESHNESS_SECONDS` — the
+    caller bounds it, the same bound the evacuation door uses); `aged` is the
+    same snapshot read with only its instants believed (see the block comment
+    above). A caller with no aged reading passes the fresh one for both.
+
+    **A serving reading readmits only if it POSTDATES the failure.** A reading
+    taken before the 429 is exactly what a subscription at the wall carries for
+    up to one refresh interval after hitting it — the normal state on a
+    two-subscription install where both just hit the wall. Readmitting on it
+    re-opens #444's ping-pong from the other side: every user turn readmits the
+    other subscription on its pre-failure "ok", switches, fails, and flaps A↔B
+    until a probe records `rate_limited`. The `window_reset` arm below already
+    orders its instant against the failure; this arm has to as well, and a
+    failure whose instant cannot be read cannot be ordered — so it readmits
+    nothing on this arm (fail closed, like the arm below).
     """
     now = now or datetime.now(timezone.utc)
+    failed_at = None
+    if last_failure_at:
+        try:
+            failed_at = parse_iso_timestamp(last_failure_at)
+        except Exception:  # noqa: BLE001
+            failed_at = None
     if fresh is not None and not fresh.refusing:
-        return RECOVERY_SERVING_NOW
+        if failed_at is not None:
+            read_at = now - timedelta(seconds=max(0, int(fresh.age_seconds or 0)))
+            if read_at > failed_at:
+                return RECOVERY_SERVING_NOW
+        # A pre-failure "ok" (or an unorderable failure) is not evidence about
+        # NOW. Fall through to the instant arm, which orders itself.
     if fresh is not None and fresh.refusing:
         # A fresh reading that says "still refusing" is the strongest evidence
         # available and it points the other way. Do not fall through to the
         # instant arm and readmit on an older, weaker signal.
         return None
-    if aged is None or not last_failure_at:
-        return None
-    try:
-        failed_at = parse_iso_timestamp(last_failure_at)
-    except Exception:  # noqa: BLE001
+    if aged is None or failed_at is None:
         return None
     for window in (aged.five_hour, aged.seven_day):
         if window is None or not window.blocked:

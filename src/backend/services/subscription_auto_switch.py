@@ -130,7 +130,13 @@ def _readmit_recovered(headroom, current_subscription_id: str) -> tuple:
     if not skipped:
         return [], {}
     ids = [c.id for c in skipped]
-    fresh = headroom.cached_headroom_readings(ids)
+    # Bounded at the DISPLAY freshness, the same bound the evacuation door
+    # (`_assigned_subscription_is_refused`) uses — a reading as old as the
+    # window it overrules cannot overrule it, in either direction. The
+    # selection bound (≥ 2h) would let a pre-wall "ok" readmit for two hours.
+    fresh = headroom.cached_headroom_readings(
+        ids, max_age_seconds=headroom.FRESHNESS_SECONDS
+    )
     aged = headroom.cached_headroom_readings(
         ids, max_age_seconds=headroom.RECOVERY_INSTANT_MAX_AGE_SECONDS
     )

@@ -103,12 +103,50 @@ class TestRecoveryVerdict:
     def test_no_evidence_at_all_readmits_nothing(self):
         assert _svc().recovery_verdict(None, None, _iso(NOW), now=NOW) is None
 
-    def test_a_fresh_serving_reading_readmits(self):
+    def test_a_fresh_serving_reading_taken_AFTER_the_failure_readmits(self):
         """Ground truth about NOW beats an inference from a past failure —
-        the #447 rule, applied to candidate selection."""
+        the #447 rule, applied to candidate selection. "About NOW" means the
+        reading POSTDATES the failure: age 30 s, failure 10 min ago."""
         svc = _svc()
-        fresh = _reading(seven={"utilization_pct": 40.0, "blocked": False, "resets_at": None})
-        assert svc.recovery_verdict(fresh, fresh, _iso(NOW), now=NOW) == svc.RECOVERY_SERVING_NOW
+        fresh = _reading(seven={"utilization_pct": 40.0, "blocked": False, "resets_at": None}, age=30)
+        assert svc.recovery_verdict(
+            fresh, fresh, _iso(NOW - timedelta(minutes=10)), now=NOW
+        ) == svc.RECOVERY_SERVING_NOW
+
+    def test_a_serving_reading_taken_BEFORE_the_failure_readmits_nothing(self):
+        """The merge-train repro (#2645 ejection): reading age 600 s, 429 two
+        minutes ago. That "ok" is the pre-wall snapshot every subscription at the
+        wall carries for up to one refresh interval — readmitting on it flaps
+        A↔B on every user turn until a probe records `rate_limited`. The
+        serving arm must order itself the way the window_reset arm does."""
+        svc = _svc()
+        fresh = _reading(seven={"utilization_pct": 40.0, "blocked": False, "resets_at": None}, age=600)
+        assert svc.recovery_verdict(
+            fresh, fresh, _iso(NOW - timedelta(minutes=2)), now=NOW
+        ) is None
+
+    def test_a_serving_reading_with_an_unorderable_failure_readmits_nothing(self):
+        """No failure instant, or an unparseable one: nothing to order against,
+        so the serving arm fails CLOSED like the instant arm."""
+        svc = _svc()
+        fresh = _reading(seven={"utilization_pct": 40.0, "blocked": False, "resets_at": None}, age=30)
+        assert svc.recovery_verdict(fresh, fresh, None, now=NOW) is None
+        assert svc.recovery_verdict(fresh, fresh, "not-a-timestamp", now=NOW) is None
+
+    def test_a_pre_failure_serving_reading_still_falls_through_to_the_reset_arm(self):
+        """A stale "ok" is not evidence, but an elapsed reset that postdates
+        the failure still is — the two arms are independent."""
+        svc = _svc()
+        fresh = _reading(seven={"utilization_pct": 40.0, "blocked": False, "resets_at": None}, age=600)
+        aged = _reading(
+            five={"utilization_pct": 100.0, "blocked": True,
+                  "resets_at": _iso(NOW - timedelta(minutes=1))},
+            age=600,
+        )
+        # Reading at NOW-10m predates the failure at NOW-2m (serving arm says
+        # nothing); the reset at NOW-1m has elapsed AND postdates the failure.
+        failed_at = _iso(NOW - timedelta(minutes=2))
+        assert svc.recovery_verdict(fresh, aged, failed_at, now=NOW) == svc.RECOVERY_WINDOW_RESET
 
     def test_a_fresh_refusing_reading_readmits_nothing(self):
         """And it must not fall through to the weaker instant arm — the
@@ -200,16 +238,38 @@ class TestReadmission:
         and the user's message failed."""
         auto_switch, svc, db = selector
         db.list_recently_failed_alternatives.return_value = [_sub("b")]
-        monkeypatch.setattr(
-            svc, "cached_headroom_readings",
-            lambda ids, **k: {i: _reading(seven={"utilization_pct": 30.0, "blocked": False,
-                                                 "resets_at": None}) for i in ids},
-        )
+        # The failure is older than the reading (#2645 ejection): only then is
+        # the reading evidence about NOW.
+        db.last_failure_at_by_subscription.return_value = {"b": _iso(_real_now() - timedelta(minutes=10))}
+        seen_bounds = []
+
+        def _readings(ids, **k):
+            seen_bounds.append(k.get("max_age_seconds"))
+            return {i: _reading(seven={"utilization_pct": 30.0, "blocked": False,
+                                       "resets_at": None}, age=30) for i in ids}
+
+        monkeypatch.setattr(svc, "cached_headroom_readings", _readings)
         picked = auto_switch.select_best_alternative_subscription("a")
         assert picked is not None
         sub, why = picked
         assert sub.id == "b"
         assert why["readmitted"] == svc.RECOVERY_SERVING_NOW
+        # The readmission door reads at the DISPLAY bound, like the evacuation
+        # door — never at the ≥2h selection bound (the merge-train repro).
+        assert svc.FRESHNESS_SECONDS in seen_bounds
+
+    def test_a_pre_wall_reading_does_not_readmit_at_the_selector(self, selector, monkeypatch):
+        """Case 2 of the ejection repro, end to end through the selector:
+        reading 600 s old, 429 two minutes ago → the skip-list stands."""
+        auto_switch, svc, db = selector
+        db.list_recently_failed_alternatives.return_value = [_sub("b")]
+        db.last_failure_at_by_subscription.return_value = {"b": _iso(_real_now() - timedelta(minutes=2))}
+        monkeypatch.setattr(
+            svc, "cached_headroom_readings",
+            lambda ids, **k: {i: _reading(seven={"utilization_pct": 30.0, "blocked": False,
+                                                 "resets_at": None}, age=600) for i in ids},
+        )
+        assert auto_switch.select_best_alternative_subscription("a") is None
 
     def test_no_evidence_leaves_the_skip_list_standing(self, selector, monkeypatch):
         auto_switch, svc, db = selector
@@ -858,13 +918,30 @@ class TestTheRefusalPredicateIsThreeState:
         monkeypatch.setattr(svc, "cached_headroom_readings",
                             lambda ids, **_k: {i: serving for i in ids})
 
-        readmitted = svc.recovery_verdict(serving, serving, _iso(_real_now()))
+        # The reading (age 30 s) POSTDATES the failure (10 min ago) — the only
+        # shape in which a serving reading is evidence about now (#2645 ejection).
+        readmitted = svc.recovery_verdict(serving, serving, _iso(_real_now() - timedelta(minutes=10)))
         evacuated = auto_switch._assigned_subscription_is_refused("sub-a")
         assert readmitted == svc.RECOVERY_SERVING_NOW
         assert evacuated is None, (
             "the readmit door opens on a fresh serving reading while the evacuate "
             "door also opens on it — that is the #447 OR, one level over"
         )
+
+    def test_a_pre_failure_reading_closes_the_readmit_door_without_opening_evacuation(self, monkeypatch):
+        """The one permitted DISagreement, and its direction: a serving reading
+        older than the failure readmits nothing (it says nothing about now),
+        and it does not evacuate either. Both doors shut is not a flap; the
+        flap is readmit + evacuate on the same reading."""
+        auto_switch, svc = _auto_switch(), _svc()
+        db = MagicMock(name="db")
+        db.is_subscription_rate_limited.return_value = True
+        monkeypatch.setattr(auto_switch, "db", db)
+        serving = _reading(five={"utilization_pct": 20.0, "blocked": False, "resets_at": None}, age=600)
+        monkeypatch.setattr(svc, "cached_headroom_readings",
+                            lambda ids, **_k: {i: serving for i in ids})
+        assert svc.recovery_verdict(serving, serving, _iso(_real_now() - timedelta(minutes=2))) is None
+        assert auto_switch._assigned_subscription_is_refused("sub-a") is None
 
 
 class TestEveryTerminalCarriesTheSwitch:
