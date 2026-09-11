@@ -10,6 +10,8 @@
  *      off by default, reversible — never "not traceable" or "secure".
  *   4. A 404 is described as what it is: a receiver that is not live, or, from
  *      an overridden URL, a receiver that answered 404.
+ *   5. The receiver line names the origin the attempt RECORDED, never the URL
+ *      configured now, and says plainly when the two differ (#2571).
  */
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
@@ -17,6 +19,7 @@ import {
   consentVariant,
   CONSENT_COPY,
   receiverCopy,
+  receiverLabel,
   isEmailNudgeVisible,
   readSnoozedUntil,
   persistSnooze,
@@ -108,6 +111,20 @@ describe('CONSENT_COPY promises only what the payload earns', () => {
 })
 
 describe('receiverCopy', () => {
+  const sink = 'https://sink.example:8787'
+  const hosted = 'https://intake.abilityai.dev'
+
+  it('names the receiver that acknowledged, from the RECORD — never the address configured now', () => {
+    expect(receiverCopy('ok', { host: sink })).toContain(sink)
+    expect(receiverCopy('ok', { host: sink })).toMatch(/acknowledged/)
+    expect(receiverCopy('ok', { host: sink, configuredHost: hosted })).not.toContain(hosted)
+  })
+  it('says when the record predates the destination instead of inventing one', () => {
+    expect(receiverCopy('ok')).toMatch(/acknowledged/)
+    expect(receiverCopy('ok')).toMatch(/not recorded/)
+    expect(receiverCopy('receiver_404')).toMatch(/not recorded/)
+    expect(receiverCopy('receiver_404')).toContain('TELEMETRY_SHARING_URL')
+  })
   it('states a default-URL 404 as a 404, never as "not live yet" (the receiver has been live since 2026-09-04)', () => {
     expect(receiverCopy('receiver_not_live')).toMatch(/answered 404/)
     // #2618: a failed send is retried at the next wake, not "daily" — the copy must not name a cadence
@@ -117,16 +134,58 @@ describe('receiverCopy', () => {
     expect(receiverCopy('receiver_not_live')).not.toMatch(/not live/i)
     expect(receiverCopy('receiver_not_live')).not.toMatch(/your/i)
   })
-  it('states an override 404 as that receiver, naming the env var', () => {
-    const c = receiverCopy('receiver_404', 'https://example.test/x')
-    expect(c).toContain('https://example.test/x')
+  it('states an override 404 as that receiver, naming the RECORDED origin and the env var', () => {
+    const c = receiverCopy('receiver_404', { host: 'https://example.test' })
+    expect(c).toContain('https://example.test')
     expect(c).toContain('TELEMETRY_SHARING_URL')
+  })
+  it('a failed attempt names where it was sent, and never says a receiver "answered"', () => {
+    const c = receiverCopy('failed', { host: sink })
+    expect(c).toContain(`to ${sink}`)
+    expect(c).not.toMatch(/answered/)
+    expect(c).toMatch(/retried/)
+  })
+  it('says plainly when the newest attempt went elsewhere than the configured address, and what happens next', () => {
+    const c = receiverCopy('ok', { host: sink, configuredHost: hosted, mismatch: true, enabled: true })
+    expect(c).toContain(sink)
+    expect(c).toContain(hosted)
+    expect(c).toMatch(/has not seen it/)
+    expect(c).toMatch(/next scheduled send/)
+    const off = receiverCopy('ok', { host: sink, configuredHost: hosted, mismatch: true, enabled: false })
+    expect(off).toMatch(/off/)
+    expect(off).not.toMatch(/next scheduled send/)
+    // No recorded origin ⇒ nothing to contrast, so no clause even if asked.
+    expect(receiverCopy('ok', { mismatch: true, configuredHost: hosted })).not.toContain(hosted)
   })
   it('never fabricates a send that did not happen', () => {
     expect(receiverCopy(null)).toMatch(/nothing has been sent/i)
     expect(receiverCopy(undefined)).toMatch(/nothing has been sent/i)
     expect(receiverCopy('ok')).toMatch(/acknowledged/)
     expect(receiverCopy('failed')).toMatch(/retried/)
+  })
+  it('never prints "null" or "undefined" for any hint or option shape', () => {
+    const hints = ['ok', 'receiver_not_live', 'receiver_404', 'failed', null, undefined, 'something-new']
+    const opts = [undefined, {}, { host: null }, { host: undefined, mismatch: true }, { host: 123, mismatch: true },
+      { host: sink, configuredHost: null, mismatch: true }, { host: sink, configuredHost: undefined, mismatch: true, enabled: false }]
+    for (const h of hints) for (const o of opts) {
+      const c = receiverCopy(h, o)
+      expect(c, `${h} ${JSON.stringify(o)}`).not.toMatch(/\bnull\b|\bundefined\b/)
+      expect(c.length).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('receiverLabel', () => {
+  it('prints the recorded origin verbatim', () => {
+    expect(receiverLabel('https://sink.example:8787')).toBe('https://sink.example:8787')
+    expect(receiverLabel('  https://a.example ')).toBe('https://a.example')
+  })
+  it('reads as unknown for an attempt logged before the destination was recorded, or a corrupt value', () => {
+    for (const v of [undefined, null, '', '   ', 123, {}, []]) {
+      const l = receiverLabel(v)
+      expect(l).toMatch(/unknown/)
+      expect(l).not.toMatch(/\bnull\b|\bundefined\b/)
+    }
   })
 })
 
