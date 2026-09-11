@@ -549,6 +549,10 @@ services:
       # a structured `queued_timeout` receipt instead of `fetch failed`.
       # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
       - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
+      # #2661 ceiling for the executions lookup that recovery runs AFTER the
+      # abort — whatever is left of the gateway ceiling is all it has, so it
+      # must fail fast rather than hang into the same `fetch failed`.
+      - MCP_RECOVERY_TIMEOUT_MS=${MCP_RECOVERY_TIMEOUT_MS:-5000}
       # MCP server authenticates to backend as ADMIN_USERNAME/ADMIN_PASSWORD.
       # Read directly from ADMIN_PASSWORD so devs do not have to set the same
       # secret twice (issue #692).

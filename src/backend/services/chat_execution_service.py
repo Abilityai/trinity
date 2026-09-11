@@ -1552,10 +1552,36 @@ async def _acquire_task_capacity(
     return cap_result, effective_timeout
 
 
-def _map_task_failure(name, result):
+# #2661: the statuses a sync backlog long-poll may reconstruct a result from
+# (the ones a row cannot leave). `TaskExecutionStatus` is a str-Enum, so the
+# stored string `db.get_execution` returns compares equal to the member.
+_SYNC_BACKLOG_TERMINAL = (
+    TaskExecutionStatus.SUCCESS,
+    TaskExecutionStatus.FAILED,
+    TaskExecutionStatus.CANCELLED,
+    TaskExecutionStatus.SKIPPED,
+)
+
+
+def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
-    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError."""
+    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError.
+
+    #2661: releases the idempotency claim before raising. Both sync branches
+    call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
+    the raising path — so every failed/cancelled/timed-out sync `/task` left its
+    claim `in_flight` for the full 24h TTL. The user-visible effect was the
+    inverse of what idempotency is for: a legitimate retry of the same message
+    answered 409 for a day against a task that had died minutes earlier, while
+    the ONLY way to get through was to reword the message — which derives a
+    different key and dispatches a genuine duplicate.
+
+    `idem` is keyword-only and REQUIRED, not defaulted: a default would let a
+    third call site be added later that silently reintroduces the wedge, and the
+    wedge is invisible until someone retries a full day later.
+    """
     if result.status in ("failed", "cancelled"):
+        idempotency_service.fail(idem)
         if "at capacity" in (result.error or ""):
             raise ChatDispatchError(
                 429, f"Agent '{name}' is at capacity. Try again later."
@@ -1678,15 +1704,15 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
     )
     try:
         wait_payload = await wait_for_sync_terminal(execution_id, timeout=sync_wait_cap)
+        timed_out = False
     except asyncio.TimeoutError:
-        raise ChatDispatchError(
-            504,
-            (
-                f"Sync task on agent '{name}' did not complete within "
-                f"{sync_wait_cap}s. Execution {execution_id} may still be "
-                f"running; poll GET /api/agents/{name}/executions/{execution_id}."
-            ),
-        )
+        # #2661: do NOT raise here. The wait can miss a terminal that landed
+        # (a lost wakeup, or one that lands inside the cap's last tick), so the
+        # row is the authority — read it below and only 504 when it is still
+        # non-terminal. Raising straight from this except was one of the two
+        # exits that left the idempotency claim `in_flight` for its 24h TTL.
+        wait_payload = None
+        timed_out = True
 
     if wait_payload is not None and wait_payload.get("result") is not None:
         result = wait_payload["result"]
@@ -1694,9 +1720,38 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
     else:
         row = db.get_execution(execution_id)
         if row is None:
+            # Nothing is running under this key that anyone can find, so a
+            # retry must be allowed to dispatch afresh (#2661) — release, the
+            # same verdict `_map_task_failure` gives a failed row.
+            idempotency_service.fail(idem)
             raise ChatDispatchError(
                 503, f"Execution {execution_id} disappeared while waiting"
             )
+        if timed_out and row.status not in _SYNC_BACKLOG_TERMINAL:
+            # Still queued/running past the long-poll cap. The claim must NOT
+            # be released — a retry would dispatch a second execution beside
+            # the live one, which is the duplicate idempotency exists to stop.
+            # Nor may it stay `in_flight`: nothing downstream completes it, so
+            # a retry after the row terminates would still answer 409 for a
+            # day (the #2661 wedge). Complete it with a RECEIPT — the same
+            # shape the async paths store (`_queued_payload`) and the same
+            # `queued_timeout` vocabulary the MCP client speaks — so a replay
+            # returns 200 + the execution to poll, and the row stays the
+            # single source of truth for the outcome.
+            receipt = {
+                "status": "queued_timeout",
+                "execution_id": execution_id,
+                "task_execution_id": execution_id,
+                "agent_name": name,
+                "message": (
+                    f"Sync task on agent '{name}' did not complete within "
+                    f"{sync_wait_cap}s. Execution {execution_id} may still be "
+                    f"running; poll GET /api/agents/{name}/executions/{execution_id}."
+                ),
+                "async_mode": True,
+            }
+            idempotency_service.complete(idem, execution_id, receipt)
+            raise ChatDispatchError(504, receipt["message"])
         from services.task_execution_service import TaskExecutionResult
 
         result = TaskExecutionResult(
@@ -1717,7 +1772,7 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
         )
         sync_chat_session_id = None
 
-    _map_task_failure(name, result)
+    _map_task_failure(name, result, idem=idem)
 
     sync_response_data = result.raw_response or {}
     if sync_chat_session_id:
@@ -1776,7 +1831,7 @@ async def _dispatch_sync_immediate(
             error=result.error if result.status == TaskExecutionStatus.FAILED else None,
         )
 
-    _map_task_failure(name, result)
+    _map_task_failure(name, result, idem=idem)
 
     response_data = result.raw_response
 
