@@ -682,6 +682,15 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   404 from the default URL is worded as a 404 at the default address (the
   receiver has been live since 2026-09-04, ent#190, so that is an anomaly to look
   at); from an overridden `TELEMETRY_SHARING_URL` as that receiver answering 404.
+  Each entry also records **`destination`** (#2571) — the scheme + host + port
+  of `TELEMETRY_SHARING_URL` at send time, an RFC 6454 origin derived through
+  `strip_url_credentials`, so it never carries userinfo, path or query — and the
+  status read answers `configured_destination`, `receiver_destination` and
+  `destination_changed`, so the panel names the host that actually answered and
+  says plainly when the newest send went somewhere other than the address now
+  configured (a local test receiver's 200 no longer reads as the hosted
+  service's acknowledgement). Entries written before the key existed render
+  their host as unknown; no migration.
 - **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
   is retried at every due wake until the first 2xx
   (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
@@ -700,8 +709,7 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
 
 **Deferred**: feature-usage / click-through coverage (PR2, child issue); an
 edition-differentiated ask (ent#496, unblocked by ent#190); the taxonomy field
-(ent#418); the send log recording its destination host (#2571); `main.py`
-adopting `utils/app_version.py` (debt inbox
+(ent#418); `main.py` adopting `utils/app_version.py` (debt inbox
 `2026-09-03-main-version-resolver-adopt-util`).
 
 ---

@@ -237,7 +237,7 @@ def test_share_now_refuses_a_schema_violation_and_records_it(tss):
     assert sends and sends[0]["ok"] is False and sends[0]["error"] == "schema"
 
 
-def test_share_now_records_a_404_and_names_the_missing_receiver(tss):
+def test_404_hint_is_judged_by_the_recorded_destination_then_by_the_current_url(tss):
     mod, store, _ = tss
     _consent_on(store)
     fake_ac, _client = _fake_client(404)
@@ -250,9 +250,20 @@ def test_share_now_records_a_404_and_names_the_missing_receiver(tss):
     assert st["recent_sends"][0]["ok"] is False
     assert st["receiver_hint"] == "receiver_not_live"
     assert st["last_shared_at"] is None and st["backfill_delivered_at"] is None
-    # An overridden URL is worded as YOUR receiver, not the hosted service.
+    # That 404 came from the DEFAULT address, and re-pointing the env var
+    # afterwards does not change where it came from (#2571). The wording follows
+    # the send; the panel is separately told the configured address has moved.
     with patch.object(mod, "TELEMETRY_SHARING_URL", "https://example.test/x"):
-        assert mod.receiver_hint(st["recent_sends"]) == "receiver_404"
+        moved = mod.get_status()
+        assert moved["receiver_hint"] == "receiver_not_live"
+        assert moved["destination_changed"] is True
+        # A pre-#2571 entry records no destination, so it keeps the pre-#2571
+        # reading: an overridden URL is worded as YOUR receiver, not the hosted
+        # service. Old data never gains a claim it cannot support.
+        mod._record_send({"sent_at": "t", "ok": False, "http_status": 404, "payload": {}})
+        legacy = mod.get_status()
+        assert legacy["receiver_hint"] == "receiver_404"
+        assert legacy["destination_changed"] is False
 
 
 def test_share_now_success_stamps_delivery_and_posts_the_share_id(tss):
@@ -291,6 +302,157 @@ def test_send_log_is_bounded_and_survives_a_corrupt_row(tss):
     assert len(sends) == mod.RECENT_SENDS_LIMIT and sends[0]["sent_at"] == "t6"
     store[mod.KEY_RECENT_SENDS] = "{not json"
     assert mod.get_status()["recent_sends"] == []   # never a 500
+
+
+# ---------------------------------------------------------------------------
+# Where the send went (#2571)
+# ---------------------------------------------------------------------------
+
+#: (configured url, the origin recorded in the send log)
+_ORIGINS = [
+    # userinfo, path, query and fragment all dropped; case folded; :443 is https's default
+    ("https://u:p@Intake.Example:443/v1/x?k=v#f", "https://intake.example"),
+    ("http://h.test:8787/v1", "http://h.test:8787"),   # an explicit non-default port IS the address
+    ("http://h.test:80/", "http://h.test"),            # the scheme's own default folds away
+    ("https://host.test:0/x", "https://host.test"),    # ":0" reads as "no port given" (ent#398)
+    ("https://[::1]:8443/x", "https://[::1]:8443"),    # an IPv6 literal keeps its brackets, skips IDNA
+    ("https://tok@LEGACY@host.test/", "https://host.test"),      # the authority ends at the LAST "@"
+    ("https://my_registry.example.com/x", "https://my_registry.example.com"),  # underscores: illegal
+                                                                              # IDNA, legal operator URL
+    ("", None),
+    ("not a url", None),
+    ("https://[oops/x", None),           # urlsplit itself raises on an unbalanced bracket
+    (None, None),                        # never raises, whatever the caller holds
+    ("https://h.test:notaport/", None),  # .port raises on a non-numeric port
+    ("https://%D0%B0pple.com/x", None),  # a percent-encoded authority is unverifiable — never guessed
+    ("example.com/api", None),           # scheme-less: httpx cannot send there either
+]
+
+
+def test_share_destination_is_an_origin_never_userinfo_path_or_query(tss):
+    """The stored value is scheme + host + port and nothing else (AC 1): a path
+    can carry a token, an origin cannot. Total over any input — it runs inside
+    `share_now`, whose entry dict is built OUTSIDE its own try."""
+    mod, _store, _ = tss
+    for url, expected in _ORIGINS:
+        got = mod.share_destination(url)
+        assert got == expected, f"{url!r} -> {got!r}, expected {expected!r}"
+        for secret in ("u:p", "tok", "LEGACY", "k=v", "/v1", "#f"):
+            assert secret not in (got or ""), f"{secret!r} survived into {got!r}"
+
+
+def test_the_same_host_written_two_ways_is_one_destination(tss):
+    """The two sides of the mismatch signal are different inputs captured at
+    different times, so one host retyped in another form must compare equal —
+    a false "changed" prints "no send has gone there since" about an address
+    sends are in fact reaching, which is the dishonest sentence this issue
+    exists to delete."""
+    mod, _store, _ = tss
+    assert mod.share_destination("https://HOST.TEST./x") == mod.share_destination("https://host.test/x")
+    assert mod.share_destination("https://fa\u00df.de/x") == mod.share_destination("https://xn--fa-hia.de/x")
+    # An IP literal is one address however it is spelled (ent#399). Comparing
+    # those textually is what permanently refused an IPv6 peer against its own
+    # card; here it would print "no send has gone there since" about an address
+    # every send is in fact reaching.
+    assert mod.share_destination("https://[0:0:0:0:0:0:0:1]:8443/x") == mod.share_destination("https://[::1]:8443/x")
+    assert mod.share_destination("https://[2606:4700:4700:0:0:0:0:1111]/x") \
+        == mod.share_destination("https://[2606:4700:4700::1111]/x")
+    # …and the folding never equates two addresses a resolver would separate:
+    # `ipaddress` REFUSES the ambiguous IPv4 spellings instead of folding them,
+    # and the port stays part of the address — that is the issue's own scenario.
+    assert mod.share_destination("http://0177.0.0.1/x") != mod.share_destination("http://127.0.0.1/x")
+    assert mod.share_destination("http://localhost:8787/x") != mod.share_destination("http://localhost/x")
+
+
+def test_send_log_records_the_destination_at_send_time(tss):
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, _client = _fake_client(200)
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "https://tok@host.test:8787/v1/telemetry-share?x=1"), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now(backfill=True)) is True
+        st = mod.get_status()
+    sends = st["recent_sends"]
+    assert sends[0]["destination"] == "https://host.test:8787"
+    persisted = store[mod.KEY_RECENT_SENDS]
+    assert "tok" not in persisted and "x=1" not in persisted and "telemetry-share" not in persisted
+    assert st["receiver_destination"] == st["configured_destination"] == "https://host.test:8787"
+    assert st["destination_changed"] is False
+
+
+def test_send_log_records_the_destination_on_a_failed_post_too(tss):
+    """The key sits on the entry dict built before anything can raise (#2618),
+    so every path records it — transport error, schema refusal, 2xx alike."""
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, client = _fake_client()
+    client.post = AsyncMock(side_effect=RuntimeError("boom"))
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "https://u:p@h.test/v1/x"), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now(backfill=True)) is False
+    sends = mod.get_status()["recent_sends"]
+    assert sends[0]["destination"] == "https://h.test" and sends[0]["error"] == "RuntimeError"
+
+    bad = _valid(mod)
+    bad["surprise"] = 1
+    fake_ac2, _client2 = _fake_client(200)
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "https://u:p@h.test/v1/x"), \
+         patch.object(mod, "build_aggregate_payload", return_value=bad), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac2):
+        assert asyncio.run(mod.share_now(backfill=True)) is False
+    sends = mod.get_status()["recent_sends"]
+    fake_ac2.assert_not_called()                     # refused before it left the box
+    assert sends[0]["error"] == "schema" and sends[0]["destination"] == "https://h.test"
+    assert "u:p" not in store[mod.KEY_RECENT_SENDS]
+
+
+def test_status_says_when_the_newest_send_went_somewhere_else(tss):
+    """The reported bug: an operator points the env var at a local receiver, gets
+    a 200, restores the default — and the panel credits the hosted service."""
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, _client = _fake_client(200)
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "http://localhost:8787/v1/telemetry-share"), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now()) is True
+    with patch.object(mod, "TELEMETRY_SHARING_URL", mod.DEFAULT_SHARE_URL):
+        st = mod.get_status()
+    assert st["receiver_hint"] == "ok"
+    assert st["receiver_destination"] == "http://localhost:8787"
+    assert st["configured_destination"] == "https://intake.abilityai.dev"
+    assert st["destination_changed"] is True
+
+
+def test_destination_comparison_ignores_case_default_port_and_path(tss):
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, _client = _fake_client(200)
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "http://localhost:8787/v1/telemetry-share"), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now()) is True
+    # The same address written another way is the same address …
+    with patch.object(mod, "TELEMETRY_SHARING_URL", "HTTP://LOCALHOST:8787/other/path?y=2"):
+        assert mod.get_status()["destination_changed"] is False
+    # … and an explicit non-default port is part of it.
+    with patch.object(mod, "TELEMETRY_SHARING_URL", "http://localhost/v1/telemetry-share"):
+        assert mod.get_status()["destination_changed"] is True
+
+
+def test_legacy_entries_read_as_unknown_never_as_a_match(tss):
+    """An entry written before the key existed keeps rendering — as unknown, not
+    as agreement with whatever is configured today (AC 4: no migration)."""
+    mod, store, _ = tss
+    mod._record_send({"sent_at": "t", "ok": True, "http_status": 200, "payload": {}})
+    st = mod.get_status()
+    assert st["receiver_hint"] == "ok"
+    assert st["receiver_destination"] is None
+    assert st["destination_changed"] is False
+    assert "destination" not in st["recent_sends"][0]   # the reader never fabricates it
 
 
 def test_backfill_is_retried_until_the_receiver_acknowledges(tss):
@@ -434,6 +596,16 @@ def test_status_get_skips_the_preview_when_asked(router_env):
     assert "payload_preview" not in cheap and "recent_sends" in cheap
     full = asyncio.run(router_mod.get_telemetry_sharing(True, _admin_user()))
     assert full["payload_preview"]["schema_version"] == 2
+
+
+def test_status_route_carries_the_destination_triple(router_env):
+    """The router spreads `get_status()`, so the three additive keys reach the
+    panel with no router change (#2571)."""
+    router_mod, _tss, _store, _audit = router_env
+    cheap = asyncio.run(router_mod.get_telemetry_sharing(False, _admin_user()))
+    assert cheap["configured_destination"] is None or isinstance(cheap["configured_destination"], str)
+    assert cheap["receiver_destination"] is None      # nothing has been sent on this store
+    assert cheap["destination_changed"] is False
 
 
 def test_dismiss_route_is_idempotent_and_audited(router_env):
