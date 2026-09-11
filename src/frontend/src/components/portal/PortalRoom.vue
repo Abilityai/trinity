@@ -232,48 +232,58 @@
             <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
           </span>
         </div>
-        <form v-else class="flex items-end gap-2" @submit.prevent="send">
-          <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
-               wrapper as the 1:1 composer; it must carry the flex sizing the
-               textarea used to hold, or the field collapses to content width.
-
-               #2259: and the same `block` on the textarea. A `<textarea>` is
-               inline-block, so in this block wrapper it sat on the baseline and
-               the line box reserved 6px below it; `items-end` then aligned Send
-               to that dead space instead of to the visible input edge. Twin of
-               PortalConversation — the two composers are the same markup in two
-               files, so a fix landing in only one silently keeps the bug. -->
-          <div ref="composerWrap" class="relative flex-1 min-w-0">
-            <PortalTypeahead
-              v-if="typeaheadOpen"
-              kind="@"
-              :rows="typeaheadRows"
-              :active-index="activeIndex"
-              :overflow="typeaheadBound.overflow"
-              :empty-message="typeaheadEmpty || ''"
-              @pick="acceptActive"
-              @hover="activeIndex = $event"
-            />
-            <textarea
-              ref="textarea"
-              v-model="input"
-              rows="1"
-              :placeholder="placeholder"
-              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-              @keydown="onComposerKeydown"
-              @input="onComposerInput"
-              @click="onComposerCaret"
-              @select="onComposerCaret"
-            ></textarea>
-          </div>
-          <button
-            type="submit"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-            :disabled="!input.trim() || sending"
-            title="Send"
+        <form v-else @submit.prevent="send">
+          <!-- #2662: the same composer shell as the 1:1 thread — field on top,
+               controls in a row inside it. The two composers are the same
+               markup in two files (the #2211 lesson recorded in
+               `portalComposerAlignment.spec.js`), so this shape lands in BOTH
+               or the room composer visibly diverges from the chat it sits
+               beside. The room has no model picker — that is per-agent and a
+               room has several — so its control row holds Send alone. -->
+          <div
+            class="rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            @click="focusComposerFromShell"
           >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
-          </button>
+            <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
+                 wrapper as the 1:1 composer, same ref name, and the same
+                 `block` on the textarea (#2259). It sheds `flex-1 min-w-0`
+                 with its twin: it is the shell's first row, not a flex item. -->
+            <div ref="composerWrap" class="relative">
+              <PortalTypeahead
+                v-if="typeaheadOpen"
+                kind="@"
+                :rows="typeaheadRows"
+                :active-index="activeIndex"
+                :overflow="typeaheadBound.overflow"
+                :empty-message="typeaheadEmpty || ''"
+                @pick="acceptActive"
+                @hover="activeIndex = $event"
+              />
+              <textarea
+                ref="textarea"
+                v-model="input"
+                rows="1"
+                :placeholder="placeholder"
+                class="block w-full resize-none border-0 bg-transparent text-sm px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                @keydown="onComposerKeydown"
+                @input="onComposerInput"
+                @click="onComposerCaret"
+                @select="onComposerCaret"
+              ></textarea>
+            </div>
+            <div class="mt-1 flex items-center gap-1">
+              <div class="ml-auto flex items-center gap-1 min-w-0">
+                <button
+                  type="submit"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
+                  :disabled="!input.trim() || sending"
+                  title="Send"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
         </form>
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
       </div>
@@ -616,6 +626,18 @@ function onComposerInput(e) {
 }
 
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
+/**
+ * #2662: the shell owns the chrome, so the visible box is bigger than the field
+ * and a click on its padding used to land on <body>. Twin of the 1:1 composer's
+ * handler, guard included — the typeahead picks on `mousedown` and the click
+ * that follows would otherwise arrive here. No `voiceCallActive` arm: a room has
+ * no call. The room's shell chrome is unconditional for the same reason.
+ */
+const SHELL_INTERACTIVE = 'button, select, textarea, input, a, [role="listbox"], [role="option"]'
+function focusComposerFromShell(event) {
+  if (event.target?.closest?.(SHELL_INTERACTIVE)) return
+  textarea.value?.focus()
+}
 
 function onComposerKeydown(e) {
   const length = typeaheadBound.value.visible.length

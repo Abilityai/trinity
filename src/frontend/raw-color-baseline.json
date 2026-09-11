@@ -1,7 +1,7 @@
 {
   "generated": "2026-09-09",
   "branch": "dev",
-  "commit": "4f71c502ccef83426db123646e5e2cd39cebd7fb",
+  "commit": "fdefeb9a6b12235e9524674bce80bf01b84fa845",
   "refrozen": {
     "issue": "#2605",
     "why": "The ratchet was documented as enforced and nothing ran it, so the tree drifted past the 2026-07-31 freeze. This re-freeze is the deliberate disposition the issue asks for, in its own PR with the increases named \u2014 NOT a silent absorption into a feature diff. From here the guard (tests/unit/rawColorRatchet.spec.js) bites.",
@@ -10,7 +10,9 @@
       "raw_nongray": "737 -> 815 (+78). Grew in 4 baselined files (ReliabilityPanel +4, ReportsPanelFleet +4, Dashboard +5, enterprise/Audit +4) and arrived in 10 files created after the freeze, led by settings/PortalSessionPolicyPanel (30) and AgentListPanel (28). views/Portal.vue is NOT among them: its 6 amber-* classes from #2261 were paid down to semantic status-warning tokens in this PR, since the issue named them as the exact thing the ratchet exists to catch.",
       "raw_gray": "6938 -> 8699 (+1761) across 24 baselined files plus 61 new ones. Gray is the neutral ink ladder and is ratcheted but not held to zero for new files.",
       "hardcoded_colors": "383 -> 456 (+73), which the issue did not report. Almost all of it is FleetGrid.vue (102 -> 156); the other five are single hex literals in ExecutionsPanel, OverviewPanel, ReliabilityPanel, ScheduleAnalyticsCard and settings/TelemetrySharingPanel.",
-      "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR."
+      "_merge_train_note": "merge-train 2026-09-09: +3 raw_gray in components/portal/PortalRailFiles.vue from #2608 (landed on dev after this branch), absorbed at regeneration; PortalFilePreview.vue is a new file from the same PR.",
+      "_2662_note": "#2662: +4 raw_gray in components/base/fieldClasses.js (11 -> 15) \u2014 the new FIELD_GHOST_CLASS recipe's resting ink and hover ground, light and dark. Gray is the neutral ink ladder and has no semantic token to move to; the recipe was trimmed from 6 to 4 by dropping the hover ink change, matching the Workspace agent picker it now sits beside. No other entry moves.",
+      "_2662_rebase_note": "#2662 regeneration after rebasing onto origin/dev @5a0cb0078: absorbs +1 raw_gray in components/portal/PortalJumpToLatest.vue, a file created on dev by #2652 after this branch was cut and never added to the baseline there. Nothing on this branch moved \u2014 fieldClasses.js stays 15, PortalConversation.vue 90, PortalRoom.vue 47. Totals were 8722/3997/197 against an actual 8723/4020/198 purely because the previous freeze was computed pre-rebase; the ratchet never reads totals, so this was cosmetic rather than a failing gate. Same shape as the _merge_train_note above."
     },
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
     "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level.",
@@ -484,7 +486,7 @@
     },
     "src/frontend/src/components/base/fieldClasses.js": {
       "raw_nongray": 0,
-      "raw_gray": 11,
+      "raw_gray": 15,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/canvas/AgentCanvasTab.vue": {
@@ -675,6 +677,11 @@
     "src/frontend/src/components/portal/PortalFilePreview.vue": {
       "raw_nongray": 0,
       "raw_gray": 35,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalJumpToLatest.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 1,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalLoops.vue": {
@@ -1005,9 +1012,9 @@
   },
   "totals": {
     "raw_nongray": 815,
-    "raw_gray": 8718,
+    "raw_gray": 8723,
     "hardcoded_colors": 456,
-    "semantic_tokens": 3997,
-    "files_with_violations": 197
+    "semantic_tokens": 4020,
+    "files_with_violations": 198
   }
 }
