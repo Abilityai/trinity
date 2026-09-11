@@ -391,12 +391,16 @@ def test_the_watcher_is_armed_in_the_agent_server(monkeypatch):
 def test_the_watcher_ships_no_new_dependency():
     """No Dockerfile change means no new pip install — the module must live on
     the stdlib plus httpx, which the heartbeat already brings."""
+    import ast
+
     src = (_BASE_IMAGE / "agent_server" / "pipeline_state_watch.py").read_text()
-    third_party = {
-        line.split()[1].split(".")[0]
-        for line in src.splitlines()
-        if line.startswith("import ") or line.startswith("from ")
-    }
+    roots = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            # level > 0 is a relative import — in-package, not a dependency.
+            roots.add((node.module or "").split(".")[0])
     allowed = {"__future__", "asyncio", "json", "logging", "os", "re", "time",
                "pathlib", "typing", "httpx"}
-    assert third_party <= allowed, f"unexpected imports: {sorted(third_party - allowed)}"
+    assert roots <= allowed, f"unexpected imports: {sorted(roots - allowed)}"
