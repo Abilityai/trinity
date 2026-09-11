@@ -12,6 +12,9 @@
  *      an overridden URL, a receiver that answered 404.
  */
 import { describe, it, expect, beforeEach } from 'vitest'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { stripComments } from './helpers/stripComments'
 import {
   isTelemetryConsentVisible,
   consentVariant,
@@ -127,6 +130,83 @@ describe('receiverCopy', () => {
     expect(receiverCopy(undefined)).toMatch(/nothing has been sent/i)
     expect(receiverCopy('ok')).toMatch(/acknowledged/)
     expect(receiverCopy('failed')).toMatch(/retried/)
+  })
+
+  // The send log records where each share went, so the sentence can name the
+  // host that answered instead of the address configured now (#2571).
+  it('names the host that answered when the log recorded one', () => {
+    const c = receiverCopy('ok', 'https://intake.abilityai.dev/v1', { destination: 'http://localhost:8787' })
+    expect(c).toContain('http://localhost:8787')
+    expect(c).toMatch(/acknowledged/)
+    expect(c).not.toMatch(/your/i)
+  })
+
+  it('says plainly when the newest send went somewhere other than the configured address', () => {
+    const moved = receiverCopy('ok', 'https://intake.abilityai.dev/v1', {
+      destination: 'http://localhost:8787',
+      configured: 'https://intake.abilityai.dev',
+      changed: true,
+    })
+    expect(moved).toContain('http://localhost:8787')
+    expect(moved).toContain('https://intake.abilityai.dev')
+    expect(moved).toContain('TELEMETRY_SHARING_URL')
+    expect(moved).toMatch(/no send has gone there since/)
+    // Unchanged: the configured address is not named at all — there is nothing to say.
+    const same = receiverCopy('ok', 'https://intake.abilityai.dev/v1', {
+      destination: 'https://intake.abilityai.dev',
+      configured: 'https://intake.abilityai.dev',
+      changed: false,
+    })
+    expect(same).not.toMatch(/no send has gone there since/)
+  })
+
+  it('never names a host it does not have, for a pre-2571 entry', () => {
+    // The load-bearing one: a legacy entry recorded no destination, so the
+    // sentence must not borrow today's URL as if it were the one that answered.
+    const legacy = receiverCopy('ok', 'https://intake.abilityai.dev/v1', {})
+    expect(legacy).not.toContain('intake.abilityai.dev')
+    expect(legacy).toMatch(/acknowledged/)
+  })
+
+  it('carries the changed-address clause on the 404 and failed branches too', () => {
+    const opts = { destination: 'http://localhost:8787', configured: 'https://intake.abilityai.dev', changed: true }
+    for (const hint of ['receiver_not_live', 'receiver_404', 'failed']) {
+      expect(receiverCopy(hint, 'https://example.test/x', opts)).toMatch(/no send has gone there since\.$/)
+    }
+    // A recorded destination is what answered; shareUrl is only the fallback.
+    const c = receiverCopy('receiver_404', 'https://example.test/x', { destination: 'http://localhost:8787' })
+    expect(c).toContain('http://localhost:8787')
+    expect(c).not.toContain('https://example.test/x')
+  })
+
+  it('leaks no JS-isms whatever the wire carries', () => {
+    for (const destination of [null, undefined, '']) {
+      for (const hint of ['ok', 'receiver_not_live', 'receiver_404', 'failed', null]) {
+        expect(receiverCopy(hint, 'https://example.test/x', { destination })).not.toMatch(/undefined|null|NaN|\[object/)
+      }
+    }
+  })
+})
+
+describe('TelemetrySharingPanel wiring (source-structure guard)', () => {
+  const panel = stripComments(
+    readFileSync(
+      fileURLToPath(new URL('../../src/components/settings/TelemetrySharingPanel.vue', import.meta.url)),
+      'utf8'
+    )
+  )
+
+  it('renders the destination per row with the unknown fallback', () => {
+    expect(panel).toMatch(/<code v-if="send\.destination">\{\{ send\.destination \}\}<\/code>/)
+    expect(panel).toContain('unknown host')
+  })
+
+  it('passes the destination triple into receiverCopy', () => {
+    const call = panel.match(/receiverCopy\([\s\S]*?\n\s*\)/)
+    expect(call).not.toBeNull()
+    expect(call[0]).toMatch(/receiver_destination/)
+    expect(call[0]).toMatch(/configured_destination/)
+    expect(call[0]).toMatch(/destination_changed/)
   })
 })
 
