@@ -141,6 +141,60 @@ def test_containers_cannot_reach_the_cloud_metadata_service() -> None:
     ), "block the RFC 3927 range, not one magic address"
 
 
+def test_ufw_and_iptables_persistent_are_never_both_installed() -> None:
+    """`ufw` Breaks `iptables-persistent`, so apt silently removes one (#2281).
+
+    Restored from test_2281_firstboot_port_exposure.py, which 6104b0e5 deleted
+    with the port list although this guard was never about the list. ufw's
+    control file carries an unversioned ``Breaks: iptables-persistent,
+    netfilter-persistent``: installing either to persist DOCKER-USER makes apt
+    REMOVE ufw, and the install then dies at ``ufw --force reset`` with an error
+    pointing at the wrong line. Machine setup now lives in start.sh, so every
+    provisioning file is checked, not only the bakery.
+    """
+    for path in (_START, _BAKERY, _FIRSTBOOT, _FIREWALL):
+        live = [
+            line
+            for line in _code(path).splitlines()
+            if "iptables-persistent" in line or "netfilter-persistent" in line
+        ]
+        assert not live, (
+            f"{path.name} references iptables-persistent/netfilter-persistent outside "
+            f"a comment: {live}. ufw Breaks both, so installing one removes ufw. "
+            "Reboot persistence is trinity-docker-firewall.service's job."
+        )
+    assert re.search(r"apt-get install\b[^\n]*\bufw\b", _code(_START)), (
+        "start.sh --provision no longer installs ufw"
+    )
+
+
+def test_firewall_rules_are_reapplied_on_every_boot() -> None:
+    """Without iptables-persistent, a unit is what survives a reboot (#2281).
+
+    Restored from test_2281_firstboot_port_exposure.py (deleted in 6104b0e5).
+    Rules applied once at provision time are gone after the first reboot, which
+    silently reopens every Docker-published port — the reopening #2281 review I1
+    already fixed once. start.sh --provision now writes the unit instead of the
+    Packer tree shipping it, so its heredoc is what gets checked.
+    """
+    body = _code(_START)
+    unit = re.search(
+        r"trinity-docker-firewall\.service <<'?UNIT'?\n(.*?)\n\s*UNIT\n", body, re.S
+    )
+    assert unit, "start.sh --provision no longer writes the boot-time firewall unit"
+    text = unit.group(1)
+    assert 'local _fw="${PWD}/scripts/deploy/docker-firewall.sh"' in body
+    assert "ExecStart=${_fw}" in text, "the unit does not run docker-firewall.sh"
+    assert "After=docker.service" in text, (
+        "the unit must be ordered after docker.service — DOCKER-USER does not "
+        "exist until Docker creates it."
+    )
+    assert "WantedBy=multi-user.target" in text, "the unit is not enabled at boot"
+    assert re.search(r"systemctl enable\b[^\n]*trinity-docker-firewall\.service", body), (
+        "the unit is written but never enabled, so it never runs."
+    )
+
+
 def test_provision_is_off_by_default_and_refuses_a_workstation() -> None:
     """``--provision`` installs packages, resets the firewall and claims 80/443,
     so it must refuse anywhere that is not a root shell on a cloud VM. Run for
