@@ -29,7 +29,7 @@
 
 **OpenTelemetry tracing** (RELIABILITY-002): auto-instrumentation for FastAPI/httpx/Redis; `traceparent` propagated through inter-agent calls; OTLP/gRPC export to `trinity-otel-collector:4317`; `OTEL_ENABLED=1`, `OTEL_SAMPLE_RATE` (default 10%).
 
-**Routers (`routers/`)** — 72 router modules:
+**Routers (`routers/`)** — 74 router modules:
 
 *Core Agent:*
 - `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (1795 lines)
@@ -41,6 +41,7 @@
 - `reminders.py` - Agent self-reminders: create/list/cancel (self-gated) (#1296) — see [Agent Self-Reminders](execution.md#agent-self-reminders-1296)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
+- `agent_pipeline_state.py` - The agent server's own pipeline-state change notice (ent#533): `POST /{name}/pipeline-state/changed`, heartbeat auth (own agent-scoped MCP key), coalesced, publishes the thin `pipeline_state_changed` trigger. Consumer is the Workspace Work read — see [Work](workspace.md)
 - `a2a.py` - A2A protocol: the authenticated per-agent card (#737) plus the **inbound server** on a separate prefix-less `a2a_server_router` — public `GET /a2a/{name}/.well-known/agent-card.json` (per-IP rate limited) + `POST /a2a/{name}` JSON-RPC (message/send, message/stream SSE, tasks/get, tasks/cancel). Exposure is opt-in per agent (`agent_ownership.a2a_exposed`, default OFF); non-exposed/inaccessible → uniform 404 (Invariant #8). `messageId` dedup is scoped per (agent, caller principal) — the field is peer-controlled and only unique per-client (ent#157). **Also hosts the OUTBOUND client (#736):** `POST /{name}/a2a/call` + `POST /{name}/a2a/task`, a Trinity agent tasking an EXTERNAL A2A agent. The target is never caller-supplied — it is a name resolved through `services/a2a_outbound.py` — and the routes are thin (auth + HTTP error map + audit); orchestration lives in `services/a2a_outbound_service.py`. Default OFF (`A2A_OUTBOUND_ENABLED`), both routes 404 when off
 - `agent_ssh.py` - SSH access endpoint
 - `credentials.py` - Credential injection/export/import (CRED-002)

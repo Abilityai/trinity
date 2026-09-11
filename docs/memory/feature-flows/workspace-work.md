@@ -31,6 +31,12 @@ Portal.vue (shell)
 └─ <PortalRail> #tab-work → <PortalWork>  Waiting on you (PortalAsks over store.asks) · Now · Earlier
 stores/portalWork.js ──► GET /api/enterprise/client-portal/work?agents=a,b&chat_id=…
 utils/websocket.js: agent_activity (started + terminal) / loop_* for a participant → portalWork (debounced 2 s)
+                    pipeline_state_changed for a participant → portalWork (debounced 500 ms, ent#533)
+
+agent_server/pipeline_state_watch.py   1 s scandir of ~/.trinity/pipeline-state, (mtime_ns,size)
+      └─► POST /api/agents/{name}/pipeline-state/changed   own agent-scoped MCP key (heartbeat auth)
+             └─► routers/agent_pipeline_state.py → work/pipeline_state.notify_changed
+                    coalesce 20/10 s · bump the Redis cache generation · thin /ws trigger
 
 client_portal/work/router.py   is_platform? else 404 · agents cap 422 · per-viewer limiter
 client_portal/work/service.py  roster ∩ names · get_fleet_executions(running|queued|recent) · stats(30d)
@@ -88,6 +94,59 @@ a cap on memory already spent); YAML through `load_hardened_yaml`; **no
 retries** (a stopped agent must not turn one read into a gateway timeout), 2 s
 per call inside a 3 s wall budget, a 10 s per-agent cache so the 12 s poll never
 reads twice. Every failure is a verdict, never an exception into the read.
+
+### Stage advances are pushed; the poll stays (ent#533)
+
+Steps used to move only when the 12 s poll happened to run, so a stage advance
+could lag a full poll behind the file the agent had already written. The file
+is the agent's, in the agent's container — **only the agent's filesystem knows
+when it changed**, so the honest notifier is agent-side; the backend can only
+ask, and asking faster is the load the 10 s cache exists to bound. The watcher
+is therefore a 1 s `os.scandir` in the agent server keyed on
+`(mtime_ns, size)`, which costs no network at all while nothing changes (the
+canonical `pipeline-tick` writer runs every 15 minutes, so a POST is an event,
+not a stream).
+
+**Why the agent's own key, and why `/api/agents/`.** `/api/internal/*`'s
+blanket router is gated on `X-Internal-Secret`, which is deliberately never
+injected into an agent; the one agent-key predicate on that prefix
+(`_pull_authorized`) additionally requires `is_pull_pilot_agent`, so a route
+placed there would be silently dead for virtually the whole fleet. The two
+existing always-on agent→backend self-reports — `POST /{name}/heartbeat`
+(#307) and `POST /{name}/executions/{id}/result` (#1083) — both live under
+`/api/agents/` with exactly this auth, which is also Invariant #15's shape for
+a fact about one named agent. So: `authorize_heartbeat` on the agent's own
+agent-scoped MCP key; a user, system, connector or *other agent's* key is 403,
+and the route carries `# mcp: none` because nothing an operator or an MCP
+client should ever call belongs on the tool surface.
+
+**Why a Redis generation and not just dropping the local entry.** `_cache` is
+a per-process dict and production runs `uvicorn --workers 2`. Invalidating in
+memory would refresh the worker that received the notice and leave the other
+serving a stale card for up to 10 s — and dev, with one `--reload` worker,
+would pass green. A notice instead `SETEX`s a generation the cache compares
+alongside its TTL, so every worker misses once. It fails **open**: Redis down
+means generation `None` on both sides, i.e. exactly today's TTL-only cache.
+Putting the JSON itself in Redis was rejected for the opposite failure
+direction — Redis down would then mean *no* cache and a fresh agent read per
+participant per poll.
+
+**Why the poll stays.** The notice is best-effort by construction: it is
+swallowed on the agent side, coalesced on the server side, and absent
+entirely on an old image or an agent without the env gate. If steps depended
+on it, every one of those became a stuck card. With the poll kept, a lost
+notice costs latency and nothing else — which is why this change has no
+user-visible state, string or default of its own.
+
+**Why the client debounce has both an earlier-deadline rule and a floor.**
+The store already debounced push refetches by 2 s for `agent_activity`. Left
+alone, a 2 s push landing 400 ms after a 500 ms stage push would postpone the
+stage refetch to 2.4 s — the store would defeat this feature's own reason to
+exist — so the earlier deadline now wins. That alone turns the debounce into
+a `delay`-length throttle, and the Work read is limited to 120/60 s per
+viewer with a 429 that renders as visible error text; a 1500 ms floor between
+push-driven refreshes keeps a pathological writer from ever reaching it. The
+floor never binds on the common path (an idle card, one stage advance).
 
 ### A ghost row is not live
 
@@ -156,10 +215,25 @@ the terminate route), the owner feeding the Work store off the door gate and
 re-scoping on a thread switch, the merged signal, and source guards on the
 shell, both conversations, the tab body, the card and the WebSocket consumer.
 
+`tests/unit/test_ent533_pipeline_state_broadcast.py` — the notice route's auth
+(no Bearer / a user key / a system key / another agent's key are all the same
+403), the thin trigger's exact key set and its ent#467 visibility by
+construction, traversal ids rejected before anything is published, `stage`
+bounded and normalised rather than rejected, coalescing, and the Redis
+generation making a *second* worker's cache miss inside the TTL (with the
+Redis-down path still TTL-only).
+`tests/unit/test_ent533_agent_pipeline_state_watch.py` — the watcher's
+`snapshot` / `changed` / `read_stage` rules and the loop itself: a silent
+baseline, one POST per changed file with the Bearer, the per-tick cap, a
+failing POST swallowed, and no scheduler at all without both env vars.
+
 ## Residuals (stated)
 
-- Steps refresh on the 12 s poll while a run is live; there is no backend
-  broadcast for a pipeline-state write (registered in the debt inbox).
+- The stage-advance notice (ent#533) is **best-effort**: swallowed on the
+  agent side, coalesced server-side, and absent on an old image. It lands in
+  ~1–1.6 s, not sub-second — one polling tick is the honest floor without an
+  inotify dependency — and the 12 s poll remains the fallback for every case
+  where it does not arrive.
 - The roster scope is today's; ent#367's profile scope inherits when it lands.
 - A step-level restart is a platform capability (#919 territory), ruled out of
   this surface; the card's lesser control is the honest one.

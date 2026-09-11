@@ -1693,9 +1693,10 @@ well, and the agent never touches CSS.
   turn (matched by execution id, never "latest running"), a synthetic item
   until the feed has it; the stream's last line is the current step (ent#286);
   elapsed from the server's reading. Live push = `agent_activity` (started and
-  terminal) + loop events for a participant, debounced; degrade = a 12 s poll
-  **only while something is live**; a RUNNING row past 1.5× the agent's turn
-  bound is `stale` and not live — never a stuck "running".
+  terminal) + loop events + `pipeline_state_changed` (ent#533) for a
+  participant, debounced; degrade = a 12 s poll **only while something is
+  live**; a RUNNING row past 1.5× the agent's turn bound is `stale` and not
+  live — never a stuck "running".
 - **AC-2 — pipelines and holders**: steps come from the agent's published
   #919 files (`~/.trinity/pipelines/*.yaml` + `pipeline-state/`), read
   best-effort by the backend under `pipelines.ts`'s hardening rules; the
@@ -1742,8 +1743,69 @@ well, and the agent never touches CSS.
   read); `src/frontend/tests/unit/portalWork.spec.js` (pure rules, the store
   under Pinia, the owner wiring, source guards on both hosts).
 - **Out of scope (stated)**: a step-level restart (#919 territory, ruled
-  out); ent#367's profile scope; a backend broadcast for pipeline-state
-  writes (steps ride the poll while running).
+  out); ent#367's profile scope. A backend broadcast for pipeline-state
+  writes was out of scope *here* and is **delivered by ent#533** (§5.23) —
+  the 12 s poll stays as the fallback, so this section's behaviour is
+  unchanged when the notice never arrives.
+- **Flow**: `docs/memory/feature-flows/workspace-work.md`
+
+### 5.23 Live pipeline-state stage advances (trinity-enterprise#533)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_WORK_STEPS_PUSH`
+- **Description**: §5.22's steps refreshed only on the 12 s poll, so a stage
+  advance could lag a full poll behind the file the agent had already
+  written. The agent server now watches its own `~/.trinity/pipeline-state/`
+  and tells the backend a file changed; the backend publishes a thin `/ws`
+  trigger and the Work store refetches through the same access-controlled
+  read. **Trinity gains no pipeline semantics** (Rule #8): the notice says
+  *a file changed*, nothing advances a stage in Trinity, and no state is
+  persisted.
+- **AC-1 — latency**: a stage advance in a running participant's
+  pipeline-state file reaches the Work card in ~1–1.6 s (1 s watcher tick +
+  a 500 ms client debounce + the existing bounded read), not up to 12 s.
+- **AC-2 — the poll is the fallback, unchanged**: §5.22's honesty rules and
+  `WORK_POLL_MS = 12000` are untouched. A dropped, refused, coalesced or
+  never-sent notice is invisible — the card behaves exactly as ent#525
+  shipped it. Old images and agents without the env gate never notify.
+- **AC-3 — the trigger is thin and scoped**: `pipeline_state_changed` carries
+  identifiers only — `{agent_name, pipeline_id, instance_id, stage,
+  changed_at}` — never `health`, `blockers`, `escalations`, per-stage metrics
+  or any file body (#918). `agent_name` is top-level, so ent#467 delivers it
+  only to clients whose roster contains the agent. `changed_at` is stamped by
+  the backend, never taken from the agent; the execution id is deliberately
+  absent (the agent does not know which ledger row it serves at write time —
+  attribution stays in the read).
+- **Agent**: `docker/base-image/agent_server/pipeline_state_watch.py` — a 1 s
+  `os.scandir` of the state dir keyed on `(mtime_ns, size)`, ≤4 POSTs per
+  tick, silent by design, gated on `TRINITY_BACKEND_URL` +
+  `TRINITY_MCP_API_KEY` exactly like the #307 heartbeat. A restart takes a
+  silent baseline rather than replaying every instance on disk. No
+  Dockerfile, no new dependency.
+- **Backend**: `routers/agent_pipeline_state.py` — `POST
+  /api/agents/{name}/pipeline-state/changed`, authorized with the agent's
+  **own** agent-scoped MCP key (`validate_mcp_api_key(track_usage=False)` +
+  `heartbeat_service.authorize_heartbeat`), never the internal secret and
+  never an admin gate. `client_portal/work/pipeline_state.py` gains
+  `notify_changed` (coalesced 20 notices / 10 s per agent; over the budget →
+  `published: false`, a 200, since a burst is the agent's normal) and a
+  **Redis generation** on the existing 10 s cache so *every* uvicorn worker
+  re-reads after a notice — a per-process invalidation would leave the other
+  prod worker stale for up to 10 s while dev's single worker passed green.
+  Fail-open: Redis down ⇒ today's TTL-only cache. No table, no migration, no
+  MCP tool (`# mcp: none`).
+- **Frontend**: one `data.type` branch in `utils/websocket.js`;
+  `stores/portalWork.js` refetches on a 500 ms debounce, with
+  **earlier-deadline-wins** (so a later 2 s `agent_activity` push cannot
+  postpone a pending stage refetch) and a **1500 ms floor** between
+  push-driven refreshes (so a pathological writer cannot drive a viewer into
+  the 120/60 s Work-read limiter, whose 429 *would* be visible error text).
+  No component, copy, state or default changes.
+- **Tests**: `tests/unit/test_ent533_pipeline_state_broadcast.py`,
+  `tests/unit/test_ent533_agent_pipeline_state_watch.py`,
+  `src/frontend/tests/unit/portalWork.spec.js`.
+- **Out of scope (stated)**: dropping the poll (AC-2 keeps it); inotify (one
+  polling tick is the honest floor without a new dependency); a generic
+  "agent file changed" notice surface for other file-backed reads.
 - **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
 ## 6. Activity Monitoring

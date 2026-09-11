@@ -1015,6 +1015,15 @@ schedules:
   heartbeat so it's near-free when no pipeline needs attention. The
   heartbeat is shipped by the `agent-dev:add-pipeline` plugin in
   `abilityai/abilities`, not by Trinity.
+- **Change notification (ent#533, 2026-09-11)**: the agent server watches
+  its own `~/.trinity/pipeline-state/` (1 s tick, keyed on
+  `(mtime_ns, size)`) and POSTs `/api/agents/{name}/pipeline-state/changed`
+  with its own agent-scoped MCP key; Trinity publishes a thin
+  `pipeline_state_changed` `/ws` trigger (ids + stage only) and the Workspace
+  Work card refetches through the existing read. Still a **read surface**:
+  no DAG logic, no transition logic, no pipeline state in the database — the
+  notice says only *a file changed*, and the 12 s poll remains the fallback
+  (Rule #8). See `requirements/core-agent.md` §5.23.
 - **Out of scope**: DAG execution engine in backend; cross-agent DAGs
   (expressed as event chains between independent per-agent pipelines);
   GUI editor for `pipeline.yaml`; persisting pipeline state in
