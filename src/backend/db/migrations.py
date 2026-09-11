@@ -4043,7 +4043,7 @@ def _migrate_agent_canvas_shares_table(cursor, conn):
     in that table's read path filters on `type`, so a canvas row there would
     also be a working public-CHAT token. See the DDL comment in db/schema.py.
 
-    Mirrored by the Alembic revision 0059_agent_canvas_shares.
+    Mirrored by the Alembic revision 0060_agent_canvas_shares.
     """
     cursor.execute("PRAGMA table_info(agent_canvas_shares)")
     if cursor.fetchall():

@@ -332,7 +332,7 @@ def test_the_share_table_ships_on_both_migration_tracks():
     backend = pathlib.Path(__file__).resolve().parents[2] / "src" / "backend"
     sqlite_src = (backend / "db" / "migrations.py").read_text()
     assert "agent_canvas_shares_table" in sqlite_src
-    alembic = backend / "migrations" / "versions" / "0059_agent_canvas_shares.py"
+    alembic = backend / "migrations" / "versions" / "0060_agent_canvas_shares.py"
     assert alembic.exists()
     assert "agent_canvas_shares" in alembic.read_text()
 
