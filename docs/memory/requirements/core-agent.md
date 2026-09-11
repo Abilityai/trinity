@@ -2428,11 +2428,56 @@ no such record gets one `client` bucket, since that browser holds one portal
 token at a time. **Never derived from token material** — the key is written back
 to localStorage in the clear.
 
-- Clamps: sidebar 200–480, side panel 280–560, and the conversation has a 480px
-  floor. When the viewport cannot fit all three the **rail auto-collapses** —
-  the conversation is never the column that gets squeezed — checked on window
-  resize as well as on drag, because a window dragged narrower is the same
-  situation arrived at differently.
+- Clamps: sidebar and side panel have pixel MINIMA (200 / 280 — where a column
+  stops being able to do its job) and **viewport-derived MAXIMA** (#2617). When
+  the viewport cannot fit all three the **rail auto-collapses** — the
+  conversation is never the column that gets squeezed — checked on window resize
+  as well as on drag, because a window dragged narrower is the same situation
+  arrived at differently.
+- **The maxima are derived, not constants (#2617, 2026-09-09).** They shipped as
+  `SIDEBAR_MAX = 480` / `RAIL_MAX = 560`, applied unconditionally, which made the
+  share a person could give a column *shrink* as their screen grew: the rail
+  stopped at ~22% of a 2560px display. Reported by the operator — *"it does not
+  go bigger than like 20% or something. I should be able to make it whatever I
+  want, say half the screen width."* — and it contradicted the file's own stated
+  intent ("deliberately generous — this is a person arranging their own screen"),
+  which an absolute pixel number cannot express. The replacement was already in
+  the file: a column may take everything left after its neighbour and
+  `CONVERSATION_MIN`, so the conversation's readable floor is the one rule that
+  stops a drag, at every screen size. `railMaxFor(viewport, sidebar)` /
+  `sidebarMaxFor(viewport, rail)`; both floored at the column's own minimum,
+  because a ceiling under the floor would invert the clamp and pin the column to
+  the *maximum*. The sidebar got the same treatment though nobody had hit its
+  cap: leaving one derived and one fixed would leave the next reader guessing
+  which rule the file follows.
+- **Desired width and effective width are two numbers (#2617, AC 4).** What is
+  stored and dragged is what the person asked for; what the grid renders is
+  `min(desired, derived max)`. So a layout arranged on a 2560px monitor is
+  clamped down for display on a laptop and comes back intact on the monitor —
+  clamping at the persistence boundary instead would have written the laptop's
+  ceiling over their choice on the first `commit()`, which is "silently
+  discarded" wearing a clamp. `enforceFit` therefore tests the EFFECTIVE widths:
+  testing the desired one would collapse a rail that fits, purely because a
+  wider one was once arranged elsewhere. Since the drag is now bounded by the
+  same floor `fitsThreeColumns` asks about, a drag can no longer break the fit
+  at all — what remains for auto-collapse is the case it was written for, a
+  window too narrow for three columns at their minima.
+- **The sidebar's ceiling is billed against what the rail RENDERS, and the
+  handle reports the effective width (#2617 review).** Two mistakes of one shape,
+  both caught in review. `sidebarMax` was measured against `effectiveRail`, which
+  carries no open/closed term, so a COLLAPSED rail was still charged at its full
+  open width — at 1280px the ceiling landed at 416 while 752 was free, *below*
+  the `SIDEBAR_MAX = 480` constant being replaced, so a narrow window came out
+  worse than before the change. It is measured against `railWidth` (the rendered
+  width: effective when open, the 48px strip when closed). And the two handles
+  bound `:value` to the DESIRE while `:max` was the derived ceiling — which lets
+  `aria-valuenow` exceed `aria-valuemax`, and makes `startValue` begin every drag
+  at a position the clamp discards, so the handle is inert for the whole distance
+  between the desire and the ceiling (several hundred px on a laptop). They bind
+  `columns.effectiveSidebar` / `columns.effectiveRail`. The desire still survives
+  untouched in storage and returns when there is room; a drag from a clamped
+  position deliberately replaces it, because the person is moving the handle they
+  can see.
 - The message cap has ONE definition (`--ws-message-max`, 1100px, wider than the
   `max-w-4xl` it replaces) and `PortalSkeleton` shares it: the skeleton exists to
   hold the footprint the loaded surface lands on (#2540), so a placeholder capped

@@ -288,6 +288,17 @@ provision_site() {
     chmod 0600 .env
     echo "→ .env: FRONTEND_URL=https://${ip}, TRINITY_INSTALL_SOURCE=${provenance}"
 
+    # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
+    # the reverse-proxy block, and their own catalog apps ship it (openclaw's
+    # Caddyfile sets it to "openclaw"). It is how a marketplace-originated
+    # install identifies itself to DigitalOcean — so it is keyed on the
+    # marketplace provenance, not on the cloud: the doc-driven install on the
+    # same cloud did not originate from the catalog.
+    local _do_header=""
+    if [ "$provenance" = "do-marketplace" ]; then
+        _do_header='header X-DO-MARKETPLACE "trinity"'
+    fi
+
     # Let's Encrypt issues certificates for bare IPs via the `shortlived` ACME
     # profile (~6-day validity, renewed automatically while the machine runs), so
     # the instance lands on browser-trusted HTTPS with no domain and no input. A
@@ -332,6 +343,7 @@ https://${ip} {
     reverse_proxy 127.0.0.1:8081 {
         flush_interval -1
     }
+    ${_do_header}
 }
 
 https:// {

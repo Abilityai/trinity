@@ -167,6 +167,11 @@ async def start_workspace_voice(
         # creates `main` would publish its drawings to every external client on
         # the roster. Never widens (ent#536).
         canvas_audience="operator",
+        # ent#535 review — this function is the gate that authorizes the wider
+        # roster read (`is_platform` is refused above), so it is the place that
+        # records it. The turn path reads it off the session instead of
+        # re-asserting `include_owned=True` a long way from here.
+        is_platform=True,
     )
     return {
         "voice_session_id": session.session_id,

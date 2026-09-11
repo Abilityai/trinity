@@ -242,7 +242,11 @@ label row records it.
 ## The canvas column
 
 `PortalVoiceCanvas.vue` replaces the rail (and Agent details) for the call's
-duration — `sm:w-[60%]`, `<main>` at `sm:w-[40%]`; below `sm` the orb has the
+duration — two flex **shares** of a zero basis, `sm:flex-[3_1_0%]` against
+`<main>`'s `sm:flex-[2_1_0%]`, never `w-[60%]` / `w-[40%]`: those summed to
+100% + the 18rem sidebar and the shell's `overflow-hidden` clipped the canvas
+column off the right edge (#2581, measured at 296px on a 1280px viewport by
+#2583). Below `sm` the orb has the
 stage and the canvas stays behind the strip's Canvas tab (mobile is
 trinity#710). It reads `GET /api/agents/{name}/voice/{sid}/panel` — the agent's
 `main` canvas whatever its audience — through `CanvasPanel` (one rendering
@@ -255,6 +259,85 @@ a **platform principal reads every audience in the Workspace**
 (`agent_page.canvas_audience_for`), which is why the session writes at
 `operator` like Agent Detail — `roster` would only add exposure. See
 [agent-canvas.md](agent-canvas.md) → Audience.
+
+### The swap is one motion, and the orb stays round (#2640)
+
+Starting a call used to snap: `<main>` toggled its share, the rail was swapped
+for the canvas in the same frame, and End call jumped back. The orb was then
+drawn as an ellipse.
+
+**The layout.** `flex-grow` is a `<number>` and therefore animatable, so the
+share transitions rather than toggling — 300 ms ease-out on `<main>`, and the
+canvas column ramps its own grow `0 → 3` over the same curve through Vue
+enter/leave classes (a newly inserted element has no value to transition
+*from*, so the ramp cannot be a class toggle). Opacity rides the same
+transition, so the canvas's content is not re-wrapping in view while the column
+is still moving — the layout-stability rule in `design-system-contract.md`.
+Instant under `prefers-reduced-motion` — and that needs **two** classes on every
+transitioning element, not one. `motion-reduce:transition-none` emits only
+`transition-property: none`; the `duration-300` beside it still applies, so
+`transitionDuration` stays `.3s`, and that is the exact property Vue's
+`getTransitionInfo` reads to decide how long to keep a leaving element alive.
+With `transition-none` alone nothing animates but `@after-leave` still resolves
+on a 300 ms fallback timer — a reduced-motion user saw the canvas vanish, an
+empty right column, then the rail appear. `motion-reduce:duration-0` drives that
+timeout to 0. Caught in review on #2640; the class-counting test passed because
+it asserted the class string rather than the behaviour, so it now counts both.
+
+Two consequences worth writing down:
+
+* **The `v-if` / `v-else-if` chain is gone.** A `<Transition>` wrapper breaks
+  the adjacency a chain needs, so the exclusivity the chain used to guarantee by
+  construction is now a named computed both arms read
+  (`voiceCanvasHasColumn`). Deriving one from the other is what keeps them from
+  drifting into both claiming the column.
+* **The rail waits for the canvas to finish leaving** (`voiceCanvasLeaving`,
+  set by the transition's own `before-leave` / `after-leave`). Vue keeps a
+  leaving element in the DOM for the duration of its transition; without the
+  gate the rail would mount at its full fixed width beside a canvas that is
+  still shrinking — three columns in a row sized for two, `<main>` squeezed by
+  flex for 300 ms, a worse jump than the one being fixed.
+
+**Known limitation — the rail column itself still steps (#2676).** Two of the
+three columns interpolate; the rail does not. Its `<aside>` carries no width
+transition in either state and it is a `shrink-0` flex sibling of `<main>`, so
+on call end it mounts at its full width in one frame — 48 px collapsed, 384 px
+open, or whatever `--ws-rail` was dragged to. So "one continuous motion" is
+two-thirds true, and on a wide open rail the remaining step can be larger than
+the 211 px snap this work removed.
+
+It is left as a step here **deliberately**, not overlooked. The honest fix is to
+give the rail column an explicitly animatable width so it can ramp `0 → w`
+complementary to the canvas — and the width of that column is owned by ent#492's
+`--ws-rail` / grid work, not by this file. Doing it from here means either a new
+wrapper element in the row or holding the rail mounted through a call, and both
+are decisions for whoever owns the column, taken with something better than a
+node-env source scan to verify them. Tracked at #2676.
+
+**The orb.** `VoiceOverlay.vue::resizeCanvas` sized the canvas bitmap **once**,
+from the `watch(canvasEl)` that fires on mount — no `ResizeObserver`, no window
+listener, no per-frame check — while the canvas is `absolute inset-0 w-full
+h-full`. Any later change to the column's width therefore left CSS stretching a
+stale bitmap, which is the squashed orb; the overlay also mounts in the same
+tick the call re-lays out the columns, so the single measurement could capture
+the pre-call width on its own. It now observes:
+
+* a `ResizeObserver` catches the box moving under a stable window (the column
+  swap, a rail drag, a flex reflow), which a window listener never sees;
+* a `resize` listener catches a `devicePixelRatio` change — dragging the window
+  to a different-density monitor resizes no box at all, so it fires no observer.
+
+The bitmap is sized at `css × devicePixelRatio` (capped at 2 — a 3x display
+would quadruple the fill cost of a full-column particle field for detail nobody
+can see at this blur radius) and the render loop draws in **CSS pixels** via
+`ctx.setTransform`, so the 45px core and the particles' fixed radii keep meaning
+what they meant before DPR scaling existed. Resizing **re-scales, never
+re-seeds**: the particle field lives in a fixed coordinate space around (0,0)
+and is seeded once in `startLoop`, so the orb does not restart when the column
+moves. A zero-sized box (hidden, or not yet laid out) is ignored rather than
+throwing the last good size away, and a same-size measurement does not touch
+the bitmap — assigning to `canvas.width` clears the canvas, so an observer
+firing on a sub-pixel reflow would otherwise blank the orb continuously.
 
 ## Files
 
