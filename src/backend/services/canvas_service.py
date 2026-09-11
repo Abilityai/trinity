@@ -13,6 +13,7 @@ half that touches the database.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Dict, List, Optional
@@ -37,6 +38,49 @@ from services.canvas_blocks import (  # noqa: F401 — re-exported for callers
 from services.idempotency_service import resolve_and_validate_execution
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# The thin /ws trigger (trinity-enterprise#532)
+# ---------------------------------------------------------------------------
+# Setter-injected from main.py rather than `from main import manager`: a service
+# does not import the app (Invariant #1). `_WS_TASKS` holds strong references —
+# a bare `create_task` handle can be garbage-collected mid-flight.
+_websocket_manager = None
+_WS_TASKS: set = set()
+
+
+def set_websocket_manager(manager) -> None:
+    global _websocket_manager
+    _websocket_manager = manager
+
+
+def _broadcast(event: dict) -> None:
+    """Fire-and-forget a thin `/ws` trigger — ids only (#918), never blocking.
+
+    `write_canvas` is synchronous and every caller reaches it on the event
+    loop, so the emit is a task rather than an await. Three failure directions
+    all end in "no trigger", never in a failed write: no manager wired, no
+    running loop (a future caller from an executor thread), or a manager that
+    raises — the last is caught INSIDE the task, which is also what keeps it
+    from resurfacing as "Task exception was never retrieved". A lost trigger
+    costs latency only: the rail still re-reads on its pre-ent#532 triggers.
+    """
+    if _websocket_manager is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _send():
+        try:
+            await _websocket_manager.broadcast(json.dumps(event))
+        except Exception as e:  # noqa: BLE001 — a trigger never fails a write
+            logger.debug("[canvas] ws trigger skipped: %s", e)
+
+    task = loop.create_task(_send())
+    _WS_TASKS.add(task)
+    task.add_done_callback(_WS_TASKS.discard)
 
 
 def validate_canvas_id(canvas_id: str) -> str:
@@ -289,7 +333,7 @@ def write_canvas(
     # future caller reaches through.
     serialize_blocks(validated)
     resolved = resolve_execution_id(execution_id, agent_name)
-    return db.upsert_agent_canvas(
+    stored = db.upsert_agent_canvas(
         agent_name,
         canvas_id,
         blocks=validated,
@@ -298,6 +342,13 @@ def write_canvas(
         execution_id=resolved,
         template=template,
     )
+    # ent#532: the Workspace rail's Canvas dot lights on this, instead of on the
+    # next thing the client happens to refetch. Ids only, and AFTER the store —
+    # a write that raised (a cap rejection, a validation refusal) emits nothing.
+    # The dict is a LITERAL because ent#467's discovery guard resolves the
+    # payload by AST to decide who may receive it.
+    _broadcast({"type": "canvas_updated", "agent_name": agent_name, "canvas_id": canvas_id})
+    return stored
 
 
 def patch_canvas(

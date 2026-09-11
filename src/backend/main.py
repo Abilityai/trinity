@@ -120,6 +120,8 @@ from routers.loops import (
     loop_router as loops_loop_router,
 )  # Sequential agent loops (#740)
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
+from services.canvas_service import set_websocket_manager as set_canvas_ws_manager  # ent#532
+from services.agent_shared_files_service import set_websocket_manager as set_shared_files_ws_manager  # ent#532
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
 from services.ws_identity_service import accessible_agents_for, resolve_ws_identity  # ent#467
@@ -310,6 +312,8 @@ set_opqueue_sync_ws_manager(manager)
 set_event_subs_ws_manager(manager)
 set_event_subs_filtered_ws_manager(filtered_manager)
 set_loop_ws_manager(manager)  # #740
+set_canvas_ws_manager(manager)        # ent#532: canvas_updated thin trigger
+set_shared_files_ws_manager(manager)  # ent#532: file_shared thin trigger
 
 # NOTE: Trinity platform instructions are now injected at runtime via
 # --append-system-prompt on every chat/task request (Issue #136).

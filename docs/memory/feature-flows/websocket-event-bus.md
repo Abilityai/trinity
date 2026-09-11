@@ -88,7 +88,7 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
   is a resolved identity with an **empty roster**, not a refusal: ownership
   joins `users.email` and `agent_sharing` is keyed on it, so the empty set is
   the exact answer, and the frontend never retries a 4001.
-- **Identity is derived from the payload, once per event.** The 36 live
+- **Identity is derived from the payload, once per event.** The 38 live
   `manager.broadcast` sites disagree about where the agent name lives
   (`agent_name` top-level, `data.name`, `data.agent_name`, two keys at once
   for `agent_collaboration`), so `agent_names_in_payload()` reads a fixed key

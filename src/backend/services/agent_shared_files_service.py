@@ -13,8 +13,10 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 import re
@@ -36,6 +38,48 @@ from services.docker_utils import container_get_archive
 from services.settings_service import get_public_chat_url
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# The thin /ws trigger (trinity-enterprise#532)
+# ---------------------------------------------------------------------------
+# Setter-injected from main.py rather than `from main import manager`: a service
+# does not import the app (Invariant #1). `_WS_TASKS` holds strong references —
+# a bare `create_task` handle can be garbage-collected mid-flight.
+_websocket_manager = None
+_WS_TASKS: set = set()
+
+
+def set_websocket_manager(manager) -> None:
+    global _websocket_manager
+    _websocket_manager = manager
+
+
+def _broadcast(event: dict) -> None:
+    """Fire-and-forget a thin `/ws` trigger — ids only (#918), never blocking.
+
+    `_persist_and_register` is synchronous and every caller reaches it on the
+    event loop, so the emit is a task rather than an await. Three failure
+    directions all end in "no trigger", never in a failed share: no manager
+    wired, no running loop (a future caller from an executor thread), or a
+    manager that raises — the last is caught INSIDE the task, which is also
+    what keeps it from resurfacing as "Task exception was never retrieved".
+    """
+    if _websocket_manager is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _send():
+        try:
+            await _websocket_manager.broadcast(json.dumps(event))
+        except Exception as e:  # noqa: BLE001 — a trigger never fails a share
+            logger.debug("[shared-files] ws trigger skipped: %s", e)
+
+    task = loop.create_task(_send())
+    _WS_TASKS.add(task)
+    task.add_done_callback(_WS_TASKS.discard)
 
 # ---------------------------------------------------------------------------
 # Constants — MVP hardcoded; can migrate to settings later
@@ -379,6 +423,12 @@ def _persist_and_register(
         "[shared-files] agent=%s shared file_id=%s filename=%s size=%d mime=%s",
         agent_name, file_id, display, size_bytes, mime_type,
     )
+    # ent#532: the Workspace rail's Files dot lights on this. The id ONLY — the
+    # url above embeds `?sig=<download_token>`, a bearer credential, and `/ws`
+    # is SCOPE_ALL. `create_share`'s idempotent replay returns its snapshot
+    # without reaching here, so a replay correctly emits nothing. The dict is a
+    # LITERAL because ent#467's discovery guard resolves the payload by AST.
+    _broadcast({"type": "file_shared", "agent_name": agent_name, "file_id": file_id})
 
     return {
         "file_id": file_id,

@@ -109,6 +109,7 @@ def _wire_files(monkeypatch, tmp_path):
 # canvas_updated
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
 async def test_write_canvas_emits_one_thin_canvas_updated(monkeypatch, canvas_mgr):
     _wire_canvas(monkeypatch)
 
@@ -132,6 +133,7 @@ async def test_write_canvas_emits_one_thin_canvas_updated(monkeypatch, canvas_mg
     assert agent_names_in_payload(event) == {"a1"}
 
 
+@pytest.mark.asyncio
 async def test_patch_canvas_emits_exactly_once(monkeypatch, canvas_mgr):
     _wire_canvas(monkeypatch)
     stored = {
@@ -153,6 +155,7 @@ async def test_patch_canvas_emits_exactly_once(monkeypatch, canvas_mgr):
     assert json.loads(canvas_mgr.messages[0])["canvas_id"] == "main"
 
 
+@pytest.mark.asyncio
 async def test_a_write_that_did_not_happen_emits_nothing(monkeypatch, canvas_mgr):
     """The emit sits AFTER the store, on the success path only — so a cap
     rejection (the ent#553 409) and a validation refusal both stay silent."""
@@ -172,6 +175,7 @@ async def test_a_write_that_did_not_happen_emits_nothing(monkeypatch, canvas_mgr
     assert canvas_mgr.messages == []
 
 
+@pytest.mark.asyncio
 async def test_no_manager_is_silent(monkeypatch):
     _wire_canvas(monkeypatch)
     canvas_service.set_websocket_manager(None)
@@ -190,6 +194,7 @@ def test_no_running_loop_is_silent(monkeypatch, canvas_mgr):
     assert canvas_mgr.messages == []
 
 
+@pytest.mark.asyncio
 async def test_a_raising_manager_never_fails_the_write(monkeypatch):
     _wire_canvas(monkeypatch)
     mgr = _FakeManager(raises=True)
@@ -211,6 +216,7 @@ async def test_a_raising_manager_never_fails_the_write(monkeypatch):
 # file_shared
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
 async def test_persist_and_register_emits_one_thin_file_shared(monkeypatch, tmp_path, files_mgr):
     _wire_files(monkeypatch, tmp_path)
 
@@ -231,6 +237,7 @@ async def test_persist_and_register_emits_one_thin_file_shared(monkeypatch, tmp_
     assert agent_names_in_payload(event) == {"a1"}
 
 
+@pytest.mark.asyncio
 async def test_create_share_emits_once_and_a_replay_emits_nothing(monkeypatch, tmp_path, files_mgr):
     _wire_files(monkeypatch, tmp_path)
     monkeypatch.setattr(files_service.db, "get_file_sharing_enabled", lambda a: True)

@@ -544,7 +544,8 @@ def test_the_guard_actually_finds_the_broadcast_sites():
         "the same call site was counted twice — the module and function passes "
         "are no longer deduped, which inflates the floor below into nonsense"
     )
-    # 36 sites today. A floor, not a snapshot: deleting a broadcast is normal,
+    # 38 sites today (ent#532 added canvas_updated + file_shared). A floor, not
+    # a snapshot: deleting a broadcast is normal,
     # discovery silently resolving nothing is not.
     assert len(payloads) >= 30, f"only found {len(payloads)} /ws payloads — discovery broke"
     events = {event for _, event, _, _ in payloads}
