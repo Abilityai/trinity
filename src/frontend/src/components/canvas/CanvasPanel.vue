@@ -41,9 +41,12 @@
         >{{ manage ? 'Done' : 'Manage' }}</button>
       </div>
 
-      <!-- Selector only when there is a choice to make. -->
+      <!-- Selector only when there is a choice to make — and ALWAYS when a
+           search has a hit (`canvasSelectorVisible`): at exactly one match the
+           old `visible.length > 1` gate hid the strip with the previous canvas
+           still on screen. -->
       <div
-        v-if="visible.length > 1 || manage"
+        v-if="selectorVisible"
         class="mb-3 flex max-h-48 flex-wrap gap-1.5 overflow-y-auto"
         data-testid="canvas-select"
       >
@@ -274,7 +277,9 @@ import { SHARE_SCOPES, scopeCopy, shareSummary, shareUrl } from './canvasShare'
 import {
   bulkDeleteOutcome,
   bulkDeletePrompt,
+  canvasAutoSelect,
   canvasHeadroom,
+  canvasSelectorVisible,
   emptyState,
   filterCanvases,
   freshness,
@@ -333,6 +338,9 @@ const visible = computed(() => filterCanvases(ordered.value, query.value))
 const showSearch = computed(() => ordered.value.length > SEARCH_THRESHOLD)
 const headroom = computed(() => canvasHeadroom(props.canvases.length, props.canvasLimit))
 const selection = computed(() => selectionState(selectedIds.value, visible.value))
+const selectorVisible = computed(() => canvasSelectorVisible({
+  visible: visible.value.length, manage: manage.value, query: query.value,
+}))
 const canManage = computed(() => props.canManage && !!props.deleteCanvas)
 
 function ageOf(c) { return c?.updated_at ? relativeTime(c.updated_at) : 'never updated' }
@@ -526,6 +534,18 @@ watch(
     if (!rows.some((c) => c.canvas_id === selectedId.value)) select(rows[0].canvas_id)
   },
   { immediate: true },
+)
+
+// ent#553 review — while a search is active the selection follows the MATCHES:
+// the list-watcher above keys off the unfiltered `props.canvases`, so a
+// narrowing to one hit never selected it. `canvasAutoSelect` is a no-op with
+// no query and when the selection is already a match.
+watch(
+  () => [visible.value, query.value],
+  () => {
+    const next = canvasAutoSelect(visible.value, selectedId.value, query.value)
+    if (next) select(next)
+  },
 )
 
 // ent#475 — the selected canvas was REWRITTEN (same id, newer `updated_at`) by
