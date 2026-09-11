@@ -16,6 +16,7 @@
     },
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
     "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level.",
+    "2638": "SubscriptionsPanel.vue raw_gray 165 -> 173 (+8): the API-key fallback toggle row. Not paid down because there is nothing to pay it down TO \u2014 `gray` is the sanctioned chrome family and tailwind.config.js defines no semantic neutral to replace it with (status-*/state-*/brand-*/accent-*/action-* are all meaning-carrying). The 8 classes are the label, the help text and the toggle's off-state, copied verbatim from the three identical toggles immediately above it; inventing a one-off semantic token for the fourth would make it the odd one out and leave the other three unconverted. Re-frozen in its own commit as the guard's own message prescribes, and scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it.",
     "_2616_note": "2026-09-10, #2616: components/portal/PortalMarkdown.vue raw_gray 13 -> 34 (+21). The Workspace transcript had no typographic treatment at all; covering tables, headings, ordered lists, blockquotes and rules costs a surface/border/ink pair per element in BOTH themes, and those are gray by definition (the contract's 'everything else is gray'). raw_nongray stays 0 and hardcoded_colors stays 0."
   },
   "files": {
@@ -861,7 +862,7 @@
     },
     "src/frontend/src/components/settings/SubscriptionsPanel.vue": {
       "raw_nongray": 4,
-      "raw_gray": 165,
+      "raw_gray": 173,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/TelemetrySharingPanel.vue": {
