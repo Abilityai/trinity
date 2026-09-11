@@ -5,7 +5,10 @@
 > signal, room grouping, persistence, and the mobile forms. The first docked tab
 > is **Work**, docked empty by the operator's split — its content is #457's.
 > Folded in: #2540, the loading rule this shell was built under (skeletons on
-> pages and threads; the scanline is for charts).
+> pages and threads; the scanline is for charts); ent#532, the backend
+> triggers that let the Canvas/Files dot light on the write instead of on the
+> next observable refetch, and the max-wait cap that keeps the shared refresh
+> debounce honest once a high-frequency writer rides it.
 
 ## The shape, and why it needs no backend
 

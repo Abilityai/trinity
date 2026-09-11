@@ -5,6 +5,7 @@
 | Date | Changes |
 |------|---------|
 | 2026-04-24 | Initial implementation (FILES-001 / #295). Steps 1–6 complete: schema, toggle + volume, internal share endpoint, public download, MCP tool, UI panel. |
+| 2026-09-11 | ent#532 — `_persist_and_register` now emits a thin `file_shared` `/ws` trigger (the id only; never the `?sig=`-bearing url), so the Workspace rail's Files dot lights on the share rather than at the next refetch. Fire-and-forget: it can never fail a share, and an idempotent replay emits nothing. |
 | 2026-09-07 | #2582 — the doc caught up with ent#461 (disposition is a server-decided allowlist, not a flat `attachment`) and with #568 (the `session_token` gate and the `require_email` policy check were deleted; both are AST-pinned dead). Added the one-way `?download=1` flag, the `HEAD` route, and the counter/audit split for a ranged prefix read. |
 
 ## Overview
@@ -154,6 +155,7 @@ No WebSocket updates yet — manual refresh on action (acceptable because volume
 | Quota | `enforce_quota()` | Sum of non-revoked, non-expired `size_bytes` for the agent; default 500 MB. |
 | Token | `secrets.token_urlsafe(32)` | 192-bit entropy, stored in `download_token`. URL param name is `sig` (NOT `download_token`) to bypass the credential sanitizer's `.*TOKEN.*` pattern. |
 | URL build | `build_download_url()` | `{public_chat_url}/api/files/{id}?sig={token}` — uses existing `/api/*` proxy path on Vite dev + prod nginx, no new proxy rules needed. |
+| `/ws` thin trigger | `_broadcast()` after the row + URL (ent#532) | `{type: "file_shared", agent_name, file_id}` — **the id only**, never the `url` (it carries the `?sig=` bearer token) or the display name. Fire-and-forget on the running loop; no manager, no loop, or a raising manager all mean "no trigger", never a failed share. `create_share`'s idempotent replay returns its snapshot without reaching the tail, so a replay emits nothing. The Workspace rail's Files tab is the consumer. |
 
 ---
 
@@ -252,6 +254,7 @@ See `docs/drafts/amazing-file-outbound.md` §6 for the full threat model. Key pr
 - Audit event `EXECUTION/file_share_download` per GET (logs IP, UA, file_id, size, MIME, target agent)
 - Download counter + `last_downloaded_at` bumped per download (best-effort; failures don't block the download)
 - Agent delete cascades: unlinks on-disk files, removes Docker volume, deletes DB rows
+- A `file_shared` thin trigger on `/ws` per NEW share (ent#532) — ids only, scoped to clients that may access the agent (ent#467); never emitted for an idempotent replay
 
 ---
 
