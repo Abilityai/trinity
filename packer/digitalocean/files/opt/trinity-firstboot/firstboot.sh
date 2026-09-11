@@ -174,6 +174,12 @@ https://${PUBLIC_IP} {
     reverse_proxy 127.0.0.1:8081 {
         flush_interval -1
     }
+
+    # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
+    # the reverse-proxy block, and their own catalog apps ship it (openclaw's
+    # Caddyfile sets it to "openclaw"). It is how a marketplace-originated
+    # install identifies itself to DigitalOcean.
+    header X-DO-MARKETPLACE "trinity"
 }
 
 http://${PUBLIC_IP} {

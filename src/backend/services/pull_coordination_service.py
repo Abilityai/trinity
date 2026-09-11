@@ -31,6 +31,7 @@ from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
 from services import event_dispatch_service
+from services import subscription_auto_switch
 from services.activity_service import activity_service
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -340,6 +341,25 @@ def _context_used(metadata: Dict[str, Any], tokens: Optional[int]) -> Optional[i
     return tokens if tokens else None
 
 
+# #2643: the worker's typed `error_code` and SUB-003's `failure_kind` are two
+# different vocabularies, and the quota class does not share a name between
+# them — it is `billing` on the wire (`result_callback._STATUS_MAP` maps an
+# agent 429 to it) and `rate_limit` in `subscription_rate_limit_events`. A
+# pass-through would file every 429 under a kind no reader knows.
+_SWITCH_FAILURE_KINDS = {"billing": "rate_limit", "auth": "auth"}
+
+
+def _switch_failure_kind(error_code: Optional[str]) -> Optional[str]:
+    """Which SUB-003 failure kind, if any, a pull terminal's code means (#2643).
+
+    An ALLOWLIST, deliberately: a code this map has not heard of switches
+    nothing. The inverse — "switch unless the code is one we know is benign" —
+    would churn an agent through every subscription it owns the first time a
+    worker reports a crash class nobody has taught this map about.
+    """
+    return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
+
+
 def apply_task_result(
     execution_id: str,
     claim_token: str,
@@ -473,6 +493,44 @@ def apply_task_result(
             row_status,
             error=(None if row_status == TaskExecutionStatus.SUCCESS else (err_text or None)),
         )
+        # #2643: SUB-003. This sink had every other terminal hook and not this
+        # one, so a pull-owned turn that died on a quota or credential failure
+        # recorded no `subscription_rate_limit_events` row (no skip-list entry,
+        # no usage card, no pressure badge) and left the agent pinned to the
+        # subscription that had just refused it — the push path has had all of
+        # that since #441/#471/#792.
+        #
+        # CAS-won branch only, beside the two hooks above: a replayed or late
+        # terminal short-circuits or loses the CAS, so it can never spend a
+        # second switch (the #1083 rule). `handle_subscription_failure` owns
+        # the rest — it records the event unconditionally, then takes the #799
+        # per-agent `agent_switch_lock` and re-reads under it, so two failures
+        # racing on one agent still switch once.
+        #
+        # Keyed on `error_code` rather than on the FAILED/CANCELLED split: a
+        # quota refusal is a quota refusal whether the worker labelled the turn
+        # failed or cancelled, and the push path likewise decides from the
+        # failure class the agent reported. A SUCCESS terminal is the one
+        # exclusion, and on the merits rather than for tidiness — the provider
+        # served that turn, which is evidence the subscription WORKS, so a
+        # stray `error_code` riding a success must not move the agent off it.
+        # (It is also the only branch where `err_text` is never bound.)
+        #
+        # It does NOT re-deliver. Re-delivery is the lease reaper's call and the
+        # #1085 governor's correlated-cause pause still gates it; this only puts
+        # the agent somewhere the next attempt can succeed. Dark until a pull
+        # pilot is enabled, wired now exactly as #1578 and #1804 were.
+        switch_kind = (
+            None
+            if row_status == TaskExecutionStatus.SUCCESS
+            else _switch_failure_kind(error_code)
+        )
+        if switch_kind is not None:
+            subscription_auto_switch.spawn_subscription_failure(
+                execution.agent_name,
+                error_message=err_text or f"[{error_code}] pull terminal",
+                failure_kind=switch_kind,
+            )
         return ResultApplyOutcome("applied", row_status)
 
     # CAS lost — reclassify against the freshly-read row.

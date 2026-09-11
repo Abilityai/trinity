@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "date": "2026-09-09",
+  "mode": "daily",
+  "scope": "--diff (feature/545-funnel-non-minting-read vs dev @ 3fa11329; enterprise submodule branch of the same name vs private main @ fd25b47)",
+  "issue": "abilityai/trinity-enterprise#545",
+  "phases_run": [
+    "P0",
+    "P1",
+    "P2 (diff)",
+    "P3",
+    "P4",
+    "P5",
+    "P6",
+    "P7",
+    "P8",
+    "P9",
+    "P10",
+    "P11",
+    "P12",
+    "P13",
+    "P14"
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "GET /api/enterprise/telemetry/funnel — response field installation_id becomes Optional[str] (null until a writer has minted it); gates unchanged: requires_entitlement('telemetry') on the router + require_admin on the route (rejects agent and connector principals, #1890 / #2323); the durable write the GET used to perform is removed"
+    ],
+    "new_inputs": [],
+    "ci_cd": [],
+    "new_workflow_expressions": 0,
+    "new_secret_references": 0,
+    "docker_or_compose_changes": 0,
+    "dependency_changes": 0,
+    "background_loops_changed": [],
+    "writers_changed": [
+      "services/operator_intake_service.py::get_or_create_installation_id — the mint on a SELECT-miss is a PRIMARY-KEY-enforced write-once claim (db.insert_setting_if_absent) followed by a read-back, no longer a last-write-wins upsert; callers (consent POST, product-event emit, canary label) unchanged"
+    ],
+    "readers_added": [
+      "services/operator_intake_service.py::get_installation_id — one settings read, no write on a miss; blank/non-string → None; a read failure propagates"
+    ],
+    "frontend": [
+      "components/settings/ActivationFunnelPanel.vue footer renders funnelFormat.js::installIdFooter(installation_id) through Vue interpolation (no v-html): minted / not_minted / unavailable"
+    ],
+    "tests": [
+      "src/backend/enterprise/tests/test_545_funnel_never_mints.py (10 tests; real throwaway sqlite via db.tables metadata; raising sentinels on the OSS minting accessor and on database.db.set_setting / insert_setting_if_absent; identity read back through system_settings; static AST guard; TestClient route with entitlement + admin overrides; agent-principal 403)",
+      "src/backend/enterprise/tests/test_190_benchmark_wiring.py (fixture: sentinel relocated to the OSS module attribute + the write sink)",
+      "tests/unit/test_operator_intake.py (+9: read twin, read-only store, read failure propagates, writer/reader are one key, racing claim — the loser keeps the winner's id)",
+      "src/frontend/tests/unit/funnelFormat.spec.js (+16: three footer states, no blank phrase, source-structure guard on the panel wiring)"
+    ]
+  },
+  "hardening_shipped": [
+    "a durable identity write is removed from a GET: opening Settings → Activation on an unminted install no longer creates the install's correlation id (the get_or_create_*-on-a-read class, ledger 2026-08-05; third occurrence after #1987 and the ent#190 benchmark read)",
+    "the mint is a write-once claim decided by the PRIMARY KEY, so two workers that SELECT-miss together land one id and the loser reads the winner's back — the last-write-wins race #1987 recorded as pre-existing (orphaning one worker's product_events rows) is closed",
+    "the enterprise suite's never-mint proof sits on the write SINK (database.db.set_setting / insert_setting_if_absent raise) plus a static AST guard over the service module, so neither a re-added top-level import nor a lazy in-function import can mint without failing CI",
+    "the footer never claims 'not minted' for a value that is merely absent or malformed: only the backend's explicit null renders that state; an admin sees 'unavailable' otherwise",
+    "no new log line, no new outbound call, no new setting: the id is not logged by the new code; the funnel stays local-only"
+  ],
+  "findings": [],
+  "supply_chain_summary": {
+    "python": "no dependency files changed",
+    "node": "no dependency files changed (host vitest and vite build ran against the existing node_modules; no lockfile change)",
+    "actions": "no workflow files changed"
+  },
+  "filter_stats": {
+    "candidates": 6,
+    "reported": 0,
+    "refuted_by_verifier": 0,
+    "excluded_by_rules": 5,
+    "notes": [
+      "EXCLUDED (rule 5, no concrete vulnerability; framework-aware): an admin can PUT an arbitrary string into system_settings.installation_id and it renders in the panel footer — through Vue interpolation only (no v-html), on an admin-only, entitlement-gated surface; self-inflicted and escaped",
+      "CHECKED, not a finding: the claim goes through insert_setting_if_absent, which does not run set_setting's sink guards (assert_plaintext_write_allowed, the install_source refusal) — by design, since it cannot overwrite; the key is the fixed literal 'installation_id', neither credential-shaped nor the provenance key",
+      "EXCLUDED (rule 5; out of diff scope): the generic DELETE /api/settings/installation_id re-keys future product events and breaks the intake correlation — pre-existing, admin-only (assert_admin rejects agent and connector principals), unchanged by this diff; the live-proof recipe uses it deliberately and restores the value",
+      "EXCLUDED (rule 6, not concretely exploitable): the read-back after the claim can return '' if an admin DELETE lands between the claim and the read — data-integrity only, requires an admin interleaving, and every caller already tolerates the empty string",
+      "EXCLUDED (rule 8 / placeholder FP): the enterprise test sets REDIS_URL=redis://u:p@localhost:6379 and SECRET_KEY=ci-not-a-real-secret — the same import-time placeholders test_190 and the enterprise CI workflow use",
+      "CHECKED, not a finding (trinity-enterprise#45 disclosure guard): the public docs now describe the funnel read as pure and nullable — the gated funnel view has been public in requirements §45 FR-4 since ent#184; the guard's own pattern (SIEM/SCIM/permissions_matrix/two_factor/enterprise_<private tables>) matches none of the 24 added lines, and neither seam file is touched"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "info": 0
+  },
+  "trend": {
+    "prior_reports": [
+      "cso-diff-2026-09-09-2618-heartbeat-dueness.json",
+      "cso-diff-2026-09-08-2578-deploy-fetch-never-recurses.json",
+      "cso-diff-2026-09-07-ent190-benchmark-wiring.json",
+      "cso-diff-2026-09-07-ent541-retention-parity-guard.json"
+    ],
+    "note": "diff-mode reports are branch-scoped; the ent#190 report covered the same module's sibling benchmark read and recorded this very item (the funnel read still minting) as deferred — closed here. No fingerprint overlap; no findings in any of the four."
+  }
+}
