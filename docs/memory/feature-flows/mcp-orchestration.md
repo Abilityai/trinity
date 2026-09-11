@@ -641,6 +641,15 @@ releases its idempotency claim (`_map_task_failure`). It previously left the
 claim `in_flight` for the full 24h TTL, so a legitimate retry answered 409 for a
 day against a task that had died minutes earlier — and rewording was the only
 way through, which is exactly the duplicate-dispatch behaviour being fixed.
+The backlog long-poll (`_dispatch_sync_backlog`) had two more exits between
+`begin()` and `complete()`: a **vanished row** now releases (nothing is
+running under that key), and a **long-poll timeout** first re-reads the row —
+a terminal the wait missed is settled normally, while a row still
+queued/running completes the claim with a `queued_timeout` receipt (the
+`_queued_payload` shape). Not released, because a retry would dispatch a
+second execution beside the live one; not left `in_flight`, because nothing
+downstream completes it. A replay therefore answers 200 + the execution to
+poll, and the row stays the single source of truth for the outcome.
 
 **Still unfixed — `fan_out` (route three):** `client.ts::fanOut()` carries the
 same unbounded `(timeout_seconds ?? 7200) + 60` ceiling. It needs a `fan_out_id`
