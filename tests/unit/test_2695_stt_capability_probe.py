@@ -307,7 +307,7 @@ def test_a_live_refusal_teaches_the_cache(monkeypatch):
                   return_value=KEY):
         with pytest.raises(ClientPortalError) as exc:
             asyncio.run(_call())
-    assert exc.value.status_code == 422
+    assert exc.value.status_code == 503      # #2696: a named refusal, not the opaque 422
     assert stt.read_cached(KEY).verdict == stt.VERDICT_REFUSED
 
 

@@ -2746,7 +2746,11 @@ async def _elevenlabs_settings_state_with_capability() -> dict:
     from services import stt_capability_service
     state = _elevenlabs_settings_state()
     cap = await stt_capability_service.ensure_capability()
-    state.update(stt_capability_service.describe(cap))
+    # #2696: `stt_last_failure` — the last live `/stt` provider error for this
+    # key (category + the provider's status word), admin-only by virtue of the
+    # route. The client got a category sentence; this is the operator half.
+    state.update(stt_capability_service.describe(
+        cap, api_key=settings_service.get_elevenlabs_api_key()))
     return state
 
 
