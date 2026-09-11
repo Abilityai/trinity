@@ -68,8 +68,11 @@ logger = logging.getLogger(__name__)
 # `in_progress` and letting the injection finish in the background. The
 # axios default is 30 s (`api.js`) and a single skill restore is bounded only
 # by `_RESTORE_TIMEOUT`, so an unbounded await turns a committed row into a
-# client-side "save failed".
-SKILL_DELIVERY_BUDGET_SECONDS = float(os.environ.get("SKILL_DELIVERY_BUDGET_SECONDS", "20"))
+# client-side "save failed". A CONSTANT, not a knob — and literally so (the
+# #1644 rule): neither compose forwards an env var for it, and an unforwarded
+# `os.environ.get` would be inert while still reading as configurable. The
+# frontend's request timeout (45 s) is sized against this value.
+SKILL_DELIVERY_BUDGET_SECONDS = 20.0
 # One retry on `SkillInjectionBusy` before reporting it: an assign that lands
 # while the START path holds the lock would otherwise never be delivered — the
 # start read its name list before the row existed, and "applies on next start"
