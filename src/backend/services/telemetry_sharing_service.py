@@ -48,6 +48,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -62,6 +63,7 @@ from redis_breaker_util import SingleFlightLock, get_breaker_redis
 from services import settings_service
 from utils.app_version import resolve_release_version
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
+from utils.url_validation import SCHEME_DEFAULT_PORTS, canonical_host, strip_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +394,60 @@ def _record_send(entry: Dict) -> None:
         logger.debug("[telemetry-share] send log write failed", exc_info=True)
 
 
+def share_destination(url: Any) -> Optional[str]:
+    """``scheme://host[:port]`` of a share URL — where a send went, and nothing else.
+
+    The RFC 6454 origin, and only that: no userinfo (``strip_url_credentials``
+    runs FIRST, so a credential never reaches the parser's output), no path, no
+    query, no fragment (#2571). A path can carry a token; an origin cannot.
+
+    Canonical at write time, so the comparison downstream is plain string
+    equality with no second normaliser to keep in step: the scheme is
+    lower-cased, the host goes through ``canonical_host`` (this codebase's one
+    answer to "is this the same host" — trailing dot stripped, UTS-46, ASCII
+    passthrough so an underscore host survives), and the port is kept only when
+    it is explicit and not the scheme's default. The two sides of the mismatch
+    signal are different inputs captured at different times — the URL as
+    configured when the send went out, versus the URL as configured now — so a
+    host retyped in another form must still compare equal, or the panel reports
+    a change that did not happen.
+
+    ``None`` when there is no scheme or host, when the host does not
+    canonicalise (a percent-encoded authority is not verifiable from Python), or
+    when the URL does not parse. **Never raises** — that is load-bearing, not
+    tidy: it runs in ``share_now``, whose entry dict is built OUTSIDE its own
+    ``try``, and in ``get_status``, which must never 500 the panel.
+    """
+    try:
+        parts = urlsplit(strip_url_credentials(url if isinstance(url, str) else ""))
+        scheme = (parts.scheme or "").lower()
+        raw = parts.hostname             # already lower-cased, brackets stripped
+        if not scheme or not raw:
+            return None
+        if ":" in raw:                   # IPv6 literal — an address, never a name: no IDNA
+            host = f"[{raw}]"
+        else:
+            host = canonical_host(raw)
+            if not host:                 # percent-encoded / non-ASCII codec failure
+                return None
+        port = parts.port                # ValueError on a non-numeric port → None below
+        if port and port != SCHEME_DEFAULT_PORTS.get(scheme):
+            return f"{scheme}://{host}:{port}"
+        return f"{scheme}://{host}"
+    except Exception:  # noqa: BLE001 — see the never-raises contract above
+        return None
+
+
+def receiver_destination(recent: List[Dict]) -> Optional[str]:
+    """Where the newest attempt went, or None: no attempts, or an entry written
+    before the log recorded a destination (#2571). Never fabricated — a legacy
+    entry stays unknown, it is not backfilled from the current URL."""
+    if not recent:
+        return None
+    value = recent[0].get("destination")
+    return value if isinstance(value, str) and value else None
+
+
 def receiver_hint(recent: List[Dict]) -> Optional[str]:
     """What the newest attempt says about the receiver — a hint for the panel,
     never a verdict: ``receiver_not_live`` (404 from the DEFAULT url — the ent#190
@@ -404,7 +460,16 @@ def receiver_hint(recent: List[Dict]) -> Optional[str]:
     if newest.get("ok") is True:
         return "ok"
     if newest.get("http_status") == 404:
-        return "receiver_not_live" if TELEMETRY_SHARING_URL == DEFAULT_SHARE_URL else "receiver_404"
+        # Judged by where THAT send went, when the log knows (#2571) — the 404 is
+        # a property of the send, and reading it against the URL configured
+        # afterwards is the same mistake this issue is filed about. A legacy
+        # entry has no recorded destination and keeps the pre-#2571 reading.
+        recorded = receiver_destination(recent)
+        at_default = (
+            recorded == share_destination(DEFAULT_SHARE_URL) if recorded
+            else TELEMETRY_SHARING_URL == DEFAULT_SHARE_URL
+        )
+        return "receiver_not_live" if at_default else "receiver_404"
     return "failed"
 
 
@@ -441,6 +506,8 @@ def get_status() -> Dict:
     except (TypeError, ValueError):
         backfill = TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS
     recent = _recent_sends()
+    configured = share_destination(TELEMETRY_SHARING_URL)
+    recorded = receiver_destination(recent)
     sharing_id = _read(KEY_SHARING_ID, None)
     return {
         "enabled": is_consent_enabled(),
@@ -458,6 +525,13 @@ def get_status() -> Dict:
         "backfill_delivered_at": _read(KEY_BACKFILL_DELIVERED_AT, None),
         "recent_sends": recent,
         "receiver_hint": receiver_hint(recent),
+        # #2571 — where the newest send actually went, where sends go now, and
+        # whether those differ. `destination_changed` is False whenever EITHER
+        # side is unknown: claiming a change without knowing would fabricate
+        # exactly the certainty this triple exists to remove.
+        "configured_destination": configured,
+        "receiver_destination": recorded,
+        "destination_changed": bool(recorded and configured and recorded != configured),
     }
 
 
@@ -771,6 +845,11 @@ async def share_now(*, backfill: bool = False, window_days: Optional[int] = None
     # every wake, unthrottled and invisible (#2654 review).
     entry: Dict[str, Any] = {
         "sent_at": _now_iso(),
+        # Where this send is going, captured now (#2571): a 200 from a local
+        # test receiver must never read later as the hosted service's
+        # acknowledgement. Set here, before any step that can raise, so every
+        # path below records it — and `share_destination` cannot raise.
+        "destination": share_destination(TELEMETRY_SHARING_URL),
         "backfill": bool(backfill),
         "window_days": int(window_days or 0),
         "ok": False,
