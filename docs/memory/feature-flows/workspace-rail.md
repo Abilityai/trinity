@@ -222,8 +222,12 @@ without clearing, so the rail does not blank and refill.
 
 ### "Updated since last view"
 
-No backend event exists for a canvas write or a shared file (registered as
-debt). The dot derives from data on every render: the newest **server**
+Since ent#532 the backend emits two thin `/ws` triggers beside the write
+itself — `canvas_updated {agent_name, canvas_id}` from
+`canvas_service.write_canvas` and `file_shared {agent_name, file_id}` from
+`agent_shared_files_service._persist_and_register` — so a canvas rewritten by
+a scheduled run lights the dot on the event rather than at the next observable
+refetch. The dot itself is unchanged: it derives from data on every render: the newest **server**
 timestamp per participant (`updated_at` / `created_at`, compared as epoch ms
 through `parseUTC` — never lexicographically, Invariant #16) is newer than the
 agent's seen marker, or nothing was ever seen and the feed is non-empty. The
@@ -234,9 +238,17 @@ untouched. Refresh triggers: participants change, a turn ending (both chats,
 through the Work signal's live → 0 edge), `loop_*` and terminal
 `agent_activity` events for a participant (platform sessions), the tab being
 opened, a successful upload **from any surface** (#2582 — the conversation
-composer, a room's fan-out, or the tab's own drop zone), and a delete. An
-external client with a scheduled canvas rewrite and no chat turn sees the dot
-at its next turn or tab open — stated.
+composer, a room's fan-out, or the tab's own drop zone), a delete, and — since
+ent#532 — the `canvas_updated` / `file_shared` triggers for a participant.
+All push triggers share one debounce, which is now capped
+(`PUSH_MAX_WAIT_MS = 2 × PUSH_DEBOUNCE_MS`): a trailing debounce that re-arms
+on every event would, under a sub-2-s canvas write stream, defer not only its
+own read but the loop/activity reads that share the timer. A single event
+still fires at exactly the 2 s trailing edge. An external client still sees
+the dot at its next turn or tab open — not because no event exists, but
+because a portal token opens no `/ws` at all (its only push is the
+per-execution stream), so reaching those clients is a new transport and is
+deferred.
 
 ### One rendering layer for the canvas
 
