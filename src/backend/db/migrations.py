@@ -4044,7 +4044,7 @@ def _migrate_execution_open_canvas(cursor, conn):
     know what the turn was about. It never widens what the agent may reach —
     the boundary that stamps it validates the canvas belongs to that agent.
 
-    Mirrored by the Alembic revision 0060_execution_open_canvas.
+    Mirrored by the Alembic revision 0061_execution_open_canvas.
     """
     _safe_add_column(
         cursor,

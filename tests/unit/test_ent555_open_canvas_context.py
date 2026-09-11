@@ -213,7 +213,7 @@ def test_the_column_ships_on_both_migration_tracks():
     import pathlib
     backend = pathlib.Path(__file__).resolve().parents[2] / "src" / "backend"
     assert "execution_open_canvas" in (backend / "db" / "migrations.py").read_text()
-    alembic = backend / "migrations" / "versions" / "0060_execution_open_canvas.py"
+    alembic = backend / "migrations" / "versions" / "0061_execution_open_canvas.py"
     assert alembic.exists() and "open_canvas_id" in alembic.read_text()
 
 

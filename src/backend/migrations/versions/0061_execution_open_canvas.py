@@ -6,14 +6,14 @@ that stamps it validates the canvas belongs to that agent.
 
 Mirrors the SQLite ``execution_open_canvas`` migration.
 
-Revision ID: 0060_execution_open_canvas
-Revises: 0059_agent_canvas_shares
+Revision ID: 0061_execution_open_canvas
+Revises: 0060_agent_canvas_shares
 """
 from alembic import op
 
 
-revision = "0060_execution_open_canvas"
-down_revision = "0059_agent_canvas_shares"
+revision = "0061_execution_open_canvas"
+down_revision = "0060_agent_canvas_shares"
 branch_labels = None
 depends_on = None
 
