@@ -350,7 +350,17 @@ def test_the_same_host_written_two_ways_is_one_destination(tss):
     mod, _store, _ = tss
     assert mod.share_destination("https://HOST.TEST./x") == mod.share_destination("https://host.test/x")
     assert mod.share_destination("https://fa\u00df.de/x") == mod.share_destination("https://xn--fa-hia.de/x")
-    # …and the port stays part of the address — that is the issue's own scenario.
+    # An IP literal is one address however it is spelled (ent#399). Comparing
+    # those textually is what permanently refused an IPv6 peer against its own
+    # card; here it would print "no send has gone there since" about an address
+    # every send is in fact reaching.
+    assert mod.share_destination("https://[0:0:0:0:0:0:0:1]:8443/x") == mod.share_destination("https://[::1]:8443/x")
+    assert mod.share_destination("https://[2606:4700:4700:0:0:0:0:1111]/x") \
+        == mod.share_destination("https://[2606:4700:4700::1111]/x")
+    # …and the folding never equates two addresses a resolver would separate:
+    # `ipaddress` REFUSES the ambiguous IPv4 spellings instead of folding them,
+    # and the port stays part of the address — that is the issue's own scenario.
+    assert mod.share_destination("http://0177.0.0.1/x") != mod.share_destination("http://127.0.0.1/x")
     assert mod.share_destination("http://localhost:8787/x") != mod.share_destination("http://localhost/x")
 
 

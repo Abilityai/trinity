@@ -63,7 +63,7 @@ from redis_breaker_util import SingleFlightLock, get_breaker_redis
 from services import settings_service
 from utils.app_version import resolve_release_version
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
-from utils.url_validation import SCHEME_DEFAULT_PORTS, canonical_host, strip_url_credentials
+from utils.url_validation import SCHEME_DEFAULT_PORTS, canonical_origin_host, strip_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -403,14 +403,17 @@ def share_destination(url: Any) -> Optional[str]:
 
     Canonical at write time, so the comparison downstream is plain string
     equality with no second normaliser to keep in step: the scheme is
-    lower-cased, the host goes through ``canonical_host`` (this codebase's one
-    answer to "is this the same host" — trailing dot stripped, UTS-46, ASCII
-    passthrough so an underscore host survives), and the port is kept only when
-    it is explicit and not the scheme's default. The two sides of the mismatch
-    signal are different inputs captured at different times — the URL as
-    configured when the send went out, versus the URL as configured now — so a
-    host retyped in another form must still compare equal, or the panel reports
-    a change that did not happen.
+    lower-cased, the host goes through ``canonical_origin_host`` (this
+    codebase's one answer to "is this the same host **as an origin key**" —
+    trailing dot stripped, UTS-46, ASCII passthrough so an underscore host
+    survives, and an IP literal parsed rather than compared as text, which is
+    the ent#399 defect: ``[::1]`` and ``[0:0:0:0:0:0:0:1]`` are one address
+    written two ways, while the ambiguous IPv4 spellings ``ipaddress`` refuses
+    stay distinct), and the port is kept only when it is explicit and not the
+    scheme's default. The two sides of the mismatch signal are different inputs
+    captured at different times — the URL as configured when the send went out,
+    versus the URL as configured now — so a host retyped in another form must
+    still compare equal, or the panel reports a change that did not happen.
 
     ``None`` when there is no scheme or host, when the host does not
     canonicalise (a percent-encoded authority is not verifiable from Python), or
@@ -424,12 +427,11 @@ def share_destination(url: Any) -> Optional[str]:
         raw = parts.hostname             # already lower-cased, brackets stripped
         if not scheme or not raw:
             return None
-        if ":" in raw:                   # IPv6 literal — an address, never a name: no IDNA
-            host = f"[{raw}]"
-        else:
-            host = canonical_host(raw)
-            if not host:                 # percent-encoded / non-ASCII codec failure
-                return None
+        host = canonical_origin_host(raw)
+        if not host:                     # percent-encoded / non-ASCII codec failure
+            return None
+        if ":" in host:                  # an IPv6 literal wears brackets in a URL
+            host = f"[{host}]"
         port = parts.port                # ValueError on a non-numeric port → None below
         if port and port != SCHEME_DEFAULT_PORTS.get(scheme):
             return f"{scheme}://{host}:{port}"
