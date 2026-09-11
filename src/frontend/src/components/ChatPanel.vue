@@ -166,6 +166,7 @@
 import { ref, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useSkillsStore } from '../stores/skills'
 import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import ModelSelector from './ModelSelector.vue'
@@ -192,6 +193,7 @@ const props = defineProps({
 })
 
 const authStore = useAuthStore()
+const skillsStore = useSkillsStore()   // #2703: per-agent "skills changed" ticks
 
 // Voice lives in the Workspace (#2559). This panel used to mount the orb and
 // run a parallel call: its own start route, its own transcript home
@@ -808,6 +810,16 @@ onMounted(() => {
     loadSessions()
     loadPlaybooks()
   }
+})
+
+// #2703 — a skill was assigned / unassigned / synced on this agent (the thin
+// `agent_skills_changed` trigger, ticked per agent in the skills store): the
+// `/` popup and the empty-state quick actions read `/playbooks`, so refetch.
+// Debounced in the store; the running gate mirrors the mount path — a stopped
+// agent has no agent-server to ask, and the status→running watch above
+// already reloads on start.
+watch(() => skillsStore.changedAt[props.agentName], (tick, prev) => {
+  if (tick && tick !== prev && props.agentStatus === 'running') loadPlaybooks()
 })
 
 onUnmounted(() => {

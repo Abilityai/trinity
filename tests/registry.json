@@ -2867,6 +2867,18 @@
         "unit"
       ],
       "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
+    },
+    {
+      "file": "unit/test_2703_skill_assign_delivery.py",
+      "feature": "#2703",
+      "added": "2026-09-11",
+      "categories": [
+        "backend",
+        "skills",
+        "websocket",
+        "unit"
+      ],
+      "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
     }
   ]
 }
