@@ -24,7 +24,13 @@ import { TrinityClient } from "../src/client.js";
 // receipt on ambiguity — a harness that collided with its own prior run would
 // look like a broken feature.
 const NONCE = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-const PROMPT = `[verify ${NONCE}] Please sleep for 60 seconds in your head, then reply DONE. Take your time.`;
+// Unique per ROUTE as well (#2675 review): in `both` mode the chat row is still
+// running when the task route aborts, and `pickRecentMcpExecution` filters on
+// the exact message — so one shared prompt made the task lookup see TWO
+// survivors (its own row and chat's), refuse on ambiguity, and exit 1. The
+// default mode was broken by the very rule it exists to verify.
+const prompt = (route: string) =>
+  `[verify ${NONCE} ${route}] Please sleep for 60 seconds in your head, then reply DONE. Take your time.`;
 
 type Outcome = { route: string; ok: boolean; note: string; executionId?: string };
 
@@ -104,7 +110,7 @@ async function main(): Promise<void> {
   try {
     if (mode === "chat" || mode === "both" || mode === "all") {
       const t0 = Date.now();
-      const response = await client.chat(agent, PROMPT, undefined, keyInfo);
+      const response = await client.chat(agent, prompt("chat"), undefined, keyInfo);
       outcomes.push(classify("914-chat", response, Date.now() - t0));
     }
 
@@ -113,7 +119,7 @@ async function main(): Promise<void> {
       // that used to hold the fetch for timeout_seconds + 60 and surface a bare
       // `fetch failed`.
       const t0 = Date.now();
-      const response = await client.task(agent, PROMPT, {}, undefined, keyInfo);
+      const response = await client.task(agent, prompt("task"), {}, undefined, keyInfo);
       outcomes.push(classify("2661-task", response, Date.now() - t0));
     }
     if (mode === "fanout" || mode === "all") {
@@ -143,7 +149,9 @@ async function main(): Promise<void> {
       "until terminal and confirm it reaches success — i.e. the target really did keep running " +
       "after we hung up, and the capacity slot was released."
   );
-  process.exit(outcomes.every((o) => o.ok) ? 0 : 0);
+  // Non-zero when any route answered fast instead of with a receipt — that is
+  // "the timeout never fired", which the run exists to prove, not a pass.
+  process.exit(outcomes.every((o) => o.ok) ? 0 : 1);
 }
 
 main();

@@ -969,6 +969,18 @@ export class TrinityClient {
 
     if (!response.ok) {
       const error = await response.text();
+      // #2661: same rule as `task()` below — a 409 idempotency replay carries
+      // the execution_id of the in-flight claim (routers/chat.py), and the tool
+      // description promises the receipt on EVERY sync route. The sequential
+      // route hit it too: a re-sent identical message inside the 24h window
+      // used to come back as an opaque `API error (409)` with nothing to poll.
+      if (response.status === 409) {
+        const executionId = extractIdempotencyExecutionId(error);
+        if (executionId) {
+          debugLog(`[chat] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
+          return this.inFlightReplayReceipt(name, executionId);
+        }
+      }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
@@ -1231,21 +1243,38 @@ export class TrinityClient {
         const executionId = extractIdempotencyExecutionId(error);
         if (executionId) {
           debugLog(`[task] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
-          return {
-            status: "queued_timeout",
-            agent: name,
-            execution_id: executionId,
-            message:
-              `This exact call was already dispatched to '${name}' and has not been replayed as complete. ` +
-              `Poll get_execution_result(execution_id="${executionId}") for its outcome; re-sending a reworded ` +
-              `variant would dispatch a SECOND execution (#2661).`,
-          };
+          return this.inFlightReplayReceipt(name, executionId);
         }
       }
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
     return (await response.json()) as ChatResponse;
+  }
+
+  /**
+   * #2661: the receipt for a 409 idempotency replay, shared by `chat()` and
+   * `task()` so the two routes cannot drift on what "already dispatched" says.
+   *
+   * The wording deliberately says "already dispatched", not "still running": a
+   * sync call that ended failed/cancelled/timed-out used to leave its claim
+   * in_flight (fixed alongside this in chat_execution_service), and a pre-fix
+   * row can still be replayed here. Resolve the id rather than trusting the
+   * claim's liveness.
+   */
+  private inFlightReplayReceipt(
+    name: string,
+    executionId: string,
+  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string } {
+    return {
+      status: "queued_timeout",
+      agent: name,
+      execution_id: executionId,
+      message:
+        `This exact call was already dispatched to '${name}' and has not been replayed as complete. ` +
+        `Poll get_execution_result(execution_id="${executionId}") for its outcome; re-sending a reworded ` +
+        `variant would dispatch a SECOND execution (#2661).`,
+    };
   }
 
   /** Shared #914/#2661 receipt body so both routes speak one contract. */

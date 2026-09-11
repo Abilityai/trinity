@@ -221,7 +221,7 @@ describe('#2320 — where the verdict is read in the poll loop', () => {
     // The reply must still be READ from the persisted history rows, which is
     // what makes it carry a row id (#2580) — not composed locally from the
     // stream. Losing that would silently reinstate the un-rateable reply.
-    expect(body).toContain('replyFromHistory(data.messages, baselineAssistants)')
+    expect(body).toContain('replyFromHistory(data.messages, baseline)')
   })
 
   it('reads the verdict before the idle timer, not after it', () => {
