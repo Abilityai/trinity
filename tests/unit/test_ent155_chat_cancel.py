@@ -241,7 +241,13 @@ def test_a_public_link_can_only_cancel_what_a_public_link_produced():
             public_router, "_validate_public_link",
             lambda token: {"id": "link-1", "agent_name": "scribe"},
         )
-        monkeypatch.setattr(public_router, "_agent_requires_email", lambda name: False)
+        # #1028: the router calls through the service module object, so the
+        # patch has to land on the ONE definition — patching a router-local
+        # alias would gate nothing and pass.
+        monkeypatch.setattr(
+            public_router.public_chat_service, "agent_requires_email",
+            lambda name: False,
+        )
         monkeypatch.setattr(public_router.db, "get_execution", lambda eid: row)
 
         async def _term(**kwargs):
@@ -348,12 +354,12 @@ def test_public_terminate_is_not_weaker_than_the_route_that_creates_the_turn():
     from routers import public as mod
     src = inspect.getsource(mod.public_terminate_execution)
     assert "session_token" in src, "no session gate on the terminate route"
-    assert "_agent_requires_email(agent_name)" in src, (
+    assert "public_chat_service.agent_requires_email(agent_name)" in src, (
         "the gate must apply only to links that HAVE a visitor identity"
     )
     assert "source_user_email" in src, "the turn is not bound to its own visitor"
     # Uniform 404 on a mismatch, never a distinguishable 403 (Invariant #8).
-    body = src[src.index("_agent_requires_email(agent_name)"):]
+    body = src[src.index("public_chat_service.agent_requires_email(agent_name)"):]
     assert "404" in body, "a mismatch must not be distinguishable from absence"
 
 

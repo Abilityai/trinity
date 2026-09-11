@@ -50,7 +50,10 @@ def _load_isolated(name: str, relpath: str):
     return mod
 
 
-_RS = _load_isolated("retention_settings_isolated", "routers/settings.py")
+# #1028: `routers/settings.py` is now the package `routers/settings/`. This
+# isolated load points at the module that owns the handler under test —
+# the split moved the code, not its behaviour.
+_RS = _load_isolated("retention_settings_isolated", "routers/settings/retention.py")
 get_retention_status = _RS.get_retention_status
 
 pytestmark = pytest.mark.unit

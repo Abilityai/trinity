@@ -28,6 +28,9 @@ from fastapi.testclient import TestClient
 import config
 import routers.agent_brain_orb as bo
 import routers.settings as sr
+# #1028: the Brain Orb handlers live in the package's `integrations` module;
+# `sr.router` remains the composed router.
+import routers.settings.integrations as sr_integrations
 from database import db
 from dependencies import (
     get_authorized_agent_by_name,
@@ -201,7 +204,7 @@ def test_put_unknown_clear_name_400(admin_client):
 
 
 def test_put_noop_succeeds_without_audit(admin_client):
-    with patch.object(sr.platform_audit_service, "log", AsyncMock()) as log:
+    with patch.object(sr_integrations.platform_audit_service, "log", AsyncMock()) as log:
         r = admin_client.put(_URL, json={})
     assert r.status_code == 200
     assert r.json()["updated"] == []
@@ -216,7 +219,7 @@ def test_put_requires_admin(user_client):
 def test_put_audit_carries_per_flag_old_new(admin_client):
     """The write flag gates an exec-adjacent surface — every change must leave
     a per-flag old→new trace, not a bare 'update'."""
-    with patch.object(sr.platform_audit_service, "log", AsyncMock()) as log:
+    with patch.object(sr_integrations.platform_audit_service, "log", AsyncMock()) as log:
         r = admin_client.put(_URL, json={"write_enabled": True})
     assert r.status_code == 200
     assert log.await_count == 1

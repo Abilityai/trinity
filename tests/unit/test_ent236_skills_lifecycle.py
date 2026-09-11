@@ -1149,7 +1149,9 @@ class TestAutomationSwitchIsHumanOnly:
     @pytest.fixture()
     def router_mod(self):
         try:
-            import routers.settings as mod
+            # #1028: the skills-library automation handlers live in the
+            # package's `integrations` module.
+            import routers.settings.integrations as mod
         except Exception:  # noqa: BLE001
             pytest.skip("routers.settings not importable in this run")
         return mod

@@ -2,7 +2,7 @@
 
 > Part of the Trinity architecture set. Core map, invariants and topology: [architecture.md](../architecture.md). This file is **not** auto-loaded.
 >
-> **Owns**: `src/backend/services/agent_service/**`, `src/backend/services/git_service.py`, `src/backend/services/template_service.py`, `src/backend/services/template_schedules.py`, `src/backend/services/template_plugins.py`, `src/backend/services/skill_service.py`, `src/backend/services/skill_packaging.py`, `src/backend/services/compatibility/**`, `src/backend/services/subscription_auto_switch.py`
+> **Owns**: `src/backend/services/agent_service/**`, `src/backend/services/git_service/**`, `src/backend/services/template_service.py`, `src/backend/services/template_schedules.py`, `src/backend/services/template_plugins.py`, `src/backend/services/skill_service.py`, `src/backend/services/skill_packaging.py`, `src/backend/services/compatibility/**`, `src/backend/services/subscription_auto_switch.py`
 >
 > **Read this before changing the paths above**: `lifecycle._apply_git_env_from_db` takes its PAT gate as a required per-call-site parameter, never a default. Sharing one gate bakes the global platform PAT into a previously tokenless container, `configure_push_remote` then clears the push blackhole, and a private knowledge base can reach the shared public upstream (the ent#162 class). An AST guard pins the exact writer set, so a third writer on any container-seeded path fails CI.
 >

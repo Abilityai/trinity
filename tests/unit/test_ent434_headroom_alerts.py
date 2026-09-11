@@ -519,7 +519,12 @@ class TestSettingsWritePaths:
         """The catch-all takes an unvalidated string. A small VALID integer is
         the dangerous input here, not garbage — "5" would be stored verbatim
         and alarm on every subscription forever (#1644's lesson)."""
-        src = (_BACKEND / "routers" / "settings.py").read_text()
+        # #1028: routers/settings.py is a package now; the catch-all lives in
+        # generic.py and the dedicated threshold route in credentials-adjacent
+        # sub-routers — read the whole package so a future re-shuffle of the
+        # sub-modules cannot silently blank this guard.
+        pkg = _BACKEND / "routers" / "settings"
+        src = "\n".join(f.read_text() for f in sorted(pkg.glob("*.py")))
         assert "HEADROOM_ALERT_THRESHOLD_KEY" in src
         assert "headroom-alert-threshold" in src
 
@@ -527,10 +532,13 @@ class TestSettingsWritePaths:
         """T1: ops keys were range-validated on /ops/config and NOWHERE on the
         catch-all, so an ops key reachable there accepted "abc" or "-40"
         verbatim. Closed generally rather than with a twelfth `if key == ...`."""
-        src = (_BACKEND / "routers" / "settings.py").read_text()
+        # #1028: the catch-all moved to routers/settings/generic.py; window from
+        # the PUT decorator to the next route decorator so the assertion still
+        # scopes to the catch-all handler alone.
+        src = (_BACKEND / "routers" / "settings" / "generic.py").read_text()
         put_key = src.index('@router.put("/{key}"')
-        ops_config = src.index('@router.put("/ops/config")')
-        catch_all = src[put_key:ops_config]
+        next_route = src.index('@router.delete("/{key}")', put_key)
+        catch_all = src[put_key:next_route]
         assert "OPS_SETTINGS_VALIDATION" in catch_all
         assert "validate_ops_setting" in catch_all
 

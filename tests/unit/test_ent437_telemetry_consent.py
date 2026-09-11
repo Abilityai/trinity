@@ -387,7 +387,10 @@ def test_tick_marker_dedupes_workers_and_fails_open(tss):
 @pytest.fixture
 def router_env():
     try:
-        from routers import settings as router_mod
+        # #1028: routers/settings.py is a package; the telemetry consent
+        # handlers live in routers/settings/flags.py, which is where the
+        # module-global collaborators they patch actually resolve.
+        from routers.settings import flags as router_mod
         import services.telemetry_sharing_service as tss_mod
     except ImportError:
         pytest.skip("backend venv required")

@@ -528,7 +528,9 @@ def _load_git_service():
     for key in list(sys.modules.keys()):
         if key.startswith("services.git_service"):
             del sys.modules[key]
-    import services.git_service as gs
+    # #1028: git_service is a package; the alias names the module that
+    # owns the functions under test, so patches land where the code looks.
+    import services.git_service.sync as gs
 
     return gs, activity_service_stub
 
