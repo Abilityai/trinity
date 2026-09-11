@@ -119,6 +119,7 @@
                   {{ send.backfill ? 'backfill' : 'heartbeat' }} · {{ send.window_days }}d window
                   <template v-if="send.http_status"> · HTTP {{ send.http_status }}</template>
                   <template v-else-if="send.error"> · {{ send.error }}</template>
+                  · <code v-if="send.destination">{{ send.destination }}</code><template v-else>unknown host</template>
                 </span>
               </summary>
               <pre class="mt-2 max-h-56 overflow-auto rounded bg-gray-50 dark:bg-gray-900 p-2 text-gray-700 dark:text-gray-300"><code>{{ payloadText(send) }}</code></pre>
@@ -150,8 +151,15 @@ const prettyPreview = computed(() =>
   store.payloadPreview ? JSON.stringify(store.payloadPreview, null, 2) : '(load to preview)'
 )
 
+// The sentence names the host that answered, not the address configured now:
+// the send log records where each attempt went, so a local test receiver's 200
+// cannot read as the hosted service's acknowledgement.
 const receiverLine = computed(() =>
-  receiverCopy(store.status.receiver_hint, store.status.share_url)
+  receiverCopy(store.status.receiver_hint, store.status.share_url, {
+    destination: store.status.receiver_destination,
+    configured: store.status.configured_destination,
+    changed: store.status.destination_changed,
+  })
 )
 
 function pretty(obj) {

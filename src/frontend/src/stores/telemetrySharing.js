@@ -40,6 +40,12 @@ export const useTelemetrySharingStore = defineStore('telemetrySharing', {
       backfill_delivered_at: null,
       recent_sends: [],
       receiver_hint: null,
+      // #2571 — where the newest send went, where sends go now, and whether
+      // those differ. Defaulted here so a pre-change backend during a rolling
+      // deploy leaves the panel on known values instead of `undefined`.
+      configured_destination: '',
+      receiver_destination: null,
+      destination_changed: false,
     },
     payloadPreview: null,
     error: '',

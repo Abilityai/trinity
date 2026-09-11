@@ -90,17 +90,33 @@ export const CONSENT_COPY = {
  * (trinity-enterprise#190), so a 404 from the default address is an anomaly
  * to look at, not the expected state; from an override it means only that the
  * receiver answered 404.
+ *
+ * The third argument is the send log's own record of where the newest attempt
+ * went (#2571), so the sentence names the host that ANSWERED rather than the
+ * address configured now — a 200 from a local test receiver is not the hosted
+ * service's acknowledgement. It is optional, and its absence reproduces the
+ * pre-#2571 wording exactly: a legacy entry, or an older backend during a
+ * rolling deploy, reads as it always did.
  */
-export function receiverCopy(hint, shareUrl = '') {
+export function receiverCopy(hint, shareUrl = '', { destination = null, configured = '', changed = false } = {}) {
+  // #2571: the sentence names the host that answered when the log recorded it,
+  // says plainly when TELEMETRY_SHARING_URL has since moved elsewhere, and never
+  // claims a destination it does not have — an entry written before the log
+  // recorded one reads exactly as it did, rather than borrowing today's URL.
+  const moved = changed && configured
+    ? ` TELEMETRY_SHARING_URL now points at ${configured}; no send has gone there since.`
+    : ''
   switch (hint) {
     case 'ok':
-      return 'The receiving service acknowledged the last send.'
+      return destination
+        ? `The receiver at ${destination} acknowledged the last send.${moved}`
+        : 'The receiving service acknowledged the last send.'
     case 'receiver_not_live':
-      return 'The receiving service answered 404 at the default address. The send is recorded here and retried automatically.'
+      return `The receiving service answered 404 at the default address${destination ? `, ${destination}` : ''}. The send is recorded here and retried automatically.${moved}`
     case 'receiver_404':
-      return `The receiver at ${shareUrl} answered 404. Check TELEMETRY_SHARING_URL.`
+      return `The receiver at ${destination || shareUrl} answered 404. Check TELEMETRY_SHARING_URL.${moved}`
     case 'failed':
-      return 'The last send failed; it is recorded below and retried automatically.'
+      return `The last send${destination ? ` to ${destination}` : ''} failed; it is recorded below and retried automatically.${moved}`
     default:
       return 'Nothing has been sent yet.'
   }
