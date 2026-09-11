@@ -1,8 +1,19 @@
 """The agent-side pipeline-state watcher (trinity-enterprise#533).
 
-Mirrors tests/unit/test_agent_heartbeat.py — force-loads the real
-``agent_server`` package from docker/base-image so the relative imports resolve
-without booting the FastAPI app.
+Imports the real ``agent_server`` package the way ``test_drain_bounded.py``
+does — ``tests/unit/conftest.py::_preload_real_agent_server`` has already
+registered ``docker/base-image/agent_server`` as a namespace package before
+collection, so the relative imports resolve without booting the FastAPI app.
+
+Deliberately **without** ``test_agent_heartbeat.py``'s per-file sys.modules
+shim, which is redundant next to that preload and is not inert: its
+unconditional eviction loop pops every ``agent_server.*`` entry at COLLECTION
+time, and any file collected earlier that already holds one — like
+``test_drain_bounded.py``, which imports ``subprocess_lifecycle`` at module
+scope and then patches it by name — gets a second, freshly-imported copy at
+run time, so its patches land on a module its own reference no longer points
+at. That file sorts before this one, so re-using the shim here turned six
+green tests red in the full-suite run (and only there).
 
 The file the watcher reports on is written by the agent itself, so this loop is
 the only thing in the system that can know a stage advanced when it advanced.
@@ -31,7 +42,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import types
 from pathlib import Path
 
 import httpx
@@ -44,38 +54,9 @@ _BASE_IMAGE_STR = str(_BASE_IMAGE)
 if _BASE_IMAGE_STR not in sys.path:
     sys.path.insert(0, _BASE_IMAGE_STR)
 
-# Import-time `agent_server` namespace shim — see test_agent_heartbeat.py for
-# why this is declared rather than monkeypatched (tests/lint_sys_modules.py).
-_STUBBED_MODULE_NAMES = [
-    "agent_server",
-    "agent_server.pipeline_state_watch",
-    "agent_server.config",
-    "agent_server.state",
-]
-
-
-@pytest.fixture(autouse=True)
-def _restore_sys_modules():
-    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
-
-
-for _mod in list(sys.modules):
-    if _mod == "agent_server" or _mod.startswith("agent_server."):
-        sys.modules.pop(_mod, None)
-
-_stub = types.ModuleType("agent_server")
-_stub.__path__ = [str(_BASE_IMAGE / "agent_server")]  # type: ignore[attr-defined]
-_stub.__package__ = "agent_server"
-sys.modules["agent_server"] = _stub
-
+# conftest.py preloads the real agent_server package; just import (the
+# test_drain_bounded.py convention). No sys.modules mutation of our own — see
+# the module docstring for what that costs the files collected before us.
 from agent_server import pipeline_state_watch as watch  # noqa: E402
 
 
