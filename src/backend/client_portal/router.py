@@ -347,7 +347,28 @@ async def portal_auth_exchange(
     # ent#375: report the token's ACTUAL lifetime (the idle window), not a
     # constant. The session now slides, so this is when it expires *if the
     # client goes quiet* — a client that keeps using it keeps it alive.
-    idle_s, _ = settings_service.get_portal_session_policy()
+    #
+    # #2689: this line named `settings_service`, which the router never imports,
+    # so every call to this route — the whole ent#163 trusted-issuer seam —
+    # answered 500 with a NameError, on `dev` and on `main`.
+    #
+    # Read through `dependencies`, which owns the ONE reader of this setting and
+    # carries the two properties the route needs: the import is function-local
+    # (`settings_service` imports `db`, so a module-level import cycles) and the
+    # read degrades to the shipped policy, because a settings hiccup must not
+    # 500 an auth path. A second copy of the call here would be a second chance
+    # to omit that degrade.
+    #
+    # Imported INSIDE the handler, not at module scope. Both module-scope forms
+    # capture at import time — a `from`-import binds the function object, and
+    # `import dependencies as _deps` binds the module object — and both go stale
+    # if `dependencies` is re-imported after this module. Measured under pytest:
+    # `sys.modules["dependencies"]` and the router's captured reference were
+    # different objects, so the route read the shipped default while the test's
+    # patch moved the live module. Resolving through `sys.modules` at call time
+    # cannot diverge.
+    from dependencies import _portal_session_policy
+    idle_s, _ = _portal_session_policy()
     return PortalExchangeResponse(
         token=token,
         email=email,

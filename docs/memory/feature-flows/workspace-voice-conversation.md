@@ -376,21 +376,50 @@ Two consequences worth writing down:
   still shrinking — three columns in a row sized for two, `<main>` squeezed by
   flex for 300 ms, a worse jump than the one being fixed.
 
-**Known limitation — the rail column itself still steps (#2676).** Two of the
-three columns interpolate; the rail does not. Its `<aside>` carries no width
-transition in either state and it is a `shrink-0` flex sibling of `<main>`, so
-on call end it mounts at its full width in one frame — 48 px collapsed, 384 px
-open, or whatever `--ws-rail` was dragged to. So "one continuous motion" is
-two-thirds true, and on a wide open rail the remaining step can be larger than
-the 211 px snap this work removed.
+**The rail column is a width, not a step (#2676).** Two of the three columns
+interpolated at first and the rail did not: it was a bare `v-if` on a `shrink-0`
+flex sibling whose `<aside>` carries no width transition, so on call end it
+appeared at full size in one frame — 48 px collapsed, 384 px open, or whatever
+`--ws-rail` had been dragged to, which on a wide rail is a **larger** step than
+the 211 px snap this work set out to remove.
 
-It is left as a step here **deliberately**, not overlooked. The honest fix is to
-give the rail column an explicitly animatable width so it can ramp `0 → w`
-complementary to the canvas — and the width of that column is owned by ent#492's
-`--ws-rail` / grid work, not by this file. Doing it from here means either a new
-wrapper element in the row or holding the rail mounted through a call, and both
-are decisions for whoever owns the column, taken with something better than a
-node-env source scan to verify them. Tracked at #2676.
+The width now lives on a **wrapper this view owns**, not on `PortalRail`'s own
+`<aside>` — the same shape the sidebar column three columns to the left already
+has (`shrink-0 overflow-hidden` plus an explicit `--ws-` width). `--ws-rail` is
+the *rendered* width (48 px collapsed, the dragged width open), so one binding
+covers both states and agrees with the inner aside at rest.
+
+It ramps through Vue enter/leave classes rather than an always-on
+`transition-[width]`, and that is the load-bearing part: the same variable is
+rewritten on every `pointermove` of a rail drag, so a permanently-transitioned
+width would make dragging the rail rubber-band by 300 ms. Vue adds the active
+class only for the enter/leave window and removes it afterwards, so a drag stays
+instant. `!w-0` is `!`-marked for the reason the canvas's `!grow-0` is — both are
+single-class selectors setting the same property, so without it Tailwind's output
+order would decide the winner.
+
+Measured in a headless Chromium against the real built stylesheet rather than
+argued from the classes: mid-transition the column is at 322 px of its 384 px
+(so it interpolates rather than stepping), it settles at 384 px, under
+`prefers-reduced-motion` it is at 384 px immediately, and a drag issued after the
+active classes are removed lands at its new width in the same frame.
+
+**This retires `voiceCanvasLeaving`.** That flag held the rail out of the row for
+the length of the canvas's leave transition, because a rail mounting at its full
+width beside a still-shrinking canvas put three columns in a row sized for two. A
+rail entering from zero width is complementary to a canvas leaving towards zero
+grow — the row's total is conserved at every frame — so the hazard is gone by
+construction rather than held off by a flag, and the two motions now overlap
+instead of running back to back. The reduced-motion reasoning the flag's comment
+carried is not lost: it belongs to the transition classes themselves and is
+pinned by the class-counting test, which requires both `motion-reduce` classes on
+every transitioning element, including the two added here.
+
+**One accepted discontinuity.** `thirdColumnResizable` is gated on
+`!voiceCall.active`, so the 8 px resize handle still appears and disappears in
+one frame at the ends of a call. It is 8 px against a column that moves 384, and
+giving the seam its own transition would mean a second animated element whose
+only content is a 1 px line.
 
 **The orb.** `VoiceOverlay.vue::resizeCanvas` sized the canvas bitmap **once**,
 from the `watch(canvasEl)` that fires on mount — no `ResizeObserver`, no window
