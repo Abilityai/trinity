@@ -274,10 +274,81 @@ export interface ScheduleExecution {
   // recovery to scope the executions lookup to the calling key.
   source_mcp_key_id?: string;
   source_mcp_key_name?: string;
+  // FANOUT-001: the batch this subtask belongs to. Written on every row of a
+  // fan-out at dispatch, which is what makes #2670's gateway-timeout receipt
+  // resolvable — one id shared by N rows, so finding ANY row finds the batch.
+  fan_out_id?: string;
   // RETRY-001: Retry tracking
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+}
+
+/** The aggregated result a completed `POST /fan-out` returns. */
+export interface FanOutDispatchResult {
+  fan_out_id: string;
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: string;
+    response?: string;
+    error?: string;
+    error_code?: string;
+    execution_id?: string;
+    cost?: number;
+    context_used?: number;
+    duration_ms?: number;
+  }>;
+}
+
+/**
+ * #2670: what a `fan_out` call answers with when the MCP server aborts its own
+ * fetch before the gateway does. The batch keeps running; this is what to poll.
+ *
+ * `fan_out_id` rather than `execution_id` — the #914/#2661 receipts name one
+ * row, and a batch is N rows sharing one id, so the aggregate is the only thing
+ * a single id can honestly point at.
+ */
+export interface FanOutTimeoutReceipt {
+  status: "fan_out_timeout";
+  agent: string;
+  fan_out_id: string;
+  /** The subtask rows found at abort time. May be a SUBSET — a slot-starved
+   *  subtask has no row yet — so it is evidence, never a manifest. */
+  execution_ids: string[];
+  task_count: number;
+  message: string;
+}
+
+/** #2670: one fan-out batch read back from its execution rows. */
+export interface FanOutBatchStatus {
+  agent_name: string;
+  fan_out_id: string;
+  /** `running` while any subtask can still change; then `completed` | `partial` | `failed`. */
+  status: string;
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  results: Array<{
+    execution_id: string;
+    /** The EXECUTION status verbatim (`queued`/`running`/`success`/…), not the
+     * dispatch response's two-value `completed`/`failed` pair — a live batch has
+     * to distinguish "waiting for a slot" from "running". */
+    status: string;
+    message?: string;
+    response?: string;
+    error?: string;
+    cost?: number;
+    context_used?: number;
+    duration_ms?: number;
+    model_used?: string;
+    started_at?: string;
+    completed_at?: string;
+  }>;
 }
 
 // Execution Query Types (MCP-007)
