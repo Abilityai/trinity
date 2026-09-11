@@ -24,6 +24,16 @@ import { WORK_POLL_MS, liveItems } from '../components/portal/portalWork'
  * token regardless.
  */
 const PUSH_DEBOUNCE_MS = 2000
+// ent#533: a stage advance is the one push worth reacting to quickly — the
+// agent already wrote the file, and the whole point of the notice is that the
+// card stops waiting for the 12 s poll.
+const PIPELINE_PUSH_DEBOUNCE_MS = 500
+// ...but never faster than this between two push-driven refreshes. The Work
+// read is limited to 120/60 s PER VIEWER server-side and its 429 surfaces as
+// visible error text on the card, so a pathological writer must be stopped
+// here rather than there. It does not bind on the common path (an idle card,
+// one advance), only under a burst — which is exactly when it matters.
+const PUSH_MIN_GAP_MS = 1500
 
 export const usePortalWorkStore = defineStore('portalWork', () => {
   const participants = ref([])
@@ -42,6 +52,8 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
 
   let _fetchToken = 0
   let _debounceTimer = null
+  let _debounceDue = 0
+  let _lastRefreshStartedAt = 0
   let _pollTimer = null
 
   const live = computed(() => liveItems(now.value))
@@ -115,13 +127,34 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
     }
   }
 
-  /** Trailing-edge debounce for push-driven refreshes. */
+  /**
+   * Trailing-edge debounce for push-driven refreshes, under two rules.
+   *
+   * **The earlier deadline wins.** A plain re-arm lets a later, slower push
+   * postpone a pending faster one — a 2 s `agent_activity` landing 400 ms
+   * after a 500 ms stage advance would drag the refetch out to 2.4 s, so the
+   * store would defeat ent#533 by itself. `Portal.vue`'s own
+   * `scheduleRefresh(1500)` benefits identically.
+   *
+   * **A floor under the burst.** Because deadlines only ever shorten, a
+   * stream of pushes becomes a `delay`-length throttle rather than a
+   * coalescing debounce. A push-driven refresh therefore never *starts*
+   * within `PUSH_MIN_GAP_MS` of the previous one's start, which keeps a burst
+   * clear of the server's per-viewer read limiter (120/60 s) whose 429 would
+   * render as an error banner on the card.
+   */
   function scheduleRefresh(delay = PUSH_DEBOUNCE_MS) {
+    const now = Date.now()
+    const due = Math.max(now + delay, _lastRefreshStartedAt + PUSH_MIN_GAP_MS)
+    if (_debounceTimer && due >= _debounceDue) return
     if (_debounceTimer) clearTimeout(_debounceTimer)
+    _debounceDue = due
     _debounceTimer = setTimeout(() => {
       _debounceTimer = null
+      _debounceDue = 0
+      _lastRefreshStartedAt = Date.now()
       refresh()
-    }, delay)
+    }, Math.max(0, due - now))
   }
 
   /**
@@ -161,6 +194,13 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
     if (!participants.value.length) return
     const name = data.agent_name
     if (!name || !participants.value.includes(name)) return
+    // ent#533: the agent wrote a new pipeline-state file. Same thin-trigger
+    // contract — ids and a stage, nothing read from the payload; the steps
+    // come back through the access-controlled read, just sooner.
+    if (data.type === 'pipeline_state_changed') {
+      scheduleRefresh(PIPELINE_PUSH_DEBOUNCE_MS)
+      return
+    }
     const isLoop = data.type === 'loop_run_completed' || data.type === 'loop_completed'
     const isActivity = data.type === 'agent_activity'
     if (isLoop || isActivity) scheduleRefresh()
@@ -168,6 +208,8 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
 
   function clear() {
     if (_debounceTimer) { clearTimeout(_debounceTimer); _debounceTimer = null }
+    _debounceDue = 0
+    _lastRefreshStartedAt = 0
     stopPolling()
     participants.value = []
     chatId.value = null
