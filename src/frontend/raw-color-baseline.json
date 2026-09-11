@@ -15,7 +15,8 @@
       "_2662_rebase_note": "#2662 regeneration after rebasing onto origin/dev @5a0cb0078: absorbs +1 raw_gray in components/portal/PortalJumpToLatest.vue, a file created on dev by #2652 after this branch was cut and never added to the baseline there. Nothing on this branch moved \u2014 fieldClasses.js stays 15, PortalConversation.vue 90, PortalRoom.vue 47. Totals were 8722/3997/197 against an actual 8723/4020/198 purely because the previous freeze was computed pre-rebase; the ratchet never reads totals, so this was cosmetic rather than a failing gate. Same shape as the _merge_train_note above."
     },
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
-    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level."
+    "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level.",
+    "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry."
   },
   "files": {
     "src/frontend/src/App.vue": {
@@ -515,7 +516,7 @@
     },
     "src/frontend/src/components/canvas/CanvasPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 46,
+      "raw_gray": 62,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/canvas/CanvasPieChart.vue": {
@@ -1011,7 +1012,7 @@
   },
   "totals": {
     "raw_nongray": 815,
-    "raw_gray": 8744,
+    "raw_gray": 8760,
     "hardcoded_colors": 456,
     "semantic_tokens": 4030,
     "files_with_violations": 198

@@ -8,14 +8,14 @@ public-CHAT token — the silent audience widening ent#554 forbids.
 
 Mirrors the SQLite ``agent_canvas_shares_table`` migration.
 
-Revision ID: 0059_agent_canvas_shares
-Revises: 0058_agent_canvases_pinned
+Revision ID: 0060_agent_canvas_shares
+Revises: 0059_agent_canvases_pinned
 """
 from alembic import op
 
 
-revision = "0059_agent_canvas_shares"
-down_revision = "0058_agent_canvases_pinned"
+revision = "0060_agent_canvas_shares"
+down_revision = "0059_agent_canvases_pinned"
 branch_labels = None
 depends_on = None
 
