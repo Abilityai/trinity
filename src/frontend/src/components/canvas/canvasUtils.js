@@ -193,6 +193,48 @@ export function filterCanvases(list, query) {
 }
 
 /**
+ * Should the chip strip render? (ent#553 review — the search-narrowing gap.)
+ *
+ * The strip exists "only when there is a choice to make", and the first cut
+ * gated that on the FILTERED list: `visible.length > 1`. At exactly one match
+ * that hides the strip, the no-match line (`!visible.length`) does not render
+ * either, and the auto-select watcher keyed off the UNFILTERED list never
+ * selects the match — so the user searched, hit one result, and the chips
+ * vanished with the previous canvas still on screen. A query with a hit
+ * always shows its hit; the "no choice" collapse applies only when NOT
+ * searching.
+ *
+ * @param {{ visible: number, manage: boolean, query: string }} s
+ */
+export function canvasSelectorVisible({ visible, manage, query }) {
+  if (manage) return true
+  if (String(query || '').trim()) return visible > 0
+  return visible > 1
+}
+
+/**
+ * Which canvas the strip should select after the visible set changed.
+ *
+ * `null` = leave the selection alone. While a query is active the selection
+ * must be one of the MATCHES: if it is not, the first match is selected (the
+ * one-match case above needs this, or the strip shows a chip the panel is
+ * not displaying). With no query the caller's own list-watcher already
+ * handles "the selected canvas disappeared".
+ *
+ * @param {Array<{canvas_id: string}>} visible
+ * @param {string|null} selectedId
+ * @param {string} query
+ * @returns {string|null}
+ */
+export function canvasAutoSelect(visible, selectedId, query) {
+  if (!String(query || '').trim()) return null
+  const rows = Array.isArray(visible) ? visible : []
+  if (!rows.length) return null
+  if (rows.some((c) => c && c.canvas_id === selectedId)) return null
+  return rows[0].canvas_id
+}
+
+/**
  * The one confirmation a bulk delete shows, naming the count (AC 3).
  *
  * Singular and plural are spelled out rather than pluralised with an "(s)":
