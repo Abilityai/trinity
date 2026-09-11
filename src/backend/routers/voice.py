@@ -130,6 +130,13 @@ async def voice_stop(
     messages_saved = 0
     if not getattr(session, "portal_session_id", None) and await _claim_save(session.session_id):
         messages_saved = _save_transcript(session)
+    else:
+        # #2694: a `/stop` that lands BEFORE the socket closes ends the session
+        # here, so the bridge's `finally` gets None back and never clears the
+        # live-call marker — the owner's own thread would refuse typed turns
+        # until the TTL. Cleared here as well; the delete is idempotent.
+        from client_portal.voice import clear_voice_call_active
+        clear_voice_call_active(getattr(session, "portal_session_id", None))
 
     # Clean up
     await voice_service.remove_session(request.voice_session_id)
@@ -410,10 +417,12 @@ async def voice_websocket(
             if getattr(ended, "portal_session_id", None):
                 # Workspace (ent#534): turns are already in the thread; close
                 # the call with its one summary row.
-                from client_portal.voice import persist_voice_call_end
+                from client_portal.voice import clear_voice_call_active, persist_voice_call_end
                 messages_saved = persist_voice_call_end(
                     ended, ended._duration_seconds, ended.end_reason, ended.end_message,
                 )
+                # #2694: the thread may take typed turns again.
+                clear_voice_call_active(getattr(ended, "portal_session_id", None))
             elif await _claim_save(voice_session_id):
                 messages_saved = _save_transcript(ended)
             await voice_service.remove_session(voice_session_id)

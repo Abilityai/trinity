@@ -2854,7 +2854,7 @@
         "reliability",
         "unit"
       ],
-      "description": "The sharing heartbeat's dueness comes from the persisted last-share stamp, not from process age (#2618). Pre-fix the loop slept the whole 24h interval from process start and then sent unconditionally, so an install that restarted inside every window shared its consent-time backfill once and never again (a dev instance sat 45h past its last share with five reloads a day while Settings reported sharing as on). Pure dueness matrix over empty / unparseable / future / exact / offset / naive stamps and a 1h interval (due unless the stamp is provably inside the interval); one wake on a store without sleeping (the consent and hard-disable gates run before any stamp read or Redis touch, with a positive control); three boots over one store driven through _loop with a fake clock the sleep stub advances (nothing sends inside the window, exactly one send lands past it, a further restart stays silent); sleep-first pinned on an ordered sleep/send timeline with the jitter fixed; the tick marker on fakeredis (TTL keyed to the send cadence at both 1h and 24h, a fresh SETNX per claim, released on the STORE after a failed send so a sibling retries at the next wake, kept after an acknowledged send even when the stamp write raises \u2014 share_now True means the receiver acknowledged \u2014 release touching only this tick's lock, fail-open, released on a cancellation mid-send); retry at the next wake with a 2xx-only stamp; an unreadable store never sends while a stamp read that alone raises reads as due; the persisted retry cap (the rule, honoured before the claim, and ten wakes against a dead receiver costing five attempts then one per half-interval); a tick that raises does not end the loop; a raise ahead of the POST is recorded in the send log and throttled like any failed attempt while a raise after an acknowledgement neither duplicates the entry nor turns True into False; _days_since pinned across every stamp shape the column has held; and a guard that the module never again says the marker is never released. Harness mirrors test_ent437 (real write-once settings store, fake httpx, asyncio.run under the unit island's strict asyncio mode)."
+      "description": "The sharing heartbeat's dueness comes from the persisted last-share stamp, not from process age (#2618). Pre-fix the loop slept the whole 24h interval from process start and then sent unconditionally, so an install that restarted inside every window shared its consent-time backfill once and never again (a dev instance sat 45h past its last share with five reloads a day while Settings reported sharing as on). Pure dueness matrix over empty / unparseable / future / exact / offset / naive stamps and a 1h interval (due unless the stamp is provably inside the interval); one wake on a store without sleeping (the consent and hard-disable gates run before any stamp read or Redis touch, with a positive control); three boots over one store driven through _loop with a fake clock the sleep stub advances (nothing sends inside the window, exactly one send lands past it, a further restart stays silent); sleep-first pinned on an ordered sleep/send timeline with the jitter fixed; the tick marker on fakeredis (TTL keyed to the send cadence at both 1h and 24h, a fresh SETNX per claim, released on the STORE after a failed send so a sibling retries at the next wake, kept after an acknowledged send even when the stamp write raises — share_now True means the receiver acknowledged — release touching only this tick's lock, fail-open, released on a cancellation mid-send); retry at the next wake with a 2xx-only stamp; an unreadable store never sends while a stamp read that alone raises reads as due; the persisted retry cap (the rule, honoured before the claim, and ten wakes against a dead receiver costing five attempts then one per half-interval); a tick that raises does not end the loop; a raise ahead of the POST is recorded in the send log and throttled like any failed attempt while a raise after an acknowledgement neither duplicates the entry nor turns True into False; _days_since pinned across every stamp shape the column has held; and a guard that the module never again says the marker is never released. Harness mirrors test_ent437 (real write-once settings store, fake httpx, asyncio.run under the unit island's strict asyncio mode)."
     },
     {
       "file": "unit/test_operator_intake.py",
@@ -2867,6 +2867,30 @@
         "unit"
       ],
       "description": "Operator intake (ent#38): never fires unless enabled, never double-submits (the marker is claimed before the POST), never raises, never fires without an email; delivery-failure observability (#1593): a non-2xx logs at WARNING with a coded detail only, a connect failure at INFO, the email never reaches a log line. ent#545: the non-minting read twin get_installation_id (None on a fresh store with a store that refuses every write, the stored id verbatim, blank/non-string as not minted, a read failure propagated rather than rendered as not minted, writer and reader as one key), the writers' mint as a write-once claim (a worker whose claim loses returns the winner's id, never an upsert), and the self-heal of a corrupt row (blank, whitespace, non-string) on both the FakeDB and the real SettingsOperations layer."
+    },
+    {
+      "file": "unit/test_2694_voice_thread_window.py",
+      "feature": "#2694",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "client-portal",
+        "voice",
+        "unit"
+      ],
+      "description": "#2694 read side: the thread window is counted in TYPED turns (the spoken rows of the calls among them ride along) under a row ceiling that reports `truncated`, so a 180-row voice call can no longer push the typed turns before it off the screen; typed->call->typed->call->typed reads back as the timeline through the real writers; the resend-dedup read keeps row semantics; equal stamps order deterministically; the platform-rows-since-last-reply delta is cursored on the newest typed ASSISTANT row (survives a failed typed turn); the history route accepts a bounded `limit` for the poll's narrow read and nothing that widens the window."
+    },
+    {
+      "file": "unit/test_2694_voice_delta_context.py",
+      "feature": "#2694",
+      "added": "2026-09-10",
+      "categories": [
+        "backend",
+        "client-portal",
+        "voice",
+        "unit"
+      ],
+      "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on."
     },
     {
       "file": "unit/test_2669_minting_accessor_callers.py",

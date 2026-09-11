@@ -8,6 +8,7 @@ fallback.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy import select, func, and_, or_, text, bindparam
@@ -200,13 +201,114 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
         # had nothing to point at.
         # ent#534: `source` / `voice_call_id` ride along so the chat can fold a
         # voice call's rows into one block and the context formatter can label them.
+        # #2694: `id` is a uuid — the tiebreak is STABLE, not chronological. Equal
+        # stamps cannot come from the live writers (one clock, microseconds,
+        # per-session monotonic voice stamps); this only makes a read repeatable.
         f"SELECT id, role, content, cost, created_at, source, voice_call_id "
         f"FROM enterprise_portal_messages "
-        f"WHERE {where} ORDER BY created_at DESC LIMIT :lim"
+        f"WHERE {where} ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
     rows.reverse()  # oldest-first for the chat view
+    return rows
+
+
+# --- The thread window, counted in typed turns (#2694) ------------------------
+#
+# `get_portal_messages` counts ROWS. A 30-minute voice call is ~180 rows, so one
+# call filled the whole 100-row history window, every typed turn before it fell
+# off, and the call block — anchored at the call's first row IN THE WINDOW —
+# rendered as the head of the thread. The window is now counted in TYPED rows;
+# every spoken row of the calls among them rides along; a row ceiling bounds the
+# payload and SAYS so, rather than silently re-creating the symptom at call #9.
+
+_MESSAGE_COLUMNS = "id, role, content, cost, created_at, source, voice_call_id"
+
+# A typed-path row. The platform's own `system` lines (the ent#523 reset notice)
+# carry NULL `source` too — they are part of the typed timeline, not of a call.
+_TYPED = "source IS NULL"
+
+# Sized against a real 30-minute transcript (~180 rows): ~3 long calls plus
+# their typed turns. Read at call time (tests pin it), never captured as a
+# default argument.
+PORTAL_HISTORY_ROW_CEILING = 600
+
+
+@dataclass
+class ThreadWindow:
+    rows: list[dict]          # oldest-first
+    truncated: bool           # the ceiling cut rows off the OLD end
+
+
+def get_portal_thread_window(agent_name: str, client_email: str, session_id: str,
+                             typed_limit: int = 100,
+                             ceiling: Optional[int] = None) -> ThreadWindow:
+    """The newest ``typed_limit`` typed rows of one thread, plus every spoken
+    row inside that span, oldest-first; at most ``ceiling`` rows (the NEWEST
+    survive, and ``truncated`` reports the cut).
+
+    Two portable statements: the ``(created_at, id)`` of the N-th newest typed
+    row, then everything at or after it. Both order by ``created_at DESC, id
+    DESC`` so the threshold and the range agree at a tie. Fewer typed rows than
+    the limit → the whole thread (≤ ceiling). A call-only thread has no typed
+    row at all and is returned whole for the same reason.
+    """
+    ceiling = int(ceiling or PORTAL_HISTORY_ROW_CEILING)
+    typed_limit = max(1, int(typed_limit or 1))
+    base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id}
+    threshold_stmt = text(
+        f"SELECT created_at, id FROM enterprise_portal_messages "
+        f"WHERE {base} AND {_TYPED} ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET :off"
+    )
+    with get_engine().connect() as conn:
+        threshold = conn.execute(threshold_stmt, {**params, "off": typed_limit - 1}).first()
+        where = base
+        range_params = dict(params)
+        if threshold is not None:
+            where += " AND (created_at > :ts OR (created_at = :ts AND id >= :tid))"
+            range_params.update(ts=threshold[0], tid=threshold[1])
+        range_stmt = text(
+            f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
+            f"WHERE {where} ORDER BY created_at DESC, id DESC LIMIT :lim"
+        )
+        rows = [dict(r) for r in conn.execute(range_stmt, {**range_params, "lim": ceiling + 1}).mappings()]
+    truncated = len(rows) > ceiling
+    rows = rows[:ceiling]
+    rows.reverse()
+    return ThreadWindow(rows=rows, truncated=truncated)
+
+
+def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
+                                       session_id: str) -> list[dict]:
+    """The rows of one thread the agent's LIVE session never produced or
+    received — spoken turns (`source='voice'`) and the platform's own `system`
+    lines — later than the newest typed assistant row, oldest-first. Every such
+    row when the thread has no typed reply yet.
+
+    The cursor is the typed ASSISTANT row, not the user row: a typed turn that
+    fails leaves a user row with no reply, and a user-row cursor would then
+    erase a call from every later delta. A reply is the one thing the live
+    session itself wrote, so "rows since the last reply" is exactly "rows it
+    has not heard", and it stays true across a retry.
+    """
+    base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
+              # Bounded like the window: the NEWEST rows survive (the formatter
+              # trims oldest-first anyway), so N back-to-back calls with no
+              # typed reply between them cannot make this read unbounded.
+              "lim": int(PORTAL_HISTORY_ROW_CEILING)}
+    stmt = text(
+        f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
+        f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
+        f"AND created_at > COALESCE((SELECT MAX(created_at) FROM enterprise_portal_messages "
+        f"                            WHERE {base} AND role = 'assistant' AND {_TYPED}), '') "
+        f"ORDER BY created_at DESC, id DESC LIMIT :lim"
+    )
+    with get_engine().connect() as conn:
+        rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
+    rows.reverse()
     return rows
 
 

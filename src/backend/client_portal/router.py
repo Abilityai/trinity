@@ -1241,10 +1241,18 @@ def portal_rename_session(agent_name: str, session_id: str, body: PortalSessionR
 
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
+                   limit: int | None = Query(None, ge=1, le=50),
                    principal: PortalPrincipal = Depends(get_portal_principal)):
     """The client's persisted conversation with a rostered agent (oldest-first),
     so it survives a refresh / re-sign-in. With ``?session_id=`` returns that
     thread; without, the most-recent one. Roster-scoped (miss → 404).
+
+    #2694: without ``limit`` the thread is read as a WINDOW of typed turns (the
+    newest 100, plus the spoken rows of the calls among them, under a row
+    ceiling that reports itself as ``truncated``). ``?limit=N`` (1–50) is the
+    narrow read the reply poll makes every few hundred milliseconds: the newest
+    N rows, whatever their source — never the window, and nothing here can
+    widen it.
     """
     email = principal.email
     # ent#358: the scope of what a caller can DO must equal what they can
@@ -1252,7 +1260,8 @@ def portal_history(agent_name: str, session_id: str | None = None,
     # gate below has to as well, or an owner 404s on their own agent.
     include_owned = principal.is_platform
     try:
-        return service.get_history(agent_name, email, session_id=session_id, include_owned=include_owned)
+        return service.get_history(agent_name, email, session_id=session_id,
+                                   include_owned=include_owned, limit=limit)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
