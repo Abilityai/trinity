@@ -714,7 +714,7 @@ unknown one and one belonging to another agent are a single uniform 404
 (Invariant #8); the id is server-minted and unguessable, so this costs a caller
 nothing it could otherwise have had.
 
-Live harness: `src/mcp-server/scripts/verify_914.ts <agent> [chat|task|both]`.
+Live harness: `src/mcp-server/scripts/verify_914.ts <agent> [chat|task|fanout|all]`.
 
 ### Agent-to-Agent Access Control (`chat.ts:29-100`)
 ```typescript
