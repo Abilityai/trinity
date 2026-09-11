@@ -175,33 +175,58 @@ async def test_a_write_that_did_not_happen_emits_nothing(monkeypatch, canvas_mgr
     assert canvas_mgr.messages == []
 
 
+# The helper is a per-service COPY (two modules, two `_broadcast`s), so the
+# three "a trigger never fails a write" directions are asserted against BOTH —
+# a guard proven on one of two sibling call sites is the incomplete-fix class.
+_SERVICES = [
+    pytest.param(canvas_service, id="canvas"),
+    pytest.param(files_service, id="shared_files"),
+]
+
+
+def _writer_for(module, monkeypatch, tmp_path):
+    """The one write path of `module`, wired far enough to reach its emit."""
+    if module is canvas_service:
+        _wire_canvas(monkeypatch)
+        return lambda: canvas_service.write_canvas(
+            "a1", "main", [], title=None, audience="roster", execution_id=None)
+    _wire_files(monkeypatch, tmp_path)
+    return lambda: files_service._persist_and_register(
+        "a1", b"x", basename="f.csv", display_name="f.csv", expires_in=3600, created_by="a1")
+
+
+@pytest.mark.parametrize("module", _SERVICES)
 @pytest.mark.asyncio
-async def test_no_manager_is_silent(monkeypatch):
-    _wire_canvas(monkeypatch)
-    canvas_service.set_websocket_manager(None)
-    out = canvas_service.write_canvas("a1", "main", [], title=None, audience="roster", execution_id=None)
+async def test_no_manager_is_silent(module, monkeypatch, tmp_path):
+    write = _writer_for(module, monkeypatch, tmp_path)
+    module.set_websocket_manager(None)
+    assert write() is not None, "an unwired manager must not fail the write"
     await _drain()
-    assert out["canvas_id"] == "main"
 
 
-def test_no_running_loop_is_silent(monkeypatch, canvas_mgr):
+@pytest.mark.parametrize("module", _SERVICES)
+def test_no_running_loop_is_silent(module, monkeypatch, tmp_path):
     """A future caller from an executor thread must degrade to 'no trigger'
     (the pre-ent#532 refetch triggers), never raise inside a write. This test is
     deliberately SYNC: there is no running loop in it."""
-    _wire_canvas(monkeypatch)
-    out = canvas_service.write_canvas("a1", "main", [], title=None, audience="roster", execution_id=None)
-    assert out["canvas_id"] == "main"
-    assert canvas_mgr.messages == []
-
-
-@pytest.mark.asyncio
-async def test_a_raising_manager_never_fails_the_write(monkeypatch):
-    _wire_canvas(monkeypatch)
-    mgr = _FakeManager(raises=True)
-    canvas_service.set_websocket_manager(mgr)
+    mgr = _FakeManager()
+    module.set_websocket_manager(mgr)
     try:
-        out = canvas_service.write_canvas("a1", "main", [], title=None, audience="roster", execution_id=None)
-        assert out["canvas_id"] == "main", "a broadcast failure must not fail the write"
+        write = _writer_for(module, monkeypatch, tmp_path)
+        assert write() is not None
+        assert mgr.messages == []
+    finally:
+        module.set_websocket_manager(None)
+
+
+@pytest.mark.parametrize("module", _SERVICES)
+@pytest.mark.asyncio
+async def test_a_raising_manager_never_fails_the_write(module, monkeypatch, tmp_path):
+    mgr = _FakeManager(raises=True)
+    module.set_websocket_manager(mgr)
+    try:
+        write = _writer_for(module, monkeypatch, tmp_path)
+        assert write() is not None, "a broadcast failure must not fail the write"
         await _drain()
         # The await is wrapped inside the task, so gathering it is clean. Drop
         # that wrapper and this raises — which is also the "Task exception was
@@ -209,7 +234,7 @@ async def test_a_raising_manager_never_fails_the_write(monkeypatch):
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         await asyncio.gather(*pending)
     finally:
-        canvas_service.set_websocket_manager(None)
+        module.set_websocket_manager(None)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +299,21 @@ async def test_create_share_emits_once_and_a_replay_emits_nothing(monkeypatch, t
     await _drain()
     assert out == snapshot
     assert len(files_mgr.messages) == 1, "the idempotent replay emitted a second trigger"
+
+
+@pytest.mark.asyncio
+async def test_channel_media_lights_the_dot_too(monkeypatch, tmp_path, files_mgr):
+    """`create_share_from_bytes` (WhatsApp media, voice notes) goes through the
+    same tail, and `list_active_for_agent` does not filter by creator — so those
+    rows ARE Files-tab rows and must light the dot like any other share."""
+    _wire_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(files_service.db, "get_file_sharing_enabled", lambda a: True)
+
+    files_service.create_share_from_bytes("a1", b"ogg-bytes", display_name="note.ogg")
+    await _drain()
+
+    assert len(files_mgr.messages) == 1
+    assert json.loads(files_mgr.messages[0])["type"] == "file_shared"
 
 
 # ---------------------------------------------------------------------------
