@@ -182,6 +182,107 @@ describe('ent#475 — the feed store fetches what the door allows', () => {
     vi.useRealTimers()
   })
 
+  it('ent#532 — a canvas write or a new share refreshes, and only for a participant', async () => {
+    vi.useFakeTimers()
+    const s = usePortalRailFeedsStore()
+    s.setParticipants(['scout'])
+    s.setFeeds({ canvas: true, files: true })
+    s.handleWebSocketEvent({ type: 'canvas_updated', canvas_id: 'main' })                        // no agent
+    s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'stranger', canvas_id: 'm' })   // not ours
+    s.handleWebSocketEvent({ type: 'file_shared', agent_name: 'stranger', file_id: 'f' })
+    vi.advanceTimersByTime(5000)
+    expect(portal.fetchAgentCanvases).not.toHaveBeenCalled()
+    expect(portal.fetchDocuments).not.toHaveBeenCalled()
+
+    // The wire carries ids only, so the store re-reads BOTH feeds through the
+    // access-controlled routes rather than rendering anything from the event.
+    s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'scout', canvas_id: 'main' })
+    vi.advanceTimersByTime(2100)
+    expect(portal.fetchAgentCanvases).toHaveBeenCalledTimes(1)
+    expect(portal.fetchDocuments).toHaveBeenCalledTimes(1)
+
+    s.handleWebSocketEvent({ type: 'file_shared', agent_name: 'scout', file_id: 'f1' })
+    vi.advanceTimersByTime(2100)
+    expect(portal.fetchDocuments).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+  })
+
+  it('ent#532 — an event with no conversation open is nobody\'s to act on', async () => {
+    vi.useFakeTimers()
+    const s = usePortalRailFeedsStore()
+    s.setFeeds({ canvas: true, files: false })
+    s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'scout', canvas_id: 'main' })
+    vi.advanceTimersByTime(5000)
+    expect(portal.fetchAgentCanvases).not.toHaveBeenCalled()
+    vi.useRealTimers()
+  })
+
+  it('ent#532 — a burst inside one window is still one read', async () => {
+    vi.useFakeTimers()
+    const s = usePortalRailFeedsStore()
+    s.setParticipants(['scout'])
+    s.setFeeds({ canvas: true, files: false })
+    for (let i = 0; i < 20; i++) {
+      s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'scout', canvas_id: 'main' })
+    }
+    vi.advanceTimersByTime(2100)
+    expect(portal.fetchAgentCanvases).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('ent#532 — a sustained write stream refreshes on a bound, not only when it stops', async () => {
+    vi.useFakeTimers()
+    const s = usePortalRailFeedsStore()
+    s.setParticipants(['scout'])
+    s.setFeeds({ canvas: true, files: false })
+    // One write every 500ms for 10s. `patch_canvas` during a streaming run and
+    // the voice panel writing per tool call are exactly this shape, and the
+    // debounce re-arms on every call — so an uncapped timer fires only after
+    // the stream ENDS, which for a long run is never.
+    for (let i = 0; i < 20; i++) {
+      s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'scout', canvas_id: 'main' })
+      vi.advanceTimersByTime(500)
+    }
+    expect(portal.fetchAgentCanvases.mock.calls.length).toBeGreaterThanOrEqual(2)
+    vi.useRealTimers()
+  })
+
+  it('ent#532 — the cap moves no shipped timing: a single event still fires at exactly 2s', async () => {
+    vi.useFakeTimers()
+    const s = usePortalRailFeedsStore()
+    s.setParticipants(['scout'])
+    s.setFeeds({ canvas: true, files: false })
+    s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'scout', canvas_id: 'main' })
+    vi.advanceTimersByTime(1999)
+    expect(portal.fetchAgentCanvases).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(portal.fetchAgentCanvases).toHaveBeenCalledTimes(1)
+    // ...and neither does the ent#475 caller that shares the timer.
+    portal.fetchAgentCanvases.mockClear()
+    s.handleWebSocketEvent({ type: 'loop_completed', agent_name: 'scout' })
+    vi.advanceTimersByTime(1999)
+    expect(portal.fetchAgentCanvases).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(portal.fetchAgentCanvases).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('ent#532 — a canvas burst cannot defer the loop refresh that shares the timer', async () => {
+    vi.useFakeTimers()
+    const s = usePortalRailFeedsStore()
+    s.setParticipants(['scout'])
+    s.setFeeds({ canvas: true, files: false })
+    s.handleWebSocketEvent({ type: 'loop_completed', agent_name: 'scout' })
+    // This is the regression this lane would otherwise INTRODUCE: the timer is
+    // shared, so a high-frequency writer on it makes a shipped signal slower.
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(500)
+      s.handleWebSocketEvent({ type: 'canvas_updated', agent_name: 'scout', canvas_id: 'main' })
+    }
+    expect(portal.fetchAgentCanvases).toHaveBeenCalled()
+    vi.useRealTimers()
+  })
+
   it('clear() empties everything and cancels a pending push refresh', async () => {
     vi.useFakeTimers()
     const s = usePortalRailFeedsStore()

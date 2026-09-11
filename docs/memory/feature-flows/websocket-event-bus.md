@@ -88,7 +88,7 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
   is a resolved identity with an **empty roster**, not a refusal: ownership
   joins `users.email` and `agent_sharing` is keyed on it, so the empty set is
   the exact answer, and the frontend never retries a 4001.
-- **Identity is derived from the payload, once per event.** The 36 live
+- **Identity is derived from the payload, once per event.** The 38 live
   `manager.broadcast` sites disagree about where the agent name lives
   (`agent_name` top-level, `data.name`, `data.agent_name`, two keys at once
   for `agent_collaboration`), so `agent_names_in_payload()` reads a fixed key
@@ -124,6 +124,29 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
   `room_participant_state.identity` *is* an agent name but the column is
   polymorphic, so keying on it would drop the event for the room's own human
   participants — room-membership scoping is a tracked follow-up).
+
+**2b. Thin triggers from a synchronous service (ent#532)**
+
+Two `/ws` events are published from code that is not `async`:
+
+| Event | Payload (the whole of it) | Emitted by |
+|---|---|---|
+| `canvas_updated` | `{type, agent_name, canvas_id}` | `services/canvas_service.py::write_canvas`, after the upsert, success path only |
+| `file_shared` | `{type, agent_name, file_id}` | `services/agent_shared_files_service.py::_persist_and_register` (the shared tail; `create_share`'s idempotent replay never reaches it, so a replay emits nothing) |
+
+The manager is **setter-injected** from `main.py` (`set_canvas_ws_manager` /
+`set_shared_files_ws_manager`) rather than lazily imported — a service never
+imports `main` (Invariant #1) — and the emit is fire-and-forget:
+`loop.create_task` on the running loop, the task held in a module-level
+strong-ref set so it cannot be garbage-collected mid-flight, the `await`
+wrapped so a raising manager is logged instead of resurfacing as "Task
+exception was never retrieved", and a silent skip when there is no running
+loop. The invariant is that a trigger can never fail or delay the write it
+describes; a lost trigger costs latency only, because the consumer re-reads
+through the access-controlled REST route regardless. Scope is payload-derived
+(the top-level `agent_name`), so neither event needed an `event_bus.py` change
+or a `FLEET_LEVEL_ALLOWLIST` entry. Neither is published on `/ws/events` —
+there is no consumer, and adding one is one setter.
 
 **3. Per-client bounded queue, never await send from fan-out**
 - Each client slot has `asyncio.Queue(maxsize=256)`

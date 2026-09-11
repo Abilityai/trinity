@@ -22,9 +22,11 @@ import { useClientPortalStore } from './clientPortal'
  *     #2582: `portalRail.js::filesSignalItems` projects it onto the same
  *     `created_at` key the Files dot already reads, so the two collections stay
  *     separate and only the SIGNAL merges them;
- *   * push-driven refreshes are DEBOUNCED (trailing 2s): a 100-run loop emits
- *     100 `loop_run_completed` events, and each would otherwise cost every
- *     participant a canvas + documents round trip.
+ *   * push-driven refreshes are DEBOUNCED (trailing 2s, capped at 4s): a
+ *     100-run loop emits 100 `loop_run_completed` events, and each would
+ *     otherwise cost every participant a canvas + documents round trip. The cap
+ *     is what keeps the trailing edge honest once a high-frequency writer
+ *     (ent#532's canvas triggers) shares the timer — see `scheduleRefresh`.
  *
  * Every request goes through the client-portal store's existing fetchers
  * (`portalHttp` + the portal auth header), so the roster gate and the
@@ -32,6 +34,9 @@ import { useClientPortalStore } from './clientPortal'
  * agent page's.
  */
 const PUSH_DEBOUNCE_MS = 2000
+// ent#532 — how long a pending read may be deferred by a re-arming burst.
+// DERIVED from the debounce so the two cannot drift apart.
+const PUSH_MAX_WAIT_MS = 2 * PUSH_DEBOUNCE_MS
 
 export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
   const participants = ref([])
@@ -47,6 +52,7 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
 
   let _fetchToken = 0
   let _debounceTimer = null
+  let _debounceSince = 0      // ent#532 — when the current burst started
   // #2582 — `noteUpload`'s coalescing state. Leading AND trailing: a second
   // note that arrives while a read is in flight must NOT join that read (its
   // listing was snapshotted before the second file landed), it must queue one
@@ -163,13 +169,33 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     }
   }
 
-  /** Trailing-edge debounce for push-driven refreshes. */
+  /**
+   * Trailing-edge debounce for push-driven refreshes, with a max wait (ent#532).
+   *
+   * The trailing edge is the point: the LAST event of a burst must be the one
+   * the read reflects, which is why this is not leading-edge. But a pure
+   * trailing debounce re-arms on every call, so under a stream of events closer
+   * together than the delay it fires only when the stream ENDS. That was fine
+   * while every caller fired once per execution (`loop_*`, terminal
+   * `agent_activity`). It is not fine for canvas writes — `patch_canvas` during
+   * a streaming run, the voice panel writing per tool call — and because this
+   * timer is SHARED, an uncapped burst would also defer the loop/activity reads
+   * that ride it, making a shipped signal slower.
+   *
+   * So a pending read is never deferred past `PUSH_MAX_WAIT_MS` from the FIRST
+   * event of the burst: a sustained stream refreshes on that bound instead of
+   * never. A single event is unaffected — `_debounceSince` is `now`, so the
+   * wait is the full delay, byte for byte what it was.
+   */
   function scheduleRefresh(delay = PUSH_DEBOUNCE_MS) {
+    const now = Date.now()
+    if (!_debounceTimer) _debounceSince = now
+    const wait = Math.max(0, Math.min(delay, PUSH_MAX_WAIT_MS - (now - _debounceSince)))
     if (_debounceTimer) clearTimeout(_debounceTimer)
     _debounceTimer = setTimeout(() => {
       _debounceTimer = null
       refresh()
-    }, delay)
+    }, wait)
   }
 
   /**
@@ -234,12 +260,16 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
   }
 
   /**
-   * Platform sessions: the fleet-wide `/ws`. Two families say "a participant
-   * just finished doing something" — loop progress (#1106) and the terminal
-   * `agent_activity` that closes every execution (schedule, chat, background
-   * task). Both are thin triggers; the data comes back through the
-   * access-controlled REST reads above (the #918 rule). An event that cannot
-   * name its agent is not ours to act on (the ent#458 review finding).
+   * Platform sessions: the fleet-wide `/ws`. Three families reach here. Two say
+   * "a participant just finished doing something" — loop progress (#1106) and
+   * the terminal `agent_activity` that closes every execution (schedule, chat,
+   * background task). The third (ent#532) says it directly: `canvas_updated`
+   * and `file_shared`, emitted beside the write, for the case the other two
+   * miss entirely — a canvas rewritten with no execution behind it, which
+   * otherwise waited for the next turn or tab open. All are thin triggers; the
+   * data comes back through the access-controlled REST reads above (the #918
+   * rule). An event that cannot name its agent is not ours to act on (the
+   * ent#458 review finding).
    */
   function handleWebSocketEvent(data) {
     if (!data || typeof data !== 'object') return
@@ -249,7 +279,11 @@ export const usePortalRailFeedsStore = defineStore('portalRailFeeds', () => {
     const isLoop = data.type === 'loop_run_completed' || data.type === 'loop_completed'
     const isTerminalActivity = data.type === 'agent_activity'
       && typeof data.activity_state === 'string' && data.activity_state !== 'started'
-    if (isLoop || isTerminalActivity) scheduleRefresh()
+    // ent#532: the backend now says so directly — a canvas write or a new
+    // share, ids only. Same debounced re-read; nothing is rendered from the
+    // event itself.
+    const isFeedTrigger = data.type === 'canvas_updated' || data.type === 'file_shared'
+    if (isLoop || isTerminalActivity || isFeedTrigger) scheduleRefresh()
   }
 
   function clear() {

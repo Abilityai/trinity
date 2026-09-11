@@ -644,11 +644,15 @@ and `CanvasPanel` passes the canvas's `agent_name` down only so an image block
 can fetch a workspace file. Empty states differ by viewer (AC 6) because the
 next action does: an operator can make an agent write a canvas, a client cannot.
 
-Deferred still: a platform-wide `canvas_updated` WebSocket trigger (ids only,
-the #918 rule). ent#534's canvas column did not need it — the voice call IS a
-WebSocket, and the bridge already emits a `tool_result` frame for every panel
-verb, so the column refetches on those and keeps only a slow safety poll. The
-rail's Canvas tab outside a call still refreshes on its own triggers.
+Shipped as ent#532: `write_canvas` emits a thin `canvas_updated`
+`{type, agent_name, canvas_id}` on `/ws` after the upsert, success path only
+(ids only, the #918 rule; ent#467 scopes it by the payload's `agent_name`), and
+the rail's feed store re-reads through the access-controlled routes. ent#534's
+canvas column still does not consume it — the voice call IS a WebSocket, and
+the bridge already emits a `tool_result` frame for every panel verb, so the
+column refetches on those and keeps only a slow safety poll. A canvas **delete**
+emits nothing: it is router-direct, and a delete cannot light an "updated since
+last view" dot.
 
 ## Key files
 
@@ -657,7 +661,7 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 | DDL | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/{0050_agent_canvases,0054_agent_canvases_template}.py` |
 | DB | `db/canvas.py` (`CanvasOperations`, `normalize_audience`) |
 | Block rules (pure) | `services/canvas_blocks.py` (`classify_image_src`, `validate_blocks`, `patch_blocks`, `map_panel_tool`) |
-| Service | `services/canvas_service.py` (`write_canvas`, `patch_canvas`, `validate_template`, `audience_within`, derived staleness) |
+| Service | `services/canvas_service.py` (`write_canvas`, `patch_canvas`, `validate_template`, `audience_within`, derived staleness, the ent#532 `canvas_updated` emit) |
 | Router | `routers/canvas.py` (`# mcp: canvas.ts …` header; PUT / PATCH / GET / DELETE) |
 | Workspace | `client_portal/agent_page.py::canvases`/`canvas_detail`, `client_portal/router.py` |
 | Voice | `services/gemini_voice.py::_execute_panel_tool`, `routers/voice.py::get_voice_panel` |

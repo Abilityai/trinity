@@ -839,12 +839,18 @@ describe('ent#475 — the shell owns the feeds (source guards)', () => {
     expect(src('components/portal/PortalRoom.vue')).toContain("prefill: { type: String, default: '' }")
   })
 
-  it('the WebSocket routes loop events and terminal activity to the feed store', () => {
+  it('the WebSocket routes loop events, terminal activity and canvas/file writes to the feed store', () => {
     const ws = src('utils/websocket.js')
-    expect((ws.match(/portalRailFeedsStore\.handleWebSocketEvent\(data\)/g) || []).length).toBe(2)
+    expect((ws.match(/portalRailFeedsStore\.handleWebSocketEvent\(data\)/g) || []).length).toBe(3)
+    // ent#532: the third route. Named here so deleting the block is a failing
+    // test rather than a silently slower dot.
+    expect(ws).toContain("data.type === 'canvas_updated' || data.type === 'file_shared'")
     const store = src('stores/portalRailFeeds.js')
     expect(store).toContain('if (!name || !participants.value.includes(name)) return')
     expect(store).toContain("data.activity_state !== 'started'")
     expect(store).toContain('scheduleRefresh()')
+    // ent#532: the shared debounce is capped. Derived from PUSH_DEBOUNCE_MS so
+    // the two cannot drift apart.
+    expect(store).toContain('PUSH_MAX_WAIT_MS = 2 * PUSH_DEBOUNCE_MS')
   })
 })

@@ -1458,7 +1458,9 @@ well, and the agent never touches CSS.
   tab. Feeds refresh on: participants change, a conversation turn ending, a
   room's `working` list going idle, `loop_*` and terminal `agent_activity`
   events for a participant (platform sessions, debounced 2s), the tab being
-  opened, and a successful upload. No timer while idle. **§5.30 widens the
+  opened, a successful upload, and — since §5.33 (ent#532) — the backend's
+  own `canvas_updated` / `file_shared` thin triggers for a participant
+  (platform sessions, the same debounce). No timer while idle. **§5.30 widens the
   Files signal to cover the viewer's own uploads**: it is derived from
   `filesSignalItems(documents, uploads)` — one projection read by both the
   signal and the seen-marking — so a file the client just sent lights the dot
@@ -1478,10 +1480,10 @@ well, and the agent never touches CSS.
   `visibleTabs` (`feedsFor`), so an external client — who sees Canvas ·
   Files — never causes a loops request, and a session that fails a door never
   fetches that tab's data.
-- **Out of scope**: the State tab (#439), the resize handles (#492), the
-  conversation-wide drop target (#524), and a backend broadcast for canvas
-  writes / shared files (registered in the debt inbox). The Work tab's
-  content landed as §5.22 (ent#525).
+- **Out of scope**: the State tab (#439), the resize handles (#492), and
+  the conversation-wide drop target (#524). The backend broadcast for canvas
+  writes / shared files, deferred here to the debt inbox, landed as §5.33
+  (ent#532). The Work tab's content landed as §5.22 (ent#525).
 - **Flow**: `docs/memory/feature-flows/workspace-rail.md` (slice 2 section),
   `workspace-loops.md`, `agent-canvas.md`
 
@@ -2887,3 +2889,76 @@ to localStorage in the clear.
 - **Tests**: `tests/unit/test_ent403_workspace_model.py`;
   `src/frontend/tests/unit/portalModelChoice.spec.js`.
 - **Flow**: `docs/memory/feature-flows/workspace-model-choice.md`
+
+### 5.33 Workspace rail — canvas/file thin triggers (trinity-enterprise#532)
+
+- **Status**: ✅ Implemented · **ID**: `WORKSPACE_RAIL_THIN_TRIGGERS`
+- **Description**: §5.20's Canvas and Files dots derive from store data, so
+  they light only when something the client can observe makes the store
+  re-read — a turn ending, a loop event, a terminal `agent_activity`, the tab
+  being opened, an upload. A canvas rewritten by a scheduled run, or a file
+  shared outside an execution, had no such moment: the dot waited for the
+  next turn or tab open. The backend now emits two **thin `/ws` triggers**
+  beside the write itself, and the rail's existing feed store re-reads on
+  them. Nothing new is rendered; only *when* the dot lights changes.
+- **The two events** (ids only — this is the whole payload):
+  - `{"type": "canvas_updated", "agent_name": "<agent>", "canvas_id": "<id>"}`
+  - `{"type": "file_shared", "agent_name": "<agent>", "file_id": "<uuid>"}`
+- **FR-1 — one chokepoint each**: `canvas_updated` is emitted in
+  `services/canvas_service.py::write_canvas`, the ONLY path that writes
+  `agent_canvases` — so REST `PUT`, REST `PATCH` (which funnels through it,
+  exactly one event), MCP `set_canvas` / `patch_canvas` and the Gemini voice
+  panel are all covered by one call. `file_shared` is emitted in
+  `services/agent_shared_files_service.py::_persist_and_register`, the shared
+  tail of `create_share` (agent extract) and `create_share_from_bytes`
+  (channel media, voice notes). `create_share`'s idempotent **replay** returns
+  its snapshot without reaching the tail and therefore emits **nothing** —
+  nothing new was shared.
+- **FR-2 — ids only, never content** (#918): blocks, `title`, `audience`,
+  `filename`, `mime_type` and above all the share `url` never ride the wire.
+  The URL embeds `?sig=<download_token>`, a bearer credential, and `/ws` is
+  `SCOPE_ALL`. Pinned by leak tests over the **serialized** bytes.
+- **FR-3 — ent#467 scope**: published on `/ws` via `manager.broadcast(...)`;
+  the top-level `agent_name` is the scoping vocabulary key, so the dispatcher
+  delivers each event only to clients that may access that agent (admins
+  unfiltered, both live fan-out and reconnect replay). No `event_bus.py`
+  change and no `FLEET_LEVEL_ALLOWLIST` entry — the payload is agent-keyed, so
+  the discovery guard classifies it on its own. Not broadcast on `/ws/events`
+  (no consumer; one setter away if one appears).
+- **FR-4 — a trigger never fails a write**: the managers are setter-injected
+  (`set_websocket_manager`, wired in `main.py`; Invariant #1 — a service never
+  imports `main`), both writers are synchronous, and the emit is
+  fire-and-forget via `loop.create_task` with a strong-ref task set. No
+  manager, no running loop, or a raising manager: the write still returns
+  normally. A lost trigger degrades to the **pre-ent#532** behaviour — the
+  next chat turn, chat switch, or Canvas/Files tab open — never to a wrong dot.
+- **FR-5 — the consumer is §5.20's**: `utils/websocket.js` routes both types to
+  `stores/portalRailFeeds.js::handleWebSocketEvent`, which keeps its
+  participant gate (an event naming an agent the open conversation does not
+  include is ignored) and calls the same debounced re-read through the
+  access-controlled client-portal routes. No new store, no new UI, no new
+  control.
+- **FR-6 — the shared debounce is capped**: `scheduleRefresh` was a pure
+  trailing debounce that re-arms on every event. Its §5.20 callers fire once
+  per execution; canvas writes do not (a `patch_canvas` stream during a run,
+  the voice panel writing per tool call), so an uncapped timer would defer the
+  read until the burst **ended** — and, because the timer is **shared** with
+  the loop/activity triggers, would make a shipped signal slower. A
+  `PUSH_MAX_WAIT_MS = 2 × PUSH_DEBOUNCE_MS` cap bounds how long a pending read
+  may be deferred from the first event of a burst. A **single** event still
+  fires at exactly the 2 s trailing edge, so no §5.20 timing moves.
+- **Out of scope**: portal-token (external) clients — they open no `/ws` at
+  all (the only portal push is the per-execution stream), so a push channel
+  for them is a new transport with its own auth, not this change; they keep
+  the next-turn / tab-open behaviour, stated. Canvas **delete** (router-direct,
+  and a delete cannot light an "updated since last view" dot). ent#557's
+  unread indicator, which deliberately rides its existing 20 s poll.
+- **Backend**: `services/canvas_service.py`,
+  `services/agent_shared_files_service.py`, `main.py` (setter wiring). No
+  endpoint, no table, no migration, no Alembic revision, no flag.
+- **Tests**: `tests/unit/test_ent532_rail_thin_triggers.py`;
+  `src/frontend/tests/unit/portalRailFeeds.spec.js`,
+  `src/frontend/tests/unit/portalRail.spec.js`.
+- **Flow**: `docs/memory/feature-flows/workspace-rail.md`,
+  `docs/memory/feature-flows/websocket-event-bus.md`,
+  `docs/memory/feature-flows/agent-canvas.md`

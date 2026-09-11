@@ -197,6 +197,15 @@ export function useWebSocket() {
           portalRailFeedsStore.handleWebSocketEvent(data)
           portalWorkStore.handleWebSocketEvent(data)   // ent#525: loop runs are one execution kind
         }
+        // ent#532: a canvas write or a newly shared file is a thin trigger
+        // (ids only, the #918 rule) emitted beside the write itself, so the
+        // rail's Canvas/Files dot lights on the event instead of on the next
+        // thing the client happens to refetch. The store re-reads through the
+        // access-controlled routes; this is a no-op unless the rail is scoped
+        // to that agent.
+        if (data.type === 'canvas_updated' || data.type === 'file_shared') {
+          portalRailFeedsStore.handleWebSocketEvent(data)
+        }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
         // The agent store filters by the agent on screen; the fleet store does a
         // guarded refresh. Each is a no-op when its panel isn't mounted.

@@ -2904,6 +2904,18 @@
         "unit"
       ],
       "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on."
+    },
+    {
+      "file": "unit/test_ent532_rail_thin_triggers.py",
+      "feature": "ent#532",
+      "added": "2026-09-11",
+      "categories": [
+        "backend",
+        "websocket",
+        "workspace",
+        "security"
+      ],
+      "description": "Workspace rail thin /ws triggers (ent#532): canvas_updated from canvas_service.write_canvas and file_shared from agent_shared_files_service._persist_and_register. Wire is ids only, asserted by strict equality plus leak checks over the serialized bytes (blocks, title, filename and the ?sig=-bearing url must never appear); agent_names_in_payload pins the ent#467 payload-derived scope and an AST case pins that the call site is a dict LITERAL that guard's discovery can read. One emit per write (patch funnels through write_canvas), none for a write that raised, none for create_share's idempotent replay; create_share_from_bytes (channel media) emits. The three 'a trigger never fails a write' directions (no manager, no running loop, a raising manager) are parametrized over BOTH per-service copies of the helper. Plus the main.py setter wiring under #1483's discovery regex. Pure unit, no Docker."
     }
   ]
 }
