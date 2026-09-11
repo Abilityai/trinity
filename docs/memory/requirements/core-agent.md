@@ -469,6 +469,22 @@
   "never read" as "all unread" would have badged every historical conversation
   in every install the day this shipped. A cursor is written the first time the
   viewer opens or sends in a thread.
+- **The absent-cursor half is amended by ent#557 (2026-09-10), and only that
+  half.** A thread with no cursor counts the agent messages newer than the
+  viewer's **account baseline** — a stored, write-once row in the same table
+  under a reserved kind, written on the viewer's first ever `mark_chat_read` and
+  never moved; every read of the table excludes it, so it is neither a phantom
+  chat nor a charge against either row cap. A viewer with no baseline (a
+  first-ever sign-in) still counts nothing, so the ent#359 property above is
+  preserved rather than traded away. The service emits those cursorless threads
+  in a second pass, de-duplicated against the rows it already returned and
+  **gated on there being room under the total-row cap**: `mark_chat_read`
+  silently no-ops at the cap, so a badge on a thread the viewer cannot mark read
+  would be one no user action clears. The count reaches the agent row, the
+  wordmark total, and the browser tab title (`utils/tabTitle.js` owns the
+  string, so the router's label and the count no longer overwrite each other),
+  and refreshes on the existing asks poll rather than only on the viewer's own
+  actions.
 - **Endpoints**: `GET /api/enterprise/client-portal/sessions` (#2198 — the whole
   sidebar list in ONE viewer-scoped call, replacing one per-agent call per rostered
   agent; roster-scoped by the same set the per-agent gate enforces, no cap and no

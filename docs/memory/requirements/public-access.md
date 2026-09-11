@@ -867,6 +867,20 @@ spoken replies (#2157) stay as composer affordances.
   into one block **keyed on the call id**, placed where the call started —
   robust to the 100-row history window and to typed turns landing mid-call.
   The Agent Detail chat is untouched.
+- **FR-3b — One timeline, and the agent knows what was said (#2694)**: the
+  thread is read as a window of **typed turns** (the newest 100, plus every
+  spoken row of the calls among them, under a row ceiling that reports itself
+  as `truncated`), so a long call never pushes the typed turns before it off
+  the screen and the call block sits where the call happened — live, after a
+  reload, after a chat switch. The first typed turn after a call carries the
+  call's content whether it resumes the agent's live session or starts cold:
+  the platform-written rows since the agent's last typed reply (spoken turns,
+  labelled as spoken; the call's label as a bracketed marker, never as the
+  agent's words) are prefixed to a resumed turn; the cold replay carries them
+  in the same form. One total character budget covers a whole 30-minute call;
+  anything trimmed is named by count. A call cannot start while a typed reply
+  is still being written, and a typed turn cannot start while a call is on
+  (both 409, unbilled, after the uniform 404), so no reply lands mid-call.
 - **FR-4 — Modal**: while the call is on, New chat, the picker, star, Reset, the
   tabs, attach, mic, textarea and Send are inert; the speaker toggle is hidden;
   one status line names the orb state / the tool at work and the way out;

@@ -1977,19 +1977,54 @@ export function assistantRow({ content = '', id = null, my_rating = null,
 // The reply a just-finished turn produced, read out of the history payload the
 // client polls anyway (`awaitPersistedReply`).
 //
-// `baselineAssistants` is the count taken BEFORE dispatch: the newest assistant
-// row is only this turn's reply if the count has grown, otherwise it is the
-// PREVIOUS turn's and would be shown twice. Returns null while that is the
-// case, which is the caller's "keep waiting".
+// `baseline` is taken BEFORE dispatch (`replyBaseline`): the newest assistant
+// row is only this turn's reply if it differs from the baseline, otherwise it
+// is the PREVIOUS turn's and would be shown twice. Returns null while that is
+// the case, which is the caller's "keep waiting".
 //
 // This is where the id was being lost. The persisted row was already in hand —
 // it is what the count is derived from — and only its content and cost were
 // carried out of the function.
-export function replyFromHistory(messages, baselineAssistants) {
-  const assistants = (Array.isArray(messages) ? messages : [])
-    .filter((m) => m && m.role === 'assistant')
-  if (assistants.length <= (Number(baselineAssistants) || 0)) return null
-  const last = assistants[assistants.length - 1]
+//
+// #2694: found by IDENTITY, not by count. The history read is now a window of
+// typed turns plus the spoken rows of the calls among them, so between the
+// baseline read and a poll the window can shift by a whole call — a count
+// would never grow, the poll would idle out, and a turn that answered would
+// be reported as "check shortly". The baseline is the id of the newest TYPED
+// assistant row (`replyBaseline`); a reply is new when that id changed. A
+// spoken reply (`source === 'voice'`) is never this turn's answer. The count
+// survives only as the fallback for a row with no id (the best-effort write).
+export function latestTypedReply(messages) {
+  const rows = Array.isArray(messages) ? messages : []
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i]
+    if (m && m.role === 'assistant' && m.source !== 'voice') return m
+  }
+  return null
+}
+
+function typedReplyCount(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'assistant' && m.source !== 'voice').length
+}
+
+// What a reply must differ from: taken BEFORE dispatch, from the same rows the
+// poll will read (the server's newest rows, or the local thread on a reattach).
+export function replyBaseline(messages) {
+  const last = latestTypedReply(messages)
+  return { id: last?.id || null, count: typedReplyCount(messages) }
+}
+
+export function replyFromHistory(messages, baseline) {
+  const last = latestTypedReply(messages)
+  if (!last) return null
+  const base = baseline && typeof baseline === 'object'
+    ? baseline
+    : { id: null, count: Number(baseline) || 0 }
+  const isNew = last.id && base.id
+    ? last.id !== base.id
+    : typedReplyCount(messages) > (Number(base.count) || 0)
+  if (!isNew) return null
   return {
     response: last.content,
     cost: last.cost ?? null,

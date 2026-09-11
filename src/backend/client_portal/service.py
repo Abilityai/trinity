@@ -130,6 +130,7 @@ class MainResetRefused(ClientPortalError):
 PORTAL_FAILURE_CATEGORIES = (
     "agent_unavailable",   # not on roster, stopped, or containerless
     "busy",                # another turn holds this thread; retrying works
+    "voice_call_active",   # #2694 — a voice call is on in this thread; send after it ends
     "capacity",            # admission refused before any agent work; unbilled
     "auth",                # subscription/credential exhausted — retry re-fails
     "timeout",             # the turn RAN and hit the agent's bound
@@ -1572,9 +1573,25 @@ def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
     return names
 
 
-_HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
-# ent#534: how many of one voice call's spoken rows survive into that context.
-_VOICE_CONTEXT_ROWS_PER_CALL = 12
+# The cold replay's window: the last 20 TYPED rows (~10 turns) plus the spoken
+# rows of the calls among them (#2694 — counted in typed turns, so a call cannot
+# fill the window on its own).
+_HISTORY_CONTEXT_MESSAGES = 20
+# The history endpoint's window, in typed turns (#2694). The row ceiling that
+# bounds it lives beside the read (`db.PORTAL_HISTORY_ROW_CEILING`).
+_HISTORY_TYPED_TURNS = 100
+# #2694: ONE total budget for spoken rows in any context block, in chars,
+# trimmed oldest-first across calls. A 30-minute call (the
+# `WORKSPACE_VOICE_MAX_DURATION` cap) is ~180 rows of ~60 chars, so a whole call
+# fits; this is the safety net, not the normal path. Replaces ent#534's
+# 12-rows-per-call counter, which hid nine tenths of every real call.
+_SPOKEN_CONTEXT_MAX_CHARS = 24_000
+# The one line above a resumed turn's delta (#2694). Read by the tests.
+VOICE_DELTA_HEADER = (
+    "[What happened in this chat since your last reply — spoken in a voice call, "
+    "not typed; bracketed lines are the platform's own notes. Context only; the "
+    "client's new message follows below]"
+)
 
 
 _TITLE_MAX_CHARS = 60  # matches the sidebar's truncation width
@@ -1963,6 +1980,22 @@ def _resolve_session_id(agent_name: str, email: str, session_id: str | None,
     return ensure_main_session(agent_name, email)
 
 
+def _refuse_turn_during_voice_call(session_id: str) -> None:
+    """#2694: no typed reply may land mid-call — the turn side of the rule
+    whose call side is `start_workspace_voice`'s 409. A reply that lands
+    between two spoken rows sits after the cursor the next typed turn uses to
+    find what the live session never heard, hiding the call's first half. The
+    owning tab's composer is inert during a call; a second tab and the headless
+    `/chat` surface are not, so the server refuses — in both turn entries,
+    BEFORE any row is created. Unbilled and retryable: nothing was dispatched,
+    and sending again after the call is exactly right.
+    """
+    from .voice import voice_call_active
+    if voice_call_active(session_id):
+        raise ClientPortalError(409, "A voice call is on in this chat — end it, then send.",
+                                category="voice_call_active", retryable=True)
+
+
 def ensure_main_session(agent_name: str, email: str) -> str:
     """The pair's pinned **Main** chat id, creating it on first need (ent#523).
 
@@ -2024,54 +2057,106 @@ def ensure_thread_for_ask(agent_name: str, email: str) -> str:
     return _resolve_session_id(agent_name, email, None)
 
 
-def _format_history_context(history: list[dict]) -> str:
-    """Render prior turns (oldest-first) as a labelled context block. Empty when
-    there is no history.
+def _one_line(content) -> str:
+    """A row's content on ONE line. The line form `Who: text` is the whole
+    contract of a context block, and a spoken row is text the platform wrote on
+    someone's behalf (the provider's transcription, the voice model's own
+    output): a newline inside it followed by `You:` or `[Client Portal]` would
+    forge a labelled line. Collapsing whitespace closes the class for every
+    row, typed or spoken (#2694)."""
+    return " ".join((content or "").split())
 
-    ent#523: SYSTEM rows are skipped. The speaker split here is binary —
-    "Client" for a user row, "You" for everything else — so the platform's own
-    line ("Main was reset. The previous conversation is saved as …") would be
-    replayed to the model as something the AGENT said. That is reachable on the
-    first turn after every Reset, and putting words in the agent's mouth is
-    worse than omitting chrome it did not write.
+
+def _spoken_cuts(rows: list[dict], budget: int) -> tuple[set, dict]:
+    """Which spoken rows fall outside ``budget`` chars, trimmed OLDEST-first
+    across every call in ``rows``. Returns the dropped row indexes and a
+    per-call count for the omission lines. ONE total budget (#2694): a per-call
+    budget is unbounded across calls, and on a runtime without ``--resume``
+    every turn replays the thread."""
+    spoken = [(i, len(_one_line(m.get("content")))) for i, m in enumerate(rows)
+              if m.get("source") == "voice" and m.get("role") != "system"
+              and _one_line(m.get("content"))]
+    total = sum(n for _, n in spoken)
+    dropped: set = set()
+    per_call: dict = {}
+    for i, n in spoken:
+        if total <= budget:
+            break
+        dropped.add(i)
+        total -= n
+        cid = rows[i].get("voice_call_id") or ""
+        per_call[cid] = per_call.get(cid, 0) + 1
+    return dropped, per_call
+
+
+def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
+    """The lines of a context block, oldest-first — the ONE renderer both the
+    cold replay and the resumed delta use (#2694), so the agent is told the
+    same thing in the same form whichever path a turn takes.
+
+    * a typed row → ``Client: …`` / ``You: …``;
+    * a spoken row → ``Client (voice): …`` / ``You (voice): …``;
+    * the platform's own ``system`` row (a call's ``Voice call · N min`` label,
+      the ent#523 reset notice) → a bracketed marker ``[…]``, NEVER ``You:`` —
+      ent#523 skipped these outright so the platform's line could not be
+      replayed as the agent's words; a marker keeps that guarantee and stops
+      hiding from the agent that a call ended or that Main was reset;
+    * spoken rows beyond the budget are dropped oldest-first, and every cut is
+      named where the call's kept rows begin — a count only, no pointer to a
+      place the agent cannot read.
     """
-    # ent#534: a voice call's spoken rows are labelled, and budgeted. A 30-minute
-    # call can be ~180 rows, which would otherwise be the WHOLE context window
-    # (`_HISTORY_CONTEXT_MESSAGES`); the last few spoken exchanges are what the
-    # next typed turn is likely about, the rest is summarised as a count.
-    kept_per_call: dict = {}
-    for m in reversed(history):
-        cid = m.get("voice_call_id")
-        if m.get("source") == "voice" and cid and m.get("role") != "system":
-            kept_per_call[cid] = kept_per_call.get(cid, 0) + 1
-    seen_per_call: dict = {}
-    omitted_noted: set = set()
-    lines = []
-    for m in history:
-        if m.get("role") == "system":
+    dropped, per_call = _spoken_cuts(rows, spoken_budget)
+    noted: set = set()
+    lines: list[str] = []
+    for i, m in enumerate(rows):
+        content = _one_line(m.get("content"))
+        if not content:
+            continue
+        role = m.get("role")
+        if role == "system":
+            lines.append(f"[{content}]")
             continue
         spoken = m.get("source") == "voice"
-        if spoken and m.get("voice_call_id"):
-            cid = m["voice_call_id"]
-            seen_per_call[cid] = seen_per_call.get(cid, 0) + 1
-            drop = kept_per_call.get(cid, 0) - _VOICE_CONTEXT_ROWS_PER_CALL
-            if seen_per_call[cid] <= drop:
-                if cid not in omitted_noted:
-                    omitted_noted.add(cid)
-                    lines.append(f"[{drop} earlier spoken turns of a voice call omitted]")
+        if spoken:
+            cid = m.get("voice_call_id") or ""
+            if cid in per_call and cid not in noted:
+                noted.add(cid)
+                lines.append(f"[{per_call[cid]} earlier spoken turns of this call not included]")
+            if i in dropped:
                 continue
-        who = "Client" if m.get("role") == "user" else "You"
+        who = "Client" if role == "user" else "You"
         if spoken:
             who += " (voice)"
-        content = (m.get("content") or "").strip()
-        if content:
-            lines.append(f"{who}: {content}")
+        lines.append(f"{who}: {content}")
+    return lines
+
+
+def _format_history_context(history: list[dict], *,
+                            spoken_budget: int = _SPOKEN_CONTEXT_MAX_CHARS) -> str:
+    """Render prior turns (oldest-first) as a labelled context block — the cold
+    turn's only continuity. Empty when there is no history. Rules: `_context_lines`.
+    """
+    lines = _context_lines(history, spoken_budget)
     if not lines:
         return ""
     return (
         "[Conversation so far with this client — context only; their new message "
         "follows below]\n" + "\n".join(lines)
     )
+
+
+def _format_voice_delta(rows: list[dict], *, budget: int = _SPOKEN_CONTEXT_MAX_CHARS) -> str:
+    """Render what the agent's LIVE session never heard (#2694) — the spoken
+    turns and platform lines since its last typed reply — as the block a
+    RESUMED turn is prefixed with. Empty when there is nothing new. Same
+    renderer as the cold replay; only the header differs, because the session
+    does remember the typed conversation and must not be handed a summary of
+    it beside the real thing (the ent#358 ruling).
+    """
+    lines = _context_lines(rows, budget)
+    if not lines:
+        return ""
+    return VOICE_DELTA_HEADER + "\n" + "\n".join(lines)
 
 
 def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
@@ -2443,6 +2528,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
 
     session_id = _resolve_session_id(agent_name, email, session_id,
                                      new_thread=new_thread)
+    _refuse_turn_during_voice_call(session_id)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
 
     # ent#186: a thread is titled from its OPENING exchange. Read the row here
@@ -2488,12 +2574,32 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # kept for the cold-retry message even when this turn resumes.
     history = []
     try:
-        history = db.get_portal_messages(
-            agent_name, email, limit=_HISTORY_CONTEXT_MESSAGES, session_id=session_id
-        )
+        # #2694: a window of TYPED turns plus the calls among them — a 180-row
+        # call no longer fills the window on its own.
+        history = db.get_portal_thread_window(
+            agent_name, email, session_id, typed_limit=_HISTORY_CONTEXT_MESSAGES
+        ).rows
     except Exception as e:  # noqa: BLE001
         logger.warning("portal history-context read failed for %s/%s: %s", agent_name, email, e)
     convo_context = _format_history_context(history)
+
+    # #2694: what the LIVE session never heard. A voice call runs on the voice
+    # provider and writes its spoken turns straight into the thread; the
+    # agent's own session was not there. The replay above is dropped on the
+    # resumed path (ent#358 — the session already remembers the TYPED
+    # conversation), which was true for typed turns and false for spoken ones,
+    # so after a call the resumed agent had no record of it. Read here, BEFORE
+    # `_persist_user_turn`, for the same reason the history is; fail-soft for
+    # the same reason too. Only computed for a turn that resumes — the cold
+    # replay already carries these rows in the same form.
+    voice_delta = ""
+    if resuming:
+        try:
+            voice_delta = _format_voice_delta(
+                db.get_platform_rows_since_last_reply(agent_name, email, session_id)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("portal voice-delta read failed for %s/%s: %s", agent_name, email, e)
     # ent#473: decided on the PRE-turn row and history — see `_title_plan`.
     title_attempt = _title_plan(_row, history)
 
@@ -2578,9 +2684,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
     if manifest_parts:
         manifest_prefix = "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
     history_prefix = (convo_context + "\n\n") if convo_context else ""
+    # #2694: the resumed turn carries the DELTA (what the session never heard),
+    # never the whole-thread replay; the cold message carries the replay, which
+    # already holds the same rows — so a cold retry cannot double-send them.
+    delta_prefix = (voice_delta + "\n\n") if voice_delta else ""
 
     cold_message = history_prefix + manifest_prefix + message
-    message = (manifest_prefix + message) if resuming else cold_message
+    message = (delta_prefix + manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -3334,6 +3444,7 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
 
     session_id = _resolve_session_id(agent_name, email, session_id,
                                      new_thread=new_thread)
+    _refuse_turn_during_voice_call(session_id)   # #2694 — before the row exists
 
     from database import db as core_db
     try:
@@ -3820,12 +3931,19 @@ def _attach_own_ratings(messages: list, email: str, *, is_platform: bool = False
 
 
 def get_history(agent_name: str, email: str, session_id: str | None = None,
-                include_owned: bool = False) -> dict:
+                include_owned: bool = False, limit: int | None = None) -> dict:
     """A client's conversation with a rostered agent (oldest-first). Roster-scoped
     (miss → 404). With ``session_id`` it returns that thread (validated to belong
     to the caller — miss → 404); with none it returns the client's most-recent
     thread, so an opening drawer resumes where they left off. Survives refresh /
-    re-sign-in — reads the private enterprise_portal_messages table."""
+    re-sign-in — reads the private enterprise_portal_messages table.
+
+    #2694: two reads, by intent. No ``limit`` → the thread WINDOW: the newest
+    ``_HISTORY_TYPED_TURNS`` typed rows plus the spoken rows of the calls among
+    them, under the row ceiling (``truncated`` says when it cut). A ``limit`` →
+    the newest N ROWS whatever their source: the reply poll's narrow read, made
+    every few hundred milliseconds while a turn runs, which only needs the
+    newest reply and must not pay for — or be confused by — the window."""
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     if session_id:
@@ -3833,7 +3951,14 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
             raise ClientPortalError(404, "Conversation not found")
     else:
         session_id = db.get_latest_portal_session_id(agent_name, email)
-    messages = db.get_portal_messages(agent_name, email, session_id=session_id) if session_id else []
+    messages: list = []
+    truncated = False
+    if session_id and limit is not None:
+        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id)
+    elif session_id:
+        window = db.get_portal_thread_window(agent_name, email, session_id,
+                                             typed_limit=_HISTORY_TYPED_TURNS)
+        messages, truncated = window.rows, window.truncated
     # ent#366: attach the caller's OWN rating to each message, so a reload shows
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
@@ -3880,6 +4005,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         "agent_name": agent_name,
         "session_id": session_id,
         "messages": messages,
+        # #2694: the ceiling cut rows off the old end — declared on the model
+        # for the same reason the fields below are.
+        "truncated": truncated,
         "in_flight_execution_id": inflight,
         "in_flight_wait_budget_seconds": wait_budget,
         # #2320: WHY the last turn ended, when it ended badly. Rides the poll
@@ -4688,6 +4816,23 @@ def _would_create_row_past_cap(email: str, kind: str, cid: str) -> bool:
     return db.count_chat_state_rows(email) >= db.MAX_CHAT_STATE_ROWS
 
 
+def _chat_state_room_left(email: str) -> bool:
+    """Can this viewer still gain a chat-state row (ent#557 review)?
+
+    Read-side twin of `_would_create_row_past_cap`, minus the per-row existence
+    check: the caller is asking about rows that provably do NOT exist yet.
+    Fails OPEN — an unreadable count reports room, because refusing to show an
+    unread badge on a count that could not be taken would hide real unread from
+    every viewer on a transient DB error, and the write path is what actually
+    enforces the cap.
+    """
+    try:
+        return db.count_chat_state_rows(email) < db.MAX_CHAT_STATE_ROWS
+    except Exception:  # noqa: BLE001 — the cap is enforced on the write path
+        logger.warning("chat-state cap read failed for %s; assuming room", email)
+        return True
+
+
 def get_chat_state(email: str) -> dict:
     """Star + unread state for every chat the caller has state for.
 
@@ -4697,21 +4842,55 @@ def get_chat_state(email: str) -> dict:
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email)
     chats = []
+    seen_threads: set[str] = set()
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
+        if kind == "thread":
+            seen_threads.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
             "unread": unread.get(cid, 0) if kind == "thread" else 0,
         })
-    # No fallback for "unread without a state row": `count_unread_by_session`
-    # INNER JOINs the state table and requires `last_read_at IS NOT NULL`, so
-    # every session it can return already has a row `get_chat_state` yielded.
-    # The loop that used to be here could never append, and a safety net that
-    # cannot fire is worse than none — it reads as protection that exists.
+    # A CURSORLESS thread has unread and no state row, so the loop above never
+    # reaches it — and that is the whole ent#557 case: an agent replies into a
+    # freshly minted Main the viewer has never opened, so no row was ever
+    # written for it. Since ent#557 `count_unread_by_session` LEFT JOINs the
+    # state table and counts those threads against the account baseline, so it
+    # is now the wider set of the two and this is where its extra rows enter the
+    # payload. Emitting them is what makes the badge, the per-agent pill, the
+    # wordmark total and the tab title fire at all.
+    #
+    # Bounded by the same read: `count_unread_by_session` is scoped to the
+    # caller's own `enterprise_portal_messages`, so this cannot append a chat
+    # that is not already theirs. `starred` is False by construction — a chat
+    # with no row has never been starred.
+    cursorless = [
+        (cid, n) for cid, n in unread.items()
+        if cid and cid not in seen_threads and n > 0
+    ]
+    # ...but ONLY while the viewer can still clear it, and that is not a
+    # nicety. `mark_chat_read` silently no-ops when the row would be a NEW one
+    # and the viewer is at `MAX_CHAT_STATE_ROWS` — deliberately, because a read
+    # marker is "incidental to what the user asked for". A cursorless thread is
+    # by definition a new row, so at the cap this pass would raise a badge on
+    # the wordmark, the agent pill and the browser tab title that opening the
+    # chat cannot dismiss. ent#557 made the no-op load-bearing: before it, a
+    # cursorless thread showed nothing, so the no-op was invisible and the
+    # justification held.
+    #
+    # Not shown beats shown-and-stuck. A capped viewer degrades to exactly the
+    # ent#359 behaviour, which is the state they were in before this feature,
+    # rather than to a badge that never goes away. The COUNT is paid only when
+    # there is something to emit — i.e. never on the ordinary load, where the
+    # list is empty and the cap cannot be the reason.
+    if cursorless and not _chat_state_room_left(email):
+        cursorless = []
+    for cid, n in cursorless:
+        chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
     return {"chats": chats}
 
 
