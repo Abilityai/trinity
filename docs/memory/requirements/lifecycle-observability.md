@@ -284,7 +284,19 @@ anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
   `system_settings` is claimed **before** the POST, so restarts / re-runs /
   concurrent workers never double-submit. A stable random `installation_id`
   (also in `system_settings`, the seed for future #758 telemetry) correlates the
-  submission.
+  submission. The id has exactly three writers — this consent POST, the
+  product-event emit (§45), and the canary alert label (a documented, deliberate
+  write, #1987) — all through `get_or_create_installation_id`; **every
+  read-shaped path** (a GET, a status readback) uses the non-minting twin
+  `get_installation_id()` and reports `None` honestly when nothing has minted
+  it yet (ent#545), because a `get_or_create_*` on a read path is a durable
+  write with a race (learnings 2026-08-05). The last such caller, the
+  enterprise activation-funnel read, adopts the twin in trinity-enterprise#570;
+  a public tree ahead of that submodule pointer still mints on the tab's first
+  open. The mint itself is a **write-once
+  claim** (`insert_setting_if_absent`, the #2380 primitive), so two workers
+  that SELECT-miss together land ONE id and the loser reads the winner's back —
+  the race #1987 recorded as pre-existing in the accessor is closed (ent#545).
 - **FR-4 — Off switch**: `OPERATOR_INTAKE_ENABLED=false` (or the cross-tool
   `DO_NOT_TRACK=1`) fully disables the outbound submission for air-gapped /
   privacy-strict installs — the consent box still appears, nothing leaves the box.
@@ -511,7 +523,15 @@ module's design lives in the private submodule.
   shows step-by-step activation counts + drop-off with an honest empty state when
   there's no data yet. It reads a gated enterprise endpoint
   (`requires_entitlement("telemetry")`) that aggregates `product_events` +
-  derives the first-value events from the OSS tables above. The **panel Vue**
+  derives the first-value events from the OSS tables above. **The read is pure
+  (ent#545)**: it reports the stored `installation_id` or `null` through the
+  non-minting accessor (§43.1) and never mints one — the first admin open of the
+  tab must not create the install's identity — and the panel footer renders an
+  honest "no install id yet" state rather than a blank, pointing at the one
+  writer an operator can actually reach (the updates opt-in, Settings →
+  General; the wizard's first product event only fires on an empty fleet or an
+  explicit `?onboarding=1`). A value that is neither an id nor the explicit
+  `null` renders as "unavailable", never as a claim about minting. The **panel Vue**
   ships in the OSS bundle but is hidden unless `telemetry` is in
   `enterprise_features` (the standard feature-flag gating). Explicitly **NOT** a
   new standalone analytics dashboard in v1.
@@ -549,10 +569,16 @@ transport); only the **reciprocity benchmark view** is entitlement-gated
   emails, no agent names.** The exact payload is **inspectable before send** via
   `GET /api/settings/telemetry-sharing` → `payload_preview` (the Settings panel).
 - **FR-3 — Periodic heartbeat + reversibility**: `TelemetrySharingService` is a
-  sleeps-first background loop (default 24h, jittered) that shares when consent is
-  on; opt-out stops egress at the next heartbeat. Fail-open (a blocked/failed/
-  air-gapped POST never affects the platform). Reuses the operator-intake httpx
-  fire-and-forget transport.
+  sleeps-first background loop that shares on the configured cadence (default
+  24h) when consent is on; opt-out stops egress at the next wake. Since #2618 the
+  loop wakes every 10 minutes (+ ≤10 min jitter) and decides from the persisted
+  `last_shared_at` whether a send is due — empty, unparseable, in the future, or
+  older than the interval — so a backend restart never resets the cadence (an
+  install that restarted daily used to share its consent-time backfill and never
+  again). Fail-open (a blocked/failed/air-gapped POST never affects the platform;
+  after five consecutive failures attempts fall to one per half-interval, measured
+  from the persisted send log). Reuses the operator-intake httpx fire-and-forget
+  transport.
 - **FR-4 — Retroactive backfill at consent**: on the off→on transition the router
   schedules an immediate fire-and-forget backfill share over a disclosed window
   (`backfill_days`, default 30) sourced from Tier-1 `product_events`, so late
@@ -652,14 +678,18 @@ no entitlement gate; only the reciprocity benchmark view stays gated (`telemetry
   receiver has been live since 2026-09-04, ent#190, so that is an anomaly to look
   at); from an overridden `TELEMETRY_SHARING_URL` as that receiver answering 404.
 - **FR-6 — Delivery that survives a missing receiver**: the consent-time backfill
-  is retried by the 24h heartbeat until the first 2xx
+  is retried at every due wake until the first 2xx
   (`telemetry_sharing_backfill_delivered_at`), then windows are cumulative from
-  `last_shared_at`; a Redis tick marker (`telemetry_share:tick`, TTL half the
-  interval, never released, fail-open) makes one worker send per interval.
+  `last_shared_at` in whole days; a Redis tick marker (`telemetry_share:tick`,
+  TTL half the interval, a fresh lock per claim, released only when the receiver
+  did not acknowledge, fail-open) makes one worker send per interval, and an
+  acknowledged send counts as delivered even if the local stamp write fails
+  (#2618).
 - **FR-7 — Reset paths**: every consent-family key sits under the
   `telemetry_sharing_` prefix the generic `PUT /api/settings/{key}` already
   refuses; the generic `DELETE` stays open for it by design — deleting a key
-  only moves toward off / ask again / re-mint. The builder runs off the event
+  only moves toward off / ask again / re-mint, or, for `last_shared_at`, one
+  re-share at the next wake (#2618; consent still gates). The builder runs off the event
   loop (`asyncio.to_thread`) and every reader is fenced so a stubbed or failing
   source degrades a field, never the payload.
 

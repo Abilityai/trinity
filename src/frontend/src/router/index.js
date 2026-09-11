@@ -266,7 +266,16 @@ export const routes = [
     path: '/workspace/a/:agentName',
     name: 'WorkspaceAgent',
     component: () => import('../views/Portal.vue'),
-    meta: { title: 'Workspace', hideHelpWidget: true }
+    // ent#556: the one Workspace route whose subject the ROUTE knows, so it is
+    // the one that can name it. Keeps the surface in the title — a bare agent
+    // name would lose "Workspace" — and reuses `agentTabTitle`, so an operator
+    // (warm agents store) sees the display name and a client session, which
+    // never populates that store, falls back to the slug. Threads and rooms
+    // cannot do this: their subject lives in component state, not the route.
+    meta: {
+      title: (to) => `Workspace · ${agentTabTitle(to.params.agentName)}`,
+      hideHelpWidget: true,
+    }
   },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
