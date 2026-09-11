@@ -10,6 +10,8 @@ import { usePortalRailFeedsStore } from '../stores/portalRailFeeds'
 import { usePortalWorkStore } from '../stores/portalWork'
 import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 import { useRoomsStore } from '../stores/rooms'
+import { useSkillsStore } from '../stores/skills'
+import { useClientPortalStore } from '../stores/clientPortal'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -36,6 +38,8 @@ export function useWebSocket() {
   const portalWorkStore = usePortalWorkStore()
   const reportsStore = useReportsStore()
   const fleetReportsStore = useFleetReportsStore()
+  const skillsStore = useSkillsStore()
+  const clientPortalStore = useClientPortalStore()
 
   const connect = async () => {
     if (ws.value) return
@@ -196,6 +200,17 @@ export function useWebSocket() {
           // or file may have changed — same thin trigger, third consumer.
           portalRailFeedsStore.handleWebSocketEvent(data)
           portalWorkStore.handleWebSocketEvent(data)   // ent#525: loop runs are one execution kind
+        }
+        // #2703: a skill was assigned / unassigned / synced on an agent — a
+        // THIN trigger ({type, agent_name}, no names: the #918 rule). Two
+        // consumers: the skills store ticks the agent so Agent Detail's
+        // playbook lists refetch through `/playbooks`; the Workspace store
+        // re-hydrates that agent's briefing (hint cards + `/` typeahead)
+        // through `/briefings`. Each is a no-op when its surface is not
+        // showing that agent.
+        if (data.type === 'agent_skills_changed' && data.agent_name) {
+          skillsStore.noteSkillsChanged(data.agent_name)
+          clientPortalStore.revalidateBriefing(data.agent_name)
         }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
         // The agent store filters by the agent on screen; the fleet store does a

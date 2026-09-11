@@ -215,6 +215,11 @@ installRotationInterceptor()
 const briefingsInFlight = new Set()
 const briefingAttempts = new Map()
 let briefingsBatchInFlight = false
+// #2703: agents whose briefing changed WHILE a hydration for them was in
+// flight. `ensureBriefing`/`revalidateBriefing` return early on an in-flight
+// name; without this a WS trigger landing mid-hydration would be lost and the
+// stale answer would win. `hydrateBriefings` re-runs once for a dirty name.
+const briefingsDirty = new Set()
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
@@ -1681,7 +1686,42 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } finally {
         if (requested) requested.forEach((n) => briefingsInFlight.delete(n))
         else briefingsBatchInFlight = false
+        // #2703: an invalidation that arrived mid-flight re-runs ONCE, so the
+        // listing the user sees is never the one fetched before the change.
+        const redo = (requested || this.agents.map((a) => a && a.name)).filter((n) => briefingsDirty.has(n))
+        redo.forEach((n) => briefingsDirty.delete(n))
+        if (redo.length) void this.revalidateBriefing(redo)
       }
+    },
+
+    /**
+     * Re-hydrate one agent's (or a few agents') briefing after its skill set
+     * changed (#2703) — stale-while-revalidate: the card keeps its hint cards
+     * and `/` entries until the new answer lands; `briefing_state` is NEVER
+     * flipped back to `pending`, because that re-enters the loading skeleton
+     * on a zone that has data (the p13 rule `mergeRosterBriefings` guards).
+     *
+     * Deliberately outside `shouldRequestBriefing`, whose job is the one-retry
+     * rule for a card that never hydrated; this is a card that did.
+     *
+     * `maxAge` (ms) bounds the call for the surfaces with no `/ws` — an
+     * external client's Workspace re-validates the active agent when the `/`
+     * popup opens, at most once per minute per agent.
+     */
+    async revalidateBriefing(names, { maxAge = 0 } = {}) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean)
+      const wanted = []
+      for (const name of list) {
+        const card = this.agents.find((a) => a && a.name === name)
+        if (!card) continue                               // not on this roster — nothing to show
+        if (maxAge > 0 && typeof card.briefing_hydrated_at === 'number'
+            && Date.now() - card.briefing_hydrated_at < maxAge) continue
+        if (briefingsInFlight.has(name)) { briefingsDirty.add(name); continue }
+        wanted.push(name)
+      }
+      if (!wanted.length) return
+      wanted.forEach((n) => briefingsInFlight.add(n))
+      await this.hydrateBriefings(wanted)
     },
 
     /**

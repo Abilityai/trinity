@@ -25,6 +25,99 @@ silent success.
 - **Automatic**: `services/agent_service/lifecycle.py::inject_assigned_skills` during agent start (`force=False` — version-unchanged skills are skipped)
 - **Fleet** (ent#236): `skills_sync_service.run_fleet_reinject` after a library sync that moved the commit — running non-ghost agents, `force=False`, bounded concurrency
 
+## Delivery on assign (#2703)
+
+Injection's missing trigger. Until #2703 every assign path — `POST /agents/{n}/skills/{s}`,
+the bulk `PUT`, the Library control (ent#386), MCP `assign_skill_to_agent` /
+`set_agent_skills` — wrote the `agent_skills` row and stopped; the package reached the
+agent only on a manual Sync, the next start, or the fleet sweep, while unassigning
+already removed it (the removal below). The write path was asymmetric, and the most
+natural flow (assign from the Library, open the Workspace, type `/`) showed nothing.
+
+`skill_service.deliver_assigned(agent, requested)` is the write-side twin of
+`remove_skills`, called by the router helper `_deliver_assigned_skills` (the twin of
+`_remove_unassigned_skills`) on POST (both branches — an "already assigned" re-click is
+the Library control's only retry) and on the PUT's `new − previous`. Same contract: the
+row is committed and authoritative, delivery is best-effort, NOTHING fails the write,
+the HTTP status stays 200 and the body carries an honest report:
+
+```
+delivery: {status, reason?, skills: {name: {status, error?}}}
+  injected        every requested skill landed (or was already present and current)
+  partial         some did; the rest carry their error
+  pending_start   the container is stopped — the start path (`skills-on-agent-start.md`) delivers
+  in_progress     the injection outlived SKILL_DELIVERY_BUDGET_SECONDS (20 s) and continues in
+                  the background; the WS trigger fires when it lands
+  not_delivered   reason ∈ docker_unavailable | injection_in_progress | agent_not_ready | injection_error
+```
+
+Load-bearing choices, each of which the reviews changed from the first draft:
+
+- **It runs the START-PATH injection — every assigned name, `force=False` — never a
+  named subset.** `_inject_skills_locked` rewrites CLAUDE.md's `## Platform Skills`
+  section to exactly the names of the run it is in, so a subset call on an agent holding
+  ten skills would leave it advertising one. A just-assigned skill has no agent-side meta
+  and is injected; unchanged siblings cost one batched metas read and read `unchanged`,
+  which the report projects as `injected` for a requested name (the skill IS present).
+- **Container state is read first**, via `docker_utils.agent_container_state_async`
+  (the executor form — the sync SDK call would block the worker's loop). The read is
+  tri-state (#2196): `None` is *Docker could not be asked* and reports
+  `not_delivered/docker_unavailable`, never `pending_start` — promising a start-path
+  delivery for a container that may be running right now would be a lie.
+- **Bounded, and the work survives the bound.** The route awaits at most
+  `SKILL_DELIVERY_BUDGET_SECONDS`; past it the task is kept in a strong-ref set
+  (`_BACKGROUND_DELIVERIES`, the #1083 lesson) and answers `in_progress`. The axios
+  default is 30 s and one restore is bounded only by `_RESTORE_TIMEOUT` (300 s), so an
+  unbounded await would turn a committed row into a client-side "save failed".
+- **Busy is retried once** (2 s): an assign that lands while the START path holds the
+  lock would otherwise never be delivered — the start read its name list before the row
+  existed, so "applies on next start" would describe a start that already happened.
+- **Under-lock re-read (`assigned_only=True`)**: the delivery path asks
+  `_inject_skills_locked` to re-read the rows inside the lock and skip any name no longer
+  assigned (`unassigned_meanwhile`, never landed, never written to CLAUDE.md) — the mirror
+  of `_remove_skills_locked`'s `still_assigned` guard. Opt-in: the start path, the sweep
+  and manual Sync keep their explicit lists verbatim.
+- A `running` container whose agent-server is not up yet (startup.sh still cloning)
+  answers connection-refused → `agent_not_ready`, distinct from `injection_error`.
+
+### The `agent_skills_changed` trigger
+
+Every writer of the listing tells open surfaces to refetch: the four router paths
+(assign, unassign — on the row change, even when removal deferred — bulk replace, manual
+Sync), a budget-exceeded delivery finishing in the background, and the fleet re-inject
+sweep's per-agent completion. `skill_service.broadcast_skills_changed(agent)` lives in
+the SERVICE (two of those writers are services, Invariant #1); `main.py` sets its
+manager beside the tags one. **Identifiers only** — `{type: "agent_skills_changed",
+agent_name}` — because `/ws` is SCOPE_ALL and unfiltered (the #918 / ent#305 rule):
+skill names on the wire would hand every authenticated client which library skills every
+tenant's agents run. Listeners refetch through access-controlled routes:
+
+- `utils/websocket.js` → `stores/skills.js::noteSkillsChanged(agent)` (per-agent tick,
+  300 ms debounce) → `ChatPanel.vue` / `PlaybooksPanel.vue` watch their agent's tick and
+  call their own `loadPlaybooks()` (`/api/agents/{name}/playbooks`, `AuthorizedAgentByName`).
+  `ChatInput` takes its list from `ChatPanel` (#2198), so the `/` popup follows.
+- `utils/websocket.js` → `stores/clientPortal.js::revalidateBriefing(agent)` →
+  `hydrateBriefings([agent])` (`GET /briefings?agents=`, roster-gated) —
+  **stale-while-revalidate**: the card's hint cards and `/` entries stay until the answer
+  lands; `briefing_state` is NEVER flipped back to `pending`, which would re-enter the
+  loading skeleton on a zone that has data (the p13 rule in `portalBriefingState.js`). An
+  event landing mid-hydration marks the agent dirty and the `finally` re-runs once.
+- **An external client's Workspace has no `/ws`** (portal token; the ticket mint is
+  JWT-only). Its equivalent: opening the `/` popup calls
+  `revalidateBriefing(active, {maxAge: 60 s})` against `briefing_hydrated_at`, which
+  `applyBriefings` now stamps — one bounded call per agent per minute.
+
+### What the user is told
+
+`utils/skillDelivery.js::deliveryText(report)` is the ONE wording rule (pure, node-testable):
+"Saved and delivered — available now" / "Saved — the agent is stopped, so it applies on
+next start" / "Saved — still installing" / "Saved but not delivered: <why>. Sync now…".
+The Skills tab's Save note takes its tone from it and arms the Sync nudge only when
+delivery did NOT land; the Library control (`components/skills/AssignedAgents.vue`) renders
+the same rule under its Assign button, since it has no Sync button of its own. MCP passes
+the `delivery` block through verbatim (`skills.ts`, Invariant #13) and its descriptions
+name the vocabulary.
+
 ## Removal (ent#236)
 
 Injection's inverse, added because an unassigned skill previously stayed on the
@@ -232,6 +325,7 @@ unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
 | Date | Change |
 |------|--------|
+| 2026-09-11 | **#2703 delivery on assign + `agent_skills_changed`**: every assign path delivers via the start-path injection with an honest per-skill `delivery` report (bounded 20 s → `in_progress`, busy retried once, `docker_unavailable` ≠ `pending_start`, opt-in under-lock re-read); one thin WS trigger from the service, fired by all six listing writers; Agent Detail lists refetch on the tick, the Workspace re-validates the briefing stale-while-revalidate (and on `/` open for portal clients, who have no `/ws`) |
 | 2026-08-04 | **trinity-enterprise#332 per-source skills root**: source layout resolvable per source (`catalog.yaml` `skills_root:` → evidence-gated `skills/` probe → `.claude/skills/` fallback; segment-wise validation, ent#314 hardened parse, lstat/containment guards, dual-layout keeps legacy + `layout_conflict`); `filter_skill_archive(source_root=…)` rewrites arcnames to the canonical agent-side destination so manifests/prune/removal stay destination-canonical with zero migration. Requirements §21.1.4. |
 | 2026-07-29 | **trinity-enterprise#236 lifecycle automation**: removal-on-unassign (`remove_skills` + `compute_removal`, manifest-driven, same inject lock), start-path reconciliation with a blast-radius refusal, and fleet-wide re-inject after a commit-changing library sync. See also [skills-library-sync.md](skills-library-sync.md) for the scheduled sync. |
 | 2026-07-19 | **trinity-enterprise#183 full-directory packages**: git-archive tar source, agent-server restore transport, tree-SHA versioning + `.trinity-skill.json`, manifest prune, frontmatter contract + declaration-only dep check, honest per-skill warnings, gitignore/untrack guard, repair path, injection lock. Replaces the single-file `write_file`-per-skill design. |

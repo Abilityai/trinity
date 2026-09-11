@@ -2904,6 +2904,18 @@
         "unit"
       ],
       "description": "#2694 turn side: a RESUMED Workspace turn is prefixed with what the live session never heard (spoken rows labelled as spoken, the call's label as a bracketed marker, never `You:`); the cold replay carries the same rows in the same form and the delta is not added on top (no double-send on a cold retry); one total spoken-char budget across calls trimmed oldest-first with every cut named; newlines inside a replayed row cannot forge a labelled line; the delta is read before the user row persists and a read failure never blocks the turn; a voice call is refused (409) while a typed reply is in flight, after the uniform 404, and a typed turn is refused (409) while a call is on."
+    },
+    {
+      "file": "unit/test_2703_skill_assign_delivery.py",
+      "feature": "#2703",
+      "added": "2026-09-11",
+      "categories": [
+        "backend",
+        "skills",
+        "websocket",
+        "unit"
+      ],
+      "description": "Skill assignment delivers (#2703): deliver_assigned runs the start-path injection (all assigned, force=False - a subset rewrites CLAUDE.md), stopped -> pending_start, Docker unreadable -> not_delivered/docker_unavailable, busy -> one retry, over budget -> in_progress with the work kept + WS on completion; under-lock re-read is opt-in; routes stay 200 with `delivery` in the body and fire the thin agent_skills_changed trigger; 404/422 fire before any write."
     }
   ]
 }

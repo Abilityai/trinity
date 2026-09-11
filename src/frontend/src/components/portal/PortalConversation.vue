@@ -1486,13 +1486,26 @@ function resetTypeahead() {
   dismissed.value = null
 }
 
+// #2703 — an external client's Workspace has no `/ws` (portal token; the
+// ticket mint is JWT-only), so the `agent_skills_changed` trigger never reaches
+// it. Opening the `/` popup is the moment the playbook list is about to be
+// read, so re-validate the active agent's briefing then — bounded to once a
+// minute per agent, stale-while-revalidate (the list on screen is never
+// blanked). On a platform session this is a cheap no-op most of the time,
+// since the WS trigger already refreshed the card.
+const TYPEAHEAD_REVALIDATE_MAX_AGE_MS = 60_000
+
 function refreshTypeahead(el) {
   if (!el) return
+  const wasOpen = !!typeaheadTrigger.value
   // Read the EVENT TARGET, never the v-model ref: reading the ref makes
   // correctness depend on Vue's internal listener ordering, which is true today
   // and an implementation detail.
   typeaheadTrigger.value = detectTypeaheadTrigger(el.value, el.selectionStart, el.selectionEnd)
   if (!typeaheadTrigger.value) activeIndex.value = -1
+  if (!wasOpen && typeaheadTrigger.value?.kind === '/' && props.agent?.name) {
+    void store.revalidateBriefing(props.agent.name, { maxAge: TYPEAHEAD_REVALIDATE_MAX_AGE_MS })
+  }
 }
 
 function onComposerInput(e) {
