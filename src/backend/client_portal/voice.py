@@ -57,6 +57,54 @@ REASON_DISABLED = "Voice is turned off on this instance."
 REASON_NO_KEY = "No voice provider key is configured on this instance."
 
 
+# ---- The live-call marker (#2694) --------------------------------------------
+#
+# The other half of "no typed reply lands mid-call". `start_workspace_voice`
+# refuses over a reply in flight; this is what lets the TURN side refuse over a
+# call in progress — the owning tab's composer is inert, but a second tab or
+# the headless `/chat` surface is not. Best-effort Redis, the TTL (the call cap
+# plus slack) is the backstop for a call the bridge never closed; the read is
+# fail-OPEN, because a Redis outage must not silence every typed turn.
+
+def _voice_active_key(portal_session_id: str) -> str:
+    return f"portal_voice_active:{portal_session_id}"
+
+
+def mark_voice_call_active(portal_session_id: str, ttl_seconds: int) -> None:
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            client.set(_voice_active_key(portal_session_id), "1", ex=int(ttl_seconds))
+    except Exception as e:  # noqa: BLE001 — a marker failure must not block the call
+        logger.warning("workspace voice: live-call mark failed for %s: %s", portal_session_id, e)
+
+
+def clear_voice_call_active(portal_session_id: Optional[str]) -> None:
+    if not portal_session_id:
+        return
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            client.delete(_voice_active_key(portal_session_id))
+    except Exception as e:  # noqa: BLE001 — the TTL is the backstop
+        logger.warning("workspace voice: live-call clear failed for %s: %s", portal_session_id, e)
+
+
+def voice_call_active(portal_session_id: str) -> bool:
+    """Whether a Workspace voice call is on in this thread right now. Fail-open."""
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return False
+        return client.get(_voice_active_key(portal_session_id)) is not None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("workspace voice: live-call read failed for %s: %s", portal_session_id, e)
+        return False
+
+
 def realtime_voice_capability(is_platform: bool) -> PortalRealtimeVoice:
     """The roster's realtime-voice capability for this principal.
 
@@ -139,6 +187,19 @@ async def start_workspace_voice(
     if not cap.available:
         raise ClientPortalError(503, cap.reason or REASON_DISABLED)
 
+    # #2694: no typed reply may land mid-call. The tab's own composer is inert
+    # during a call, but a reply can still be in flight from another tab, a
+    # reload, or the headless `/chat` surface — and a reply that lands between
+    # two spoken rows sits AFTER the cursor the next typed turn uses to find
+    # "what the live session never heard", hiding the call's first half from
+    # it. So the server refuses, in words. After the uniform 404 above: a
+    # stranger's thread must not learn that it exists and is busy. Fail-open on
+    # a Redis outage (`get_turn_inflight` → None) — a call over a possibly
+    # running turn beats no call at all.
+    from .service import get_turn_inflight
+    if get_turn_inflight(portal_session_id):
+        raise ClientPortalError(409, "A reply is still being written — wait for it, then start the call.")
+
     from config import WORKSPACE_VOICE_MAX_DURATION
     from database import db as core_db
     from services.gemini_voice import WORKSPACE_PANEL_INSTRUCTIONS, voice_service
@@ -167,7 +228,15 @@ async def start_workspace_voice(
         # creates `main` would publish its drawings to every external client on
         # the roster. Never widens (ent#536).
         canvas_audience="operator",
+        # ent#535 review — this function is the gate that authorizes the wider
+        # roster read (`is_platform` is refused above), so it is the place that
+        # records it. The turn path reads it off the session instead of
+        # re-asserting `include_owned=True` a long way from here.
+        is_platform=True,
     )
+    # #2694: the thread is on a call from here until the bridge's close clears
+    # it (`routers/voice.py`); a typed turn on this thread is refused meanwhile.
+    mark_voice_call_active(portal_session_id, WORKSPACE_VOICE_MAX_DURATION + 120)
     return {
         "voice_session_id": session.session_id,
         "websocket_url": f"/ws/voice/{session.session_id}",

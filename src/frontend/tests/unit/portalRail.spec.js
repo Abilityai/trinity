@@ -409,8 +409,21 @@ describe('ent#474 — shell wiring (source guards)', () => {
     // every remount, still keyless, and still visibility-gated on `railVisible`
     // — which is what the assertion below reads, now without pinning which arm
     // of the chain it sits on.
-    expect(el).toMatch(/v-(else-)?if="railVisible"/)
+    //
+    // #2640 broke the chain itself: the voice canvas is inside a <Transition>
+    // now (so the swap animates), and a `v-else-if` needs an adjacent sibling.
+    // The gate is written out instead.
+    //
+    // #2676 moved the gate one element out: the rail column is a WRAPPER this
+    // view owns, carrying the animatable width, and `PortalRail` sits inside it
+    // unconditionally. `railHasColumn` is that gate and it still reads
+    // `railVisible` — asserted below at its definition rather than on the
+    // element, because the element no longer carries a condition at all. What
+    // this guard is about is unchanged: the rail is a sibling of <main>,
+    // outside every remount, keyless, and visibility-gated.
     expect(el).toContain(':tabs="railTabs"')
+    expect(el).not.toMatch(/\bkey=/)
+    expect(portal).toMatch(/const railHasColumn = computed\([\s\S]{0,200}railVisible\.value/)
   })
 
   it('gives Agent details a rail TAB, reversing the ent#523 arrangement (ent#547)', () => {
@@ -439,8 +452,21 @@ describe('ent#474 — shell wiring (source guards)', () => {
 
     // ent#534: the voice canvas still takes the column first; the rail is now
     // the only other arm.
-    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,160}v-if="voiceCall\.active && voiceCall\.voiceSessionId && activeAgent"/)
-    expect(portal).toMatch(/<PortalRail[\s\S]{0,80}v-else-if="railVisible"/)
+    //
+    // #2640: both arms read ONE named condition rather than a `v-if` /
+    // `v-else-if` chain — the canvas is wrapped in a <Transition> so the swap
+    // animates, and that wrapper breaks the adjacency a chain needs. What this
+    // assertion is about is EXCLUSIVITY, which the shared computed still gives
+    // by construction; the construct that expresses it is not the property.
+    //
+    // #2676: the rail's half of that condition moved onto the column wrapper,
+    // where the width it animates lives. Exclusivity is still ONE shared
+    // computed read by both arms — `voiceCanvasHasColumn` — which is the
+    // property; which element carries the `v-if` is not.
+    expect(portal).toMatch(/<PortalVoiceCanvas[\s\S]{0,240}v-if="voiceCanvasHasColumn"/)
+    expect(portal).toMatch(/v-if="railHasColumn"/)
+    expect(portal).toMatch(/const railHasColumn = computed\([\s\S]{0,200}!voiceCanvasHasColumn\.value/)
+    expect(portal).toMatch(/const voiceCanvasHasColumn = computed\(/)
 
     // BOTH rail mounts must dock the body. The column and the mobile sheet are
     // separate `<PortalRail>` instances, and a slot given to one alone leaves

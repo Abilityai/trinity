@@ -265,6 +265,14 @@
              keyed on the call id (`groupVoiceBlocks`), placed where the call
              started. Visibly spoken — no rating control, a mic glyph, the
              label the call wrote ("Voice call · N min", and how it ended). -->
+        <!-- #2694: the window is counted in typed turns under a row ceiling.
+             When the ceiling cut the OLD end, say so — a thread that silently
+             starts mid-call is the very symptom the window fix removes. -->
+        <p
+          v-if="historyTruncated"
+          :class="PLATFORM_LINE_CLASS"
+          data-testid="portal-history-truncated"
+        >Earlier messages in this chat aren't shown</p>
         <template v-for="(item, k) in threadItems" :key="item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`">
         <details
           v-if="item.kind === 'voice-call'"
@@ -297,7 +305,7 @@
         <div v-else>
         <p
           v-if="item.message.role === 'system'"
-          class="my-3 text-center text-xs text-gray-400 dark:text-gray-500"
+          :class="PLATFORM_LINE_CLASS"
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
@@ -513,167 +521,206 @@
              pressable and is not is worse than no button.
              So: the toggle stays live, and the fields it sits beside go inert
              around it. -->
-        <!-- The model gets its own row: fixed-width action buttons plus a
-             select leave only 34px for typing on phones and narrow columns.
-             Keep the native primitive and server capability gate, while the
-             textarea retains the available width beside the 44px actions. -->
-        <BaseSelect
-          v-if="modelControl.render"
-          v-model="selectedModel"
-          class="mb-2 w-full max-w-sm"
-          :disabled="voiceCallActive || !modelControl.enabled"
-          :title="modelControl.reason || 'Which model this chat runs on'"
-          aria-label="Model for this chat"
-          data-testid="portal-model-picker"
-        >
-          <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
-          <option
-            v-for="opt in modelControl.options"
-            :key="opt.id"
-            :value="opt.id"
-            :title="optionTitle(opt)"
-          >{{ optionText(opt) }}</option>
-        </BaseSelect>
         <form
-          class="flex items-end gap-2"
           :aria-disabled="voiceCallActive ? 'true' : undefined"
           @submit.prevent="send"
         >
           <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFile" />
-          <!-- ent#534's control, at ent#547's address: the composer row, LEFT of
-               attach. Rendered for platform sessions only (the audio socket
-               takes the platform JWT); when the instance cannot do it the
-               control is disabled WITH the reason as its title, never a dead
-               button. Pressing it opens the orb over the thread; End (or
-               Escape) returns here and the call's transcript is in the chat.
-               Sized `h-11 w-11` like its neighbours rather than kept at the
-               header's `p-2`: the composer's boxes are 44px on the 4px grid
-               (#2259), and `portalComposerAlignment.spec.js` holds every button
-               in this form to that. -->
-          <button
-            v-if="voiceEntry.render"
-            type="button"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
-            :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
-            :disabled="!voiceEntry.enabled || voiceStarting"
-            :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-            :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-            :aria-pressed="voiceCallActive"
-            data-testid="portal-voice-call"
-            @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
-          >
-            <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
-            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
-          </button>
-          <!-- Everything the orb takes over while a call runs. A real flex row,
-               NOT `display: contents`: an element with `display: contents`
-               generates no box, and `opacity` needs one — so the dimming would
-               silently do nothing while `pointer-events` (which inherits) still
-               worked, leaving the composer fully bright and completely
-               unclickable. It re-declares `items-end gap-2` because it is now
-               the row the buttons and the field are items of, and `flex-1
-               min-w-0` so the textarea still takes the slack the form used to
-               give it directly. -->
-          <div
-            class="flex-1 min-w-0 flex items-end gap-2"
-            :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''"
-          >
-          <!-- #2259: the composer's action buttons are `h-11 w-11` (44px, on the
-               4px grid) rather than `p-2.5` around a 20px icon (40px, off it).
-               `items-end` pins them to the bottom so they stay beside the LAST
-               line as the field grows, and at 44px against the 46px single-line
-               composer the icon's centre lands within 1px of the text line in
-               both states. Sizing the box explicitly (instead of padding an
-               icon) also keeps the three buttons identical when one of them
-               swaps its glyph. -->
-          <button
-            type="button"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-            title="Attach a file for the agent"
-            :disabled="voiceCallActive"
-            @click="fileInput?.click()"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-          </button>
-          <button
-            v-if="sttSupported"
-            type="button"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-50"
-            :class="listening ? 'text-status-danger-600 dark:text-status-danger-400 animate-pulse' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
-            :title="micTitle"
-            :aria-label="micTitle"
-            :aria-pressed="listening"
-            :disabled="transcribing || voiceCallActive"
-            @click="toggleMic"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
-          </button>
-          <!-- ent#392: this is the composer's FIRST anchored overlay, so the
-               wrapper is new. It must inherit the flex sizing the textarea used
-               to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
-               field to content width — and it deliberately carries no z-index,
-               so it creates no stacking context of its own.
+          <!-- #2662: ONE composer shell — the field on top, the controls in a
+               row inside it, the model picker right-aligned beside Send.
 
-               #2259: it must ALSO not be taller than the textarea it wraps. A
-               `<textarea>` is inline-block, so inside this block wrapper it sat
-               on the baseline and the line box reserved 6px of descender space
-               below it. `items-end` aligns the flex ITEM — this wrapper — so the
-               buttons bottom-aligned to that dead space and Send hung 6px below
-               the visible input edge. The `block` on the textarea removes the
-               line box entirely; it also re-anchors the typeahead's
-               `absolute bottom-full` to the real field. Do not drop it. -->
-          <div ref="composerWrap" class="relative flex-1 min-w-0">
-            <PortalTypeahead
-              v-if="typeaheadOpen"
-              :kind="typeaheadKind"
-              :rows="typeaheadRows"
-              :active-index="activeIndex"
-              :overflow="typeaheadBound.overflow"
-              :hidden-count="typeaheadHidden"
-              :empty-message="typeaheadEmpty || ''"
-              @pick="acceptActive"
-              @hover="activeIndex = $event"
-            />
-            <textarea
-              ref="textarea"
-              v-model="input"
-              rows="1"
-              :placeholder="composerPlaceholder"
-              :disabled="voiceCallActive"
-              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-              @input="onComposerInput"
-              @keydown="onComposerKeydown"
-              @click="onComposerCaret"
-              @select="onComposerCaret"
-            ></textarea>
-          </div>
-          <!-- ent#155: Send becomes Stop while a turn is live. Send is disabled
-               for that whole period anyway, so this is the same control doing
-               the only thing it usefully can. -->
-          <button
-            v-if="canCancelTurn"
-            type="button"
-            @click="cancelTurn"
-            :disabled="cancelling"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-status-danger-600 hover:bg-status-danger-700 text-white disabled:opacity-40 transition"
-            :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
-            aria-label="Stop this turn"
+               The border, fill and focus ring move OFF the textarea and onto
+               this shell, which is what makes the controls read as being inside
+               the field rather than parked around it. The ring is scoped to the
+               FIELD — `has-[textarea:focus]`, never `focus-within` — because
+               `focus-within` lit the whole shell when an icon button was merely
+               tabbed onto, and drew a second ring concentric with the model
+               picker's own. `portalComposerAlignment.spec.js` asserts the
+               absence of `focus-within:` here, so this is not a preference. The
+               textarea keeps `block w-full` (#2259 — an inline-block textarea
+               reserves a descender line box its wrapper then inherits) and goes
+               transparent and borderless; it must never regain `rounded-2xl`
+               or a background, or there are two nested boxes.
+
+               This shape is also what finally fixes the narrow composer. In the
+               single-row layout every 44px button came out of the field's
+               width: at 375px the textarea measured 143px and wrapped a
+               placeholder over four lines, and adding the model picker to that
+               row was what left 34px in ent#403 (hence its own-row placement,
+               and hence this issue). Stacked, the field takes the full shell at
+               every width and the controls have a row of their own to spend.
+
+               Two consequences of the chrome living HERE rather than on the
+               textarea, both of which the first cut of this shape got wrong:
+
+               (a) The visible box is now bigger than the field, so a click on
+               the 8px padding band or on the control row's ground landed on
+               <body> — where before the shell existed the box WAS the textarea
+               and a click anywhere in it put the caret in. `focusComposerFromShell`
+               puts that back.
+
+               (b) The chrome is CONDITIONAL on the call, not static. ent#547's
+               two inert regions dim the contents, but this element is the parent
+               of both and cannot join them: the call toggle lives inside it and
+               must stay at full contrast, and `opacity` on a parent is not
+               something a child can undo. So the border and fill are REMOVED for
+               the call's duration rather than dimmed — the composer recedes to
+               the page ground, the one live control stays bright. Removed and
+               not muted because a muted pair would be four more raw-gray classes
+               in a file whose baseline this issue's AC says must not grow, while
+               `border-transparent`/`bg-transparent` cost none.
+
+               BOTH arms are bound and the static class carries no chrome colour
+               at all. That is not tidiness — it is the fix for a bug this had on
+               its first cut. Leaving `border-transparent bg-transparent` static
+               and binding only the resting pair renders a light composer with NO
+               border: Tailwind emits `.border-transparent` AFTER `.border-gray-300`
+               (so transparent wins) but `.bg-transparent` BEFORE `.bg-white` (so
+               white wins), and the two utilities therefore disagree about which
+               of an equal-specificity pair survives. Dark hid it, because every
+               `dark:` variant is emitted after both. Mutually exclusive arms have
+               no ordering to get wrong. -->
+          <div
+            class="rounded-2xl border px-2 py-2 transition has-[textarea:focus]:border-action-primary-600 dark:has-[textarea:focus]:border-action-primary-500 has-[textarea:focus]:ring-[3px] has-[textarea:focus]:ring-action-primary-500/40 dark:has-[textarea:focus]:ring-action-primary-400/40"
+            :class="voiceCallActive ? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"
+            @click="focusComposerFromShell"
           >
-            <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-            </svg>
-            <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" /></svg>
-          </button>
-          <button
-            v-else
-            type="submit"
-            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
-            :disabled="sending || !input.trim() || voiceCallActive"
-            title="Send"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
-          </button>
+            <!-- ent#392's anchor, unchanged in job and in ref name (the
+                 outside-click close reads `composerWrap`). It sheds `flex-1
+                 min-w-0` because it is no longer a flex item competing with
+                 buttons — it is the shell's first row and simply full width. -->
+            <div ref="composerWrap" class="relative" :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''">
+              <PortalTypeahead
+                v-if="typeaheadOpen"
+                :kind="typeaheadKind"
+                :rows="typeaheadRows"
+                :active-index="activeIndex"
+                :overflow="typeaheadBound.overflow"
+                :hidden-count="typeaheadHidden"
+                :empty-message="typeaheadEmpty || ''"
+                @pick="acceptActive"
+                @hover="activeIndex = $event"
+              />
+              <textarea
+                ref="textarea"
+                v-model="input"
+                rows="1"
+                :placeholder="composerPlaceholder"
+                :disabled="voiceCallActive"
+                class="block w-full resize-none border-0 bg-transparent text-sm text-gray-900 dark:text-gray-100 px-2 py-2 leading-6 focus:outline-none focus:ring-0 max-h-40"
+                @input="onComposerInput"
+                @keydown="onComposerKeydown"
+                @click="onComposerCaret"
+                @select="onComposerCaret"
+              ></textarea>
+            </div>
+            <!-- ent#547: the call toggle stays LIVE while everything else goes
+                 inert, and the split is the point rather than a tidy-up. The
+                 same button starts and ends the call; inside a region carrying
+                 `pointer-events-none` it would render pressed for the whole
+                 call and refuse the click that ends it — a control that looks
+                 live and does nothing. Two inert regions now, because the
+                 stacked layout puts the field and the other controls on
+                 different rows and `opacity` needs a real box on each. -->
+            <div class="mt-1 flex items-center gap-1">
+              <button
+                v-if="voiceEntry.render"
+                type="button"
+                class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
+                :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750'"
+                :disabled="!voiceEntry.enabled || voiceStarting"
+                :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+                :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+                :aria-pressed="voiceCallActive"
+                data-testid="portal-voice-call"
+                @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
+              >
+                <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+                <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
+              </button>
+              <div class="flex-1 min-w-0 flex items-center gap-1" :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''">
+                <button
+                  type="button"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750 transition"
+                  title="Attach a file for the agent"
+                  :disabled="voiceCallActive"
+                  @click="fileInput?.click()"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                </button>
+                <button
+                  v-if="sttSupported"
+                  type="button"
+                  class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-50"
+                  :class="listening ? 'text-status-danger-600 dark:text-status-danger-400 animate-pulse' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750'"
+                  :title="micTitle"
+                  :aria-label="micTitle"
+                  :aria-pressed="listening"
+                  :disabled="transcribing || voiceCallActive"
+                  @click="toggleMic"
+                >
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
+                </button>
+                    <!-- Right cluster: the model picker, then Send. `ml-auto`
+                         rather than a spacer element, and `min-w-0` so the picker
+                         is the thing that truncates when the row runs out — never
+                         Send, which is `shrink-0`. -->
+                <div class="ml-auto flex items-center gap-1 min-w-0">
+                  <!-- `@keydown.enter.prevent` is the price of moving the picker
+                       INSIDE the <form>. On dev it was a sibling above it, so Enter
+                       there did nothing; inside, Chrome and Firefox route Enter on a
+                       focused <select> to the form's default button, and a user who
+                       arrows to another model and presses Enter to commit the choice
+                       sends their unfinished draft instead. Preventing it costs
+                       nothing: on every engine whose picker is drawn by the platform
+                       the open dropdown never dispatches here, so the only page-level
+                       effect of Enter on this control was the submit. -->
+                  <BaseSelect
+                    v-if="modelControl.render"
+                    v-model="selectedModel"
+                    variant="ghost"
+                    class="min-w-0 max-w-[17rem]"
+                    :disabled="voiceCallActive || !modelControl.enabled"
+                    :title="modelControl.reason || 'Which model this chat runs on'"
+                    aria-label="Model for this chat"
+                    data-testid="portal-model-picker"
+                    @keydown.enter.prevent
+                  >
+                    <option :value="INHERIT_VALUE">{{ modelDefaultText }}</option>
+                    <option
+                      v-for="opt in modelControl.options"
+                      :key="opt.id"
+                      :value="opt.id"
+                      :title="optionTitle(opt)"
+                    >{{ optionText(opt) }}</option>
+                  </BaseSelect>
+                  <button
+                    v-if="canCancelTurn"
+                    type="button"
+                    @click="cancelTurn"
+                    :disabled="cancelling"
+                    class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-status-danger-600 hover:bg-status-danger-700 text-white disabled:opacity-40 transition"
+                    :title="cancelling ? 'Stopping…' : 'Stop this turn (Esc)'"
+                    aria-label="Stop this turn"
+                  >
+                    <svg v-if="cancelling" class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                    <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" /></svg>
+                  </button>
+                  <button
+                    v-else
+                    type="submit"
+                    class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
+                    :disabled="sending || !input.trim() || voiceCallActive"
+                    title="Send"
+                  >
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </form>
       </div>
@@ -695,7 +742,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline } from './portalUtils'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useStickToBottom } from '@/composables/useStickToBottom'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -861,6 +908,14 @@ const loadingHistory = ref(false)
 // condition). Never goes false again on this instance, so the adoption-path
 // refetch swaps messages in place with no beam; `convKey` remounts re-derive it.
 const historyLoaded = ref(!(props.sessionId && !props.newChat))
+// #2694: the history window is counted in typed turns and bounded by a row
+// ceiling; true when the ceiling cut rows off the OLD end of this thread.
+const historyTruncated = ref(false)
+// The platform speaking ABOUT the thread — one look for the ent#523 system
+// line and the #2694 window notice: centred, muted, no avatar, so neither is
+// read as something the agent said. Dark meta text stops at gray-400 (the
+// contract's ink floor).
+const PLATFORM_LINE_CLASS = 'my-3 text-center text-xs text-gray-400 dark:text-gray-400'
 const input = ref('')
 const sending = ref(false)
 // ent#523 — Reset, offered on Main only.
@@ -1063,6 +1118,7 @@ const dismissed = ref(null)
 async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
+  historyTruncated.value = false
   terminalOutcome.value = null
   let inFlight = null
   let inFlightBudget = null
@@ -1070,8 +1126,9 @@ async function loadThread(sessionId) {
   let outcome = null
   try {
     const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds,
-            lastTurnOutcome } =
+            lastTurnOutcome, truncated } =
       await store.fetchHistory(props.agent.name, sessionId || null)
+    historyTruncated.value = truncated === true
     // #2214: the budget is the marker's REMAINING TTL, honest only from the
     // instant it was measured — stamp that instant beside the fetch, not when
     // the (possibly long) reattached stream later ends.
@@ -1159,9 +1216,10 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
   // The baseline is what is on screen right now: this client reloaded INTO a
   // running turn, so every assistant message it can see predates that turn.
-  // Passing nothing made `assistants.length > undefined` false on every poll,
-  // so the reply never rendered and the user had to reload a second time.
-  const baseline = messages.value.filter((m) => m.role === 'assistant').length
+  // Passing nothing made the poll's comparison false on every poll, so the
+  // reply never rendered and the user had to reload a second time. #2694: the
+  // baseline is the newest TYPED reply's identity (`replyBaseline`), not a count.
+  const baseline = replyBaseline(messages.value)
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
     const data = await awaitPersistedReply(currentSessionId.value, baseline,
@@ -1451,6 +1509,18 @@ function onComposerInput(e) {
 // The caret moves with no input event — a click, a drag-select — and accepting
 // against bounds computed for where it used to be splices over the wrong text.
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
+/**
+ * #2662: click anywhere on the composer shell lands in the field. Guarded, not
+ * unconditional — a click that already reached a control keeps its own effect,
+ * and the typeahead is excluded by role because it picks on `mousedown` and the
+ * click that follows would otherwise arrive here and steal the focus back.
+ */
+const SHELL_INTERACTIVE = 'button, select, textarea, input, a, [role="listbox"], [role="option"]'
+function focusComposerFromShell(event) {
+  if (voiceCallActive.value) return
+  if (event.target?.closest?.(SHELL_INTERACTIVE)) return
+  textarea.value?.focus()
+}
 
 function onComposerKeydown(e) {
   const length = typeaheadBound.value.visible.length
@@ -1536,7 +1606,7 @@ async function deliver(text) {
     let started = null
     // Read before anything is dispatched: after the fact it is impossible to
     // tell this turn's reply from the previous one's.
-    const baseline = await persistedAssistantCount(currentSessionId.value)
+    const baseline = await persistedReplyBaseline(currentSessionId.value)
     // ent#403: read the choice ONCE, here, so the streaming dispatch and its
     // synchronous fallback below run the same turn on the same model — a value
     // re-read between the two could differ if the record settled in between.
@@ -1800,10 +1870,15 @@ function onStreamEvent(evt) {
 // live, billed turns "not delivered" and offered a Retry that ran and billed
 // them a second time.
 //
-// `baselineAssistants` is the count read from the SERVER before dispatch. Using
-// the local list instead let a retry return the PREVIOUS turn's reply on its
-// first poll — the answer to the wrong question, while a second turn ran unseen.
+// The baseline is read from the SERVER before dispatch (`persistedReplyBaseline`).
+// Using the local list instead let a retry return the PREVIOUS turn's reply on
+// its first poll — the answer to the wrong question, while a second turn ran unseen.
 const REPLY_POLL_MS = 700
+// #2694: how many of the newest rows the poll reads. The reply it waits for is
+// the newest row of the thread (the composer is inert during a call and a call
+// cannot start over a reply in flight), so a handful is enough; the server
+// caps the parameter at 50.
+const REPLY_POLL_ROWS = 8
 // Time-based, NOT poll-count-based. With the backoff below, 8 polls is up to
 // 8 x 15s = 120s late in a turn — so a count silently stretched this debounce
 // into two minutes of spinner before the no-answer message appeared.
@@ -1841,7 +1916,7 @@ function replyPollInterval(elapsedMs) {
 // is matched against it before it is believed — a thread can hold a verdict from
 // an earlier turn, and reporting that one as this turn's failure would be a new
 // way to lie about the same thing.
-async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
+async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
                                    dispatchedAtMs, executionId = null) {
   let idleSince = null
   // Measured from DISPATCH, not from when this function was reached. The
@@ -1861,7 +1936,11 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
     if (Date.now() > deadline) return { lost: true }
     let data
     try {
-      data = await store.fetchHistory(props.agent.name, sessionId || null)
+      // #2694: the NARROW read — the newest few rows, never the thread window.
+      // This runs every 700 ms early in a turn; the window (100 typed turns
+      // plus their calls) is the wrong thing to pay for here, and a count over
+      // it is the wrong thing to compare (see `replyFromHistory`).
+      data = await store.fetchHistory(props.agent.name, sessionId || null, { limit: REPLY_POLL_ROWS })
     } catch {
       // A hiccup reading history is not evidence the turn failed.
       await wait()
@@ -1871,7 +1950,7 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
     // caller's own rating out with the text. They were always in hand here —
     // this reads the row the server WROTE — and were being dropped, which is
     // the whole of the "not rateable until reload" defect.
-    const reply = replyFromHistory(data.messages, baselineAssistants)
+    const reply = replyFromHistory(data.messages, baseline)
     if (reply) return { ...reply, session_id: data.sessionId || sessionId }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
@@ -1895,14 +1974,16 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
   }
 }
 
-// Assistant count as the SERVER sees it — the baseline a reply must exceed.
-async function persistedAssistantCount(sessionId) {
-  if (!sessionId) return 0
+// The newest typed reply as the SERVER sees it — the baseline this turn's
+// reply must differ from (#2694: by identity, read from the same narrow rows
+// the poll reads, so the two can never disagree about the window).
+async function persistedReplyBaseline(sessionId) {
+  if (!sessionId) return replyBaseline([])
   try {
-    const data = await store.fetchHistory(props.agent.name, sessionId)
-    return (data.messages || []).filter((m) => m.role === 'assistant').length
+    const data = await store.fetchHistory(props.agent.name, sessionId, { limit: REPLY_POLL_ROWS })
+    return replyBaseline(data.messages)
   } catch {
-    return 0
+    return replyBaseline([])
   }
 }
 
