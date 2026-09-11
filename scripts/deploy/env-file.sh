@@ -1,9 +1,10 @@
 #!/bin/bash
 # Shared `.env` writer. Sourced, never executed.
 #
-# Extracted so `start.sh --provision` and `set-domain.sh` write `.env` the same
-# way. It is small enough to have been copied, which is exactly how the two
-# provisioning implementations this repo just collapsed came to disagree.
+# Kept in its own file so every script that writes `.env` (today only
+# `start.sh`) uses this one writer. It is small enough to be copied instead,
+# which is exactly how the provisioning implementations this repo collapsed
+# came to disagree.
 
 # Write (or rewrite) one key in `.env`, relative to the caller's working
 # directory (the repo root in both callers).

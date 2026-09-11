@@ -40,7 +40,6 @@ _FIRSTBOOT = (
     _ROOT / "packer" / "digitalocean" / "files" / "opt" / "trinity-firstboot" / "firstboot.sh"
 )
 _BAKERY = _ROOT / "packer" / "digitalocean" / "scripts" / "01-provision.sh"
-_SET_DOMAIN = _ROOT / "scripts" / "deploy" / "set-domain.sh"
 _CARD = (
     _ROOT / "src" / "frontend" / "src" / "components" / "onboarding" / "HardeningGuide.vue"
 )
