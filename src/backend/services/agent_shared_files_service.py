@@ -81,6 +81,7 @@ def _broadcast(event: dict) -> None:
     _WS_TASKS.add(task)
     task.add_done_callback(_WS_TASKS.discard)
 
+
 # ---------------------------------------------------------------------------
 # Constants — MVP hardcoded; can migrate to settings later
 # ---------------------------------------------------------------------------
