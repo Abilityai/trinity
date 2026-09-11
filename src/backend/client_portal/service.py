@@ -625,7 +625,8 @@ async def _agent_runtime(agent_name: str) -> str:
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
-                 model_context: ModelContext) -> PortalAgentCard:
+                 model_context: ModelContext,
+                 stt_ready: bool | None = None) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
 
@@ -640,6 +641,11 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     of this function. `model_context` is resolved once per load for the same
     reason `availability` is threaded: it is instance-level, and re-reading it
     per card would put a settings read back on every row.
+
+    #2695: `stt_ready` is the CAPABILITY verdict (`stt_capability_service`),
+    resolved once per load like `tts_ready` — threaded in, never probed here.
+    `None` means "same as `tts_ready`", which is what the bit meant before the
+    probe existed and what a caller that has not asked the provider still gets.
     """
     from services import tts_service
     name = r["agent_name"]
@@ -681,10 +687,13 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
             )
         ),
         # #2212: voice INPUT needs the platform key only — no agent voice, since
-        # nothing is spoken back. `tts_ready` IS `transcribe_portal_audio`'s own
-        # gate (`tts_service.is_available()`), so the mic the client sees and the
-        # endpoint it would call cannot disagree.
-        stt_available=bool(tts_ready),
+        # nothing is spoken back. #2695: AND that key must actually be permitted
+        # to transcribe — ElevenLabs permissions are per endpoint, and a key with
+        # Text-to-Speech but no Speech-to-Text rendered a mic that failed on
+        # every press. `stt_ready` is `transcribe_portal_audio`'s own gate (key
+        # present AND the capability verdict not `refused`), so the mic the
+        # client sees and the endpoint it would call still cannot disagree.
+        stt_available=bool(tts_ready and (stt_ready if stt_ready is not None else True)),
         availability=availability,
         # ent#403: `None` — no control at all — for every non-platform principal.
         # The roster payload is the ONLY capability channel an external client
@@ -778,8 +787,12 @@ async def get_agent_card(email: str | None, agent_name: str,
     # answer differently is the defect, not the cost. Negligible beside this
     # function's existing availability read and its bounded briefing HTTP.
     runtime = await _agent_runtime(agent_name)
-    card = _row_to_card(row, tts_service.is_available(), _default_voice_id(),
+    tts_ready = tts_service.is_available()
+    card = _row_to_card(row, tts_ready, _default_voice_id(),
                         availability=availability,
+                        # #2695: the same capability read the roster makes, so
+                        # the page and the sidebar cannot disagree about the mic.
+                        stt_ready=await _stt_ready(tts_ready),
                         # `include_owned` IS the platform-session bit here — the
                         # roster unions owned agents only for a platform session
                         # (ent#357), which is the same door ent#403 gates on.
@@ -834,6 +847,11 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     """
     from services import tts_service
     tts_ready = tts_service.is_available()  # global key check, once per roster load
+    # #2695: and whether that key may TRANSCRIBE — one cached provider verdict
+    # per key, resolved once per load beside `tts_ready`. Bounded (a slow or
+    # unreachable provider answers `unknown` within `WAIT_BUDGET_SECONDS` and
+    # the mic stays), so this is one awaited O(1) read, not a fan-out (#2163).
+    stt_ready = await _stt_ready(tts_ready)
     # #2157: the platform default voice is likewise instance-level — read once,
     # not once per card, so adding the fallback costs the roster no extra query.
     default_voice = _default_voice_id()
@@ -876,7 +894,8 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      availability=availability.get(r["agent_name"], "unknown"),
                      is_platform=include_owned,
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
-                     model_context=model_context)
+                     model_context=model_context,
+                     stt_ready=stt_ready)
         for r in rows
     ]
     # #2163: the briefing is DEFERRED, not dropped. Saying so on the card is
@@ -1425,14 +1444,30 @@ _STT_MAX_BYTES = 12 * 1024 * 1024   # ~ a minute of Opus; caps the upload
 _STT_TIMEOUT = 60.0
 
 
+async def _stt_ready(tts_ready: bool) -> bool:
+    """THE mic gate (#2212 + #2695): key present AND the key's speech-to-text
+    capability not refused by the provider. One function, read by the roster,
+    the agent page and `transcribe_portal_audio`, so the control a client sees
+    and the endpoint it calls resolve the same answer. Fail-soft by
+    construction — `allowed` is everything but a definitive refusal."""
+    if not tts_ready:
+        return False
+    from services import stt_capability_service
+    cap = await stt_capability_service.ensure_capability()
+    return cap.allowed
+
+
 async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
                                   content_type: str, audio: bytes,
                                   include_owned: bool = False) -> str:
     """Transcribe a client's recorded audio to text (portal voice input, #78).
     Roster-scoped (miss → 404). Fail-soft: any provider/format problem raises a
     ClientPortalError so the client just types instead of getting a 500. Gated on
-    the same ElevenLabs key as TTS."""
+    the same ElevenLabs key as TTS — and, since #2695, on that key being
+    PERMITTED to transcribe (`_stt_ready`), the same gate the card's
+    `stt_available` bit is built from."""
     from services import tts_service   # shares the ElevenLabs key/availability check
+    from services import stt_capability_service
     import config
 
     if not agent_on_roster(agent_name, email, include_owned):
@@ -1441,7 +1476,7 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
         raise ClientPortalError(400, "No audio")
     if len(audio) > _STT_MAX_BYTES:
         raise ClientPortalError(413, "Recording is too long")
-    if not tts_service.is_available():
+    if not await _stt_ready(tts_service.is_available()):
         raise ClientPortalError(404, "Voice input is not available")
 
     logger.debug("portal STT: %d bytes, content_type=%r, filename=%r",
@@ -1465,6 +1500,9 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
         raise ClientPortalError(502, "Voice input failed — please type instead")
     if resp.status_code != 200:
         logger.warning("portal STT provider error %s: %s", resp.status_code, resp.text[:500])
+        # #2695: a real refusal is the best evidence there is — remember it so
+        # the next roster load hides the mic instead of offering it again.
+        stt_capability_service.record_live_refusal(elevenlabs_key, resp.status_code, resp.text)
         raise ClientPortalError(422, "Could not transcribe the audio")
     text = ((resp.json() or {}).get("text") or "").strip()
     if not text:

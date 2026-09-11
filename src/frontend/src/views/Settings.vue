@@ -568,6 +568,22 @@
                         v-else
                         class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
                       >not set</span>
+                      <!-- #2695: "configured" is presence; this is whether the key can
+                           TRANSCRIBE. ElevenLabs permissions are per endpoint, so a key
+                           that speaks may still refuse speech-to-text — and then the
+                           Workspace mic is hidden, which this is the one place to see. -->
+                      <span
+                        v-if="sttCapability.tone !== 'none'"
+                        data-testid="elevenlabs-stt-capability"
+                        :data-tone="sttCapability.tone"
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium"
+                        :class="sttCapability.tone === 'ok'
+                          ? 'bg-status-success-100 text-status-success-800 dark:bg-status-success-900 dark:text-status-success-200'
+                          : sttCapability.tone === 'bad'
+                            ? 'bg-status-danger-100 text-status-danger-800 dark:bg-status-danger-900 dark:text-status-danger-200'
+                            : 'bg-status-warning-100 text-status-warning-800 dark:bg-status-warning-900 dark:text-status-warning-200'"
+                        :title="sttCapability.hint"
+                      >{{ sttCapability.label }}</span>
                     </label>
                     <div class="flex gap-2">
                       <input
@@ -591,6 +607,14 @@
                         class="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
                       >Clear</button>
                     </div>
+                    <p
+                      v-if="sttCapability.tone === 'bad' || sttCapability.tone === 'unverified'"
+                      data-testid="elevenlabs-stt-hint"
+                      class="mt-1 text-xs"
+                      :class="sttCapability.tone === 'bad'
+                        ? 'text-status-danger-600 dark:text-status-danger-400'
+                        : 'text-status-warning-700 dark:text-status-warning-300'"
+                    >{{ sttCapability.hint }}</p>
                   </div>
 
                   <!-- Default voice id -->
@@ -2127,6 +2151,7 @@ import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
+import { describeSttCapability } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
@@ -2550,7 +2575,16 @@ const elevenLabs = reactive({
   keySource: 'none',   // override | env | none
   apiKeyInput: '',
   defaultVoiceId: '',
+  // #2695: what the provider said when asked whether this key may transcribe —
+  // capable | refused | unknown | unconfigured, plus its own status word.
+  sttCapability: 'unconfigured',
+  sttDetail: null,
 })
+const sttCapability = computed(() => describeSttCapability({
+  key_configured: elevenLabs.keyConfigured,
+  stt_capability: elevenLabs.sttCapability,
+  stt_detail: elevenLabs.sttDetail,
+}))
 const savingElevenLabs = ref(false)
 const elevenLabsSaveSuccess = ref(false)
 const elevenLabsError = ref('')
@@ -3053,6 +3087,10 @@ function applyElevenLabsState(state) {
   elevenLabs.keyConfigured = !!state.key_configured
   elevenLabs.keySource = state.key_source || 'none'
   elevenLabs.defaultVoiceId = state.default_voice_id || ''
+  // An older backend sends no capability field: `undefined` reads as
+  // "unverified", never as "capable" — see describeSttCapability.
+  elevenLabs.sttCapability = state.stt_capability
+  elevenLabs.sttDetail = state.stt_detail ?? null
 }
 
 async function loadElevenLabsSettings() {
