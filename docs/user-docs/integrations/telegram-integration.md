@@ -142,15 +142,37 @@ When a bot joins a Telegram group, Trinity automatically creates a group config.
 2. Connected groups appear in the **Telegram Groups** section
 3. Each group shows:
    - Group name and type (group/supergroup)
+   - Whether the bot sees the whole conversation or only tagged messages (see **Group context** below)
    - Current trigger mode
    - Welcome message settings
+   - A **Group context** switch (on by default)
 
 ### Trigger Modes
 
-| Mode | Bot Responds To | Privacy Mode Required |
-|------|----------------|----------------------|
-| **Mention only** (default) | @mentions and replies to bot | Either (works with Privacy enabled) |
-| **All messages** | Every message in the group | Privacy must be **Disabled** |
+| Mode | Bot Responds To | Context the reply uses | Privacy Mode Required |
+|------|----------------|------------------------|----------------------|
+| **Mention only** (default) | @mentions, replies to the bot, and `/commands@yourbot` | The group's recent conversation, if the bot can see it (see **Group context** below); otherwise just the tagged message plus the quoted message when the tag is a reply | Either — context needs Privacy **Disabled** |
+| **All messages** | Every message in the group | The group's recent conversation | Privacy must be **Disabled** |
+| **Observe** | Every message, but the agent may stay silent | The group's recent conversation | Privacy must be **Disabled** |
+
+### Group context
+
+When the bot can see the group's messages, the agent remembers what the group has been saying — who said what, for the last 40 messages within 24 hours — and a tagged turn is answered in that context. "@agent summarise what we decided" works without anyone re-pasting the thread. Un-tagged messages are only *remembered*; the agent still speaks only per the trigger mode, and remembering costs no agent turn.
+
+Each group's entry in the Telegram dialog tells you where it stands:
+
+| Badge | Meaning | What to do |
+|-------|---------|------------|
+| **Sees all messages** | An un-tagged message has reached the bot in this group — context is on. | Nothing. |
+| **Tagged messages only** | Privacy Mode is on, so Telegram delivers only @mentions and replies. | In @BotFather send `/setprivacy` → **Disable**, then remove and re-add the bot to the group. Making the bot a group admin also works. |
+| **Not confirmed yet** | Privacy Mode is off (or hasn't been checked), but nothing un-tagged has arrived here yet. | If the bot joined before you turned Privacy Mode off, remove and re-add it. Press **Verify** to re-check Privacy Mode. |
+| **Context off** | You turned the **Group context** switch off for this group. | Turn it back on when you want it. |
+
+Notes:
+- Context is per group (and per topic in forum supergroups). Nothing from private chats or other groups is ever used in a group reply.
+- The bot only ever remembers messages delivered while it is present — Telegram gives bots no history, so there is no backfill.
+- `/reset@yourbot` in a group clears that group's remembered conversation for everyone. A bare `/reset` without the suffix does nothing in mention-only mode.
+- Turn **Group context** off per group when a room should not be remembered at all (a legal or HR channel, say). Tagged turns then see only the tagged message, as before.
 
 **If "all messages" mode doesn't work:**
 1. Verify Privacy Mode is disabled in BotFather (`/setprivacy` -> Disable)

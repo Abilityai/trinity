@@ -129,7 +129,8 @@ def test_no_status_field_is_committed(catalog):
 # happen is a gap or a reordering, so the assertion is "a dense J01..JNN run in
 # order", and the count moves in the same commit that adds the record.
 # ent#498 added J11 (a companion's brief reaches you where you work).
-DECLARED_JOURNEY_COUNT = 11
+# ent#600 added J12 (the agent knows the group's conversation when tagged).
+DECLARED_JOURNEY_COUNT = 12
 
 
 def test_every_journey_is_declared_densely_and_in_order(catalog):

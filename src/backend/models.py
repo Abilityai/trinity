@@ -3852,6 +3852,13 @@ class TelegramGroupConfigResponse(BaseModel):
     # ent#265: per-group consent for completion reports (default allow; the
     # model IS the field allowlist for the GET's `Response(**row)` build).
     allow_proactive: bool = True
+    # ent#600: group conversation context — per-group toggle (default ON), the
+    # honest status (all_messages / tagged_only / unconfirmed / off) with the
+    # next action named, and the proof timestamp behind it.
+    context_enabled: bool = True
+    context_status: str = "unconfirmed"
+    context_hint: Optional[str] = None
+    last_untagged_seen_at: Optional[str] = None
 
 
 class TelegramGroupConfigUpdateRequest(BaseModel):
@@ -3860,6 +3867,9 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     welcome_text: Optional[str] = None
     # ent#265: human-only arm — the router calls reject_agent_principal when set.
     allow_proactive: Optional[bool] = None
+    # ent#600: human-only arm too — recording a group's conversation is a
+    # privacy decision the owner makes, not one an agent grants itself.
+    context_enabled: Optional[bool] = None
 
 
 class TelegramGroupMessageRequest(BaseModel):

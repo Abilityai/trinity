@@ -1306,6 +1306,7 @@ TABLES = {
             telegram_secret_token TEXT,
             last_update_id INTEGER DEFAULT 0,
             progress_indicator_enabled INTEGER DEFAULT 1,
+            can_read_all_group_messages INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT
         )
@@ -1344,7 +1345,9 @@ TABLES = {
             updated_at TEXT,
             verified_by_email TEXT,
             verified_at TEXT,
-            allow_proactive INTEGER DEFAULT 1
+            allow_proactive INTEGER DEFAULT 1,
+            last_untagged_seen_at TEXT,
+            context_enabled INTEGER DEFAULT 1
         )
     """,
 

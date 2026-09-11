@@ -72,13 +72,15 @@ class TestSessionKeys:
         )
         assert derived == "T1:C1:1720000000.111222"
 
-    def test_telegram_key_deliberately_does_not_match_a_participant(self):
-        """Pins the KNOWN limitation (see module docstring).
+    def test_telegram_key_matches_every_participant(self):
+        """The re-decision this test was written to force (see module docstring).
 
-        Telegram group sessions are per-(sender, chat); the broadcast uses a
-        synthetic agent-sender key, so no participant's session contains it. This
-        asserts the accepted trade-off rather than a fixed bug — and fails loudly
-        if the adapter later grows a group branch, forcing a re-decision.
+        #1649 pinned Telegram group sessions as per-(sender, chat) and filed the
+        broadcast under a synthetic agent-sender key nobody read — a KNOWN
+        limitation. ent#600 gave the adapter the per-chat group branch #1649
+        named as the fix, so the derived key now IS the session every
+        participant's inbound message resolves to: the agent recalls its own
+        broadcast when someone replies.
         """
         from adapters.base import NormalizedMessage
         from adapters.telegram_adapter import TelegramAdapter
@@ -91,10 +93,9 @@ class TestSessionKeys:
             sender_id="55555", text="yes", channel_id="-100999", timestamp="t",
             metadata={"bot_id": "bot-7", "is_group": True},
         ))
-        assert derived == "bot-7:atlas:-100999"
-        assert derived != participant_inbound, (
-            "Telegram group keys now collide with a participant session — if the "
-            "adapter gained a group branch, revisit #1649's session model"
+        assert derived == "bot-7:group:-100999"
+        assert derived == participant_inbound, (
+            "the broadcast must land in the session a participant's reply reads (ent#600)"
         )
 
 
@@ -247,7 +248,7 @@ class TestRoutersPersist:
         assert captured["session_identifier"] == "T1:C1:1720000000.111222"
 
     @pytest.mark.asyncio
-    async def test_telegram_router_persists_under_the_synthetic_agent_key(self, monkeypatch):
+    async def test_telegram_router_persists_under_the_group_key(self, monkeypatch):
         """The router must file the broadcast under the agent-as-sender key —
         proving it passes `agent_name` as sender_id, not a real user."""
         from routers import telegram as tg_router
@@ -286,8 +287,9 @@ class TestRoutersPersist:
         await tg_router.send_telegram_group_message("atlas", "-100999", req)
 
         assert captured, "the router never persisted the broadcast"
-        assert captured["session_identifier"] == "bot-7:atlas:-100999", (
-            "expected the synthetic agent-sender key (#1649)"
+        assert captured["session_identifier"] == "bot-7:group:-100999", (
+            "expected the per-chat group key — the session a participant's reply "
+            "reads (ent#600 closed #1649's recall limitation)"
         )
         assert captured["channel"] == "telegram"
         assert captured["text"] == "standup in 5"

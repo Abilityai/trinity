@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from database import db
 from services import channel_history, rate_limiter
 from services.settings_service import get_proactive_rate_limit
+from services.telegram_group_context import flag_from_bot_info, group_context_status  # ent#600
 from dependencies import (
     AuthorizedAgentByName,
     OwnedAgentByName,
@@ -216,6 +217,8 @@ async def configure_telegram_bot(
         bot_username=bot_username,
         bot_id=bot_id,
     )
+    # ent#600: getMe already told us whether Privacy Mode is off — keep it.
+    db.set_telegram_can_read_all_group_messages(agent_name, flag_from_bot_info(bot_info))
 
     # Register webhook if public URL is available
     from services.settings_service import settings_service
@@ -293,6 +296,11 @@ async def test_telegram_bot(
                 result = resp.json()
                 if result.get("ok"):
                     bot_info = result["result"]
+                    # ent#600: Verify is the documented way to re-check Privacy
+                    # Mode after a BotFather change — refresh the stored fact.
+                    db.set_telegram_can_read_all_group_messages(
+                        agent_name, flag_from_bot_info(bot_info)
+                    )
                     return {
                         "ok": True,
                         "message": f"Bot @{bot_info.get('username')} is operational",
@@ -344,7 +352,19 @@ async def list_telegram_groups(
     here is strictly broader than every usable consumer.
     """
     groups = db.get_telegram_groups_for_agent(agent_name)
-    return [TelegramGroupConfigResponse(**g) for g in groups]
+    binding = db.get_telegram_binding(agent_name)
+    return [_group_config_response(binding, g) for g in groups]
+
+
+def _group_config_response(binding: Optional[dict], group: dict) -> TelegramGroupConfigResponse:
+    """ent#600: a group row plus its honest context status (the model is the
+    field allowlist; extra row keys are dropped)."""
+    status, hint = group_context_status(
+        can_read_all=(binding or {}).get("can_read_all_group_messages"),
+        last_untagged_seen_at=group.get("last_untagged_seen_at"),
+        context_enabled=group.get("context_enabled", True),
+    )
+    return TelegramGroupConfigResponse(**group, context_status=status, context_hint=hint)
 
 
 @auth_router.put("/{agent_name}/telegram/groups/{group_config_id}")
@@ -362,7 +382,9 @@ async def update_telegram_group(
     # (ent#223's own post-ship pitfall, learnings 2026-07-24). Granting consent
     # is a human decision; existing agent-callable trigger_mode / welcome
     # updates keep working, and REPORTING under the consent stays automatic.
-    if config.allow_proactive is not None:
+    if config.allow_proactive is not None or config.context_enabled is not None:
+        # ent#600: recording a group's conversation is the owner's privacy
+        # decision — same grant-vs-use line as the consent arm above.
         reject_agent_principal(current_user)
 
     # Validate trigger_mode if provided
@@ -390,11 +412,15 @@ async def update_telegram_group(
         welcome_enabled=config.welcome_enabled,
         welcome_text=config.welcome_text,
         allow_proactive=config.allow_proactive,   # ent#265: completion-report consent
+        context_enabled=config.context_enabled,   # ent#600: group-context opt-out
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Group config not found")
 
-    return updated
+    # ent#600: return the same shape as the listing so a toggle flips the
+    # status in place ("off" ⇄ the evidence-based state). A dict, as before —
+    # ent#265's tests (and any caller) subscript the result.
+    return _group_config_response(binding, updated).model_dump()
 
 
 @auth_router.delete("/{agent_name}/telegram/groups/{group_config_id}")
@@ -507,18 +533,12 @@ async def send_telegram_group_message(
 
             result = response.json().get("result", {})
 
-            # #1649: record the broadcast in a channel session so it is not
-            # simply lost. Telegram group sessions are keyed per (sender, chat)
-            # — the adapter has no group branch — and a broadcast has no human
-            # sender, so it is filed under a SYNTHETIC agent-sender key.
-            #
-            # Known limitation, deliberate: nothing else writes to that key, so
-            # no participant's inbound session contains this message and the
-            # agent still will NOT recall its broadcast when someone replies in
-            # the group. This is honest bookkeeping (the message is recorded,
-            # auditable, and attributable) — not a recall fix. Fixing recall
-            # needs a per-chat group session, which changes existing inbound
-            # group behaviour and is a separate decision.
+            # #1649: record the broadcast in the group's channel session so the
+            # agent can recall it. The per-chat group session #1649 named as
+            # the missing piece exists since ent#600 (`get_session_identifier`
+            # has a group branch), so the key derived below IS the session a
+            # participant's reply reads — `sender_id` is passed for the
+            # signature only and no longer shapes the key.
             channel_history.persist_outbound_group_message(
                 agent_name=agent_name,
                 channel="telegram",

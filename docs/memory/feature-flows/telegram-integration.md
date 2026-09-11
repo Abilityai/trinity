@@ -405,14 +405,26 @@ TelegramAdapter.parse_message(update)
     |  - Detect group vs private (chat.type in {"group", "supergroup"})
     |  - Check @mention in entities → _is_bot_mentioned()
     |  - Check reply_to_message → _is_reply_to_bot()
-    |  - If neither and trigger_mode not in {"all", "observe"} → return None (skip)
+    |  - A /command@botname also counts as tagged (ent#600)
+    |  - If neither and trigger_mode not in {"all", "observe"} → metadata.observe_only=True (ent#600;
+    |    previously return None). Every untagged group message carries metadata.untagged=True.
+    |  - Groups only: sender_display_name / sender_username (attributed history, #903) and
+    |    topic_id for forum supergroups
     |  - Strip @mention from text for cleaner agent input
     v
 ChannelMessageRouter.handle_message()
     |  - Rate limit with per-group key (telegram:{bot_id}:group:{chat_id})
     |  - Silent drop on rate limit (no public error message in group)
     |  - Add sender identity context (Issue #349): "[Group: {title}]\n[From: @{username} ({first_name})]"
-    |  - Fresh context per message (no prior session history — prevents context bleed)
+    |  - Step 0 (ent#600): observe_only → _record_observed_message() — persist the message into the
+    |    GROUP session with its speaker label, note last_untagged_seen_at, prune on cadence; return.
+    |    No rate-limit charge, no typing, no reaction, no execution. Bare /commands are skipped.
+    |  - Session key is per CHAT ({bot_id}:group:{chat_id}[:topic:{thread}]) — ent#600; DMs stay per user
+    |  - Context = sender identity (+ [Replying to X: "…"] quote) + bounded attributed history block
+    |    from the group session (newest 40 within 24h, [NO_REPLY] rows skipped, lines clamped) + text.
+    |    Per-group `context_enabled` off ⇒ the pre-ent#600 fresh prompt. DM history can never appear:
+    |    a DM session carries a different key.
+    |  - The tagged user turn is persisted BEFORE execution (stored order = what the group saw)
     |  - Execute via TaskExecutionService
     v
 Response Check (Issue #349 — observe mode):
@@ -451,9 +463,27 @@ This enables the agent to:
 |-----------|---------------------|-----------------|---------------------|
 | @mention in entities | ✅ Process | ✅ Process | ✅ Process |
 | Reply to bot's message | ✅ Process | ✅ Process | ✅ Process |
-| Regular message (no mention) | ❌ Skip | ✅ Process | ✅ Process (agent may skip reply) |
+| Regular message (no mention) | 👁 Observe — recorded as group context, no turn (ent#600; was ❌ Skip) | ✅ Process | ✅ Process (agent may skip reply) |
+| `/command@botname` | ✅ Process (counts as tagged, ent#600) | ✅ Process | ✅ Process |
+| Bare `/command` (no suffix) | ❌ Skip — neither executed nor recorded | ✅ Process | ✅ Process |
 
 **Observation Mode (Issue #349)**: In `observe` mode, the agent sees all messages (like `all` mode) but can return `[NO_REPLY]` anywhere in its response to suppress sending. This enables selective engagement — the agent monitors conversation context and chooses when to participate.
+
+### Group Conversation Context (ent#600, TGRAM-GROUP-CTX)
+
+The trigger rules above decide when the agent *speaks*; this decides what it *knows* when it does. Every trigger mode gets the same context; what `mention` mode adds is the **observe** path — seeing without spending a turn (the thing `observe` mode could only do at one agent run per message).
+
+**Store** — the group's own `public_chat_sessions` row, keyed per chat by `TelegramAdapter.get_session_identifier` (`{bot_id}:group:{chat_id}`, plus `:topic:{message_thread_id}` in forum supergroups). Before ent#600 the key was per *sender* even in a group, which is why group turns ran with fresh context (#1649 pinned that as a known limitation and asked for this re-decision). DMs keep `{bot_id}:{sender}:{chat}`, so DM history structurally cannot reach a group reply — the reason for the old fresh-context rule still holds. MEM-001 memory stays excluded for groups (router: `verified_email and not is_group`), so a shared session cannot feed one user's durable memory (learnings 2026-07-04).
+
+**Observe path** (`ChannelMessageRouter._record_observed_message`, step 0): for `metadata.observe_only` messages — resolve the agent (auto-creates the group config), `adapter.note_untagged_seen` (stamps `last_untagged_seen_at`), then record only if `adapter.group_context_enabled` and, under `group_auth_mode=any_verified`, the group is unlocked. Persists `role=user` with `sender_label` (#903), prunes the session to `STORE_CAP` (500) rows every `PRUNE_EVERY` (50) inserts. Never raises. Bare `/commands` are skipped; the transport also refuses to *execute* them (`_process_update` gates the command branch on `observe_only`) — otherwise `/reset` from any member would have started firing un-tagged the moment parse_message stopped returning None.
+
+**Turn context** (router step 7, groups): `_format_group_sender` (identity + `reply_quote_line` — the zero-config slice that works with Privacy Mode on) + `_group_history_block` + the text. The block is rendered by `services/telegram_group_context.format_group_history`: newest `MAX_MESSAGES` (40, env `TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`) within `MAX_AGE_HOURS` (24, env `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`), `[NO_REPLY]` assistant rows dropped (over-fetched 2× so they don't eat the window), each line collapsed to one line and clamped to 500 chars, labels clamped/de-bracketed, assistant lines prefixed `[agent]`, the two delimiters stripped from content. Observed history is untrusted third-party input — every member can put text in front of the agent without addressing it. The tagged user turn is persisted at step 7 (before execution) and step 11 skips it (`_user_turn_persisted`), so a message posted during a long run sorts after the one it answers, and a failed run keeps the tagged message in memory.
+
+**Status** (`group_context_status`, surfaced as `context_status`/`context_hint` on `GET …/telegram/groups` and in `TelegramChannelPanel.vue`): `off` (toggle) → `all_messages` (`last_untagged_seen_at` set — evidence wins; an admin bot receives everything regardless of Privacy Mode) → `tagged_only` (`getMe.can_read_all_group_messages` = 0; hint: `/setprivacy` → Disable, remove & re-add the bot, or make it admin) → `unconfirmed` (flag 1 or unknown, nothing seen yet; hint: re-add / press Verify). The flag is stored on `telegram_bindings.can_read_all_group_messages` at connect, at Verify (`POST …/telegram/test` without chat_id), and when the bot is added to a group (`_handle_bot_member_change` → `fetch_can_read_all_group_messages`, best-effort after the config write).
+
+**Side-effects of the per-chat key**: `/reset@bot` by any member clears the group's shared context (documented; a bare `/reset` is inert in mention mode); proactive `send_group_message` broadcasts (#1649) now land in the session a reply reads; ent#265 completion reports still are not written into group context.
+
+Guards: `tests/unit/test_ent600_telegram_group_context.py`; the #1649 tripwire (`test_1649_group_message_history.py`) now asserts the keys coincide.
 
 ### Member Events
 
@@ -482,6 +512,10 @@ This enables the agent to:
 | verified_at | TEXT | ISO timestamp when group was verified |
 | created_at | TEXT | ISO timestamp |
 | updated_at | TEXT | ISO timestamp |
+| last_untagged_seen_at | TEXT | ent#600 — when an un-tagged message last reached the bot here (proof it sees the conversation) |
+| context_enabled | INTEGER | ent#600 — per-group context opt-out; DEFAULT 1 |
+
+(`telegram_bindings.can_read_all_group_messages INTEGER` — ent#600, Telegram's `getMe` fact; NULL = never checked.)
 
 Unique constraint: `(binding_id, chat_id)`
 
@@ -490,7 +524,7 @@ Unique constraint: `(binding_id, chat_id)`
 All endpoints require JWT + `OwnedAgentByName` (agent owner only):
 
 - `GET /api/agents/{name}/telegram/groups` — List active group configs
-- `PUT /api/agents/{name}/telegram/groups/{id}` — Update trigger_mode, welcome_enabled, welcome_text (ownership verified)
+- `PUT /api/agents/{name}/telegram/groups/{id}` — Update trigger_mode, welcome_enabled, welcome_text, allow_proactive, context_enabled (ownership verified; the two consent arms are human-only). Items carry `context_status` + `context_hint` (ent#600)
 - `DELETE /api/agents/{name}/telegram/groups/{id}` — Deactivate group config
 
 ### Frontend: Group Config UI
@@ -501,6 +535,7 @@ The `TelegramChannelPanel.vue` component shows group configurations when the bot
 - Trigger mode radio buttons (mention-only / all messages)
 - Welcome message toggle with text input (`{name}` placeholder)
 - Remove button per group (deactivates, doesn't delete)
+- Context status badge + hint per group (`BaseBadge`: Sees all messages / Tagged messages only / Not confirmed yet / Context off — ent#600) and a **Group context** checkbox (`context_enabled`); Verify reloads the groups so a Privacy Mode change shows in place
 
 ### Group Authentication Mode (group_auth_mode)
 
@@ -595,7 +630,7 @@ send_group_message(
 
 - **No new attack surface**: Group messages use the same webhook endpoint with the same dual-layer auth
 - **IDOR prevention**: Group config update verifies the config ID belongs to the requesting agent's binding
-- **Context bleed prevention**: Group messages get fresh context (no prior session history) — agent replies in a public group cannot leak prior DM conversation context
+- **Context bleed prevention**: a group turn reads only the group's own per-chat session (ent#600; before that, fresh context) — a DM session carries a different key, so agent replies in a public group cannot leak prior DM conversation context. Observed group history is untrusted input and is rendered inside a delimited, clamped block (see Group Conversation Context)
 - **Bot loop prevention**: Inherited from DM support — `parse_message()` skips messages from bots (`is_bot` check)
 - **Silent rate limiting**: Rate limit errors are not sent to groups (would be visible to all members)
 - **Membership not verified per message**: Telegram doesn't provide a cheap per-message membership check; this is standard bot behavior and is documented

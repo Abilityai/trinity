@@ -1108,6 +1108,7 @@ telegram_bindings = Table(
     Column("telegram_secret_token", Text),
     Column("last_update_id", Integer),
     Column("progress_indicator_enabled", Integer),  # ent#264: default ON (1)
+    Column("can_read_all_group_messages", Integer),  # ent#600: getMe fact; NULL = never checked
     Column("created_at", Text),
     Column("updated_at", Text),
 )
@@ -1145,6 +1146,10 @@ telegram_group_configs = Table(
     Column("verified_at", Text),
     # ent#265: per-group consent for completion reports (default allow, opt-out mute)
     Column("allow_proactive", Integer),
+    # ent#600: group conversation context — proof an untagged message arrived,
+    # and the per-group opt-out toggle (default ON)
+    Column("last_untagged_seen_at", Text),
+    Column("context_enabled", Integer),
 )
 
 whatsapp_bindings = Table(
