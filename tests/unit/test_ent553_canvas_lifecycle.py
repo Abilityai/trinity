@@ -267,6 +267,48 @@ def test_deleting_the_default_canvas_frees_a_slot_against_the_cap(canvas_db, mon
     assert _write("agent-a", "third")["canvas_id"] == "third"
 
 
+def test_the_cap_reaches_the_wire_as_a_409(canvas_db, monkeypatch):
+    """The review asked for the ROUTE, not only the db layer: prove the
+    `CanvasLimitExceeded` an agent's PUT trips comes back as a **409**, not a
+    500 from an exception nobody translated.
+
+    Runs the real chain — `routers/canvas.write_canvas` → `canvas_service.
+    write_canvas` → `db.upsert_agent_canvas` — with only the rate limiter
+    stubbed (Redis-backed; a bounded fixture has none). The refusal names the
+    remedy (retire a canvas) and never claims the payload was too large, since
+    413 would send the agent shrinking blocks that were never the problem.
+    """
+    import asyncio
+    from fastapi import HTTPException
+    from models import CanvasWrite
+    from routers import canvas as canvas_router
+    from services import rate_limiter
+
+    monkeypatch.setattr(rate_limiter, "enforce", lambda *a, **k: None)
+    _set_cap(monkeypatch, 2)
+    _write("agent-a", "one")
+    _write("agent-a", "two")
+
+    async def put(canvas_id):
+        return await canvas_router.write_canvas(
+            name="agent-a",
+            canvas_id=canvas_id,
+            data=CanvasWrite(blocks=[], audience="operator"),
+            request=None,
+            current_user=_user(agent_name="agent-a"),
+        )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(put("three"))
+    assert excinfo.value.status_code == 409
+    assert "delete" in excinfo.value.detail.lower() or "retire" in excinfo.value.detail.lower(), \
+        excinfo.value.detail
+
+    # And the same PUT against an EXISTING id is an update, never a refusal —
+    # otherwise an agent at the cap could no longer redraw its own boards.
+    assert asyncio.run(put("two"))["canvas_id"] == "two"
+
+
 # NOTE (out of scope, recorded rather than fixed): `canvas_service.empty_canvas`
 # returns `created_at`/`updated_at` as None while `models.Canvas` declares them
 # required `str`, so `Canvas(**empty_canvas(...))` raises. It is LATENT, not
