@@ -41,6 +41,9 @@ _PROVISION = _PACKER / "scripts" / "01-provision.sh"
 _FIRSTBOOT = _PACKER / "files" / "opt" / "trinity-firstboot" / "firstboot.sh"
 _TEMPLATE = _PACKER / "trinity.pkr.hcl"
 _SUBMIT = _PACKER / "scripts" / "mp-submit.sh"
+# #2380 moved the Caddyfile out of firstboot.sh: `start.sh --provision --site-only`
+# writes it now, for the marketplace image and the doc-driven install alike.
+_START = _REPO_ROOT / "scripts" / "deploy" / "start.sh"
 
 
 def test_build_installs_security_updates_before_anything_else() -> None:
@@ -65,14 +68,20 @@ def test_build_installs_security_updates_before_anything_else() -> None:
 
 
 def test_caddyfile_carries_the_marketplace_header() -> None:
-    text = _FIRSTBOOT.read_text()
+    text = _START.read_text()
     assert 'header X-DO-MARKETPLACE "trinity"' in text, (
         "Rule 10 of DigitalOcean's 1-Click build standard specifies "
         "X-DO-MARKETPLACE on the reverse-proxy block."
     )
-    # Inside the Caddyfile heredoc, not merely somewhere in the script.
+    # The same `provision_site` serves the doc-driven install, which did not
+    # originate from the catalog — so the header is keyed on the marketplace
+    # provenance, and the heredoc carries the variable that holds it.
+    assignment = text[text.index('_do_header=\'header X-DO-MARKETPLACE') - 400 : text.index('_do_header=\'header X-DO-MARKETPLACE')]
+    assert 'provenance" = "do-marketplace"' in assignment, (
+        "the header must be set only for the do-marketplace provenance"
+    )
     heredoc = text[text.index("cat > /etc/caddy/Caddyfile") : text.index("\nCADDY\n")]
-    assert "X-DO-MARKETPLACE" in heredoc, "header is outside the Caddyfile heredoc"
+    assert "${_do_header}" in heredoc, "header variable is outside the Caddyfile heredoc"
 
 
 def test_submit_is_chained_after_the_manifest_not_parallel_to_it() -> None:
