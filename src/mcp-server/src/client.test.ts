@@ -17,6 +17,8 @@ import {
   extractIdempotencyExecutionId,
   CHAT_RECOVERY_TRIGGERS,
   TASK_RECOVERY_TRIGGERS,
+  pickRecentFanOut,
+  FAN_OUT_RECOVERY_TRIGGERS,
 } from "./client.js";
 import type { ScheduleExecution } from "./types.js";
 
@@ -235,5 +237,128 @@ describe("#2661 extractIdempotencyExecutionId", () => {
     assert.equal(extractIdempotencyExecutionId("{}"), undefined);
     assert.equal(extractIdempotencyExecutionId(JSON.stringify({ detail: "plain string" })), undefined);
     assert.equal(extractIdempotencyExecutionId(JSON.stringify({ execution_id: "" })), undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2670 — the fan-out batch matcher
+// ---------------------------------------------------------------------------
+//
+// The third route of the #914 class, and the one where the ambiguity rule has
+// to be restated rather than reused. `/task` refuses when more than one ROW
+// survives, because it cannot tell which is the caller's. A fan-out stamps ONE
+// `fan_out_id` on all N of its rows, so N survivors is the expected shape and
+// the unit that must be unambiguous is the BATCH.
+
+function fanExec(over: Partial<ScheduleExecution>): ScheduleExecution {
+  return exec({ triggered_by: "fan_out", fan_out_id: "fo_A", ...over });
+}
+
+describe("#2670 pickRecentFanOut", () => {
+  it("returns the batch when every row of it survives", () => {
+    const rows = [
+      fanExec({ id: "e1", message: "task one" }),
+      fanExec({ id: "e2", message: "task two" }),
+      fanExec({ id: "e3", message: "task three" }),
+    ];
+    const picked = pickRecentFanOut(rows, { now: NOW_MS, messages: ["task one", "task two", "task three"] });
+    assert.equal(picked?.fan_out_id, "fo_A");
+    assert.deepEqual(picked?.execution_ids.sort(), ["e1", "e2", "e3"]);
+  });
+
+  it("is not confused by N rows — that is the normal shape, not ambiguity", () => {
+    // The rule #2661 needed on /task would refuse this outright.
+    const rows = Array.from({ length: 10 }, (_, i) =>
+      fanExec({ id: `e${i}`, message: `task ${i}` }));
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS })?.fan_out_id, "fo_A");
+  });
+
+  it("refuses when TWO distinct batches survive", () => {
+    const rows = [
+      fanExec({ id: "e1", fan_out_id: "fo_A" }),
+      fanExec({ id: "e2", fan_out_id: "fo_B" }),
+    ];
+    // A wrong batch id is worse than none: the caller would poll a foreign
+    // batch and act on a well-formed result that is not theirs.
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS }), undefined);
+  });
+
+  it("finds the batch even when part of it has already finished", () => {
+    // By the time the gateway gives up, a batch is normally a MIX. Filtering to
+    // non-terminal rows — which /chat and /task do — would drop exactly the
+    // batches furthest along.
+    const rows = [
+      fanExec({ id: "e1", status: "success" }),
+      fanExec({ id: "e2", status: "running" }),
+      fanExec({ id: "e3", status: "failed" }),
+    ];
+    const picked = pickRecentFanOut(rows, { now: NOW_MS });
+    assert.equal(picked?.fan_out_id, "fo_A");
+    assert.equal(picked?.execution_ids.length, 3);
+  });
+
+  it("ignores rows from other routes even when they carry a fan_out_id", () => {
+    const rows = [
+      fanExec({ id: "mine" }),
+      exec({ id: "other", triggered_by: "mcp", fan_out_id: "fo_Z" }),
+    ];
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS })?.fan_out_id, "fo_A");
+  });
+
+  it("ignores rows with no fan_out_id at all", () => {
+    const rows = [exec({ id: "x", triggered_by: "fan_out" })];
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS }), undefined);
+  });
+
+  it("scopes to the calling key when one is supplied", () => {
+    const rows = [
+      fanExec({ id: "mine", fan_out_id: "fo_A", source_mcp_key_id: "key-A" }),
+      fanExec({ id: "theirs", fan_out_id: "fo_B", source_mcp_key_id: "key-B" }),
+    ];
+    assert.equal(
+      pickRecentFanOut(rows, { now: NOW_MS, mcpKeyId: "key-A" })?.fan_out_id,
+      "fo_A",
+    );
+  });
+
+  it("lets a row with no key id through — older backends have none", () => {
+    const rows = [fanExec({ id: "e1", source_mcp_key_id: undefined })];
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS, mcpKeyId: "key-A" })?.fan_out_id, "fo_A");
+  });
+
+  it("uses the call's own messages as the discriminator", () => {
+    // A fan-out has N messages, so this filter is STRONGER here than on a
+    // single-message route: two batches that share no message cannot collide.
+    const rows = [
+      fanExec({ id: "mine", fan_out_id: "fo_A", message: "summarise Q1" }),
+      fanExec({ id: "theirs", fan_out_id: "fo_B", message: "unrelated work" }),
+    ];
+    assert.equal(
+      pickRecentFanOut(rows, { now: NOW_MS, messages: ["summarise Q1", "summarise Q2"] })?.fan_out_id,
+      "fo_A",
+    );
+  });
+
+  it("drops rows outside the window", () => {
+    const rows = [fanExec({ id: "old", started_at: new Date(NOW_MS - 120_000).toISOString() })];
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS, windowMs: 35_000 }), undefined);
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS, windowMs: 300_000 })?.fan_out_id, "fo_A");
+  });
+
+  it("returns nothing for an empty page rather than throwing", () => {
+    assert.equal(pickRecentFanOut([], { now: NOW_MS }), undefined);
+  });
+
+  it("treats an unparseable started_at as out of window", () => {
+    const rows = [fanExec({ id: "bad", started_at: "not a date" })];
+    assert.equal(pickRecentFanOut(rows, { now: NOW_MS }), undefined);
+  });
+
+  it("declares its own trigger set rather than borrowing /chat's or /task's", () => {
+    // The per-call-site rule #2661 wrote down: a fan-out row is `fan_out` and
+    // nothing else, and widening this would let another route's row name a batch.
+    assert.deepEqual([...FAN_OUT_RECOVERY_TRIGGERS], ["fan_out"]);
+    assert.ok(![...CHAT_RECOVERY_TRIGGERS].includes("fan_out" as never));
+    assert.ok(![...TASK_RECOVERY_TRIGGERS].includes("fan_out" as never));
   });
 });

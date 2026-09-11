@@ -384,6 +384,7 @@ console.log(`Registered ${totalTools} tools`);
 | `get_chat_history` | 275-292 | `{agent_name}` | `GET /api/agents/{name}/chat/history` |
 | `get_agent_logs` | 297-326 | `{agent_name, lines?}` | `GET /api/agents/{name}/logs` |
 | `fan_out` | 390-590 | `{agent_name, tasks[], timeout_seconds?, max_concurrency?, model?, system_prompt?, allowed_tools?}` | `POST /api/agents/{name}/fan-out` |
+| `get_fan_out_result` | `tools/executions.ts` | `{agent_name, fan_out_id}` | `GET /api/agents/{name}/fan-out/{fan_out_id}` (#2670) |
 
 > **Per-agent timeout fallback (#418, 2026-04-20)**: For `chat_with_agent` (when `parallel=true`) and `fan_out`, `timeout_seconds` is fully optional with **no default**. When omitted, the backend falls back to the target agent's configured `execution_timeout_seconds` (TIMEOUT-001; default 900s, max 7200s). Previously, the Zod schema defaulted to `600`, which silently capped inter-agent invocations below the per-agent setting.
 
@@ -588,7 +589,7 @@ if (response.status === 429) {
 }
 ```
 
-### Gateway-Timeout Receipt — both sync routes (#914 sequential, #2661 parallel)
+### Gateway-Timeout Receipt — all three sync routes (#914 `/chat`, #2661 `/task`, #2670 `fan_out`)
 
 A synchronous `chat_with_agent` holds the MCP-gateway → backend → agent HTTP
 chain open for the whole agent run. The MCP client imposes its own 30–60s
@@ -651,11 +652,69 @@ second execution beside the live one; not left `in_flight`, because nothing
 downstream completes it. A replay therefore answers 200 + the execution to
 poll, and the row stays the single source of truth for the outcome.
 
-**Still unfixed — `fan_out` (route three):** `client.ts::fanOut()` carries the
-same unbounded `(timeout_seconds ?? 7200) + 60` ceiling. It needs a `fan_out_id`
-receipt rather than an `execution_id`, and no polling surface resolves one today.
+#### Route three — `fan_out` (#2670)
 
-Live harness: `src/mcp-server/scripts/verify_914.ts <agent> [chat|task|both]`.
+`client.ts::fanOut()` carried the same unbounded `(timeout_seconds ?? 7200) + 60`
+ceiling, and it is the route that exceeds the gateway most reliably: a fan-out
+dispatches N tasks and by construction runs longer than any single one of them.
+
+**The receipt names a `fan_out_id`, not an `execution_id`.** A batch is N rows
+sharing one id, so a single execution id could only ever name one arbitrary
+member of it. `{status: "fan_out_timeout", agent, fan_out_id, execution_ids,
+task_count, message}`.
+
+**Ambiguity is redefined, not reused.** #2661 refuses when more than one ROW
+survives its filters, because on `/task` it cannot tell which row is the
+caller's. A fan-out stamps one `fan_out_id` on all N of its rows, so finding
+*any* row finds the batch and N survivors is the expected shape. The unit that
+must be unambiguous is therefore the BATCH: `pickRecentFanOut` refuses when more
+than one distinct `fan_out_id` survives. Same rule ("a wrong id is worse than
+none"), measured on the right thing.
+
+**Status is deliberately not filtered.** `/chat` and `/task` require a
+non-terminal row, because a terminal one is evidence the receipt is unnecessary.
+By the time a fan-out's gateway gives up, the batch is normally a *mix* — some
+subtasks done, some running — so requiring non-terminal rows would drop exactly
+the batches furthest along. The recency window is what bounds staleness.
+
+**The polling surface reads rows, not the idempotency snapshot.**
+`GET /api/agents/{name}/fan-out/{fan_out_id}` folds `schedule_executions` (where
+`fan_out_id` has been stamped on every subtask since FANOUT-001) into an
+aggregate. `routers/fan_out.py` does store the whole aggregated response as its
+idempotency snapshot, which looks like a free receipt — but `complete()` runs
+only once the batch has FINISHED, so the snapshot cannot answer the question a
+timed-out caller is actually asking, which is *what is happening right now*.
+
+| aggregate status | means |
+|---|---|
+| `running` | any subtask can still change — outranks every verdict, because reporting one early is what makes a polling caller stop polling |
+| `completed` | every subtask succeeded |
+| `partial` | some did. Best-effort is the fan-out's default policy, so this is a normal outcome, not an error |
+| `failed` | none did |
+
+`deadline_exceeded` is absent by construction: it is the dispatcher's verdict on
+its own outer deadline, held in memory by the call that timed out, and not a
+property of any row. Per-task status is the **execution** status verbatim
+(`queued`/`running`/`success`/…), not the dispatch response's two-value pair — a
+live batch has to distinguish "waiting for a slot" from "running", and a
+two-value vocabulary reports a healthy queued subtask as a failure.
+
+**Backend counterparts (#2670):** the in-flight 409 now returns the same
+`{error, message, execution_id}` shape `/chat` and `/task` do — it was a bare
+string, so `fan_out` could not benefit from the #2661 client that reads that
+field — and the batch id is attached to the idempotency claim **when it is
+minted** (`FanOutService.execute(on_started=…)`) rather than at `complete()`.
+Attaching at the end records the id exactly when nobody needs it any more: the
+window in which a concurrent duplicate arrives, and in which this call's own
+gateway gives up, is the whole run.
+
+**New MCP tool:** `get_fan_out_result(agent_name, fan_out_id)` — same
+`{self} ∪ permitted` gate as `get_execution_result` beside it. A malformed id, an
+unknown one and one belonging to another agent are a single uniform 404
+(Invariant #8); the id is server-minted and unguessable, so this costs a caller
+nothing it could otherwise have had.
+
+Live harness: `src/mcp-server/scripts/verify_914.ts <agent> [chat|task|fanout|all]`.
 
 ### Agent-to-Agent Access Control (`chat.ts:29-100`)
 ```typescript

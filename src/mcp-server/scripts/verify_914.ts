@@ -12,7 +12,7 @@
  *   TRINITY_API_URL=http://localhost:8000 \
  *   TRINITY_TOKEN="trinity_mcp_..." \
  *   TRINITY_MCP_KEY_ID="<key id from Settings → API Keys>" \
- *   npx tsx src/mcp-server/scripts/verify_914.ts <agent_name> [chat|task|both]
+ *   npx tsx src/mcp-server/scripts/verify_914.ts <agent_name> [chat|task|fanout|all]
  *
  * Not a test — debug harness for the live stack. Deleted before PR
  * lands? No: kept so future operators can reproduce the recovery path.
@@ -63,14 +63,26 @@ function resolveKeyId(): string | undefined {
 function classify(route: string, response: unknown, elapsedMs: number): Outcome {
   console.log(`[verify-${route}] elapsed=${elapsedMs}ms`);
   console.log(JSON.stringify(response, null, 2));
-  if (
-    typeof response === "object" &&
-    response !== null &&
-    "status" in response &&
-    (response as { status?: string }).status === "queued_timeout"
-  ) {
+  const status =
+    typeof response === "object" && response !== null && "status" in response
+      ? (response as { status?: string }).status
+      : undefined;
+  if (status === "queued_timeout") {
     const executionId = (response as { execution_id?: string }).execution_id;
     return { route, ok: true, note: "queued_timeout receipt", executionId };
+  }
+  // #2670: the batch receipt names a fan_out_id, not an execution_id — N rows
+  // share one id, so a single execution id could only name an arbitrary member.
+  if (status === "fan_out_timeout") {
+    const r = response as { fan_out_id?: string; execution_ids?: string[]; task_count?: number };
+    return {
+      route,
+      ok: true,
+      note:
+        `fan_out_timeout receipt (fan_out_id=${r.fan_out_id}, ` +
+        `${r.execution_ids?.length ?? 0}/${r.task_count ?? "?"} rows found at abort)`,
+      executionId: r.fan_out_id,
+    };
   }
   return { route, ok: false, note: "fast response — no timeout fired; did the agent reply quickly?" };
 }
@@ -96,19 +108,32 @@ async function main(): Promise<void> {
   const outcomes: Outcome[] = [];
 
   try {
-    if (mode === "chat" || mode === "both") {
+    if (mode === "chat" || mode === "both" || mode === "all") {
       const t0 = Date.now();
       const response = await client.chat(agent, prompt("chat"), undefined, keyInfo);
       outcomes.push(classify("914-chat", response, Date.now() - t0));
     }
 
-    if (mode === "task" || mode === "both") {
+    if (mode === "task" || mode === "both" || mode === "all") {
       // #2661: sync parallel — async_mode omitted on purpose. This is the route
       // that used to hold the fetch for timeout_seconds + 60 and surface a bare
       // `fetch failed`.
       const t0 = Date.now();
       const response = await client.task(agent, prompt("task"), {}, undefined, keyInfo);
       outcomes.push(classify("2661-task", response, Date.now() - t0));
+    }
+    if (mode === "fanout" || mode === "all") {
+      // #2670: three tasks so the receipt has to identify a BATCH rather than a
+      // row — with one task the distinction the fix turns on is invisible. The
+      // nonce is per-message for the same reason it is per-run above: the
+      // matcher's message discriminator must have something unique to match.
+      const t0 = Date.now();
+      const tasks = [1, 2, 3].map((n) => ({
+        id: `verify-${n}`,
+        message: `${PROMPT} (batch member ${n})`,
+      }));
+      const response = await client.fanOut(agent, tasks, {}, undefined, keyInfo);
+      outcomes.push(classify("2670-fanout", response, Date.now() - t0));
     }
   } catch (err) {
     console.error(`[verify] error:`, (err as Error).message);
