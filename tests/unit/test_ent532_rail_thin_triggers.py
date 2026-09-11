@@ -227,11 +227,17 @@ async def test_a_raising_manager_never_fails_the_write(module, monkeypatch, tmp_
     try:
         write = _writer_for(module, monkeypatch, tmp_path)
         assert write() is not None, "a broadcast failure must not fail the write"
-        await _drain()
-        # The await is wrapped inside the task, so gathering it is clean. Drop
-        # that wrapper and this raises — which is also the "Task exception was
-        # never retrieved" noise the wrapper exists to prevent.
+        # Snapshot the emit task BEFORE letting it run. `asyncio.all_tasks()`
+        # returns only tasks that have NOT finished, so draining first and
+        # snapshotting after collects nothing and the gather below is vacuous —
+        # it passes just as happily with the wrapper deleted, which is a guard
+        # that guards nothing. Taken here, the gather runs the task and
+        # re-raises whatever it raised, so deleting the wrapper turns this red.
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        assert pending, "the emit created no task, so this proves nothing"
+        # No exception escapes: the wrapper caught it inside the task, which is
+        # also what keeps it from resurfacing as "Task exception was never
+        # retrieved" when the task is garbage-collected.
         await asyncio.gather(*pending)
     finally:
         module.set_websocket_manager(None)
