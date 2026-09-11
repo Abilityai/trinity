@@ -140,6 +140,16 @@ def client(ps, monkeypatch):
         "other-agent": _key("agent", OTHER),
         "user": _key("user"),
         "system": _key("system"),
+        # Every non-`agent` scope carries THIS agent's name, so what is on
+        # trial is the scope check alone and not a name mismatch that would
+        # reject them anyway. `ops` is #2323's sixth scope: the proof that the
+        # predicate is an allowlist, not two named enemies. A literal `None`
+        # scope cannot come from `validate_mcp_api_key` (it coalesces to
+        # "user"), so it stands in for a principal built by something else.
+        "connector": _key("connector", AGENT),
+        "ops": _key("ops", AGENT),
+        "null-scope": _key(None, AGENT),
+        "no-scope-at-all": {"agent_name": AGENT, "user_id": 1},
     }
     validations = []
 
@@ -191,7 +201,16 @@ def test_a_missing_or_unknown_key_is_403(client, managers, headers):
     assert not managers[0].messages and not managers[1].messages
 
 
-@pytest.mark.parametrize("token", ["user", "system", "other-agent"])
+@pytest.mark.parametrize("token", [
+    "user", "system", "other-agent",
+    # The documented contract (architecture/api-endpoints.md) names connector
+    # too, and #2323's lesson is that a gate closed against *named* enemies
+    # opens for the next scope someone invents: `mcp_api_keys.scope` is
+    # free text with no CHECK constraint. `authorize_heartbeat` is already
+    # the right shape — an allowlist of exactly `agent` — so these pin that
+    # shape rather than change it.
+    "ops", "connector", "null-scope", "no-scope-at-all",
+])
 def test_a_key_that_is_not_this_agents_own_is_the_same_403(client, managers, token):
     r = client.post(ROUTE, json=BODY, headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 403
