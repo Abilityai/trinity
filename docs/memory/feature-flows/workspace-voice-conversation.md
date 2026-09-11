@@ -142,13 +142,91 @@ rating control.
 
 **Readers of the table** (the ent#428 lesson — a column that changes what a row
 *is* must be met by every existing reader): `_format_history_context` labels
-spoken rows `Client (voice):` / `You (voice):` and **budgets** them to the last
-12 per call with an omission line; the resend dedup in `_persist_user_turn`
+spoken rows `Client (voice):` / `You (voice):` and budgets them — since #2694 under
+ONE total char budget across calls (24k, a whole 30-minute call fits), trimmed
+oldest-first with every cut named, the call's label as a bracketed marker; the resend dedup in `_persist_user_turn`
 ignores spoken rows (typing the words you just said is a new message, not a
 retry); `_title_plan`'s two-message window is bypassed by `title_if_empty` from
 the first spoken line; `PortalHistoryMessage` carries `source` /
 `voice_call_id`; ratings on spoken rows are accepted via the API but the block
 renders no control.
+
+## One timeline, and the agent knows what was said (trinity#2694)
+
+Two defects reported together on 2026-09-10, one per side of the table.
+
+**The read side — the window, not the sort.** The stored order was never
+wrong: both writers stamp the same ISO-Z microsecond format and the read
+orders by it. `get_history` returned the newest **100 rows**, and a 30-minute
+call is ~180, so one call filled the window, every typed turn before it fell
+off, and the block — anchored at the call's first row *in the window* —
+rendered as the head of the thread. `db.get_portal_thread_window` now counts
+the window in **typed turns** (`source IS NULL`; the newest 100 for the
+endpoint, 20 for the cold replay): the `(created_at, id)` of the N-th newest
+typed row is the threshold, everything at or after it rides along (so a call's
+rows come whole), under `PORTAL_HISTORY_ROW_CEILING` (600, the NEWEST survive)
+that reports itself as `PortalHistory.truncated`; the chat then shows one
+platform line, "Earlier messages in this chat aren't shown", instead of
+silently re-creating the symptom at call #9. Both statements order by
+`created_at DESC, id DESC` — the `id` tiebreak is a uuid, stable not
+chronological, so the threshold and the range agree at a tie. Verified on
+SQLite (the test suite) and PostgreSQL (the statements run as-is). The
+resend-dedup read (`limit=1`) and the voice prompt's own opening context keep
+row semantics — the latter trims oldest-first at 3 000 chars and would have
+lost the newest turns under a wider window.
+
+**The reply poll pays for none of it.** `awaitPersistedReply` polls history
+every 700 ms early in a turn; over the window that would be hundreds of KB per
+tick, and its count-based detector would break — between the baseline and a
+poll the window can shift by a whole call, the count never grows, and a turn
+that answered is reported as "check shortly". `GET …/history?limit=N` (1–50,
+row semantics, the newest rows) is the poll's narrow read, and
+`portalUtils.js::replyFromHistory` finds the reply by **identity**: the
+baseline is the newest *typed* assistant row's id (`replyBaseline`), a reply
+is new when that id changed, and a spoken reply is never this turn's answer.
+Nothing on the route can widen the window.
+
+**The turn side — what the live session never heard.** A call runs on the
+voice provider and writes its spoken turns straight into the thread; the
+agent's own session was not there. The history replay is dropped on the
+resumed path (ent#358 — the session already remembers the typed conversation),
+which was true for typed turns and false for spoken ones. A resumed turn is
+now prefixed with the **delta**: `db.get_platform_rows_since_last_reply` — the
+spoken rows and platform `system` lines later than the newest typed
+*assistant* row (the last thing the live session itself wrote; a user-row
+cursor would erase a call from every later delta after one failed typed turn)
+— rendered by `_format_voice_delta` under `VOICE_DELTA_HEADER`. The cold
+replay (`_format_history_context`, rewritten) renders the same rows in the same
+form and the delta is *not* added on top, so a cold retry never double-sends.
+One renderer (`_context_lines`) for both: `Client (voice):` / `You (voice):`,
+the platform's own row as a bracketed marker `[Voice call · 4 min]` (ent#523
+skipped these; a marker keeps "never the agent's words" and stops hiding that a
+call ended or Main was reset), whitespace collapsed inside a row so a
+transcript line cannot forge a labelled line, and ONE total spoken budget
+(`_SPOKEN_CONTEXT_MAX_CHARS`, 24k — a whole 30-minute call fits) trimmed
+oldest-first across calls, every cut named by count and nothing pointing the
+agent at a place it cannot read. Read before `_persist_user_turn`, fail-soft,
+computed in `portal_chat` only (the streaming entry funnels through it).
+
+**No reply lands mid-call — two gates, one marker.** The tab's composer is
+inert during a call, but a reply can be in flight from another tab, a reload,
+or the headless `/chat` surface, and a reply between two spoken rows would sit
+after the cursor and hide the call's first half from the next delta. So both
+sides refuse, in words, after their uniform 404: `start_workspace_voice`
+answers **409** ("A reply is still being written — wait for it, then start the
+call.") when `get_turn_inflight` is set, and both turn entries (`portal_chat`,
+`start_portal_turn`) answer **409** (`category="voice_call_active"`, unbilled,
+retryable) through `_refuse_turn_during_voice_call` while the thread's live-call
+marker `portal_voice_active:{session}` is set — written by `start_workspace_voice`
+once the provider session exists (TTL = the cap + slack), cleared by the bridge's
+`finally` and by the REST `/stop`. Both reads are fail-open on a Redis outage:
+a call over a possibly running turn, or a turn over a possibly live call, beats
+silencing either. A client-side lock is never the second gate — it covers one
+tab (the review's finding, recorded in `docs/memory/learnings.md`).
+
+Deferred, registered in the debt inbox: cursor pagination for long threads
+(the ceiling is the honest stopgap), a transcript file the agent can read
+(the budget covers the cap), a partial index on typed rows.
 
 ## The session outlives the connection
 
@@ -298,21 +376,50 @@ Two consequences worth writing down:
   still shrinking — three columns in a row sized for two, `<main>` squeezed by
   flex for 300 ms, a worse jump than the one being fixed.
 
-**Known limitation — the rail column itself still steps (#2676).** Two of the
-three columns interpolate; the rail does not. Its `<aside>` carries no width
-transition in either state and it is a `shrink-0` flex sibling of `<main>`, so
-on call end it mounts at its full width in one frame — 48 px collapsed, 384 px
-open, or whatever `--ws-rail` was dragged to. So "one continuous motion" is
-two-thirds true, and on a wide open rail the remaining step can be larger than
-the 211 px snap this work removed.
+**The rail column is a width, not a step (#2676).** Two of the three columns
+interpolated at first and the rail did not: it was a bare `v-if` on a `shrink-0`
+flex sibling whose `<aside>` carries no width transition, so on call end it
+appeared at full size in one frame — 48 px collapsed, 384 px open, or whatever
+`--ws-rail` had been dragged to, which on a wide rail is a **larger** step than
+the 211 px snap this work set out to remove.
 
-It is left as a step here **deliberately**, not overlooked. The honest fix is to
-give the rail column an explicitly animatable width so it can ramp `0 → w`
-complementary to the canvas — and the width of that column is owned by ent#492's
-`--ws-rail` / grid work, not by this file. Doing it from here means either a new
-wrapper element in the row or holding the rail mounted through a call, and both
-are decisions for whoever owns the column, taken with something better than a
-node-env source scan to verify them. Tracked at #2676.
+The width now lives on a **wrapper this view owns**, not on `PortalRail`'s own
+`<aside>` — the same shape the sidebar column three columns to the left already
+has (`shrink-0 overflow-hidden` plus an explicit `--ws-` width). `--ws-rail` is
+the *rendered* width (48 px collapsed, the dragged width open), so one binding
+covers both states and agrees with the inner aside at rest.
+
+It ramps through Vue enter/leave classes rather than an always-on
+`transition-[width]`, and that is the load-bearing part: the same variable is
+rewritten on every `pointermove` of a rail drag, so a permanently-transitioned
+width would make dragging the rail rubber-band by 300 ms. Vue adds the active
+class only for the enter/leave window and removes it afterwards, so a drag stays
+instant. `!w-0` is `!`-marked for the reason the canvas's `!grow-0` is — both are
+single-class selectors setting the same property, so without it Tailwind's output
+order would decide the winner.
+
+Measured in a headless Chromium against the real built stylesheet rather than
+argued from the classes: mid-transition the column is at 322 px of its 384 px
+(so it interpolates rather than stepping), it settles at 384 px, under
+`prefers-reduced-motion` it is at 384 px immediately, and a drag issued after the
+active classes are removed lands at its new width in the same frame.
+
+**This retires `voiceCanvasLeaving`.** That flag held the rail out of the row for
+the length of the canvas's leave transition, because a rail mounting at its full
+width beside a still-shrinking canvas put three columns in a row sized for two. A
+rail entering from zero width is complementary to a canvas leaving towards zero
+grow — the row's total is conserved at every frame — so the hazard is gone by
+construction rather than held off by a flag, and the two motions now overlap
+instead of running back to back. The reduced-motion reasoning the flag's comment
+carried is not lost: it belongs to the transition classes themselves and is
+pinned by the class-counting test, which requires both `motion-reduce` classes on
+every transitioning element, including the two added here.
+
+**One accepted discontinuity.** `thirdColumnResizable` is gated on
+`!voiceCall.active`, so the 8 px resize handle still appears and disappears in
+one frame at the ends of a call. It is 8 px against a column that moves 384, and
+giving the seam its own transition would mean a second animated element whose
+only content is a 1 px line.
 
 **The orb.** `VoiceOverlay.vue::resizeCanvas` sized the canvas bitmap **once**,
 from the `watch(canvasEl)` that fires on mount — no `ResizeObserver`, no window
