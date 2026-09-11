@@ -99,10 +99,16 @@ describe('PortalMarkdown.vue — the visual contract', () => {
   const style = MARKDOWN.slice(MARKDOWN.indexOf('<style scoped>'))
   const styleCode = code(style)
 
-  it('wraps at the edge instead of scrolling sideways', () => {
+  it('wraps a CODE BLOCK at the edge instead of scrolling it sideways', () => {
     expect(style).toMatch(/white-space: pre-wrap/)
     expect(style).toMatch(/overflow-wrap: anywhere/)
-    expect(styleCode).not.toMatch(/overflow-x/)
+    // Narrowed from "the sheet has no overflow-x at all" (#2616): a markdown
+    // TABLE must scroll in its own viewport, or a ten-column table widens the
+    // bubble. The claim #2515 actually makes is about the `pre` — a scroller
+    // inside a chat bubble hides the end of a line behind a gesture nobody
+    // makes — so it is asserted about the `pre`.
+    const preRule = styleCode.slice(styleCode.indexOf(':deep(pre) {'))
+    expect(preRule.slice(0, preRule.indexOf('}'))).not.toMatch(/overflow-x/)
   })
 
   it('keeps the #2211 paragraph rhythm the transcripts used to carry', () => {
