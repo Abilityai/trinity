@@ -4739,6 +4739,23 @@ def _would_create_row_past_cap(email: str, kind: str, cid: str) -> bool:
     return db.count_chat_state_rows(email) >= db.MAX_CHAT_STATE_ROWS
 
 
+def _chat_state_room_left(email: str) -> bool:
+    """Can this viewer still gain a chat-state row (ent#557 review)?
+
+    Read-side twin of `_would_create_row_past_cap`, minus the per-row existence
+    check: the caller is asking about rows that provably do NOT exist yet.
+    Fails OPEN — an unreadable count reports room, because refusing to show an
+    unread badge on a count that could not be taken would hide real unread from
+    every viewer on a transient DB error, and the write path is what actually
+    enforces the cap.
+    """
+    try:
+        return db.count_chat_state_rows(email) < db.MAX_CHAT_STATE_ROWS
+    except Exception:  # noqa: BLE001 — the cap is enforced on the write path
+        logger.warning("chat-state cap read failed for %s; assuming room", email)
+        return True
+
+
 def get_chat_state(email: str) -> dict:
     """Star + unread state for every chat the caller has state for.
 
@@ -4748,21 +4765,55 @@ def get_chat_state(email: str) -> dict:
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email)
     chats = []
+    seen_threads: set[str] = set()
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
+        if kind == "thread":
+            seen_threads.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
             "unread": unread.get(cid, 0) if kind == "thread" else 0,
         })
-    # No fallback for "unread without a state row": `count_unread_by_session`
-    # INNER JOINs the state table and requires `last_read_at IS NOT NULL`, so
-    # every session it can return already has a row `get_chat_state` yielded.
-    # The loop that used to be here could never append, and a safety net that
-    # cannot fire is worse than none — it reads as protection that exists.
+    # A CURSORLESS thread has unread and no state row, so the loop above never
+    # reaches it — and that is the whole ent#557 case: an agent replies into a
+    # freshly minted Main the viewer has never opened, so no row was ever
+    # written for it. Since ent#557 `count_unread_by_session` LEFT JOINs the
+    # state table and counts those threads against the account baseline, so it
+    # is now the wider set of the two and this is where its extra rows enter the
+    # payload. Emitting them is what makes the badge, the per-agent pill, the
+    # wordmark total and the tab title fire at all.
+    #
+    # Bounded by the same read: `count_unread_by_session` is scoped to the
+    # caller's own `enterprise_portal_messages`, so this cannot append a chat
+    # that is not already theirs. `starred` is False by construction — a chat
+    # with no row has never been starred.
+    cursorless = [
+        (cid, n) for cid, n in unread.items()
+        if cid and cid not in seen_threads and n > 0
+    ]
+    # ...but ONLY while the viewer can still clear it, and that is not a
+    # nicety. `mark_chat_read` silently no-ops when the row would be a NEW one
+    # and the viewer is at `MAX_CHAT_STATE_ROWS` — deliberately, because a read
+    # marker is "incidental to what the user asked for". A cursorless thread is
+    # by definition a new row, so at the cap this pass would raise a badge on
+    # the wordmark, the agent pill and the browser tab title that opening the
+    # chat cannot dismiss. ent#557 made the no-op load-bearing: before it, a
+    # cursorless thread showed nothing, so the no-op was invisible and the
+    # justification held.
+    #
+    # Not shown beats shown-and-stuck. A capped viewer degrades to exactly the
+    # ent#359 behaviour, which is the state they were in before this feature,
+    # rather than to a badge that never goes away. The COUNT is paid only when
+    # there is something to emit — i.e. never on the ordinary load, where the
+    # list is empty and the cap cannot be the reason.
+    if cursorless and not _chat_state_room_left(email):
+        cursorless = []
+    for cid, n in cursorless:
+        chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
     return {"chats": chats}
 
 
