@@ -167,18 +167,23 @@ Check it actually came up — `docker ps | grep cloudflared`. A missing tunnel
 container is silent, and leaves the instance in exactly the plain-HTTP state
 this table says to avoid.
 
-A marketplace droplet (#2281) is a special case — it comes up on a bare public IP
-with no domain, which is why that channel provisions a Caddy sidecar using
-Let's Encrypt's short-lived IP certificates, and why Trinity shows a first-run
-hardening guide there (#2380) prompting for a real domain or a VPN. That guide is
-gated on install provenance and never appears on an install like this one. A
-marketplace droplet also boots with **no admin account**: the first person to
+A provisioned DigitalOcean droplet — the Marketplace image (#2281) or one created
+by `scripts/deploy/trinity-do-create.sh`, both through `start.sh --provision` — is
+a special case: it comes up on a bare public IP with no domain, which is why
+provisioning installs Caddy with Let's Encrypt's short-lived IP certificates, and
+why Trinity's first-run overlay carries a **Secure this instance** step there
+(#2380, ent#581) prompting for a real domain, then a Cloudflare Tunnel. That step
+is gated on install provenance and never appears on an install like this one. A
+Marketplace droplet also boots with **no admin account**: the first person to
 open it in a browser creates one at `/setup` (ent#580) — see Security
-Recommendations below for what that means before you open it.
+Recommendations below for what that means before you open it. A
+`trinity-do-create.sh` droplet does not: the installer asks for the admin
+password before it creates the droplet.
 
-Provenance is set by whatever builds the image — `TRINITY_INSTALL_SOURCE` in
-`.env` (`do-marketplace` / `vultr-marketplace` / `script`), read once at first
-boot and recorded permanently. Setting it by hand afterwards does nothing: the
+Provenance is written by whatever provisions the box (in this repo,
+`start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
+`.env` (`do-marketplace` / `vultr-marketplace` / `do-script` / `script`), read once
+at first boot and recorded permanently. Setting it by hand afterwards does nothing: the
 recorder never overwrites an existing value and the API refuses to write or
 clear it, because a gate that can be self-asserted is not a gate. Leave it unset
 on an ordinary install — the guide then renders nowhere, which is the intent.

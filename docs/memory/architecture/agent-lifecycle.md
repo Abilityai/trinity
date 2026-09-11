@@ -33,12 +33,12 @@ Backend orchestration in `services/subscription_auto_switch.py`: `_hot_reload_su
 ### Install Provenance & First-Run Hardening Guide (#2380)
 
 **How** an instance was installed, recorded once at boot, gating a first-run
-HTTPS/VPN hardening guide that can appear on a marketplace install and nowhere
-else. Full flow: [install-provenance.md](../feature-flows/install-provenance.md);
+hardening guide that can appear on a marketplace or DigitalOcean-script
+(`do-script`) install and nowhere else. Full flow: [install-provenance.md](../feature-flows/install-provenance.md);
 requirements §8.10 (`infrastructure.md`).
 
-- **Provenance is the gate, and it has to be** — a marketplace droplet is the one
-  install where Trinity knows at boot that it is on a public IPv4 with no domain
+- **Provenance is the gate, and it has to be** — a provisioned droplet (marketplace
+  image or DigitalOcean install script) is the one install where Trinity knows at boot that it is on a public IPv4 with no domain
   and zero network configuration. The obvious predicate is unusable: measured
   across all 16 managed instances, every one serves plain HTTP with no `DOMAIN`,
   no `HTTPS_ENABLED`, on a `100.x` Tailscale CGNAT address — structurally
@@ -83,25 +83,34 @@ requirements §8.10 (`infrastructure.md`).
   ship Caddy with them, so a droplet can boot on genuinely trusted HTTPS — just
   on a short renewal cycle at an unmemorable address.
 - **The guide** is the `secure` step of the first-run overlay since ent#581
-  (`components/onboarding/FirstRunOverlay.vue` over the `firstRunSteps.js`
-  registry; it replaced `HardeningGuide.vue`). It applies only when the flags
-  have loaded AND the admin is on a `marketplace_install` AND posture ≠
-  `https-domain`, and a skipped step does not re-open the overlay. Skipping is
-  localStorage (the ent#319 precedent — no new endpoint; a pre-ent#581 guide
-  dismissal counts as a skip); retirement is server state, so a configured
-  domain retires it with no client state. Server *state*, not verified fact: the
-  posture reads an operator-declared address, so an admin who types any https
-  domain completes the step. That is deliberate — it is the AC's completion
-  condition, and an admin can already skip it outright — but it is NOT the standard PROV-003
-  holds provenance to, and the difference is that this one gates a nudge while
-  that one gates whether the nudge may exist at all. It offers a real domain and
-  a VPN as **complementary** paths, and says plainly that Trinity issues no
-  certificate itself: setting the Public URL changes the name Trinity hands out,
-  and whatever terminates TLS in front of it is what acts on that.
-- **Nothing in the OSS tree writes the marker** — #2281's Packer snapshot and
-  §8.9's outstanding cloud-init example do — so provenance reads `unknown` on
-  every install today and the guide renders nowhere. That is the contract
-  working, and it is what makes this half safe to ship first.
+  (`components/onboarding/steps/StepSecure.vue`, dispatched by
+  `FirstRunOverlay.vue` over the `firstRunSteps.js` registry; it replaced
+  `HardeningGuide.vue`). It applies only when the flags have loaded AND a
+  verified admin AND `hardening_guide_eligible` (a separate set from
+  `marketplace_install`: the marketplace sources plus `do-script`; the overlay
+  hands it to the registry as `marketplaceInstall`) AND posture ≠
+  `https-domain`, and a skipped step does not re-open the overlay. One step
+  carries both stages the guide advises — the domain field (`address`), then the
+  Cloudflare Tunnel guidance (`tunnel`) — and the posture picks the stage:
+  `https-domain` completes the step, which then stops opening the overlay and, on
+  a re-open (`?onboarding=1`, Settings → General → Re-run setup), reads done and
+  speaks only to the optional tunnel. Skipping is localStorage (the ent#319
+  precedent — no new endpoint; a pre-ent#581 address-stage dismissal counts as a
+  skip); completion is server state, so a configured domain completes it with no
+  client state. Server *state*, not verified fact: the posture reads an
+  operator-declared address, so an admin who types any https domain completes
+  the step. That is deliberate — it is the AC's completion condition, and an
+  admin can already skip it outright — but it is NOT the standard PROV-003 holds
+  provenance to, and the difference is that this one gates a nudge while that one
+  gates whether the nudge may exist at all. It offers a real domain, then a
+  Cloudflare Tunnel, as steps that stack. Trinity issues no certificate itself;
+  on a `start.sh --provision` host Caddy obtains one for the saved Public URL
+  behind the backend's on-demand-TLS `ask` gate (`GET /api/public/tls-allowed`,
+  PROV-015).
+- **The marker's writer is `start.sh --provision`** (PROV-011): `--provenance`
+  if given, else `do-script` on DigitalOcean. An install that never passes
+  through `--provision` writes nothing, reads `unknown`, and never sees the guide
+  — the contract working.
 
 ### First-Run Provisioning — honest `setup_completed` (#2381)
 

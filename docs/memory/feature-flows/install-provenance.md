@@ -1,17 +1,22 @@
 # Install Provenance & First-Run Hardening Guide (#2380)
 
-> Record **how** an instance was installed, and show a first-run HTTPS/VPN
-> hardening guide on marketplace installs and nowhere else.
-> Requirements: `docs/memory/requirements/infrastructure.md` §8.10 (PROV-001…011).
-> Sits on §8.9 (#2280); the marker's producer is #2281.
+> Record **how** an instance was installed, and show a first-run hardening guide
+> (a real domain, then a Cloudflare Tunnel) on installs known to have landed on a
+> public cloud VM at a bare IP — the marketplace images and the DigitalOcean
+> install script — and nowhere else.
+> Requirements: `docs/memory/requirements/infrastructure.md` §8.10 (PROV-001…015).
+> Sits on §8.9 (#2280). The marker's producer is `start.sh --provision`
+> (PROV-011), called by #2281's Packer image and the DigitalOcean installer; the
+> host side of that path is [hosted-install.md](hosted-install.md) → *Provision Layer*.
 
 ## Why provenance, and not "is TLS configured?"
 
 This is the whole design, so it goes first.
 
-A marketplace droplet is the only install where Trinity can know, at boot, that
-there is a public IPv4 with no domain, that the operator has done zero network
-configuration, and that nobody has read `docs/DEPLOYMENT.md`.
+A provisioned droplet — a marketplace image, or one created by the DigitalOcean
+install script — is the only install where Trinity can know, at boot, that there
+is a public IPv4 with no domain and that the operator has done zero network
+configuration.
 
 None of that is true of the managed fleet — and critically, **the fleet is
 indistinguishable from an unhardened droplet by every observable signal**.
@@ -29,20 +34,33 @@ recorded then and carried forward, rather than inferred later.
 ## The marker
 
 ```
-provisioner writes .env:  TRINITY_INSTALL_SOURCE=do-marketplace
+start.sh --provision → provision_site() writes .env      [scripts/deploy/start.sh:271, :280-284]
+    TRINITY_INSTALL_SOURCE=do-marketplace   ← Packer first boot passes --provenance do-marketplace
+    TRINITY_INSTALL_SOURCE=do-script        ← DO installer: the --cloud digitalocean default (:181-186)
         │
         ▼  (compose forwards it — dev, prod AND hosted)
-backend boot: database._record_install_source(cursor, conn)   [SQLite]
-              database._record_install_source_engine()        [PostgreSQL]
-        │  validate against INSTALL_SOURCE_VALUES
+backend boot: database._record_install_source(cursor, conn)   [SQLite, database.py:703]
+              database._record_install_source_engine()        [PostgreSQL, database.py:792]
+        │  validate against INSTALL_SOURCE_VALUES               [config.py:561]
         │  write ONLY if no row exists
         ▼
 system_settings.install_source = 'do-marketplace'
         │
         ▼  every later read — the env var is never consulted again
-settings_service.get_install_source()  →  'do-marketplace' | … | 'unknown'
-settings_service.is_marketplace_install()  →  bool
+settings_service.get_install_source()          →  'do-marketplace' | … | 'unknown'   [settings_service.py:539]
+settings_service.is_marketplace_install()      →  bool                               [settings_service.py:570]
+settings_service.is_hardening_guide_eligible() →  bool  ← the guide's gate           [settings_service.py:581]
 ```
+
+**Who writes it.** `start.sh --provision` is the only writer in the tree: the
+`--provenance` argument if given, else the cloud's default. The script does not
+validate the value — an unrecognised one is dropped at boot (below). An install
+that never passes through `--provision` (a plain or `--hosted` `start.sh`)
+writes nothing and reads `unknown`.
+
+**`do-script` is not `script`.** `--cloud digitalocean` refuses to run unless
+DigitalOcean's metadata service answers (`start.sh:392-404`), so the value
+records a fact the machine established rather than a claim someone typed.
 
 An **env var, not a marker file.** `/etc/trinity/install-source` was the issue's
 other suggestion. `config.py` reads zero files today (it is pure `os.getenv`),
@@ -99,13 +117,19 @@ already in the closed set.
 ## The surface
 
 `GET /api/settings/feature-flags` — the established home for UI-gating flags, and
-an explicit AC that no new endpoint appear:
+an explicit AC that no new endpoint appear (`routers/settings.py:274-297`):
 
 | field | type | notes |
 |---|---|---|
-| `install_source` | string | `do-marketplace` \| `vultr-marketplace` \| `script` \| `unknown`. A string on a mostly-boolean surface; `platform_default_model` is the precedent |
-| `marketplace_install` | bool | **the gate.** Resolved server-side so the browser holds no second copy of which channels count as a marketplace (the ent#386 rule) |
+| `install_source` | string | `do-marketplace` \| `vultr-marketplace` \| `do-script` \| `script` \| `unknown`. A string on a mostly-boolean surface; `platform_default_model` is the precedent |
+| `marketplace_install` | bool | Did this come from a vendor listing — `MARKETPLACE_INSTALL_SOURCES` (`config.py:577`). Still served and still means only that; it is **not** the guide's gate |
+| `hardening_guide_eligible` | bool | **The gate.** `HARDENING_GUIDE_INSTALL_SOURCES` (`config.py:592`) = the marketplace set ∪ `do-script`. A separate set, not a widening of `marketplace_install`, which would make a doc-driven install claim a marketplace provenance it does not have. Neither set includes `script` or `unknown` |
 | `install_tls_posture` | string | `unconfigured` \| `http` \| `https-ip` \| `https-domain` |
+
+Both booleans are resolved server-side, so the browser holds no second copy of
+which provenances qualify (the ent#386 rule). The store reads only
+`hardening_guide_eligible` for the step and fails closed to `false` on a failed
+fetch (`stores/sessions.js:148-150`, `:177-179`).
 
 `GET /api/version` also carries `install_source`, for operator support. It is
 threaded into `_build_version_payload` as a **parameter** — that function is
@@ -133,58 +157,122 @@ principal.
 Let's Encrypt IP-address certificates went GA 2026-01-15 — ACME `shortlived`
 profile, ~6-day validity, `http-01`/`tls-alpn-01` only (no DNS-01) — and
 DigitalOcean's own 1-Click authoring rules direct vendors to ship Caddy with
-them. A marketplace droplet can therefore come up on genuinely browser-trusted
+them. A provisioned droplet can therefore come up on genuinely browser-trusted
 HTTPS at a bare IP with zero user input.
 
 So `https-ip` is **working**. What it is not is finished: a ~6-day renewal cycle,
 an unmemorable address, and an instance on the open internet. The guide is an
-upgrade prompt, and must not read as a breakage warning.
+upgrade prompt, and must not read as a breakage warning. Renewal happens only
+while the machine runs, so the copy also says that a server left off for longer
+than the certificate's life comes back to a browser warning until renewal catches
+up — stated as a property of the profile, never of this instance's certificate
+(`hardeningGuide.js:81-87`).
 
-## The card
+## The step
 
-**Since ent#581 this is the `secure` step of the first-run overlay**
-(`components/onboarding/steps/StepSecure.vue`; registry in
-`components/onboarding/firstRunSteps.js`, first in the fixed step order). The
-Public URL field sits in the step, dismissal is the overlay's per-step Skip, and
-`https-domain` reads the step as done. The history below describes the card it
-replaced (`HardeningGuide.vue`, deleted); the posture copy is unchanged.
+**Since ent#581 the guide is the `secure` step of the first-run overlay**
+(`components/onboarding/steps/StepSecure.vue`, dispatched by
+`FirstRunOverlay.vue`; its registry entry is first in the fixed step order,
+`components/onboarding/firstRunSteps.js:30-42`). It replaced the Dashboard card
+`HardeningGuide.vue` (deleted); the posture copy in `hardeningGuide.js` is
+unchanged.
 
-Renders only when: flags loaded **and** `marketplace_install` **and** not
-dismissed **and** posture ≠ `https-domain`. The flags-loaded term prevents a
-flash before the answer arrives (the `firstRun.js` rationale).
+Applies only when (`firstRunSteps.js:40-41`, context wired at
+`FirstRunOverlay.vue:205-228`): flags loaded **and** a verified admin **and**
+`hardening_guide_eligible` (handed to the registry as `marketplaceInstall`,
+`FirstRunOverlay.vue:214`) **and** posture ≠ `https-domain`. The overlay itself
+opens only once the flags, the profile and the first-run read have landed
+(`isFirstRunOverlayVisible`, `firstRunSteps.js:145-151`), which prevents a flash
+before the answer arrives (the `firstRun.js` rationale). Admin is a real gate:
+the one action lands in Settings → General, which is `adminOnly`, and the copy
+discloses the instance's network posture.
 
-Two paths, presented as complementary rather than either/or (PROV-009): a real
-domain — point an A record at the droplet, set it as the Public URL, and a normal
-90-day certificate replaces the short-lived IP one — **and** private access,
-putting the instance behind a VPN so the UI stops being served publicly.
+**Two stages in one step; the posture picks the stage.** `hardeningStage()`
+(`hardeningGuide.js:28-30`) maps `https-domain` → `tunnel` and every other
+posture → `address`:
 
-Dismissal is localStorage (the ent#319 precedent — no new endpoint, no server
-row). Retirement is server *state*: once the posture is `https-domain` the card
-is gone with no client state involved.
+| posture | stage | the step shows |
+|---|---|---|
+| `unconfigured` / `http` / `https-ip` | `address` | the posture badge and headline, the **Public URL** field (`StepSecure.vue:43-65`), and both paths behind "Why this matters" |
+| `https-domain` | `tunnel` | "Your domain is set" and the tunnel guidance only (`POSTURE_COPY['https-domain']`, `hardeningGuide.js:88-95`) |
+
+`https-domain` is also the step's completion: its `pending` term goes false, so
+the step reads done and no longer opens the overlay on its own. The `tunnel`
+stage is what the step shows when opened again — e.g. on a re-open
+(`?onboarding=1`, Settings → General → Re-run setup), which lists every eligible
+step, done ones included.
+
+Two steps that stack, never either/or (PROV-009): a real domain, then a
+Cloudflare Tunnel so the server stops listening on the public internet — the
+tunnel needs the name. A tunnel rather than a VPN because a VPN breaks every
+inbound integration (Telegram, WhatsApp, VoIP, public agent links, webhook
+triggers). The tunnel stage is guidance with no button: `TUNNEL_TOKEN` lives in
+`.env` and `cloudflared` starts under a compose profile, neither reachable from a
+container.
+
+**Skipping is localStorage** (the ent#319 precedent — no new endpoint, no server
+row). The overlay's per-step Skip — or Continue past the step while it is still
+pending (`FirstRunOverlay.vue:347-369`) — writes `trinity_first_run_skipped`
+(`firstRunSteps.js:251-259`), and a skipped step does not re-open the overlay
+(`firstRunSteps.js:145-151`). The retired card's address-stage dismissal
+(`trinity_hardening_guide_dismissed`) is read once as a skip of `secure`
+(`legacySkips`, `firstRunSteps.js:226-238`), so an operator who declined before
+the upgrade is not re-asked; nothing writes that key any more. Its tunnel-stage
+key is not read: at that posture the step is already done.
 
 State, not verified fact — and worth being precise about, because this design
 refuses exactly that shape one level up. `public_chat_url` is operator-declared,
-so an admin who types any https domain retires the card whether or not DNS
+so an admin who types any https domain completes the step whether or not DNS
 resolves or a certificate exists. That is accepted here and refused for
 `install_source` because the two gate different things: provenance decides
 whether this surface may exist at all, while the posture only decides whether a
-nudge is still worth showing to someone who can already dismiss it outright.
+nudge is still pending for someone who can already skip it outright.
 
-The card is also explicit that **Trinity issues no certificate**. Nothing in the
-tree reads `public_chat_url` and reconfigures a proxy or a listener; setting it
-changes the name Trinity hands out, and whatever terminates TLS in front of the
-backend is what turns that name into a longer-lived certificate.
+**The domain field is the whole step.** Saving the Public URL used to reconfigure
+nothing: the instance started advertising a name no web server answered to while
+the guide moved on as though step one were done. On a host provisioned by
+`start.sh --provision`, the Caddyfile carries on-demand TLS behind an `ask` gate
+(`scripts/deploy/start.sh:325-362`), so Caddy obtains a certificate for the saved
+name on its first request:
 
-It composes `BaseCard` / `BaseButton` / `BaseBadge`. Both sibling onboarding
-cards hand-roll their shell and dismiss button and predate the primitives
-ratchet — they are the behavioural model, not the markup model.
+```
+browser → https://trinity.example.com
+   │  Caddy: no site for that name → catch-all `https://` site, tls { on_demand }
+   ▼
+GET http://127.0.0.1:8000/api/public/tls-allowed?domain=trinity.example.com
+   │  routers/public.py:50-102   (unauthenticated — Caddy holds no credential)
+   │  requested = domain.strip().strip('.').lower()
+   │  allowed   = urlparse(settings_service.get_public_chat_url()).hostname
+   │              (the saved row, else PUBLIC_CHAT_URL)
+   ▼  200 iff requested == allowed; 404 otherwise
+Caddy obtains an ordinary Let's Encrypt certificate and serves the name
+```
+
+- **Exact host, parsed** — never a substring match, so `evil-example.com` cannot
+  ride on `example.com`.
+- **Fails closed** — 404 on no domain, no configured URL, a failed settings read,
+  or a mismatch. `on_demand` without a working gate makes the instance request
+  certificates for any name anyone points at it, until the ACME account is
+  rate-limited and the operator's own renewals fail.
+- **Moves no privilege** — Trinity is containerised and cannot rewrite the
+  Caddyfile or reload Caddy. Caddy asking Trinity keeps the operator out of a
+  root shell. The route discloses only whether a guessed hostname matches, which
+  DNS answers anyway.
+
+The copy still claims only what it can know. Trinity issues no certificate
+itself; the step says whatever terminates TLS in front of it "is configured to
+obtain one for the name you save" — a statement about provisioning, never a
+verdict on a handshake — and tells the operator to let DNS settle first
+(`StepSecure.vue:99-109`).
 
 ## What is deliberately not here
 
-Nothing in the OSS tree writes `TRINITY_INSTALL_SOURCE`. #2281's Packer snapshot
-does, and §8.9's outstanding AC4 cloud-init example
-(`trinity-ops-public/provision/cloud-init.sh`) does. Until one of them lands,
-provenance reads `unknown` on every install and the guide renders nowhere.
+A marker for installs that never pass through `start.sh --provision`. A plain or
+`--hosted` `start.sh` writes no `TRINITY_INSTALL_SOURCE`, so provenance reads
+`unknown` there and the guide renders nowhere. That is PROV-004's contract
+working as specified, not a gap — it is what keeps the step off every instance
+whose posture someone already chose.
 
-That is PROV-004's contract working as specified, not a gap — and it is what
-makes this half safe to ship first.
+A Vultr provisioner. `vultr-marketplace` is in both sets, but `--provision`
+accepts only `--cloud digitalocean`, so the domain step's on-demand-TLS promise
+holds only on a host whose Caddyfile `start.sh --provision` wrote.

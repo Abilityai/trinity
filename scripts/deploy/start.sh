@@ -62,9 +62,9 @@ compose_project_name() {
         | sed 's/^[_-]*//'
 }
 
-# `set_env_key` — shared with scripts/deploy/set-domain.sh, which rewrites the
-# same file after the install. One copy, because a `.env` writer that disagrees
-# with itself corrupts credentials silently.
+# `set_env_key` lives in env-file.sh so every `.env` writer shares one copy,
+# because a `.env` writer that disagrees with itself corrupts credentials
+# silently.
 . ./scripts/deploy/env-file.sh
 # -----------------------------------------------------------------------------
 
