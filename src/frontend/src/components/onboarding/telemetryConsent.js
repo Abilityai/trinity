@@ -85,25 +85,64 @@ export const CONSENT_COPY = {
 }
 
 /**
- * The receiver line. A 404 is stated for what it is, never dressed up as an
- * install fault. The hosted receiver has been live since 2026-09-04
- * (trinity-enterprise#190), so a 404 from the default address is an anomaly
- * to look at, not the expected state; from an override it means only that the
- * receiver answered 404.
+ * The name of the receiver an attempt went to, as the panel prints it — the
+ * recorded origin (scheme + host + port; never a path, query or userinfo), or
+ * "an unknown receiver" for an attempt logged before the origin was recorded
+ * (#2571) or carrying a corrupt value. One rule for the per-row "to …" text and
+ * the "Last delivered … to …" line; never "null" or "undefined".
  */
-export function receiverCopy(hint, shareUrl = '') {
+export function receiverLabel(host) {
+  return typeof host === 'string' && host.trim() ? host.trim() : 'an unknown receiver'
+}
+
+/**
+ * The receiver line. Decided from what the newest attempt RECORDED — the origin
+ * it was posted to — never from the URL configured now: the two differ after an
+ * operator tests against a local sink and restores the default, and that is
+ * exactly when the old sentence lied (#2571). A 404 is stated for what it is,
+ * never dressed up as an install fault. The hosted receiver has been live since
+ * 2026-09-04 (trinity-enterprise#190), so a 404 from the default address is an
+ * anomaly to look at, not the expected state.
+ *
+ * `host` is the recorded origin (null when the entry predates the record);
+ * `configuredHost` is where sends go now; `mismatch` is the backend's verdict
+ * that both are known and differ — it appends the plain sentence naming both
+ * and what happens next, which depends on `enabled` (with sharing off there is
+ * no next send to promise). Only a real HTTP status may say "answered": a
+ * `failed` attempt names where it was sent, because a refused payload or a
+ * pre-POST failure never reached anyone.
+ */
+export function receiverCopy(hint, { host = null, configuredHost = null, mismatch = false, enabled = true } = {}) {
+  const named = typeof host === 'string' && host.trim() ? host.trim() : ''
+  let line
   switch (hint) {
     case 'ok':
-      return 'The receiving service acknowledged the last send.'
+      line = named
+        ? `The receiving service at ${named} acknowledged the last send.`
+        : 'The receiving service acknowledged the last send; which receiver answered was not recorded (sent before this version).'
+      break
     case 'receiver_not_live':
-      return 'The receiving service answered 404 at the default address. The send is recorded here and retried automatically.'
+      line = 'The receiving service answered 404 at the default address. The send is recorded here and retried automatically.'
+      break
     case 'receiver_404':
-      return `The receiver at ${shareUrl} answered 404. Check TELEMETRY_SHARING_URL.`
+      line = named
+        ? `The receiver at ${named} answered 404. Check TELEMETRY_SHARING_URL.`
+        : 'A receiver answered 404; which one was not recorded (sent before this version). Check TELEMETRY_SHARING_URL.'
+      break
     case 'failed':
-      return 'The last send failed; it is recorded below and retried automatically.'
+      line = named
+        ? `The last send to ${named} failed; it is recorded below and retried automatically.`
+        : 'The last send failed; it is recorded below and retried automatically.'
+      break
     default:
       return 'Nothing has been sent yet.'
   }
+  if (mismatch && named) {
+    const now = typeof configuredHost === 'string' && configuredHost.trim() ? configuredHost.trim() : 'a different address'
+    line += ` That send went to ${named}; sharing is now configured for ${now}, which has not seen it.`
+    line += enabled ? ' The next scheduled send goes there.' : ' Sharing is off, so nothing further leaves the box.'
+  }
+  return line
 }
 
 /** Ordering the email section needs — moved verbatim from AdminEmailNudge (#2381). */

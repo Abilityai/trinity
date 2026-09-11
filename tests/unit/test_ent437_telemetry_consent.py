@@ -238,6 +238,10 @@ def test_share_now_refuses_a_schema_violation_and_records_it(tss):
 
 
 def test_share_now_records_a_404_and_names_the_missing_receiver(tss):
+    """The wording is decided from the origin RECORDED on the attempt, never from
+    the URL configured at read time (#2571): a 404 the default address answered
+    stays "404 at the default address" after the operator points the URL
+    elsewhere — and the status then says the configured receiver differs."""
     mod, store, _ = tss
     _consent_on(store)
     fake_ac, _client = _fake_client(404)
@@ -248,11 +252,27 @@ def test_share_now_records_a_404_and_names_the_missing_receiver(tss):
         st = mod.get_status()
     assert st["recent_sends"][0]["http_status"] == 404
     assert st["recent_sends"][0]["ok"] is False
+    assert st["recent_sends"][0]["host"] == _DEFAULT_ORIGIN
     assert st["receiver_hint"] == "receiver_not_live"
+    assert st["receiver_host"] == _DEFAULT_ORIGIN and st["receiver_mismatch"] is False
     assert st["last_shared_at"] is None and st["backfill_delivered_at"] is None
-    # An overridden URL is worded as YOUR receiver, not the hosted service.
+    assert mod.KEY_LAST_SHARED_HOST not in store          # a 404 stamps nothing
+    # A restart with an override configured: the recorded 404 still belongs to
+    # the default address, and the status says sends now go elsewhere.
     with patch.object(mod, "TELEMETRY_SHARING_URL", "https://example.test/x"):
-        assert mod.receiver_hint(st["recent_sends"]) == "receiver_404"
+        st = mod.get_status()
+    assert st["receiver_hint"] == "receiver_not_live"
+    assert st["receiver_host"] == _DEFAULT_ORIGIN
+    assert st["configured_host"] == "https://example.test"
+    assert st["receiver_mismatch"] is True
+    # A 404 recorded AGAINST an override is that receiver's, not the hosted service's.
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "https://example.test/x"), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now(backfill=True)) is False
+        st = mod.get_status()
+    assert st["receiver_hint"] == "receiver_404" and st["receiver_host"] == "https://example.test"
+    assert st["receiver_mismatch"] is False
 
 
 def test_share_now_success_stamps_delivery_and_posts_the_share_id(tss):
@@ -304,6 +324,131 @@ def test_backfill_is_retried_until_the_receiver_acknowledges(tss):
     backfill, days = mod._resolve_window(False, None)
     assert backfill is False and days >= 1      # cumulative since the last success
     assert mod._resolve_window(True, 7) == (True, 7)   # explicit window wins
+
+
+# ---------------------------------------------------------------------------
+# Destination record (#2571): every attempt says where it went
+# ---------------------------------------------------------------------------
+
+_DEFAULT_ORIGIN = "https://intake.abilityai.dev"
+
+
+@pytest.mark.parametrize("url,origin", [
+    ("https://u:tok@h.example:8787/v1/x?k=v#f", "https://h.example:8787"),   # userinfo, path, query, fragment all gone
+    ("https://a@b@host.example/x", "https://host.example"),                   # double-@: the authority ends at the LAST @
+    ("https://@host.example/x", "https://host.example"),                       # empty username
+    ("http://[::1]:8787/x", "http://[::1]:8787"),                              # IPv6 literal keeps its brackets and port
+    ("HTTPS://Host.Example/x", "https://host.example"),                        # scheme + host are case-insensitive
+    ("  https://h.example/x  ", "https://h.example"),                          # whitespace-wrapped (3.9 and 3.13 disagree on it)
+    ("https://h.example:abc/x", "https://h.example:abc"),                      # never reads .port, which would raise
+    ("https://intake.abilityai.dev:443/v1/telemetry-share", "https://intake.abilityai.dev:443"),  # textual: an explicit :443 differs from the default, by design
+    ("https://[oops/x", None),                                                 # urlsplit raises "Invalid IPv6 URL" — swallowed
+    ("//h.example/x", None),                                                   # protocol-relative: no scheme is invented
+    ("intake.example/v1", None),                                               # scheme-less
+    ("ftp://h.example/x", None),                                               # not a scheme the transport can post to
+    ("https://tok@/x", None),                                                  # userinfo with no host
+    ("", None), ("   ", None), (None, None), (123, None),
+])
+def test_send_host_is_the_origin_only_and_never_raises(tss, url, origin):
+    mod, _store, _ = tss
+    assert mod._send_host(url) == origin
+    assert mod._send_host(mod.DEFAULT_SHARE_URL) == _DEFAULT_ORIGIN
+
+
+def test_every_recorded_attempt_carries_its_destination_and_never_a_credential(tss):
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, _client = _fake_client(200)
+    sink = "https://user:s3cret-token@sink.example:8787/v1/share?key=q-token#frag"
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", sink), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now(backfill=True)) is True
+        st = mod.get_status()
+    blob = json.dumps(store)   # the WHOLE settings store, not just the log
+    assert "s3cret-token" not in blob and "q-token" not in blob
+    assert json.loads(store[mod.KEY_RECENT_SENDS])[0]["host"] == "https://sink.example:8787"
+    assert store[mod.KEY_LAST_SHARED_HOST] == "https://sink.example:8787"       # the stamp says to whom
+    assert st["last_shared_host"] == "https://sink.example:8787"
+    assert st["share_url"] == "https://sink.example:8787/v1/share"             # userinfo, query, fragment dropped
+    assert st["configured_host"] == "https://sink.example:8787"
+    # Attempts that never reach the wire carry the origin they were AIMED at:
+    # the writer stamps it, so a hand-built entry (a refused payload, a test)
+    # is never logged without one.
+    with patch.object(mod, "TELEMETRY_SHARING_URL", sink):
+        mod._record_send({"sent_at": "t2", "ok": False, "error": "schema", "payload": None})
+    assert mod._recent_sends()[0]["host"] == "https://sink.example:8787"
+
+
+def test_a_sink_acknowledgement_stays_the_sinks_after_the_default_is_restored(tss):
+    """The headline scenario of #2571: override → 200 → restore the default. The
+    sentence used to say the hosted receiver acknowledged the last send."""
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, _client = _fake_client(200)
+    sink = "http://host.docker.internal:8787/v1/telemetry-share"
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", sink), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now(backfill=True)) is True
+        st = mod.get_status()
+    assert st["receiver_hint"] == "ok" and st["receiver_mismatch"] is False
+    assert st["receiver_host"] == st["configured_host"] == "http://host.docker.internal:8787"
+    # Restart with the default restored: the record keeps its truth.
+    with patch.object(mod, "TELEMETRY_SHARING_URL", mod.DEFAULT_SHARE_URL):
+        st = mod.get_status()
+    assert st["receiver_hint"] == "ok"                       # the SINK acknowledged
+    assert st["receiver_host"] == "http://host.docker.internal:8787"
+    assert st["last_shared_host"] == "http://host.docker.internal:8787"
+    assert st["configured_host"] == _DEFAULT_ORIGIN
+    assert st["receiver_mismatch"] is True
+    # The retry cap reads outcome and time only — a destination change neither
+    # resets nor triggers it (deferred by design).
+    failures = [{"sent_at": mod._now_iso(), "ok": False, "host": h} for h in
+                ("https://a.example", "https://b.example", None, "https://a.example", "https://c.example")]
+    assert mod._retry_throttled(failures, 24 * 3600) is True
+
+
+def test_a_legacy_or_corrupt_destination_is_unknown_and_never_a_mismatch(tss):
+    mod, store, _ = tss
+    # Entries written before #2571 carry no host at all.
+    store[mod.KEY_RECENT_SENDS] = json.dumps([{"sent_at": "t", "ok": True, "http_status": 200, "payload": {}}])
+    st = mod.get_status()
+    assert st["receiver_hint"] == "ok"
+    assert st["receiver_host"] is None and st["receiver_mismatch"] is False
+    assert st["last_shared_host"] is None
+    # A legacy 404 cannot be attributed to the default address, even when the
+    # default is what is configured now — that attribution IS the bug.
+    store[mod.KEY_RECENT_SENDS] = json.dumps([{"sent_at": "t", "ok": False, "http_status": 404}])
+    with patch.object(mod, "TELEMETRY_SHARING_URL", mod.DEFAULT_SHARE_URL):
+        assert mod.get_status()["receiver_hint"] == "receiver_404"
+    # A corrupt value is "unknown", never "known and different".
+    for bad in (123, "", "   ", {"h": 1}, None):
+        store[mod.KEY_RECENT_SENDS] = json.dumps([{"sent_at": "t", "ok": True, "host": bad}])
+        st = mod.get_status()
+        assert st["receiver_host"] is None and st["receiver_mismatch"] is False, bad
+    store[mod.KEY_LAST_SHARED_HOST] = "   "
+    assert mod.get_status()["last_shared_host"] is None
+
+
+def test_an_unparseable_url_still_records_the_attempt(tss):
+    """`_send_host` runs inside the best-effort writer; a raise there would drop
+    the whole entry (the #2654 class) and `_tick` would log "tick failed" at
+    every wake with nothing in the panel."""
+    mod, store, _ = tss
+    _consent_on(store)
+    fake_ac, client = _fake_client()
+    client.post = AsyncMock(side_effect=ValueError("Invalid IPv6 URL"))
+    with patch.object(mod, "TELEMETRY_SHARING_ENABLED", True), \
+         patch.object(mod, "TELEMETRY_SHARING_URL", "https://[oops/v1/x"), \
+         patch.object(mod.httpx, "AsyncClient", fake_ac):
+        assert asyncio.run(mod.share_now(backfill=True)) is False
+        st = mod.get_status()
+    assert st["recent_sends"][0]["error"] == "ValueError"
+    assert st["recent_sends"][0]["host"] is None
+    assert st["receiver_hint"] == "failed" and st["receiver_mismatch"] is False
+    assert st["configured_host"] is None
+    assert st["share_url"] == "https://[oops/v1/x"       # the display scrub never raises either
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +577,8 @@ def test_status_get_skips_the_preview_when_asked(router_env):
     router_mod, _tss, _store, _audit = router_env
     cheap = asyncio.run(router_mod.get_telemetry_sharing(False, _admin_user()))
     assert "payload_preview" not in cheap and "recent_sends" in cheap
+    # #2571: the destination verdict rides the same read, untouched by the router.
+    assert {"last_shared_host", "receiver_host", "configured_host", "receiver_mismatch"} <= set(cheap)
     full = asyncio.run(router_mod.get_telemetry_sharing(True, _admin_user()))
     assert full["payload_preview"]["schema_version"] == 2
 
